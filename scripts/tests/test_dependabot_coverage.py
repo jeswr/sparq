@@ -15,7 +15,10 @@
 #   * every TRACKED npm lock root and every TRACKED Dockerfile directory is either
 #     covered by a matching Dependabot entry or carries a written exclusion;
 #   * exclusions stay HONEST — an exclusion whose path no longer exists is a failure,
-#     so the allowlist cannot rot into a silent blanket;
+#     so the allowlist cannot rot into a silent blanket, and a docker exclusion's
+#     stated PREMISE (consumes only this repo's own floating image, so there is no
+#     third-party pin to refresh) is checked against the Dockerfile's real `FROM`
+#     rather than taken on the reason string's word;
 #   * the specific regression above cannot return (npm is aimed at the workspaces
 #     root, not at a member whose lock is gitignored).
 #
@@ -55,18 +58,33 @@ EXCLUDED_NPM_ROOTS = {
     ),
 }
 
+# Registry namespace this repo publishes its own images under. A base outside it is
+# third-party by definition, and a third-party base is exactly what Dependabot exists
+# to refresh — so it cannot be excluded.
+FIRST_PARTY_IMAGE_PREFIX = "ghcr.io/sparq-org/"
+
+# Each docker exclusion declares the SINGLE base image that makes it safe, not just a
+# prose reason. `base` is checked both ways round (see _docker_exclusion_problems):
+# the declared value must itself be first-party and floating, and the Dockerfile's
+# actual `FROM` set must be exactly it.
 EXCLUDED_DOCKER_DIRS = {
-    "/deploy/paas/lws": (
-        "Railway config-as-code shim that consumes this repo's OWN published image "
-        "(ghcr.io/sparq-org/sparq-lws-core:latest). The base is first-party and the "
-        "floating tag IS the deploy mechanism, so there is no third-party pin to "
-        "refresh; the upstream digest is governed by /crates/sparq-lws-core."
-    ),
-    "/deploy/paas/sparq-server": (
-        "Railway config-as-code shim over this repo's OWN published image "
-        "(ghcr.io/sparq-org/sparq-server:latest) — first-party base, floating tag by "
-        "design; the upstream digest is governed by the root Dockerfile."
-    ),
+    "/deploy/paas/lws": {
+        "base": "ghcr.io/sparq-org/sparq-lws-core:latest",
+        "reason": (
+            "Railway config-as-code shim that consumes this repo's OWN published image. "
+            "The base is first-party and the floating tag IS the deploy mechanism, so "
+            "there is no third-party pin to refresh; the upstream digest is governed by "
+            "/crates/sparq-lws-core."
+        ),
+    },
+    "/deploy/paas/sparq-server": {
+        "base": "ghcr.io/sparq-org/sparq-server:latest",
+        "reason": (
+            "Railway config-as-code shim over this repo's OWN published image — "
+            "first-party base, floating tag by design; the upstream digest is governed "
+            "by the root Dockerfile."
+        ),
+    },
 }
 
 # The npm workspaces root. Member manifests are walked off the root lock, so members
@@ -113,6 +131,50 @@ def parse_update_entries(text: str) -> list[dict]:
         if m and current is not None:
             current["directory"] = m.group(1)
     return entries
+
+
+def parse_from_images(text: str) -> list[str]:
+    """Image reference of every `FROM` directive, in file order.
+
+    Per-stage flags (`--platform=…`) and stage aliases (`AS builder`) are stripped;
+    the reference is returned verbatim so a digest pin or a foreign registry stays
+    visible to the caller.
+    """
+    from_re = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)", re.IGNORECASE)
+    return [m.group(1) for m in map(from_re.match, text.splitlines()) if m]
+
+
+def _docker_exclusion_problems(rel: str, spec: dict, text: str) -> list[str]:
+    """Reasons the docker exclusion of `rel` is NOT justified by its Dockerfile.
+
+    The premise of every entry in EXCLUDED_DOCKER_DIRS is "this file consumes exactly
+    one of this repo's own floating images, so Dependabot has no third-party pin to
+    refresh here". Both halves are enforced, which is what stops the table from being
+    edited into a blanket exemption: the DECLARED base must be first-party and
+    un-pinned, AND the file's real `FROM` set must be exactly that one base. Empty
+    list means the exclusion still holds.
+    """
+    problems: list[str] = []
+    declared = spec["base"]
+    if not declared.startswith(FIRST_PARTY_IMAGE_PREFIX):
+        problems.append(
+            "%s: declared base %r is not under %s, so it is third-party and the "
+            "'nothing for Dependabot to refresh' premise fails"
+            % (rel, declared, FIRST_PARTY_IMAGE_PREFIX)
+        )
+    if "@" in declared:
+        problems.append(
+            "%s: declared base %r is digest-pinned, and a pin is precisely what "
+            "Dependabot must refresh" % (rel, declared)
+        )
+    found = parse_from_images(text)
+    if found != [declared]:
+        problems.append(
+            "%s: Dockerfile FROM images %r are not exactly the declared base [%r]; "
+            "the exclusion's stated premise no longer describes the file"
+            % (rel, found, declared)
+        )
+    return problems
 
 
 class TestDependabotCoverage(unittest.TestCase):
@@ -221,14 +283,63 @@ class TestDependabotCoverage(unittest.TestCase):
                 "the exemption. Remove it." % rel,
             )
             self.assertTrue(reason.strip(), "exclusion %s must carry a reason" % rel)
-        for rel, reason in EXCLUDED_DOCKER_DIRS.items():
+        for rel, spec in EXCLUDED_DOCKER_DIRS.items():
             path = REPO_ROOT / rel.lstrip("/") / "Dockerfile"
             self.assertTrue(
                 path.exists(),
                 "stale exclusion %s: the Dockerfile is gone, so the entry now only "
                 "widens the exemption. Remove it." % rel,
             )
-            self.assertTrue(reason.strip(), "exclusion %s must carry a reason" % rel)
+            self.assertTrue(
+                spec["reason"].strip(), "exclusion %s must carry a reason" % rel
+            )
+
+    def test_docker_exclusions_still_consume_only_a_first_party_floating_base(self):
+        """The premise, checked against the file — not against the reason string.
+
+        Without this, swapping a third-party or digest-pinned base into an excluded
+        Dockerfile would leave it silently outside Dependabot while every other
+        assertion here stayed green.
+        """
+        for rel, spec in EXCLUDED_DOCKER_DIRS.items():
+            text = (REPO_ROOT / rel.lstrip("/") / "Dockerfile").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(
+                [],
+                _docker_exclusion_problems(rel, spec, text),
+                "docker exclusion %s no longer holds: give the directory a docker "
+                "Dependabot entry, or fix the base" % rel,
+            )
+
+    # --- the exclusion check itself is not vacuous --------------------------------
+    def test_guard_rejects_a_third_party_pinned_base_in_the_file(self):
+        spec = {"base": "ghcr.io/sparq-org/sparq-server:latest", "reason": "x"}
+        problems = _docker_exclusion_problems(
+            "/deploy/paas/sparq-server", spec, "FROM debian@sha256:%s\n" % ("0" * 64)
+        )
+        self.assertTrue(
+            problems,
+            "replacing the first-party floating base with a third-party pinned one "
+            "must fail the exclusion guard",
+        )
+
+    def test_guard_rejects_blessing_a_third_party_base_in_the_table(self):
+        """Editing EXCLUDED_DOCKER_DIRS to match a foreign base must not silence it."""
+        base = "debian@sha256:%s" % ("0" * 64)
+        problems = _docker_exclusion_problems(
+            "/x", {"base": base, "reason": "x"}, "FROM %s\n" % base
+        )
+        self.assertTrue(problems, "a third-party digest-pinned base must be excludable")
+
+    def test_guard_rejects_an_extra_stage(self):
+        spec = {"base": "ghcr.io/sparq-org/sparq-server:latest", "reason": "x"}
+        problems = _docker_exclusion_problems(
+            "/x", spec, "FROM alpine AS build\nFROM %s\n" % spec["base"]
+        )
+        self.assertTrue(
+            problems, "a smuggled-in third-party build stage must fail the guard"
+        )
 
 
 if __name__ == "__main__":
