@@ -129,6 +129,24 @@ LegacyMode::{Reject, Allow}   // Reject (DEFAULT, fail-closed): a legacy no-prov
 //   RDF vocab: prov_vocab::{SPQVP_NS, MODEL, MODEL_VERSION, CONTENT_VERSION, METRIC, NORMALIZATION, DIMENSION, VERBALIZATION} (http://sparq.dev/spqv-prov#)
 //   `compact` (delta feature) carries the provenance forward (a v3 store stays v3); SPQV_VERSION_V3 = 3. NEGATIVE tests: tests/spqv_v3_provenance.rs.
 
+// --- DRAFT external-key profile (src/external_key.rs) --- feature = "external-key" ONLY; LEAN, no new dep [SONNET-4.6] sq-lhcot.2 (#2789)
+// The KERN-boundary (#1746) interoperability table: OPAQUE producer-supplied multihash digests -> vector slots, so a table is NOT
+// tied to one dictionary-id generation. NOT FROZEN (version 0 = DRAFT) and NOT wired into VectorStore — the .spqv container is
+// byte-for-byte unchanged in both feature states. sparq NEVER derives a key; it defines NO concept-hash scheme.
+ExternalKeyTable::new(hash_code: u32, key_len: usize) -> Result<Self, String>   // one multihash code at one length per table; key_len 1..=64
+table.insert(digest, slot) -> Result<(), String>   // wrong length or DUPLICATE key -> Err (one key = exactly one slot)
+table.with_provenance(EmbeddingProvenance) / .with_unverified_signature(bytes) -> ...   // provenance binding; signature is opaque + NEVER verified
+table.to_bytes() / ExternalKeyTable::from_bytes(&[u8]) -> Result<Self, String>   // entries written ASCENDING by digest: bytes are a function of the
+//   logical table, NOT of insertion order (that canonical form is what the cross-repository fixtures pin)
+table.lookup(hash_code, digest) -> Result<Option<u32>, String>   // Ok(Some) resolved / Ok(None) absent / Err NOT EVALUABLE (foreign code, wrong length)
+table.lookup_multihash(&[u8]) -> Result<Option<u32>, String>     // same over a binary multihash, via parse_multihash
+parse_multihash(&[u8]) -> Result<(u32, &[u8]), String>   // <code varint><len varint><digest>; rejects NON-MINIMAL varints, len disagreement, trailing bytes
+table.provenance() -> Option<&EmbeddingProvenance>;  table.unverified_signature() -> &[u8]   // absence is reported, never defaulted
+// FAIL-CLOSED parse: bad magic / any version != 0 / non-zero reserved flags / key_len 0 or > 64 / count overrunning the buffer (checked before
+//   allocating) / entries not STRICTLY ascending (rejects unsorted AND duplicate in one comparison) / bad provenance block / trailing bytes.
+// Profile: research/spqv-external-key-profile.md. Corpus: tests/fixtures/external-key/ (MANIFEST.tsv + 5 positive/13 negative .bin, written by an
+//   INDEPENDENT Python encoder). Runner: tests/external_key_profile.rs. Open questions K1-K7 (store binding, signatures) BLOCK the freeze.
+
 // --- incremental add/remove/update (src/delta.rs) --- feature = "delta" ONLY; LEAN, no new dep [OPUS-4.8] sq-pi44
 // In-RAM DELTA SIDECAR over the immutable base: append map + tombstone set. No file rebuild; a single graph change no
 // longer forces a full re-embed. get/iter/len (hence search) transparently union base+delta and honour tombstones.
@@ -1591,6 +1609,63 @@ neighbour pairs, so `policy.k` bounds the per-vector merge fan-in; the canonical
 group's smallest (deterministic). Misconfigurations are `Err`, never silent: a `k` the
 build `ef_search` beam cannot serve, a ground-truth id absent from the index, a
 gate/threshold outside its range, an all-zero/non-finite/duplicate-id input.
+
+### 23. External-key interoperability table — DRAFT profile (opt-in, feature = `external-key`) [SONNET-4.6] sq-lhcot.2 / #2789
+
+**Read this first: the profile is NOT frozen.** It is being co-designed with Kern/PSS on GitHub
+#1746; `EXTERNAL_KEY_PROFILE_VERSION` is `0`, which means *draft*, and the frozen profile will carry
+a version `>= 1` that this build **rejects** rather than mis-parsing. Nothing written under version 0
+carries a compatibility promise. Do not persist a draft table you are not prepared to regenerate. The
+specification is `research/spqv-external-key-profile.md`; open questions **K1–K7** (notably store
+binding and signatures) block the freeze.
+
+**What it is for.** A `.spqv` is keyed by build-time **dictionary id**, so it is valid only against
+the exact graph generation it was built against — and the thread-count-stable fingerprint *passes* a
+re-parse whose ids merely permuted (the id-keyed staleness contract above). An **external key** names
+the identity rather than the id, so it survives a re-parse. Keys are **opaque producer-supplied
+multihash digests**: sparq is a consumer and format co-designer, it never derives a key and defines
+**no** concept-hash scheme.
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features external-key
+use sparq_vectors::external_key::ExternalKeyTable;
+use sparq_vectors::spqv_provenance::{EmbeddingProvenance, Metric, Normalization};
+
+// One multihash code at one digest length per table (that is what makes entries fixed-width).
+let mut table = ExternalKeyTable::new(0x12 /* sha2-256 */, 32)?;
+table.insert(&digest_from_the_producer, 0)?;   // duplicate key => Err: one key, exactly one slot
+let table = table.with_provenance(               // an external key is generation-independent but
+    EmbeddingProvenance::new("m", Metric::Cosine, Normalization::L2),  // NOT embedding-space-independent
+);
+
+let bytes = table.to_bytes();                    // entries ASCENDING by digest — canonical, not insertion order
+let received = ExternalKeyTable::from_bytes(&bytes)?;   // fail-closed on every malformation
+match received.lookup(0x12, &digest_from_the_producer)? {
+    Some(slot) => { /* index the companion .spqv's dense data section at `slot` */ }
+    None => { /* the key is genuinely absent — a clean miss */ }
+}
+// An `Err` from lookup means the query could not be EVALUATED (foreign multihash code, wrong-length
+// digest) — deliberately distinct from a miss, so a substitution attempt cannot read as "not found".
+# Ok::<(), String>(())
+```
+
+**Scope boundaries, stated rather than implied.** The table is a **standalone block with its own
+magic**, not a `.spqv` section: the container (v1/v2/v3/v4) is byte-for-byte unchanged and
+`external_key.rs` is **not wired into `VectorStore`**, so dictionary-ID mode and external-key mode
+coexist by not touching. **No mmap index is built** — the bead sequences format test vectors and
+parsers *before* that optimization, and the fixed-width sorted layout is chosen so it is later a pure
+read-path change. Multibase *text* decoding is out of scope (a producer hands over bytes); the
+normalization rule is decode-then-compare, never compare text. The signature area is **opaque and
+never verified** — the accessor is named `unverified_signature()` so its presence cannot be read as
+an integrity claim.
+
+**Conformance corpus.** `crates/sparq-vectors/tests/fixtures/external-key/` carries `MANIFEST.tsv`
+plus 5 positive and 13 negative byte-level fixtures, written by an **independent stdlib-Python
+encoder** (`generate.py`) rather than by this crate — so `tests/external_key_profile.rs` compares two
+implementations instead of confirming one is self-consistent, re-encoding every accepted fixture and
+asserting the bytes match. Each rejection row records a **required error substring**, so a parser
+cannot pass by rejecting everything for the wrong reason. A non-Rust implementation reads the
+manifest and the `.bin` files, not the test.
 
 ## Gotchas / feature flags / prerequisites
 

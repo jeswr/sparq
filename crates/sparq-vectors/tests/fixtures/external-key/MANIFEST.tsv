@@ -1,0 +1,25 @@
+# [SONNET-4.6] sq-lhcot.2 (#2789) DRAFT external-key .spqv profile conformance corpus.
+# Profile: research/spqv-external-key-profile.md. Regenerate: generate.py (see its header).
+# An `accept` row's detail column is prose; a `reject` row's is a REQUIRED error substring:
+# a conforming parser must refuse the fixture AND say why. Columns are tab-separated;
+# `-` means not-applicable. Cross-repository consumers read this file, not the .rs test.
+#
+fixture	expect	entries	hash_code	key_len	detail
+pos-empty.bin	accept	0	0x12	32	an empty table is well-formed: a producer with no external keys yet still declares its (code, length) profile
+pos-three-keys.bin	accept	3	0x12	32	the canonical shape: three 32-byte keys in ascending digest order
+pos-provenance.bin	accept	2	0x12	32	an external key is generation-independent but NOT embedding-space-independent, so the table binds the embedding provenance
+pos-signature.bin	accept	1	0x12	32	the signature area round-trips as OPAQUE bytes; no implementation verifies it under the draft profile, and its presence asserts nothing
+pos-sha2-512-keys.bin	accept	2	0x13	64	a 64-byte digest at the length cap — the entry width is derived from the header, never assumed to be 32
+neg-truncated-header.bin	reject	-	-	-	truncated
+neg-bad-magic.bin	reject	-	-	-	magic
+neg-frozen-profile-version.bin	reject	-	-	-	version
+neg-nonzero-flags.bin	reject	-	-	-	reserved
+neg-zero-key-len.bin	reject	-	-	-	must not be 0
+neg-oversized-key-len.bin	reject	-	-	-	cap
+neg-unsorted-entries.bin	reject	-	-	-	strictly ascending
+neg-duplicate-key.bin	reject	-	-	-	strictly ascending
+neg-truncated-entries.bin	reject	-	-	-	truncated
+neg-absurd-entry-count.bin	reject	-	-	-	overruns
+neg-trailing-bytes.bin	reject	-	-	-	trailing
+neg-corrupt-provenance.bin	reject	-	-	-	provenance block does not parse
+neg-oversized-signature-len.bin	reject	-	-	-	cap

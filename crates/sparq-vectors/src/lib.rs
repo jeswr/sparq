@@ -22,6 +22,14 @@ pub mod cost;
 pub mod delta;
 pub mod diskann;
 pub mod embed;
+// [SONNET-4.6] sq-lhcot.2 (issue #2789): the DRAFT external-key `.spqv` interoperability profile
+// being co-designed with Kern/PSS on #1746 — the `(key, slot)` table codec + fail-closed parser the
+// bead sequences BEFORE any mmap-index work, with byte-level fixtures in
+// `tests/fixtures/external-key/`. `external-key` feature only (off by default, no new dependency);
+// it is NOT wired into `VectorStore`, so the `.spqv` container is unchanged. Profile version 0 means
+// DRAFT: the frozen profile carries a version >= 1 and is rejected here rather than mis-parsed.
+#[cfg(feature = "external-key")]
+pub mod external_key;
 // [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e): the P1 structure-aware-vectorisation TYPED-LITERAL
 // ENCODERS — the datatype router + order-preserving numeric + boolean-sign + date encoders, plus
 // the self-describing `.spqv` SchemaHeader (per-block metric tags + metric-correctness guard).

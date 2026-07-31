@@ -109,6 +109,17 @@ filtered-ann = []
 # pending the cross-implementation profile #1746 — the KERN boundary), so this ships the core v3
 # record without privileging any encoder.
 spqv-provenance = []
+# [SONNET-4.6] sq-lhcot.2 (issue #2789, KERN boundary #1746): the DRAFT external-key `.spqv`
+# INTEROPERABILITY PROFILE — a `(external key, slot)` table whose keys are OPAQUE producer-supplied
+# multihash digests, so a table stops being tied to one dictionary-id generation. OPT-IN and OFF by
+# default; a LEAN feature — it adds NO new dependency (a hand-rolled fixed-width LE codec that reuses
+# the ALWAYS-COMPILED `EmbeddingProvenance` block codec, so it does not imply `spqv-provenance`; no
+# serde, no multihash crate) and pulls in NEITHER the engine
+# NOR any heavy crate. It gates `external_key.rs` ONLY: nothing is wired into `VectorStore`, so the
+# `.spqv` container (v1/v2/v3/v4) is byte-for-byte unchanged in BOTH feature states. The profile is
+# NOT frozen (version 0 = DRAFT) and the mmap index is deliberately NOT built — this ships the format
+# test vectors + parser the bead sequences first. See research/spqv-external-key-profile.md.
+external-key = []
 # [GPT-5.6] sq-lsp7k.25: opaque per-vector UTF-8 metadata persisted inside `.spqv` and returned
 # beside exact-search hits. OPT-IN and OFF by default; a LEAN feature with no new dependency.
 # Ordinary `put` stores keep writing the existing v2/v3 formats byte-for-byte; the v4 metadata
@@ -252,6 +263,14 @@ serde_json = "1"
 [[test]]
 name = "proptest_quant"
 required-features = ["structure"]
+
+# [SONNET-4.6] sq-lhcot.2: the external-key profile conformance runner reads
+# `sparq_vectors::external_key`, so it needs the opt-in `external-key` feature. Registering the
+# requirement keeps `cargo build --all-targets` (default features) green when the feature is out of
+# the build — the body is additionally `#![cfg(feature = "external-key")]`.
+[[test]]
+name = "external_key_profile"
+required-features = ["external-key"]
 
 # [OPUS-4.8] sq-ip3a: the bench example measures HNSW (`VectorIndex`) recall/build, so it needs the
 # approximate backend. Gating it on `approx-ann` keeps `cargo build --all-targets` (default features)
