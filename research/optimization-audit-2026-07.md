@@ -15,11 +15,16 @@ readability, or a deliberate design tradeoff, and avoid duplicating in-flight pr
   (`scripts/perf-gate.py` / `bench/perf-baseline.json`) or an EC2 benchmark run
   (sq-vw3ax.12). Work-box numbers quoted below are **non-canonical directional
   brackets** used only to size expectations, never claims.
-- Deterministic ratchets (`wasm_bundle_bytes`, `store_bytes_per_triple[_small]`,
-  `dict_bytes_per_term`) must hold or improve on every item — those are the only
-  hard-failing metrics. `parse_ns_per_byte` is wall-clock-derived and therefore an
-  **advisory timing signal (tracked/warned, non-blocking)**: watched on every item, but
-  it never blocks a merge. No clippy/readability/soundness compromise; new risk-bearing
+- Deterministic ratchets must hold or improve on every item. `scripts/perf-gate.py`
+  classifies by `mode` in `bench/perf-baseline.json`: **every `mode: auto` metric
+  hard-fails** (exit 2), and only `mode: noise` timing metrics are advisory. The
+  `mode: auto` metrics relevant to the items below are `wasm_bundle_bytes`,
+  `store_bytes_per_triple[_small]` and `dict_bytes_per_term` (the baseline also gates
+  others, e.g. `comp_store_bytes_per_triple`, `fts_bytes_per_doc`,
+  `vectors_{diskann,pq}_recall_at10`, `geo_compliance_deficit`). `parse_ns_per_byte` is
+  the sole `mode: noise` metric — wall-clock-derived and therefore an **advisory timing
+  signal (tracked/warned, non-blocking)**: watched on every item, but it never blocks a
+  merge. No clippy/readability/soundness compromise; new risk-bearing
   paths ship **opt-in** behind differential tests (the established yannakakis / semijoin-bitmap /
   cs-planner pattern).
 
@@ -390,10 +395,13 @@ deliberate tradeoffs. Standing do-not-touch list:
 1. **Canonical or it did not happen**: deterministic perf-gate metrics for anything
    byte-countable; EC2 benchmark runs (sq-vw3ax.12) for latency/throughput; work-box
    numbers locate hot spots only. This document's bracket figures are non-canonical.
-2. **Ratchets hold or improve** on every PR: `wasm_bundle_bytes`,
-   `store_bytes_per_triple[_small]`, `dict_bytes_per_term`. `parse_ns_per_byte` is not a
-   ratchet — it is an advisory timing signal (tracked/warned, non-blocking). Item 1 is the
-   only deliberate re-baseline, and it moves DOWN.
+2. **Ratchets hold or improve** on every PR: every `mode: auto` metric in
+   `bench/perf-baseline.json` hard-fails the gate on regression — the ones this document
+   touches are `wasm_bundle_bytes`, `store_bytes_per_triple[_small]` and
+   `dict_bytes_per_term`. `parse_ns_per_byte` is the sole `mode: noise` metric: its floor
+   still ratchets down on sustained improvement, but a regression is an advisory timing
+   warning (tracked/warned, non-blocking). Item 1 is the only deliberate re-baseline, and
+   it moves DOWN.
 3. **Differential-or-die** for anything near semantics: ingest byte-identity suites,
    W3C conformance, ON==OFF feature differentials, byte-identical HTTP bodies.
 4. **Measure-first beads (12, 13) may close as "measured, rejected"** — a recorded

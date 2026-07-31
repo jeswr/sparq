@@ -8,9 +8,10 @@ shapes** — they steer prioritization only and must never be baked into docs, t
 thresholds. Any adopted change proves itself on the canonical EC2 lane
 (`research/ci-ec2-design.md`, greenlit sq-vw3ax.12) and against the deterministic
 `scripts/perf-gate.py` ratchets, which must hold or improve. Mind the split those ratchets
-enforce: only the deterministic byte-count metrics hard-fail, while the wall-clock-derived
-`parse_ns_per_byte` is an **advisory timing signal (tracked/warned, non-blocking)** — the
-measurement obligations below cite it in that sense, never as a hard ratchet.
+enforce: every `mode: auto` metric in `bench/perf-baseline.json` hard-fails, while the
+`mode: noise` timing metrics are advisory. `parse_ns_per_byte` is the sole `mode: noise`
+metric — wall-clock-derived, an **advisory timing signal (tracked/warned, non-blocking)** —
+and the measurement obligations below cite it in that sense, never as a hard ratchet.
 
 ## 0. Disjointness map — what this record must NOT restate
 
