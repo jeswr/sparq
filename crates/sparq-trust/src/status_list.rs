@@ -1414,8 +1414,9 @@ mod tests {
         // Exactly at the limit still enumerates.
         let at = StatusDelta::between_with_limit(list_iri(), &prev, &next, 8);
         assert_eq!(at.changed_indices().map(<[u64]>::len), Some(8));
-        // The default limit comfortably covers this case.
-        assert!(DEFAULT_MAX_CHANGED_INDICES >= 8);
+        // The default limit comfortably covers this case (checked at compile time — the
+        // operand is a `const`, so a runtime `assert!` is a constant assertion).
+        const { assert!(DEFAULT_MAX_CHANGED_INDICES >= 8) };
     }
 
     #[test]
