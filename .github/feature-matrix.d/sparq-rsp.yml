@@ -1,4 +1,6 @@
 # Feature-matrix fragment for `sparq-rsp`.
+# SCOPE ([SONNET-4.6] issue #2384): a leg change is a TWO-FILE change — this fragment
+# AND scripts/tests/feature-matrix-legnames.golden.txt. See README.md in this directory.
 
 # [GPT-5.6] Gap-triggered event-time session windows are default-OFF, and
 # tests/session_oracle.rs is compiled only with this feature.

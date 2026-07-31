@@ -1,3 +1,6 @@
+# SCOPE ([SONNET-4.6] issue #2384): a leg change is a TWO-FILE change — this fragment
+# AND scripts/tests/feature-matrix-legnames.golden.txt. See README.md in this directory.
+#
 # [GPT-5.6] sq-lsp7k.26: exercise deterministic multi-hop signature expansion and its
 # weighted-Jaccard property witnesses; the feature is default-OFF.
 - name: "sparq-sim (multi-hop)"

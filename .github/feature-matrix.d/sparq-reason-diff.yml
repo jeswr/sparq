@@ -1,6 +1,8 @@
 # Feature-matrix fragment for `sparq-reason-diff`. Same contract as every fragment here
 # (see sparq-cli.yml / scripts/assemble-feature-matrix.py): each leg's check-run name is
 # `opt-in <name>` and GATES via the ci-summary aggregator.
+# SCOPE ([SONNET-4.6] issue #2384): a leg change is a TWO-FILE change — this fragment
+# AND scripts/tests/feature-matrix-legnames.golden.txt. See README.md in this directory.
 
 # [FABLE-5] sq-xg6uu: the OWL 2 RL differential-vs-external-oracle harness. The whole
 # crate (deps included) is behind `rl-oracle` — a default build is an empty lib, so this

@@ -1,6 +1,8 @@
 # Feature-matrix fragment for `sparq-hdt`. Same contract as every fragment here (see
 # sparq-cli.yml / scripts/assemble-feature-matrix.py): each leg's check-run name is
 # `opt-in <name>` and GATES via the ci-summary aggregator.
+# SCOPE ([SONNET-4.6] issue #2384): a leg change is a TWO-FILE change — this fragment
+# AND scripts/tests/feature-matrix-legnames.golden.txt. See README.md in this directory.
 
 # [FABLE-5] sq-8ju74: the HDT WRITE path (`save` — Graph -> standard-layout .hdt via the
 # direct in-memory encoder, src/write.rs + src/encode.rs). The whole tests/write_roundtrip.rs
