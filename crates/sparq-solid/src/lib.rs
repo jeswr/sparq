@@ -546,8 +546,9 @@ impl PodStore {
     ///
     /// `acp:vc` gates a matcher on the requesting agent holding a Verifiable Credential that
     /// satisfies a stated requirement. sparq-solid never verifies a credential itself — the
-    /// caller (a Solid server, or the opt-in `acp-vc` backend
-    /// [`VerifiedCredentials::admit_data_integrity`]) verifies the presentation and records
+    /// caller (a Solid server, or the opt-in `acp-vc` backend's
+    /// `VerifiedCredentials::admit_data_integrity` — a code span rather than an intra-doc link,
+    /// since that method exists only under that feature) verifies the presentation and records
     /// the resulting `(agent, requirement IRI)` holdings in `credentials`, which is the
     /// **trusted channel** for them: exactly like `provenance`, these facts are asserted by
     /// the caller and are **never** read from pod or `.acr` content, so an agent cannot

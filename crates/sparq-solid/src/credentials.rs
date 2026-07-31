@@ -51,8 +51,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// Caller-supplied (TRUSTED) *already-verified* credential holdings: which ACP `acp:vc`
 /// requirement IRIs each agent WebID has been proven to satisfy.
 ///
-/// Built by the storage/authentication layer (or by the `acp-vc` backend,
-/// [`VerifiedCredentials::admit_data_integrity`]) and passed to
+/// Built by the storage/authentication layer (or by the `acp-vc` backend's
+/// `VerifiedCredentials::admit_data_integrity` — a code span rather than an intra-doc link,
+/// since that method exists only under that feature and the workspace rustdoc gate also runs
+/// `-D warnings` in the DEFAULT feature state) and passed to
 /// [`crate::PodStore::materialize_acp_with_credentials`] /
 /// [`crate::materialize_acp_with_credentials`]. An empty map (the default) means no agent
 /// holds any credential, so no `acp:vc` matcher ever grants — fully fail-closed.
