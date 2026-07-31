@@ -2,8 +2,10 @@
 # [SONNET-4.6] run_differential_harness.sh — PROOF M1 (sq-3x7dl.14.2).
 #
 # Drives the XPath differential oracle harness:
-#   1. Run the Rust harness's own unit tests (the F&O references, the self-expiring
-#      oracle-divergence guards, the per-test-function fault-injection coverage checks).
+#   1. Run the Rust harness's own unit tests (the F&O references, the CPython
+#      codepoint-slicing cross-check of the fn:substring window, the codepoint->byte
+#      boundary-conversion property test (sq-hjvte), the self-expiring oracle-divergence
+#      guards, the per-test-function fault-injection coverage checks).
 #   2. Build the harness (zk/xpath/differential/).
 #   3. Generate the oracle Noir test file — every expected value read back from sparq's
 #      own Rust SPARQL/XSD scalar evaluator, cross-checked bit-for-bit against native f64
