@@ -188,3 +188,46 @@ fn interning_entry_point_expands_a_list_valued_answer() {
         "the `:pair` answer plus the two-cell rdf:first/rest chain (2 triples per cell): {ids:?}"
     );
 }
+
+/// Generated rdf:first/rest CELLS must never be the same RDF node as a blank the answer
+/// already carries. The list expander used to mint `_l1`, `_l2`, … unconditionally, so a query
+/// projecting a data blank literally spelled `_:_l1` alongside a list value MERGED that blank
+/// with a chain cell — two distinct RDF nodes collapsing into one, i.e. a semantically wrong
+/// answer graph. Cell labels are now allocated under a prefix proven fresh against every blank
+/// reachable in the rows being expanded.
+#[test]
+fn generated_list_cells_never_merge_with_a_projected_blank() {
+    const FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    const REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+
+    let mut dict = sparq_core::dict::Dict::default();
+    // Cells were minted tail-first, so the old expander gave `(1 2)` the labels `_l1` (the `2`
+    // cell) and `_l2` (the head) — `_:_l1` is therefore a label the data can collide with.
+    let data = "@prefix : <http://ex/>. :a :seeAlso _:_l1 . _:_l1 :name \"n\" .";
+    let query = "@prefix : <http://ex/>. { ?s :seeAlso ?b } => { ?b :pair (1 2) }.";
+    let ids = reason_n3_query(&mut dict, data, query).expect("interned list answer");
+
+    // Interning is idempotent, so this is the id the PROJECTED data blank already has.
+    let projected = dict.intern_blank("_l1");
+    let pair = dict.intern_iri("http://ex/pair");
+    let first = dict.intern_iri(FIRST);
+    let rest = dict.intern_iri(REST);
+
+    let answer = ids.iter().find(|r| r[1] == pair).expect("the `:pair` answer row");
+    assert_eq!(
+        answer[0], projected,
+        "the projected blank keeps its own identity — it IS `_:_l1` from the data: {ids:?}"
+    );
+    let cells: Vec<_> = ids.iter().filter(|r| r[1] == first).map(|r| r[0]).collect();
+    assert_eq!(cells.len(), 2, "a two-member list expands to two cells: {ids:?}");
+    assert!(
+        !cells.contains(&projected),
+        "a generated list cell MERGED with the projected `_:_l1` blank — two distinct RDF \
+         nodes collapsed into one: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|r| r[1] == rest && r[0] == projected),
+        "the projected blank must not carry chain structure either: {ids:?}"
+    );
+    assert_eq!(ids.len(), 5, "the `:pair` answer plus 2 triples per cell: {ids:?}");
+}

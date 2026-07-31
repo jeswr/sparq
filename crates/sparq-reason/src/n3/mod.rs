@@ -409,14 +409,16 @@ pub fn reason_n3_query_terms(data: &str, query: &str) -> Result<Vec<[Term; 3]>, 
 /// As [`reason_n3_query_terms`], but interned into `dict` — the RDF-shaped answer form
 /// [`reason_n3`] returns. First-class `( … )` list values in an answer are expanded into
 /// rdf:first/rest blank-node chains (whose structure triples are part of the returned answer),
-/// exactly as the closure entry points expand them.
+/// exactly as the closure entry points expand them. A generated chain cell is always a
+/// DISTINCT node from any blank the answers already carry — cell labels are minted under a
+/// prefix proven fresh against them, so a projected `_:_l1` cannot merge with a list cell.
 ///
 /// Errors — additionally to [`reason_n3_query_terms`] — when an answer carries a quoted `{ … }`
 /// formula, which has no dictionary representation; use the term-level entry point for a query
 /// whose conclusion is formula-valued.
 pub fn reason_n3_query(dict: &mut Dict, data: &str, query: &str) -> Result<Vec<[Id; 3]>, String> {
     let answers = reason_n3_query_terms(data, query)?;
-    let mut exp = ListExpander::default();
+    let mut exp = ListExpander::new(&answers);
     let (mut rows, mut structure) = exp.expand_rows(&answers);
     rows.append(&mut structure);
     let mut out = Vec::with_capacity(rows.len());
@@ -537,21 +539,24 @@ fn fresh_carry_prefix(parsed: &parser::Parsed) -> String {
     fresh_blank_prefix(&seen, "__st")
 }
 
+/// Every blank label reachable in `t`, including nested list members, formula
+/// rows and quoted-triple components.
+fn term_blank_labels<'a>(t: &'a Term, out: &mut FxHashSet<&'a str>) {
+    match t {
+        Term::Blank(l) => {
+            out.insert(l.as_str());
+        }
+        Term::List(ms) => ms.iter().for_each(|m| term_blank_labels(m, out)),
+        Term::Formula(ts) => {
+            ts.iter().for_each(|r| r.iter().for_each(|m| term_blank_labels(m, out)));
+        }
+        Term::Triple(tr) => tr.iter().for_each(|m| term_blank_labels(m, out)),
+        _ => {}
+    }
+}
+
 /// Every blank label in a parsed document, including nested structured terms.
 fn document_blank_labels(parsed: &parser::Parsed) -> FxHashSet<&str> {
-    fn labels<'a>(t: &'a Term, out: &mut FxHashSet<&'a str>) {
-        match t {
-            Term::Blank(l) => {
-                out.insert(l.as_str());
-            }
-            Term::List(ms) => ms.iter().for_each(|m| labels(m, out)),
-            Term::Formula(ts) => {
-                ts.iter().for_each(|r| r.iter().for_each(|m| labels(m, out)));
-            }
-            Term::Triple(tr) => tr.iter().for_each(|m| labels(m, out)),
-            _ => {}
-        }
-    }
     let mut seen = FxHashSet::default();
     let rule_terms = parsed
         .rules
@@ -559,7 +564,7 @@ fn document_blank_labels(parsed: &parser::Parsed) -> FxHashSet<&str> {
         .chain(&parsed.backward_rules)
         .flat_map(|r| r.premise.iter().chain(&r.conclusion));
     for t in parsed.facts.iter().chain(rule_terms) {
-        t.iter().for_each(|m| labels(m, &mut seen));
+        t.iter().for_each(|m| term_blank_labels(m, &mut seen));
     }
     seen
 }
@@ -1023,8 +1028,11 @@ fn intern_closure(
     // First-class list values have no dictionary representation — expand them
     // into rdf:first/rest blank-node chains (one chain per list VALUE, shared
     // across the facts that mention it).
-    let mut exp = ListExpander::default();
     let fact_rows: Vec<[Term; 3]> = facts.all.iter().cloned().collect();
+    // The same expander also expands the proof rows below, so its cell labels must be
+    // fresh against THOSE blanks too — seed it from both.
+    let step_rows = steps.iter().flat_map(|(g, _, prem)| std::iter::once(g).chain(prem));
+    let mut exp = ListExpander::new(fact_rows.iter().chain(step_rows));
     let (fact_rows, mut extra) = exp.expand_rows(&fact_rows);
     // Intern the ground closure into the dictionary.
     let mut out = Vec::with_capacity(fact_rows.len() + extra.len());
@@ -1052,14 +1060,32 @@ fn intern_closure(
 /// Expands first-class `Term::List` values into rdf:first/rest blank-node
 /// chains for consumers that need pure RDF triples (the dictionary-interning
 /// entry points). One chain per distinct list value; `()` becomes `rdf:nil`.
-#[derive(Default)]
+///
+/// Cell labels are minted under a `prefix` proven fresh against every blank
+/// label reachable in the rows the expander was built for ([`ListExpander::new`]) —
+/// a generated cell can therefore never be the same RDF node as a blank the
+/// caller is already carrying (a document blank or a projected query answer
+/// literally spelled `_:_l1` would otherwise MERGE with a generated cell and
+/// emit a semantically wrong graph).
 struct ListExpander {
     heads: FxHashMap<Term, Term>,
     structure: Vec<[Term; 3]>,
     counter: usize,
+    prefix: String,
 }
 
 impl ListExpander {
+    /// An expander whose cell labels are fresh against every blank reachable in
+    /// `rows` — which must cover EVERY row this expander will be asked to
+    /// expand, since the prefix is fixed at construction.
+    fn new<'a>(rows: impl IntoIterator<Item = &'a [Term; 3]>) -> Self {
+        let mut seen = FxHashSet::default();
+        for r in rows {
+            r.iter().for_each(|t| term_blank_labels(t, &mut seen));
+        }
+        let prefix = fresh_blank_prefix(&seen, "_l");
+        Self { heads: FxHashMap::default(), structure: Vec::new(), counter: 0, prefix }
+    }
     fn expand_rows(&mut self, rows: &[[Term; 3]]) -> (Vec<[Term; 3]>, Vec<[Term; 3]>) {
         let out: Vec<[Term; 3]> = rows.iter().map(|r| self.expand_row(r)).collect();
         (out, std::mem::take(&mut self.structure))
@@ -1089,7 +1115,7 @@ impl ListExpander {
         let mut tail = Term::Iri(parser::RDF_NIL.into());
         for m in members.into_iter().rev() {
             self.counter += 1;
-            let node = Term::Blank(format!("_l{}", self.counter));
+            let node = Term::Blank(format!("{}{}", self.prefix, self.counter));
             self.structure.push([node.clone(), Term::Iri(parser::RDF_FIRST.into()), m]);
             self.structure.push([node.clone(), Term::Iri(parser::RDF_REST.into()), tail]);
             tail = node;
