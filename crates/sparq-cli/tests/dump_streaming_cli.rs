@@ -12,8 +12,9 @@
 //! `cargo test -p sparq-cli --features streaming-serialization`.
 #![cfg(feature = "streaming-serialization")]
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// A fresh scratch dir under the cargo per-test-target tmp dir.
 fn scratch(tag: &str) -> PathBuf {
@@ -141,31 +142,47 @@ fn the_streamed_turtle_dump_reparses_to_the_same_triples() {
     assert_eq!(back.len(), source.len());
 }
 
-/// A closed downstream pipe (`dump … | head`) is a NORMAL exit, not a panic.
+/// A closed downstream pipe (the `dump … | head` shape) is a NORMAL exit, not a panic.
 ///
 /// This is the one externally visible behaviour difference the feature makes, and it is a real
 /// improvement: the buffered `print!` path panics with "failed printing to stdout: Broken pipe"
 /// and exits 101, because `print!` unwraps its write. The streaming path classifies
-/// `ErrorKind::BrokenPipe` and returns quietly. Deterministic at this fixture size — `head`
-/// closes the pipe long before a 2000-subject document finishes writing.
+/// `ErrorKind::BrokenPipe` and returns quietly — exit 0, nothing on stderr.
+///
+/// Built WITHOUT a shell: `head` is emulated by reading a 64-byte prefix and then dropping the
+/// read end, which is what makes the child's next write fail with `EPIPE`. A shell pipeline
+/// would have had to smuggle the child's status back out through `PIPESTATUS` (bash-only; `sh`
+/// is dash on Debian/Ubuntu, where it is a fatal "Bad substitution" that never runs the CLI at
+/// all), so the status assertion below is only trustworthy because the pipe is built here.
+///
+/// Deterministic at this fixture size: a 2000-subject document is far larger than the pipe
+/// buffer, so the child is still writing — and therefore still has a write left to fail — when
+/// the read end closes.
 #[test]
 fn a_closed_downstream_pipe_is_a_quiet_exit() {
     let ttl = wide_ttl();
     let p = fixture("broken-pipe", &ttl, "ttl");
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "{} dump {} turtle turtle | head -c 64 > /dev/null; exit ${{PIPESTATUS[0]:-$?}}",
-            env!("CARGO_BIN_EXE_sparq-cli"),
-            p.to_str().unwrap()
-        ))
-        .output()
-        .expect("spawning the pipeline");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sparq-cli"))
+        .args(["dump", p.to_str().unwrap(), "turtle", "turtle"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawning sparq-cli");
+
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut head = [0u8; 64];
+    stdout.read_exact(&mut head).expect("the first bytes of the dump must arrive");
+    drop(stdout); // the `| head` moment: the reader goes away mid-document.
+
+    let out = child.wait_with_output().expect("waiting for sparq-cli");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !stderr.contains("panicked"),
-        "a closed pipe must not panic the writer: {stderr}"
+        out.status.success(),
+        "a closed pipe must be a quiet exit 0, got {:?}: {}",
+        out.status.code(),
+        stderr
     );
+    assert!(stderr.is_empty(), "a closed pipe must say nothing on stderr: {}", stderr);
 }
 
 /// Formats WITHOUT a streaming writer are untouched by the feature — `nquads` still goes
