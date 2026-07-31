@@ -396,6 +396,7 @@ fn sample_manifest() -> ProofManifest {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -733,6 +734,7 @@ fn full_manifest_prove_verify_scan() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -857,6 +859,7 @@ fn filter_manifest(
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -1217,6 +1220,7 @@ fn nonce_binding_mismatch_rejected() {
             key_set: vec![],
             commitment_attestations: vec![],
             attributions: vec![vec![0]],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -1316,6 +1320,7 @@ fn holder_pop_manifest(holder_hex: &str, pop_hex: &str, cryptosuite: &str) -> Pr
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -1585,6 +1590,7 @@ fn holder_bound_manifest(
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -1969,6 +1975,7 @@ fn holder_pop_valid_verifies_end_to_end() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2032,6 +2039,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             key_set: vec![],
             commitment_attestations: vec![],
             attributions: vec![vec![0]],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -2299,6 +2307,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2336,6 +2345,7 @@ fn filter_reject_filter_add_on_scan_only() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2370,6 +2380,7 @@ fn filter_reject_constant_swap_age_as_salary() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2419,6 +2430,7 @@ fn filter_reject_operand_slot_substitution() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0], vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2469,6 +2481,7 @@ fn filter_reject_false_verdict_row() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2506,6 +2519,7 @@ fn filter_reject_unbindable_filter_fragment() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2549,6 +2563,7 @@ fn filter_binding_happy_path_structure() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2618,6 +2633,7 @@ fn filter_reject_unproven_failing_row() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2672,6 +2688,7 @@ fn filter_two_rows_both_gated_verifies() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2737,6 +2754,7 @@ fn filter_reject_ungated_second_slot_within_scan() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0], vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2789,6 +2807,7 @@ fn filter_same_slot_in_two_patterns_needs_one_edge() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0], vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2809,6 +2828,294 @@ fn filter_same_slot_in_two_patterns_needs_one_edge() {
     attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
     prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy())
         .expect("same-slot-in-both-patterns needs only the one gating edge");
+}
+
+// --- explicit pattern→scan mapping (`manifest.pattern_scans`) -------------
+//
+// [OPUS-5] sq-q9r5e follow-up. The sq-q9r5e fix closed audit L-1 by demanding
+// the FILTER be discharged at EVERY slot the filtered variable occupies across
+// EVERY pattern a scan MATCHES BY CONSTANTS. Correct, but an over-demand where
+// two query patterns share a constant layout: two DISTINCT scans each answering
+// one of them, with the filtered variable at DIFFERENT slots in each, could not
+// build an accepted manifest at all. `manifest.pattern_scans` declares the
+// mapping so the gate can demand exactly the declared answering scan's slots.
+//
+// These tests are STRUCTURAL (no bb): the declaration is checked against the
+// same bb-bound `pattern_is_const`/`pattern_const_enc` the audit-#1
+// reconstruction binds, so the structural stage decides it on its own.
+
+/// The `{ ?s <age> ?v . ?v <age> ?o }` shape: TWO query patterns with the SAME
+/// constant layout `(?, <ex/age>, ?)`, placing `?v` at slot 2 (pattern 0) and
+/// slot 0 (pattern 1).
+const SAME_LAYOUT_QUERY: &str = "SELECT ?s ?v ?o WHERE { ?s <http://ex/age> ?v . ?v <http://ex/age> ?o FILTER(?v >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }";
+
+/// A one-triple `<ex/age>` credential committed under its OWN salt (audit #9
+/// requires distinct salts for distinct committed graphs), plus the scan over
+/// `(?, <ex/age>, ?)` that answers it.
+fn age_scan(subject: &str, salt_byte: u8) -> (ProofInputs, Fr, Fr) {
+    let graph = vec![Triple::new(
+        NamedOrBlankNode::NamedNode(iri(subject)),
+        iri("http://ex/age"),
+        int_lit(25),
+    )];
+    let salt = salt_from_bytes(&[salt_byte; 32]);
+    let commit = commit_triples(&graph, salt).unwrap();
+    let commitment = commit.commitment;
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let inputs = build_scan(&[commit], &pattern).expect("scan builds").inputs;
+    (inputs, commitment, salt)
+}
+
+/// A witness-only `filter_int` whose `operand_enc` is pinned to `slot_enc` (the
+/// scanned column the binding edge consumes), so stage 2's edge equality holds.
+fn filter_over_slot(slot_enc: FieldHex) -> ProofInputs {
+    let mut filt = filter_inputs(25, FilterOp::Ge, 18, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = slot_enc;
+    }
+    filt
+}
+
+fn scan_row_slot(inputs: &ProofInputs, row: usize, slot: usize) -> FieldHex {
+    match inputs {
+        ProofInputs::Scan { rows, .. } => rows[row][slot].clone(),
+        _ => unreachable!("scan inputs"),
+    }
+}
+
+/// The honest two-scan, same-constant-layout manifest: scan 0 answers pattern 0
+/// (`?v` at slot 2), scan 1 answers pattern 1 (`?v` at slot 0), and each carries
+/// exactly the one true-verdict FILTER edge its OWN pattern's slot needs.
+/// `pattern_scans` is left EMPTY here; each test sets it as it wants.
+fn same_layout_manifest() -> ProofManifest {
+    let (scan_a, commit_a, salt_a) = age_scan("http://ex/alice", 9);
+    let (scan_b, commit_b, salt_b) = age_scan("http://ex/bob", 11);
+    let filt_a = filter_over_slot(scan_row_slot(&scan_a, 0, 2));
+    let filt_b = filter_over_slot(scan_row_slot(&scan_b, 0, 0));
+    let sk = test_issuer_sk(1);
+    ProofManifest {
+        fully_hidden_revocation: None,
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: SAME_LAYOUT_QUERY.into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: vec![
+            attest_with_salt(commit_a, salt_a, &sk),
+            attest_with_salt(commit_b, salt_b, &sk),
+        ],
+        attributions: vec![vec![0], vec![0]],
+        pattern_scans: vec![],
+        // The two scans are over DISTINCT committed graphs, so `?v` crossing
+        // patterns 0/1 is a genuine cross-graph join and the Q6 gate (sq-en5dx,
+        // keyed on committed-graph identity) requires the non-bnode obligation.
+        join_obligations: vec![("v".to_string(), 0, 1)],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![
+            SubProof { inputs: scan_a, proof_hex: String::new() }, // proof 0 -> pattern 0
+            SubProof { inputs: scan_b, proof_hex: String::new() }, // proof 1 -> pattern 1
+            SubProof { inputs: filt_a, proof_hex: String::new() }, // proof 2
+            SubProof { inputs: filt_b, proof_hex: String::new() }, // proof 3
+        ],
+        binding_edges: vec![
+            BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 2 },
+            BindingEdge { from_proof: 1, from_row: 0, from_slot: 0, to_proof: 3 },
+        ],
+        join_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
+    }
+}
+
+/// The issue this whole schema addition exists for. WITHOUT a declaration the
+/// verifier resolves pattern→scan by constant membership, so scan 0 also matches
+/// pattern 1 and scan 1 also matches pattern 0; the sq-q9r5e every-slot rule then
+/// demands FOUR gating edges and this HONEST manifest is rejected. WITH the
+/// explicit `pattern_scans` declaration the gate demands exactly the two slots
+/// the declared answering scans bind, and it verifies.
+#[test]
+fn pattern_scans_declaration_removes_the_same_layout_over_demand() {
+    let mut m = same_layout_manifest();
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
+        other => panic!(
+            "without an explicit pattern→scan mapping the membership fallback must \
+             fail closed (over-demand); expected UnboundFilter(v), got {other:?}"
+        ),
+    }
+
+    m.pattern_scans = vec![vec![0], vec![1]];
+    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy())
+        .expect("declared pattern→scan mapping demands exactly the declared slots");
+}
+
+/// The declaration must not become an ESCAPE HATCH for audit L-1. In the L-1
+/// witness shape ONE scan answers both same-layout patterns; declaring it for
+/// both keeps both slots in the obligation, so the ungated second slot is still
+/// rejected. (Declaring it for only one pattern is impossible: the other pattern
+/// would be left unanswered — `PatternScanUnbound`, pinned below.)
+#[test]
+fn pattern_scans_cannot_ungate_the_l1_second_slot() {
+    let (scan, commit, salt) = age_scan("http://ex/alice", 9);
+    let filt = filter_over_slot(scan_row_slot(&scan, 0, 2));
+    let sk = test_issuer_sk(1);
+    let mut m = ProofManifest {
+        fully_hidden_revocation: None,
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: SAME_LAYOUT_QUERY.into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: vec![attest_with_salt(commit, salt, &sk)],
+        attributions: vec![vec![0], vec![0]],
+        // One scan, declared as answering BOTH same-layout patterns.
+        pattern_scans: vec![vec![0], vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },
+            SubProof { inputs: filt, proof_hex: String::new() },
+        ],
+        // Slot 2 gated; slot 0 (where ?v binds under pattern 1) NOT gated.
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
+    };
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
+        other => panic!(
+            "declaring one scan for both same-layout patterns must keep BOTH slots in \
+             the FILTER obligation (L-1); expected UnboundFilter(v), got {other:?}"
+        ),
+    }
+
+    // …and dropping pattern 1 from the declaration is not an escape either.
+    m.pattern_scans = vec![vec![0], vec![]];
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::PatternScanUnbound { pattern: 1 }) => {}
+        other => panic!("an empty declared entry must reject; got {other:?}"),
+    }
+}
+
+/// A scan sub-proof named by NO pattern is rejected: its disclosed rows would be
+/// read as some pattern's solution while carrying no FILTER-gating or
+/// attribution obligation from any pattern. This is the obligation that makes
+/// the declared (narrower) mapping total, so no disclosed row escapes gating.
+#[test]
+fn pattern_scans_reject_a_dangling_scan() {
+    let mut m = same_layout_manifest();
+    // Scan 1 is left out of the declaration while still disclosing its rows.
+    m.pattern_scans = vec![vec![0], vec![0]];
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::PatternScanUndeclared { proof: 1 }) => {}
+        other => panic!(
+            "a scan declared for no pattern must reject; expected \
+             PatternScanUndeclared{{proof:1}}, got {other:?}"
+        ),
+    }
+}
+
+/// A declaration may NARROW the constant-membership relation, never contradict
+/// it: naming a sub-proof that is not a scan, is out of range, or whose bb-bound
+/// pattern constants do not answer the pattern (audit #10) is rejected — so a
+/// prover cannot move the FILTER obligation onto a scan of a different predicate.
+#[test]
+fn pattern_scans_reject_a_declaration_contradicting_the_bound_constants() {
+    let mut m = same_layout_manifest();
+    // sub-proof 2 is the `filter_int`, not a scan.
+    m.pattern_scans = vec![vec![2], vec![1]];
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::PatternScanMismatch { pattern: 0, proof: 2 }) => {}
+        other => panic!("declaring a non-scan must reject; got {other:?}"),
+    }
+
+    // …and an out-of-range index is the same rejection.
+    m.pattern_scans = vec![vec![0], vec![99]];
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::PatternScanMismatch { pattern: 1, proof: 99 }) => {}
+        other => panic!("an out-of-range declared index must reject; got {other:?}"),
+    }
+
+    // …and a scan whose bound predicate constant answers a DIFFERENT pattern:
+    // an `<ex/role>` scan cannot be declared as answering an `<ex/age>` pattern.
+    let role_scan = scan_inputs_for(&credential_graph(), "http://ex/role");
+    let mut m = same_layout_manifest();
+    m.sub_proofs.push(SubProof { inputs: role_scan, proof_hex: String::new() });
+    let sk = test_issuer_sk(1);
+    for c in scan_commitments(&m) {
+        if !m
+            .commitment_attestations
+            .iter()
+            .any(|a| a.commitment == FieldHex::from_field(&c))
+        {
+            m.commitment_attestations
+                .push(attest_with_salt(c, salt_from_bytes(&[9u8; 32]), &sk));
+        }
+    }
+    m.pattern_scans = vec![vec![4], vec![1]];
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+        Err(CheckError::PatternScanMismatch { pattern: 0, proof: 4 }) => {}
+        other => panic!(
+            "declaring a constant-mismatched scan must reject (audit #10); got {other:?}"
+        ),
+    }
+}
+
+/// The declaration is indexed per query pattern in query order (like
+/// `attributions`), so a mis-sized vector cannot be interpreted — it is rejected
+/// rather than silently falling back to the membership inference.
+#[test]
+fn pattern_scans_reject_an_arity_mismatch() {
+    let mut m = same_layout_manifest();
+    m.pattern_scans = vec![vec![0]]; // one entry for two query patterns
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::PatternScanArityMismatch { patterns: 2, declared: 1 }) => {}
+        other => panic!(
+            "a mis-sized pattern_scans must reject; expected \
+             PatternScanArityMismatch{{patterns:2,declared:1}}, got {other:?}"
+        ),
+    }
+}
+
+/// `pattern_scans` is `#[serde(default)]`, so a legacy manifest that never heard
+/// of the field parses with an EMPTY declaration and keeps the membership
+/// inference (and its fail-closed over-demand) byte-for-byte. Omitting the field
+/// is therefore never a way to WEAKEN a gate.
+#[test]
+fn pattern_scans_absent_in_json_means_no_declaration() {
+    let m = same_layout_manifest();
+    let json = m.to_json();
+    assert!(json.contains("\"pattern_scans\""), "the field serialises");
+    let stripped: serde_json::Value = {
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("pattern_scans");
+        v
+    };
+    let legacy = ProofManifest::from_json(&stripped.to_string())
+        .expect("a manifest with no pattern_scans still parses");
+    assert!(legacy.pattern_scans.is_empty());
+    match prefilter_manifest_structure(&legacy, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
+        other => panic!(
+            "with no declaration the fail-closed membership over-demand must stand; \
+             got {other:?}"
+        ),
+    }
 }
 
 // --- issuer-signature / key-set NEGATIVE tests (audit #3) -----------------
@@ -2847,6 +3154,7 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -2998,6 +3306,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         key_set: vec![public_key_to_hex(&sk.public_key())],
         commitment_attestations: vec![full_attestation],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -3315,6 +3624,7 @@ fn cross_graph_manifest(
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: declared,
+        pattern_scans: vec![],
         join_obligations: obligations,
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -3988,6 +4298,7 @@ fn revocation_stale_status_list_rejected() {
         key_set: vec![public_key_to_hex(&sk.public_key())],
         commitment_attestations: vec![att],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -4188,6 +4499,7 @@ fn revocation_within_window_verifies() {
         key_set: vec![public_key_to_hex(&sk.public_key())],
         commitment_attestations: vec![att],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -4375,6 +4687,7 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -4467,6 +4780,7 @@ fn committed_index_without_hidden_revocation_rejected() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
@@ -4516,6 +4830,7 @@ fn committed_index_disclosed_commitment_mismatch_rejected() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
@@ -4832,6 +5147,7 @@ fn fully_hidden_scan_manifest(
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -5119,6 +5435,7 @@ fn fh_structural_manifest(rev: RevocationStatus) -> ProofManifest {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -5263,6 +5580,7 @@ fn fully_hidden_proof_without_fully_hidden_reference_rejected() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -5526,6 +5844,7 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -5704,6 +6023,7 @@ fn hi_scan_manifest_no_clear_attestation(
         key_set: vec![],                  // no declared narrowing
         commitment_attestations: vec![],  // NO clear attestation — hidden-only
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge },
@@ -6176,6 +6496,7 @@ fn filter_f64_composes_end_to_end() {
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
@@ -6284,6 +6605,7 @@ fn entailment_manifest(regime: EntailmentRegime, steps: Vec<DerivationStep>) -> 
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: regime,
         derivation_steps: steps,

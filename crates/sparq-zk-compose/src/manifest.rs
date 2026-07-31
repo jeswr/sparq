@@ -1832,6 +1832,49 @@ pub struct ProofManifest {
     /// BGP pattern may draw from) — fed to `verify::recheck` for the Q6
     /// cross-graph bnode-join guard.
     pub attributions: Vec<Vec<usize>>,
+    /// [OPUS-5] sq-q9r5e follow-up: the EXPLICIT per-pattern answering-scan
+    /// declaration — `pattern_scans[pi]` is the set of `sub_proofs` indices of
+    /// the SCAN sub-proofs that answer query BGP pattern `pi`. Indexed per query
+    /// pattern in query order, exactly like [`Self::attributions`].
+    ///
+    /// # Why it exists (the same-constant-layout ambiguity)
+    /// Without it the verifier resolves pattern→scan by constant MEMBERSHIP
+    /// (`crate::verifier`'s `scan_matches_pattern`), so two query patterns
+    /// sharing a constant layout — e.g. `{ ?s <age> ?v . ?v <age> ?o }`, both
+    /// `(?, <age>, ?)` — are BOTH matched by the SAME scan sub-proof and the
+    /// verifier cannot tell which one it was meant to answer. The FILTER gate
+    /// then has to fail CLOSED and demand the filter be discharged at EVERY slot
+    /// the filtered variable occupies across EVERY pattern the scan matches
+    /// (sq-q9r5e / audit L-1) — correct, but an over-demand: an honest prover
+    /// with two DISTINCT scans answering two same-layout patterns, where the
+    /// filtered variable sits at different slots in each, cannot build an
+    /// accepted manifest. Declaring the mapping lets the verifier demand exactly
+    /// the slots the DECLARED answering scan binds.
+    ///
+    /// # It is DECLARED, not trusted — the verifier re-checks it
+    /// `crate::verifier`'s `bind_pattern_scans` gate rejects a declaration that
+    /// is mis-sized (not one entry per query pattern), leaves a pattern
+    /// unanswered (empty entry), names a sub-proof that is out of range / not a
+    /// scan / whose bb-bound `pattern_is_const`/`pattern_const_enc` do NOT match
+    /// the pattern's constants, or leaves a scan sub-proof DANGLING (declared for
+    /// no pattern at all — its disclosed rows would carry no FILTER/attribution
+    /// obligation). So a declaration can only ever be a sub-set of the membership
+    /// relation, and every disclosed scan row is attributed to some pattern.
+    ///
+    /// # EMPTY = not declared (legacy manifests keep the fail-closed behaviour)
+    /// An empty vector means "no declaration"; the verifier falls back to the
+    /// membership inference and its fail-closed over-demand. Omitting the field
+    /// is therefore never a way to WEAKEN a gate — the inferred set is always a
+    /// superset of any valid declaration, so the inferred obligations are always
+    /// at least as strong.
+    ///
+    /// Consumed by the FLAT stage-1 gates only. The `extended-fragment` regime
+    /// defers all query-text term binding (see `verify_fragment_manifest`), so a
+    /// declaration is neither validated nor used there.
+    // [OPUS-5] sq-q9r5e follow-up: explicit pattern→scan mapping. Research-grade,
+    // NOT externally audited (sq-qhy4).
+    #[serde(default)]
+    pub pattern_scans: Vec<Vec<usize>>,
     /// Declared non-bnode join obligations (manifest side of the layer-3
     /// gate). `(variable, pattern_i, pattern_j)`.
     #[serde(default)]
@@ -2597,6 +2640,7 @@ mod holder_binding_tests {
             key_set: vec![public_key_to_hex(&issuer.public_key())],
             commitment_attestations: vec![att],
             attributions: vec![],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -2876,6 +2920,7 @@ mod canonical_edge_tests {
             key_set: vec![],
             commitment_attestations: vec![],
             attributions: vec![],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -3166,6 +3211,7 @@ mod path_schema_tests {
             key_set: vec![],
             commitment_attestations: vec![],
             attributions: vec![],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],

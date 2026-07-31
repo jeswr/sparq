@@ -183,6 +183,34 @@ until a human accredited cryptographer signs off; that engagement is still recom
   scan could be read at, and REJECTS a manifest that cannot. Manifests over queries whose patterns
   have distinct constant layouts (the ordinary case, incl. every other test in the suite) are
   unaffected.
+
+  **Structural follow-up — LANDED (the explicit pattern→scan mapping).** The fail-closed direction
+  above was correct but an over-demand: an honest prover with two DISTINCT scans answering two
+  same-layout patterns, where the filtered variable sits at a different slot in each, could not
+  construct an accepted manifest at all (the gate demanded a filter proof at a slot the scan does not
+  meaningfully bind). Note the *pre*-fix code could not serve that shape either — `find_map` gated
+  the FIRST-matching pattern's slot on EVERY matching scan, which is the wrong slot for the second
+  scan. The structural fix is now in the schema: `ProofManifest::pattern_scans` declares, per query
+  BGP pattern (query order, exactly like `attributions`), the `sub_proofs` indices of the scans that
+  answer it. It is DECLARED, not trusted — `verifier::resolve_pattern_scans` rejects a declaration
+  that is mis-sized (`PatternScanArityMismatch`), leaves a pattern unanswered
+  (`PatternScanUnbound`), names a sub-proof that is out of range / not a scan / whose bb-bound
+  `pattern_is_const`/`pattern_const_enc` contradict the pattern's constants (`PatternScanMismatch`,
+  audit #10), or leaves a scan DANGLING, i.e. declared for no pattern at all
+  (`PatternScanUndeclared`). Because every declared pair must satisfy `scan_matches_pattern`, a valid
+  declaration is always a SUBSET of the membership relation, so declaring can only ever RELAX toward
+  obligations the prover could already have met; the "no dangling scan" rule is what makes the
+  narrower mapping total, so no disclosed scan row escapes gating. `bind_query_correctness` (FILTER
+  slots) and `bind_attributions` (audit #8) both read the resolved mapping. An EMPTY `pattern_scans`
+  means "not declared" and keeps the membership inference — and its fail-closed over-demand —
+  byte-for-byte, so a legacy manifest is unaffected and omitting the field is never a way to weaken a
+  gate. `global_attributions` (the Q6 cross-graph namespace) and `bind_joins` are DELIBERATELY left
+  on membership: membership is the wider relation, which is the conservative-safe direction for both
+  (more non-bnode obligations demanded, no join accepted that a narrower mapping would reject);
+  narrowing them is a separate, security-critical change. Witnesses:
+  `crates/sparq-zk-compose/tests/e2e.rs::pattern_scans_*` — the honest two-scan same-layout manifest
+  now verifies, the L-1 single-scan witness is still rejected under every declaration a prover could
+  write, and each of the four rejections above is pinned. NOT externally audited (sq-qhy4).
 - **M-1 / L-2** are already covered by **CR-G8 / sq-j506** and **CR-G9** respectively — no new bead
   (the auditor should weigh gating `DualLeafV1` out of production until sq-j506 is audited).
 
