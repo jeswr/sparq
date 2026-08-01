@@ -1,236 +1,127 @@
-<!-- [OPUS-4.8] sq-iigf — GitHub Pages cutover runbook + rollback. Docs only. -->
+<!-- [OPUS-5] sq-iigf — GitHub Pages cutover record. Docs only.
+     Rewritten for #5530: the original runbook described a pre-cutover state that no
+     longer exists, and recommended a rollback that would now take the live site down. -->
 
-# GitHub Pages cutover runbook (benchmark-data branch → Actions producer)
+# GitHub Pages: cutover record (COMPLETE)
 
-This is an operational runbook for the **one repo-owner action** that flips
-`jeswr/sparq` from serving GitHub Pages off a branch to serving it off a GitHub
-Actions producer workflow — and, critically, the ordering and rollback that keep
-the **live benchmark dashboard from going dark** during that switch.
+> **This is no longer an actionable runbook.** The cutover it sequenced — moving
+> `sparq` from a branch-served Pages site to a GitHub Actions producer — is **done**.
+> It is kept as a record of the resulting topology and, more importantly, as a
+> **warning**: the rollback the original document recommended would now take the
+> live site offline. See [Do not "roll back"](#do-not-roll-back).
 
-It does **not** build the producer workflow. The producer is tracked separately
-(see [Producer prerequisites](#producer-prerequisites-what-the-actions-workflow-must-satisfy)
-below); this runbook only pins the *safe sequence* and the *one-step rollback* so
-the owner cannot accidentally brick the dashboard on the first Actions deploy.
+## Provenance of the claims below
 
-## TL;DR
+Verified on 2026-08-01 by reading the **in-repo workflows** at commit `83b592c2` —
+**not** by probing the live site or the Pages API. Anyone acting on repo *settings*
+should re-confirm the live state first (`gh api repos/sparq-org/sparq/pages`); the
+file tree can only tell you what the producer *would* publish, not what the Pages
+service is currently serving.
 
-- Pages is **half-switched**: `build_type` is already `workflow`, but there is
-  **no Actions producer workflow** in the repo yet. The dashboard you see today
-  is a **frozen snapshot** served from the `benchmark-data` branch — still up, no
-  longer updated.
-- **Do NOT let any Actions Pages deploy run** until the unified producer is landed
-  and green. The first `deploy-pages` run replaces the live dashboard with
-  whatever that workflow publishes — which, with no producer, is nothing.
-- The **recommended interim state** is to revert Pages **Source** back to the
-  `benchmark-data` branch (one click, or one `gh api` call). That restores the
-  live, *updating* dashboard with zero downtime and keeps it live until the
-  producer is ready.
+Note the repo also moved orgs: it is **`sparq-org/sparq`**, not `jeswr/sparq`. Every
+API call and URL in the original document targeted the old owner and the old
+`github.io` host, and would misfire today.
 
-## Current state (verified)
+## What is live now
 
-Confirmed against the live API and the in-repo workflows on 2026-06-15.
+- **The producer is [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).**
+  It builds the Next.js feature-showcase, overlays the benchmark dashboards and the
+  operational GUI, runs an artifact smoke check, and deploys via `actions/deploy-pages`.
+  (The original document's central claim — that `.github/workflows/` contained *no*
+  Actions Pages producer — has not been true for a long time.)
+- **The site serves at the custom domain `https://sparq.jeswr.org/`**, root-relative
+  (`basePath ''`), pinned by [`site/public/CNAME`](../site/public/CNAME) and asserted
+  by the smoke check. The old `https://jeswr.github.io/sparq/...` URLs are historical.
+- **Pages source is `build_type: workflow`** and the one-time owner flip (`sq-vbq9`)
+  is resolved, so `pages.yml`'s deploy step **is** the live publisher.
+- **There is exactly one deploy slot, and `pages.yml` owns it.**
 
-### Pages is configured for Actions, but no producer exists
+The single artifact assembles three things:
 
-`gh api repos/jeswr/sparq/pages` reports:
-
-- `build_type: "workflow"` — the **Source** has already been switched to
-  *GitHub Actions* in **Settings → Pages**.
-- `source.branch: "benchmark-data"`, `source.path: "/"` — the previous
-  branch-source is still recorded (this is what a one-step rollback restores).
-- `status: "built"`, `html_url: https://jeswr.github.io/sparq/`.
-
-But there is **no Actions Pages producer workflow** in `.github/workflows/`. There
-is no `docs.yml`, and nothing in the tree calls `actions/deploy-pages`. So the
-"workflow" source has **no producer** behind it. The build type is set; the thing
-that would build is missing.
-
-### The dashboard is served *frozen* from the `benchmark-data` branch
-
-The benchmark dashboard is published by
-[`.github/workflows/bench.yml`](../.github/workflows/bench.yml) and
-[`.github/workflows/bench-ec2.yml`](../.github/workflows/bench-ec2.yml). Both use
-`benchmark-action/github-action-benchmark` with
-`gh-pages-branch: benchmark-data` — i.e. they push results to the
-**`benchmark-data` branch**, which branch-Pages historically served. The
-switch to `build_type: workflow` means Pages **no longer serves that branch**, so
-the dashboard is now a **frozen snapshot**: the URL still returns `200`, but new
-benchmark commits to `benchmark-data` are no longer published.
-
-Live probe (2026-06-15):
-
-| URL | Status | Meaning |
+| Path | Contents | Source |
 |---|---|---|
-| `https://jeswr.github.io/sparq/dev/bench/` | `200` | frozen snapshot — still up, no longer updated |
-| `https://jeswr.github.io/sparq/dev/bench-ec2/` | `404` | EC2 series dir not yet on the served snapshot |
-| `https://jeswr.github.io/sparq/` | `404` | no site root (the dashboard lives under `dev/bench`) |
+| `/` | Next.js feature-showcase + papers | `site/`, built in `pages.yml` |
+| `/dev/bench*/` | benchmark dashboards | overlaid from the `benchmark-data` branch |
+| `/app/` | operational GUI workbench | `gui/app`, built in `pages.yml` |
 
-### Two benchmark series exist — the EC2 one is easy to miss
+### The dashboards are folded in, not served from a branch
 
-There are **two** dashboard directories on `benchmark-data`, written by two
-different workflows:
+`bench.yml` and `bench-ec2.yml` still push results to the **`benchmark-data`** branch
+— that has not changed. What changed is that Pages no longer *serves* that branch:
+`pages.yml` **reads** it (`git archive origin/benchmark-data dev`) and overlays the
+whole `dev/` tree into the artifact.
 
-- `dev/bench` — the per-commit CI series, written by `bench.yml`
-  (`benchmark-data-dir-path: dev/bench`). This is the one currently served at
-  `200`.
-- `dev/bench-ec2` — the **heavy EC2 series**, written by `bench-ec2.yml`
-  (`benchmark-data-dir-path: dev/bench-ec2`). This is the easy-to-miss one. Note
-  `bench-ec2.yml` is **not live**: it authenticates through an AWS OIDC role
-  (`vars.AWS_BENCH_ROLE_ARN`) that was deliberately descoped, and its crons were
-  **retired** in [#3784](https://github.com/sparq-org/sparq/issues/3784) because
-  each scheduled tick failed at the credentials step and — carrying no advisory
-  declaration — gated `main`. It is now **manual dispatch only** (pick `lane:
-  heavy` or `lane: full-suite`), so `dev/bench-ec2` may be empty or absent on the
-  served snapshot today — hence its `404` above. It is still a declared producer of
-  a **second** Pages directory, so any unified producer must account for it or the
-  EC2 dashboard `404`s after cutover.
+The fold is by **glob (`dev/bench*`)**, not an enumerated list, so every series is
+carried automatically. There are now **three**: `dev/bench` (per-commit CI, from
+`bench.yml`), `dev/bench-ec2` and `dev/bench-nightly` (both from `bench-ec2.yml`).
+A build-time assertion fails the run if any `dev/bench*` subtree present on the
+branch is missing from the artifact, so narrowing that scope cannot regress silently.
 
-### Chart.js is loaded from a CDN
+`bench-ec2.yml` remains **manual-dispatch only** — its OIDC role (`AWS_BENCH_ROLE_ARN`)
+was descoped and its crons retired in
+[#3784](https://github.com/sparq-org/sparq/issues/3784) — so its directories may not
+exist on the branch. The smoke check asserts `dev/bench-ec2` is in the artifact **iff**
+it exists on the branch, rather than hard-failing every deploy on its absence.
 
-`bench/dashboard/index.html` loads Chart.js from the jsDelivr CDN
-(`<script src="https://cdn.jsdelivr.net/npm/chart.js@.../dist/Chart.min.js">`).
-This is fine for the branch-served snapshot, but for an Actions-built site the
-**recommendation** is to vendor Chart.js locally rather than pull it from a CDN at
-page load — for **supply-chain hygiene and availability** (the dashboard keeps
-working offline / if the CDN is down, and the bytes are reviewable and
-reproducible). This is a recommendation, not a check the repo's tooling enforces:
-the repo's Scorecard posture covers pinning **GitHub Actions / Docker
-dependencies** (`PinnedDependencies`) and **workflow token scopes**
-(`TokenPermissions`) — it does not analyse runtime JS loaded by the Pages site, so
-no existing gate would flag a CDN `<script>`. Vendoring is good hygiene regardless.
+### Chart.js is vendored
 
-## Safe cutover sequence
+The original document listed "vendor Chart.js off the CDN" as an outstanding
+recommendation. It is **done**: `bench/dashboard/vendor/Chart.min.js` is tracked,
+`bench/dashboard/index.html` loads it by relative path, and
+[`scripts/check-dashboard-publish-wiring.py`](../scripts/check-dashboard-publish-wiring.py)
+enumerates it in the seed list so it cannot fall out of the published set.
+Provenance is recorded in [`bench/dashboard/vendor/README.md`](../bench/dashboard/vendor/README.md).
 
-The cutover is **single-source and mutually exclusive**: a GitHub repo has exactly
-one Pages source. The instant the Actions producer's first `deploy-pages` runs, it
-**replaces** whatever the branch source was serving. So the rule is:
+## Do not "roll back"
 
-> **Land and green the unified producer FIRST. Only THEN allow an Actions Pages
-> deploy to run.**
+The original document recommended, as its headline action, reverting the Pages
+**Source** to the `benchmark-data` branch. **That recommendation is now inverted.**
+Applying it today would point Pages at a branch that contains only a root redirect
+and the `dev/` dashboard tree, so:
 
-Do not toggle anything, dispatch the producer, or let it run on a `main` push
-until **all** of the prerequisites below are satisfied and verified on a real
-producer run's artifact.
+- the feature-showcase root, the papers and every `/surface/*` route would `404`;
+- the operational GUI at `/app/` would `404`;
+- only the dashboards under `/dev/bench*/` would survive.
 
-### Producer prerequisites: what the Actions workflow must satisfy
+There is no longer a scenario in which that is the recovery action. If a deploy
+publishes a bad artifact, the fix is to **fix forward or re-run `pages.yml` from a
+good commit** — the producer is the source of truth, and a re-run republishes the
+whole tree.
 
-These are the acceptance criteria the producer (tracked as
-beads `sq-h0tr` and `sq-zngy`; parent design `sq-w9sr`) **must** meet before its
-first deploy is allowed to publish. This runbook *specifies* them; it does not
-build them.
+## Where the invariants live now
 
-1. **Publish the mdBook docs site.** The unified producer builds the mdBook guide
-   (plus `cargo doc` API output, per `sq-h0tr`) into the Pages artifact, so the
-   site root (`https://jeswr.github.io/sparq/`) stops `404`-ing and serves the
-   guide.
-2. **Publish BOTH benchmark series.** The artifact must contain **both**
-   `dev/bench` **and** `dev/bench-ec2` (glob `dev/bench*`). Folding only
-   `dev/bench` would make the EC2 dashboard `404` after cutover — exactly the
-   reconciliation gap called out in `sq-zngy`.
-3. **Read existing `benchmark-data` history.** The producer must `git checkout`
-   (or otherwise read) the `benchmark-data` branch and copy the existing
-   `dev/bench*` subtrees into the artifact, so the historical series is **not
-   lost** at cutover. The benchmark series lives on that branch, not in `main`;
-   the producer that builds the Actions artifact has to bring it across.
-4. **Vendor Chart.js off the CDN (recommended).** The dashboard's Chart.js
-   dependency should be vendored locally and referenced with a relative path,
-   rather than loaded from a CDN at page load — for supply-chain hygiene and
-   availability (offline / CDN-outage resilience, reviewable reproducible bytes).
-   This is a recommendation, not a tooling-enforced gate: the repo's Scorecard
-   posture pins Actions/Docker dependencies and workflow token scopes, not runtime
-   JS served by Pages (see [Chart.js is loaded from a CDN](#chartjs-is-loaded-from-a-cdn)).
-5. **Post-deploy smoke check.** A producer step (or a follow-up check) must assert
-   the deployed site is intact: `dev/bench/{index.html, data.js (non-empty),
-   dashboard.js}` **and** `dev/bench-ec2/index.html` all return `200` (per
-   `sq-zngy`). This catches exactly the reconciliation regression the early
-   source-flip created.
+The prerequisites the original document *specified* in prose are now **executable
+assertions inside the producer**, which is the right place for them. If you are
+tempted to re-specify them here, edit the workflow instead:
 
-### Ordering checklist
+| Invariant | Enforced by |
+|---|---|
+| Custom domain is set on every deploy | `out/CNAME` check in `pages.yml`'s smoke step |
+| Every `dev/bench*` series is folded in | glob-fold assertion in the overlay step |
+| Core dashboard files present, `data.js` non-empty | smoke step |
+| GUI lands at `/app/` with the right asset prefix | overlay assertion in `pages.yml` |
+| Dashboard assets stay wired into the published set | `scripts/check-dashboard-publish-wiring.py` |
+| Built site has no broken internal links | `scripts/check-site-links.sh` (lychee, pre-deploy) |
 
-1. **Keep the dashboard live in the interim** — if it is currently frozen and the
-   producer is not ready, apply the [rollback](#rollback-restore-the-live-dashboard-in-one-step)
-   now so the dashboard keeps updating while the producer is built. This is the
-   recommended state until step 4.
-2. **Land the producer** (`sq-h0tr` + `sq-zngy`) on `main` and confirm CI is
-   green, with all five prerequisites above satisfied.
-3. **Verify the producer artifact** on a run that builds but does **not** deploy
-   (or inspect the uploaded artifact of a dry run): confirm it contains the guide,
-   `dev/bench`, `dev/bench-ec2`, vendored Chart.js (no CDN reference), and the
-   imported `benchmark-data` history.
-4. **Flip the source to Actions** — only now. If a rollback (below) was applied,
-   set Pages **Source** back to *GitHub Actions* so the producer's `deploy-pages`
-   becomes the live source. (If `build_type` is already `workflow`, this step is a
-   no-op and you proceed straight to letting the producer deploy.)
-5. **Let the producer deploy and run the smoke check.** Trigger the producer (push
-   to `main` or `workflow_dispatch`) and confirm the post-deploy smoke check
-   passes — guide root `200`, both dashboard dirs `200`.
+## The one thing still open
 
-The owner-side toggle itself (flipping **Source** to *GitHub Actions*) is tracked
-as the `needs:user` bead `sq-vbq9`; do not perform it before step 4.
+**Where the mdBook guide is published.** [`.github/workflows/docs.yml`](../.github/workflows/docs.yml)
+builds and validates the guide but deliberately ships **no deploy job** — a second
+`actions/deploy-pages` would race `pages.yml` for the single slot and last-writer-wins
+over the showcase root. The `sq-w9sr` design placed the guide at the site root, which
+predates the showcase and is no longer viable. Reconciling that is tracked as the open
+product decision `sq-svtt` (guide at a `/guide/` sub-path vs. at the root vs. a merged
+deploy); mounting it at `/guide/` on the same artifact is implemented by
+[#5022](https://github.com/sparq-org/sparq/issues/5022), which had not landed as of the
+commit above — `pages.yml` overlays no `guide/` tree.
 
-## Rollback: restore the live dashboard in one step
-
-If an Actions deploy has bricked the dashboard (blank / `404`), or you simply want
-the **live, updating** dashboard back while the producer is still being built,
-revert the Pages **Source** to the `benchmark-data` branch. This is a single
-owner action.
-
-**Via the GitHub UI:** Settings → Pages → "Build and deployment" → **Source =
-"Deploy from a branch"**, Branch = **`benchmark-data` / `/ (root)`** → Save.
-
-**Via the API** (equivalent, scriptable):
-
-```sh
-gh api -X PUT repos/jeswr/sparq/pages \
-  -f 'build_type=legacy' \
-  -f 'source[branch]=benchmark-data' \
-  -f 'source[path]=/'
-```
-
-Within a minute or so, `https://jeswr.github.io/sparq/dev/bench/` is served from
-the branch again — and, unlike the frozen snapshot, it **resumes updating** as
-`bench.yml` pushes new points to `benchmark-data`. (`dev/bench-ec2` will appear
-once `bench-ec2.yml` is live and has pushed at least one point — which now requires
-both re-provisioning `AWS_BENCH_ROLE_ARN` and a manual dispatch, since #3784 retired
-its crons.)
-
-This rollback is the **recommended interim state** until the unified producer is
-ready: it is the only configuration in which the dashboard both serves *and*
-updates, and it costs nothing to maintain.
-
-## Decision note for the owner
-
-There are two viable states right now. The producer is not yet landed, so this is
-a real choice, not a transient.
-
-- **Option A — Revert now (recommended).** Apply the
-  [rollback](#rollback-restore-the-live-dashboard-in-one-step) immediately. The
-  dashboard goes from *frozen* back to *live and updating* with **zero downtime**,
-  and stays that way with no further attention until the producer is ready. The
-  cost is that the Actions-source switch is deferred — but nothing depends on that
-  switch until the docs site exists, which it does not yet. This keeps the most
-  visible artifact (the public perf trend) healthy while the producer is built.
-- **Option B — Stay on Actions, accept a frozen dashboard.** Leave
-  `build_type: workflow` as-is and accept that the dashboard is a **frozen
-  snapshot** (no new points published) until the unified producer lands. This
-  avoids a back-and-forth toggle, but the public dashboard silently stops
-  reflecting reality in the meantime — and any *accidental* Actions Pages run
-  (a stray `workflow_dispatch`, an early producer attempt) before the producer is
-  complete would turn the frozen-but-present dashboard into a blank / `404`.
-
-**Recommendation:** **Option A.** Reverting now is a single, reversible action
-with zero downtime and no maintenance, and it removes the brick risk entirely
-(there is no Actions producer that could overwrite the served branch while the
-source points at `benchmark-data`). Switch to Actions only once the producer
-satisfies every prerequisite in
-[Producer prerequisites](#producer-prerequisites-what-the-actions-workflow-must-satisfy)
-and its artifact has been verified.
+Until that lands, the guide is a CI artifact only, not a published page. This is the
+sole remaining item from the original prerequisite list.
 
 ## See also
 
-- [`.github/workflows/bench.yml`](../.github/workflows/bench.yml) — the per-commit
-  benchmark producer (writes `dev/bench` on `benchmark-data`).
-- [`.github/workflows/bench-ec2.yml`](../.github/workflows/bench-ec2.yml) — the
-  heavy EC2 benchmark producer (writes `dev/bench-ec2`).
-- [`docs/branch-protection.md`](branch-protection.md) — the required-checks /
-  branch-protection record this repo enforces.
+- [`.github/workflows/pages.yml`](../.github/workflows/pages.yml) — the live producer.
+- [`.github/workflows/docs.yml`](../.github/workflows/docs.yml) — mdBook build/validate (no deploy).
+- [`.github/workflows/bench.yml`](../.github/workflows/bench.yml) — writes `dev/bench` on `benchmark-data`.
+- [`.github/workflows/bench-ec2.yml`](../.github/workflows/bench-ec2.yml) — writes `dev/bench-ec2` and `dev/bench-nightly`.
+- [`docs/branch-protection.md`](branch-protection.md) — the required-checks record.
