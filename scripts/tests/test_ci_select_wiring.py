@@ -1433,6 +1433,79 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
                       "the workflow's --jq regex must match the one pinned here")
 
 
+class TestConeEvidenceBase(unittest.TestCase):
+    """[OPUS-5] #5148: the changed-cone (sq-6vshe.8) SHADOW logging lived inside
+    `coverage-measure`, so the sq-6vshe.17 merge_group demotion pinned above took the
+    batch-diff cone samples with it — and the sq-3dr4t ENFORCE flip landed ~10 h later.
+    That was decided rather than absorbed: docs/branch-protection.md §*Coverage
+    MEASUREMENT off the merge queue* records that the flip stands on the
+    `pull_request` + push-to-`main` window, and states the honest limit that NO
+    divergence corpus was ever retained for ANY event.
+
+    Both halves of that record are only true while the wiring below holds, so pin them:
+    a silent return to shadow, or a silent start at retaining the divergence log, must
+    RED here and force the recorded decision to be rewritten in the same change — which
+    is the whole point of the issue (an explicit decision, not a side effect)."""
+
+    BP_MD = REPO_ROOT / "docs" / "branch-protection.md"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = _load(CI_YML)
+        cls.steps = cls.ci["jobs"]["coverage-measure"]["steps"]
+
+    def _cone_step(self, needle):
+        """The single coverage-measure step whose `run:` invokes cone_coverage.py <needle>."""
+        hits = [s for s in self.steps
+                if "scripts/cone_coverage.py" in str(s.get("run", ""))
+                and needle in str(s.get("run", ""))]
+        self.assertEqual(len(hits), 1,
+                         f"expected exactly one coverage-measure step running "
+                         f"cone_coverage.py {needle}, found {len(hits)}")
+        return hits[0]
+
+    def test_the_cone_step_is_in_enforce_mode(self):
+        """`--enforce` is what makes "no cone-vs-full divergence samples accrue on any
+        event" true: the outside-cone crates are never measured, so there is nothing to
+        compare. Drop it and shadow observation resumes — on `pull_request` + push only,
+        since the demotion above keeps this job off `merge_group` — at which point the
+        recorded evidence-base decision no longer describes reality."""
+        run = str(self._cone_step("--mode compute-cone").get("run", ""))
+        self.assertIn("--enforce", run,
+                      "coverage-measure's cone step must stay in ENFORCE mode, or "
+                      "docs/branch-protection.md's recorded #5148 decision (no shadow "
+                      "samples accrue on ANY event) becomes false — rewrite that note in "
+                      "the same change that returns to shadow")
+
+    def test_the_divergence_log_is_not_retained_as_an_artifact(self):
+        """The record states plainly that `coverage-cone-divergence-shard-N.json` has
+        never been uploaded, so no corpus exists to have been narrowed. Uploading it
+        would be a fine way to REOPEN the question — but the note claiming no corpus
+        exists must not survive that change, so this REDs to force the pairing."""
+        log_name = "coverage-cone-divergence-shard-"
+        self.assertIn(log_name, str(self._cone_step("--mode report").get("run", "")),
+                      "the report step should still name the divergence log it writes")
+        for step in self.steps:
+            uses = str(step.get("uses", ""))
+            if not uses.startswith("actions/upload-artifact@"):
+                continue
+            with_ = step.get("with") or {}
+            self.assertNotIn(
+                log_name, f"{with_.get('path', '')}\n{with_.get('name', '')}",
+                "the cone divergence log is now UPLOADED — a corpus can accrue again, so "
+                "update the #5148 decision in docs/branch-protection.md, which currently "
+                "states that it never is")
+
+    def test_the_decision_is_recorded_where_the_demotion_is_documented(self):
+        """The issue asked for an explicit decision, not workflow-comment folklore: it
+        belongs in the maintainer-visible doc that already owns the demotion's meaning."""
+        text = self.BP_MD.read_text(encoding="utf-8")
+        for needle in ("#5148", "coverage-cone-divergence-shard-N.json"):
+            self.assertIn(needle, text,
+                          f"docs/branch-protection.md must keep the recorded coverage-cone "
+                          f"evidence-base decision (missing {needle!r})")
+
+
 class TestDraftTierWiring(unittest.TestCase):
     """[FABLE-5] Draft-tier CI (docs/branch-protection.md §Draft-tier CI): draft
     PR heads run a REDUCED matrix — coverage / bench / CodeQL / heavy shards

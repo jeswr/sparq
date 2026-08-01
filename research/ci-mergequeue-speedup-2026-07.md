@@ -320,6 +320,24 @@ This needs an explicit maintainer-visible design (proceed-and-document), not a q
 > Method: unauthenticated `GET /repos/sparq-org/sparq/actions/workflows/{ci-summary.yml,
 > ci.yml}/runs?event=merge_group&status=success` (300 + 200 runs) and
 > `GET /actions/runs/30652403619/jobs`.
+>
+> **KNOCK-ON, decided rather than absorbed (issue #5148, 2026-08-01) [OPUS-5].** Demoting
+> the measure legs also took the sq-6vshe.8 changed-cone **shadow** logging off
+> `merge_group` — it lived inside `coverage-measure`, so the batch-diff cone samples
+> stopped with it. The sq-3dr4t ENFORCE flip then landed ~10 h later (`83b0a445`,
+> 2026-07-31T08:14Z, vs this cutover's 2026-07-30T22:22Z), so its shadow window is
+> `pull_request` + push-to-`main` throughout and `merge_group` only up to the cutover.
+> **Recorded decision: option (a) — the flip stands on the PR + push window; batch-diff
+> cones are not required for it**, because a merge group's union diff covers every member
+> PR's changed paths (save where two members cancel to a net no-op), so a batch cone is
+> WIDER and exercises *less* narrowing than the PR cones the flip is about. Option (b)
+> (relocating the shadow step into
+> `coverage-floors`) is declined: post-flip there is no shadow computation left to
+> relocate, and under enforce divergence detection is structurally unavailable on **every**
+> event. The full statement, including the honest limit that no divergence corpus was ever
+> retained as an artifact, is in `docs/branch-protection.md` §*Coverage MEASUREMENT off the
+> merge queue*, pinned by
+> `scripts/tests/test_ci_select_wiring.py::TestConeEvidenceBase`.
 
 **(b) Selection-soundness memo + the fmx4u §7 P8 decision → bead sq-6vshe.18 — SAFE.**
 The union-diff-vs-target-tip argument that makes merge-group selection sound under

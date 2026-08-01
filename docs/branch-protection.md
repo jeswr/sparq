@@ -234,6 +234,49 @@ What is **not** risked: no committed floor is ever silently lowered (the monoton
 never left the queue, and a deliberate lowering stays a governed, loud re-baseline), and
 the nightly full-coverage tier (`coverage-nightly`) is untouched.
 
+**What this demotion did to the changed-cone evidence base — an explicit decision, not a
+side effect (issue #5148).** The changed-cone selector (sq-6vshe.8) landed on 2026-07-04 in
+SHADOW mode: the shard still measured every crate and the selector only *logged* the cone it
+would have chosen, so an outside-cone crate coming in below its floor was recorded as a
+**divergence** — the observation that a later ENFORCE flip could be read against. This
+demotion (`3ab83df`, 2026-07-30T22:22Z) stopped the `coverage-measure` legs — and with them
+that shadow logging — from running on `merge_group`; the ENFORCE flip (sq-3dr4t, `83b0a445`)
+landed the next morning, 2026-07-31T08:14Z. So the last ~10 hours of shadow observation
+carried no batch-diff (`merge_group`) cones, and the ~26 days before it did. **Decision
+(option (a) of the issue): the flip stands on `pull_request` + push-to-`main` observation,
+and batch-diff cones are not required for it.** The cone is a function of the *diff's*
+reverse-dep closure, and a merge group's union diff over a batch covers every member PR's
+changed paths (save where two members' edits cancel to a net no-op) — so a batch cone is
+WIDER, and exercises *less* narrowing than the PR cones the flip is actually about. The
+property the flip turns on — can a crate outside the cone regress? — is a property of the
+closure, not of the diff's shape.
+
+**What "evidenced" honestly means here, and what it does not.** No retained divergence
+corpus exists in this repository, for any event: the per-shard
+`coverage-cone-divergence-shard-N.json` that the report step writes has never been uploaded
+as an artifact — it is written to the runner's disk and discarded with the runner, so what
+survived a shadow run was its step-summary rendering, under Actions retention. What *is* in
+the tree and carries the flip is the fail-safe structure (every full-run trigger —
+`Cargo.lock`, root `Cargo.toml`, `.github/`, `scripts/`, an unowned path — and every selector
+error resolves to `mode=full`, an EMPTY `COVERAGE_CONE`, and therefore a whole-shard
+measurement) plus the hermetic unit tests in `scripts/tests/test_cone_coverage.py`, with the
+nightly full run on `main` as the drift backstop. And under ENFORCE, divergence detection is
+*structurally* unavailable on **every** event rather than only on `merge_group`: where a cone
+is applied the outside-cone crates are never measured, so there is nothing to compare them
+against (`cone_coverage.py` says `divergence_detection: unavailable` rather than reporting an
+empty `divergences` list that could be misread as proof the cone is sound), and on the
+`mode=full` fail-safe paths every crate is inside the cone by construction, so no divergence
+is expressible there either.
+
+Consequently the issue's alternative — relocating the shadow computation into the cheap
+`coverage-floors` job — is **declined**: there is no shadow computation left to relocate (the
+surviving step runs `--enforce`, and its `COVERAGE_CONE` output is consumed by the measure
+step in that *same* job), and a relocated step would collect nothing while enforce is on.
+Re-opening the question means deliberately returning to shadow (dropping `--enforce`) **and**
+uploading the divergence log as an artifact so a corpus actually accrues — at which point
+this note stops being true, which
+`scripts/tests/test_ci_select_wiring.py::TestConeEvidenceBase` REDs to force.
+
 ## Draft-tier CI (reduced matrix on draft PR heads)
 
 <!-- [FABLE-5] Draft-tier CI design record (2026-07-17). Motivation: the autonomous

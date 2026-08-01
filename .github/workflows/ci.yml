@@ -3381,6 +3381,14 @@ jobs:
         # the sole gate). NB under enforce the outside-cone crates are not measured, so
         # divergence detection is structurally unavailable and the report says so instead
         # of implying the empty divergence list proves the cone sound.
+        #
+        # [OPUS-5] #5148 — `--divergence-log` below is a PER-RUN DEBUG FILE, not a corpus:
+        # it is written to the runner's workspace and NEVER uploaded, so nothing accrues
+        # across runs, on any event. The evidence base the sq-3dr4t ENFORCE flip actually
+        # stands on — and why the sq-6vshe.17 merge_group demotion above does not narrow it
+        # — is a RECORDED DECISION in docs/branch-protection.md §"Coverage MEASUREMENT off
+        # the merge queue", pinned by
+        # scripts/tests/test_ci_select_wiring.py::TestConeEvidenceBase.
         if: always() && hashFiles('cone.json') != '' && hashFiles('target/coverage/coverage-summary.json') != ''
         run: |
           python3 scripts/cone_coverage.py \
