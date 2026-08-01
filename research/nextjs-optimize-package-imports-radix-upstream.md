@@ -144,7 +144,7 @@ const sum = async ns => (await Promise.all([...ns].map(mjs))).reduce((a, b) => a
 Run in this checkout on 2026-08-01 (`node v20`), it prints exactly the table's values and passes all three
 assertions:
 
-```
+```text
 own dist/*.mjs   1 pkg  4378 B
 barrel closure  60 pkgs 529292 B
 used closure    24 pkgs 98419 B
