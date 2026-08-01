@@ -185,6 +185,37 @@ class RegistryAssembly(unittest.TestCase):
             br.registry_text(root)
         self.assertIn("no `id` field", str(cm.exception))
 
+    def test_second_entry_without_an_id_is_rejected(self):
+        # Validation must be PER ENTRY, not fragment-wide: one identified entry
+        # must not vouch for an id-less sibling, or the assembled registry would
+        # carry a benchmark no id-based gate can ever resolve.
+        root = _tree(
+            registry_frags={
+                "half.toml": ENTRY.format(bid="ok") + '\n[[benchmark]]\nname = "missing"\n'
+            }
+        )
+        with self.assertRaises(br.RegistryError) as cm:
+            br.registry_text(root)
+        self.assertIn("entry #2 has no `id` field", str(cm.exception))
+
+    def test_entry_declaring_two_ids_is_rejected(self):
+        root = _tree(
+            registry_frags={"two.toml": ENTRY.format(bid="x") + 'id = "y"\n'}
+        )
+        with self.assertRaises(br.RegistryError) as cm:
+            br.registry_text(root)
+        self.assertIn("declares 2 `id` fields", str(cm.exception))
+
+    def test_id_before_the_first_benchmark_header_is_rejected(self):
+        # A top-level `id` belongs to no entry; accepting it would leave an id that
+        # duplicate detection never sees.
+        root = _tree(
+            registry_frags={"stray.toml": 'id = "loose"\n' + ENTRY.format(bid="x")}
+        )
+        with self.assertRaises(br.RegistryError) as cm:
+            br.registry_text(root)
+        self.assertIn("declared before the first [[benchmark]] header", str(cm.exception))
+
 
 class CompetitorAssembly(unittest.TestCase):
     def test_fragment_competitor_joins_the_array(self):

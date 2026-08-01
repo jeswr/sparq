@@ -112,6 +112,22 @@ def registry_ids(text: str) -> list[str]:
     return _ID_RE.findall(text)
 
 
+def benchmark_blocks(text: str) -> list[str]:
+    """The body of each `[[benchmark]]` table in `text`, in file order.
+
+    A block runs from just after its own header to the start of the next one (or
+    end of text). Validation has to be PER BLOCK: a fragment-wide `id` scan would
+    accept `[[benchmark]] id="ok"` followed by an id-less second entry, putting an
+    unidentifiable benchmark into the assembled registry — invisible to every gate
+    that resolves a suite by id.
+    """
+    heads = list(_BENCHMARK_HEADER_RE.finditer(text))
+    return [
+        text[m.end() : (heads[i + 1].start() if i + 1 < len(heads) else len(text))]
+        for i, m in enumerate(heads)
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # benchmarks.toml
 # --------------------------------------------------------------------------- #
@@ -121,15 +137,17 @@ def assemble_registry(trunk_text: str, frags: list[tuple[str, str]]) -> str:
     Each fragment is preceded by a provenance comment naming its file, so a reader
     of the assembled output can tell which fragment an entry came from. Raises
     RegistryError on a fragment that declares no `[[benchmark]]`, declares a
-    non-`[[benchmark]]` table, or reuses an `id` already claimed by the trunk or an
-    earlier fragment (a duplicate id would make the registry ambiguous for every
-    gate that resolves a suite by id).
+    non-`[[benchmark]]` table, has any `[[benchmark]]` entry without exactly one
+    `id`, or reuses an `id` already claimed by the trunk or an earlier fragment (a
+    duplicate id would make the registry ambiguous for every gate that resolves a
+    suite by id).
     """
     seen: dict[str, str] = {i: REGISTRY_TRUNK.name for i in registry_ids(trunk_text)}
     parts = [trunk_text.rstrip("\n")]
     for name, text in frags:
         where = f"{REGISTRY_FRAGMENT_DIR.name}/{name}"
-        if not _BENCHMARK_HEADER_RE.search(text):
+        head = _BENCHMARK_HEADER_RE.search(text)
+        if not head:
             raise RegistryError(
                 f"{where}: declares no [[benchmark]] entry — a registry fragment "
                 f"must contain at least one"
@@ -140,9 +158,24 @@ def assemble_registry(trunk_text: str, frags: list[tuple[str, str]]) -> str:
                 f"{where}: unexpected top-level table {stray.group(0).strip()!r} — a "
                 f"registry fragment may only declare [[benchmark]] entries"
             )
-        ids = registry_ids(text)
-        if not ids:
-            raise RegistryError(f"{where}: a [[benchmark]] entry has no `id` field")
+        if registry_ids(text[: head.start()]):
+            raise RegistryError(
+                f"{where}: an `id` is declared before the first [[benchmark]] header "
+                f"— every id must belong to a [[benchmark]] entry"
+            )
+        ids = []
+        for position, block in enumerate(benchmark_blocks(text), start=1):
+            block_ids = registry_ids(block)
+            if not block_ids:
+                raise RegistryError(
+                    f"{where}: [[benchmark]] entry #{position} has no `id` field"
+                )
+            if len(block_ids) > 1:
+                raise RegistryError(
+                    f"{where}: [[benchmark]] entry #{position} declares {len(block_ids)} "
+                    f"`id` fields {block_ids} — an entry carries exactly one"
+                )
+            ids.extend(block_ids)
         for bid in ids:
             if bid in seen:
                 raise RegistryError(
