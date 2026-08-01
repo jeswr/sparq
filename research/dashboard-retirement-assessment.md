@@ -9,6 +9,10 @@
 > standalone dashboard, and the standalone dashboard is the *live published* GitHub Pages
 > artifact. Deleting it today would both lose capability and break the served dashboard.
 
+> **Post-record status:** The Pages cutover discussed below is complete. The linked
+> runbook has been rewritten as the post-cutover topology and provenance record;
+> future-tense cutover steps below are retained as historical retirement criteria.
+
 ## What each surface is
 
 - **Standalone `bench/dashboard/`** (`index.html` + `dashboard.js` + `dashboard.css` +

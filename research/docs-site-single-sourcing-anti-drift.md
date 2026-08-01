@@ -9,6 +9,10 @@
 > sq-p26u (`include_str!` / docs.rs). Companion runbook:
 > [`docs/pages-cutover-runbook.md`](../docs/pages-cutover-runbook.md).
 
+> **Post-record status:** The Pages cutover described below is complete. The linked
+> runbook has been rewritten as the post-cutover topology and provenance record;
+> references below to a pending Pages mount are retained as historical analysis.
+
 ## 1. The requirement, restated
 
 The bead asks for a Pages-hosted docs site with **no content duplicated across
