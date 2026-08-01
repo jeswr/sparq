@@ -246,38 +246,85 @@ input fact set `F`:
 1. **Safety / range-restriction.** Every variable of a conclusion occurs in some premise
    **join** atom of the same rule.
 2. **No head existentials.** No conclusion contains a blank node.
-3. **Ground predicates.** Every premise join atom has an IRI predicate.
+3. **Ground predicates, premise *and* conclusion.** Every premise join atom has an IRI
+   predicate, **and so does every conclusion atom**.
 4. **No generator on a recursive cycle.** Build the predicate dependency graph (edge
    `p → q` when `q` heads a rule with `p` in its premise). No rule that contains a
    *functional* builtin — `Func` (`mod.rs:2406`), a list generator (`mod.rs:1927`), or a
    `Binder` (`mod.rs:1889`) — may have its head predicate on a cycle of that graph.
 5. **No scope re-entry.** No `log:semantics` / `log:content` / `log:conclusion` /
    `log:parsedAsN3` / `log:supports`, and no backward (`<=`) rules.
+6. **No term construction in a conclusion.** No conclusion term is a compound
+   `Term::List` / `Term::Triple` / `Term::Formula` ([`model.rs:14-24`](../crates/sparq-reason/src/n3/model.rs))
+   that contains a variable.
+
+Conditions (3)-on-conclusions and (6) are **not decorative** — each closes a term source
+that (1)–(5) alone leave open, and both are reachable in this engine today:
+
+- **A variable conclusion predicate is safe but unbounded in `P`.** (1) is satisfied by
+  `{ ?x :grants ?p . ?p a :Mode } => { ?x ?p :r }`: `?p` occurs in a premise join atom, so
+  the rule is range-restricted — yet the derived predicate is drawn from the active domain,
+  not from a fixed rule-head set. Without (3)-on-conclusions, `P ⊆ A` and the Herbrand-base
+  bound below degrades from `|P|·|A|²` to `|A|³`.
+- **A safe head can *build* a term, with no builtin and no blank node.** `Term` is richer
+  than RDF: `List` and `Triple` are compound terms, `apply_deep` substitutes **into** them
+  (`mod.rs:1984-2003`), and `ground_triple`'s instantiation check accepts a compound whose
+  components are all instantiated (`mod.rs:1740-1744`), so a list- or quoted-triple-valued
+  conclusion is derived, not rejected (live test: `tests/n3_query.rs:183`). Hence
+  `{ ?x :seen ?l } => { ?x :seen (?l) }` mints a strictly deeper term every round and
+  **never reaches a fixpoint**, while satisfying (1), (2), (4) and (5) — it contains no
+  blank node and no `Func`/`ListGen`/`Binder`. (6) is what excludes it.
+
+Accepted / rejected, for a checker to pin (each row is a test case for the BAF gate of §8
+phase 4 — the `math:greaterThan` acceptance is subject to §9 question 2):
+
+| Rule | Verdict | Condition |
+|---|---|---|
+| `{ ?x schema:age ?y . ?y math:greaterThan 18 } => { ?x auth:read <r> }` | accept | the P-1 PoC rule; `math:greaterThan` is a comparison, not a generator |
+| `{ ?r solidx:parent ?p . ?p solidx:ancestor ?a } => { ?r solidx:ancestor ?a }` | accept | recursive but datalog: ground head predicate, no constructor |
+| `{ ?x :grants ?p . ?p a :Mode } => { ?x ?p :r }` | **reject** | (3) — variable conclusion predicate |
+| `{ ?x :seen ?l } => { ?x :seen (?l) }` | **reject** | (6) — recursive list construction, non-terminating |
+| `{ ?x :p ?y } => { ?x :q <<( ?x :p ?y )>> }` | **reject** | (6) — quoted-triple construction (terminating here, but the domain is no longer `A`) |
+| `{ ?x :n ?n . (?n 1) math:sum ?m } => { ?x :n ?m }` | **reject** | (4) — generator on its own head predicate's cycle |
 
 ### 5.2 The bound
 
 **Claim.** For `R ∈ BAF` over `F`, `reason_n3(F ∪ R)` terminates, and with
 `A` = the **active domain** (every ground term occurring in `F`, in `R`'s constants, and in
 the finitely many terms mintable by the acyclic generator builtins of (4)), `P` = the set of
-predicates heading a rule, `v` = the largest number of distinct variables in any premise:
+IRIs occurring as a conclusion predicate in `R` — a **fixed, rule-determined** set, by (3) —
+`v` = the largest number of distinct variables in any premise:
 
 - closure size: `|C| ≤ |F| + |P|·|A|²`
 - rounds to fixpoint: `≤ |C| − |F| + 1`
 - total work: `O(|R| · |A|^v · |C|)` naively; semi-naive removes one `|C|` factor per
   non-`needs_full` rule, and each atom's real cost is the index row-count of §2.2.
 
-**Why it holds.** (2) and (4) together mean no rule can introduce a ground term outside
-`A`: existential invention is the only other term source, and (2) removes it, while (4)
-confines term-minting builtins to a stratified, finite cascade. (1) means every derived
-fact is fully ground. (3) keeps every atom off the `all`-scan branch of §2.2. (5) removes
-the only re-entrant control flow. So the Herbrand base is finite and bounded by
-`|P|·|A|²`; the fixpoint is monotone (the engine never retracts) and adds at least one fact
-per round, so it converges within `|C|` rounds. This is the classical datalog result — for
+**Why it holds.** The engine has **exactly three** ways to put a ground term into a derived
+fact that was not already in `A`, and BAF closes all three: existential invention (removed
+by (2)), term-minting builtins (confined by (4) to a stratified, finite cascade), and
+**head term construction** — a conclusion `List`/`Triple`/`Formula` assembled from bound
+variables, removed by (6). With all three closed, every derived term is in `A`. (1) means
+every derived fact is fully ground. (3) does double duty: on the premise side it keeps every
+atom off the `all`-scan branch of §2.2, and on the conclusion side it pins the derived
+predicate set to the fixed `P` rather than letting it range over `A`. (5) removes the only
+re-entrant control flow. So the Herbrand base is finite and bounded by `|P|·|A|²`; the
+fixpoint is monotone (the engine never retracts) and adds at least one fact per round, so it
+converges within `|C|` rounds. This is the classical datalog result — for
 fixed `R`, **data complexity is PTIME** (Dantsin, Eiter, Gottlob & Voronkov, *Complexity and
 expressive power of logic programming*, ACM Computing Surveys 33(3), 2001, §4) — and BAF
-conditions (1)–(5) are precisely what reduce the N3 fragment to datalog-with-stratified-
+conditions (1)–(6) are precisely what reduce the N3 fragment to datalog-with-stratified-
 functions. Nothing in this claim is novel; the contribution is pinning the exact conditions
 under which sparq's engine satisfies its hypotheses.
+
+**How the claim degrades if a condition is dropped**, since the two added this revision were
+missing from an earlier draft of this record and the omission was not benign:
+
+| Dropped | Effect |
+|---|---|
+| (3) on conclusions only | still terminates and still PTIME, but `P ⊆ A`, so the Herbrand-base bound becomes `|A|³` and `|C| ≤ |F| + |A|³` |
+| (6) | **the claim fails outright** — the Herbrand base is infinite and the fixpoint need not exist (`{ ?x :seen ?l } => { ?x :seen (?l) }`) |
+| (2) or (4) | as (6): unbounded domain growth, no fixpoint (§6, U-1/U-2) |
 
 **What the bound does not say.** It is an upper bound in `|A|`, and `|A|` on the admission
 path includes **externally attested terms** — the credential graph a requester presents.
@@ -292,10 +339,17 @@ one.
 |---|---|---|
 | P-1 / P-2 with the PoC `.acr` rule | yes | closure = input facts plus at most one grant per admitted fact; 2 rounds. P-2 runs one closure **per** admitted fact — linear in admitted-fact count, and the *only* super-linear term in the trust crate's own evaluation |
 | P-1 / P-2 with an **arbitrary** caller rule | **unknown — nothing checks** | none; see §6 |
-| P-3, WAC stratum (`common.n3` + `wac.n3`) | yes, **by construction** | `string:scrape`/`concatenation`/`encodeForUri` mint terms but their head predicates (`parentCand`, `auth:*` pair principals) are off every cycle, satisfying (4). Closure bounded by resources × authorizations × principals |
-| P-3, ACP + ODRL strata (`acp-*.n3`, `odrl-*.n3`) | **not audited** | outside this record (§8 phase 7). Compilation by `n3::compiled::compile` establishes BAF (1)(2)(5) for them, but **not** (4) |
+| P-3, WAC stratum (`common.n3` + `wac.n3`) | yes, **by construction** | `string:scrape`/`concatenation`/`encodeForUri` mint terms but their head predicates (`parentCand`, `auth:*` pair principals) are off every cycle, satisfying (4). Every conclusion in both files has a ground IRI predicate and no compound term, satisfying (3) and (6). Closure bounded by resources × authorizations × principals |
+| P-3, ACP + ODRL strata (`acp-*.n3`, `odrl-*.n3`) | **not audited** | outside this record (§8 phase 7). Compilation by `n3::compiled::compile` establishes BAF (1)(2)(5)(6) for them — `sym` rejects list-, formula- and non-ground-quoted-triple constants outright (`compiled.rs:397-404`), which is (6) — but **not** (4), and **not** (3) on conclusions: a `Term::Var` in conclusion predicate position compiles as an ordinary bound slot (`compiled.rs:825-831`) |
 | P-4 cert-graph closure | n/a (no reasoner) | signature verifications proportional to depth × anchors × certification edges; the shipped implementation is depth-1 (`bench/trust-admission/README.md`) |
 | P-5 admissibility ruleset | yes | active domain = the 32 level IRIs + 7 leftOperand IRIs of `LEVEL_ORDERS` plus the policy's constraints; transitive closure over chains of length ≤ 4 |
+
+Every **yes** row was re-checked against the added conditions (3)-on-conclusions and (6):
+the PoC `.acr` rule, `common.n3`, `wac.n3` and `admissibility.rs`'s `CLOSURE_RULES` /
+`DISCHARGE_RULE` all conclude with a ground IRI predicate and no compound term, so the
+membership verdicts are unchanged by this revision. That the shipped rules *happen* to
+satisfy conditions nothing enforces is exactly the §10 caveat, now over six conditions
+rather than five.
 
 ## 6. What is not bounded, and how exposed it is
 
@@ -316,7 +370,16 @@ head — but nothing rejects one.
 **U-3 — `needs_full` rules do not amortise.** §2.3: cost scales with rounds × full extent,
 so a large closure with negation-guarded rules is superlinear even inside BAF.
 
-**Exposure, stated plainly.** As of this record, U-1 and U-2 are reachable **only** by an
+**U-4 — a term-constructing head needs no builtin and no blank node.** BAF (6) exists
+because `Term` carries compound `List` / `Triple` / `Formula` values (`model.rs:14-24`),
+`apply_deep` substitutes into them (`mod.rs:1984-2003`) and the instantiation check accepts
+the result (`mod.rs:1740-1744`). So a rule that is safe, existential-free and
+builtin-free — `{ ?x :seen ?l } => { ?x :seen (?l) }` — still nests a fresh term every
+round and hangs. This is the same hang as U-1 through a channel U-1's "functional builtin"
+framing does **not** cover, and it is the one BAF condition the compiled subset already
+enforces for free (§7, F-6).
+
+**Exposure, stated plainly.** As of this record, U-1, U-2 and U-4 are reachable **only** by an
 in-process Rust caller that passes a rule string, because (a) `abac_rule_n3_for` returns
 `""` so no `.acr` rule is loaded from a store, and (b) the HTTP trust block supplies facts,
 never rules (§1). So today these are **latent** defects, correctly classified as
@@ -338,23 +401,28 @@ what P8 was scheduled to precede.
   bound-first traversal in `match_premise_seeded` would make OSB automatic and retire the
   hand-splitting discipline. **Highest leverage finding in this record.**
 - **F-4** — `derive_grants` performs no static check on a caller-supplied rule and the
-  engine has no budget, so P-1/P-2 are undecidable in general (U-1, U-2).
+  engine has no budget, so P-1/P-2 are undecidable in general (U-1, U-2, U-4).
 - **F-5** — `derive_conditional_grants` runs a full closure **per admitted fact**
   (`wire.rs:146-152`). Correct (it is what preserves the holder↔grant association) but
   linear in fact count where one closure over holder-tagged facts would do.
 - **F-6** — the fix for F-4 already exists and is tested: `n3::compiled::compile` rejects
   backward rules, conclusion existentials, `log:includes`/`supports`, list builtins,
-  `math:`/`time:` builtins, and "rules whose builtin inputs no premise can bind" as **loud
-  compile errors** (`compiled.rs:58-71`), and `tests/compiled_equivalence.rs` pins its
-  closure set-equal to `reason_n3` on the access-control corpus. That is BAF (1)(2)(4-partial)(5)
-  already implemented, behind the opt-in `compiled-rules` feature, and it is the evaluator
-  the materialiser that consumes admitted facts already uses.
+  `math:`/`time:` builtins, list- and formula-valued terms, quoted triples with variables in
+  a conclusion, and "rules whose builtin inputs no premise can bind" as **loud compile
+  errors** (`compiled.rs:58-71`, `compiled.rs:397-404`, `compiled.rs:838-842`), and
+  `tests/compiled_equivalence.rs` pins its closure set-equal to `reason_n3` on the
+  access-control corpus. That is BAF (1)(2)(5)(6) and (4-partial) already implemented,
+  behind the opt-in `compiled-rules` feature, and it is the evaluator the materialiser that
+  consumes admitted facts already uses. It does **not** give (3) on conclusions: a variable
+  in conclusion predicate position compiles as an ordinary bound slot
+  (`compiled.rs:825-831`), so the residual checks phase 4 must add are (3)-on-conclusions
+  and the (4) cycle check — two conditions, not one.
 
 ## 8. Recommendation and phased plan
 
 **Recommendation.** Do **not** build a new rule analyser or a reasoner budget. Route the
 admission path's rule text through the fragment gate that already exists, and add only the
-one condition that gate is missing.
+two conditions that gate is missing — (3) on conclusions, and the (4) cycle check.
 
 Each phase is a future bead; each is independently shippable and independently reviewable.
 
@@ -373,9 +441,10 @@ Each phase is a future bead; each is independently shippable and independently r
    change that makes OSB a property of the *engine* rather than of every rule file.
 4. **Gate P-1/P-2 on the compiled subset** (F-4/F-6). Add an opt-in
    `derive_grants_checked` to `wire.rs` that runs `n3::compiled::compile` on the caller's
-   rule and returns `Err` — never a hang — when it is rejected, plus a BAF-(4) cycle check
-   for the term-minting builtins `compile` still admits (`string:concatenation`,
-   `string:scrape`, `log:uri`). Feature-gated so the default build is unchanged; the
+   rule and returns `Err` — never a hang — when it is rejected, plus the two checks
+   `compile` does not make: a BAF-(4) cycle check for the term-minting builtins it still
+   admits (`string:concatenation`, `string:scrape`, `log:uri`), and a BAF-(3) rejection of a
+   variable in conclusion predicate position. Feature-gated so the default build is unchanged; the
    `.acr` rule channel, when wired, uses only the checked entry point. **Blocked on §9
    question 2:** `compile` currently rejects `math:` builtins, so as written this phase
    would reject the design's own worked example (`math:greaterThan`) until comparison
@@ -425,6 +494,14 @@ means operationally). Phase 4 is the one that must precede wiring the `.acr` rul
 - It does not bound `sparq-engine` SPARQL evaluation on P-6; the trust-expression rewrite
   has a different cost model and is out of scope.
 - It leaves ~900 lines of `acp-*.n3` / `odrl-*.n3` unaudited (§8 phase 7).
-- The BAF bound is **conditional on conditions (1)–(5) being checked**. Nothing in the
-  shipped code checks them today. Until phase 4 lands, §5 describes a fragment the
-  admission path *happens* to stay inside, not one it is *held* inside.
+- The BAF bound is **conditional on conditions (1)–(6) being checked**. Nothing on the
+  text-engine admission path checks them today (the compiled path checks four of the six —
+  §7 F-6). Until phase 4 lands, §5 describes a fragment the admission path *happens* to stay
+  inside, not one it is *held* inside.
+- The BAF conditions are a **sufficient** set, argued informally from the engine's term
+  sources and index behaviour and cited to `file:line` — not a machine-checked proof, and
+  not claimed minimal. Conditions (3)-on-conclusions and (6) were added after review found
+  that (1)–(5) admitted both a variable-predicate head (breaking the `|P|·|A|²` bound) and a
+  recursive compound-term head (breaking termination outright); a further such gap is
+  possible, and the conditions should be treated as the current best statement rather than a
+  closed result until the phase-4 checker and its rejection tests exist.

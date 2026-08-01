@@ -1172,10 +1172,15 @@ core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-
 8. **P8 — Cost/decidability spike (prototype).** Bound admission-rule evaluation cost and
    confirm one-side-bound seeding everywhere; work-box timings are non-canonical. *Blocked-on:
    P1–P4.* **ANALYSED** (`sq-pfae.9`, [`research/trust-admission-cost-decidability.md`](trust-admission-cost-decidability.md)):
-   the bound is proven for a stated fragment (safety + no head existentials + ground
-   predicates + no term-minting builtin on a recursive cycle + no scope re-entry), under
-   which data complexity is PTIME; outside it the path is **undecidable** — `reason_n3`
-   carries no budget and `wire::derive_grants` validates nothing. One-side-bound seeding is
+   the bound is **argued, not machine-checked**, for a stated six-condition fragment (safety
+   + no head existentials + ground IRI predicates in premise *and* conclusion + no
+   term-minting builtin on a recursive cycle + no scope re-entry + no compound term
+   constructed in a conclusion), under which data complexity is PTIME; outside it the path is
+   **undecidable** — `reason_n3` carries no budget and `wire::derive_grants` validates
+   nothing. The last two conditions are load-bearing, not tidying: a variable conclusion
+   predicate is range-restricted yet breaks the `|P|·|A|²` bound, and a recursive
+   list-/quoted-triple-valued head breaks termination outright with no blank node and no
+   builtin. One-side-bound seeding is
    **confirmed for the v1 admission path and refuted as a blanket claim** (two shipped rules
    violate it, both bounded and polynomial). **Enforcement is NOT shipped**: the fragment is
    one the path happens to stay inside, not one it is held inside.
