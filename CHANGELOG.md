@@ -500,5 +500,5 @@ reproduce):
   single-pattern/FILTER comparisons short-circuit via index range-counting and are excluded
   from the claims above.
 
-[Unreleased]: https://github.com/jeswr/sparq/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/jeswr/sparq/releases/tag/v0.1.0
+[Unreleased]: https://github.com/sparq-org/sparq/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/sparq-org/sparq/releases/tag/v0.1.0

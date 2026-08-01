@@ -4,7 +4,7 @@ description: How to USE the sparq RDF triplestore + SPARQL 1.1/1.2 engine (Rust 
 license: MIT
 metadata:
   version: "0.1.0"
-  homepage: https://github.com/jeswr/sparq
+  homepage: https://github.com/sparq-org/sparq
 ---
 
 # sparq — usage skills (router)
@@ -52,7 +52,7 @@ Pick the surface that matches the task:
 - **[`academic-paper`](./academic-paper/SKILL.md)** — The sparq paper-factory PROCESS (epic sq-gum8): turn a sparq contribution into an academic paper — identify a genuinely-novel contribution, classify it and pick a venue (ISWC/ESWC Resource for the engine, PVLDB/SIGMOD/EDBT for DB-systems, arXiv/workshop for not-yet-sound ZK/MPC), draft a single-source Typst (.typ) paper whose eval section binds to live benchmark data, build both a PDF and an in-site HTML page from that one source, and review claims↔evidence under sparq's empirical-honesty mandate (canonical vs indicative numbers; the ZK/MPC not-yet-sound disclaimer). _(status: factory machinery, not an engine capability; design record `research/paper-factory-design.md`.)_
 
 ## Discoverability
-These follow the [Agent Skills](https://agentskills.io) `SKILL.md` convention (YAML frontmatter `name`/`description`). Any agent that supports the standard can load a skill directly from a clone of this repo, or you can copy/symlink one into `~/.claude/skills/`. They are also packaged as a Claude Code plugin (see `.claude-plugin/`): `/plugin marketplace add jeswr/sparq` then `/plugin install sparq@sparq-tools`.
+These follow the [Agent Skills](https://agentskills.io) `SKILL.md` convention (YAML frontmatter `name`/`description`). Any agent that supports the standard can load a skill directly from a clone of this repo, or you can copy/symlink one into `~/.claude/skills/`. They are also packaged as a Claude Code plugin (see `.claude-plugin/`): `/plugin marketplace add sparq-org/sparq` then `/plugin install sparq@sparq-tools`.
 
 ## Maintenance
 **When you change a public API, update the matching `skills/<surface>/SKILL.md` in the same change.** See [`AGENTS.md`](../AGENTS.md) for the rule and the TODO/beads policy.

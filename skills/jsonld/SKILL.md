@@ -4,7 +4,7 @@ description: Parse, expand, flatten, compact, and frame W3C JSON-LD 1.1 with spa
 license: MIT
 metadata:
   version: "0.1.0"
-  homepage: https://github.com/jeswr/sparq
+  homepage: https://github.com/sparq-org/sparq
 ---
 
 # sparq JSON-LD 1.1

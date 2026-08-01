@@ -378,7 +378,7 @@ bundle), explicitly **not** a prerequisite.
   matching §1, **statically exported** (`output: 'export'`) to `out/`.
 - **Pages base path:** the repo's Pages site is served at **`https://sparq.jeswr.org/`**
   (project page, not a user page), so set **`basePath: '/sparq'`** + matching `assetPrefix` and
-  load all wasm/bb.js assets through the base path. (Confirmed: `gh api repos/jeswr/sparq/pages`
+  load all wasm/bb.js assets through the base path. (Confirmed: `gh api repos/sparq-org/sparq/pages`
   → `html_url: https://sparq.jeswr.org/`.)
 - **Co-hosting with `/dev/bench`:** today Pages is served from the **`benchmark-data` branch**
   at `/` (`build_type: legacy`), whose tree is `index.html` + `dev/` — i.e. the benchmark
