@@ -14,9 +14,9 @@
 # fine; removing them below the recorded floor fails.
 #
 #   --seed                 (re)generate bench/coverage-presence.json from the tree
-#   --check                FAIL if any crate dropped below its recorded test count, or
-#                          lost its integration-tests dir (had_integration_dir: true ->
-#                          now absent).
+#   --check                FAIL if any crate dropped below its recorded test count, lost
+#                          its integration-tests dir (had_integration_dir: true -> now
+#                          absent), or is present in crates/ but UNTRACKED by the file.
 #   --allow-lower          permit --seed to LOWER a count (deliberate test removal).
 import argparse, json, os, re, sys
 
@@ -97,6 +97,11 @@ def seed(path, allow_lower):
             "commit by the .github/workflows/ci.yml coverage job. The floor only RISES "
             "(--seed will not lower without --allow-lower). Regenerate after adding tests: "
             "scripts/coverage-presence.py --seed.",
+            "[OPUS-5] sparq-org/sparq#5140: EVERY directory under crates/ with a Cargo.toml "
+            "must appear here — --check FAILs on an untracked crate, because a crate absent "
+            "from this file is guarded by nothing and can lose all of its tests unnoticed "
+            "(25 of 67 crates had drifted into exactly that state). So adding a crate now "
+            "requires re-running --seed, and the counts below are the FULL tree.",
         ],
         "crates": res,
     }
@@ -108,9 +113,8 @@ def seed(path, allow_lower):
     if kept:    print(f"  kept:   {len(kept)} unchanged")
     return 0
 
-def check(path):
-    floors = json.load(open(path))["crates"]
-    cur = scan()
+def evaluate(floors, cur):
+    """Pure floors-vs-tree comparison. Returns (oks, fails) as message lists."""
     fails, oks = [], []
     for crate, fentry in sorted(floors.items()):
         info = cur.get(crate)
@@ -126,6 +130,21 @@ def check(path):
         else:
             oks.append(f"{crate}: {info['tests']} tests (floor {mn})"
                        + (" +integ" if info["integration_dir"] else ""))
+    # [OPUS-5] sparq-org/sparq#5140 — COVERAGE guard. The loop above only ever visits
+    # crates that are ALREADY recorded, so a crate added to crates/ after the last
+    # --seed was tracked by nothing: it could lose every one of its tests and this gate
+    # would still print all-ok. That is how 25 of 67 crates (incl. sparq-lws-wasm)
+    # accumulated no floor at all. Same rule as the shard-partition guard next to it in
+    # the ci.yml coverage-floors job: no crate is silently un-gated.
+    for crate in sorted(cur):
+        if crate not in floors:
+            fails.append(f"{crate}: UNTRACKED by the presence gate ({cur[crate]['tests']} "
+                         f"tests) — run scripts/coverage-presence.py --seed")
+    return oks, fails
+
+def check(path):
+    floors = json.load(open(path))["crates"]
+    oks, fails = evaluate(floors, scan())
     for o in oks:   print(f"  ok   {o}")
     for fl in fails: print(f"  FAIL {fl}")
     if fails:

@@ -1009,6 +1009,21 @@ jobs:
       # cross-runner .profraw merge to be valid. Stdlib-only, no git/network.
       - name: Self-test check-coverage-rustflags.py (fixtures + live invariant — sq-6vshe.11)
         run: python3 scripts/tests/test_coverage_rustflags.py
+      # [OPUS-5] test_coverage_presence.py (13 tests) — the test-PRESENCE gate
+      # (scripts/coverage-presence.py, run by the ci.yml coverage-floors job). Its own
+      # hole was COVERAGE, not counting: check() iterated the RECORDED floors only, so a
+      # crate added to crates/ after the last --seed was guarded by nothing and could lose
+      # every test while the gate printed all-ok (sparq-org/sparq#5140 — 25 of 67 crates,
+      # incl. sparq-lws-wasm, had drifted into exactly that state). Pins the evaluate()
+      # decision table incl. the new UNTRACKED direction, the live invariant that
+      # bench/coverage-presence.json covers the whole crates/ tree and currently passes,
+      # and two vacuity guards (an empty scan would make the live layer pass by comparing
+      # empty sets). Stdlib-only, no git/network/compile.
+      # NB the issue ref is written `sparq-org/sparq#5140`, not ` #5140` — a `#` preceded
+      # by whitespace opens a YAML comment even inside a plain scalar, which would
+      # silently truncate this step name rather than error.
+      - name: Self-test coverage-presence.py (untracked-crate guard + live invariant — sparq-org/sparq#5140)
+        run: python3 scripts/tests/test_coverage_presence.py
       # [OPUS-5] sparq-org/sparq#4652: the zero-dispatch merge-group watchdog
       # (scripts/merge-group-watchdog.py, .github/workflows/merge-group-watchdog.yml)
       # plus the CI_TIMEOUT routing split it feeds in merge-queue-feedback.yml. Both
