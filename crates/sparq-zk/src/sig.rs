@@ -43,35 +43,46 @@
 //! candidate can ship as parallel options for the paper's per-signature
 //! performance + security table. v1 ships `poseidon2-schnorr-v1` only.
 //!
-//! ## Constant-time posture (CR-G5 / sq-8jv7) [OPUS-4.8]
-//! Honest statement, do NOT over-read: **this signing path is NOT asserted
-//! constant-time.** The Baby-JubJub scalar multiplication `R = G·k` and the
-//! scalar arithmetic `s = k + e·sk` are done with `arkworks`
-//! (`ark-ed-on-bn254` / `ark-ff`), which makes **no default constant-time
-//! guarantee** and which sparq does not (and cannot, without replacing the
-//! curve implementation) assert is constant-time. A co-located attacker
-//! observing signing could in principle obtain a timing/cache signal
-//! correlated with the secret key `sk` or the nonce `k`. This is the
-//! **irreducible arkworks residual** recorded in
-//! `compliance/cryptoreview/side-channel-analysis.md` §2.2 / §6 and gap
-//! **CR-G5**; closing it needs a constant-time scalar-mul (a curve/dep swap),
-//! tracked as a follow-up bead.
+//! ## Constant-time posture (CR-G5 / sq-8jv7 / sq-j3b9) [OPUS-5]
+//! Honest statement, do NOT over-read: **this signing path is still NOT
+//! asserted constant-time.** What has changed, in two steps, is how much of the
+//! secret-dependent *shape* lives in code sparq owns.
 //!
-//! What sq-8jv7 *did* change is the secret-dependent control flow **in code we
-//! own**: `derive_nonce`'s degenerate-`k` guard is now branchless (always
-//! computes the re-fold candidate and `subtle`-selects it), so our own emitted
-//! control flow is data-independent of the secret nonce. We do **not** claim
-//! this makes signing constant-time — the arkworks residual dominates.
+//! * **sq-8jv7** made `derive_nonce`'s degenerate-`k` guard branchless (always
+//!   computes the re-fold candidate and `subtle`-selects it), so the nonce
+//!   derivation emits no secret-dependent control flow.
+//! * **sq-j3b9** replaced the secret-scalar multiplications — `pk = sk·G` in
+//!   [`SecretKey::public_key`] and `R = G·k` in [`sign_deterministic`] — with
+//!   `crate::ct::mul_ct`, a fixed-width double-and-ALWAYS-add ladder whose trip
+//!   count and per-iteration work do not vary with the scalar. The `arkworks`
+//!   generic `Group::mul_bigint` these replace branched on every secret scalar
+//!   bit (`if b { res += self }`) *and* short-circuited leading zeros, i.e. it
+//!   carried the textbook square-and-multiply side channel. The ladder is
+//!   value-identical (differential test in `crate::ct`), so no signature, key,
+//!   or wire format changes.
+//!
+//! **What remains open (the part sq-j3b9 did NOT close).** Every operation
+//! above still bottoms out in `arkworks` (`ark-ed-on-bn254` / `ark-ff`) field
+//! arithmetic, which makes **no default constant-time guarantee** and which
+//! sparq does not — and cannot, without replacing the field/curve
+//! implementation — assert is constant-time. The scalar arithmetic
+//! `s = k + e·sk` is likewise untouched `arkworks` (though, unlike a scalar
+//! multiplication, it is a fixed two-operation sequence with no loop and no
+//! branch, so it carries no square-and-multiply structure). This is the
+//! residual recorded in `compliance/cryptoreview/side-channel-analysis.md`
+//! §2.2 / §6 and gap **CR-G5**; closing it is the curve/dep swap sq-j3b9
+//! scoped as its ceiling and deliberately did not take. **No instrumented
+//! `dudect`/`ctgrind` measurement has been run** — this is a source-level shape
+//! argument, and a clean reading is not a timing-channel proof.
 //!
 //! **Why the residual is rated LOW (placement, not primitives):** the secret
 //! key is used **only at ISSUANCE** (signing), which v1 places in a trusted
 //! issuance environment; the relying party only ever calls [`verify`], which
-//! is over **public** data (commitment + public key) and carries no secret.
-//! This becomes load-bearing only if signing ever moves to an exposed /
-//! online surface (e.g. the deferred in-circuit hidden-key upgrade), at which
-//! point a constant-time scalar-mul is required. The crate remains
-//! **research-grade and externally unaudited** (CR-G1, `sq-qhy4`); a clean
-//! source-level reading is not a timing-channel proof.
+//! is over **public** data (commitment + public key) and carries no secret —
+//! and which therefore deliberately keeps the faster variable-time `arkworks`
+//! multiplication. The rating is unchanged by sq-j3b9: hardening the shape of
+//! the ladder does not upgrade the *claim*. The crate remains **research-grade
+//! and externally unaudited** (CR-G1, `sq-qhy4`).
 
 use crate::field::Fr;
 use crate::poseidon2;
@@ -402,9 +413,13 @@ pub struct Signature {
 
 impl SecretKey {
     /// Derive the public key `pk = sk·G`.
+    // [OPUS-5] sq-j3b9: `sk` is the long-term secret, so the multiplication goes
+    // through the scalar-independent ladder (`crate::ct::mul_ct`) rather than
+    // arkworks' `if bit { add }` double-and-add. Value-identical; see `crate::ct`
+    // for the bounded claim (this is NOT "constant-time signing").
     pub fn public_key(&self) -> PublicKey {
         let g = EdwardsProjective::generator();
-        PublicKey((g * self.0).into_affine())
+        PublicKey(crate::ct::mul_ct(&g, &self.0).into_affine())
     }
 
     /// A deterministic secret key from a `u64` seed — issuance-tooling / test
@@ -528,9 +543,11 @@ fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
     // when `k == 0`, so the control flow our code emits is data-independent of
     // the secret nonce. (The `k == 0` event is itself negligibly rare — ~2^-251
     // for a 251-bit scalar field — so this is defence-in-depth, not a measured
-    // leak; the irreducible residual is the arkworks scalar mul `G·k` /
-    // `e·sk.0`, which sparq does NOT assert constant-time — see the module
-    // CONSTANT-TIME POSTURE note and `compliance/cryptoreview/side-channel-analysis.md` §2.2.)
+    // leak. [OPUS-5] sq-j3b9 has since moved the scalar mul `G·k` onto the
+    // fixed-width `crate::ct::mul_ct` ladder; the remaining residual is the
+    // arkworks scalar arithmetic `e·sk.0` and the underlying field ops, which
+    // sparq does NOT assert constant-time — see the module CONSTANT-TIME POSTURE
+    // note and `compliance/cryptoreview/side-channel-analysis.md` §2.2.)
     let k2_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), k_base, *m]);
     let k2 = JjScalar::from_be_bytes_mod_order(&k2_base.into_bigint().to_bytes_be());
     // Constant-time "is k zero?" over the canonical little-endian scalar bytes,
@@ -553,18 +570,22 @@ fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
 /// only ever calls [`verify`]. Equivalent in shape to `sign` but with the
 /// nonce pinned, so it is replay-stable and seed-reuse-proof.
 //
-// # Constant-time posture (CR-G5 / sq-8jv7) [OPUS-4.8]
-// NOT asserted constant-time. The scalar mul `G·k` and the scalar arithmetic
-// `k + e·sk.0` use arkworks ops sparq does not assert are constant-time (the
-// irreducible residual — see the module CONSTANT-TIME POSTURE note). Our own
-// secret-dependent control flow ([`derive_nonce`]'s `k == 0` guard) is
-// branchless; the residual is the dependency's, and is LOW today by
-// issuance-side placement.
+// # Constant-time posture (CR-G5 / sq-8jv7 / sq-j3b9) [OPUS-5]
+// Still NOT asserted constant-time. The secret-dependent SHAPE is now sparq's:
+// [`derive_nonce`]'s `k == 0` guard is branchless (sq-8jv7) and `G·k` goes
+// through the fixed-width `crate::ct::mul_ct` ladder rather than arkworks'
+// bit-branching double-and-add (sq-j3b9). The scalar arithmetic `k + e·sk.0`
+// and every underlying field operation remain arkworks ops sparq does not
+// assert are constant-time — the residual (see the module CONSTANT-TIME POSTURE
+// note), LOW today by issuance-side placement.
 // [OPUS-4.8] audit #3 codex #4.
 pub fn sign_deterministic(sk: &SecretKey, m: &Fr) -> Signature {
     let g = EdwardsProjective::generator();
     let k = derive_nonce(sk, m);
-    let r_pt = (g * k).into_affine();
+    // [OPUS-5] sq-j3b9: `k` is the secret nonce — recovering even a few of its
+    // bits over several signatures recovers `sk` — so `R = G·k` goes through the
+    // scalar-independent ladder, not arkworks' bit-branching double-and-add.
+    let r_pt = crate::ct::mul_ct(&g, &k).into_affine();
     let pk = sk.public_key().0;
     let e = challenge(&r_pt, &pk, m);
     let s = k + e * sk.0;
@@ -1071,6 +1092,11 @@ pub(crate) fn sign<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
 ) -> Signature {
     let g = EdwardsProjective::generator();
     let k = JjScalar::rand(rng);
+    // [OPUS-5] sq-j3b9: this test-only signer deliberately KEEPS the arkworks
+    // multiplication. `sk.public_key()` below now goes through the ladder, so
+    // every `sign` → `verify` test in this module cross-checks a ladder-derived
+    // public key against an arkworks-derived `R` — an independent-path check the
+    // suite would lose if both sides used the same implementation.
     let r_pt = (g * k).into_affine();
     let pk = sk.public_key().0;
     let e = challenge(&r_pt, &pk, m);
@@ -1429,6 +1455,40 @@ mod tests {
         // Cross-check against the scalar value equality (the prior-`==` semantics).
         assert_eq!(eq_same, sk_a.0 == sk_a2.0);
         assert_eq!(eq_diff, sk_a.0 == sk_b.0);
+    }
+
+    // [OPUS-5] sq-j3b9: routing the two SECRET-scalar multiplications through the
+    // fixed-width `crate::ct::mul_ct` ladder must be a pure timing-shape change —
+    // every derived key and every signature has to be BYTE-IDENTICAL to what the
+    // arkworks variable-time multiplication produced. This pins both halves
+    // against the reference implementation directly (the `crate::ct` differential
+    // covers the ladder in isolation; this covers the call sites), so a drift
+    // that silently re-keyed an issuer or invalidated already-issued credentials
+    // fails here.
+    #[test]
+    fn ct_ladder_call_sites_are_value_identical_to_arkworks() {
+        let g = EdwardsProjective::generator();
+        for seed in [0u64, 1, 7, 4242] {
+            let (sk, pk) = keypair(seed);
+            // pk = sk·G must match the arkworks reference exactly.
+            assert_eq!(
+                pk.0,
+                (g * sk.0).into_affine(),
+                "ladder-derived public key must equal the arkworks reference"
+            );
+
+            // R = G·k must match too, for the real deterministic nonce.
+            let m = commitment_message(&Fr::from(seed));
+            let sig = sign_deterministic(&sk, &m);
+            let k = derive_nonce(&sk, &m);
+            assert_eq!(
+                sig.r,
+                (g * k).into_affine(),
+                "ladder-derived nonce commitment must equal the arkworks reference"
+            );
+            // ...and the signature the ladder produced still verifies.
+            assert!(verify(&pk, &m, &sig), "ladder-signed message must verify");
+        }
     }
 
     // [OPUS-4.8] sq-u8a8: compile + behaviour check that `SecretKey` implements
