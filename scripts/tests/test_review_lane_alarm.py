@@ -232,7 +232,12 @@ class TestInstructionTextIsNotAPass(unittest.TestCase):
 
 class TestRegistryLaneReachability(unittest.TestCase):
     """The reachability predicate is the claim this whole alarm rests on: it must be the
-    registry's own admission test, pinned to REAL branch names measured on 2026-07-26."""
+    registry's own admission test, pinned to REAL branch names measured on 2026-07-26.
+
+    Only its NEGATIVE answer is a fact. The positive one replicates the three author-side
+    gates only, and the registry additionally requires a provenance record no sparq-side
+    token can read — see `TestTheResidualEligibleClass` for the population that bound
+    leaves behind and where it stays visible."""
 
     def test_real_worker_branch_is_reachable(self):
         self.assertTrue(alarm.registry_lane_reachable(
@@ -259,6 +264,78 @@ class TestRegistryLaneReachability(unittest.TestCase):
         # same breath — a paraphrased predicate would silently mis-scope the alarm.
         self.assertEqual(alarm.REGISTRY_HEAD_REF_RE.pattern,
                          r"^sparq-agent/issue-([1-9][0-9]*)-")
+
+
+class TestTheResidualEligibleClass(unittest.TestCase):
+    """sparq#4677, review round 2 — the population `registry_lane_reachable` admits and
+    the review lane still never enrolls.
+
+    Admission at the registry ALSO requires a provenance record this repo holds no token
+    to read, so the positive answer is an upper bound: the `registry-lane` state contains
+    PRs that were never enrolled and are indistinguishable, by shape, from PRs that were.
+    `mislabelled-unreviewed` cannot see them BY CONSTRUCTION — it only detects the case
+    the predicate can prove negative. What separates them is TIME: an enrolled PR ends up
+    with a lane label, one that was never enrolled never does. `registry-lane-unconfirmed`
+    is that measurement, and it is what keeps the residual counted rather than assumed
+    away."""
+
+    NOW = "2026-07-26T00:00:00Z"
+    # Syntactically eligible on all three author-side gates, aged well past the threshold.
+    RESIDUAL = dict(number=4200, ref="sparq-agent/issue-4677-30221671021-1",
+                    login="sparq-orchestrator[bot]", created="2026-07-18T00:00:00Z")
+
+    def now(self):
+        return alarm._parse_iso(self.NOW)
+
+    def test_the_residual_shape_is_admitted_by_the_reachability_predicate(self):
+        """It has to be — that is the whole gap. If this ever fails, the residual has
+        become detectable directly and this row is no longer the right instrument."""
+        self.assertTrue(alarm.registry_lane_reachable(pr(**self.RESIDUAL), REPO))
+        self.assertEqual(alarm.classify_pr(pr(**self.RESIDUAL), [], REPO), "registry-lane")
+
+    def test_the_certain_case_row_provably_cannot_see_it(self):
+        labelled = pr(labels=(alarm.UNREVIEWED_LABEL,), **self.RESIDUAL)
+        self.assertFalse(alarm.is_mislabelled_unreviewed(labelled, REPO))
+
+    def test_it_is_counted_in_the_census_every_tick(self):
+        aged = pr(**self.RESIDUAL)
+        self.assertTrue(alarm.is_lane_unconfirmed(aged, REPO, self.now(), 24))
+        findings, census = alarm.find_blind_spot([aged], {}, REPO, self.now(), 24)
+        self.assertEqual(census.get("registry-lane-unconfirmed"), 1)
+        # A COUNT, not an alarm: the same shape is what a merely slow lane looks like, so
+        # this row must never on its own file an issue or turn the run red.
+        self.assertEqual(findings, [])
+        self.assertEqual(census.get("registry-lane"), 1)
+
+    def test_an_eligible_pr_that_a_review_DID_reach_is_not_residual(self):
+        """The one observable difference, and the control arm: without it the row would
+        count the entire `registry-lane` population and mean nothing."""
+        for label in sorted(alarm.LANE_LABELS):
+            with self.subTest(label=label):
+                reviewed = pr(labels=(label,), **self.RESIDUAL)
+                self.assertFalse(
+                    alarm.is_lane_unconfirmed(reviewed, REPO, self.now(), 24))
+
+    def test_a_fresh_or_draft_or_unreachable_pr_is_not_residual(self):
+        for name, overrides in (
+            # Below the threshold a pending review is the likelier reading.
+            ("fresh", {"created": "2026-07-25T23:00:00Z"}),
+            # A draft has not asked for a review yet.
+            ("draft", {"draft": True}),
+            # The unreachable population IS the blind spot and is already alarmed;
+            # counting it here too would inflate the row with the case we can prove.
+            ("unreachable", {"ref": "research/x", "login": "jeswr"}),
+        ):
+            with self.subTest(name):
+                shape = dict(self.RESIDUAL)
+                shape.update(overrides)
+                self.assertFalse(alarm.is_lane_unconfirmed(pr(**shape), REPO,
+                                                           self.now(), 24))
+
+    def test_the_row_is_explained_where_a_maintainer_reads_it(self):
+        body = alarm.render_issue_body([], {"registry-lane-unconfirmed": 3}, REPO, 24)
+        self.assertIn("registry-lane-unconfirmed", body)
+        self.assertIn("upper bound", body)
 
 
 class TestNonAlarmingStates(unittest.TestCase):
@@ -308,8 +385,14 @@ class TestNonAlarmingStates(unittest.TestCase):
             # `blind-spot-<disposition>` likewise rides alongside: the blind spot is
             # partitioned by WHO OWNS each PR, so the release and dependabot classes stop
             # reading as "someone forgot to review it" (sparq#4677).
+            # ...and so does `registry-lane-unconfirmed`: #4 is eligible on every gate this
+            # repo can check, but 25 days old with no lane label, so it is the RESIDUAL —
+            # eligible on paper, never demonstrably enrolled. The state exit stays
+            # `registry-lane`; this row is the measurement that keeps the upper bound
+            # honest rather than assumed (sparq#4677).
             {"blind-spot": 1, "draft": 1, "human-held": 1, "registry-lane": 1,
-             "hold-owner-unknown": 1, "blind-spot-agent-dispatch": 1},
+             "hold-owner-unknown": 1, "blind-spot-agent-dispatch": 1,
+             "registry-lane-unconfirmed": 1},
         )
 
 

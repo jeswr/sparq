@@ -135,6 +135,18 @@
 # TICK rather than only when someone goes looking — `mislabelled-unreviewed` (the
 # regression detector, expected 0) and `blind-spot-<disposition>` (who owns each class).
 #
+# ...AND THE RESIDUAL THAT PREDICATE CANNOT SEE. `registry_lane_reachable` replicates only
+# the three AUTHOR-SIDE gates; the registry ALSO requires a provenance record no sparq-side
+# token can read. Its positive answer is therefore an UPPER BOUND, so the `registry-lane`
+# state contains PRs that are worker-shaped, same-repo and bot-authored and were still
+# never enrolled — indistinguishable here at a point in time, and by construction invisible
+# to `mislabelled-unreviewed`, which can only prove the NEGATIVE case. TIME separates them:
+# an enrolled PR acquires a lane label, one that was never enrolled never does. The
+# `registry-lane-unconfirmed` row counts exactly that — eligible on paper, past the
+# threshold, no review artefact — so the upper bound is a MEASURED bound rather than an
+# assumed one, and neither this alarm nor verdict-bridge.py claims an enrolment it cannot
+# observe.
+#
 # THE GENERALISABLE RULE, worth applying beyond this instance: when auditing a pipeline,
 # compare the VISIBILITY PREDICATE OF EVERY COMPONENT THAT WRITES STATE against the one
 # that does the WORK. A labeller with wider vision than its worker manufactures invisible
@@ -225,6 +237,14 @@ LANE_LABELS = frozenset({"review:pass", "review:changes", "review:needs", "revie
 # every population anyone counts. verdict-bridge no longer writes it on this population
 # and withdraws the ones it already wrote, so `mislabelled-unreviewed` should converge to
 # ZERO; a non-zero count is the regression detector for that fix.
+#
+# `mislabelled-unreviewed` catches only the CERTAIN half of that defect — the PRs
+# `registry_lane_reachable` can PROVE the lane never sees. Its positive answer is an upper
+# bound (see that function: the registry additionally requires a provenance record no
+# sparq-side token can read), so the eligible set contains a RESIDUAL of PRs that are
+# worker-shaped, same-repo and bot-authored and were still never enrolled. Nothing
+# available here separates them at a point in time — but TIME separates them, and
+# `registry-lane-unconfirmed` below is that measurement.
 UNREVIEWED_LABEL = "review:unreviewed"
 
 DEFAULT_MAX_AGE_HOURS = 24
@@ -551,8 +571,42 @@ def is_mislabelled_unreviewed(pr: dict, repo: str) -> bool:
 
     Reads only the PR listing (labels + head + author), so it costs no extra API call and
     is computed for EVERY open PR — drafts and human-held PRs included, because a label
-    that lies does so regardless of why the PR is quiet."""
+    that lies does so regardless of why the PR is quiet.
+
+    BOUND: only the CERTAIN half. `registry_lane_reachable` is an upper bound, so a PR it
+    admits may still never have been enrolled; that residual is carried by
+    `is_lane_unconfirmed` instead."""
     return UNREVIEWED_LABEL in _labels(pr) and not registry_lane_reachable(pr, repo)
+
+
+def is_lane_unconfirmed(pr: dict, repo: str, now: dt.datetime, max_age_hours: float) -> bool:
+    """True iff this PR is ELIGIBLE on every gate sparq can check, is past the alarm
+    threshold, and still carries no review artefact of any kind.
+
+    THE RESIDUAL CLASS. `registry_lane_reachable` replicates the registry's three
+    AUTHOR-SIDE gates, but admission ALSO requires a provenance record only the registry
+    writes and no sparq-side token can read. So its positive answer is an upper bound, and
+    the population it admits CONTAINS PRs the lane will never review — the same shape as
+    an enrolled one on every input available here, and therefore invisible to
+    `is_mislabelled_unreviewed`, which can only prove the negative case.
+
+    What separates them is TIME, not shape: an enrolled PR acquires a `LANE_LABELS`
+    verdict label, and one that was never enrolled does not, ever. This row is that
+    measurement, and it is the reason `scripts/verdict-bridge.py` may write its
+    informational label on an eligible PR without the claim going unchecked.
+
+    Costs no extra API call (listing labels + head + author + `created_at`) and reads no
+    comments, deliberately: it must be computable for the `registry-lane` population,
+    whose comments this alarm does not fetch (see `main`). Drafts are excluded HERE
+    explicitly, mirroring `classify_pr`'s own first exit — a draft has not asked for a
+    review yet — because this predicate runs over EVERY open PR rather than only the ones
+    that reached a non-draft state exit."""
+    if pr.get("draft") is True or not registry_lane_reachable(pr, repo):
+        return False
+    if LANE_LABELS & _labels(pr):
+        return False
+    age = (now - _parse_iso(pr.get("created_at"))).total_seconds() / 3600.0
+    return age >= max_age_hours
 
 
 def _parse_iso(ts: str) -> dt.datetime:
@@ -587,6 +641,19 @@ def find_blind_spot(
         # a blind-spot one (sparq#4677).
         if is_mislabelled_unreviewed(pr, repo):
             census["mislabelled-unreviewed"] = census.get("mislabelled-unreviewed", 0) + 1
+        # THE RESIDUAL CLASS the predicate above cannot see. `registry-lane` is an UPPER
+        # BOUND — admission ALSO needs a registry provenance record no sparq-side token can
+        # read — so that state silently contains PRs eligible on paper that were never
+        # enrolled, and they are exactly the ones `mislabelled-unreviewed` must miss. No
+        # input here separates them from a genuinely enrolled PR at a point in time; AGE
+        # does, because an enrolled PR acquires a lane label and this one never will.
+        # COUNTED, never alarmed: the same shape is also what a merely SLOW lane looks
+        # like, and this file must not go red on a guess. A row that grows while
+        # `blind-spot` stays flat is the signal that the upper bound has gone slack.
+        if is_lane_unconfirmed(pr, repo, now, max_age_hours):
+            census["registry-lane-unconfirmed"] = (
+                census.get("registry-lane-unconfirmed", 0) + 1
+            )
         hold_notes: list[str] = []
         if HUMAN_HOLD_LABELS & _labels(pr):
             owner = hold_ownership(pr, events, comments)
@@ -700,6 +767,17 @@ def render_issue_body(findings: list[dict], census: dict, repo: str, max_age_hou
         "**0**; a non-zero value means a labeller has again been given wider vision than its "
         "worker, which manufactures backlog that *looks* enrolled and therefore drops out of "
         "every population anyone measures (sparq#4677).",
+        "",
+        "**`registry-lane-unconfirmed`** counts the RESIDUAL that row cannot see. The "
+        "reachability predicate replicates the registry's three *author-side* gates only; "
+        "admission also requires a provenance record no sparq-side token can read, so "
+        "`registry-lane` is an **upper bound** and contains PRs that look enrolled here and "
+        "never were. Nothing separates them by shape — but an enrolled PR eventually "
+        "acquires a lane label and one that was never enrolled does not, so this row counts "
+        f"PRs eligible on paper that are past {max_age_hours:g}h with **no** review artefact "
+        "at all. It is a measurement, not an alarm: a slow lane looks the same for a while, "
+        "so read it as a trend, and a row that grows while `blind-spot` stays flat means the "
+        "upper bound has gone slack (sparq#4677).",
         "",
         "A `needs:user` / `review:needs-user` hold exempts a PR from this alarm only when a "
         "HUMAN applied it — resolved from the `labeled` timeline event, and downgraded to a "
@@ -1292,6 +1370,60 @@ def _self_test() -> int:  # noqa: C901 - a flat table of named assertions reads 
     check("a DRAFT wearing the label is still counted",
           census_dr.get("mislabelled-unreviewed") == 1)
 
+    # THE RESIDUAL CLASS the row above cannot see (sparq#4677 review round 2). This PR is
+    # syntactically eligible on all three author-side gates — worker branch, this repo, the
+    # App bot — so `registry_lane_reachable` admits it and it exits `registry-lane`. If the
+    # registry never wrote it a provenance record, no review will ever come, and NOTHING in
+    # this repo can tell the two apart by shape. Age can, and does.
+    eligible_stale = _pr(number=77, ref="sparq-agent/issue-77-1-1",
+                         login="sparq-orchestrator[bot]", created="2026-07-18T00:00:00Z")
+    check("the residual shape is EXACTLY the eligible one",
+          registry_lane_reachable(eligible_stale, repo)
+          and classify_pr(eligible_stale, [], repo) == "registry-lane")
+    check("...so `mislabelled-unreviewed` provably cannot see it",
+          not is_mislabelled_unreviewed(
+              _pr(number=77, ref="sparq-agent/issue-77-1-1",
+                  login="sparq-orchestrator[bot]", labels=(UNREVIEWED_LABEL,)), repo))
+    check("...and it IS counted as registry-lane-unconfirmed",
+          is_lane_unconfirmed(eligible_stale, repo, now, DEFAULT_MAX_AGE_HOURS))
+    _, census_r = find_blind_spot([eligible_stale], {}, repo, now, DEFAULT_MAX_AGE_HOURS)
+    check("...every tick, in the census the maintainer reads",
+          census_r.get("registry-lane-unconfirmed") == 1)
+    check("...while staying a plain `registry-lane` exit — this is a count, not an alarm",
+          census_r.get("registry-lane") == 1)
+    _, census_r2 = find_blind_spot(
+        [eligible_stale, _pr(number=78, ref="sparq-agent/issue-78-1-1",
+                             login="sparq-orchestrator[bot]",
+                             created="2026-07-18T00:00:00Z")],
+        {}, repo, now, DEFAULT_MAX_AGE_HOURS)
+    check("...and the row is a POPULATION, not a flag",
+          census_r2.get("registry-lane-unconfirmed") == 2)
+    # An eligible PR that a review DID reach carries a lane label — the one observable
+    # difference — so it is not residual. Without this arm the row would count the whole
+    # `registry-lane` population and mean nothing.
+    check("an eligible PR bearing a verdict label is NOT unconfirmed",
+          not is_lane_unconfirmed(
+              _pr(number=79, ref="sparq-agent/issue-79-1-1",
+                  login="sparq-orchestrator[bot]", labels=("review:pass",),
+                  created="2026-07-18T00:00:00Z"), repo, now, DEFAULT_MAX_AGE_HOURS))
+    # ...nor is a FRESH one: below the threshold, a pending review is the likelier reading.
+    check("a fresh eligible PR is not yet unconfirmed",
+          not is_lane_unconfirmed(
+              _pr(number=80, ref="sparq-agent/issue-80-1-1",
+                  login="sparq-orchestrator[bot]", created="2026-07-25T23:00:00Z"),
+              repo, now, DEFAULT_MAX_AGE_HOURS))
+    # ...nor a DRAFT (it has not asked for a review) or an UNREACHABLE PR (that population
+    # is the blind spot, already alarmed — double-counting it would inflate this row).
+    check("a draft is not unconfirmed",
+          not is_lane_unconfirmed(
+              _pr(number=81, ref="sparq-agent/issue-81-1-1", draft=True,
+                  login="sparq-orchestrator[bot]", created="2026-07-18T00:00:00Z"),
+              repo, now, DEFAULT_MAX_AGE_HOURS))
+    check("an unreachable PR is not unconfirmed — it is the blind spot",
+          not is_lane_unconfirmed(
+              _pr(number=82, ref="research/x", login="jeswr",
+                  created="2026-07-18T00:00:00Z"), repo, now, DEFAULT_MAX_AGE_HOURS))
+
     body = render_issue_body(findings3, {"blind-spot": 1}, repo, DEFAULT_MAX_AGE_HOURS)
     check("the issue body self-identifies", body.startswith("> 🤖 SPARQ agent"))
     check("the issue body carries the dedupe key", f"<!-- {KEY_PREFIX}: {ALARM_KEY} -->" in body)
@@ -1300,6 +1432,8 @@ def _self_test() -> int:  # noqa: C901 - a flat table of named assertions reads 
     check("the issue body explains every disposition",
           all(name in body_d for name in DISPOSITIONS))
     check("the issue body explains the mislabelled row", "mislabelled-unreviewed" in body_d)
+    check("the issue body explains the residual row it cannot see",
+          "registry-lane-unconfirmed" in body_d and "upper bound" in body_d)
 
     # --- fail-loud on malformed input (never a quiet green).
     for name, thunk in (

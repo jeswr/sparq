@@ -142,17 +142,35 @@ because release-plz names its branch ``release-plz-<timestamp>``.
 
 A PR that is labelled but never reviewed is WORSE than one never labelled, because the
 label makes it look enrolled and it drops out of every population anyone counts.  So
-``flag`` now requires POSITIVE evidence that the review lane can enumerate the PR, and a
-``review:unreviewed`` already sitting on a PR the lane cannot reach is REMOVED
-(``unflag``).  The population does not become invisible by being unlabelled:
-``scripts/review_lane_alarm.py`` censuses it every tick and names each PR's disposition.
+``flag`` now requires POSITIVE evidence that the PR clears every admission gate this repo
+can OBSERVE, and a ``review:unreviewed`` already sitting on a PR the lane provably cannot
+reach is REMOVED (``unflag``).  The population does not become invisible by being
+unlabelled: ``scripts/review_lane_alarm.py`` censuses it every tick and names each PR's
+disposition.
 
-This is a write-path narrowing ONLY.  Reachability gates ``flag``/``unflag`` and NOTHING
+WHAT THE POSITIVE ANSWER DOES *NOT* SAY — THE RESIDUAL CLASS.  The registry admits a PR
+only if it ALSO holds a provenance record that this repo has no token to read, and that
+record can only ever NARROW admission further.  Clearing the three author-side gates is
+therefore an UPPER BOUND on admission and never evidence of it, so the positive value is
+named ``ELIGIBLE`` and NOT "reachable": calling it reachable would state as fact the one
+thing this module cannot observe.  The asymmetry is the point — ``UNREACHABLE`` is
+CERTAIN and is the only value that REMOVES a label, while ``ELIGIBLE`` merely fails to
+exclude, and no code here may read it as "the lane has enrolled this PR".
+
+The residual — a worker-shaped, same-repo, bot-authored PR the registry never enrolled —
+is INDISTINGUISHABLE from an enrolled one at write time, from any input this repo holds a
+token for.  It is therefore carried where it IS observable: it AGES into
+``review_lane_alarm.py``'s ``registry-lane-unconfirmed`` census row, which counts PRs
+eligible on paper that are past the alarm threshold with no review artefact at all.  That
+row is the residual census this module's ``ELIGIBLE`` cannot resolve, and it is why a
+flag written here is not a claim of enrolment that nothing would ever check.
+
+This is a write-path narrowing ONLY.  Admission gates ``flag``/``unflag`` and NOTHING
 else — a hand-dispatched verdict on an unreachable PR still promotes exactly as before,
 which matters because for that population a hand-dispatched verdict is the ONLY route to
-a review.  Pinned by ``test_reachability_gates_only_the_informational_label``.
+a review.  Pinned by ``test_admission_gates_only_the_informational_label``.
 
-Reachability is TRI-STATE, not boolean.  ``unknown`` (the query dropped a field, the head
+Admission is TRI-STATE, not boolean.  ``unknown`` (the query dropped a field, the head
 repo was deleted, the author is a ghost) writes NOTHING in either direction, mirroring
 this module's standing "never act on absence of evidence" rule: an unreadable input must
 not be able to strip labels off the whole repository.
@@ -165,7 +183,7 @@ spelling verbatim would make EVERY PR read as unreachable, silently stopping all
 and unflagging the entire repository — a guard that reads as present and is not.  The
 author's kind is therefore taken from the GraphQL ``__typename`` of the ``Actor`` union,
 with the suffix kept only as a fallback.  Pinned by
-``test_a_graphql_bot_author_without_the_bot_suffix_is_still_reachable``.
+``test_a_graphql_bot_author_without_the_bot_suffix_is_still_eligible``.
 
 ACTIONS
 -------
@@ -176,9 +194,10 @@ retract   head-bound verdict is fail (or AMBIGUOUS) and ``review:pass`` is prese
           orchestrator applied by hand is never fought.  Deleting the pass COMMENT is
           therefore not a retraction gesture the bridge can see — post a fail instead.
 flag      green + mergeable + non-draft + no head-bound verdict + no ``review:*`` label
-          + the registry review lane can REACH the PR -> add ``review:unreviewed``.
-          Purely informational: no arming predicate anywhere consumes this label, so it
-          can never block or cause a merge.
+          + the PR is ELIGIBLE on every admission gate this repo can observe -> add
+          ``review:unreviewed``.  Purely informational: no arming predicate anywhere
+          consumes this label, so it can never block or cause a merge.  Eligibility is
+          an upper bound, not enrolment — see THE RESIDUAL CLASS above.
 unflag    ``review:unreviewed`` is stale — a verdict arrived, another ``review:*`` label
           arrived, or the PR is one the review lane structurally cannot reach -> remove
           it.
@@ -279,13 +298,20 @@ FULL_SHA_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
 # The registry review lane's own head-ref admission regex, replicated VERBATIM from
 # `enumerate_review_items` (registry scripts/dispatch-claim.py) and byte-identical to
 # scripts/review_lane_alarm.py's REGISTRY_HEAD_REF_RE.  Kept byte-identical on purpose:
-# the whole claim of `lane_reachability` is "the lane can/cannot see this PR", so the test
+# the whole claim of `lane_admission` is "the lane can/cannot see this PR", so the test
 # must BE the lane's test rather than a paraphrase of it.
 REGISTRY_HEAD_REF_RE = re.compile(r"^sparq-agent/issue-([1-9][0-9]*)-")
 
-# Tri-state reachability.  `UNKNOWN` writes nothing in EITHER direction — see the module
-# docstring; an unreadable input must never be able to strip labels off the repository.
-REACHABLE = "reachable"
+# Tri-state admission, DELIBERATELY ASYMMETRIC in what it claims.  `UNREACHABLE` is
+# CERTAIN — a PR failing any author-side gate can never be enumerated — and it is the only
+# value that REMOVES a label.  The positive value is only `ELIGIBLE`: the registry ALSO
+# requires a provenance record this repo has no token to read, so clearing these gates is
+# an UPPER BOUND on admission, never evidence of it, and naming it `REACHABLE` would state
+# as fact the one thing this module cannot observe.  The residual it cannot resolve ages
+# into review_lane_alarm.py's `registry-lane-unconfirmed` row — see the module docstring.
+# `UNKNOWN` writes nothing in EITHER direction: an unreadable input must never be able to
+# strip labels off the repository.
+ELIGIBLE = "eligible"
 UNREACHABLE = "unreachable"
 UNKNOWN = "unknown"
 
@@ -331,8 +357,8 @@ class PullRequest:
     # disjointness cannot be proven.  Refuses every grant; never blocks a retraction.
     contributors_complete: bool = True
     # The three AUTHOR-SIDE inputs the registry review lane admits on, plus this repo's
-    # own full name to compare the head repo against.  Consumed ONLY by
-    # `lane_reachability`, which gates ONLY the informational flag/unflag pair.
+    # own full name to compare the head repo against.  Consumed ONLY by `lane_admission`,
+    # which gates ONLY the informational flag/unflag pair.
     head_ref: str = ""
     head_repo: str = ""
     repo: str = ""
@@ -356,7 +382,7 @@ class Decision:
     # True when a counted pass came from whoever OPENED the PR.  ADVISORY: reported so
     # the population stays measurable, never acted on.  See `is_opener`.
     opener_verdict: bool = False
-    # This PR's `lane_reachability` at decision time, carried so `run()` can COUNT the
+    # This PR's `lane_admission` at decision time, carried so `run()` can COUNT the
     # withheld-flag population rather than re-deriving it from the reason string.
     lane: str = ""
 
@@ -454,15 +480,23 @@ def author_is_bot(pr: PullRequest) -> bool | None:
     return None
 
 
-def lane_reachability(pr: PullRequest) -> str:
-    """Can the (cross-repo) registry review lane EVER enumerate this PR?
+def lane_admission(pr: PullRequest) -> str:
+    """Is this PR EXCLUDED from the (cross-repo) registry review lane by its own shape?
 
-    ``REACHABLE`` / ``UNREACHABLE`` / ``UNKNOWN`` — replicating the three AUTHOR-SIDE
-    gates of the registry's ``enumerate_review_items``.  The registry ADDITIONALLY
-    requires a provenance record it alone can write; that is a live cross-repo read this
-    repo holds no token for, and it can only ever NARROW admission — so a ``REACHABLE``
-    here is an upper bound, and every ``UNREACHABLE`` is certain.  Certainty is the
-    direction that matters: ``UNREACHABLE`` is the only value that REMOVES a label.
+    ``ELIGIBLE`` / ``UNREACHABLE`` / ``UNKNOWN`` — replicating the three AUTHOR-SIDE gates
+    of the registry's ``enumerate_review_items``.  The question this answers is the
+    NEGATIVE one, and only the negative answer is a fact: every ``UNREACHABLE`` is
+    certain, because a PR failing an author-side gate can never be enumerated whatever
+    else is true of it.
+
+    ``ELIGIBLE`` is strictly weaker than "reachable" and must not be read as enrolment.
+    The registry ADDITIONALLY requires a provenance record it alone can write; that is a
+    live cross-repo read this repo holds no token for, and it can only ever NARROW
+    admission.  So the eligible set CONTAINS a residual of PRs the lane will never review,
+    indistinguishable from the enrolled ones on every input available here.  That residual
+    is not silently absorbed: it ages into ``review_lane_alarm.py``'s
+    ``registry-lane-unconfirmed`` census row (eligible on paper, past the alarm threshold,
+    no review artefact), which is where the gap this predicate cannot close stays visible.
 
     Gates ONLY the informational ``flag``/``unflag`` pair.  It is deliberately absent from
     every arming-relevant path, because a hand-dispatched verdict is the sole route to a
@@ -477,7 +511,7 @@ def lane_reachability(pr: PullRequest) -> str:
     is_bot = author_is_bot(pr)
     if is_bot is None:
         return UNKNOWN
-    return REACHABLE if is_bot else UNREACHABLE
+    return ELIGIBLE if is_bot else UNREACHABLE
 
 
 def hold_labels(labels: Iterable[str]) -> list[str]:
@@ -642,7 +676,7 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
     countable, self_passes, opener_passes = classify_verdicts(comments, pr.head_sha, pr)
     verdict = countable[-1] if countable else None
     # Gates the informational label ONLY (sparq#4677). Never consulted by promote/retract.
-    reach = lane_reachability(pr)
+    admission = lane_admission(pr)
 
     def out(action: str, reason: str) -> Decision:
         """Stamp every exit so neither a refusal nor an advisory exits silently."""
@@ -669,7 +703,7 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
             reason,
             self_review=bool(self_passes),
             opener_verdict=bool(opener_passes),
-            lane=reach,
+            lane=admission,
         )
 
     # The one reason string both unflag-on-unreachable exits share, so the two branches
@@ -706,7 +740,7 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
             # pending review, it is the manufactured-backlog bug itself (sparq#4677).
             # Removing it is the one write that shrinks, rather than grows, the set of
             # PRs wearing a claim nothing will honour.
-            if reach == UNREACHABLE:
+            if admission == UNREACHABLE:
                 return out("unflag", unreachable_reason)
             return out("none", "flagged, still unreviewed")
         other_review_label = any(
@@ -715,14 +749,25 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
         if other_review_label or has_attestation:
             return out("none", "already in a review lane")
         if is_green_and_ready(pr):
-            # POSITIVE evidence of reachability is required to claim a review is pending.
-            if reach != REACHABLE:
+            # POSITIVE evidence that the lane is not structurally blind to this PR is
+            # required before writing a label that reads as a pending review.
+            if admission != ELIGIBLE:
                 return out(
                     "none",
-                    f"green + mergeable but {reach} by the registry review lane — not "
+                    f"green + mergeable but {admission} by the registry review lane — not "
                     f"flagging (review_lane_alarm censuses it instead; sparq#4677)",
                 )
-            return out("flag", "green + mergeable but invisible to every lane")
+            # ELIGIBLE, NOT "enrolled": the registry's provenance admission is not
+            # readable from this repo, so this label records "no verdict exists and
+            # nothing structurally excludes one", never "a review is on its way".  A PR
+            # eligible here that the registry never enrolled ages into
+            # review_lane_alarm.py's `registry-lane-unconfirmed` census row.
+            return out(
+                "flag",
+                "green + mergeable, no verdict, and eligible on every admission gate this "
+                "repo can observe — registry provenance admission is NOT observable here, "
+                "so this is not a claim the lane has enrolled it (sparq#4677)",
+            )
         return out("none", "no head-bound verdict")
 
     if verdict.value == AMBIGUOUS:
@@ -739,11 +784,11 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
         if flagged:
             # Same reasoning as the no-verdict branch: an unreachable PR's flag is a
             # claim nothing can honour, whatever the comment thread says (sparq#4677).
-            if reach == UNREACHABLE:
+            if admission == UNREACHABLE:
                 return out("unflag", unreachable_reason)
         elif (
             is_green_and_ready(pr)
-            and reach == REACHABLE
+            and admission == ELIGIBLE
             and not any(label.startswith("review:") for label in pr.labels)
         ):
             return out(
@@ -1321,12 +1366,14 @@ REPO = "sparq-org/sparq"
 
 
 def pr_fixture(**overrides) -> PullRequest:
-    """A PR the registry review lane CAN reach, unless a test says otherwise.
+    """A PR the registry review lane is not structurally blind to, unless a test says so.
 
-    The reachable shape is the default because ``flag`` is only defined for that
-    population (sparq#4677) — a fixture that defaulted to unreachable would make every
-    inherited ``flag`` assertion in this file and in
-    ``scripts/tests/test_verdict_bridge.py`` pass for the wrong reason.
+    The ELIGIBLE shape is the default because ``flag`` is only defined for that population
+    (sparq#4677) — a fixture that defaulted to unreachable would make every inherited
+    ``flag`` assertion in this file and in ``scripts/tests/test_verdict_bridge.py`` pass
+    for the wrong reason.  Eligible is NOT enrolled: this same shape is what the residual
+    class (no registry provenance record) looks like from here, which is exactly why
+    nothing downstream may read the flag as "a review is coming".
     """
     base = {
         "number": 4200,
@@ -1478,11 +1525,26 @@ def self_test() -> None:
     # ------------------------------------------------------------------ sparq#4677
     # THE LABELLER MUST NOT SEE FURTHER THAN THE REVIEWER.
     #
-    # Control arm first: the flag assertions above all run on the REACHABLE fixture, so
+    # Control arm first: the flag assertions above all run on the ELIGIBLE fixture, so
     # they only mean something if the unreachable complement behaves differently.
-    assert lane_reachability(pr_fixture()) == REACHABLE
+    assert lane_admission(pr_fixture()) == ELIGIBLE
     assert decide(pr_fixture(), []).action == "flag"
-    assert lane_reachability(unreachable_fixture()) == UNREACHABLE
+
+    # THE RESIDUAL CLASS (review round 2). `pr_fixture()` IS the residual shape: a
+    # worker-shaped, same-repo, bot-authored PR whose registry provenance record this repo
+    # holds no token to read. It is indistinguishable here from an enrolled one, so the
+    # positive answer must not be spelled — or read — as "reachable"/"enrolled", and the
+    # write it authorises must say so on its face.
+    assert ELIGIBLE == "eligible", "the positive state must not claim reachability"
+    assert "REACHABLE" not in globals(), "an acknowledged upper bound must not be so NAMED"
+    flag_reason = decide(pr_fixture(), []).reason
+    assert "eligible" in flag_reason, flag_reason
+    assert "NOT observable" in flag_reason, flag_reason
+    # ...and it is review_lane_alarm.py, not this module, that carries the residual, so
+    # the census row this module names must actually exist there.
+    assert "registry-lane-unconfirmed" in __doc__
+
+    assert lane_admission(unreachable_fixture()) == UNREACHABLE
     assert decide(unreachable_fixture(), []).action == "none", "must not manufacture backlog"
 
     # The FOUR MEASURED live PRs from sparq#4677, by (head ref, author) shape. Every one
@@ -1497,7 +1559,7 @@ def self_test() -> None:
     ]
     for name, ref, login, kind in live_unreviewable:
         shape = pr_fixture(head_ref=ref, author_login=login, author_typename=kind)
-        assert lane_reachability(shape) == UNREACHABLE, name
+        assert lane_admission(shape) == UNREACHABLE, name
         # ...it is never flagged in the first place...
         assert decide(shape, []).action == "none", name
         # ...and a flag already on it is WITHDRAWN, which is what heals the live four.
@@ -1513,26 +1575,26 @@ def self_test() -> None:
     # silently unflagging the whole repository. `__typename` is what prevents it.
     assert author_is_bot(pr_fixture(author_login="sparq-orchestrator",
                                     author_typename="Bot")) is True
-    assert lane_reachability(pr_fixture(author_login="sparq-orchestrator",
-                                        author_typename="Bot")) == REACHABLE
-    # ...and the REST spelling of the same App is equally reachable.
-    assert lane_reachability(pr_fixture(author_login="sparq-orchestrator[bot]",
-                                        author_typename="Bot")) == REACHABLE
+    assert lane_admission(pr_fixture(author_login="sparq-orchestrator",
+                                        author_typename="Bot")) == ELIGIBLE
+    # ...and the REST spelling of the same App is equally eligible.
+    assert lane_admission(pr_fixture(author_login="sparq-orchestrator[bot]",
+                                        author_typename="Bot")) == ELIGIBLE
     # ...the suffix alone still works when `__typename` was not selected (fallback).
     assert author_is_bot(pr_fixture(author_login="x[bot]", author_typename="")) is True
     # ...but a human is not laundered into a bot by either spelling.
     assert author_is_bot(pr_fixture(author_login="jeswr", author_typename="User")) is False
-    assert lane_reachability(
+    assert lane_admission(
         pr_fixture(author_login="jeswr", author_typename="User")) == UNREACHABLE
 
     # Each of the three admission gates is INDEPENDENTLY sufficient to make a PR
     # unreachable (they are AND-ed) — a fixture failing two proves nothing about either.
-    assert lane_reachability(pr_fixture(head_ref="chore/bump")) == UNREACHABLE
-    assert lane_reachability(pr_fixture(head_repo="attacker/sparq")) == UNREACHABLE
-    assert lane_reachability(
+    assert lane_admission(pr_fixture(head_ref="chore/bump")) == UNREACHABLE
+    assert lane_admission(pr_fixture(head_repo="attacker/sparq")) == UNREACHABLE
+    assert lane_admission(
         pr_fixture(author_login="jeswr", author_typename="User")) == UNREACHABLE
     # `issue-0` is not a worker branch (the regex demands [1-9][0-9]*).
-    assert lane_reachability(pr_fixture(head_ref="sparq-agent/issue-0-1-1")) == UNREACHABLE
+    assert lane_admission(pr_fixture(head_ref="sparq-agent/issue-0-1-1")) == UNREACHABLE
 
     # UNKNOWN writes NOTHING in either direction. An unreadable field must never be able
     # to strip review:unreviewed off every PR in the repository at once.
@@ -1546,11 +1608,11 @@ def self_test() -> None:
         {"author_login": "someone", "author_typename": ""},
     ):
         blinded = pr_fixture(**blind)
-        assert lane_reachability(blinded) == UNKNOWN, blind
+        assert lane_admission(blinded) == UNKNOWN, blind
         assert decide(blinded, []).action == "none", blind
         assert decide(pr_fixture(labels={UNREVIEWED_LABEL}, **blind), []).action == "none", blind
 
-    # REACHABILITY GATES ONLY THE INFORMATIONAL LABEL. For the unreachable population a
+    # ADMISSION GATES ONLY THE INFORMATIONAL LABEL. For the unreachable population a
     # hand-dispatched verdict is the ONLY route to a review, so it must still promote —
     # and a fail must still retract. If this ever fails, the fix has become a stall.
     assert decide(unreachable_fixture(), [passing]).action == "promote"
@@ -1562,7 +1624,7 @@ def self_test() -> None:
     # The decision CARRIES the lane state, so run() can count the withheld population
     # without re-deriving it from prose.
     assert decide(unreachable_fixture(), []).lane == UNREACHABLE
-    assert decide(pr_fixture(), []).lane == REACHABLE
+    assert decide(pr_fixture(), []).lane == ELIGIBLE
 
     # SCOPING (the event path). The number an event payload names is parsed strictly;
     # anything present but non-numeric must RAISE, never degrade to a full sweep.
