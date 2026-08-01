@@ -1,0 +1,166 @@
+{
+  "schema": "sparq-feature-matrix-unlegged-allowlist/v1",
+  "note": "Written-reason registry for enforcement invariant (3) of scripts/feature-matrix-tiers.py (issue #5138): a cargo feature that a fragment-carrying crate DECLARES but that appears in NO leg of that crate, is activated by no executor the guard models (ci.yml's workspace default lane, a test:true feature-matrix leg, or a scripts/coverage.sh case arm), and that the detector classifies SENSITIVE. Every entry needs a NON-EMPTY written reason and is one of exactly two kinds, and the reason MUST say which: (A) COVERED-ELSEWHERE — a real executor the guard cannot model (e.g. a dedicated ci.yml job), so the entry is permanent until that executor moves; (B) RECORDED GAP — no known executor; the entry is DEBT, seeded so invariant (3) can gate NEW occurrences while the pre-existing set is triaged per-crate. A kind-(B) entry is not a justification and must not be read as one. This file is held STRICT in both directions: --enforce also REDs on a STALE entry (feature no longer declared, now legged, now executed, or now non-sensitive), so the list can only shrink. Do NOT add an entry to silence a NEW gated test — add the executor instead. See also scripts/check-feature-test-execution.allowlist.json, the sibling registry for the C1 guard (unmapped feature-gated TEST TARGETS); several reasons below cite it because the two guards see the same gap from different angles.",
+  "allowlist": [
+    {
+      "crate": "sparq-canon",
+      "feature": "bridge-lowcopy",
+      "reason": "(B) RECORDED GAP. The detector fires on `cfg(not(feature = \"bridge-lowcopy\"))` in src/lib.rs, where the feature selects between two implementations of the oxrdf-0.3 -> 0.2 bridge's `serialize_quads` (the default one, and a single-reusable-buffer one). Both polarities are product code and only the OFF one is executed, by the workspace default lane. No leg, no coverage.sh arm, no dedicated job. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-canon",
+      "feature": "rdf12-triple-terms",
+      "reason": "(B) RECORDED GAP, already tracked by the C1 guard: scripts/check-feature-test-execution.allowlist.json carries the same (crate, feature) with the reason \"No feature-matrix leg for rdf12-triple-terms yet (tracked gap). The feature is non-standard, off by default, and the test is the only consumer. A future leg will close this gap.\" Closing it there closes it here."
+    },
+    {
+      "crate": "sparq-cli",
+      "feature": "spqcprm2",
+      "reason": "(B) RECORDED GAP. tests/emit_format_v2.rs gates its SPQCPRM2 emit-flag contract tests on this feature and nothing turns it on. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "jsonld-suite",
+      "reason": "(A) COVERED-ELSEWHERE: the dedicated `jsonld-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite`. It is not a feature-matrix leg because it first FETCHES the pinned W3C JSON-LD 1.1 suites and then enforces a pinned pass floor — neither of which the uniform matrix leg shape expresses."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "service-loopback",
+      "reason": "(A) COVERED-ELSEWHERE: the dedicated `service-federation-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features service-loopback --test service_loopback`. Not a matrix leg: the lane stands up an in-process loopback SPARQL endpoint and asserts egress scoping."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "service",
+      "reason": "(A) COVERED-ELSEWHERE: the `service-federation-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features service --test service_eval_suite` against the fetched W3C sparql11/service suite, with a pinned pass floor."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "http-protocol",
+      "reason": "(A) COVERED-ELSEWHERE: the `service-federation-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite` and enforces the pinned HTTP_PROTOCOL_FLOOR on the printed TOTAL line."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "federation-descriptors",
+      "reason": "(A) COVERED-ELSEWHERE: the `service-federation-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features federation-descriptors --test sd_gsp_suite` (Service Description + Graph Store Protocol) with a pinned floor."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "d-entail",
+      "reason": "(A) COVERED-ELSEWHERE: the dedicated `inference-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features d-entail --test d_entail_suite` with a pinned pass floor."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "rif-core",
+      "reason": "(A) COVERED-ELSEWHERE: the `inference-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features rif-core --test rif_core_suite` with a pinned pass floor."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "rif-wg-core",
+      "reason": "(A) COVERED-ELSEWHERE: the `inference-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features rif-wg-core --test rif_wg_core_suite` with a pinned pass floor."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "el-suite",
+      "reason": "(A) COVERED-ELSEWHERE: the `inference-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features el-suite,el-suite-par --test el_suite` (OWL 2 EL classification) with a pinned floor."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "el-suite-par",
+      "reason": "(A) COVERED-ELSEWHERE: enabled alongside `el-suite` by the same `cargo test -p sparq-conformance --features el-suite,el-suite-par --test el_suite` invocation in the `inference-conformance` job of .github/workflows/ci.yml."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "ql-experimental",
+      "reason": "(A) COVERED-ELSEWHERE: the `inference-conformance` job in .github/workflows/ci.yml runs `cargo test -p sparq-conformance --features ql-experimental --test ql_dllite_suite` (OWL 2 QL) with a pinned floor."
+    },
+    {
+      "crate": "sparq-conformance",
+      "feature": "dl-direct",
+      "reason": "(A) COVERED-ELSEWHERE: the `inference-conformance` job in .github/workflows/ci.yml runs `cargo test --profile release-fast -p sparq-conformance --features dl-direct --test dl_suite` (OWL 2 Direct Semantics) with pinned floors. The release-fast profile is why it is a bespoke job rather than a matrix leg."
+    },
+    {
+      "crate": "sparq-engine",
+      "feature": "cs-anchor-incidence",
+      "reason": "(B) RECORDED GAP. tests/distinct_pushdown.rs carries `#[cfg(feature = \"cs-anchor-incidence\")]` assertions for the per-anchor incidence-set precomputation and nothing turns the feature on. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-engine",
+      "feature": "topk-lazy-strkey",
+      "reason": "(B) RECORDED GAP. src/exec.rs carries a `cfg(all(test, feature = \"topk-lazy-strkey\"))` test block that no executor compiles. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-fedplan",
+      "feature": "foldhash-maps",
+      "reason": "(B) RECORDED GAP, benches-only. The detector's hit is `#[cfg(feature = \"foldhash-maps\")]` in benches/fedplan.rs; the feature also swaps the map type in src/descriptor.rs, whose ON arm is asserted by a `#[cfg(feature = \"foldhash-maps\")]` test in that file. No lane builds sparq-fedplan benches or turns the feature on, so neither the bench nor the ON assertion runs. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-kb",
+      "feature": "literature-live",
+      "reason": "(A) COVERED-ELSEWHERE by policy — there is deliberately NO executor. Per scripts/check-feature-test-execution.allowlist.json: the feature opens a real network connection to the Anthropic API, and live-network tests are never run in CI by contract (the eval harness uses recorded fixtures). Bit-rot protection is the gating workspace `cargo clippy --all-targets --all-features`, which compiles the gated code."
+    },
+    {
+      "crate": "sparq-nlq",
+      "feature": "live",
+      "reason": "(A) COVERED-ELSEWHERE by policy — there is deliberately NO executor. `live` is in this script's own SCOPE_ALLOWLIST and in the .github/workflows/feature-matrix.yml SCOPE comment: tests/exec_accuracy.rs drives a live model endpoint, which CI never does. Bit-rot protection is the gating workspace `--all-features` clippy."
+    },
+    {
+      "crate": "sparq-serve",
+      "feature": "backup",
+      "reason": "(B) RECORDED GAP. The detector fires on `cfg(not(feature = \"backup\"))` in src/lib.rs, which selects a different visibility/shape for the backup module in a change-stream-only build; only the OFF arm is executed. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-serve",
+      "feature": "result-cache",
+      "reason": "(B) RECORDED GAP, already tracked by the C1 guard: scripts/check-feature-test-execution.allowlist.json carries the same (crate, feature) with the reason \"sparq-serve is in coverage.sh PER_COMMIT_CRATES but measured with default features only (no result-cache case arm). No feature-matrix leg for result-cache in sparq-serve exists. Tracked gap: add a sparq-serve (result-cache) leg to the fragment.\""
+    },
+    {
+      "crate": "sparq-server",
+      "feature": "backup",
+      "reason": "(B) RECORDED GAP, tracked by the C1 guard (\"No feature-matrix leg for sparq-server backup yet. The backup feature is off by default (sq-o5bi). Tracked gap: add a sparq-server (backup) leg.\") and independently recorded in .github/workflows/ci.yml, whose cargo-mutants entry excludes shacl/backup/n3-patch because \"NO CI executor runs their suites\"."
+    },
+    {
+      "crate": "sparq-server",
+      "feature": "shacl",
+      "reason": "(B) RECORDED GAP, tracked by the C1 guard (\"No feature-matrix leg for sparq-server shacl yet. The shacl feature is off by default. Tracked gap: add a sparq-server (shacl) leg.\") and independently recorded in the cargo-mutants exclusion note in .github/workflows/ci.yml."
+    },
+    {
+      "crate": "sparq-server",
+      "feature": "n3-patch",
+      "reason": "(B) RECORDED GAP. tests/gsp_patch.rs gates its N3 Patch cases on the feature. .github/workflows/ci.yml's cargo-mutants entry already states plainly that shacl/backup/n3-patch have NO CI executor running their suites — this entry is the guard's own record of the same fact. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-sim",
+      "feature": "lexical",
+      "reason": "(B) RECORDED GAP. tests/proptest_metric.rs gates property witnesses for the FST-style lexical tier on this feature and nothing turns it on. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-sim",
+      "feature": "tbox",
+      "reason": "(B) RECORDED GAP. src/lib.rs carries `#[cfg(feature = \"tbox\")]` immediately adjacent to `#[test]` (the b-direct pattern) for the T-box-aware signature expansion, and nothing turns the feature on. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-vectors",
+      "feature": "approx-ann",
+      "reason": "(B) RECORDED GAP, already tracked by the C1 guard: scripts/check-feature-test-execution.allowlist.json carries the same (crate, feature) with the reason \"No feature-matrix leg for sparq-vectors approx-ann yet. The feature pulls the heavy instant-distance HNSW crate; building it in the feature-matrix lane requires verifying it stays within the CI wall-clock budget. Tracked gap: add a sparq-vectors (approx-ann) leg.\""
+    },
+    {
+      "crate": "sparq-vectors",
+      "feature": "delta",
+      "reason": "(B) RECORDED GAP, already tracked by the C1 guard: scripts/check-feature-test-execution.allowlist.json carries the same (crate, feature) with the reason \"No feature-matrix leg for sparq-vectors delta yet. The delta feature gates the in-RAM VectorDelta sidecar and the persisted .spqd format. Tracked gap: add a sparq-vectors (delta) leg.\""
+    },
+    {
+      "crate": "sparq-zk",
+      "feature": "commitment-value-only",
+      "reason": "(B) RECORDED GAP. src/commit.rs gates a deliberately-weaker research/benchmark commitment variant (`ValueOnlyV1`) on this feature, and the detector fires on the `cfg(not(feature = ...))` arm. NOTE for reviewers: this is a privacy-relevant surface — the gated variant is documented as NOT a production commitment scheme, and nothing here claims otherwise. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-zk-compose",
+      "feature": "commitment-value-only",
+      "reason": "(B) RECORDED GAP. tests/bb_gates_matrix.rs gates cases on this feature (the sparq-zk variant above, forwarded) and nothing turns it on. Same reviewer note applies: the gated variant is a research/benchmark commitment, not a production one. Pre-existing at the time invariant (3) was added; not triaged here."
+    },
+    {
+      "crate": "sparq-zk-compose",
+      "feature": "extended-fragment",
+      "reason": "(B) RECORDED GAP. src/manifest.rs carries a `cfg(all(test, feature = \"extended-fragment\"))` test block that no executor compiles. Pre-existing at the time invariant (3) was added; not triaged here."
+    }
+  ]
+}

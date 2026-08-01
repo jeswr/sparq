@@ -53,11 +53,6 @@
       "reason": "No feature-matrix leg for sparq-server shacl yet. The shacl feature is off by default. Tracked gap: add a sparq-server (shacl) leg."
     },
     {
-      "crate": "sparq-solid",
-      "features": ["trust-graph"],
-      "reason": "No feature-matrix leg for sparq-solid trust-graph yet. The trust-graph feature is off by default. Tracked gap: add a sparq-solid (trust-graph) leg."
-    },
-    {
       "crate": "sparq-vectors",
       "features": ["approx-ann"],
       "reason": "No feature-matrix leg for sparq-vectors approx-ann yet. The feature pulls the heavy instant-distance HNSW crate; building it in the feature-matrix lane requires verifying it stays within the CI wall-clock budget. Tracked gap: add a sparq-vectors (approx-ann) leg. Affected tests: hybrid.rs, hybrid_olympics.rs, olympics.rs, recall.rs, throughput.rs."

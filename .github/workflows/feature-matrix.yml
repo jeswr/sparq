@@ -75,7 +75,7 @@
 # [OPUS-5] sq-p1ccp — THE GUARD ABOVE IS NOW ENFORCED, NOT MERELY REVIEW DISCIPLINE. The
 # gating `setup` job runs `python3 scripts/feature-matrix-tiers.py --enforce`, which REDs
 # that job (and so withholds the ENTIRE opt-in matrix — see AGENTS.md's MISSING-LEG-
-# ATTRIBUTION rule before triaging a phantom leg failure) on either violation:
+# ATTRIBUTION rule before triaging a phantom leg failure) on any of three violations:
 #   (1) a leg carries `tier: check` while the detector still classifies one of its features
 #       SENSITIVE — a `cfg(feature = "F")` hit under `tests/`/`benches/`, a `#[cfg(test)]`/
 #       `#[test]`-adjacent hit under `src/`, or ANY `cfg(not(feature = "F"))` in the crate —
@@ -92,6 +92,21 @@
 #       `cargo test` leg — today exactly one: sparq-py's `arrow`, reachable only through
 #       the pymodule (`[lib] test = false`), whose executor is the gating maturin `arrow`
 #       pytest job in python.yml. Prefer adding the leg to writing a reason.
+#   (3) [OPUS-5] issue #5138 — a ZERO-LEG cargo feature is SENSITIVE and unexecuted. (2)
+#       could only ever judge (crate, feature) pairs it read OFF a leg, so a feature
+#       declared in a crate's Cargo.toml with NO leg was never handed to the detector at
+#       all: INVISIBLE to the guard rather than sensitive-and-uncovered — the guard could
+#       not fire on the exact case it exists to catch. Proven on the tree by deleting the
+#       `sparq-lws-core (odrl-authz)` leg: the pre-#5138 detector still printed "0
+#       enforcement violations". (3) therefore enumerates every fragment-carrying crate's
+#       declared `[features]` and judges the ones NO leg mentions. (2) owns LEGGED
+#       features, (3) owns ZERO-LEG ones — disjoint sets, nothing judged twice, nothing
+#       falling between. A candidate is clean when some executor activates it: ci.yml's
+#       workspace default lane (so a DEFAULT-ON feature is never a gap), a `test: true`
+#       leg's transitive feature closure, or a `scripts/coverage.sh` case arm. The only
+#       exit is a written reason in `scripts/feature-matrix-unlegged.allowlist.json`,
+#       which is held STRICT in both directions — an entry that stops describing a live
+#       gap REDs too, so the file can only shrink. Prefer adding the leg.
 # The detector is FAIL-CLOSED: any parse/IO error classifies the leg SENSITIVE (keep the
 # full leg), never a silent demotion. Options (a)/(b) above are still exactly what you DO —
 # what changed is that skipping them is now caught mechanically.
@@ -388,6 +403,10 @@ jobs:
         # PR — the ratchet. Fail-closed: a detector/IO error classifies a leg SENSITIVE (keep
         # the full leg), never a silent demotion. Stdlib + the PyYAML installed above; it
         # scans crates/ (checked out above). At ZERO annotations this is a no-op green.
+        # [OPUS-5] issue #5138: it ALSO reds on invariant (3) — a ZERO-LEG declared cargo
+        # feature that is sensitive and that no executor activates, with no written reason
+        # in scripts/feature-matrix-unlegged.allowlist.json. See the header comment; this
+        # is the case invariants (1)/(2) were structurally unable to see.
         run: python3 scripts/feature-matrix-tiers.py --enforce
       - name: Structural guard C1 — feature-gated test execution (sq-qcnn.31)
         # [SONNET-4.6] sq-qcnn.31: Fail-closed guard — every feature-gated test module or

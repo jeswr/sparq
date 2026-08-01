@@ -972,13 +972,17 @@ jobs:
       # that refuses to mint issues outside CI. Stdlib-only, no gh/git/network.
       - name: Self-test drift-scan.py (all scanner classes + CI guard — sq-1cb6l)
         run: python3 scripts/tests/test_drift_scan.py
-      # test_feature_matrix_tiers.py (50 tests) — the feature-matrix tier
+      # test_feature_matrix_tiers.py (69 tests) — the feature-matrix tier
       # detector (scripts/feature-matrix-tiers.py): cfg expression parser
       # (feature/test/not/any/all/other nodes + balanced-paren error), all
       # acceptance criteria (a)–(i) (gated test file, cfg(not(feature)) src,
       # nested combinators, parse-error fail-closed, unreadable-dir fail-closed,
-      # tier:check enforce, fail-open mutation, non-sensitive), plus extraction +
-      # split helpers. Stdlib-only, no subprocess/network.
+      # tier:check enforce, fail-open mutation, non-sensitive), (j) the
+      # cross-crate feature-name collision, and (k) [issue #5138] enforcement
+      # invariant (3) — the ZERO-LEG blind spot: a declared-but-unlegged
+      # sensitive feature REDs, a default-on / leg-implied / written-reason one
+      # does not, and a STALE registry entry REDs so the registry only shrinks.
+      # Plus extraction + split helpers. Stdlib-only, no subprocess/network.
       - name: Self-test feature-matrix-tiers.py (cfg parser + tier enforcement — sq-1cb6l)
         run: python3 scripts/tests/test_feature_matrix_tiers.py
       # test_check_pypi_name.py (15 tests) — supplements the existing

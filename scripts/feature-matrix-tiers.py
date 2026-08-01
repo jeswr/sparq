@@ -29,11 +29,23 @@
 #             CRATE and no written test-reason: override (sq-vya1 guard).
 #             Cargo feature names are crate-local, so both invariants key on
 #             the (crate, feature) PAIR — a test:true leg for feature F in
-#             crate A must never satisfy a sensitive F in crate B.
+#             crate A must never satisfy a sensitive F in crate B; OR
+#         (3) any ZERO-LEG cargo feature of a fragment-carrying crate is
+#             sensitive and is executed by no CI executor, with no written
+#             reason in scripts/feature-matrix-unlegged.allowlist.json
+#             (issue #5138 — the invariant-(2) blind spot: (2) derives its
+#             candidate set FROM the legs, so a feature declared in
+#             Cargo.toml with NO leg was never handed to the detector at
+#             all — invisible to the guard rather than sensitive-and-
+#             uncovered). (2) owns LEGGED features, (3) owns ZERO-LEG ones;
+#             the two candidate sets are disjoint by construction.
 #   python3 scripts/feature-matrix-tiers.py --report-unlegged
 #       Advisory: features with no leg, against the SCOPE allowlist.
 #
-# Stdlib only (no new Python deps beyond stdlib). Runs under Python 3.10+.
+# Stdlib only (no new Python deps beyond stdlib). Runs under Python 3.11+
+# (`tomllib`, for reading each crate's [features] table in invariant (3) —
+# the same floor scripts/check-feature-test-execution.py already imposes on
+# the feature-matrix `setup` job that runs both).
 
 from __future__ import annotations
 
@@ -48,6 +60,14 @@ from typing import List, Optional, Tuple
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FRAGMENT_DIR = REPO_ROOT / ".github" / "feature-matrix.d"
 CRATES_DIR = REPO_ROOT / "crates"
+
+# Invariant (3): the written-reason registry for a zero-leg sensitive feature
+# whose coverage genuinely lives outside the feature matrix (or which is a
+# recorded, not-yet-triaged gap). See the file's own `note` field.
+UNLEGGED_ALLOWLIST_PATH = REPO_ROOT / "scripts" / "feature-matrix-unlegged.allowlist.json"
+
+# Invariant (3) reuses the C1 guard's executor model rather than re-deriving it.
+FTE_SCRIPT = REPO_ROOT / "scripts" / "check-feature-test-execution.py"
 
 # Allowlist: features explicitly excluded from the unlegged completeness check.
 # These are known to have no per-PR leg by design (design record §4.3).
@@ -758,6 +778,219 @@ def load_fragments() -> List[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Invariant (3) support: declared features, CI executors, written-reason registry
+# ---------------------------------------------------------------------------
+
+# Names imported from the C1 guard. Listed explicitly so a rename over there
+# fails LOUDLY here (fail-closed) instead of silently degrading invariant (3).
+_FTE_REQUIRED_SYMBOLS = (
+    "_compute_closure",
+    "_load_features_table",
+    "_parse_per_commit_crates",
+    "_parse_coverage_case_extras",
+    "COVERAGE_SH",
+)
+
+_FTE_MODULE_CACHE: list = []
+
+
+def _load_fte_module():
+    """Import scripts/check-feature-test-execution.py (the C1 guard) as a module.
+
+    Invariant (3) asks the SAME question C1 asks — "does any CI executor
+    actually run this feature's code?" — so it reuses C1's executor model
+    (cargo's default-features + `--features` transitive closure, plus the
+    coverage.sh `measure()` case arms) rather than growing a second, subtly
+    different notion of coverage.
+
+    FAIL-CLOSED: any import failure, or a missing expected symbol, is a hard
+    exit(2). A broken import must never be read as "everything is covered".
+    The filename carries dashes, so it is loaded by path, not by `import`.
+    """
+    import importlib.util  # noqa: PLC0415 — local: only invariant (3) needs it
+
+    if _FTE_MODULE_CACHE:
+        return _FTE_MODULE_CACHE[0]
+
+    spec = importlib.util.spec_from_file_location(
+        "sparq_check_feature_test_execution", FTE_SCRIPT
+    )
+    if spec is None or spec.loader is None:
+        sys.stderr.write(
+            "error: cannot load {} (needed by enforcement invariant (3))\n".format(
+                FTE_SCRIPT
+            )
+        )
+        sys.exit(2)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["sparq_check_feature_test_execution"] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # pragma: no cover - defensive, fail-closed
+        sys.stderr.write(
+            "error: failed to import {}: {} (invariant (3) cannot run)\n".format(
+                FTE_SCRIPT, exc
+            )
+        )
+        sys.exit(2)
+    missing = [s for s in _FTE_REQUIRED_SYMBOLS if not hasattr(mod, s)]
+    if missing:
+        sys.stderr.write(
+            "error: {} no longer defines {} — invariant (3) reuses the C1 "
+            "executor model and cannot run without them\n".format(
+                FTE_SCRIPT, ", ".join(missing)
+            )
+        )
+        sys.exit(2)
+    _FTE_MODULE_CACHE.append(mod)
+    return mod
+
+
+def declared_features(crate_dir: Path) -> Optional[List[str]]:
+    """Return a crate's non-`default` `[features]` keys, or None if unreadable.
+
+    None means "could not enumerate" — invariant (3) treats that as a
+    VIOLATION for a fragment-carrying crate (fail-closed), never as "this
+    crate declares no features".
+    """
+    import tomllib  # noqa: PLC0415 — local: Python 3.11+, only used here
+
+    cargo_toml = crate_dir / "Cargo.toml"
+    try:
+        with open(cargo_toml, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return None
+    table = data.get("features", {})
+    if not isinstance(table, dict):
+        return None
+    return [str(k) for k in table if k != "default"]
+
+
+def workspace_members() -> set:
+    """Return the crate names listed in the root Cargo.toml `workspace.members`.
+
+    Fail-closed in the STRICT direction: an unreadable root manifest yields an
+    empty set, so no crate is credited with the workspace default lane and the
+    guard reports MORE, not fewer, candidates.
+    """
+    import tomllib  # noqa: PLC0415 — local: Python 3.11+, only used here
+
+    try:
+        with open(REPO_ROOT / "Cargo.toml", "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return set()
+    members = data.get("workspace", {}).get("members", [])
+    if not isinstance(members, list):
+        return set()
+    return {str(m).rsplit("/", 1)[-1] for m in members}
+
+
+def executed_features(legs: List[dict], fte) -> dict:
+    """Return ``{crate: set(features some CI executor activates)}``.
+
+    Three executor sources, all mirroring cargo semantics via C1's closure:
+      * ci.yml's workspace lane (`cargo nextest archive --workspace
+        --all-targets`, no `--features`), which runs every WORKSPACE MEMBER's
+        tests with that crate's DEFAULT features — so a default-on feature is
+        always executed and is never a gap;
+      * every ``test: true`` feature-matrix leg (a leg is what actually runs
+        `cargo test -p <crate> --features <set>`); and
+      * each ``scripts/coverage.sh`` ``measure()`` case arm for a
+        PER_COMMIT_CRATE (coverage measurement runs the suite too).
+
+    Each expands to the TRANSITIVE closure of the crate's default features plus
+    the named ones, so a feature with no leg of its own still counts as
+    executed when another leg's feature implies it (e.g. ``a = ["b"]``).
+    """
+    executed: dict = {}
+
+    def _add(crate: str, extra_csv: str) -> None:
+        table = fte._load_features_table(_crate_dir(crate) / "Cargo.toml")
+        defaults = frozenset(
+            f for f in table.get("default", [])
+            if not f.startswith("dep:") and "/" not in f
+        )
+        extra = frozenset(f.strip() for f in extra_csv.split(",") if f.strip())
+        closure = fte._compute_closure(defaults | extra, table)
+        executed.setdefault(crate, set()).update(closure)
+
+    members = workspace_members()
+    for leg in legs:
+        crate = str(leg.get("crate", ""))
+        if crate in members:
+            _add(crate, "")
+        if not bool(leg.get("test", True)):
+            continue
+        _add(crate, str(leg.get("features", "") or ""))
+
+    case_extras = fte._parse_coverage_case_extras(fte.COVERAGE_SH)
+    for crate in fte._parse_per_commit_crates(fte.COVERAGE_SH):
+        _add(crate, ",".join(sorted(case_extras.get(crate, frozenset()))))
+
+    return executed
+
+
+def _registry_display() -> str:
+    """Repo-relative path to the invariant-(3) registry, for error messages."""
+    try:
+        return str(UNLEGGED_ALLOWLIST_PATH.relative_to(REPO_ROOT))
+    except ValueError:  # a test-patched path outside the repo
+        return str(UNLEGGED_ALLOWLIST_PATH)
+
+
+def load_unlegged_allowlist(path: Path) -> List[dict]:
+    """Load + schema-validate the invariant-(3) written-reason registry.
+
+    Each entry needs ``crate`` (str), ``feature`` (str) and a NON-EMPTY
+    ``reason`` (str); duplicate (crate, feature) pairs are rejected. A missing
+    file means an empty registry (the guard then has no exits at all, which is
+    the strict direction). Any malformed file is a hard exit(2) — fail-closed,
+    since a silently-empty registry would flip entries into passes.
+    """
+    import json  # noqa: PLC0415 — local: only invariant (3) needs it
+
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("error: cannot read {}: {}\n".format(path, exc))
+        sys.exit(2)
+    entries = data.get("allowlist", []) if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        sys.stderr.write(
+            "error: {}: expected an object with an 'allowlist' list\n".format(path)
+        )
+        sys.exit(2)
+    seen: set = set()
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            sys.stderr.write(
+                "error: {}: entry [{}] is not an object\n".format(path, i)
+            )
+            sys.exit(2)
+        for key in ("crate", "feature", "reason"):
+            if not str(entry.get(key, "") or "").strip():
+                sys.stderr.write(
+                    "error: {}: entry [{}] is missing a non-empty {!r}\n".format(
+                        path, i, key
+                    )
+                )
+                sys.exit(2)
+        pair = (str(entry["crate"]), str(entry["feature"]))
+        if pair in seen:
+            sys.stderr.write(
+                "error: {}: duplicate entry for {}\n".format(path, pair)
+            )
+            sys.exit(2)
+        seen.add(pair)
+    return entries
+
+
+# ---------------------------------------------------------------------------
 # Classify mode
 # ---------------------------------------------------------------------------
 
@@ -804,6 +1037,119 @@ def cmd_classify(legs: List[dict]) -> None:
 # Enforce mode
 # ---------------------------------------------------------------------------
 
+def _enforce_unlegged(legs: List[dict]) -> List[str]:
+    """Invariant (3): classify every ZERO-LEG declared feature (issue #5138).
+
+    Returns a list of violation strings (empty = clean).
+
+    Candidate set = for each crate that carries a fragment, every key of its
+    Cargo.toml ``[features]`` table (minus ``default``) that appears in NO leg
+    of that crate. Legged features are invariant (2)'s business; the two sets
+    are disjoint, so nothing is judged twice and nothing falls between them.
+
+    A candidate violates when the detector calls it SENSITIVE and no CI
+    executor activates it. The single exit is a written reason in
+    ``scripts/feature-matrix-unlegged.allowlist.json``.
+
+    The registry is held STRICT in both directions: an entry that no longer
+    describes a live gap — feature undeclared, now legged, now executed, or
+    now non-sensitive — is itself a violation. So the file can only shrink,
+    and it cannot rot into a list of stale excuses the way an append-only
+    allowlist does.
+    """
+    violations: List[str] = []
+    fte = _load_fte_module()
+    executed = executed_features(legs, fte)
+    allowlist = load_unlegged_allowlist(UNLEGGED_ALLOWLIST_PATH)
+    allow_reason = {
+        (str(e["crate"]), str(e["feature"])): str(e["reason"]) for e in allowlist
+    }
+
+    legged: dict = {}
+    for leg in legs:
+        crate = str(leg.get("crate", ""))
+        legged.setdefault(crate, set()).update(_features_from_leg(leg))
+
+    # (crate, feature) -> why it is NOT a live gap, for the staleness sweep.
+    not_a_gap: dict = {}
+    # crate -> its declared feature set, or None when the manifest is unreadable.
+    declared_by_crate: dict = {}
+
+    for crate in sorted(legged):
+        crate_dir = _crate_dir(crate)
+        declared = declared_features(crate_dir)
+        declared_by_crate[crate] = None if declared is None else set(declared)
+        if declared is None:
+            violations.append(
+                "VIOLATION(3) crate {!r}: cannot read/parse {}/Cargo.toml, so "
+                "its declared cargo features cannot be enumerated. The "
+                "zero-leg-feature guard is fail-closed: fix the manifest (or "
+                "the fragment's `crate:` value) rather than skipping the "
+                "crate.".format(crate, crate_dir)
+            )
+            continue
+        crate_executed = executed.get(crate, set())
+        for feature in sorted(declared):
+            if feature in legged.get(crate, set()):
+                not_a_gap[(crate, feature)] = "it appears in a leg (invariant (2) owns it)"
+                continue
+            if feature in crate_executed:
+                not_a_gap[(crate, feature)] = (
+                    "a CI executor already activates it (a leg's feature "
+                    "closure or a coverage.sh case arm)"
+                )
+                continue
+            clf = classify_leg(crate_dir, [feature])
+            if not clf.sensitive:
+                not_a_gap[(crate, feature)] = "the detector classifies it non-sensitive"
+                continue
+            if (crate, feature) in allow_reason:
+                continue
+            violations.append(
+                "VIOLATION(3) feature {!r} of crate {!r} is declared in "
+                "Cargo.toml, appears in NO leg of that crate, is activated by "
+                "no executor THIS GUARD MODELS (the workspace default lane, a "
+                "test:true leg, or a coverage.sh case arm), and the detector "
+                "classifies it SENSITIVE ({}). Add a test:true leg to "
+                ".github/feature-matrix.d/{}.yml, or a coverage.sh case arm, "
+                "or — if the coverage genuinely lives elsewhere, e.g. a "
+                "dedicated ci.yml job — a written reason in {}.".format(
+                    feature,
+                    crate,
+                    "; ".join(clf.reasons) or clf.error_msg or "unknown",
+                    crate,
+                    _registry_display(),
+                )
+            )
+
+    # Staleness sweep. Scoped to crates this run actually enforces: an entry
+    # for a crate whose fragment has been deleted is out of this guard's reach
+    # (it has no legs to judge), so it is left alone rather than mis-reported.
+    for (crate, feature), reason in sorted(allow_reason.items()):
+        declared = declared_by_crate.get(crate)
+        if crate not in legged or declared is None:
+            continue
+        if feature not in declared:
+            why = "it is not declared in the crate's Cargo.toml [features] table"
+        elif (crate, feature) in not_a_gap:
+            why = not_a_gap[(crate, feature)]
+        else:
+            continue  # a live gap: the entry is doing real work, keep it
+        violations.append(
+            "VIOLATION(3-stale) {}/{} has an entry in {} but is not a live "
+            "gap: {}. Delete the entry — the registry is allowed to shrink "
+            "only. (Its recorded reason was: {})".format(
+                crate,
+                feature,
+                _registry_display(),
+                why,
+                reason[:120],
+            )
+        )
+
+    return violations
+
+
 def cmd_enforce(legs: List[dict]) -> int:
     """Enforce tier consistency and the sq-vya1 guard.
 
@@ -817,8 +1163,17 @@ def cmd_enforce(legs: List[dict]) -> int:
         test:true leg FOR THAT CRATE. A sensitive (crate, feature) with no
         test:true leg => VIOLATION (sq-vya1 guard), unless a leg for that
         (crate, feature) carries a written `test-reason:` override.
+    (3) Every cargo feature a fragment-carrying crate DECLARES but that
+        appears in NO leg of that crate must be non-sensitive, or executed by
+        some CI executor, or carry a written reason in
+        scripts/feature-matrix-unlegged.allowlist.json. This closes the
+        invariant-(2) blind spot (issue #5138): (2) can only ever look at
+        (crate, feature) pairs it read OFF a leg, so a feature declared in
+        Cargo.toml with zero legs was never handed to the detector — it was
+        invisible to the guard rather than sensitive-and-uncovered, i.e. the
+        guard could not fire on the exact case it exists to catch.
 
-    Both invariants key on the (crate, feature) PAIR, never the bare feature
+    All three invariants key on the (crate, feature) PAIR, never the bare feature
     name: cargo feature names are crate-LOCAL, so a `test: true` leg for
     feature F in crate A says nothing about a sensitive F in crate B. Keying
     on the bare name let exactly that cross-crate collision silently satisfy
@@ -886,6 +1241,8 @@ def cmd_enforce(legs: List[dict]) -> int:
             "the leg if the coverage genuinely lives outside `cargo "
             "test`.".format(f, crate)
         )
+
+    violations.extend(_enforce_unlegged(legs))
 
     if violations:
         for v in violations:

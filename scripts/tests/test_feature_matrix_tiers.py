@@ -993,6 +993,281 @@ class TestFeaturesFromLeg(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# (k) [OPUS-5] issue #5138 — invariant (3), the ZERO-LEG blind spot.
+#
+# Invariant (2) derives its candidate set FROM the legs, so a cargo feature
+# declared in Cargo.toml with NO leg was never handed to the detector at all:
+# it was INVISIBLE to the guard rather than sensitive-and-uncovered, i.e. the
+# guard could not fire on the exact case it exists to catch. Demonstrated on
+# the live tree by deleting the `sparq-lws-core (odrl-authz)` leg: the
+# pre-#5138 detector still printed "0 enforcement violations".
+#
+# These tests are hermetic — a synthetic crate whose Cargo.toml DECLARES a
+# feature, and a legs list that never mentions it.
+# ---------------------------------------------------------------------------
+
+class TestZeroLegFeature(unittest.TestCase):
+    """Invariant (3): a declared-but-unlegged sensitive feature must RED."""
+
+    GATED_TEST = '#![cfg(feature = "orphan")]\n#[test]\nfn t() {}\n'
+
+    def _run(
+        self,
+        *,
+        cargo_features: str,
+        test_files: dict,
+        legs: list,
+        registry: dict = None,
+    ) -> int:
+        """Run cmd_enforce against a synthetic crate + registry. Returns exit code."""
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_crate(tmp, test_files=test_files)
+            # _make_crate writes an EMPTY [features] table; declare ours.
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "fixture"\nversion = "0.1.0"\n'
+                "[features]\n" + cargo_features,
+                encoding="utf-8",
+            )
+            registry_path = Path(tmp) / "unlegged.allowlist.json"
+            registry_path.write_text(
+                json.dumps(registry if registry is not None else {"allowlist": []}),
+                encoding="utf-8",
+            )
+
+            original_crate_dir = det._crate_dir
+            original_registry = det.UNLEGGED_ALLOWLIST_PATH
+            original_members = det.workspace_members
+
+            def patched_crate_dir(name: str) -> Path:
+                if name == "fixture":
+                    return root
+                return original_crate_dir(name)
+
+            det._crate_dir = patched_crate_dir
+            det.UNLEGGED_ALLOWLIST_PATH = registry_path
+            # The fixture is not in the real workspace; pretend it is, so the
+            # "default features are always executed" executor is exercised.
+            det.workspace_members = lambda: {"fixture"}
+            try:
+                return det.cmd_enforce(legs)
+            finally:
+                det._crate_dir = original_crate_dir
+                det.UNLEGGED_ALLOWLIST_PATH = original_registry
+                det.workspace_members = original_members
+
+    def _covered_leg(self) -> list:
+        """A leg for an UNRELATED feature — so `orphan` has zero legs."""
+        return [
+            {
+                "name": "fixture (other)",
+                "crate": "fixture",
+                "features": "other",
+                "test": True,
+            }
+        ]
+
+    def test_zero_leg_sensitive_feature_fails(self):
+        """THE BLIND SPOT: declared, unlegged, sensitive, unexecuted => RED."""
+        exit_code = self._run(
+            cargo_features='default = []\nother = []\norphan = []\n',
+            test_files={"orphan_gated.rs": self.GATED_TEST},
+            legs=self._covered_leg(),
+        )
+        self.assertNotEqual(
+            exit_code,
+            0,
+            "A cargo feature with ZERO legs whose tests are cfg-gated on it "
+            "must fail invariant (3) — this is the #5138 hole.",
+        )
+
+    def test_zero_leg_non_sensitive_feature_passes(self):
+        """A zero-leg feature with no feature-gated code is not a gap."""
+        exit_code = self._run(
+            cargo_features='default = []\nother = []\norphan = []\n',
+            test_files={"plain.rs": "#[test]\nfn t() {}\n"},
+            legs=self._covered_leg(),
+        )
+        self.assertEqual(
+            exit_code, 0, "A non-sensitive zero-leg feature must not RED."
+        )
+
+    def test_zero_leg_default_on_feature_passes(self):
+        """A DEFAULT-ON feature is run by the workspace lane, so it is no gap.
+
+        Guards against the over-fire that would otherwise flag every default
+        feature of every fragment-carrying crate. The fixture's ONLY leg is
+        `test: false`, so the workspace default lane is the sole executor —
+        which is the live shape of sparq-py (whose one leg, `arrow`, is
+        test:false, and whose planner trio dp-planner / algebra-rewrite /
+        antijoin-static-decline is default-on and legless). Without the
+        workspace-lane executor this case RETURNS A VIOLATION.
+        """
+        exit_code = self._run(
+            cargo_features='default = ["orphan"]\nother = []\norphan = []\n',
+            test_files={"orphan_gated.rs": self.GATED_TEST},
+            legs=[
+                {
+                    "name": "fixture (other)",
+                    "crate": "fixture",
+                    "features": "other",
+                    "test": False,
+                }
+            ],
+        )
+        self.assertEqual(
+            exit_code, 0, "A default-on feature is executed by the workspace lane."
+        )
+
+    def test_zero_leg_feature_implied_by_a_leg_passes(self):
+        """`other = ["orphan"]` means the `other` leg activates `orphan` too."""
+        exit_code = self._run(
+            cargo_features='default = []\nother = ["orphan"]\norphan = []\n',
+            test_files={"orphan_gated.rs": self.GATED_TEST},
+            legs=self._covered_leg(),
+        )
+        self.assertEqual(
+            exit_code,
+            0,
+            "A leg whose feature transitively implies `orphan` executes it.",
+        )
+
+    def test_written_reason_registry_entry_passes(self):
+        """The single exit: a written reason in the unlegged registry."""
+        exit_code = self._run(
+            cargo_features='default = []\nother = []\norphan = []\n',
+            test_files={"orphan_gated.rs": self.GATED_TEST},
+            legs=self._covered_leg(),
+            registry={
+                "allowlist": [
+                    {
+                        "crate": "fixture",
+                        "feature": "orphan",
+                        "reason": "(A) COVERED-ELSEWHERE by a dedicated job.",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(
+            exit_code, 0, "A written-reason registry entry must satisfy invariant (3)."
+        )
+
+    def test_registry_entry_without_reason_is_rejected(self):
+        """An entry with an empty reason is a hard error, not a silent pass."""
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(
+                cargo_features='default = []\nother = []\norphan = []\n',
+                test_files={"orphan_gated.rs": self.GATED_TEST},
+                legs=self._covered_leg(),
+                registry={
+                    "allowlist": [
+                        {"crate": "fixture", "feature": "orphan", "reason": "  "}
+                    ]
+                },
+            )
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_stale_registry_entry_fails(self):
+        """Registry entries may only shrink: a now-legged feature must RED.
+
+        Without this the registry would rot into a list of stale excuses the
+        way an append-only allowlist does.
+        """
+        exit_code = self._run(
+            cargo_features='default = []\norphan = []\n',
+            test_files={"orphan_gated.rs": self.GATED_TEST},
+            legs=[
+                {
+                    "name": "fixture (orphan)",
+                    "crate": "fixture",
+                    "features": "orphan",
+                    "test": True,
+                }
+            ],
+            registry={
+                "allowlist": [
+                    {
+                        "crate": "fixture",
+                        "feature": "orphan",
+                        "reason": "stale — the feature now has a leg",
+                    }
+                ]
+            },
+        )
+        self.assertNotEqual(
+            exit_code, 0, "A registry entry that is no longer a live gap must RED."
+        )
+
+    def test_undeclared_registry_entry_fails(self):
+        """An entry for a feature the crate no longer declares must RED."""
+        exit_code = self._run(
+            cargo_features='default = []\nother = []\n',
+            test_files={"plain.rs": "#[test]\nfn t() {}\n"},
+            legs=self._covered_leg(),
+            registry={
+                "allowlist": [
+                    {
+                        "crate": "fixture",
+                        "feature": "orphan",
+                        "reason": "stale — the feature was deleted",
+                    }
+                ]
+            },
+        )
+        self.assertNotEqual(
+            exit_code, 0, "A registry entry for an undeclared feature must RED."
+        )
+
+    def test_unreadable_manifest_fails_closed(self):
+        """A fragment crate whose Cargo.toml cannot be parsed must RED.
+
+        Fail-closed: "cannot enumerate the features" must never be read as
+        "this crate declares none".
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_crate(tmp)
+            (root / "Cargo.toml").write_text("this is not = [ valid toml\n", encoding="utf-8")
+            original_crate_dir = det._crate_dir
+
+            def patched_crate_dir(name: str) -> Path:
+                return root if name == "fixture" else original_crate_dir(name)
+
+            det._crate_dir = patched_crate_dir
+            try:
+                exit_code = det.cmd_enforce(
+                    [
+                        {
+                            "name": "fixture (other)",
+                            "crate": "fixture",
+                            "features": "other",
+                            "test": True,
+                        }
+                    ]
+                )
+            finally:
+                det._crate_dir = original_crate_dir
+        self.assertNotEqual(
+            exit_code, 0, "An unparseable crate manifest must fail invariant (3) closed."
+        )
+
+
+class TestUnleggedRegistryIsWellFormed(unittest.TestCase):
+    """The REAL registry file parses and every entry carries a written reason."""
+
+    def test_real_registry_loads(self):
+        entries = det.load_unlegged_allowlist(det.UNLEGGED_ALLOWLIST_PATH)
+        for entry in entries:
+            self.assertTrue(str(entry["reason"]).strip())
+            self.assertIn(
+                str(entry["reason"]).strip()[:3],
+                ("(A)", "(B)"),
+                "Every entry must declare its kind: (A) COVERED-ELSEWHERE or "
+                "(B) RECORDED GAP — see the file's `note`.",
+            )
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
