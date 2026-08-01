@@ -187,6 +187,19 @@ MUST_FAIL = [
     "The verifier sends a Trust Envelope containing the query.",
     "See the trust-envelope contract in §3.1.",
     "# parse the verifier->holder trust  envelope (query + TR + nonce)",
+    # [SONNET-4.6] issue #5546 — the pre-migration GitHub owner, in every shape the
+    # repo-wide sweep found it: the plain URL, the raw `github.com/...` source-uri, the
+    # REST path, the `gh` repo flag, the `github.repository` guard, the OIDC subject,
+    # the npm git spec, the plugin-marketplace shorthand, and bare backticked prose.
+    "See https://github.com/jeswr/sparq/issues/5546 for the rationale.",
+    "slsa-verifier verify-artifact … --source-uri github.com/jeswr/sparq",
+    "> `gh api repos/jeswr/sparq/rulesets/<id>` shows the enforced rules.",
+    "Verify with `gh attestation verify <file> --repo jeswr/sparq`.",
+    "    if: github.repository == 'jeswr/sparq'   # never on forks",
+    '"token.actions.githubusercontent.com:sub": "repo:jeswr/sparq:ref:refs/heads/main"',
+    '  "@jeswr/sparq": "github:jeswr/sparq#<commit-sha>"',
+    "`/plugin marketplace add jeswr/sparq` then `/plugin install sparq@sparq-tools`.",
+    "the standing directive on `jeswr/sparq#1546`",
 ]
 
 MUST_PASS = [
@@ -213,6 +226,21 @@ MUST_PASS = [
     "bench/lws-core-readpath/emit_envelope.py writes the console envelope",
     # The inline marker exempts a deliberate mention (e.g. a changelog recording the rename).
     "renamed TrustEnvelope -> ContractRequest. terminology-allow: CHANGELOG record of the rename",
+    # [SONNET-4.6] #5546 — the migrated owner passes, and the four coordinate families
+    # that share the `jeswr/` prefix but did NOT migrate must stay writable. Over-matching
+    # any of these would force a bogus rewrite of a real, still-correct reference.
+    "See https://github.com/sparq-org/sparq/issues/5546 for the rationale.",
+    "Verify with `gh attestation verify <file> --repo sparq-org/sparq`.",
+    "- **npm**: `@jeswr/sparq` — RDF/JS-typed API over the wasm build.",  # npm scope
+    "docker run --rm -p 3030:3030 ghcr.io/jeswr/sparq-server:X.Y.Z",  # ghcr namespace
+    "cosign verify-attestation ghcr.io/jeswr/sparq@<digest> ...",  # ghcr, bare name
+    "3. `brew install jeswr/sparq/sparq` then `brew test sparq`.",  # Homebrew tap path
+    "1. Create the tap repo `jeswr/homebrew-sparq` (one-time).",  # the tap's own repo
+    "Adopt vs adapt (grounding in `jeswr/sparql_noir`, §4)",  # a DIFFERENT repo
+    "the maintainer's private `jeswr/sparql-zkp-ontologies` repo",  # another one
+    # The inline marker (as an invisible HTML comment in markdown) exempts the handful of
+    # lines that must NAME the old owner to contrast it with the new one.
+    "it is **`sparq-org/sparq`**, not `jeswr/sparq`. <!-- terminology-allow: contrast -->",
 ]
 
 

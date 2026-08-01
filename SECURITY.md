@@ -15,7 +15,7 @@ Two private channels, either is fine:
 
 1. **GitHub Security Advisories (preferred).** Open a private report via the repository's
    **Security → Advisories → "Report a vulnerability"** page
-   (<https://github.com/jeswr/sparq/security/advisories/new>). This keeps the report,
+   (<https://github.com/sparq-org/sparq/security/advisories/new>). This keeps the report,
    discussion, and fix coordination private until a coordinated disclosure.
 2. **Email.** Write to **jesse@jeswr.org** with a clear subject line (e.g.
    `[sparq security] <short summary>`). If you want to encrypt, say so in a first

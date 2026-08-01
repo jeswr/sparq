@@ -4,7 +4,7 @@ description: "Run and use the experimental native `sparq-lws-core` Solid/LDP (Li
 license: MIT
 metadata:
   version: "0.1.0"
-  homepage: https://github.com/jeswr/sparq
+  homepage: https://github.com/sparq-org/sparq
 ---
 
 # sparq native Solid/LWS server

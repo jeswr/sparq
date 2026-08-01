@@ -4,7 +4,7 @@ description: "Graph-level Solid-style access control over a sparq RDF dataset wi
 license: MIT
 metadata:
   version: "0.1.0"
-  homepage: https://github.com/jeswr/sparq
+  homepage: https://github.com/sparq-org/sparq
 ---
 
 # sparq-solid — graph-level WAC/ACP access control
@@ -311,7 +311,7 @@ Materialize the authorization view from the access-control documents, then enfor
   inheritance can never disagree; `None` ⇒ un-protected ⇒ fail closed. Feeds `decide`'s
   `governing_acl`/`scope`, which `WacDecision::acl_link_header()` turns into the FR-5
   `Link: rel="acl"` surface (above). **Honest scope:** Phase-1 implements
-  the WAC `accessTo` + container-`default` subset of [issue #992](https://github.com/jeswr/sparq/issues/992)
+  the WAC `accessTo` + container-`default` subset of [issue #992](https://github.com/sparq-org/sparq/issues/992)
   (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk. The **HTTP shell**
   over this library surface (FR-4, sq-snopa.6) has LANDED as `sparq-server`'s opt-in
   `solid-authz` feature — `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed thin wrapper
@@ -718,8 +718,8 @@ public surface is `sparq_trust::{vocab, policy, admit, wire, delegation}` (+ the
 `delegation_prov` / `did` / `store` / `secprop` / `framework_vocab` modules) — see
 [`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
 `research/solid-trust-graph-authz-design.md` §6.0 (tracked in
-[issue #940](https://github.com/jeswr/sparq/issues/940); landing via design PR
-<https://github.com/jeswr/sparq/pull/951>).
+[issue #940](https://github.com/sparq-org/sparq/issues/940); landing via design PR
+<https://github.com/sparq-org/sparq/pull/951>).
 
 **Trust-document storage / authoring model** (the **opt-in `store` feature**, `sq-pfae.5`,
 design §3.2). `sparq_trust::store::TrustStore` decides *where* trust rules live and *which

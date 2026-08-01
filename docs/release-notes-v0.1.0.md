@@ -14,4 +14,4 @@ An experimental, from-scratch RDF triplestore + SPARQL engine in Rust.
 
 **Install** — binaries below · `cargo install sparq-cli` · `npm i @jeswr/sparq` · `docker pull ghcr.io/jeswr/sparq-server:0.1.0`
 
-**Known caveat** — crates.io builds resolve upstream `spargebra` 0.4.6: a small set of vendored SPARQL-parser conformance fixes apply only to git builds until the upstream PRs land (`vendor/spargebra/SPARQ-PATCHES.md`). APIs are unstable (0.x). Full details: [CHANGELOG.md](https://github.com/jeswr/sparq/blob/v0.1.0/CHANGELOG.md).
+**Known caveat** — crates.io builds resolve upstream `spargebra` 0.4.6: a small set of vendored SPARQL-parser conformance fixes apply only to git builds until the upstream PRs land (`vendor/spargebra/SPARQ-PATCHES.md`). APIs are unstable (0.x). Full details: [CHANGELOG.md](https://github.com/sparq-org/sparq/blob/v0.1.0/CHANGELOG.md).

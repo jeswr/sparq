@@ -43,6 +43,18 @@
         ":!:**/vendor/**"
       ]
     },
+    "all-markdown": {
+      "why": "EVERY tracked markdown file — docs/, skills/, book/, compliance/, crate READMEs, research/ records, and the agent briefs under .claude/. Wider than `docs-markdown` because a stale link rots identically wherever it is written, and the #5546 sweep found the old owner in all of those trees. Deliberately narrower than `authored-source-and-docs`: a repo coordinate in a workflow or a script is a code change with its own review, not prose.",
+      "include": [
+        "*.md"
+      ],
+      "exclude": [
+        ":!:.beads/**",
+        ":!:vendor/**",
+        ":!:**/vendor/**",
+        ":!:**/node_modules/**"
+      ]
+    },
     "authored-source-and-docs": {
       "why": "Everything a human AUTHORS that ships or is published: Rust/TS/Python/shell source, RDF vocabularies (.ttl/.jsonld/.yaml.ld), Noir circuits, Typst papers + specs, manifests, CI workflows, and all markdown INCLUDING research/. This is the surface a term banned from PUBLIC API + PUBLISHED VOCABULARY must be checked over — the #3811 gap was exactly that `.rs` and `.ttl` were unreachable.",
       "include": [
@@ -185,6 +197,17 @@
           "why": "Deliberate violation fixtures — the mutation evidence that the gate is non-vacuous. They exist to be caught when scanned EXPLICITLY by the test; they must not red the repo-wide scan."
         }
       ]
+    },
+    {
+      "id": "stale-repo-owner",
+      "label": "the pre-migration GitHub owner `jeswr/sparq` (say: `sparq-org/sparq`)",
+      "why": "issue #5546 — the repository moved to the `sparq-org` org. GitHub's rename redirect holds only while the OLD owner/name stays unclaimed, so every stale coordinate is a link that breaks the day someone registers the old path. This term is the ratchet that stops new prose reintroducing it after the sweep. It deliberately does NOT match the npm scope `@jeswr/sparq`, the `ghcr.io/jeswr/...` image namespace, the Homebrew tap path `jeswr/sparq/sparq`, or sibling repos such as `jeswr/sparql_noir` and `jeswr/sparql-zkp-ontologies` — those are different registries or different repositories, and are not what migrated.",
+      "patterns": [
+        "(?<!@)(?<!ghcr\\.io/)\\bjeswr/sparq(?![\\w-])(?!/sparq)"
+      ],
+      "ignoreCase": true,
+      "surface": "all-markdown",
+      "exemptPaths": []
     }
   ],
   "allowPatterns": {
@@ -216,6 +239,7 @@
     ],
     "quoted-triple": [],
     "embedded-triple": [],
-    "trust-envelope": []
+    "trust-envelope": [],
+    "stale-repo-owner": []
   }
 }

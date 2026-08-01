@@ -215,7 +215,7 @@ the offending id. A genuinely-intended one-sided entry is recorded with a reason
 ## 5. Provenance verification (for a consumer)
 
 ```sh
-gh attestation verify sparq-cli-<ver>.sbom.cdx.json --repo jeswr/sparq   # SLSA provenance on the SBOM
+gh attestation verify sparq-cli-<ver>.sbom.cdx.json --repo sparq-org/sparq   # SLSA provenance on the SBOM
 shasum -a 256 -c SHA256SUMS                                              # release-asset integrity
 cargo audit bin sparq-server                                            # read the embedded manifest (cargo-auditable)
 cosign verify-attestation ghcr.io/jeswr/sparq@<digest> ...              # image SBOM + provenance
@@ -227,7 +227,7 @@ correspond to SIG-1/SIG-2, DEP-5, and SIG-3 respectively.
 > **Operating-effectiveness status (release-gated controls):** all four commands above are
 > **unrunnable today** — `release.yml` triggers only on `push: tags: v*`, and the repo has **no
 > `v*` tags, no GitHub Releases, and no Sigstore attestations yet** (verified `git tag -l 'v*'` → 0,
-> `gh release list` → empty, `gh api repos/jeswr/sparq/attestations/...` → 404, 2026-06-15). The
+> `gh release list` → empty, `gh api repos/sparq-org/sparq/attestations/...` → 404, 2026-06-15). The
 > SIG-*/PUB-*/VEX-4/DEP-5 controls are therefore **verified at the configuration level (workflow
 > wiring reviewed and correct), not at the operating level** — no attested SBOM/VEX artifact has ever
 > been produced. An external auditor must re-verify these by cutting (or observing) the first `v*`
@@ -314,7 +314,7 @@ one where the class is undeterminable.
 | Component class | Raw `bom-ref` signal | `supplier.name` | `supplier.url` | `publisher` | Rationale |
 |---|---|---|---|---|---|
 | crates.io-published dependency | `registry+https://github.com/rust-lang/crates.io-index#…` | `crates.io` | `https://crates.io/crates/<name>` | the crate's `author` where present (144/166); else absent | crates.io is the distributor / supplier-of-record |
-| first-party workspace crate | `path+file…/crates/sparq-*#…` (+ the root component & its build-target sub-components) | `Jesse Wright` | `https://github.com/jeswr/sparq` | — (these crates carry no `author` in raw output) | the project authors + ships these; matches the VEX top-level `metadata.supplier` |
+| first-party workspace crate | `path+file…/crates/sparq-*#…` (+ the root component & its build-target sub-components) | `Jesse Wright` | `https://github.com/sparq-org/sparq` | — (these crates carry no `author` in raw output) | the project authors + ships these; matches the VEX top-level `metadata.supplier` |
 | vendored `[patch.crates-io]` crate (today only `spargebra`) | `path+file…/vendor/<name>#…` | `crates.io` | `https://crates.io/crates/<name>` | its `author` (`Tpt <…>`) | a crates.io-published crate vendored as a patch replacement → crates.io is its supplier-of-record, **NOT** the sparq project (attributing it to sparq would be fabrication) |
 | anything else | — | **omitted** | — | — | not determinable → omitted honestly per NTIA's omit/mark-unknown guidance. **None occurs today**, so coverage is **100%** |
 
@@ -335,7 +335,7 @@ one where the class is undeterminable.
   "purl": "pkg:cargo/aho-corasick@1.1.4" }
 ```
 
-The first-party `sparq-core` gets `supplier {name:"Jesse Wright", url:["https://github.com/jeswr/sparq"]}`;
+The first-party `sparq-core` gets `supplier {name:"Jesse Wright", url:["https://github.com/sparq-org/sparq"]}`;
 the vendored `spargebra` gets `supplier {name:"crates.io", url:["https://crates.io/crates/spargebra"]}` +
 `publisher "Tpt <thomas@pellissier-tanon.fr>"` (NOT attributed to sparq).
 

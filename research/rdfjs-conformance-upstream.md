@@ -182,7 +182,7 @@ self-identification, Why before What, @jeswr as the review gate, explicitly not-
 None of this is done yet; it is the follow-on work, to be cut as beads when a decision arrives.
 
 - `package.json`: `private: false`, the settled name, and `repository` repointed off
-  `jeswr/sparq`.
+  `sparq-org/sparq`.
 - Attribution/licence: MIT is already compatible, but carry the copyright line explicitly into the
   transferred package rather than relying on this repo's root `LICENSE`.
 - README: strip the sparq-specific framing (the "candidate contribution" banner, the `@jeswr/sparq`

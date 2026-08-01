@@ -268,7 +268,7 @@ cargo publish -p sparq-server
 >   `cargo package` and attests the resulting `.crate` bytes (identical to what `cargo publish`
 >   uploads) with `actions/attest-build-provenance`. This puts **no** provenance link on the
 >   crates.io page — that needs upstream support — but a consumer who downloads the `.crate` can
->   `gh attestation verify <file> --repo jeswr/sparq`. The crates.io-native sub-gap stays **OPEN**
+>   `gh attestation verify <file> --repo sparq-org/sparq`. The crates.io-native sub-gap stays **OPEN**
 >   (external — see `compliance/openssf/gap-register.md` GX-OSSF-2 / `compliance/gap-register.md`
 >   GX-10). Do **not** describe a crates.io publish as "signed".
 > - **npm `@jeswr/sparq` — native Sigstore provenance** via [`publish.yml`](../.github/workflows/publish.yml)'s

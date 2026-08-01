@@ -93,7 +93,7 @@ tarball ships those prebuilt). Add to the consumer's `package.json`:
 ```jsonc
 "dependencies": {
   // pin an immutable commit; `directory: "js"` is read from this package.json
-  "@jeswr/sparq": "github:jeswr/sparq#<commit-sha>"
+  "@jeswr/sparq": "github:sparq-org/sparq#<commit-sha>"
 }
 ```
 
