@@ -226,6 +226,10 @@ jobs:
         with:
           # Distinct cache key: this lane builds sparq-zk* with the toolchain present.
           key: zk-toolchain
+          # sq-3sbrr save discipline: only the main-scoped entry is restorable by
+          # other refs, so a PR-head save is pure budget churn. The push-to-main and
+          # nightly runs of this same lane keep the entry warm. Restore is untouched.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Install nargo via noirup, pinned to NARGO_VERSION. We fetch the `noirup` binary
       # DIRECTLY from a tagged release (NOIRUP_BIN_URL) rather than running upstream's

@@ -208,6 +208,11 @@ jobs:
           # Distinct from the nightly lane's `kani-<crate>` keys: the PR tier churns on
           # branch content and must never poison the nightly backstop's warm cache.
           key: kani-pr-${{ matrix.suite.crate }}
+          # sq-3sbrr save discipline: a save from a PR head is scoped to that branch
+          # ref alone, so nothing else can ever restore it — it only consumes the
+          # repo's shared 10 GB Actions-cache budget and LRU-evicts the main-scoped
+          # entries every branch DOES restore. Restore is untouched.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install Kani
         run: |
           cargo install --locked kani-verifier

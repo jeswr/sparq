@@ -231,6 +231,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown   # enables the wasm bundle-size metric in ci-bench.sh
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # sq-3sbrr save discipline: only the main-scoped entry is restorable by
+          # other refs, so a PR-head save is pure budget churn. The push-to-main and
+          # nightly runs of this same lane keep the entry warm. Restore is untouched.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # [OPUS-4.8] (sq-7d3dj.14) binaryen (wasm-opt) — installed unconditionally so the
       # TREND-ONLY wasm_opt_bundle_bytes metric runs on BOTH PR and main tiers. ci-bench.sh
       # guards on `command -v wasm-opt` so the step is a no-op skip when absent. The version

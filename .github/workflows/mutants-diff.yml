@@ -40,6 +40,16 @@ jobs:
           fetch-depth: 0
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # NO `save-if` — deliberate, and the one documented exception to the sq-3sbrr
+      # discipline applied across the other PR-triggered rust-cache lanes (#5166).
+      # This workflow's `on:` is `pull_request` ONLY, and the step passes neither
+      # `key:` nor `shared-key:`, so rust-cache derives a default key unique to this
+      # workflow+job. Nothing on main ever writes that key. Guarding the save on
+      # `refs/heads/main` would therefore not redirect the save to main — it would
+      # delete it, leaving the lane permanently cold: every run a full workspace
+      # rebuild plus cargo-mutants, with no main-scoped entry to fall back on. The
+      # branch-scoped save it makes today IS restorable, by the next push to the same
+      # PR head, which is the only reuse this lane can have.
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install pinned cargo-mutants

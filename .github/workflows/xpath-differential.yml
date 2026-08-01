@@ -102,6 +102,10 @@ jobs:
           key: xpath-differential
           workspaces: |
             zk/xpath/differential
+          # sq-3sbrr save discipline: only the main-scoped entry is restorable by
+          # other refs, so a PR-head save is pure budget churn. The push-to-main and
+          # nightly runs of this same lane keep the entry warm. Restore is untouched.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # CHEAP HALF FIRST — no Noir toolchain needed. Runs the harness's own unit tests
       # (the F&O references, the self-expiring oracle-divergence guards, the
