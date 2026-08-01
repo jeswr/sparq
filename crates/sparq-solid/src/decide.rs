@@ -74,18 +74,28 @@ impl AclScope {
 /// the materialized auth view actually supports. A server that ignores `status` entirely
 /// still gets the correct allow/deny; `status` only refines the *HTTP code*.
 ///
-/// # Anonymous definitive denies map to **403**, not 401 (sq-qonip)
+/// # The uniform **403**: a known limitation, NOT a permitted stricter choice (sq-qonip)
 ///
-/// The Solid protocol permits either code for a definitive deny to an *anonymous*
-/// requester: **403** ("forbidden, full stop") or **401** ("authenticate and retry").
-/// `AclStatus` deliberately carries **no** authentication state, and the shipped HTTP shell
-/// (`sparq-server`'s `solid-authz` `deny_status_code`) maps every definitive deny to a
-/// **403** whether or not the requester presented a WebID.
+/// `AclStatus` deliberately carries **no** authentication state — this crate takes an
+/// already-resolved [`crate::Session`] and answers a graph-set question, leaving the
+/// 401-vs-403 split to the HTTP shell (`research/sparq-solid-scope.md` § *Scope boundary —
+/// what stays in PSS no matter what*). The shipped shell (`sparq-server`'s `solid-authz`
+/// `deny_status_code`) accordingly maps every definitive deny to a **403**, whether or not
+/// the requester presented a WebID.
 ///
-/// That is the *stricter* of the two and is correctness-neutral: withholding the 401 retry
-/// invitation can only under-invite a retry, it can never widen a deny into a grant. A
-/// downstream server that wants the 401 lane applies it in its own shell — it knows its
-/// authentication state, this crate does not.
+/// That uniform 403 is fine for its current caller, `POST /authz/decide`, which *reports* a
+/// decision rather than serving a protected resource (the API caller's own authentication is
+/// gated separately and does answer 401 + `WWW-Authenticate`). It is **not** conformant on an
+/// LDP resource-serving path: the [Solid Protocol](https://solidproject.org/TR/protocol)
+/// § *Authentication* requires a server to answer a request that lacks the credentials a
+/// protected resource needs with **401** (unless 404 is preferred for security reasons), and
+/// Solid-OIDC requires the accompanying `WWW-Authenticate` challenge so the client can start
+/// authentication. A resource server built on this crate MUST add that lane from its own
+/// authentication state; reusing `deny_status_code` unchanged there is a known
+/// non-conformance, not a stricter-but-permitted alternative.
+///
+/// Fail-closed is orthogonal and unaffected: the HTTP code only ever refines a deny that is
+/// already `allow == false`, so withholding the challenge cannot widen a deny into a grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AclStatus {
     /// A governing ACL was discovered and the auth view is loaded: the decision is
@@ -94,8 +104,9 @@ pub enum AclStatus {
     Resolved,
     /// No governing ACL exists anywhere up the container chain (the resource is
     /// **un-protected by any discoverable ACL**). Fail-closed ⇒ `allow == false`. A
-    /// Solid server treats this as a definitive deny — map to **403**, for an anonymous
-    /// requester too (the permitted 401 lane is deliberately not taken; see the enum docs).
+    /// Solid server treats this as a definitive deny — the shipped shell maps it to **403**
+    /// for every requester, though an LDP resource server owes an *anonymous* one the
+    /// Solid-required **401** challenge instead (see the enum docs).
     NoAcl,
     /// A governing ACL was discovered, but the authorization view is **not loaded**
     /// (`materialize_wac` / `materialize_acp` has not been run, so no verdict can be
@@ -111,8 +122,9 @@ pub enum AclStatus {
 
 impl AclStatus {
     /// Whether this status denotes a **retryable** (operational/transient) condition a
-    /// server should map to **503**, rather than a definitive permission outcome (**403**
-    /// — anonymous requesters included). Convenience for the resource-server status
+    /// server should map to **503**, rather than a definitive permission outcome (the
+    /// shipped shell's **403**; see the enum docs for the **401** an LDP resource server
+    /// owes an anonymous requester instead). Convenience for the resource-server status
     /// mapping; `Unloaded` and `Transient` are retryable, `Resolved` and `NoAcl` are
     /// definitive. Fail-closed is orthogonal — every non-`Resolved` status still carries
     /// `allow == false`.

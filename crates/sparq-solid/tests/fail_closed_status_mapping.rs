@@ -9,11 +9,15 @@
 //! | retryable deny (`Unloaded` / `Transient`)             | `503` |
 //! | definitive deny (`Resolved` / `NoAcl`), ANY requester | `403` |
 //!
-//! sq-qonip: the split takes **no authentication state**. Solid permits `401` as well as
-//! `403` for a definitive deny to an *anonymous* requester; sparq takes the stricter `403`
-//! uniformly, matching `sparq-server`'s `solid_authz::deny_status_code` (which has no
-//! session input). Withholding the 401 retry invitation can only under-invite a retry — it
-//! can never widen a deny into a grant. See [`anonymous_definitive_deny_is_403_not_401`].
+//! sq-qonip: `http_status` below is a test-local **model** of that split, and it takes no
+//! authentication state — because [`AclStatus`] carries none, which is what this suite can
+//! honestly pin. `sparq-solid` is downstream of no HTTP crate, so nothing here observes the
+//! shipped shell: `sparq-server`'s `solid_authz::deny_status_code` is pinned by its OWN unit
+//! tests (`deny_status_code_maps_definitive_vs_retryable`,
+//! `shipped_mapper_gives_anonymous_definitive_denies_the_same_403`), which is where a
+//! server-side drift would be caught. Note the shipped 403-for-anonymous is a known
+//! non-conformance on an LDP resource-serving path, documented on `AclStatus`; this suite
+//! locks the *library* contract underneath it, not that HTTP choice.
 //!
 //! Invariants pinned here (all fail-closed, per `decide.rs` FR-6 / sq-snopa.2):
 //! - `is_retryable()` holds **exactly** for `{Unloaded, Transient}` and NOT for
@@ -65,13 +69,12 @@ fn materialized_store(nquads: &str) -> PodStore {
     store
 }
 
-/// The FR-6 status-mapping oracle a resource server applies to a [`WacDecision`]: the
-/// single source of truth for the 200/403/503 split this suite locks.
+/// A test-local **model** of the FR-6 status mapping a resource server applies to a
+/// [`WacDecision`] — the 200/403/503 split this suite locks.
 ///
-/// sq-qonip: it takes **no authentication state**, mirroring `sparq-server`'s
-/// `solid_authz::deny_status_code` — a definitive deny is a `403` whether or not the
-/// requester presented a WebID. The `401` "authenticate and retry" lane Solid also permits
-/// for anonymous requesters is deliberately not taken; see the module docs.
+/// sq-qonip: it is NOT the shipped mapper and nothing here calls one; it takes no
+/// authentication state because [`AclStatus`] supplies none, which is the invariant this
+/// file actually pins. `sparq-server`'s `deny_status_code` is tested in `sparq-server`.
 fn http_status(d: &WacDecision) -> u16 {
     if d.allow {
         200
@@ -219,19 +222,18 @@ fn status_to_http_table() {
     }
 }
 
-/// sq-qonip — an **anonymous** definitive deny maps to `403`, NOT `401`, exactly like an
-/// authenticated one.
+/// sq-qonip — the **library** invariant underneath the HTTP split: a definitive deny to an
+/// anonymous requester is indistinguishable, in everything [`AclStatus`] exposes, from the
+/// authenticated one. Same `status`, same retryability, so any mapper reading only a
+/// [`WacDecision`] necessarily emits the same code for both.
 ///
-/// Solid permits either code here; sparq takes the stricter `403` uniformly, and the
-/// mapping has no session input at all (mirroring `sparq-server`'s
-/// `solid_authz::deny_status_code`, whose only inputs are the `AclStatus` retryability
-/// bits). Pinned so the docs and the shipped shell cannot drift apart again: the audit that
-/// raised this found `decide.rs` + this table promising a `401` the server never emits.
-///
-/// Correctness-neutral and never fail-open — withholding the "authenticate and retry"
-/// invitation can only under-invite a retry, it can never widen a deny into a grant.
+/// That is what makes the shipped shell's uniform 403 a *consequence* rather than a choice —
+/// and it is why an LDP resource server owing an anonymous requester Solid's 401 challenge
+/// must source the authentication state itself (a known non-conformance if it does not; see
+/// the `AclStatus` docs). This test does not observe any HTTP mapper: `http_status` is the
+/// local model, and `sparq-server`'s real one is pinned by its own unit tests.
 #[test]
-fn anonymous_definitive_deny_is_403_not_401() {
+fn anonymous_definitive_deny_is_indistinguishable_from_authenticated() {
     let materialized = materialized_store(POD_WITH_ROOT_ACL);
     let no_acl_store = materialized_store(POD_WITHOUT_ACL);
 
@@ -256,13 +258,13 @@ fn anonymous_definitive_deny_is_403_not_401() {
         assert_eq!(
             http_status(d),
             403,
-            "[{}] an anonymous definitive deny is 403, never the permitted-but-untaken 401",
+            "[{}] a definitive deny under the local model of the mapping",
             name
         );
     }
 
-    // The authenticated counterparts map IDENTICALLY: the code carries no session signal,
-    // so an observer cannot tell the two apart by status.
+    // The authenticated counterparts are IDENTICAL in everything the decision exposes, so
+    // no mapper reading only a `WacDecision` can tell the two apart.
     assert_eq!(anon_resolved.status, auth_resolved.status);
     assert_eq!(
         http_status(&anon_resolved),
