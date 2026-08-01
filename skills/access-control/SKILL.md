@@ -864,6 +864,16 @@ pinned together by a drift test) — it is **not** an ODRL profile or a per-meth
 (those are the downstream Phase 3/4 beads `sq-bevd3`/`sq-uor3g`). The Phase 2 **N3 admissibility
 reasoner** over this vocabulary now ships — see below.
 
+The registry also names the three **vendored** (not minted) dimension IRIs the estate uses as
+`secx:property` values — `SEC_PROP_POST_QUANTUM_FORGERY`, `SEC_PROP_POST_QUANTUM_SNOOPING`,
+`SEC_PROP_SIGNATURE_TYPE_LEAKAGE` (paper §7.7 #3/#4/#5) — which are members of `ALL_SECPROP_IRIS`
+and are re-asserted in `secprop-ext.ttl` as `sec-prop:SecurityProperty` subjects with the vendored
+IRI, label and type verbatim (issue #3441). That re-assertion adds **no** type the vendored source
+lacks — in particular they are **not** typed `owl:ObjectProperty` as the *minted* `secx:` dimensions
+are — so the extension still mints and refines nothing on his terms (extend, do not fork). Their
+purpose is to make the file self-contained for the `secx:property` range and to let the cross-crate
+dimension-IRI drift guards (`sq-mgxz8`) check subject presence directly.
+
 The **assurance axis is the honesty mechanism**: `Proven ⊐ Claimed ⊐ Conjectured`, one axis
 orthogonal to every property. The **default** assurance for a sparq-asserted ZK property is
 `secx:Claimed` (decision #1001 Option A) with audit status `secx:ExternalSignOffPending` — and **no

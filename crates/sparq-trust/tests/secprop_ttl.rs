@@ -65,6 +65,53 @@ fn secprop_ext_ttl_declares_every_minted_term() {
     }
 }
 
+/// The three VENDORED `sec-prop:` dimension IRIs that the estate uses as `secx:property`
+/// values — `PostQuantumForgery`, `PostQuantumSnooping`, `SignatureTypeLeakage` — are
+/// declared here as `sec-prop:SecurityProperty` subjects (issue #3441). Previously only
+/// their LEVELS were in this file, so the cross-crate dimension-IRI drift guards
+/// (sq-mgxz8, `sparq_policy::secprop`) had to exempt them from the subject-presence
+/// check via a hard-coded list — those exemption entries are now redundant for these
+/// three, but retiring them is follow-up work in `sparq-policy`. The declarations
+/// re-assert the vendored IRI, label and `sec-prop:SecurityProperty` type; nothing is
+/// minted or refined (design §4.1, extend-do-not-fork).
+#[test]
+fn secprop_ext_ttl_declares_the_vendored_dimension_subjects() {
+    use oxrdf::{NamedNode, NamedOrBlankNode, Term};
+    use sparq_trust::secprop::{
+        SEC_PROP_POST_QUANTUM_FORGERY, SEC_PROP_POST_QUANTUM_SNOOPING,
+        SEC_PROP_SECURITY_PROPERTY, SEC_PROP_SIGNATURE_TYPE_LEAKAGE,
+    };
+
+    const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let rdf_type = NamedNode::new(RDF_TYPE).unwrap();
+
+    let mut typed: Vec<(String, String)> = Vec::new();
+    for result in TurtleParser::new().for_reader(TTL.as_bytes()) {
+        let t = result.expect("valid Turtle");
+        if t.predicate == rdf_type {
+            if let (NamedOrBlankNode::NamedNode(s), Term::NamedNode(o)) = (t.subject, t.object) {
+                typed.push((s.into_string(), o.into_string()));
+            }
+        }
+    }
+
+    for dim in [
+        SEC_PROP_POST_QUANTUM_FORGERY,
+        SEC_PROP_POST_QUANTUM_SNOOPING,
+        SEC_PROP_SIGNATURE_TYPE_LEAKAGE,
+    ] {
+        assert!(
+            typed
+                .iter()
+                .any(|(s, ty)| s == dim && ty == SEC_PROP_SECURITY_PROPERTY),
+            "the vendored dimension `{}` must be declared in secprop-ext.ttl as a \
+             sec-prop:SecurityProperty subject, so the sq-mgxz8 drift guards can check \
+             subject presence without a vendored-dimension exemption list (#3441)",
+            dim,
+        );
+    }
+}
+
 /// The assurance axis carries exactly the three ordered levels, the audit-status set
 /// includes the live `ExternalSignOffPending` state, and the file references the open
 /// `sq-qhy4` audit gate — the load-bearing honesty invariants of the vocabulary.
