@@ -141,17 +141,46 @@ export function scanWitnesses(
 }
 
 /**
- * Does a prover error mean the CIRCUIT was unsatisfiable (the witness solve failed) rather
- * than something breaking?
+ * The label the shipped circuit gives the ONE constraint a false verdict claim trips:
+ * `assert_eq(result, expected, "filter verdict mismatch")` in
+ * `sparq_zk_compose_core::filter_int::filter_int_check` (zk/compose/compose_core/src/filter_int.nr),
+ * pinned circuit-side by `filter_int_rejects_lying_verdict` in
+ * zk/compose/compose_core/src/tests.nr (`#[test(should_fail_with = "filter verdict mismatch")]`).
+ * Recognising it depends on noir_js surfacing the failing assertion's label in the thrown
+ * error's message — see the fail-safe direction noted on {@link isUnsatisfiable}.
  *
- * The distinction is load-bearing for honesty: an unsatisfiable solve is the SUCCESS case
- * of the tool's "try to forge the opposite verdict" affordance — the constraint system
- * refusing a false claim — whereas a circuit-fetch or WASM-instantiate failure is a broken
- * build. The panel must never present the second as the first. Kept in this pure module
- * (not in the panel) so it is unit-tested against the noir_js / bb.js phrasings.
+ * Every OTHER assertion in that circuit member — `operand encoding mismatch`, `not a decimal
+ * digit`, `non-canonical leading zero`, `unknown comparison operator` — indicates a broken
+ * fixture or a bad input encoding on OUR side, not a refused claim, so none of them are
+ * listed here.
+ */
+const VERDICT_CONSTRAINT = "filter verdict mismatch";
+
+/**
+ * Does a prover error mean the circuit REFUSED THE CLAIM — i.e. the verdict constraint was
+ * unsatisfiable — rather than something breaking?
+ *
+ * The distinction is load-bearing for honesty: a refused claim is the SUCCESS case of the
+ * tool's "try to forge the opposite verdict" affordance, and the panel reports it as the
+ * constraint system declining to certify a verdict the hidden value does not satisfy. That
+ * is cryptographic evidence, so it must be earned by the SPECIFIC constraint, not inferred
+ * from the shape of an error.
+ *
+ * Hence the deliberately narrow rule: only the circuit's own {@link VERDICT_CONSTRAINT}
+ * label counts. A bare `execution failed`, a generic `Assertion failed`, an `unsatisfiable`
+ * with no attribution, or any `constraint` wording is treated as a PROVER ERROR and shown
+ * with its raw message — those also arise from malformed ACIR, a bb.js / noir_js nightly
+ * whose API has shifted, a witness-encoding bug, or a stale `operand_enc` fixture, and
+ * presenting any of those as "the real circuit refused a false claim" would dress a broken
+ * build up as soundness evidence.
+ *
+ * The failure direction is chosen on purpose. If a prover bump changes how the assertion
+ * label is surfaced, a genuine refusal degrades to an honest "proving failed" with the raw
+ * message — never the reverse. Pinned against `@aztec/bb.js` 5.0.0-nightly.20260324 +
+ * `@noir-lang/noir_js` 1.0.0-beta.21 (gui/app/package.json); re-check on any bump.
  */
 export function isUnsatisfiable(message: string): boolean {
-  return /verdict mismatch|execution failed|unsatisfiable|assert|constraint/i.test(message);
+  return message.toLowerCase().includes(VERDICT_CONSTRAINT);
 }
 
 /**

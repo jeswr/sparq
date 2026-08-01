@@ -20,6 +20,20 @@ import type { SparqlResults } from "@sparq/client";
  *  JS-safe prime well under 2^53 so all arithmetic stays exact in IEEE-754 doubles. */
 export const FIELD_P = 2_147_483_647; // 2^31 − 1 (a Mersenne prime), exact in f64
 
+/**
+ * The largest AGGREGATE the additive sharing can carry EXACTLY, and the invariant that makes
+ * the revealed bit MEAN what the panel says it means.
+ *
+ * Reconstruction is a sum *modulo p*, so it recovers `Σ contributions` only while that sum
+ * stays below `p`; past the prime it wraps to a small residue. Bounding each contribution
+ * individually is NOT enough — two parties contributing `p − 1` each reconstruct to `p − 2`,
+ * and a threshold comparison against that residue would confidently answer `false` for a
+ * total that is in fact nearly twice the prime. {@link runSecureThreshold} therefore enforces
+ * the AGGREGATE bound and refuses an input set that would wrap, rather than returning a wrong
+ * verdict — the same "decline, never silently wrap" rule the per-row scan already applies.
+ */
+export const MAX_TOTAL = FIELD_P - 1;
+
 function mod(x: number): number {
   const r = x % FIELD_P;
   return r < 0 ? r + FIELD_P : r;
@@ -75,8 +89,10 @@ export interface MpcResult {
   received: number[][];
   /** Per-party local partial sum over the shares it received (free, zero-round addition). */
   localSums: number[];
-  /** The reconstructed total. In the real protocol this is NEVER opened; it is surfaced
-   *  only to show what is REDACTED. */
+  /** The reconstructed total. Because {@link runSecureThreshold} enforces
+   *  `Σ contributions ≤ MAX_TOTAL`, this residue IS the exact mathematical sum — not a
+   *  wrapped one. In the real protocol it is NEVER opened; it is surfaced only to show what
+   *  is REDACTED. */
   totalRedacted: number;
   /** The public threshold. */
   threshold: number;
@@ -94,6 +110,12 @@ export interface MpcResult {
  *   5. ONLY the boolean `total ≥ threshold` is revealed; the exact total is never an
  *      output (here retained as `totalRedacted` purely to show what is withheld).
  *
+ * DOMAIN (checked, not assumed). Every contribution must be a non-negative integer below
+ * `FIELD_P`, the threshold must be a non-negative integer, and — the aggregate invariant that
+ * step 5's claim rests on — `Σ contributions` must not exceed {@link MAX_TOTAL}. Reconstruction
+ * is a sum mod p, so past the prime the verdict would be about a wrapped residue rather than
+ * the sum; an input set that would wrap is REFUSED with that reason instead of answered.
+ *
  * `rand` is injectable so the panel (and the tests) can be deterministic; the default is
  * `Math.random` (NOT a CSPRNG — this is illustration, not security).
  */
@@ -104,6 +126,31 @@ export function runSecureThreshold(
 ): MpcResult {
   const n = parties.length;
   if (n < 2) throw new Error("need at least 2 parties");
+
+  if (!Number.isInteger(threshold) || threshold < 0) {
+    throw new Error(
+      `the public threshold must be a non-negative integer, got ${String(threshold)}`,
+    );
+  }
+
+  // The aggregate range check. Each contribution is re-validated here (the exported entry
+  // point must not trust its caller) and the running total is checked against MAX_TOTAL as it
+  // accumulates — bailing on the party that crosses the prime keeps `total` itself exact in
+  // f64, and names the row an operator has to change.
+  let total = 0;
+  for (const p of parties) {
+    if (!Number.isInteger(p.value) || p.value < 0 || p.value >= FIELD_P) {
+      throw new Error(
+        `party "${p.name}" contributes ${String(p.value)}, which is not a non-negative integer below the field prime ${FIELD_P}`,
+      );
+    }
+    total += p.value;
+    if (total > MAX_TOTAL) {
+      throw new Error(
+        `the contributions sum past the field prime (running total ${total} exceeds ${MAX_TOTAL} at party "${p.name}"): the additive sharing reconstructs modulo p, so a threshold comparison here would answer about the wrapped residue, not about the sum. Narrow the query or scale the contribution column down.`,
+      );
+    }
+  }
 
   // 1 + 2: every party splits its value into n shares (row i of the matrix).
   const matrix: ShareMatrixCell[][] = parties.map((p) => {
@@ -124,6 +171,15 @@ export function runSecureThreshold(
   // 4 + 5: combining the local sums reconstructs Σ inputs. The real protocol never opens
   // this; it is computed only to display the REDACTED value and derive the one revealed bit.
   const totalRedacted = reconstruct(localSums);
+
+  // The aggregate check above guarantees the residue IS the exact sum, so `verdict` below is
+  // the mathematical predicate `Σ contributions ≥ threshold` the panel displays — not a
+  // statement about a wrapped field element. Assert the equality rather than assume it.
+  if (totalRedacted !== total) {
+    throw new Error(
+      `internal invariant broken: reconstruction gave ${totalRedacted} but the contributions total ${total}`,
+    );
+  }
 
   return {
     parties,
@@ -184,6 +240,11 @@ function pickValueVar(results: SparqlResults): string | null {
  * additive sharing is defined over F_p on non-negative integers, so a negative or
  * fractional contribution is DECLINED rather than silently wrapped mod p (which would
  * produce a confident, wrong verdict).
+ *
+ * This is a PER-ROW filter only: the rows it keeps can still sum past the prime, which would
+ * wrap the aggregate. That bound belongs to the whole input set, so it is enforced (and the
+ * run refused with the reason) by {@link runSecureThreshold} — dropping high rows here would
+ * quietly answer about a different set of parties than the one the panel lists.
  */
 export function partiesFromResults(results: SparqlResults): PartyScan {
   const valueVar = pickValueVar(results);

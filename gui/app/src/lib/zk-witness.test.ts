@@ -2,9 +2,12 @@
 //
 // Covers: the EXACT `xsd:integer` acceptance rule (a near-miss datatype must NOT be offered
 // as provable, or the witness solve fails at prove time), witness/label column pick, the
-// three distinct decline reasons, the skipped-row accounting, and the unsatisfiable-vs-broken
-// error classification. The bb.js proving path itself is not unit-tested here (it needs the
-// WASM prover + the shipped ACIR); it is exercised by opening the tool.
+// three distinct decline reasons, the skipped-row accounting, and the refused-vs-broken error
+// classification.
+//
+// SCOPE, stated so it is not mistaken for more: nothing in THIS file runs bb.js, and opening
+// the tool by hand is not a test. The load-bearing prove/verify path is covered elsewhere —
+// see zk-prover-parity.test.ts for what is gated, and what is still only argued.
 //
 // Run via:   npm run test:unit   (gui/app)
 import { test } from "node:test";
@@ -169,13 +172,51 @@ test("scanWitnesses skips every row when the store has no xsd:integer column", (
 // isUnsatisfiable — the honesty split between "refused a false claim" and "broken"
 // ---------------------------------------------------------------------------
 
-test("isUnsatisfiable recognises a failed witness solve", () => {
-  assert.equal(isUnsatisfiable("Circuit execution failed: Assertion failed"), true);
-  assert.equal(isUnsatisfiable("verdict mismatch"), true);
-  assert.equal(isUnsatisfiable("constraint not satisfied"), true);
+test("isUnsatisfiable recognises the circuit's own verdict constraint", () => {
+  // The only assertion a false claim can trip: `filter verdict mismatch` in
+  // sparq_zk_compose_core::filter_int, surfaced by noir_js inside its execution error.
+  assert.equal(
+    isUnsatisfiable("Circuit execution failed: Assertion failed: 'filter verdict mismatch'"),
+    true,
+  );
+  assert.equal(isUnsatisfiable("Error: filter verdict mismatch"), true);
+  // Case-insensitively, since the wrapper text around the label is not contractual.
+  assert.equal(isUnsatisfiable("ASSERTION FAILED: 'FILTER VERDICT MISMATCH'"), true);
 });
 
 test("isUnsatisfiable does not misreport a broken build as a refused claim", () => {
   assert.equal(isUnsatisfiable("ZK circuit fetch failed: 404"), false);
   assert.equal(isUnsatisfiable("WebAssembly.instantiate(): out of memory"), false);
+});
+
+test("isUnsatisfiable treats every UNATTRIBUTED execution failure as a prover error", () => {
+  // These are the ambiguous middle the panel must not dress up as cryptographic refusal:
+  // malformed ACIR, a shifted nightly API, or a witness-encoding bug all surface this way.
+  assert.equal(isUnsatisfiable("Circuit execution failed"), false);
+  assert.equal(isUnsatisfiable("Circuit execution failed: Assertion failed"), false);
+  assert.equal(isUnsatisfiable("Error: constraint not satisfied"), false);
+  assert.equal(isUnsatisfiable("the circuit is unsatisfiable"), false);
+  assert.equal(isUnsatisfiable("could not deserialize circuit: invalid ACIR format"), false);
+  assert.equal(isUnsatisfiable("TypeError: backend.generateProof is not a function"), false);
+});
+
+test("isUnsatisfiable does not count the circuit's OTHER assertions as a refused claim", () => {
+  // A stale operand_enc fixture, a wrong digit encoding or a bad op code are OUR bugs — the
+  // claim was never reached, so reporting them as "the circuit refused it" would be a lie.
+  assert.equal(
+    isUnsatisfiable("Circuit execution failed: Assertion failed: 'operand encoding mismatch'"),
+    false,
+  );
+  assert.equal(
+    isUnsatisfiable("Circuit execution failed: Assertion failed: 'not a decimal digit'"),
+    false,
+  );
+  assert.equal(
+    isUnsatisfiable("Circuit execution failed: Assertion failed: 'non-canonical leading zero'"),
+    false,
+  );
+  assert.equal(
+    isUnsatisfiable("Circuit execution failed: Assertion failed: 'unknown comparison operator'"),
+    false,
+  );
 });

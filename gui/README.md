@@ -155,7 +155,10 @@ secret-sharing run: the share matrix, each party's received view, the free zero-
 addition, then the verdict next to an explicit list of what stays withheld. Rows the store
 yielded that could not become parties (unbound, non-numeric, or outside the field's exact
 range) are surfaced with their reason, because a quietly-shortened party list would change
-the verdict without saying so.
+the verdict without saying so. That one bit is the *mathematical* predicate, not a claim
+about a field element: reconstruction is a sum mod *p*, so a party set whose contributions
+would total past the prime is **declined with that reason** rather than answered from the
+wrapped residue.
 
 ## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
 

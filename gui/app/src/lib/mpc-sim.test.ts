@@ -13,6 +13,7 @@ import type { SparqlResults } from "@sparq/client";
 import {
   DEFAULT_THRESHOLD,
   FIELD_P,
+  MAX_TOTAL,
   partiesFromResults,
   reconstruct,
   runSecureThreshold,
@@ -138,6 +139,68 @@ test("runSecureThreshold's verdict is the only threshold-derived output", () => 
 
 test("runSecureThreshold rejects a single-party run", () => {
   assert.throws(() => runSecureThreshold(PARTIES.slice(0, 1), 10, seeded(1)), /at least 2 parties/);
+});
+
+// ---------------------------------------------------------------------------
+// The aggregate field bound — the invariant behind "Σ contributions ≥ threshold"
+// ---------------------------------------------------------------------------
+
+test("runSecureThreshold answers exactly at the largest aggregate the field carries", () => {
+  // Sum lands precisely on MAX_TOTAL: reconstruction is still exact, so the displayed
+  // predicate must be the mathematical one at both sides of the threshold.
+  const edge: Party[] = [
+    { name: "Alice", value: FIELD_P - 100 },
+    { name: "Bob", value: 99 },
+  ];
+  const met = runSecureThreshold(edge, MAX_TOTAL, seeded(11));
+  assert.equal(met.totalRedacted, MAX_TOTAL);
+  assert.equal(met.verdict, true);
+
+  const missed = runSecureThreshold(edge, MAX_TOTAL + 1, seeded(11));
+  assert.equal(missed.totalRedacted, MAX_TOTAL);
+  assert.equal(missed.verdict, false);
+});
+
+test("runSecureThreshold REFUSES an input set whose sum would wrap the field", () => {
+  // The reviewer's case: two contributions of p − 1 reconstruct to p − 2, so comparing that
+  // residue with a threshold of p − 1 used to answer `false` for a sum of nearly 2p. There
+  // is no correct verdict to return from a wrapped residue, so the run is declined instead.
+  const wrapping: Party[] = [
+    { name: "Alice", value: FIELD_P - 1 },
+    { name: "Bob", value: FIELD_P - 1 },
+  ];
+  assert.throws(() => runSecureThreshold(wrapping, MAX_TOTAL, seeded(13)), /sum past the field/);
+
+  // The first total that is NOT representable is exactly p.
+  const justOver: Party[] = [
+    { name: "Alice", value: FIELD_P - 1 },
+    { name: "Bob", value: 1 },
+  ];
+  assert.throws(() => runSecureThreshold(justOver, 10, seeded(13)), /sum past the field/);
+
+  // The error names the party that crossed it, so the operator can see which row to change.
+  assert.throws(() => runSecureThreshold(justOver, 10, seeded(13)), /"Bob"/);
+});
+
+test("runSecureThreshold rejects a contribution outside the field", () => {
+  assert.throws(
+    () => runSecureThreshold([{ name: "Alice", value: FIELD_P }, PARTIES[1]], 10, seeded(3)),
+    /not a non-negative integer below the field prime/,
+  );
+  assert.throws(
+    () => runSecureThreshold([{ name: "Alice", value: -1 }, PARTIES[1]], 10, seeded(3)),
+    /not a non-negative integer below the field prime/,
+  );
+  assert.throws(
+    () => runSecureThreshold([{ name: "Alice", value: 1.5 }, PARTIES[1]], 10, seeded(3)),
+    /not a non-negative integer below the field prime/,
+  );
+});
+
+test("runSecureThreshold rejects a threshold it cannot compare exactly", () => {
+  assert.throws(() => runSecureThreshold(PARTIES, 1.5, seeded(3)), /non-negative integer/);
+  assert.throws(() => runSecureThreshold(PARTIES, -1, seeded(3)), /non-negative integer/);
+  assert.throws(() => runSecureThreshold(PARTIES, Number.NaN, seeded(3)), /non-negative integer/);
 });
 
 // ---------------------------------------------------------------------------
