@@ -22,7 +22,11 @@
 #      PR head — the job holds `pull-requests: write`), the permissions block must be
 #      exactly the least-privilege pair, `pull_request` must carry NO `paths:` filter, and
 #      routing-self-tests.yml must actually INVOKE this file (a test nobody runs is a
-#      call-site mutant that survives everything else).
+#      call-site mutant that survives everything else). #5160 adds the placement half of
+#      that last point: routing-self-tests reaches this file only through a `paths:`
+#      filter, which cannot name a repo-root file that does not exist yet, so the TOTALITY
+#      ratchet additionally runs in docs-quality's `quick-gates` — gating, and filtered by
+#      nothing (TestTotalityRunsOnEveryPR).
 #
 # Needs PyYAML (same dependency the other wiring suites use); everything else is stdlib.
 # Run:  python3 scripts/tests/test_pr_area_labels.py
@@ -44,6 +48,9 @@ DERIVER = REPO_ROOT / "scripts" / "pr-area-labels.py"
 POLICY = REPO_ROOT / "ci" / "area-labels.toml"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "pr-area-label.yml"
 ROUTING_WF = REPO_ROOT / ".github" / "workflows" / "routing-self-tests.yml"
+# [OPUS-5] #5160: the gating lane with NO `paths:` filter, which is where the totality
+# ratchet has to run so a PR that triggers nothing else cannot skip it.
+DOCS_QUALITY_WF = REPO_ROOT / ".github" / "workflows" / "docs-quality.yml"
 CRATES = REPO_ROOT / "crates"
 SKILLS = REPO_ROOT / "skills"
 REPO = "sparq-org/sparq"
@@ -980,6 +987,85 @@ class TestSelfTestIsActuallyInvoked(unittest.TestCase):
 
     def test_the_validate_job_has_no_if_guard(self):
         self.assertNotIn("if", self.wf["jobs"]["validate"])
+
+
+class TestTotalityRunsOnEveryPR(unittest.TestCase):
+    """#5160 — the totality ratchet must run on a PR that TRIGGERS NOTHING ELSE.
+
+    `test_every_tracked_file_in_the_repo_resolves` is a totality gate over the real git
+    tree, but routing-self-tests.yml can only reach it through a `paths:` filter, and a
+    filter cannot name a repo-root file that does not exist yet. So a PR that added only
+    a new root config (`.jscpd.json`, #5150) matched no trigger, never ran the ratchet,
+    and merged with it already broken — the red then landed on the next, unrelated PR.
+
+    The fix is placement, not content: the same two tests also run in docs-quality's
+    `quick-gates`, which is gating and carries NO `paths:` filter, so no PR can skip
+    them. This class pins that placement structurally — an invocation nobody runs, an
+    `if:` guard, a discarded exit code, or a `paths:` filter appearing on docs-quality
+    would each silently restore the hole."""
+
+    #: the exact command the lane must run — the ratchet AND its non-vacuity guard,
+    #: because a ratchet whose computation has been neutered cannot fail.
+    INVOCATION = ("python3 scripts/tests/test_pr_area_labels.py "
+                  "TestPolicyTable.test_the_totality_check_detects_an_unmapped_path "
+                  "TestPolicyTable.test_every_tracked_file_in_the_repo_resolves")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wf = _yaml(DOCS_QUALITY_WF)
+        cls.job = cls.wf["jobs"]["quick-gates"]
+        cls.steps = [s for s in cls.job["steps"]
+                     if "test_pr_area_labels.py" in (s.get("run") or "")]
+
+    def test_quick_gates_invokes_the_totality_ratchet(self):
+        self.assertEqual(len(self.steps), 1,
+                         "expected exactly one docs-quality quick-gates step invoking "
+                         f"this suite, found {len(self.steps)}")
+        run = " ".join(self.steps[0]["run"].replace("\\\n", " ").split())
+        self.assertIn(self.INVOCATION, run,
+                      "the quick-gates step no longer runs the totality ratchet plus "
+                      "its non-vacuity guard")
+
+    def test_the_ratchet_exit_code_is_not_discarded(self):
+        """`|| true`, `; true` or a pipe leaves every substring seam green while the leg
+        can no longer fail — the commonest swallow shape in this repo's verdict corpus."""
+        joined = self.steps[0]["run"].replace("\\\n", " ")
+        calls = [" ".join(ln.split()) for ln in joined.splitlines()
+                 if "test_pr_area_labels.py" in ln]
+        self.assertEqual(len(calls), 1, f"expected one call, found {calls}")
+        self.assertRegex(calls[0],
+                         r"^python3 scripts/tests/test_pr_area_labels\.py[\w. ]*$",
+                         f"the ratchet call is not a bare command: {calls[0]!r}")
+
+    def test_neither_the_job_nor_the_step_carries_an_if_guard(self):
+        self.assertNotIn("if", self.job)
+        self.assertNotIn("if", self.steps[0])
+
+    def test_docs_quality_pull_request_trigger_has_no_paths_filter(self):
+        """THE property that makes this placement total. A `paths:` filter here would
+        re-open exactly the hole the move closes, and would do it invisibly."""
+        on = _on_block(self.wf)
+        self.assertIn("pull_request", on)
+        self.assertNotIn("paths", on["pull_request"] or {})
+        self.assertNotIn("paths-ignore", on["pull_request"] or {})
+
+    def test_the_hosting_job_is_gating_not_advisory(self):
+        """A ratchet that runs inside an excluded check-run does not block a merge."""
+        self.assertNotIn("advisory", self.job["name"].lower())
+        registry = json.loads((REPO_ROOT / ".github" / "advisory-registry.json")
+                              .read_text(encoding="utf-8"))
+        self.assertNotIn(self.job["name"], registry["jobs"])
+
+    def test_the_named_tests_exist_in_this_module(self):
+        """Renaming either test leaves the lane naming a test that no longer exists.
+        `unittest` does exit non-zero on an unknown name (verified), so the lane still
+        reds — but as an opaque usage error. This turns that into a named failure that
+        says which invocation to update."""
+        for name in ("test_the_totality_check_detects_an_unmapped_path",
+                     "test_every_tracked_file_in_the_repo_resolves"):
+            self.assertTrue(hasattr(TestPolicyTable, name),
+                            f"docs-quality invokes TestPolicyTable.{name}, which no "
+                            f"longer exists here")
 
 
 if __name__ == "__main__":

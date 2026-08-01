@@ -870,6 +870,30 @@ jobs:
         run: python3 scripts/tests/test_path_ownership.py
       - name: Selection wiring inspection (fail-closed guards + real crate needles — sq-fmx4u.3)
         run: python3 scripts/tests/test_ci_select_wiring.py
+      # [OPUS-5] #5160: the sibling map's TOTALITY ratchet, run HERE because this lane
+      # runs on EVERY PR. `test_every_tracked_file_in_the_repo_resolves` asserts that
+      # every git-tracked path attributes to an `area:` through ci/area-labels.toml; a
+      # path that attributes to nothing puts its PR on the SERIALIZING `__global__`
+      # partition, which is the starvation reg#677 removed. Its home suite lives in
+      # routing-self-tests.yml, whose `paths:` filter cannot name a repo-root file that
+      # does not exist yet — so a PR adding ONLY a new root config (live case:
+      # `.jscpd.json` on #5150) matched no trigger, never ran the ratchet, and merged
+      # with it already broken; the red then landed on the NEXT, unrelated PR that
+      # happened to touch a triggering path. docs-quality has no `paths:` filter at all,
+      # so running it here makes the check total over PRs as well as over the tree, and
+      # a break can no longer reach `main` to be inherited by an innocent PR.
+      # Exactly two tests: the ratchet, plus the non-vacuity guard that reds if the
+      # totality computation is neutered (a ratchet that cannot fail is not a gate). The
+      # rest of the suite — derivation, effects, the pr-area-label.yml seam — stays in
+      # routing-self-tests.yml, whose triggers do cover the files it pins. Seconds-cheap,
+      # stdlib + the PyYAML installed above; no network, no build.
+      # Pinned by test_pr_area_labels.py::TestTotalityRunsOnEveryPR, which asserts this
+      # step exists, is unconditional, discards no exit code, and that this workflow's
+      # `pull_request` trigger still carries no `paths:` filter.
+      - name: "area-attribution totality (every tracked path resolves — #5160) — GATING"
+        run: |
+          set -euo pipefail
+          python3 scripts/tests/test_pr_area_labels.py TestPolicyTable.test_the_totality_check_detects_an_unmapped_path TestPolicyTable.test_every_tracked_file_in_the_repo_resolves
       # [SONNET-4.6] sq-6vshe.15: the merge-queue cache/artifact posture is two
       # single-line YAML properties that are INVISIBLE when absent — a dropped
       # `save-if` just makes the queue slower and churns the shared 10 GB cache
