@@ -54,15 +54,23 @@
 //! ## What this module does and does NOT establish (read before claiming anything)
 //!
 //! - **Online generation is genuinely non-interactive and structurally
-//!   seed-local.** Each party's share is summed over that party's seed view alone
-//!   (`view_of`), and the generation path is *instrumented*: the test
-//!   `no_share_uses_a_seed_its_party_does_not_hold` records which seeds each
-//!   party's share actually touched and requires that set to be exactly the
-//!   complement of `A`, then checks those seed-local shares against the global
-//!   `Σ_A PRF(k_A, ctr)·f_A` construction. So locality is a *checked* property of
-//!   the real generator, not a comment — though see the in-process caveat below:
-//!   what is checked is which seed MAY enter which share, never process
-//!   isolation.
+//!   seed-local.** Each party's share is produced by a *party-local* generator
+//!   (`PartyView::share_at`) over a view that **carries only that party's own
+//!   key material** — the key of a seed the party does not hold is simply absent
+//!   from the structure, so that generator has nothing to evaluate, and the
+//!   access instrumentation fires **at** each `PRF(k_A, ctr)` call site rather
+//!   than after a global evaluation. `shared_mask` runs exactly these `n`
+//!   party-local generators and evaluates no other key. The test
+//!   `no_share_uses_a_seed_its_party_does_not_hold` records that access set,
+//!   requires it to be exactly the complement of `A`, and cross-checks the
+//!   resulting shares against the global `Σ_A PRF(k_A, ctr)·f_A` polynomial —
+//!   evaluated **independently**, never fed into the shares. Its non-vacuity is
+//!   shown by splicing a non-held seed into one party view with its *real*
+//!   coefficient and re-running the same routine: the emitted number is
+//!   unchanged (that coefficient is `0`), and only the access instrumentation
+//!   goes red. So locality is a *checked* property of the real generator, not a
+//!   comment — though see the in-process caveat below: what is checked is which
+//!   key material a share's generator can reach, never process isolation.
 //! - **The SETUP here is a SIMULATED one-time trusted setup, NOT dealer-less
 //!   key agreement.** [`PrssRandomness::with_simulated_setup`] draws every `k_A`
 //!   locally from OS entropy, standing in for the real replicated-seed
@@ -299,19 +307,41 @@ impl PrssRandomness {
         self.view_of(1).count()
     }
 
-    /// The indices into [`Self::seeds`] of the seeds party `party` holds — that
-    /// party's **entire** cryptographic view of the setup.
+    /// The indices into [`Self::seeds`] of the seeds party `party` holds — the
+    /// index-level description of that party's cryptographic view of the setup.
     ///
     /// A seed `k_A` is held by exactly the parties **not** in `A`, so this is the
-    /// complement of the sets containing `party`. Generation for that party may
-    /// read nothing outside this view; [`Self::sharing_at_observed`] is the hook
-    /// that checks it does not.
+    /// complement of the sets containing `party`. This returns *indices*, not key
+    /// material; [`Self::party_view`] is the structure generation actually runs
+    /// on, and it carries only the keys named here.
     fn view_of(&self, party: u64) -> impl Iterator<Item = usize> + '_ {
         self.seeds
             .iter()
             .enumerate()
             .filter(move |(_, seed)| !seed.set.contains(&party))
             .map(|(i, _)| i)
+    }
+
+    /// Party `party`'s **entire** cryptographic view of the setup, as the
+    /// party-local generator sees it: the key material of exactly the seeds it
+    /// holds, each already paired with the public coefficient `f_A(x_party)`.
+    ///
+    /// This is the boundary that makes seed-locality structural rather than
+    /// disciplinary — a key the party does not hold is *absent* from the returned
+    /// [`PartyView`], so [`PartyView::share_at`] cannot evaluate one. In a real
+    /// federation this is the whole of what party `party` would have been given.
+    fn party_view(&self, party: u64) -> PartyView<'_> {
+        PartyView {
+            party,
+            held: self
+                .view_of(party)
+                .map(|idx| HeldSeed {
+                    idx,
+                    key: &self.seeds[idx].key,
+                    coeff: self.seeds[idx].f_at[party as usize - 1],
+                })
+                .collect(),
+        }
     }
 
     /// Reserve the next PRF counter, refusing fail-closed at exhaustion.
@@ -335,58 +365,110 @@ impl PrssRandomness {
         Ok(ctr)
     }
 
-    /// The degree-`t` sharing generated at PRF counter `ctr`, plus — **as a
-    /// SIMULATION-ONLY oracle** — the shared value `r = Σ_A PRF(k_A, ctr)` itself.
+    /// The full degree-`t` sharing at PRF counter `ctr`: `n` **independent
+    /// party-local** runs of [`PartyView::share_at`], one per party.
     ///
-    /// The `Fp` returned first is exactly what no `≤ t` parties can compute; it is
-    /// available here only because this in-process simulation holds every seed. It
-    /// is used for the `r ≠ 0` rejection (see the module note on that gap) and by
-    /// the tests, and it is deliberately **not** reachable from the public API.
-    fn sharing_at(&self, ctr: u64) -> (Fp, Vec<Share>) {
-        self.sharing_at_observed(ctr, |_, _| {})
+    /// This is the whole of the online protocol. No seed is evaluated outside the
+    /// view of a party that holds it, because each run can only reach the keys in
+    /// its own view.
+    ///
+    /// The simulation therefore pays what the `n` parties collectively pay —
+    /// `n · C(n−1, t)` PRF evaluations, since every seed is re-derived by each of
+    /// its holders — rather than the `C(n, t)` a central evaluator would. That is
+    /// the cost of the party-local boundary being real instead of asserted, and
+    /// it is per-party `C(n−1, t)` for anyone actually running the protocol.
+    fn shares_at(&self, ctr: u64) -> Vec<Share> {
+        self.shares_at_observed(ctr, |_, _| {})
     }
 
-    /// [`Self::sharing_at`] with an instrumentation hook on the generation path:
-    /// `observe(party, seed_idx)` fires for **every seed that enters party
-    /// `party`'s share**.
+    /// [`Self::shares_at`] with an instrumentation hook threaded into the
+    /// party-local generators: `observe(party, seed_idx)` fires at the
+    /// `PRF(k_A, ctr)` call site, for **every key party `party` actually
+    /// evaluates**.
     ///
     /// This is what makes seed-locality a checked property of the *generator*
-    /// rather than of a re-derivation of the coefficients: each party's share is
-    /// summed over [`Self::view_of`] alone, and
+    /// rather than of a re-derivation of the coefficients:
     /// `no_share_uses_a_seed_its_party_does_not_hold` records the access set on
-    /// this exact path and requires it to equal that view — so a generator that
-    /// read a seed its party does not hold goes red even when the arithmetic
-    /// still comes out right (which it would, since `f_A(x_i) = 0` there).
-    fn sharing_at_observed<F: FnMut(u64, usize)>(
-        &self,
-        ctr: u64,
-        mut observe: F,
-    ) -> (Fp, Vec<Share>) {
-        // One PRF evaluation per seed. Every seed is held by at least one party
-        // (`|A| = t < n`), so this is exactly the UNION of what the parties
-        // themselves evaluate — never an evaluation of a seed nobody holds.
-        let prf: Vec<Fp> = self
-            .seeds
+    /// this exact path and requires it to equal that party's view — so a
+    /// generator that reached for a key its party does not hold goes red even
+    /// though the arithmetic would still come out right (`f_A(x_i) = 0` there).
+    fn shares_at_observed<F: FnMut(u64, usize)>(&self, ctr: u64, mut observe: F) -> Vec<Share> {
+        (1..=self.n as u64)
+            .map(|party| self.party_view(party).share_at(ctr, &mut observe))
+            .collect()
+    }
+
+    /// **SIMULATION-ONLY oracle:** the shared value `r = F(0) = Σ_A PRF(k_A, ctr)`.
+    ///
+    /// This is exactly what no `≤ t` parties can compute; it is available here
+    /// only because this in-process simulation holds every seed. It is computed
+    /// **independently of the shares** — over `self.seeds` directly, feeding
+    /// nothing into any [`PartyView`] — so it is never evidence about the
+    /// party-local path. It backs the `r ≠ 0` rejection (see the module note on
+    /// that gap) and the tests, and is deliberately not reachable from the public
+    /// API.
+    fn central_value_at(&self, ctr: u64) -> Fp {
+        self.seeds
             .iter()
-            .map(|seed| prf_fp(&seed.key, ctr))
-            .collect();
-        // `r = F(0) = Σ_A PRF(k_A, ctr)`: the SIMULATION-ONLY oracle of the
-        // method docs above. No party computes this sum.
-        let value = prf.iter().fold(Fp::zero(), |acc, &p| acc.add(p));
-        let shares = (1..=self.n as u64)
-            .map(|party| {
-                // Party `party` sums over ONLY the seeds it holds. The terms it
-                // cannot compute are exactly the ones `f_A` kills, so this local
-                // sum still equals F(x_party) of the global polynomial.
-                let mut y = Fp::zero();
-                for idx in self.view_of(party) {
-                    observe(party, idx);
-                    y = y.add(prf[idx].mul(self.seeds[idx].f_at[party as usize - 1]));
-                }
-                Share { x: party, y }
-            })
-            .collect();
-        (value, shares)
+            .fold(Fp::zero(), |acc, seed| acc.add(prf_fp(&seed.key, ctr)))
+    }
+
+    /// The sharing at `ctr` together with the simulation-only oracle for its
+    /// value. The two halves are computed by separate, independent passes —
+    /// [`Self::shares_at`] over the per-party views, [`Self::central_value_at`]
+    /// over the whole setup.
+    fn sharing_at(&self, ctr: u64) -> (Fp, Vec<Share>) {
+        (self.central_value_at(ctr), self.shares_at(ctr))
+    }
+}
+
+/// One entry of a [`PartyView`]: a key the party **holds**, with the public
+/// coefficient `f_A(x_party)` that key's PRF output is scaled by.
+struct HeldSeed<'a> {
+    /// Index into [`PrssRandomness::seeds`]. A label for instrumentation and
+    /// tests only — nothing in generation dereferences it.
+    idx: usize,
+    /// `k_A`, borrowed from the setup. Only held keys are ever borrowed into a
+    /// view, which is what makes a non-held evaluation unrepresentable.
+    key: &'a [u8; 32],
+    /// `f_A(x_party)`, public and (for a held seed) nonzero.
+    coeff: Fp,
+}
+
+/// A single party's key material — the **only** thing that party's share
+/// generator can reach.
+///
+/// In a real federation this is what the one-time replicated-seed setup would
+/// have delivered to that party and nothing more; here it is a borrowed
+/// projection of the in-process setup, assembled by
+/// [`PrssRandomness::party_view`]. The
+/// distinction the module docs draw between the party-local path and the
+/// simulation-only oracle is this type: [`Self::share_at`] has no access to
+/// `PrssRandomness`, so it cannot evaluate a key its party does not hold.
+struct PartyView<'a> {
+    /// The Shamir point `x_i` this view belongs to.
+    party: u64,
+    /// Exactly the seeds this party holds — the complement of the unqualified
+    /// sets containing [`Self::party`].
+    held: Vec<HeldSeed<'a>>,
+}
+
+impl PartyView<'_> {
+    /// The party's share at counter `ctr`:
+    /// `Σ_{A : i ∉ A} PRF(k_A, ctr) · f_A(x_i)`, over **this view alone**.
+    ///
+    /// Non-interactive: `C(n−1, t)` local PRF evaluations, no rounds, no access
+    /// to any other party's state. `observe(party, seed_idx)` fires immediately
+    /// before each PRF evaluation, so the recorded set is the set of keys this
+    /// generator genuinely used — not a set of indices into values something else
+    /// already computed.
+    fn share_at(&self, ctr: u64, observe: &mut dyn FnMut(u64, usize)) -> Share {
+        let mut y = Fp::zero();
+        for seed in &self.held {
+            observe(self.party, seed.idx);
+            y = y.add(prf_fp(seed.key, ctr).mul(seed.coeff));
+        }
+        Share { x: self.party, y }
     }
 }
 
@@ -525,11 +607,12 @@ impl DistributedRandomness for PrssRandomness {
         RandomnessModel::Prss
     }
 
-    /// A fresh degree-`t` sharing of the PRSS value at the next counter — one
-    /// local PRF evaluation per seed, **zero rounds**.
+    /// A fresh degree-`t` sharing of the PRSS value at the next counter — each
+    /// party's `C(n−1, t)` local PRF evaluations over its own view, **zero
+    /// rounds**. The simulation-only value oracle is not evaluated on this path.
     fn shared_mask(&mut self) -> Result<Vec<Share>, MpcError> {
         let ctr = self.next_counter()?;
-        Ok(self.sharing_at(ctr).1)
+        Ok(self.shares_at(ctr))
     }
 
     /// As [`shared_mask`](Self::shared_mask), redrawing at a fresh counter on the
@@ -710,15 +793,17 @@ mod tests {
         }
     }
 
-    /// **The load-bearing structural invariant.** A share may only accumulate PRF
-    /// outputs of seeds its party actually holds; PRSS achieves that because
+    /// **The load-bearing structural invariant.** A share may only evaluate the
+    /// PRF on seeds its party actually holds; PRSS achieves that because
     /// `f_A(x_i) = 0` exactly when `i ∈ A`.
     ///
     /// Checked on the REAL generation path (the one `shared_mask` runs), via the
-    /// [`PrssRandomness::sharing_at_observed`] access hook — not on a
-    /// re-derivation of the coefficients, which would leave a generator that
-    /// touched a non-held seed undetected (its coefficient is zero, so the
-    /// emitted numbers would be unchanged).
+    /// [`PrssRandomness::shares_at_observed`] hook, which fires **at** each
+    /// `prf_fp` call site inside the party-local [`PartyView::share_at`] — not on
+    /// a re-derivation of the coefficients, and not after a global evaluation of
+    /// every key, either of which would leave a generator that reached for a
+    /// non-held seed undetected (its coefficient is zero, so the emitted numbers
+    /// would be unchanged).
     #[test]
     fn no_share_uses_a_seed_its_party_does_not_hold() {
         const CTR: u64 = 9;
@@ -742,10 +827,10 @@ mod tests {
                 }
             }
 
-            // (b) The generation path itself: every seed each party's share
-            // touches, recorded as that party is generated.
+            // (b) The generation path itself: every key each party's generator
+            // actually evaluated, recorded at the `prf_fp` call site.
             let mut accessed: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
-            let (_, shares) = source.sharing_at_observed(CTR, |party, idx| {
+            let shares = source.shares_at_observed(CTR, |party, idx| {
                 accessed[party as usize - 1].insert(idx);
             });
             for party in 1..=n as u64 {
@@ -761,6 +846,14 @@ mod tests {
                     );
                 }
                 assert_eq!(held.len(), source.seeds_per_party());
+                // The party-local view carries key material for EXACTLY those
+                // seeds — a forbidden key is not merely unused, it is absent.
+                let carried: BTreeSet<usize> =
+                    source.party_view(party).held.iter().map(|h| h.idx).collect();
+                assert_eq!(
+                    carried, held,
+                    "party {party} (n = {n}) must be handed EXACTLY its own key material"
+                );
                 assert_eq!(
                     accessed[party as usize - 1], held,
                     "party {party} (n = {n}) must generate from EXACTLY its own seed view"
@@ -777,10 +870,8 @@ mod tests {
                 assert_eq!(share.y, global, "party {} (n = {n})", i + 1);
             }
 
-            // (d) Mutation guard, so (b)/(c) are not vacuous: deliberately using
-            // a seed the party does NOT hold — with a real (nonzero) coefficient,
-            // which is what a leak would look like — changes its share, and the
-            // access set that produced it is not the one recorded above.
+            // (d) Mutation guard, so (b) is not vacuous — run through the SAME
+            // party-local interface, not around it.
             if source.t >= 1 {
                 let party = 1u64;
                 let forbidden = source
@@ -789,12 +880,34 @@ mod tests {
                     .position(|s| s.set.contains(&party))
                     .expect("t >= 1 ⇒ some unqualified set contains party 1");
                 assert!(!accessed[0].contains(&forbidden));
-                let leaked = shares[0]
-                    .y
-                    .add(prf_fp(&source.seeds[forbidden].key, CTR));
+
+                // Splice the forbidden key into party 1's view with its REAL
+                // coefficient — the shape an actual seed-locality bug takes — and
+                // re-run `share_at`. That coefficient is `f_A(x_1) = 0`, so the
+                // emitted share is IDENTICAL: no value-level check could catch
+                // this. Only the access instrumentation does, which is precisely
+                // why (b) asserts on the access set and not on the numbers.
+                let mut tampered = source.party_view(party);
+                let real_coeff = source.seeds[forbidden].f_at[party as usize - 1];
+                assert_eq!(real_coeff, Fp::zero(), "a non-held seed's coefficient is 0");
+                tampered.held.push(HeldSeed {
+                    idx: forbidden,
+                    key: &source.seeds[forbidden].key,
+                    coeff: real_coeff,
+                });
+                let mut leaked_access = BTreeSet::new();
+                let leaked = tampered.share_at(CTR, &mut |_, idx| {
+                    leaked_access.insert(idx);
+                });
+                assert_eq!(
+                    leaked.y, shares[0].y,
+                    "the real coefficient is 0, so a leak is INVISIBLE in the share value"
+                );
+                assert!(leaked_access.contains(&forbidden));
                 assert_ne!(
-                    leaked, shares[0].y,
-                    "a forbidden seed entering a share must be observable in its value"
+                    leaked_access, accessed[0],
+                    "a forbidden key evaluated by the party-local generator MUST show up \
+                     in the access set — otherwise (b) is vacuous"
                 );
             }
         }
