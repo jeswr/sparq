@@ -392,6 +392,17 @@ jobs:
       - name: preflight — checker tests + worker-brief block consistency — GATING
         run: python3 scripts/tests/test_preflight.py
 
+      # [OPUS-5] #5021: hermetic self-test of the mdBook link-fixup preprocessor
+      # (scripts/mdbook-rewrite-links.py) — which repo-relative link targets get rewritten
+      # to the mount-portable blob URL and which are left alone. It runs HERE, on every PR,
+      # rather than only in docs.yml, because docs.yml fires on a hand-maintained path
+      # filter AND a preprocessor regression is SILENT: mdBook exits 0 and simply emits a
+      # link that 404s under the book mount. The lowercase-root-doc case is the defect #5021
+      # reports; narrowing `_ROOT_MD` back to `[A-Z]` reds exactly that case here.
+      # Hermetic: no network, no files, no subprocess (same pattern as the lints above).
+      - name: Self-test mdbook-rewrite-links.py (which link targets get rewritten)
+        run: python3 scripts/mdbook-rewrite-links.py --self-test
+
       - name: Demo deployment manifests
         run: |
           bash deploy/demo/check.sh
