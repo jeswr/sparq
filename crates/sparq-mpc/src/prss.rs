@@ -54,9 +54,15 @@
 //! ## What this module does and does NOT establish (read before claiming anything)
 //!
 //! - **Online generation is genuinely non-interactive and structurally
-//!   seed-local.** Each party's share is a sum over only the seeds it holds; that
-//!   locality is a *checked* invariant, not a comment
-//!   (`no_share_uses_a_seed_its_party_does_not_hold`).
+//!   seed-local.** Each party's share is summed over that party's seed view alone
+//!   (`view_of`), and the generation path is *instrumented*: the test
+//!   `no_share_uses_a_seed_its_party_does_not_hold` records which seeds each
+//!   party's share actually touched and requires that set to be exactly the
+//!   complement of `A`, then checks those seed-local shares against the global
+//!   `Σ_A PRF(k_A, ctr)·f_A` construction. So locality is a *checked* property of
+//!   the real generator, not a comment — though see the in-process caveat below:
+//!   what is checked is which seed MAY enter which share, never process
+//!   isolation.
 //! - **The SETUP here is a SIMULATED one-time trusted setup, NOT dealer-less
 //!   key agreement.** [`PrssRandomness::with_simulated_setup`] draws every `k_A`
 //!   locally from OS entropy, standing in for the real replicated-seed
@@ -290,7 +296,22 @@ impl PrssRandomness {
     /// storage figure (every party holds the seed of every set it is not in, and
     /// by symmetry that count is the same for all parties).
     pub fn seeds_per_party(&self) -> usize {
-        self.seeds.iter().filter(|s| !s.set.contains(&1)).count()
+        self.view_of(1).count()
+    }
+
+    /// The indices into [`Self::seeds`] of the seeds party `party` holds — that
+    /// party's **entire** cryptographic view of the setup.
+    ///
+    /// A seed `k_A` is held by exactly the parties **not** in `A`, so this is the
+    /// complement of the sets containing `party`. Generation for that party may
+    /// read nothing outside this view; [`Self::sharing_at_observed`] is the hook
+    /// that checks it does not.
+    fn view_of(&self, party: u64) -> impl Iterator<Item = usize> + '_ {
+        self.seeds
+            .iter()
+            .enumerate()
+            .filter(move |(_, seed)| !seed.set.contains(&party))
+            .map(|(i, _)| i)
     }
 
     /// Reserve the next PRF counter, refusing fail-closed at exhaustion.
@@ -322,24 +343,47 @@ impl PrssRandomness {
     /// is used for the `r ≠ 0` rejection (see the module note on that gap) and by
     /// the tests, and it is deliberately **not** reachable from the public API.
     fn sharing_at(&self, ctr: u64) -> (Fp, Vec<Share>) {
-        let mut value = Fp::zero();
-        let mut ys = vec![Fp::zero(); self.n];
-        for seed in &self.seeds {
-            let p = prf_fp(&seed.key, ctr);
-            value = value.add(p);
-            for (y, &f) in ys.iter_mut().zip(seed.f_at.iter()) {
-                // `f` is 0 exactly for the parties in `seed.set` — the parties
-                // that do NOT hold this seed. So each party's share only ever
-                // accumulates PRF outputs it could have computed itself.
-                *y = y.add(p.mul(f));
-            }
-        }
-        let shares = ys
-            .into_iter()
-            .enumerate()
-            .map(|(i, y)| Share {
-                x: i as u64 + 1,
-                y,
+        self.sharing_at_observed(ctr, |_, _| {})
+    }
+
+    /// [`Self::sharing_at`] with an instrumentation hook on the generation path:
+    /// `observe(party, seed_idx)` fires for **every seed that enters party
+    /// `party`'s share**.
+    ///
+    /// This is what makes seed-locality a checked property of the *generator*
+    /// rather than of a re-derivation of the coefficients: each party's share is
+    /// summed over [`Self::view_of`] alone, and
+    /// `no_share_uses_a_seed_its_party_does_not_hold` records the access set on
+    /// this exact path and requires it to equal that view — so a generator that
+    /// read a seed its party does not hold goes red even when the arithmetic
+    /// still comes out right (which it would, since `f_A(x_i) = 0` there).
+    fn sharing_at_observed<F: FnMut(u64, usize)>(
+        &self,
+        ctr: u64,
+        mut observe: F,
+    ) -> (Fp, Vec<Share>) {
+        // One PRF evaluation per seed. Every seed is held by at least one party
+        // (`|A| = t < n`), so this is exactly the UNION of what the parties
+        // themselves evaluate — never an evaluation of a seed nobody holds.
+        let prf: Vec<Fp> = self
+            .seeds
+            .iter()
+            .map(|seed| prf_fp(&seed.key, ctr))
+            .collect();
+        // `r = F(0) = Σ_A PRF(k_A, ctr)`: the SIMULATION-ONLY oracle of the
+        // method docs above. No party computes this sum.
+        let value = prf.iter().fold(Fp::zero(), |acc, &p| acc.add(p));
+        let shares = (1..=self.n as u64)
+            .map(|party| {
+                // Party `party` sums over ONLY the seeds it holds. The terms it
+                // cannot compute are exactly the ones `f_A` kills, so this local
+                // sum still equals F(x_party) of the global polynomial.
+                let mut y = Fp::zero();
+                for idx in self.view_of(party) {
+                    observe(party, idx);
+                    y = y.add(prf[idx].mul(self.seeds[idx].f_at[party as usize - 1]));
+                }
+                Share { x: party, y }
             })
             .collect();
         (value, shares)
@@ -531,6 +575,7 @@ impl DistributedRandomness for PrssRandomness {
 mod tests {
     use super::*;
     use crate::shamir::ShamirBackend;
+    use std::collections::BTreeSet;
 
     fn prss(n: usize) -> PrssRandomness {
         PrssRandomness::with_seeded_setup(n, 0xC0FFEE).expect("valid small-n setup")
@@ -667,12 +712,19 @@ mod tests {
 
     /// **The load-bearing structural invariant.** A share may only accumulate PRF
     /// outputs of seeds its party actually holds; PRSS achieves that because
-    /// `f_A(x_i) = 0` exactly when `i ∈ A`. Checked on the precomputed
-    /// coefficients the generator actually multiplies by, not on a re-derivation.
+    /// `f_A(x_i) = 0` exactly when `i ∈ A`.
+    ///
+    /// Checked on the REAL generation path (the one `shared_mask` runs), via the
+    /// [`PrssRandomness::sharing_at_observed`] access hook — not on a
+    /// re-derivation of the coefficients, which would leave a generator that
+    /// touched a non-held seed undetected (its coefficient is zero, so the
+    /// emitted numbers would be unchanged).
     #[test]
     fn no_share_uses_a_seed_its_party_does_not_hold() {
+        const CTR: u64 = 9;
         for n in 2..=9usize {
             let source = prss(n);
+            // (a) The coefficient structure that MAKES seed-locality possible.
             for seed in &source.seeds {
                 for (i, &f) in seed.f_at.iter().enumerate() {
                     let party = i as u64 + 1;
@@ -688,6 +740,62 @@ mod tests {
                         assert_ne!(f, Fp::zero());
                     }
                 }
+            }
+
+            // (b) The generation path itself: every seed each party's share
+            // touches, recorded as that party is generated.
+            let mut accessed: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+            let (_, shares) = source.sharing_at_observed(CTR, |party, idx| {
+                accessed[party as usize - 1].insert(idx);
+            });
+            for party in 1..=n as u64 {
+                let held: BTreeSet<usize> = source.view_of(party).collect();
+                // The view is exactly the complement of the sets containing the
+                // party — i.e. the seeds it is a non-holder of are forbidden.
+                for (idx, seed) in source.seeds.iter().enumerate() {
+                    assert_eq!(
+                        held.contains(&idx),
+                        !seed.set.contains(&party),
+                        "party {party} holds the seed for A = {:?} iff it is not in A",
+                        seed.set
+                    );
+                }
+                assert_eq!(held.len(), source.seeds_per_party());
+                assert_eq!(
+                    accessed[party as usize - 1], held,
+                    "party {party} (n = {n}) must generate from EXACTLY its own seed view"
+                );
+            }
+
+            // (c) Those seed-local shares agree with the GLOBAL construction
+            // `F(x_i) = Σ_A PRF(k_A, ctr)·f_A(x_i)` summed over ALL seeds — the
+            // sum no single party can compute.
+            for (i, share) in shares.iter().enumerate() {
+                let global = source.seeds.iter().fold(Fp::zero(), |acc, seed| {
+                    acc.add(prf_fp(&seed.key, CTR).mul(seed.f_at[i]))
+                });
+                assert_eq!(share.y, global, "party {} (n = {n})", i + 1);
+            }
+
+            // (d) Mutation guard, so (b)/(c) are not vacuous: deliberately using
+            // a seed the party does NOT hold — with a real (nonzero) coefficient,
+            // which is what a leak would look like — changes its share, and the
+            // access set that produced it is not the one recorded above.
+            if source.t >= 1 {
+                let party = 1u64;
+                let forbidden = source
+                    .seeds
+                    .iter()
+                    .position(|s| s.set.contains(&party))
+                    .expect("t >= 1 ⇒ some unqualified set contains party 1");
+                assert!(!accessed[0].contains(&forbidden));
+                let leaked = shares[0]
+                    .y
+                    .add(prf_fp(&source.seeds[forbidden].key, CTR));
+                assert_ne!(
+                    leaked, shares[0].y,
+                    "a forbidden seed entering a share must be observable in its value"
+                );
             }
         }
     }
