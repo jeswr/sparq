@@ -1161,6 +1161,11 @@ version = "0.13.2"
 criteria = "safe-to-deploy"
 notes = "RustCrypto-org crate; direct dep of the OFF-by-default vc-bridge feature (needs safe-to-deploy — subsumes the solid-server-rs sq-gg0qq.1 DEV-ONLY ES256 test-token usage which only needs safe-to-run); no upstream audit covers this exact version [OPUS-4.8]"
 
+[[exemptions.p384]]
+version = "0.13.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; direct dep of the OFF-by-default vc-bridge feature (the ecdsa-rdfc-2019 P-384/SHA-384 profile, sq-txg1y). Deliberately the 0.13 line so it shares the already-exempted ecdsa/elliptic-curve/primeorder/sha2 with p256 — it adds NO other package to the lockfile. No upstream audit covers this exact version [OPUS-5]"
+
 [[exemptions.parking]]
 version = "2.2.1"
 criteria = "safe-to-deploy"

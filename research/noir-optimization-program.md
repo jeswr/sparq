@@ -740,3 +740,36 @@ verification of the PR's diff against `master`:
 The bead stays **open**, blocked on the §6 author review and on `sq-i50o4` (a `bb`
 binary) like the rest of the program. Nothing was posted upstream, and the PR's
 body and review thread were not read — only its diff.
+
+### 10.13 `sq-9xhoa` (row 2, truncate after an `and` mask) — already shipped upstream as a draft, verified (2026-08-01)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-truncate-after-and-mask-8628.md` (verified against noir `master`,
+> `d89d99a9`).
+
+**Tracking correction, same shape as §10.11 and §10.12.** The bead was
+re-dispatched as an implementation task; it is not one. Row 2 (#8628) was written
+and shipped in steps 1–2 as draft **noir#13264**, which §10.1 already lists — the
+bead is open because the §6 author-review gate has not been passed, not because
+code is missing. **Do not re-implement.** Verified this session: `master`'s
+`remove_truncate_after_range_check.rs` still has only its three original `match`
+arms (so the PR is unmerged), and the whole diff re-applies to `master` with no
+offset and no fuzz. Unlike #13265 it touches **no existing snapshot file**, so it
+carries no rebase hazard.
+
+Nothing was measured or executed — no `nargo`, no `bb`, no built compiler — so no
+ACIR-opcode delta and no gate count. The record is a source-level verification of
+the PR's diff against `master`:
+
+| finding | consequence |
+|---|---|
+| the bound is sound and the arm's dominance question is **vacuous**: `mask.num_bits()` is the value's bit length (`field_element.rs:414-423`, pinned by the upstream proptest `num_bits_agrees_with_ilog2`), and the bound is attached to the `and`'s *own result*, which by SSA dominance already dominates every use — so the pass's `previous_block` clearing heuristic can only cost a missed rewrite here, never an unsound one | stronger than the pre-existing `RangeCheck` arm, whose validity genuinely leans on that heuristic. Per `sq-qhy4` still **not** a soundness certification |
+| the tests are non-vacuous (source-derived, not executed): deleting the arm reddens both positive snapshots; computing the bound as popcount instead of bit length reddens the `mask = 0b101, truncate to 2 bits` test; flipping the `<=` reddens the `507` test; and the fixture's `kept` case bites at execution because its author picked an input where masked (`417`) and truncated (`161`) differ | the red-on-wrong-answer gap that blocks #13265 (§10.12) is **already closed** here |
+| **the one real gap — signed types.** The `2^n - 1` → `Truncate` canonicalization in `simplify/binary.rs:243` is guarded by `is_unsigned()`, so on a signed type an `and` by a `2^n - 1` mask survives to the pass and fires the new arm — a mask class unreachable on unsigned types. All seven unit tests and all four fixture cases are `u64`/`u32` | the single uniquely-reachable case has zero coverage. A few `i32`/`i64` SSA unit tests close it; cheap, and worth landing on the PR branch |
+| **placement question for the maintainer**: neither `get_value_max_num_bits` (`dfg.rs:574-634`, no `And` arm) nor the `Truncate` rule in `simplify.rs:210-262` covers this today, so the PR is not redundant — but that `Truncate` rule already reasons about `Div` **by a constant** in exactly this shape, and `get_value_max_num_bits` also backs the `RangeCheck` removal at `simplify.rs:281-284` | teaching the bound to `get_value_max_num_bits` instead would fire everywhere rather than at pipeline position `ssa/mod.rs:395`, and would drop redundant **range checks** on masked values for free. jfecher's in-issue direction was the pass, so this is a question to raise, not a defect — and it is row 7 (`sq-jj3ne`) territory |
+| the cost claim holds structurally: `convert_ssa_truncate` (`acir/mod.rs:856-892`) has **no early-out** on known bit width and always lowers to `truncate_var` → `euclidean_division_var` (`acir_context/mod.rs:1165-1179`) | each removal really does avoid a whole euclidean-division lowering; its *size* stays unquantified pending `bb` |
+| frequency is **weak-negative and unmeasured**: the diff updates no existing snapshot, and the idiomatic `& 0xFF`/`& 0xFFFF` masks are precisely the ones already canonicalized to truncations, so the arm's reachable population on unsigned types is the unusual non-`2^n - 1` masks | contrast §10.12, where the rule demonstrably fired on compiler-generated IR. The #11580 "does it pay rent" question is open, and the fixture sits in `execution_success`, not `test_programs/benchmarks/`, so no committed number moves if the rule regresses |
+
+The bead stays **open**, blocked on the §6 author review and on `sq-i50o4` like
+the rest of the program. Nothing was posted upstream, and the PR's body and review
+thread were not read — only its diff.

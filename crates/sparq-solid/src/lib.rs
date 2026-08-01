@@ -15,6 +15,12 @@ pub mod conformance;
 // so it mirrors `wac_allow`'s always-present public-API placement (#1154).
 mod decide;
 pub mod fixture;
+// [SONNET-4.6] sq-ysv3u: the TRUSTED verified-credential channel behind ACP `acp:vc` — the
+// exact analogue of `provenance` below, carrying "which credential requirements has this
+// agent been VERIFIED to satisfy". Always compiled: the channel itself adds no dependency,
+// and the `acp:vc` fail-closed matcher semantics it feeds are unconditional. Only the
+// `sparq-vc`-backed verification that populates it is behind the opt-in `acp-vc` feature.
+mod credentials;
 mod loader;
 mod materialize;
 // [OPUS-4.8] sq-3jtd.5: TRUSTED per-resource creator/owner provenance — the channel by
@@ -62,8 +68,17 @@ pub use decide::{is_control_document_name, AclScope, AclStatus, EffectiveAcl, Wa
 // /report vocabulary is the shared `conformance::{Decision, Expect, ScenarioReport}`).
 pub use wac_conformance::{AclBuilder, AuthBuilder, WacScenario};
 pub use fixture::{acp_fixture, wac_fixture};
-pub use materialize::{materialize_acp, materialize_acp_with, materialize_wac, MaterializeStats};
+pub use materialize::{
+    materialize_acp, materialize_acp_with, materialize_acp_with_credentials, materialize_wac,
+    MaterializeStats,
+};
 pub use provenance::AccessProvenance;
+// [SONNET-4.6] sq-ysv3u: the ACP `acp:vc` trusted verified-credential channel. Always
+// compiled (it adds no dependency); the `acp-vc` feature adds the sparq-vc-backed
+// trust-the-issuer verification that populates it.
+pub use credentials::VerifiedCredentials;
+#[cfg(feature = "acp-vc")]
+pub use credentials::{VcAdmitError, VcRequirement};
 #[cfg(feature = "odrl-bridge")]
 pub use odrl_bridge::{
     action_to_mode, materialize_permission, materialize_permission_conditional, materialize_policy,
@@ -523,7 +538,69 @@ impl PodStore {
         &mut self,
         provenance: &AccessProvenance,
     ) -> Result<MaterializeStats, String> {
-        self.materialize_acp_with_scoped(provenance, ReindexScope::Full)
+        self.materialize_acp_with_credentials(provenance, &VerifiedCredentials::new())
+    }
+
+    /// (Re-)materialize the ACP auth view using TRUSTED creator/owner facts AND TRUSTED
+    /// verified-credential holdings, resolving `acp:vc` matchers ([SONNET-4.6] sq-ysv3u).
+    ///
+    /// `acp:vc` gates a matcher on the requesting agent holding a Verifiable Credential that
+    /// satisfies a stated requirement. sparq-solid never verifies a credential itself — the
+    /// caller (a Solid server, or the opt-in `acp-vc` backend's
+    /// `VerifiedCredentials::admit_data_integrity` — a code span rather than an intra-doc link,
+    /// since that method exists only under that feature) verifies the presentation and records
+    /// the resulting `(agent, requirement IRI)` holdings in `credentials`, which is the
+    /// **trusted channel** for them: exactly like `provenance`, these facts are asserted by
+    /// the caller and are **never** read from pod or `.acr` content, so an agent cannot
+    /// self-grant by writing a forged holding into a document they control (design doc §2.4).
+    ///
+    /// `materialize_acp_with(&prov)` is exactly
+    /// `materialize_acp_with_credentials(&prov, &VerifiedCredentials::new())` — with no
+    /// credential supplied, **every** `acp:vc` matcher rejects every candidate (fail-closed).
+    ///
+    /// # Errors
+    ///
+    /// As [`PodStore::materialize_acp_with`], plus an `Err` if a credential holder's WebID
+    /// collides with the reserved principal encoding.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sparq_solid::{AccessProvenance, Mode, PodStore, Session, VerifiedCredentials};
+    ///
+    /// // A policy on /clinic/ grants Read only to holders of an "over 18" credential.
+    /// let acp = "http://www.w3.org/ns/solid/acp#";
+    /// let req = "https://issuer.ex/req#OverEighteen";
+    /// let nquads = format!(
+    ///     "<https://pod.ex/clinic/d0.ttl#it> <https://ex.dev/ns#k> \"v\" <https://pod.ex/clinic/d0.ttl> .\n\
+    ///      <https://pod.ex/clinic/.acr> <{acp}memberAccessControl> <https://pod.ex/clinic/.acr#c> <https://pod.ex/clinic/.acr> .\n\
+    ///      <https://pod.ex/clinic/.acr#c> <{acp}apply> <https://pod.ex/clinic/.acr#pol> <https://pod.ex/clinic/.acr> .\n\
+    ///      <https://pod.ex/clinic/.acr#pol> <{acp}allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/clinic/.acr> .\n\
+    ///      <https://pod.ex/clinic/.acr#pol> <{acp}allOf> <https://pod.ex/clinic/.acr#m> <https://pod.ex/clinic/.acr> .\n\
+    ///      <https://pod.ex/clinic/.acr#m> <{acp}vc> <{req}> <https://pod.ex/clinic/.acr> .\n");
+    /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(&nquads, "nquads")?);
+    ///
+    /// // With no credential presented the policy grants NOBODY — not even anonymously.
+    /// store.materialize_acp()?;
+    /// let anon = Session::default();
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+    /// assert_eq!(store.accessible(&anon, Mode::Read).len(), 0);
+    /// assert_eq!(store.accessible(&alice, Mode::Read).len(), 0);
+    ///
+    /// // The caller verified alice's credential and asserts the holding.
+    /// let mut creds = VerifiedCredentials::new();
+    /// creds.hold("https://alice.ex/card#me", req);
+    /// store.materialize_acp_with_credentials(&AccessProvenance::new(), &creds)?;
+    /// assert_eq!(store.accessible(&alice, Mode::Read).len(), 1); // d0
+    /// assert_eq!(store.accessible(&anon, Mode::Read).len(), 0);  // still nothing
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn materialize_acp_with_credentials(
+        &mut self,
+        provenance: &AccessProvenance,
+        credentials: &VerifiedCredentials,
+    ) -> Result<MaterializeStats, String> {
+        self.materialize_acp_with_scoped(provenance, credentials, ReindexScope::Full)
     }
 
     /// [`PodStore::materialize_acp_with`] invalidating the session cache only at `scope` — the
@@ -532,9 +609,10 @@ impl PodStore {
     fn materialize_acp_with_scoped(
         &mut self,
         provenance: &AccessProvenance,
+        credentials: &VerifiedCredentials,
         scope: ReindexScope,
     ) -> Result<MaterializeStats, String> {
-        let stats = materialize_acp_with(&mut self.graph, provenance)?;
+        let stats = materialize_acp_with_credentials(&mut self.graph, provenance, credentials)?;
         self.reconcile_bridged_after_static();
         self.reindex_with(scope);
         Ok(stats)
