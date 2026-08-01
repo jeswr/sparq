@@ -142,10 +142,10 @@ crate grew — keep a wildcard arm) and has five variants:
 ## ⚠️ Opt-in NON-STANDARD RDF 1.2 triple-term profile
 
 **OFF by default; NOT W3C RDFC-1.0.** RDFC-1.0 is an RDF-1.1-only spec with no
-notion of triple terms; their canonicalization is **unsettled upstream**
-([w3c/rdf-star-wg#114](https://github.com/w3c/rdf-star-wg/issues/114)). With the
-feature OFF, behaviour is byte-identical to the standard surface (triple terms
-still raise `CanonError::TripleTerm`; the W3C suite still passes).
+notion of triple terms. W3C has published no RDF-1.2 dataset canonicalization
+specification. With the feature OFF, behaviour is byte-identical to the standard
+surface (triple terms still raise `CanonError::TripleTerm`; the W3C suite still
+passes).
 
 Enable the cargo feature to opt in to a **separate, clearly non-standard** v2
 profile. It natively re-implements the RDFC-1.0 algorithm over oxrdf 0.3 and
