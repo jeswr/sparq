@@ -727,6 +727,11 @@ def _self_test():
     assert attribute("crates/sparq-core/README.md", policy) == "sparq-core"
     # The shared-lane rows the frontier depends on.
     assert attribute("Cargo.lock", policy) == "deps"
+    # sparq#5128: the root manifest must stay ATTRIBUTABLE. `derive_areas` is strict — one
+    # unresolved path and the PR derives no labels at all — so were this row to stop resolving,
+    # every PR touching the root manifest would declare nothing. (It is NOT a gate that a new crate
+    # registers itself in `[workspace] members`; see `ready-issues.py::partition_path`.)
+    assert attribute("Cargo.toml", policy) == "workspace"
     assert attribute(".github/workflows/ci.yml", policy) == "ci"
     assert attribute("scripts/pr-area-labels.py", policy) == "ci"
     # Additive only: derivation never proposes removing a human label.
