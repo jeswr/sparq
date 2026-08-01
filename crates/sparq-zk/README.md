@@ -5,7 +5,7 @@ The **engine-side ZK foundation** for [sparq](../../README.md): the off-circuit
 **commitment pipeline** and the **zk-trace seam** behind the
 [derived-credentials design](../../research/zkp-query-proofs-plan.md). RDFC10
 canonicalization, Poseidon2-BN254 per-graph commitments, graph-scoped term/triple
-field encoding, issuer signatures, and the `<urn:sparq:zk>` registry plumbing.
+field encoding, issuer signatures — including the **issuer-attested holder binding** (`sig::{holder_key_digest, commitment_message_with_holder, SecretKey::sign_commitment_with_holder}` for issuance, `sig::holder_pop_message` for the challenge-bound proof-of-possession, and `sig::in_circuit_holder_witness` for the hidden-key `holder_pok` member), whose fail-closed enforcement lives in `sparq-zk-compose`'s `verifier::{bind_holder_pop, bind_holder_pok}` under `HolderBindingPolicy` — and the `<urn:sparq:zk>` registry plumbing.
 
 Why it exists: everything here is off-circuit Rust whose outputs (BN254 field
 elements, leaf orderings, witness input sets) are exactly what the later Noir
