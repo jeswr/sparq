@@ -2947,24 +2947,89 @@ fn bridged_only_retraction_returns_to_unloaded() {
 // matches a collection-valued `odrl:assignee`/`odrl:recipient` by identity-OR-membership,
 // but an ACP `auth:agent` head matches by IDENTITY alone (a session carries no membership
 // evidence). So the persisted head must be expanded to the members the request evidenced
-// — on the ALLOW side only. The DENY side, and an ALLOW's `noneOf` carve-out, stay
-// one-shot: freezing a partial member list there lets unlisted members ESCAPE the
-// restriction (fail-open).
+// — on the ALLOW side only. Every other collection-valued head (a DENY head, an ALLOW's
+// `noneOf` carve-out, an ALLOW head with no evidenced member) leaves the frozen path
+// entirely: an identity-matched head cannot re-check membership, so freezing one either
+// lets members ESCAPE the restriction (fail-open) or binds nobody at all.
+//
+// Collection IDENTITY is read from the POLICY (`Policy::party_collections`, retained by
+// the parser from `a odrl:PartyCollection` / `odrl:partOf`) as well as from the request's
+// membership evidence, so a collection with ZERO supplied member edges is recognised —
+// that is what stops a bare collection IRI being frozen as if it were a plain party.
 // ===========================================================================
 
 /// The `odrl:PartyCollection` alice and bob are members of (carol is not).
 const LAB: &str = "https://pod.ex/groups/lab";
 
+/// The `a odrl:PartyCollection` declaration that gives LAB its identity in the policy
+/// document, independently of any membership edge.
+const LAB_DECL: &str = "<https://pod.ex/groups/lab> a odrl:PartyCollection .";
+
 /// "the LAB collection MAY read n1" — a bare `odrl:assignee` naming a PartyCollection.
 fn lab_assignee_permit() -> sparq_policy::Policy {
     parse_policy_str(
-        r#"
+        &format!(
+            r#"
 @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+{}
 <urn:pol/lab> a odrl:Set ; odrl:permission [
     odrl:action odrl:read ;
     odrl:target <https://pod.ex/notes/n1> ;
     odrl:assignee <https://pod.ex/groups/lab> ] .
 "#,
+            LAB_DECL
+        ),
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// "the LAB collection MUST NOT read n1" — a prohibition whose head is the collection.
+fn lab_prohibition() -> sparq_policy::Policy {
+    parse_policy_str(
+        &format!(
+            r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+{}
+<urn:pol/labdeny> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://pod.ex/groups/lab> ] .
+"#,
+            LAB_DECL
+        ),
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// "anyone EXCEPT the LAB collection MAY read n1" — an ALLOW `neq` carve-out whose
+/// excluded value is the collection.
+fn lab_carve_out_permit() -> sparq_policy::Policy {
+    parse_policy_str(
+        &format!(
+            r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+{}
+<urn:pol/notlab> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                      odrl:rightOperand <https://pod.ex/groups/lab> ] ] .
+"#,
+            LAB_DECL
+        ),
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// "everyone MAY read n1" — the public allow used to show a prohibition biting.
+fn public_read_permit() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pub2> a odrl:Set ; odrl:permission [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
         "turtle",
     )
     .expect("policy parses")
@@ -3000,22 +3065,25 @@ fn collection_assignee_grants_one_head_per_known_member() {
 }
 
 // 41. SOUNDNESS FLOOR: the expansion draws ONLY on the caller-supplied membership
-//     evidence. With NO evidence the head set is byte-for-byte the unexpanded base case
-//     (just the collection IRI) — a party is never granted on an UNPROVEN membership.
+//     evidence, so a ZERO-EDGE collection has nothing to expand to. The policy declares
+//     LAB a collection, so the head is recognised as one and the rule leaves the frozen
+//     path entirely rather than persist a bare collection IRI that binds nobody — no
+//     conditional grant at all, and no party granted on an UNPROVEN membership.
 #[test]
-fn collection_assignee_without_evidence_expands_to_nothing() {
+fn collection_assignee_without_evidence_emits_no_conditional_grant() {
     let mut g = pod();
     let req = Request::new(odrl("read")).on(N1).by(ALICE); // no membership evidence
     let out = materialize_permission_conditional(&mut g, &lab_assignee_permit(), &req);
-    assert!(out.granted);
-    assert_eq!(cond_grants_for(&g, None), 1, "exactly the collection head, unexpanded");
-    assert_eq!(cond_grants_for(&g, Some(LAB)), 1, "the collection IRI");
+    assert!(!out.granted, "a zero-edge collection assignee grants nothing: {out:?}");
+    assert_eq!(cond_grants_for(&g, None), 0, "NO conditional grant is persisted");
+    assert_eq!(cond_grants_for(&g, Some(LAB)), 0, "not even the bare collection IRI");
     assert_eq!(cond_grants_for(&g, Some(ALICE)), 0, "no head on an unproven membership");
 
     let mut store = PodStore::new(pod());
-    assert!(store.materialize_odrl_permission_conditional(&lab_assignee_permit(), &req).granted);
+    assert!(!store.materialize_odrl_permission_conditional(&lab_assignee_permit(), &req).granted);
     assert!(!reads(&mut store, ALICE), "unproven membership grants nothing");
     assert!(!reads(&mut store, BOB), "unproven membership grants nothing");
+    assert!(!reads(&mut store, CAROL), "and nothing widened to a non-member");
 }
 
 // 42. THE DENY DUAL STAYS ONE-SHOT: a collection-valued deny head cannot re-check
@@ -3024,17 +3092,7 @@ fn collection_assignee_without_evidence_expands_to_nothing() {
 //     evaluator — which does the real identity-or-membership check — denies instead.
 #[test]
 fn collection_prohibition_stays_one_shot() {
-    let prohib = parse_policy_str(
-        r#"
-@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
-<urn:pol/labdeny> a odrl:Set ; odrl:prohibition [
-    odrl:action odrl:read ;
-    odrl:target <https://pod.ex/notes/n1> ;
-    odrl:assignee <https://pod.ex/groups/lab> ] .
-"#,
-        "turtle",
-    )
-    .unwrap();
+    let prohib = lab_prohibition();
     let req = lab_members(Request::new(odrl("read")).on(N1).by(ALICE));
 
     let mut g = pod();
@@ -3049,13 +3107,7 @@ fn collection_prohibition_stays_one_shot() {
 
     // End-to-end with deny-overrides: a public allow is in force; each member's own
     // request materializes that member's frozen deny (the one-shot contract).
-    let permit = parse_policy_str(
-        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
-        <urn:pol/pub2> a odrl:Set ; odrl:permission [
-            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
-        "turtle",
-    )
-    .unwrap();
+    let permit = public_read_permit();
     let mut store = PodStore::new(pod());
     assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
     assert!(reads(&mut store, ALICE), "public allow in force before the deny");
@@ -3074,18 +3126,7 @@ fn collection_prohibition_stays_one_shot() {
 //     evaluator applies the real `neq`-over-membership check instead.
 #[test]
 fn collection_carve_out_stays_one_shot() {
-    let pol = parse_policy_str(
-        r#"
-@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
-<urn:pol/notlab> a odrl:Set ; odrl:permission [
-    odrl:action odrl:read ;
-    odrl:target <https://pod.ex/notes/n1> ;
-    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
-                      odrl:rightOperand <https://pod.ex/groups/lab> ] ] .
-"#,
-        "turtle",
-    )
-    .unwrap();
+    let pol = lab_carve_out_permit();
     // carol (NOT a lab member) asks; the evidence names bob as a lab member.
     let req = Request::new(odrl("read")).on(N1).by(CAROL).with_party_membership(BOB, LAB);
 
@@ -3101,90 +3142,95 @@ fn collection_carve_out_stays_one_shot() {
     assert!(!reads(&mut store, ALICE), "no widening to unrelated agents");
 }
 
-// 44. THE LIMIT OF THE COLLECTION CHECK (DENY): collection-ness is only ever KNOWN to the
-//     bridge through the request's own `odrl:partOf` evidence — neither the request nor
-//     the parsed policy carries an `rdf:type odrl:PartyCollection` fact. So a prohibition
-//     naming a collection the request evidenced NOTHING for is indistinguishable from a
-//     prohibition naming a plain party, and takes the ordinary concrete-head path: the
-//     bare collection IRI is persisted as a deny head, which matches no member session.
-//     That is the UNCHANGED pre-`heads_name_evidenced_party_collection` behaviour (the check
-//     narrows the fail-open window, it does not close it) and it is why the one-shot
-//     fallback is documented as conditional on supplied evidence, not absolute.
+// 44. THE ZERO-EDGE DENY IS CLOSED: a prohibition naming a collection the request
+//     supplied NO `odrl:partOf` edge for used to take the ordinary concrete-head path and
+//     persist the bare collection IRI as a deny head — a head no member session can match,
+//     so every member escaped the prohibition. Collection identity now comes from the
+//     policy's own `a odrl:PartyCollection` declaration, so the rule leaves the frozen path
+//     regardless of evidence: NO conditional deny is emitted, and nothing is widened.
 #[test]
-fn collection_prohibition_without_evidence_persists_an_unenforceable_head() {
+fn zero_edge_collection_prohibition_emits_no_conditional_deny() {
+    let prohib = lab_prohibition();
+    // NO `.with_party_membership(…)`: identity comes from the policy declaration alone.
+    let req = Request::new(odrl("read")).on(N1).by(CAROL);
+
+    let mut g = pod();
+    let out = materialize_prohibition_conditional(&mut g, &prohib, &req);
+    assert_eq!(cond_denies_for(&g, None), 0, "NO re-checked deny condition: {out:?}");
+    assert_eq!(
+        cond_denies_for(&g, Some(LAB)),
+        0,
+        "and specifically NOT the bare collection IRI, which binds no member session"
+    );
+
+    // Through the real enforcement path, against a public allow: the collection deny is
+    // never persisted as an unenforceable head, and a member who DOES evidence membership
+    // is bound by the one-shot deny the fallback materializes.
+    let permit = public_read_permit();
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
+    assert!(!store.materialize_odrl_prohibition_conditional(&prohib, &req).prohibited,
+        "carol is not a member under any evidence, so no deny is materialized for her");
+    assert!(reads(&mut store, CAROL), "the non-member keeps the public allow");
+    let alice_req = lab_members(Request::new(odrl("read")).on(N1).by(ALICE));
+    assert!(store.materialize_odrl_prohibition_conditional(&prohib, &alice_req).prohibited);
+    assert!(!reads(&mut store, ALICE), "the member is bound by the one-shot deny");
+}
+
+// 45. THE ZERO-EDGE CARVE-OUT IS CLOSED — the case that actually WIDENED access. With no
+//     `odrl:partOf` edge the `neq` carve-out used to freeze an `auth:Public` grant plus a
+//     `noneOf` matcher naming the collection; the matcher accepts no member session, so
+//     every member of the EXCLUDED collection kept the public grant. The policy-declared
+//     identity now routes the rule to the one-shot path: no public conditional grant is
+//     persisted, and a member of the excluded collection cannot read.
+#[test]
+fn zero_edge_collection_carve_out_emits_no_conditional_grant() {
+    let pol = lab_carve_out_permit();
+    let req = Request::new(odrl("read")).on(N1).by(CAROL); // no membership evidence
+
+    let mut g = pod();
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "carol is outside the excluded collection: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, None),
+        0,
+        "NO everyone-except condition is persisted on an unenforceable collection matcher"
+    );
+
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, CAROL), "the un-excluded requester reads (frozen one-shot)");
+    assert!(!reads(&mut store, BOB), "a member of the EXCLUDED collection must NOT read");
+    assert!(!reads(&mut store, ALICE), "nor any other member");
+}
+
+// 46. IDENTITY WITHOUT A TYPE TRIPLE: a document that states `<alice> odrl:partOf <lab>`
+//     has identified `<lab>` as a collection just as surely as `a odrl:PartyCollection`,
+//     and the parser retains both. The prohibition still leaves the frozen path even
+//     though the REQUEST carries no membership evidence at all.
+#[test]
+fn policy_stated_membership_edge_identifies_the_collection() {
     let prohib = parse_policy_str(
         r#"
 @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
-<urn:pol/labdeny2> a odrl:Set ; odrl:prohibition [
+<https://pod.ex/alice> odrl:partOf <https://pod.ex/groups/lab> .
+<urn:pol/labdeny3> a odrl:Set ; odrl:prohibition [
     odrl:action odrl:read ;
     odrl:target <https://pod.ex/notes/n1> ;
     odrl:assignee <https://pod.ex/groups/lab> ] .
 "#,
         "turtle",
     )
-    .unwrap();
-    // NO `.with_party_membership(…)` — the bridge cannot tell LAB from a plain WebID.
-    let req = Request::new(odrl("read")).on(N1).by(CAROL);
+    .expect("policy parses");
+    assert!(
+        prohib.party_collections.contains(LAB),
+        "the `odrl:partOf` object is retained as a collection: {:?}",
+        prohib.party_collections
+    );
 
     let mut g = pod();
-    let out = materialize_prohibition_conditional(&mut g, &prohib, &req);
-    assert!(out.prohibited, "a deny condition IS emitted (no collection signal): {out:?}");
-    assert_eq!(cond_denies_for(&g, Some(LAB)), 1, "the head is the bare collection IRI");
-    assert_eq!(cond_denies_for(&g, Some(ALICE)), 0, "no member head — none was evidenced");
-
-    // The honest consequence, through the real enforcement path: a public allow stands,
-    // and an unevidenced member of the prohibited collection is NOT denied by it.
-    let permit = parse_policy_str(
-        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
-        <urn:pol/pub3> a odrl:Set ; odrl:permission [
-            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
-        "turtle",
-    )
-    .unwrap();
-    let mut store = PodStore::new(pod());
-    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
-    assert!(store.materialize_odrl_prohibition_conditional(&prohib, &req).prohibited);
-    assert!(
-        reads(&mut store, ALICE),
-        "documented gap: an UNEVIDENCED member of the prohibited collection keeps the \
-         public allow — the deny head matches by identity only. Supply the `odrl:partOf` \
-         evidence (which routes the rule to the one-shot path) to bind such a member."
-    );
-}
-
-// 45. THE LIMIT OF THE COLLECTION CHECK (ALLOW carve-out): the same evidence-shaped blind
-//     spot on the exception side. With no `odrl:partOf` edge for the excluded IRI the
-//     carve-out is frozen into a `noneOf` matcher naming the collection, which accepts no
-//     member session, so a member of the excluded collection keeps the grant.
-#[test]
-fn collection_carve_out_without_evidence_persists_an_unenforceable_matcher() {
-    let pol = parse_policy_str(
-        r#"
-@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
-<urn:pol/notlab2> a odrl:Set ; odrl:permission [
-    odrl:action odrl:read ;
-    odrl:target <https://pod.ex/notes/n1> ;
-    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
-                      odrl:rightOperand <https://pod.ex/groups/lab> ] ] .
-"#,
-        "turtle",
-    )
-    .unwrap();
-    let req = Request::new(odrl("read")).on(N1).by(CAROL); // no membership evidence
-
-    let mut g = pod();
-    let out = materialize_permission_conditional(&mut g, &pol, &req);
-    assert!(out.granted);
-    assert_eq!(cond_grants_for(&g, None), 1, "the everyone-except grant IS persisted");
-
-    let mut store = PodStore::new(pod());
-    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
-    assert!(reads(&mut store, CAROL), "the un-excluded requester reads");
-    assert!(
-        reads(&mut store, BOB),
-        "documented gap: an UNEVIDENCED member of the EXCLUDED collection escapes the \
-         frozen noneOf matcher, which names the collection IRI and accepts no member \
-         session. Supplying the `odrl:partOf` evidence routes the rule to the one-shot \
-         path instead (see `collection_carve_out_stays_one_shot`)."
-    );
+    let req = Request::new(odrl("read")).on(N1).by(CAROL); // no request-side evidence
+    materialize_prohibition_conditional(&mut g, &prohib, &req);
+    assert_eq!(cond_denies_for(&g, Some(LAB)), 0, "no bare collection deny head");
+    assert_eq!(cond_denies_for(&g, None), 0, "no conditional deny at all");
 }

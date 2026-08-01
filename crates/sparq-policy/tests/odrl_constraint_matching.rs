@@ -1073,3 +1073,73 @@ fn party_collection_members_reports_exactly_the_supplied_evidence() {
     let bare = Request::new(left("read")).on("http://example.org/x");
     assert!(bare.party_collection_members("http://example.org/team").is_empty());
 }
+
+// ===========================================================================
+// sq-rf9uv — `Policy::party_collections`: collection IDENTITY retained from the policy
+// DOCUMENT, carried independently of any member list. A consumer that freezes a rule
+// into an identity-matched head (the sparq-solid ODRL bridge) must recognise a
+// collection with ZERO supplied membership edges, which request evidence alone can
+// never do. [SONNET-4.6]
+// ===========================================================================
+
+#[test]
+fn party_collections_retains_declared_collection_identity() {
+    let p = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<http://example.org/team>  a odrl:PartyCollection .
+<http://example.org/alice> odrl:partOf <http://example.org/crew> .
+<http://example.org/photos> a odrl:AssetCollection .
+<http://example.org/img1>  odrl:partOf <http://example.org/photos> .
+<urn:pol/pc> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ; odrl:target <http://example.org/x> ;
+    odrl:assignee <http://example.org/team> ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses");
+
+    // The explicit type declaration — retained with NO membership edge anywhere.
+    assert!(
+        p.party_collections.contains("http://example.org/team"),
+        "an `a odrl:PartyCollection` subject is a collection even with zero members: {:?}",
+        p.party_collections
+    );
+    // The object of a policy-stated `odrl:partOf` edge — the same identity, expressed
+    // the other common way round.
+    assert!(
+        p.party_collections.contains("http://example.org/crew"),
+        "the object of an `odrl:partOf` edge is a collection: {:?}",
+        p.party_collections
+    );
+    // An explicitly-typed AssetCollection is NOT admitted through the shared
+    // `odrl:partOf` predicate.
+    assert!(
+        !p.party_collections.contains("http://example.org/photos"),
+        "an `a odrl:AssetCollection` is not a party collection: {:?}",
+        p.party_collections
+    );
+    // Nothing else is: neither the member, nor the rule target, nor the policy IRI.
+    assert!(!p.party_collections.contains("http://example.org/alice"), "a member is not a collection");
+    assert!(!p.party_collections.contains("http://example.org/x"), "the rule target is not a collection");
+    assert!(!p.party_collections.contains("urn:pol/pc"), "the policy is not a collection");
+}
+
+#[test]
+fn party_collections_is_empty_when_the_document_declares_none() {
+    let p = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/plain> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <http://example.org/x> ;
+    odrl:assignee <http://example.org/alice> ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses");
+    assert!(
+        p.party_collections.is_empty(),
+        "a plain assignee IRI is never inferred to be a collection: {:?}",
+        p.party_collections
+    );
+}

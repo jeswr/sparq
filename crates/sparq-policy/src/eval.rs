@@ -332,7 +332,9 @@ impl Request {
     /// a `Request` carries no `rdf:type odrl:PartyCollection` fact to distinguish them.
     /// A caller that needs to fail CLOSED on collection-valued input (the bridge's DENY
     /// and carve-out directions) can use a non-empty result as proof it is looking at a
-    /// collection, but gets no signal at all in the un-evidenced case.
+    /// collection, but gets no signal at all in the un-evidenced case — for that it must
+    /// consult collection IDENTITY, carried separately by
+    /// [`Policy::party_collections`](crate::Policy::party_collections).
     pub fn party_collection_members(&self, collection: &str) -> Vec<&str> {
         self.party_memberships
             .iter()
