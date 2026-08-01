@@ -98,6 +98,13 @@
 //! serializer versions and asserts the token edge cases byte-exactly, so any
 //! such change fails loudly with re-verification instructions.
 //!
+//! Status checked 2026-08-01 (issue #3455): W3C rdf12-n-quads is a **Working
+//! Draft** (23 July 2026) and has never been published past Working Draft, so
+//! the "once final" wording above is current, not stale. The byte-exact
+//! expectations were compared against that draft's grammar and all match it;
+//! the rule-by-rule comparison table, and the two notes it surfaced to carry
+//! forward to the REC re-check, are recorded in the test file's module docs.
+//!
 //! [OPUS-4.8] sq-hslb — full non-standard RDF-1.2 triple-term canon profile;
 //! sq-5i1d — `*_with::<D: Digest>` hash-profile parity (SHA-384).
 //! Fable unavailable; flag for re-review when Fable returns.
