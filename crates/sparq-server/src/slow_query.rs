@@ -198,14 +198,18 @@ mod tests {
     use sparq_core::Graph;
 
     /// A graph with a couple of triples so the planner has something to estimate.
+    ///
+    /// `sparq_engine::update` is PURE — it borrows the graph and RETURNS the updated one — so
+    /// the seeded graph is its return value, not the input. (Discarding it left this fixture
+    /// silently empty.)
     fn graph() -> Graph {
-        let mut g = Graph::new();
-        sparq_engine::update(
-            &mut g,
+        let g = sparq_engine::update(
+            &Graph::new(),
             "INSERT DATA { <http://e/a> <http://e/p> <http://e/b> . \
                            <http://e/b> <http://e/p> <http://e/c> }",
         )
         .expect("seed update");
+        assert_eq!(g.len(), 2, "the fixture must actually be seeded");
         g
     }
 
