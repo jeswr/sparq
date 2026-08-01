@@ -429,10 +429,13 @@ audit-readiness further. Each is a candidate future bead (none is a soundness cl
 implemented here).
 
 1. ~~**Sync `AGENTS.md` externalized-deps note to `noir_XPath v0.3.0`**~~ — DONE (`sq-6mhcd` /
-   #3138); the note now records v0.3.0 and distinguishes the face-repo release from the
-   `XPATH_TAG: "v0.2.0"` pin the differential lane actually verifies. The **pin bump itself**
-   (v0.2.0 → v0.3.0 in `xpath-differential.yml` + `run_differential_harness.sh`) remains open —
-   it is a CI change needing a green re-run, not doc-sync.
+   #3138); the note records v0.3.0 and distinguishes the face-repo release from the `XPATH_TAG`
+   pin the differential lane actually verifies. ~~**The pin bump itself**~~ — also DONE (#5456):
+   both `.github/workflows/xpath-differential.yml` and `zk/xpath/scripts/run_differential_harness.sh`
+   now pin `XPATH_TAG` **v0.3.0**, so the lane's evidence tracks the current release. The
+   resulting evidence is still only as good as a **green CI run of that lane** (`nargo test` +
+   per-test-function fault injection), which only CI can produce — read the pin and the run, not
+   this note. See §1.3.
 2. **Sync `compliance/cryptoreview/gap-register.md` CR-G6 + `research/zk-verifier-reaudit.md`
    NEW-2** to drop the "`HolderPop` not yet credential-bound" line — that item CLOSED on `main`
    (`sq-c2ql`/`sq-z8s7`/`sq-i1dt`/`sq-42e3`, forge-pinned by `holder_pop_forge.rs`). Leave the
