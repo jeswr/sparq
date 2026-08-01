@@ -319,6 +319,14 @@ pub struct ServerConfig {
     /// the buffered serialiser (same bytes, `Content-Length`, plus a `Warning` header) rather
     /// than being shed.
     ///
+    /// **Requires a memory ceiling to take effect.** The buffered fallback materialises the
+    /// whole response, so degrading is only the safer choice when one of
+    /// [`max_query_bytes`](Self::max_query_bytes) / [`max_query_rows`](Self::max_query_rows) /
+    /// [`max_results`](Self::max_results) bounds how large that can be. With none configured —
+    /// which is the default — this cap is inert and every SELECT-JSON response streams whatever
+    /// the pressure, since a bounded stream beats an unbounded buffer; the pin such a stream
+    /// holds is bounded instead by [`stream_pin_timeout`](Self::stream_pin_timeout).
+    ///
     /// **What it bounds, and why the ring's own `K` does not.** A streamed body keeps its
     /// `spawn_blocking` worker — and therefore its `Arc<Generation>` pin — alive for as long as
     /// the client is still draining chunks (bounded-channel backpressure). The ring's retention
@@ -887,10 +895,12 @@ impl Default for ServerConfig {
             body_read_timeout: Some(Duration::from_secs(30)),
             // [SONNET-4.6] sq-7d3dj.28: streaming admission ON by default, at a reading that a
             // healthy server never reaches (the ring retains 4 + the current generation, and a
-            // reader only ADDS to the count once it outlives retention). It is the bound that
-            // makes SELECT-JSON streaming-by-default safe: without it N stalled readers pin N
-            // stale generations with nothing to cap them. 0 / SPARQ_STREAM_MAX_LIVE_GENERATIONS=0
-            // disables admission. See ServerConfig::stream_max_live_generations.
+            // reader only ADDS to the count once it outlives retention). It only ENGAGES on a
+            // server that also set a memory ceiling, since degrading to the buffered path is
+            // only safe when something bounds the buffered answer — on this default config
+            // (no ceilings) the pin bound is stream_pin_timeout alone. 0 /
+            // SPARQ_STREAM_MAX_LIVE_GENERATIONS=0 disables admission outright. See
+            // ServerConfig::stream_max_live_generations.
             stream_max_live_generations: Some(32),
             // [SONNET-4.6] sq-7d3dj.28: 30s idle drain deadline — the read-side complement to the
             // slow-BODY guard above, and the only mechanism that RELEASES a generation a stalled
@@ -7032,12 +7042,22 @@ const STREAM_CHANNEL_CAP: usize = 4;
 /// permit is released when the handler returns, not when the body drains) bounds that. So when
 /// [`GenerationRing::live_generations`] has reached
 /// [`ServerConfig::stream_max_live_generations`] the response is DEGRADED to the buffered
-/// serialiser rather than shed: the buffered path produces the same bytes, is always
-/// memory-bounded, and never pins past serialize — the design's stated preference over a `503`
-/// (a correct answer beats a refusal when a correct answer is affordable).
+/// serialiser rather than shed: the buffered path produces the same bytes and never pins past
+/// serialize — the design's stated preference over a `503` (a correct answer beats a refusal
+/// when a correct answer is affordable).
+///
+/// **…but only when the correct answer IS affordable.** The buffered serialiser MATERIALISES
+/// the whole response, so degrading trades a bounded transport (four channel slots, whatever
+/// the result size) for an allocation the size of the answer. That is a bound only if something
+/// bounds the answer, and [`ServerConfig::default`] configures none of the memory ceilings. So
+/// admission first requires a configured ceiling ([`buffered_response_bound`]); with none the
+/// stream is ADMITTED under pressure, because streaming is then the memory-safer of the two and
+/// the pin it holds is separately bounded by [`ServerConfig::stream_pin_timeout`]. Preferring an
+/// unbounded buffer to a bounded stream *because the server is under pressure* would be exactly
+/// the wrong trade.
 ///
 /// Returns `None` to admit the stream, or `Some(warning)` — the `Warning` header value naming
-/// the reading and the cap — when it was declined.
+/// the reading, the cap, and the ceiling that made buffering affordable — when it was declined.
 ///
 /// **Cost, stated plainly.** [`GenerationRing::live_generations`] takes the ring's writer-side
 /// mutex and prunes its weak registry, so this adds one short lock — over a registry whose
@@ -7045,10 +7065,14 @@ const STREAM_CHANNEL_CAP: usize = 4;
 /// request. That is not free, and the ring's own `at` docs warn against the writer-side mutex on
 /// the hot path. The exact reading is taken deliberately: it is the signal the design specifies,
 /// its critical section is orders of magnitude shorter than the query it guards, and the check
-/// is skipped entirely when the cap is unset. A lock-free pressure gauge is the obvious
-/// follow-up if a benchmark ever attributes anything measurable to it.
+/// is skipped entirely when the cap is unset — or when no memory ceiling is configured, since
+/// then no reading can decline the stream. A lock-free pressure gauge is the obvious follow-up
+/// if a benchmark ever attributes anything measurable to it.
 fn stream_admission(state: &AppState, config: &ServerConfig) -> Option<header::HeaderValue> {
     let cap = config.stream_max_live_generations?;
+    // Checked BEFORE the reading: with nothing bounding the buffered answer there is no
+    // pressure at which degrading to it is the safer choice, so the ring lock is never taken.
+    let bound = buffered_response_bound(config)?;
     let live = state.live_generations();
     if live < cap {
         return None;
@@ -7056,10 +7080,36 @@ fn stream_admission(state: &AppState, config: &ServerConfig) -> Option<header::H
     // RFC 9111 §5.5 warn-code 199 "Miscellaneous warning" with the agent and a quoted text.
     // Positional `format!` args (CodeQL rust/unused-variable false positive on inline captures).
     header::HeaderValue::from_str(&format!(
-        "199 sparq \"streamed response declined: {} live generations at/over the --stream-max-live-generations cap of {}; served buffered\"",
-        live, cap
+        "199 sparq \"streamed response declined: {} live generations at/over the --stream-max-live-generations cap of {}; served buffered (bounded by {})\"",
+        live, cap, bound
     ))
     .ok()
+}
+
+/// [SONNET-4.6] (sq-7d3dj.28) The configured ceiling that makes the buffered fallback
+/// affordable, or `None` when nothing bounds it.
+///
+/// Every one of these caps aborts evaluation with an honest `413` before the working set — and
+/// therefore the serialised response the buffered path materialises — can exceed it, so any one
+/// of them turns "buffer the whole answer" from an unbounded allocation into a bounded one.
+/// `--max-query-bytes` prices the working set in bytes and is the closest thing to a direct
+/// bound on the response, so it is named first when several are set. The decision itself is just
+/// "some ceiling exists"; the name is carried into the degradation `Warning` so an operator
+/// reading it can see which of their ceilings is the one making the fallback affordable.
+///
+/// Note this is the ceiling on the ENGINE's working set, not a byte-exact bound on the response;
+/// it makes the buffered allocation a function of operator-chosen limits rather than of
+/// client-chosen result size, which is the property admission needs.
+fn buffered_response_bound(config: &ServerConfig) -> Option<&'static str> {
+    if config.max_query_bytes.is_some() {
+        Some("--max-query-bytes")
+    } else if config.max_query_rows.is_some() {
+        Some("--max-query-rows")
+    } else if config.max_results.is_some() {
+        Some("--max-results")
+    } else {
+        None
+    }
 }
 
 /// [SONNET-4.6] (sq-7d3dj.28) Attaches the [`stream_admission`] `Warning` to a response the

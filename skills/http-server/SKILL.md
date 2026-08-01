@@ -399,8 +399,14 @@ concurrency permit is released when the handler returns the response, not when t
 Two knobs bound it. **Admission** (`--stream-max-live-generations`, default 32): at/over that many
 live generations a SELECT-JSON response does not stream at all — it degrades to the buffered
 serialiser (same bytes, `Content-Length`) and carries
-`Warning: 199 sparq "streamed response declined: … served buffered"`. Degradation is preferred to a
-`503` shed: a correct answer beats a refusal when the correct answer is affordable. The buffered
+`Warning: 199 sparq "streamed response declined: … served buffered (bounded by …)"`. Degradation is preferred to a
+`503` shed: a correct answer beats a refusal when the correct answer is affordable. **Affordable is
+a precondition, not a hope** — the buffered serialiser materialises the whole response, so admission
+engages only on a server that also set a memory ceiling (`--max-query-bytes` / `--max-query-rows` /
+`--max-results`) to bound that answer, and a degraded result over the ceiling is then an honest
+pre-first-byte `413` rather than a materialised body. With no ceiling configured (the default) the
+cap is inert and SELECT-JSON streams under any pressure: a bounded transport beats an unbounded
+buffer, and the pin is still bounded by `--stream-pin-timeout`. The buffered
 chunk path releases its snapshot pin once its owned chunks are built rather than when the client
 finishes reading — without that the fallback would hold a generation for the whole drain too, and
 the cap would bound nothing. **The pin cap**
@@ -1473,7 +1479,7 @@ env overrides the default.
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
 | `--header-read-timeout SECS` | `SPARQ_HEADER_READ_TIMEOUT` | `15` (`0`=off) | **slow-loris guard**: max time a connection may take to send its complete request-header block — enforced at hyper's HTTP/1 connection layer by `sparq_server::serve` (NOT `axum::serve`, which never installs a timer so its header deadline is inert), so it fires BEFORE a handler and frees the concurrency slot a dribbling client would otherwise hold forever; connection closed when exceeded (`sq-2gqr`) |
 | `--body-read-timeout SECS` | `SPARQ_BODY_READ_TIMEOUT` | `30` (`0`=off) | **slow-body guard** (complement to `--header-read-timeout`): idle deadline between consecutive request-**body** reads — applied by `sparq_server::serve` via a `tower_http` `RequestBodyTimeoutLayer`. Closes the slow-**body** dribble a complete-header client could otherwise use (declare a large `Content-Length`, send a few bytes, stall) to hold the slot under `--max-body-bytes` and before `--query-timeout` starts. The timer RESETS after each received chunk, so an honest large upload is not penalised — only an idle stall is; body read fails → request aborted (`sq-lodb`) |
-| `--stream-max-live-generations N` | `SPARQ_STREAM_MAX_LIVE_GENERATIONS` | `32` (`0`=off) | **streaming admission**: at/over N generations alive anywhere (ring-retained **or** reader-pinned) a SELECT-JSON response is served **buffered** instead of streamed, with a `Warning: 199 sparq "…"` header — graceful degradation, never a shed. Bounds how many stale generations chunked bodies can hold: the ring's retention bound `K` covers only the ring's own references, and the `--max-concurrent` permit is released when the handler returns, not when the body drains (`sq-7d3dj.28`) |
+| `--stream-max-live-generations N` | `SPARQ_STREAM_MAX_LIVE_GENERATIONS` | `32` (`0`=off) | **streaming admission**: at/over N generations alive anywhere (ring-retained **or** reader-pinned) a SELECT-JSON response is served **buffered** instead of streamed, with a `Warning: 199 sparq "…"` header — graceful degradation, never a shed. Bounds how many stale generations chunked bodies can hold: the ring's retention bound `K` covers only the ring's own references, and the `--max-concurrent` permit is released when the handler returns, not when the body drains. **Inert unless a memory ceiling is set** (`--max-query-bytes`/`--max-query-rows`/`--max-results`): buffering materialises the whole answer, so with nothing bounding it the stream is admitted regardless of pressure (`sq-7d3dj.28`) |
 | `--stream-pin-timeout SECS` | `SPARQ_STREAM_PIN_TIMEOUT` | `30` (`0`=off) | **per-stream pin cap** (read-side complement to `--body-read-timeout`): idle deadline between consecutive chunk hand-offs to a streaming client, reset after each chunk — an honest slow-link export is not penalised, only a stall is. A reader that stops draining has its stream **abandoned** so the generation pin is released, and the body is truncated under the truncation-safety contract (`X-Sparq-Truncated: pin-deadline`), never silently short (`sq-7d3dj.28`) |
 | `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0`=off) | result/solution cap (SELECT + CONSTRUCT/DESCRIBE WHERE-solutions + EXPLAIN ANALYZE; not ASK/GSP-read/UPDATE) → honest `413` (not truncation) |
 | `--max-query-rows N` | `SPARQ_MAX_QUERY_ROWS` | unlimited (`0`=off) | **memory cap** (coarse): working-set ROW ceiling on **every** form → honest `413` (`sq-ebii`) |

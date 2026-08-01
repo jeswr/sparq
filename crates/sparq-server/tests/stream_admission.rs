@@ -15,7 +15,10 @@
 //!    does not stream at all: it GRACEFULLY DEGRADES to the buffered serialiser (identical
 //!    bytes, `Content-Length`, never a pin held past serialize) with a `Warning` header. The
 //!    design prefers this to a `503` shed: a correct answer beats a refusal when the correct
-//!    answer is affordable.
+//!    answer is affordable — and the buffered answer is only AFFORDABLE when a memory ceiling
+//!    (`--max-query-bytes` / `--max-query-rows` / `--max-results`) bounds it, since the buffered
+//!    serialiser materialises the whole response. With no ceiling configured the stream is
+//!    admitted under any pressure, and both halves of that are asserted here.
 //! 2. **The per-stream pin cap** — a reader that stops draining past `--stream-pin-timeout` has
 //!    its stream ABANDONED so the pin is released, and the body is truncated under the
 //!    sq-7d3dj.26 contract: the document-closing `]}}` is never written and the reason is
@@ -39,6 +42,12 @@ use tower::ServiceExt;
 const TRIPLES: usize = 20_000;
 
 const QUERY: &str = "SELECT * WHERE { ?s ?p ?o }";
+
+/// A configured memory ceiling, far above anything [`TRIPLES`] can produce, so it never refuses
+/// these queries. Its presence is what makes the buffered fallback a BOUNDED allocation, and
+/// therefore what lets admission degrade a stream at all: without one the server would be
+/// trading a bounded transport for an unbounded buffer precisely when it is under pressure.
+const ROOMY_ROW_CEILING: usize = 1_000_000;
 
 fn big_graph() -> Graph {
     let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
@@ -128,6 +137,7 @@ async fn under_ring_pressure_a_stream_degrades_to_the_buffered_path() {
         big_graph(),
         ServerConfig {
             stream_max_live_generations: Some(CAP),
+            max_query_rows: Some(ROOMY_ROW_CEILING),
             ..ServerConfig::default()
         },
     ));
@@ -156,6 +166,13 @@ async fn under_ring_pressure_a_stream_degrades_to_the_buffered_path() {
     assert!(warning.starts_with("199 sparq "), "warning: {}", warning);
     assert!(
         warning.contains("cap of 2") && warning.contains("live generations"),
+        "warning: {}",
+        warning
+    );
+    // …and names the ceiling that made buffering the whole answer affordable, so an operator
+    // can see WHICH of their limits the fallback is leaning on.
+    assert!(
+        warning.contains("bounded by --max-query-rows"),
         "warning: {}",
         warning
     );
@@ -198,7 +215,11 @@ async fn a_degraded_response_holds_no_pin_while_the_client_drains() {
             // Small: this is about the PIN, not the body size, and every buffered SELECT-JSON
             // response goes through the same chunked path whatever its length.
             Graph::load_str("<http://ex/s> <http://ex/p> \"o\" .", "turtle").unwrap(),
-            ServerConfig { stream_max_live_generations: Some(2), ..ServerConfig::default() },
+            ServerConfig {
+                stream_max_live_generations: Some(2),
+                max_query_rows: Some(ROOMY_ROW_CEILING),
+                ..ServerConfig::default()
+            },
         ));
         publish_generations(&app, 3).await;
 
@@ -247,6 +268,8 @@ async fn with_admission_disabled_the_same_pressure_still_streams() {
         big_graph(),
         ServerConfig {
             stream_max_live_generations: None,
+            // Everything else matches the degradation test, so the cap is the only difference.
+            max_query_rows: Some(ROOMY_ROW_CEILING),
             ..ServerConfig::default()
         },
     ));
@@ -281,6 +304,9 @@ async fn below_the_cap_a_stream_is_admitted() {
             // The ring holds the current generation plus up to 4 retained, so 16 is far above
             // anything three updates can produce.
             stream_max_live_generations: Some(16),
+            // Set, so this control isolates the CAP comparison — a stream admitted here is
+            // admitted because the pressure is below 16, not because degrading was unaffordable.
+            max_query_rows: Some(ROOMY_ROW_CEILING),
             ..ServerConfig::default()
         },
     ));
@@ -294,6 +320,78 @@ async fn below_the_cap_a_stream_is_admitted() {
         "pressure below the cap must not degrade the response"
     );
     assert!(parts.headers.get(axum::http::header::WARNING).is_none());
+}
+
+/// THE AFFORDABILITY TEST. Degrading swaps a bounded transport (four channel slots, whatever the
+/// result size) for an allocation the size of the whole serialised answer. On a server with NO
+/// memory ceiling configured — which is `ServerConfig::default()` — nothing bounds that answer, so
+/// the same over-cap pressure must NOT degrade: a client could otherwise pair a large SELECT with
+/// ring pressure to force the server to materialise an unbounded response exactly when it is
+/// already under load. Streaming is the memory-safer of the two, and the pin it holds is bounded
+/// by `--stream-pin-timeout` instead.
+#[tokio::test]
+async fn over_the_cap_with_no_memory_ceiling_the_stream_is_still_admitted() {
+    let app = router(AppState::with_config(
+        big_graph(),
+        ServerConfig {
+            // The SAME cap the degradation test uses, under the SAME pressure — the only
+            // difference is that no ceiling bounds the buffered answer.
+            stream_max_live_generations: Some(2),
+            max_query_rows: None,
+            max_query_bytes: None,
+            max_results: None,
+            ..ServerConfig::default()
+        },
+    ));
+    publish_generations(&app, 3).await;
+
+    let response = app.clone().oneshot(select_request()).await.unwrap();
+    let (parts, body) = response.into_parts();
+    assert_eq!(parts.status, axum::http::StatusCode::OK);
+    assert!(
+        parts.headers.get(axum::http::header::CONTENT_LENGTH).is_none(),
+        "FORBIDDEN: an unbounded result must not be buffered whole just because the ring is busy"
+    );
+    assert!(
+        parts.headers.get(axum::http::header::WARNING).is_none(),
+        "nothing was degraded, so nothing should claim it was"
+    );
+    let out = drain(body).await;
+    assert!(out.bytes.ends_with(b"]}}"));
+}
+
+/// …and the corollary: when a ceiling IS configured, it really does bound the degraded response.
+/// Over-cap pressure plus a result that EXCEEDS the ceiling is an honest pre-first-byte `413`,
+/// not a materialised body — the buffered fallback is bounded by refusal, which is the property
+/// that makes degrading affordable in the first place.
+#[tokio::test]
+async fn a_degraded_response_that_exceeds_the_ceiling_is_refused_not_materialised() {
+    let app = router(AppState::with_config(
+        big_graph(),
+        ServerConfig {
+            stream_max_live_generations: Some(2),
+            // Far below TRIPLES: this result cannot fit under the ceiling.
+            max_query_rows: Some(100),
+            ..ServerConfig::default()
+        },
+    ));
+    publish_generations(&app, 3).await;
+
+    let response = app.clone().oneshot(select_request()).await.unwrap();
+    let (parts, body) = response.into_parts();
+    assert_eq!(
+        parts.status,
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+        "a degraded response over the ceiling must be refused before the first byte"
+    );
+    let out = drain(body).await;
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&out.bytes)
+            .ok()
+            .and_then(|v| v["results"]["bindings"].as_array().map(Vec::len))
+            .is_none(),
+        "a refusal must not carry a result set"
+    );
 }
 
 /// THE PIN-CAP TEST. A client that takes the response and then STOPS READING is abandoned once
