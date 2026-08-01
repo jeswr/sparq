@@ -31,6 +31,10 @@ mod classify;
 mod extract;
 #[cfg(feature = "hasse")]
 mod hasse;
+// [SONNET-4.6] sq-clsv6: incremental classification under TBox edits — only under
+// `incremental`, so the stateless build carries zero edit-tracking state or code.
+#[cfg(feature = "incremental")]
+mod incremental;
 mod normal;
 #[cfg(feature = "rbox")]
 mod rbox;
@@ -39,6 +43,15 @@ mod rbox;
 pub use abox::{realize, realize_graph, AboxReport, Realization};
 #[cfg(feature = "hasse")]
 pub use hasse::{classify_hasse_graph, DirectHierarchy};
+// [SONNET-4.6] sq-clsv6 (Phase E5): the stateful edit-tracking classifier. Read
+// `IncrementalClassifier`'s docs for what "incremental" does and does NOT cover here (additions
+// are folded in; a retraction takes an honest full-re-classification fallback).
+#[cfg(feature = "incremental")]
+pub use incremental::{EditDisposition, FullReason, IncrementalClassifier, IncrementalReport};
+// [SONNET-4.6] sq-q0o82 (E4 follow-up): the compute/apply attribution the parallel-apply
+// refinement decision is measured on — see `classify_graph_par_stats`.
+#[cfg(feature = "par")]
+pub use classify::ParPhaseStats;
 
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
@@ -57,7 +70,10 @@ const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subProp
 /// self-restrictions** (sq-pbz04.2.6: `owl:hasSelf "true"^^xsd:boolean` — the `∃r.Self` local
 /// reflexivity concept, completion rules **CR-Self**); with
 /// the `rbox` feature it adds the RBox role automaton (`rdfs:subPropertyOf` role inclusions,
-/// `owl:propertyChainAxiom` chains, `owl:TransitiveProperty` — completion rules CR10/CR11).
+/// `owl:propertyChainAxiom` chains, `owl:TransitiveProperty` — completion rules CR10/CR11);
+/// completeness there additionally assumes a REGULAR told RBox — a non-regular one (forbidden
+/// by the OWL 2 global restrictions) is flagged via the `rbox_non_regular` field, not silently
+/// classified as if complete.
 /// Axioms using constructs outside the active fragment are NOT applied and their class-axiom
 /// occurrences are counted in [`Report::skipped_axioms`] (honest incompleteness rather than a
 /// silent wrong answer). Two kinds of skip are distinguished by the EL theory:
@@ -111,9 +127,16 @@ pub struct Report {
     pub emitted_subsumptions: usize,
     /// Named classes found unsatisfiable (`⊑ owl:Nothing`).
     pub unsatisfiable_classes: usize,
+    /// [SONNET-4.6] sq-26zuf: whether the saturation derived
+    /// `owl:Thing rdfs:subClassOf owl:Nothing` (`⊤ ⊑ ⊥`). This global clash is separate from
+    /// [`unsatisfiable_classes`](Self::unsatisfiable_classes), which counts only named classes
+    /// and therefore excludes `owl:Thing`.
+    pub thing_unsatisfiable: bool,
     /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): ABox assertions the realiser DEFERRED as counted skips
-    /// — a `DataPropertyAssertion` (literal object; the `cdomain` point-range rescue is a
-    /// sequenced follow-up) or a `ClassAssertion` whose class expression is outside the EL
+    /// — a `DataPropertyAssertion` whose literal has no minted point range (EVERY literal object
+    /// without `cdomain`; [SONNET-4.6] sq-vkq9u rescues the exact-numeric ones as `{a} ⊑ ∃q.{v}`
+    /// when `abox` and `cdomain` are composed, leaving the string / lang-tagged / float-tier /
+    /// ill-formed cases deferred) or a `ClassAssertion` whose class expression is outside the EL
     /// fragment. Set only by [`realize`] / [`realize_graph`]; the TBox `Classifier::classify` /
     /// `classify_graph` leave it `0`. A non-zero count is the honest "n instance facts not
     /// internalized" signal (fail-closed — never a guessed typing).
@@ -127,6 +150,22 @@ pub struct Report {
     /// typed `Classifier::classify` API leaves it `0`.
     #[cfg(feature = "rbox")]
     pub emitted_role_subsumptions: usize,
+    /// [SONNET-4.6] sq-oj06v (`rbox`): honest RBox-regularity flag — `true` when the TOLD RBox
+    /// (role inclusions + property chains + transitive roles) is NOT regular, i.e. its
+    /// dependency graph has a cycle through a property-chain constraint (detected by
+    /// `rbox::told_rbox_regular` over the pre-binarization axioms). The OWL 2 global
+    /// restrictions forbid such an RBox; the CR10/CR11 saturation still TERMINATES and every
+    /// derived subsumption stays SOUND, but the EL+ completeness argument assumes regularity —
+    /// so when this is `true` the classification MAY BE INCOMPLETE (the `skipped_axioms`
+    /// honesty posture: flagged, never silently wrong). Conservative: told-inclusion edges
+    /// participate in the cycle detection, so a chain constraint fed back through an inclusion
+    /// is also flagged; pure inclusion cycles (equivalent roles), binary transitivity
+    /// (`r ∘ r ⊑ r`), and chains with an `owl:topObjectProperty` superproperty (normatively
+    /// admissible, unconditionally) are NOT. Set by every extraction-based entry (`Classifier::classify`,
+    /// `classify_graph`, their `par` twins, and the `abox` realiser); `false` on a regular or
+    /// RBox-free input, and absent (like the whole role automaton) without the `rbox` feature.
+    #[cfg(feature = "rbox")]
+    pub rbox_non_regular: bool,
 }
 
 /// The complete class-subsumption lattice for the named classes of a TBox, as a typed view
@@ -207,7 +246,11 @@ impl ClassHierarchy {
 /// use sparq_core::Graph;
 /// use sparq_reason_el::Classifier;
 ///
-/// // A ⊑ ∃r.B, B ⊑ C, ∃r.C ⊑ D  ⊨  A ⊑ D  (the CR4 subsumption OWL 2 RL cannot derive).
+/// // A ⊑ ∃r.B, B ⊑ C, ∃r.C ⊑ D  ⊨  A ⊑ D  (CR4 — reasoning through an ∃r successor).
+/// // [OPUS-5] sq-2ch27: the "…which OWL 2 RL cannot derive" gloss this line used to carry was
+/// // measured WRONG for THIS shape — sparq's RL implements `scm-svf1`, and both restriction
+/// // nodes appear syntactically, so RL closes it too. The RL gap that does hold is pinned in
+/// // `crates/sparq-cli/tests/el_cli.rs::el_derives_what_rl_cannot` (TBox conjunction).
 /// let ttl = r#"
 ///   @prefix : <http://ex/> .
 ///   @prefix owl: <http://www.w3.org/2002/07/owl#> .
@@ -255,7 +298,7 @@ impl Classifier {
     ) -> ClassHierarchy {
         // Same TBox-only extraction contract as `classify` above.
         let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
-        let sat = saturate_extracted_par(&ex, threads);
+        let (sat, _stats) = saturate_extracted_par(&ex, threads);
         let cls = classify::classify(&sat, &ex.names);
         hierarchy_from(cls, &ex.names, ex.report)
     }
@@ -280,12 +323,13 @@ pub(crate) fn saturate_extracted(ex: &extract::Extracted) -> classify::Saturatio
 /// [FABLE-5] sq-wy3i6 (E4): the parallel twin of [`saturate_extracted`] — same `rbox`
 /// branching, but the fixpoint runs on the bounded scoped-worker pool. Kept structurally
 /// parallel to `saturate_extracted` so the two entry families cannot drift on the role-box
-/// wiring.
+/// wiring. Returns the [`ParPhaseStats`] compute/apply attribution alongside the fixpoint
+/// (sq-q0o82) — callers that do not want it drop the second element.
 #[cfg(feature = "par")]
 pub(crate) fn saturate_extracted_par(
     ex: &extract::Extracted,
     threads: std::num::NonZeroUsize,
-) -> classify::Saturation {
+) -> (classify::Saturation, ParPhaseStats) {
     #[cfg(feature = "rbox")]
     {
         let role_box = rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
@@ -323,6 +367,7 @@ pub(crate) fn hierarchy_from(
         .filter_map(|&c| names.dict_of(c))
         .collect();
     report.unsatisfiable_classes = unsatisfiable.len();
+    report.thing_unsatisfiable = cls.thing_unsatisfiable;
     ClassHierarchy {
         subsumers,
         unsatisfiable,
@@ -370,9 +415,29 @@ pub fn classify_graph_par(
     triples: &mut Vec<[Id; 3]>,
     threads: std::num::NonZeroUsize,
 ) -> Report {
+    classify_graph_par_stats(dict, triples, threads).0
+}
+
+/// [SONNET-4.6] sq-q0o82 (E4 follow-up, `par`): [`classify_graph_par`] plus the
+/// [`ParPhaseStats`] attribution of the saturation's PARALLEL compute phase against its
+/// SEQUENTIAL apply phase. The graph mutation, the emitted triples and the [`Report`] are
+/// byte-identical to [`classify_graph_par`] (which is this function discarding the stats) —
+/// the instrumentation only reads two clocks per bulk-synchronous round.
+///
+/// This is the measurement seam for the open "should the apply phase be parallelised too?"
+/// question: parallelising `add_link`'s CR4/CR5 (and the `rbox` CR10/CR11) closure would put
+/// the identical-closure invariant at risk, so it is worth doing ONLY where
+/// [`ParPhaseStats::apply_fraction`] on a real ontology says apply dominates. Native targets
+/// only (see [`Classifier::classify_par`]).
+#[cfg(feature = "par")]
+pub fn classify_graph_par_stats(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    threads: std::num::NonZeroUsize,
+) -> (Report, ParPhaseStats) {
     let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
-    let sat = saturate_extracted_par(&ex, threads);
-    materialize_lattice(dict, triples, &ex, &sat)
+    let (sat, stats) = saturate_extracted_par(&ex, threads);
+    (materialize_lattice(dict, triples, &ex, &sat), stats)
 }
 
 /// The shared `classify_graph` / `classify_graph_par` tail: project the saturation onto named

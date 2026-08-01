@@ -1150,7 +1150,7 @@ function HonestyPanel() {
         <p className="flex flex-wrap gap-3 pt-1">
           <a
             className="text-primary underline-offset-4 hover:underline"
-            href="https://github.com/jeswr/sparq/blob/main/SECURITY.md"
+            href="https://github.com/sparq-org/sparq/blob/main/SECURITY.md"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -1158,7 +1158,7 @@ function HonestyPanel() {
           </a>
           <a
             className="text-primary underline-offset-4 hover:underline"
-            href="https://github.com/jeswr/sparq/tree/main/compliance/cryptoreview"
+            href="https://github.com/sparq-org/sparq/tree/main/compliance/cryptoreview"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -1166,7 +1166,7 @@ function HonestyPanel() {
           </a>
           <a
             className="text-primary underline-offset-4 hover:underline"
-            href="https://github.com/jeswr/sparq/tree/main/zk/compose"
+            href="https://github.com/sparq-org/sparq/tree/main/zk/compose"
             target="_blank"
             rel="noopener noreferrer"
           >

@@ -29,12 +29,27 @@
 //! // A human-readable rendering:
 //! const text = Validator.validateText(dataTurtle, shapesTurtle, "turtle");
 //! ```
+//!
+//! For **repeat validation without re-parse** (a large fixed data graph re-checked as
+//! shapes are edited, or one shapes graph over many documents), the opt-in `stateful`
+//! feature adds a pre-parsed `ParsedGraph` handle — parse once, validate many times.
+//! OFF by default so the showcase artifact (and its deterministic bundle-bytes record)
+//! is unchanged; see the `stateful` module and `research/shacl-wasm-stateful-2026-07.md`
+//! (the sq-01xlp measurement + decision).
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-lfmf: crate has zero `unsafe`
 
 use oxrdf::Term;
 use sparq_core::Graph;
 use sparq_shacl::{ValidationReport, ValidationResult};
 use wasm_bindgen::prelude::*;
+
+// [FABLE-5] sq-01xlp: the opt-in pre-parsed/stateful validation handle. Behind the
+// non-default `stateful` feature so the default showcase bundle carries zero extra
+// surface; CI builds + tests the bundle in both feature states.
+#[cfg(feature = "stateful")]
+mod stateful;
+#[cfg(feature = "stateful")]
+pub use stateful::ParsedGraph;
 
 /// Parses the two RDF documents (`data` and `shapes`) in `format` and validates, returning
 /// the report. The single place both graphs are loaded the same way (the syntaxes
@@ -120,7 +135,7 @@ fn result_message(r: &ValidationResult) -> String {
 /// Serialises a [`ValidationReport`] to the JS-facing JSON described on [`Validator::validate`].
 /// The bundle carries no serde, so — exactly like the lean bundle's SHACL-JSON serialiser —
 /// the document is assembled by hand and strings are escaped by [`push_json_string`].
-fn report_to_json(report: &ValidationReport) -> String {
+pub(crate) fn report_to_json(report: &ValidationReport) -> String {
     let mut out = String::from("{\"conforms\":");
     out.push_str(if report.conforms { "true" } else { "false" });
     out.push_str(",\"results\":[");

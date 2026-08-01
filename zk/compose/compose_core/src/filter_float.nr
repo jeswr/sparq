@@ -16,6 +16,37 @@
 //! everything (all of lt/le/gt/ge/eq false, ne true), which is exactly the
 //! `sparq_ieee754` predicate contract (deliberately NOT std::cmp::Ord; see
 //! noir-circuit-patterns "Standard library traits").
+//!
+//! [FABLE-5] sq-lxi7 -- GENERAL fractional/scientific `xsd:double` fragment:
+//! STATUS **DEFERRED, NOT implemented; affordability UNRESOLVED (no gate claim)**.
+//! `filter_f64_composable_check` (below) covers only the INTEGER-VALUED fragment
+//! (exact `f64::from(u64)` for value < 2^53). The general fragment (fractional
+//! mantissas, scientific `1.5E3`, rounded values) needs a full in-circuit
+//! decimal->IEEE-754 round-to-nearest-even parser: arbitrary lexical form ->
+//! the 52-bit significand, with subnormal + overflow-to-(+/-)0 / (+/-)Inf and
+//! tie-to-even at the halfway boundary. The SOUND shape (noir-optimisation
+//! "push the compute into an unconstrained Brillig hint + an in-circuit
+//! verifier") is: witness the canonical mantissa digits + base-10 exponent and
+//! bind them to the canonical `xsd:double` token exactly as the integer member
+//! binds its digits -- the HARD sub-problem being reconstructing xsd:double's
+//! CANONICAL lexical form (single leading digit, mandatory '.', normalised 'E'
+//! exponent) for the blake3 bind -- then take the claimed IEEE `bits` as a
+//! Brillig hint and CONSTRAIN it by checking the committed value
+//! `V = mantissa * 10^exp` lies inside the RNE rounding interval of the real
+//! that `bits` denotes: a cross-base (10 vs 2) BIG-INTEGER interval comparison
+//! with correct tie-to-even. That big-integer interval check is precisely the
+//! part that "may blow the constraint budget": it MUST be `bb gates`-measured
+//! (per the noir-optimisation skill) BEFORE it is called affordable, and if the
+//! measured cost is prohibitive the honest outcome is to document the cost and
+//! REJECT -- never ship an unsound shortcut such as `mantissa * 10^exp` in f64
+//! (which silently loses RNE). This work item could not run that measurement:
+//! the pinned nargo/bb toolchain is absent from the impl environment (it lives
+//! only in the `zk-toolchain.yml` CI lane). So NO parser ships here; the
+//! integer-valued member stays the only composable double fragment, and an
+//! out-of-fragment (fractional/scientific) operand remains UNPROVABLE by the
+//! digit-only token rather than silently mis-bound. Left for a
+//! toolchain-equipped follow-up (measure -> ship-or-documented-reject +
+//! external audit, sq-qhy4).
 
 use crate::filter_int::{OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
 use crate::hashes::{h2, TYPE_CODE_LITERAL};

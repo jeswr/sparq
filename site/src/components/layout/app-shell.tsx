@@ -54,7 +54,7 @@ import {
 // register run / EXPLAIN / connect verbs was removed with /try, sq-4hiqe — /app owns them).
 import { PaletteCommandsProvider } from "@/components/palette-commands";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 // [GPT-5.6] sq-f8ufg — the published documentation surface currently lives in the repository's
 // Agent Skills router. The mdBook build is validation-only (not deployed at /docs or /guide), so
 // link to this canonical, live index rather than presenting a dead route on the marketing site.

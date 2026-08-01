@@ -77,6 +77,13 @@ scs = []
 imports = []
 
 [dev-dependencies]
+# [SONNET-4.6] sq-z1xv8 — the shared ratchet-floor constants. DEV-ONLY (zero-dep,
+# `publish = false`): the conformance ratchet floor this crate's test runner enforces is
+# the SAME `const` sparq-conformance's central scoreboard reports, so the two cannot
+# drift, and the dep edge puts this crate in the floors crate's reverse-dependency
+# closure (which is what makes CI test-selection sound for the floor — it replaces the
+# guard test's old runtime read of this file's source).
+sparq-conformance-floors = { path = "../sparq-conformance-floors" }
 # [OPUS-4.8] sq-55c1: the differential-fuzz harness (tests/diff_fuzz.rs) talks to
 # the pluggable reference-engine adapter over JSON (request out, normalised report
 # in). serde derive on the report structs; serde_json for (de)serialisation — the

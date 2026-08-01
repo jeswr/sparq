@@ -15,6 +15,17 @@
 // forge-test overclaim. Bibliographic entries were verified against public sources
 // (zksparql.org, CEUR-WS Vol-4085, Springer/ACM indexes) on 2026-07-01.
 //
+// REVISION 3 (sq-gum8.5, submission support): hardened the related-work section into
+// subsections (3.1-3.5) covering PoneglyphDB, ZKGraph, VeriDKG, zk-creds/Crescent and ZKLP,
+// with (a) an EXPLICIT disclaimer of any priority/compliance claim about in-circuit IEEE 754
+// (ZKLP exists and claims that ground), (b) an explicit statement that the fragment of
+// section 7.1 is NARROWER than the relational systems' - OPTIONAL/MINUS/NOT EXISTS/aggregation
+// are OUT, so no coverage advantage is claimed, and (c) an explicit self-delta vs the
+// Braun-Kaefer / Braun-Wright-Kaefer line (dataset soundness vs evaluation correctness).
+// Added a reproducibility pointer (section 16) to the deterministic constraint-count pack in
+// bench/zk-compose/. New bibliographic entries carry the provenance caveat noted at the head
+// of the References section. NO number of any kind was added to this document.
+//
 // HONESTY: the entire zkSPARQL estate is research-grade and NOT externally audited (open
 // external-audit gate sq-qhy4). This draft states that plainly and repeatedly; it must never be
 // edited into claiming a settled production guarantee while that gate is open.
@@ -159,39 +170,118 @@ candidate-normative successor to this draft.
 
 This section is informative.
 
-*Verifiable query evaluation over databases.* IntegriDB #cite("INTEGRIDB") and vSQL
-#cite("VSQL") prove SQL query answers correct against a committed, outsourced database, and
-ZKSQL #cite("ZKSQL") extends the guarantee to zero knowledge: the answer is proven correct
-while the database's records stay hidden. zkSPARQL targets the same class of guarantee for
-RDF and SPARQL, with three structural differences: the data model is graph-shaped, with blank
-nodes and per-graph canonicalisation (section 6); trust is rooted in *issuer attestation
-signatures* over per-graph commitments rather than in a single data owner's commitment, so
-proofs compose across many small signed graphs (credentials); and the admissibility of a
-proof *method* is itself policy-controlled (section 13). The zkSPARQL manifest is a
-non-interactive object designed to be checked offline against externally supplied trust
-anchors (section 11).
+Every comparison below states *what* a system proves and *about what*. None of it is a
+performance comparison: this document reports no measured comparison against another system
+and reproduces no other system's reported figures. The only quantitative artefact it points
+at is the deterministic constraint-count pack of section 16.2, which counts gates in this
+document's own circuit family and in nothing else.
 
-*Anonymous credentials and selective disclosure.* CL signatures #cite("CL02"), the BBS line
-of multi-message signatures #cite("BBS04"), and the `bbs-2023` / `ecdsa-sd-2023`
-Data-Integrity cryptosuites #cite("VC-DI") let a holder reveal a subset of signed attributes,
-sometimes with simple predicates. zkSPARQL generalises the *statement language*: instead of
-disclosing attribute subsets, the holder proves that a SPARQL query — joins, typed value
-filters, revocation state — evaluates as claimed over the signed data (section 7), without
-disclosing the data. It does not replace credential-level selective disclosure: ingest of
-`bbs-2023` credentials is an explicitly deferred seam (section 15).
+== Verifiable and zero-knowledge query evaluation over databases
 
-*Zero-knowledge proofs over RDF and SPARQL.* The annotation and admissibility layer of this
-document (sections 12–13) directly extends the `sec-prop` security-properties vocabulary of
-Wright, Shadbolt, Zhao, Zhao and Braun #cite("SEC-PROP") — prior work of this document's
-editor — and the query-proof pipeline shares that work's goal of proving correct SPARQL
-evaluation over verifiable credentials, realised here with a different commitment scheme,
-circuit family, and manifest format. The research agenda is stated in #cite("WRIGHT-DC25").
-Braun, Wright and Käfer #cite("BWK26") prove soundness of SPARQL query results via
-*selectively disclosed views* of the queried dataset — a disclosure-based mechanism, where
-zkSPARQL keeps the source graphs hidden and proves algebra evaluation in-circuit. The sparq
-estate described here is an engine-integrated implementation with its own manifest format,
-verifier obligation set, and admissibility layer; it is not a wire-compatible implementation
-of any of the above.
+IntegriDB #cite("INTEGRIDB") and vSQL #cite("VSQL") prove SQL query answers correct against a
+committed, outsourced database: integrity against a cheating server, with no hiding of the
+data. ZKSQL #cite("ZKSQL") extends the guarantee to zero knowledge — the answer is proven
+correct while the database's records stay hidden — with an interactive, VOLE-based argument
+run between prover and verifier. PoneglyphDB #cite("PONEGLYPHDB") addresses the same SQL
+setting with a *non-interactive* PLONKish argument, so its proof object, like the manifest of
+section 8, can be checked offline and after the fact.
+
+zkSPARQL targets the same class of guarantee for RDF and SPARQL, with four structural
+differences: the data model is graph-shaped, with blank nodes and per-graph canonicalisation
+(section 6); trust is rooted in *issuer attestation signatures* over per-graph commitments
+rather than in a single data owner's commitment, so proofs compose across many small signed
+graphs (credentials); credential-layer statements — holder possession, revocation
+non-membership, hidden-issuer attestation — are carried by the *same* manifest and the same
+verifier obligation set as the query-layer statements (sections 8 and 10), rather than by a
+separate credential protocol; and the admissibility of a proof *method* is itself
+policy-controlled (section 13). The zkSPARQL manifest is a non-interactive object designed to
+be checked offline against externally supplied trust anchors (section 11).
+
+The fragment comparison cuts the other way and is stated plainly here so it is not mistaken:
+the relational systems above accept far more of their query language than section 7.1 accepts
+of SPARQL. `OPTIONAL`, `MINUS`, `FILTER NOT EXISTS` and aggregation are #strong[OUT] of this
+fragment by design, because each asserts a closed-world or completeness property that
+composed membership proofs do not establish. This document therefore claims no coverage
+advantage over relational zero-knowledge query systems; its fragment is monotone and
+deliberately narrow.
+
+== Verifiable and zero-knowledge queries over graphs and RDF
+
+ZKGraph #cite("ZKGRAPH") evaluates graph queries in zero knowledge under a PLONKish argument
+and is the closest graph-shaped analogue. It does not target RDF or SPARQL: there is no RDF
+dataset canonicalisation, no blank-node discipline, and no notion of many independently
+signed source graphs — the three things sections 6 and 7 are built around.
+
+VeriDKG #cite("VERIDKG") verifies SPARQL query results over decentralised knowledge graphs
+using an authenticated data structure. Its guarantee is *integrity against a cheating server*
+and it is deliberately not hiding: the verifier sees the results and the authenticated
+structure they were drawn from. That is a different point in the design space from the model
+of section 5, where the verifier is not trusted with the source graphs at all. The two
+guarantees are complementary rather than competing — and VeriDKG's is a settled published
+result, whereas this document's is not, pending the audit gate of section 17.1.
+
+== Anonymous credentials and selective disclosure
+
+CL signatures #cite("CL02"), the BBS line of multi-message signatures #cite("BBS04"), and the
+`bbs-2023` / `ecdsa-sd-2023` Data-Integrity cryptosuites #cite("VC-DI") let a holder reveal a
+subset of signed attributes, sometimes with simple predicates. zk-creds #cite("ZKCREDS")
+generalises the mechanism by putting the credential check inside a zkSNARK, so statements
+about attributes of *existing* identity documents can be proven; Crescent #cite("CRESCENT")
+follows the same route for existing JWT and mDL credentials with a prepare-once /
+show-fast split.
+
+What all of these prove is a statement about a *credential and its attributes*. zkSPARQL
+generalises the *statement language* instead: the holder proves that a SPARQL query — joins,
+typed value filters, revocation state — evaluates as claimed over the signed data
+(section 7), without disclosing the data. It does not replace credential-level
+selective disclosure, and it is not a competing credential format: ingest of `bbs-2023`
+credentials is an explicitly deferred seam (section 15).
+
+== In-circuit numerics
+
+The `xsd:double` FILTER lane of section 7.1 needs IEEE 754 semantics inside a circuit. ZKLP
+#cite("ZKLP") gives zero-knowledge circuits for IEEE 754 arithmetic and states that they are
+the first set fully compliant with that standard; it also surveys the earlier in-circuit
+floating-point line. This document accordingly makes #strong[no] priority, completeness, or
+standard-compliance claim about floating point in zero knowledge. The reference
+implementation's double lane rests on the editor's `noir_IEEE754` Noir library, consumed by
+the circuit family as a pinned external dependency (`sparq_ieee754`); it is an engineering
+dependency of the value-comparison lane, not a contribution of this document. Its own
+evidence is a differential harness against the hardware floating-point oracle — a testing
+artefact, not a proof of anything.
+
+== Delta to this document's own line
+
+Parts of the work cited in this section are prior work of this document's editor and
+co-authors, so the boundary is stated explicitly rather than left to the reader.
+
+The annotation and admissibility layer of this document (sections 12–13) directly extends the
+`sec-prop` security-properties vocabulary of Wright, Shadbolt, Zhao, Zhao and Braun
+#cite("SEC-PROP"), and the query-proof pipeline shares that work's goal of proving correct
+SPARQL evaluation over verifiable credentials, realised here with a different commitment
+scheme, circuit family, and manifest format. The research agenda is stated in
+#cite("WRIGHT-DC25").
+
+Braun and Käfer #cite("BK25"), and then Braun, Wright and Käfer #cite("BWK26"), establish
+what is best called #dfn[dataset soundness]: the verifier is shown a *selectively disclosed
+view* of the queried dataset together with a proof that the view is a faithful part of the
+signed source, and the query is then checked against that disclosed view. The hidden object
+is the undisclosed remainder of the dataset; the evaluated portion is revealed.
+
+zkSPARQL targets #dfn[evaluation correctness] instead: no view of the source graphs is
+disclosed, the algebra of section 7.2 is evaluated *inside* the circuit family over
+commitments (section 7.3), and the verifier checks a manifest (section 8) whose sub-proofs
+bind to those commitments and to the verifier nonce (section 9). The two mechanisms are
+complementary, and this document does not claim its direction is generally preferable: for
+many predicates a disclosed view is cheaper, simpler, and easier to audit, and a
+disclosed-base entailment re-check is explicitly #strong[not] representable as a
+zero-knowledge sub-proof here (section 7.4). What is claimed is only that the two hide
+different things and therefore suit different threat models (section 5).
+
+The sparq estate described here is an engine-integrated implementation with its own manifest
+format, verifier obligation set, and admissibility layer; it is not a wire-compatible
+implementation of any of the work cited above. No positive security property of it is
+asserted as achieved while the external audit gate remains open (sections 1 and 17.1).
 
 = Terminology and conformance
 
@@ -366,16 +456,48 @@ An issuer attests a committed graph by signing its commitment:
 
 == The supported SPARQL fragment
 
-The provable fragment of SPARQL #cite("SPARQL11-QUERY") is deliberately small and bucketed:
+This subsection is candidate-normative (section 2.2). The fragment is the monotone,
+federation-free subset below. "IN (today)" means implemented by the reference verifier;
+"IN (phase N)" means designed but #strong[not yet implemented]; `DEFERRED` is admissible
+only after its stated re-entry condition; and `OUT` is excluded. These labels are part of
+the fragment boundary, not an implementation roadmap that a manifest may anticipate.
 
-- basic graph pattern (BGP) scans over committed graphs;
-- value `FILTER` constraints, bucketed by datatype lane: integer, `xsd:double`,
-  signed integer, `xsd:decimal`, and a value-dictionary lane;
-- a single-prover equality `JOIN` across hidden credentials.
+#table(
+  columns: (1.2fr, 1fr, 3.8fr),
+  align: (left, left, left),
+  table.header[Construct][Disposition][Reason],
+  [`SELECT`], [IN (today)], [Membership is defined over solution mappings.],
+  [`ASK`], [IN (today)], [Non-emptiness of eval(P) is monotone.],
+  [`CONSTRUCT`], [OUT], [Graph-template instantiation is outside the membership property; a consumer can instantiate a template from a disclosed mapping.],
+  [`DESCRIBE`], [OUT], [Its result is implementation-defined.],
+  [BGP], [IN (today)], [Scan circuits check row membership and per-scan completeness.],
+  [`Join`], [IN (today)], [Hidden equality join, retaining the cross-graph blank-node exclusion below.],
+  [`FILTER`], [IN (today: four numeric lanes); IN (phases 2–3: section 7.2 expression fragment)], [Monotone under SPARQL error-as-unsatisfied semantics.],
+  [`UNION`], [IN (phase 2)], [Set union is monotone. Each disclosed solution identifies its branch; the verifier re-derives that branch from the query.],
+  [`OPTIONAL` / `LeftJoin`], [OUT], [An unbound optional side asserts that no compatible extension exists, a non-monotone closed-world claim.],
+  [`MINUS`], [OUT], [Closed-world set difference is non-monotone.],
+  [`FILTER NOT EXISTS`], [OUT], [Closed-world negation is non-monotone.],
+  [`FILTER EXISTS`], [DEFERRED], [Positive existence is monotone, but re-entry requires phase 2 and semantics pinned to SPARQL 1.2.],
+  [`GRAPH`], [OUT], [Named-graph attribution contradicts the graph-set privacy model.],
+  [`SERVICE`], [OUT], [Federation is outside the fragment.],
+  [`VALUES`], [IN (phase 2)], [Public inline rows are monotone; `UNDEF` cells are wildcards.],
+  [`BIND` / `Extend`], [IN (phase 3)], [A deterministic in-fragment expression adds a derived binding; non-deterministic built-ins remain out.],
+  [Nested `SELECT`], [IN (phase 3)], [An in-fragment subquery is monotone; subqueries containing aggregates remain out.],
+  [Property paths], [IN (phases 1–2, bounded semantics)], [Governed by the first-class bounded semantics below.],
+  [Aggregation (`GROUP BY`, `HAVING`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`, `SAMPLE`)], [OUT], [An aggregate claims completeness of the whole pattern, which composed proofs do not establish. Re-entry requires a composed-completeness obligation.],
+  [`ORDER BY`], [OUT; possible accept-and-strip re-entry], [Ordering is membership-indifferent, but accepting it could imply an unverified top-result claim. Re-entry requires an explicit "order not proved" manifest flag.],
+  [`DISTINCT`, `REDUCED`, `LIMIT`, `OFFSET`, projection], [IN (today)], [These modifiers are membership-indifferent.],
+  [SPARQL 1.2 triple terms / reification], [OUT (encoding gap)], [The committed leaf encoding has no triple-term lane.],
+  [SPARQL 1.2 `LANGDIR`, `hasLANG`, `hasLANGDIR`, `STRLANGDIR`, `isTRIPLE`, `TRIPLE`, `SUBJECT`, `PREDICATE`, `OBJECT`], [OUT (encoding gap)], [These require term-encoding lanes first.],
+  [SPARQL 1.2 `EXISTS` clarifications], [Adopted where relevant], [They govern eventual positive-`EXISTS` re-entry.],
+)
 
-`OPTIONAL`, `UNION`, property paths, aggregation, and subqueries are *not* part of the
-fragment. A prover #strong[MUST NOT] emit a manifest claiming coverage of a construct outside
-this fragment, and a verifier encountering such a claim #strong[MUST] reject it.
+A prover #strong[MUST NOT] emit a manifest claiming coverage of a construct whose
+disposition is not "IN (today)", unless the verifier and circuit family implement the named
+phase and identify that extension explicitly. A verifier #strong[MUST] reject a claimed
+construct that it does not implement, any `DEFERRED` or `OUT` construct, and any expression
+or path form outside the tables below. Thus candidate-normative design text does not enlarge
+the reference implementation's claim surface ahead of implementation.
 
 == Formal semantics of the fragment
 
@@ -384,6 +506,101 @@ onto the SPARQL algebra of Pérez, Arenas and Gutiérrez #cite("PAG09"), as adop
 SPARQL 1.1 recommendation #cite("SPARQL11-QUERY"), over the RDF 1.1 graph model
 #cite("RDF11-CONCEPTS") under simple entailment #cite("RDF11-MT"). It is the semantic anchor
 for the correctness obligation `bind_query_correctness` (section 10.3).
+
+*Property-path extension (candidate-normative; phases 1–2).* The following dispositions
+are designed extensions and remain unavailable until their named phase is implemented:
+
+#table(
+  columns: (1fr, 1fr, 4fr),
+  align: (left, left, left),
+  table.header[Path form][Disposition][Evaluation / circuit semantics],
+  [`iri`], [IN (phase 1)], [Identical to a triple pattern.],
+  [`^p`], [IN (phase 1)], [Swap subject and object; composition is preserved.],
+  [`p1/p2`], [IN (phase 1)], [Rewrite to a BGP with a fresh, non-projected intermediate variable.],
+  [`p1|p2`], [IN (phase 2)], [Rewrite to `UNION` with per-solution branch attribution.],
+  [`p?`], [IN (phase 2)], [The union of the occurrence-witnessed zero-length case and one step.],
+  [`p+`], [IN (phase 2, bounded)], [`path_reach` with one through k steps.],
+  [`p*`], [IN (phase 2, bounded)], [`path_reach` with zero through k steps.],
+  [`!(p1|…|pn)` including inverse members], [DEFERRED], [Monotone, but deferred until after `path_reach`; predicate inequality over salted term encodings also requires the re-audited-pending-external argument to be specified.],
+)
+
+For `p+` and `p*`, the circuit #strong[MUST] prove, and the manifest #strong[MUST] be read
+as claiming, exactly:
+
+#quote(block: true)[
+  There exists a chain of committed triples `(t_1, …, t_ℓ)` with `1 ≤ ℓ ≤ k`
+  (`0 ≤ ℓ ≤ k` for `*`), each `t_i` a member of a committed graph in the disclosed
+  attribution set with predicate `p`, chained object-to-subject, connecting `μ(s)` to
+  `μ(o)` — where #strong[`k` is a public input disclosed in the manifest].
+]
+
+The following requirements are first-class verification obligations, subject to the
+external-audit caveat of section 17.1:
+
++ *Public bound.* Proofs at different k are different statements. The verifier
+  #strong[MUST] expose k to the consumer and #strong[MUST] reject a claimed depth greater
+  than the selected circuit member's bound.
++ *Existence only.* A path proof #strong[MUST NOT] assert that longer paths do not exist or
+  that the reachable set is complete. Failure to produce a proof at k proves nothing.
++ *One-directional equivalence.* For the bounded evaluation, $op("eval")_k(P) subset.eq op("eval")(P)$:
+  every bounded witness is a SPARQL `p+` or `p*` solution, while completeness is only up to
+  k. If a walk exists, a simple path of length at most the committed union's node count
+  exists; choosing at least that count restores per-pair completeness, but a verifier
+  #strong[MUST NOT] assume that choice was made.
++ *Padding.* Every unused step when ℓ < k #strong[MUST] contribute nothing: it
+  #strong[MUST] either be a proven committed-row membership or a constrained pass-through
+  preserving the chain endpoint.
++ *Zero length.* For `p*` and `p?`, a zero-length result #strong[MUST] establish both
+  `μ(s) = μ(o)` and that the term occurs in the committed union. Bare equality is
+  insufficient; an occurrence witness is required.
++ *Cycles.* Evaluation is existence-based set semantics. A witness chain need not be
+  simple, and duplicate walks do not create additional solutions.
+
+The intended circuit family is `path_reach_d{k}`, unrolled to k steps. It is designed but
+not implemented at this draft's publication; the requirements above specify what an
+implementation must bind, not a present cryptographic guarantee.
+
+*Expression extension (candidate-normative; phase 3).* The following table is the complete
+designed expression fragment. Except for the four numeric comparison lanes marked today,
+these entries do not describe current verifier coverage.
+
+#table(
+  columns: (1.6fr, 1fr, 3.4fr),
+  align: (left, left, left),
+  table.header[Expression class][Disposition][Verification boundary],
+  [Logical `&&`, `||`, `!`], [IN (phase 3)], [Requires the EBV/error lane below.],
+  [Numeric comparisons], [IN (today: four lanes); phase 3 in expression positions], [`=`, `!=`, `<`, `<=`, `>`, `>=`; integer, double, signed-integer, and decimal lanes.],
+  [String comparison / equality], [IN (phase 3)], [Codepoint order only; locale collation is OUT.],
+  [`dateTime`, `date`, `time`, duration comparison/arithmetic], [IN (phase 3)], [Datatype-bucketed expression-node circuits.],
+  [`sameTerm`], [IN (phase 3)], [Committed-leaf equality.],
+  [RDF-term `=`], [IN (phase 3)], [Leaf plus literal-value equality; retains the dual-leaf caveat of section 17.2.],
+  [`IN` / `NOT IN` constant lists], [IN (phase 3)], [Public-constant (in)equality; `NOT IN` is value inequality, not closed-world negation.],
+  [`BOUND`], [IN (phase 3)], [With `OPTIONAL` out, boundness is static for BGP-derived variables; an `Extend`-introduced variable remains dynamically unbound when its expression errors.],
+  [`IF` / `COALESCE`], [IN (phase 3)], [Requires the EBV/error lane.],
+  [`isIRI`, `isBlank`, `isLiteral`, `isNumeric`, `datatype`, `lang`, `str`], [IN (phase 3 after encoding dependency)], [Requires type, datatype, and language lanes.],
+  [`IRI`, `STRDT`, `STRLANG`], [DEFERRED], [Requires encoding-side term construction.],
+  [`BNODE`, `UUID`, `STRUUID`, `RAND`, `NOW`], [OUT], [Non-deterministic; an as-of value may instead be verifier-supplied public input.],
+  [String functions: `STRLEN`, `SUBSTR`, `UCASE`, `LCASE`, `STRSTARTS`, `STRENDS`, `CONTAINS`, `STRBEFORE`, `STRAFTER`, `ENCODE_FOR_URI`, `CONCAT`], [IN (phase 3)], [Bounded byte-array representation; `SUBSTR` retains its byte-position caveat.],
+  [`REGEX` / `REPLACE`], [IN (phase 3, bounded subset only)], [Literal, anchored, and character-class subset; full `fn:matches` is OUT.],
+  [`langMatches`], [IN (phase 3 after estate gap-fill)], [Requires its missing circuit implementation.],
+  [`abs`, `round`, `ceil`, `floor`], [IN (phase 3)], [Integer and floating-point lanes.],
+  [Arithmetic `+`, `-`, `*`, `/`], [IN (phase 3)], [Division's decimal-as-double approximation #strong[MUST] be surfaced.],
+  [Date components `YEAR` through `TZ`], [IN (phase 3; `TZ` after gap-fill)], [`TZ` requires its missing implementation.],
+  [`MD5`, `SHA1`, `SHA256`, `SHA384`, `SHA512`], [IN (phase 3 after estate gap-fill)], [Requires digest and hexadecimal-output circuits.],
+  [Aggregate functions], [OUT], [Aggregation is outside the fragment.],
+)
+
+Phase 3 uses composable, datatype-bucketed expression-node circuits, not a generic
+expression VM. Each node sub-proof discloses operand and result commitments; binding edges
+#strong[MUST] connect node results leaf-to-root and root every leaf in a scan-row slot. The
+verifier #strong[MUST] re-derive the expression tree from the query text and #strong[MUST]
+reject a manifest whose declared tree differs.
+
+Every expression node #strong[MUST] carry `(value, is_error)`. Comparisons and functions
+#strong[MUST] propagate `is_error` according to SPARQL/XPath rules; `&&`, `||`, `IF`, and
+`COALESCE` #strong[MUST] implement the three-valued effective-boolean-value table; and a
+`FILTER` root #strong[MUST] accept only `true` with `is_error = false`. These are verification
+obligations for the designed extension and are not claims that the phase-3 circuits exist.
 
 *Data model.* Let I, B, and L be the pairwise-disjoint sets of IRIs, blank nodes, and
 literals, and V a set of variables disjoint from all three. An RDF graph G is a finite set
@@ -397,14 +614,20 @@ v in dom(μ1) ∩ dom(μ2); their union μ1 ∪ μ2 is then itself a mapping.
 *Grammar.* A fragment pattern P over the committed graphs G1, …, Gn is generated by:
 
 ```
-P ::= BGP | Filter(C, P) | Join(P1, P2)
+P ::= BGP | Filter(C, P) | Join(P1, P2) | Project(W, P)
+    | Union(P1, P2) | Values(R) | Extend(v, E, P)
+    | Path(s, path, o)
 ```
 
-subject to: a `BGP` (a finite set of triple patterns over terms and variables) is evaluated
+subject to: the first line is the currently implemented grammar; the second line is the
+candidate-normative extension and is admitted only as its corresponding phase becomes
+implemented. A `BGP` (a finite set of triple patterns over terms and variables) is evaluated
 against *exactly one* committed graph; `C` is a value constraint drawn from the
 datatype-bucketed comparison forms of section 7.1; and `Join` is the equality join of
 section 7.1, whose two sub-patterns are evaluated over *distinct* committed graphs and share
-at least one variable.
+at least one variable. `R` is a public `VALUES` row set, `E` is an expression from the table
+above, `W` is a projection list, and `path` is an admitted path form with public bound k
+where required.
 
 *Evaluation.* The evaluation eval(P) is a set of solution mappings:
 
@@ -415,6 +638,14 @@ at least one variable.
   as *not satisfied*;
 - eval(Join(P1, P2)) = the set of unions μ1 ∪ μ2 where μ1 is in eval(P1), μ2 is in eval(P2),
   and μ1 and μ2 are compatible.
+- eval(Union(P1, P2)) = eval(P1) ∪ eval(P2), with the witnessed branch disclosed;
+- eval(Values(R)) is the public set of mappings encoded by R, where `UNDEF` omits that
+  variable from the row mapping;
+- eval(Extend(v, E, P)) evaluates E under each μ in eval(P), adds v ↦ value when E succeeds,
+  and retains μ without a v binding when E raises an expression error;
+- eval(Project(W, P)) restricts each mapping in eval(P) to W;
+- eval(Path(s, path, o)) is SPARQL path evaluation for non-recursive rewrites and eval_k for
+  bounded `p+` / `p*`, exactly as constrained above.
 
 *Blank nodes across graphs.* Blank-node identity is scoped to a single graph
 #cite("RDF11-CONCEPTS"), and per-graph canonicalisation (section 6.1) does not — and cannot —
@@ -433,9 +664,9 @@ only if μ is a member of eval(P) — respectively eval(P) is non-empty — as d
   Editor's note — three boundaries of this definition are deliberate. (1) It is a *set*
   semantics; whether the implementation preserves duplicate-solution multiplicities (the bag
   semantics of #cite("PAG09")) is not pinned by this draft's grounding material;
-  transcription is tracked as bead sq-rvgr2.7. (2) Projection (`SELECT` variable lists) is not
-  transcribed; the correctness property above is defined on full solution mappings, and its
-  transcription is likewise tracked as bead sq-rvgr2.7. (3) Result *completeness* — that no
+  transcription is tracked as bead sq-rvgr2.7. (2) Projection (`SELECT` variable lists) is
+  transcribed above as restriction of each solution mapping to the selected variables; this
+  does not claim bag semantics or result completeness. (3) Result *completeness* — that no
   solutions were omitted — is #strong[not] claimed by `bind_query_correctness` as glossed here;
   whether any obligation claims it is not pinned, and is likewise tracked as bead sq-rvgr2.7.
   None of these boundaries weakens the membership property, but all three
@@ -900,6 +1131,8 @@ This section is informative.
 
 = Conformance testing and toolchain pinning
 
+== Open conformance gaps
+
 Two conformance gaps are open:
 
 + *No portable test vectors.* An adversarial forge-test suite exists covering the manifest
@@ -914,6 +1147,33 @@ Two conformance gaps are open:
   descriptive, not normative. Until the layout is specified toolchain-independently
   (section 2.3), cross-version interoperability is out of reach and even reference-level
   compatibility can only be claimed against the pinned toolchain.
+
+== Reproducible constraint counts
+
+The one reproducible quantitative artefact of the reference implementation is a
+#dfn[constraint-count pack]: the per-member gate count of every compiled circuit-family
+member, grouped by family and reported alongside the family parameters it varies over. It
+lives in the sparq repository #cite("SPARQ") under `bench/zk-compose/`, is regenerated by a
+script that reads a regression-gated snapshot rather than invoking the prover, and is
+therefore byte-identical on re-run and independent of the machine that runs it. This document
+states no figure from it; it points at it so a reader can obtain the figures without trusting
+prose.
+
+Three honesty constraints govern what that artefact may be read to mean, and they are
+repeated here because they are easy to lose in a table:
+
++ A gate count is a *size* of a compiled circuit under the toolchain pinned in section 16.1.
+  It is not a running time, and no wall-clock figure — prove, verify, or end-to-end — is
+  reported by this document or by the pack. Timings gathered on a development machine are not
+  comparable across machines and are excluded deliberately.
++ A gate count says nothing about whether the circuit proves the right statement. The
+  coverage status of each SPARQL construct is section 7.1's table, not a circuit size; in
+  particular the bounded property-path members prove a strictly weaker, bounded-existence
+  statement (section 7.1), and a large or small number next to them does not change that.
++ The pack reproduces no other system's reported figures. Constraint counts are not
+  comparable across proof systems, arithmetizations, or circuit granularities, so a ratio
+  between this family and a differently-arithmetized published system would not be a
+  measurement of anything. The related work of section 3 is cited, never re-measured.
 
 = Security and Privacy Considerations
 
@@ -977,6 +1237,16 @@ policy — it is not, and must not be presented as, an independent cryptographic
 
 = References
 
+#note[
+  Editor's note (revision 3). The entries `PONEGLYPHDB`, `ZKGRAPH`, `VERIDKG`, `ZKLP`,
+  `ZKCREDS`, `CRESCENT` and `BK25` were added in revision 3 from the project's own
+  search-verified related-work records. Venue, year, and the DOI / arXiv identifier are
+  reproduced from those records; author initials and exact titles have #strong[not] been
+  independently re-verified against the publishers' pages in this revision, and two entries
+  (`ZKGRAPH`, `BK25`) deliberately carry an identifier and a description rather than a title
+  that could not be confirmed. They must be checked before any camera-ready use.
+]
+
 #references((
   ("RFC2119", [Bradner, S. #emph[Key words for use in RFCs to Indicate Requirement Levels].
     RFC 2119, IETF, March 1997.]),
@@ -1026,6 +1296,9 @@ policy — it is not, and must not be presented as, an independent cryptographic
     in Decentralised Data Architectures]. ISWC 2025 Companion Volume (Doctoral Consortium),
     CEUR-WS Vol-4085, paper 19, Nara, Japan, November 2025.
     https://ceur-ws.org/Vol-4085/paper19.pdf.]),
+  ("BK25", [Braun, C.; Käfer, T. In: The Semantic Web (ESWC 2025), Springer, 2025.
+    DOI 10.1007/978-3-031-94575-5_21 — RDF-level selective disclosure combined with
+    zero-knowledge proofs; the immediate predecessor of the entry below.]),
   ("BWK26", [Braun, C.; Wright, J.; Käfer, T. #emph[Proving Soundness of SPARQL Query Results
     Using Selective Disclosure of RDF Datasets and Zero-Knowledge Proofs]. In: The Semantic
     Web, Springer, 2026. DOI 10.1007/978-3-032-25156-5_16.]),
@@ -1037,6 +1310,25 @@ policy — it is not, and must not be presented as, an independent cryptographic
   ("ZKSQL", [Li, X.; Weng, C.; Xu, Y.; Wang, X.; Rogers, J. #emph[ZKSQL: Verifiable and
     Efficient Query Evaluation with Zero-Knowledge Proofs]. Proceedings of the VLDB Endowment
     16(8), 1804–1816, 2023.]),
+  ("PONEGLYPHDB", [Gu; Fang; Nawab. #emph[PoneglyphDB: Efficient Non-Interactive
+    Zero-Knowledge Proofs for Private Database Queries]. ACM SIGMOD / Proceedings of the ACM
+    on Management of Data, 2025. arXiv:2411.15031.]),
+  ("ZKGRAPH", [ZKGraph — zero-knowledge evaluation of graph queries under a PLONKish
+    argument; property-graph model, no RDF or SPARQL surface. arXiv:2507.00427, July 2025.]),
+  ("VERIDKG", [Zhou; et al. #emph[VeriDKG: A Verifiable SPARQL Query Engine for Decentralized
+    Knowledge Graphs]. Proceedings of the VLDB Endowment 17(5), 2024.
+    https://www.vldb.org/pvldb/vol17/p912-zhou.pdf. (Authenticated data structure; integrity
+    against a cheating server, not hiding.)]),
+  ("ZKLP", [Ernstberger, J.; et al. #emph[Zero-Knowledge Location Privacy via Accurate
+    Floating-Point SNARKs]. IEEE Symposium on Security and Privacy, 2025. (States the first
+    set of zero-knowledge circuits fully compliant with IEEE 754; cited here to disclaim any
+    priority or compliance claim of this document's own double lane — section 3.4.)]),
+  ("ZKCREDS", [Rosenberg, M.; White, J.; Garman, C.; Miers, I. #emph[zk-creds: Flexible
+    Anonymous Credentials from zkSNARKs and Existing Identity Infrastructure]. IEEE Symposium
+    on Security and Privacy, 2023.]),
+  ("CRESCENT", [Microsoft Research. #emph[Crescent] — unlinkable presentation of existing JWT
+    and mDL credentials with zkSNARKs, split into a prepare-once and a show-fast phase.
+    Project, no figure from it is reproduced here.]),
   ("CL02", [Camenisch, J.; Lysyanskaya, A. #emph[A Signature Scheme with Efficient
     Protocols]. SCN 2002, LNCS 2576, Springer, 2003.]),
   ("BBS04", [Boneh, D.; Boyen, X.; Shacham, H. #emph[Short Group Signatures]. CRYPTO 2004,

@@ -65,30 +65,32 @@
 //! ## The HONEST current floor
 //!
 //! `RIF_WG_CORE_FLOOR` is the ACTUAL MEASURED pass count of the arm against the pinned
-//! `Core_v1.22` archive, not an aspirational target. It is a MEASURED **3** after the
-//! sq-n7y15 positional-Atom importer [SONNET-4.6] — 3 of the 46 tests now PASS
-//! non-vacuously:
+//! `Core_v1.22` archive, not an aspirational target. It is a MEASURED **5** — the arm
+//! run against the FETCHED archive reports `TOTAL rif-wg-core 5 0 41` (5 pass, 0 fail,
+//! 41 skip of 46: 18 `skip:condition-shape`, 19 `skip:imports`, 4
+//! `skip:unsupported-builtin`). The 5 non-vacuous passes are:
 //!
-//! * **Positive/Negative Entailment** — real premises with `Import` directives still do
-//!   not import; under the NET vacuity rule an un-importable premise is a SKIP, never a
-//!   vacuous pass. Binary/unary positional atoms DO import now. Multi-slot frames also
-//!   now import (sq-jsgyn [SONNET-4.6]) — premises that were `skip:condition-shape`
-//!   solely due to multi-slot frames may graduate to entailment tests once the live
-//!   suite is re-run with `scripts/fetch-inference-suites.sh`; the floor must be
-//!   updated to the actual measured count after that re-run.
-//! * **Positive Syntax** — inputs using constructs beyond arity-1/arity-2 positional
-//!   atoms and multi-slot frames (arity-3+ atoms, local constants) still do not import.
-//!   Multi-slot-frame-only inputs may now PASS (sq-jsgyn).
-//! * **Negative Syntax / Import Rejection** — the 3 safeness `NegativeSyntaxTests`
-//!   now GENUINELY PASS: their positional atoms import, and the range-restriction checker
-//!   correctly detects the targeted violation (`UnboundHeadVar`/`UnboundBuiltinInput`).
-//!   `ImportRejection` tests remain SKIPs (blanket import-refusal).
+//! * **Positive Entailment** (3) — `Frames`, `Frame_slots_are_independent`,
+//!   `Positional_Arguments`. Binary/unary positional atoms import (sq-n7y15) and
+//!   multi-slot frames import (sq-jsgyn), so these premises now reach the closure and
+//!   their ground conclusions are genuinely checked. Premises carrying `Import`
+//!   directives still do not import; under the NET vacuity rule such a premise is a
+//!   SKIP, never a vacuous pass.
+//! * **Positive Syntax** (1) — `Core_Safeness_2`. Inputs using constructs beyond
+//!   arity-1/arity-2 positional atoms and multi-slot frames (arity-3+ atoms, local
+//!   constants) still do not import and remain SKIPs.
+//! * **Negative Syntax** (1) — `Core_NonSafeness`: its positional atoms import, and the
+//!   range-restriction checker correctly detects the targeted violation
+//!   (`UnboundHeadVar`/`UnboundBuiltinInput`) rather than vacuously rejecting via
+//!   `UnrecognizedElement`. `ImportRejection` tests remain SKIPs (blanket
+//!   import-refusal).
 //!
 //! [SONNET-4.6] sq-n7y15: floor raised 0 → 3. [SONNET-4.6] sq-jsgyn: multi-slot frame
-//! import added — floor RISE-READY (re-run with fetched suite to measure new count;
-//! update `RIF_WG_CORE_FLOOR` to the measured result). Remaining blockers: arity-3+
-//! atoms, Import-closure, local constants. The honest denominator with a legible skip
-//! taxonomy is more informative than an inflated count from vacuous rejections.
+//! import added, leaving the floor RISE-READY pending a re-run against the fetched
+//! archive. [SONNET-4.6] #3469: that re-run was performed — floor raised 3 → the
+//! MEASURED 5. Remaining blockers: arity-3+ atoms, Import-closure, local constants. The
+//! honest denominator with a legible skip taxonomy is more informative than an inflated
+//! count from vacuous rejections.
 //!
 //! ## Feature gating (both states) + fixtures
 //!
@@ -130,16 +132,16 @@ mod gated {
     /// RIF/XML importer's Core coverage grows and real W3C tests graduate from SKIP to
     /// PASS). A STANDARDS-suite result (family "W3C RIF"), NOT a self-asserting
     /// expressivity ratchet. [FABLE-5] sq-pbz04.5.5
-    // [SONNET-4.6] sq-n7y15: raised from 0 to 3 by positional-Atom import. The 3 passing
-    // tests are the 3 NegativeSyntaxTests whose positional Atoms now import successfully,
-    // allowing the range-restriction checker to genuinely detect the targeted violations
-    // (UnboundHeadVar/UnboundBuiltinInput) rather than vacuously rejecting via
-    // UnrecognizedElement.
-    // [SONNET-4.6] sq-jsgyn: multi-slot frame import added. The floor remains 3 (the
-    // W3C archive files are not vendored; the floor must be re-measured after fetching
-    // the archive via scripts/fetch-inference-suites.sh and re-running the suite with
-    // `--features rif-wg-core`). Rise-only: update only to the measured result.
-    pub const RIF_WG_CORE_FLOOR: usize = 3;
+    // [SONNET-4.6] sq-n7y15: raised from 0 to 3 by positional-Atom import.
+    // [SONNET-4.6] sq-jsgyn: multi-slot frame import added, leaving the floor rise-ready
+    // pending a re-measure against the (non-vendored) fetched archive.
+    // [SONNET-4.6] #3469: re-measured. With the archive fetched via
+    // scripts/fetch-inference-suites.sh and the lane run with `--features rif-wg-core`,
+    // BOTH this lane and bench/rif/run.sh report 5 passes, 0 fails, 41 skips of 46 —
+    // so the floor rises 3 -> the MEASURED 5. The 5 are PositiveEntailment {Frames,
+    // Frame_slots_are_independent, Positional_Arguments}, PositiveSyntax Core_Safeness_2
+    // and NegativeSyntax Core_NonSafeness. Rise-only: update only to a measured result.
+    pub const RIF_WG_CORE_FLOOR: usize = 5;
 
     /// The pinned archive version (mirrors `scripts/fetch-inference-suites.sh`).
     const CORE_VERSION: &str = "Core_v1.22";
@@ -618,8 +620,10 @@ mod gated {
     /// * `ValidationFailed(DistinctGroundEqual | Nonmonotonic)` — these are NOT
     ///   violation-detections but UNSUPPORTED-CAPABILITY fail-closes: `DistinctGroundEqual`
     ///   rejects a *VALID* RIF-Core document (a ground body `Equal` like
-    ///   `"1"^^integer = "1.0"^^decimal` is legal Core) pending the value-space comparator
-    ///   (sq-v5evr/#1646); `Nonmonotonic` is a defensive internal-invariant guard. Neither
+    ///   `"true"^^boolean = "1"^^boolean` is legal Core) pending a NON-numeric value-space
+    ///   comparator — the numeric half now resolves via `Num::cmp_relational`
+    ///   (sq-v5evr/#1646, adopted in sq-anyad), so only non-numeric literal equality still
+    ///   reaches this fail-close; `Nonmonotonic` is a defensive internal-invariant guard. Neither
     ///   demonstrates detecting the targeted violation — treating them as a pass would
     ///   launder an unsupported-capability rejection, exactly the vacuity this guard
     ///   forbids (sq-pbz04.5.5 review Finding 2). → the named condition-shape skip.
@@ -787,22 +791,16 @@ mod gated {
             fails
         );
         // [FABLE-5] `pass >= RIF_WG_CORE_FLOOR` is the RATCHET check (the floor may only
-        // RISE). At the current MEASURED floor of 0 the comparison is trivially true (0
-        // is the `usize` minimum — clippy's `absurd_extreme_comparisons`), but the check
-        // is SEMANTICALLY the ratchet and MUST stay a `>=` so raising the floor above 0
-        // (as the importer's Core coverage grows and real tests graduate SKIP→PASS)
-        // immediately enforces the new floor without a code edit here. The `#[allow]` is
-        // scoped to this one statement; the moment the floor is raised the lint no longer
-        // fires and the check bites for real.
-        #[allow(clippy::absurd_extreme_comparisons)]
-        {
-            assert!(
-                pass >= RIF_WG_CORE_FLOOR,
-                "RIF WG Core pass count {} regressed below the ratchet floor {}",
-                pass,
-                RIF_WG_CORE_FLOOR
-            );
-        }
+        // RISE). [SONNET-4.6] #3469: with the floor at the MEASURED 5 the comparison is
+        // no longer trivially true against the `usize` minimum, so the former
+        // `#[allow(clippy::absurd_extreme_comparisons)]` is gone — the check now bites
+        // for real.
+        assert!(
+            pass >= RIF_WG_CORE_FLOOR,
+            "RIF WG Core pass count {} regressed below the ratchet floor {}",
+            pass,
+            RIF_WG_CORE_FLOOR
+        );
     }
 
     // ------------------------------------------------------------- oracle unit tests

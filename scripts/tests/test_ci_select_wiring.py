@@ -57,6 +57,7 @@ BENCH_YML = REPO_ROOT / ".github" / "workflows" / "bench.yml"  # [SONNET-4.6] sq
 SELECT_YML = REPO_ROOT / ".github" / "workflows" / "ci-select.yml"
 GATE_PY = REPO_ROOT / "scripts" / "ci_summary_gate.py"
 CI_SELECT_PY = REPO_ROOT / "scripts" / "ci_select.py"  # [OPUS-4.8] sq-fmx4u.6
+COVERAGE_GATE_PY = REPO_ROOT / "scripts" / "coverage-gate.py"  # [SONNET-4.6] sq-6vshe.17
 OWNERSHIP_TOML = REPO_ROOT / "ci" / "path-ownership.toml"  # [OPUS-4.8] sq-fmx4u.6
 # [OPUS-4.8] path-aware CI audit: the merge_group changed-files gates.
 CONTAINER_SCAN_YML = REPO_ROOT / ".github" / "workflows" / "container-scan.yml"
@@ -86,6 +87,18 @@ def _gate_module():
     return mod
 
 
+def _coverage_gate_module():
+    # [SONNET-4.6] sq-6vshe.17: import the coverage ratchet gate to read
+    # COVERAGE_ALARM_LANE — the single source of truth for the demoted-lane token the
+    # ci.yml filer must file the post-merge coverage alarm under. (Hyphenated filename,
+    # so it has to be loaded by path.)
+    spec = importlib.util.spec_from_file_location("coverage_gate", COVERAGE_GATE_PY)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["coverage_gate"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _ci_select_module():
     # [OPUS-4.8] sq-fmx4u.6: import the selector to read `_LANE_SEEDS` — the single
     # source of truth the fuzz.yml + ci.yml `wasm` guards must mirror.
@@ -107,6 +120,237 @@ def _workspace_members() -> set[str]:
         if isinstance(name, str):
             members.add(name)
     return members
+
+
+# ---------------------------------------------------------------------------------
+# [OPUS-5] #3781 — A TINY GITHUB-EXPRESSION EVALUATOR, so a workflow expression can
+# be MUTATION-TESTED instead of merely string-matched.
+#
+# WHY THIS EXISTS. A mutation sweep over these repos' CI guards found that every
+# UNCAUGHT mutant lived in a workflow `if:`, a step body, or a production call site —
+# never in a Python predicate. String-equality inspection tests (`assertEqual(name,
+# "gate" + MARKER_EXPR)`) catch a DELETED expression but say nothing about what it
+# EVALUATES to, so dropping a `!`, widening a label list, or swapping the two branches
+# of a ternary passes them. The #3781 defect was exactly of that shape: an expression
+# that was individually correct and composed into a deadlock. So the marker expression
+# is EVALUATED here, against synthetic event payloads, and the rendered check-run name
+# is fed to the real gate predicates — end to end, YAML → name → verdict.
+#
+# The grammar is deliberately the SMALLEST one that covers the live expression:
+# parenthesised `&&`/`||`/`!`/`==`, single-quoted literals, `true`/`false`, dotted
+# `github.…` context paths, and the two functions used (`contains`, `fromJSON`).
+# Anything outside it raises — an expression that outgrows this evaluator FAILS THE
+# TEST LOUDLY rather than silently going unchecked (fail-closed).
+_TOKEN_RE = re.compile(
+    r"""\s*(?:
+        (?P<str>'(?:[^']|'')*')
+      | (?P<op>&&|\|\||==|!=|!|\(|\)|,)
+      | (?P<word>[A-Za-z_][A-Za-z0-9_.\-*]*)
+    )""",
+    re.VERBOSE,
+)
+
+
+class GhExprError(AssertionError):
+    """The expression used syntax outside the evaluator's supported grammar."""
+
+
+def _tokenize(src: str) -> list[tuple[str, str]]:
+    pos, out = 0, []
+    while pos < len(src):
+        if src[pos].isspace():
+            pos += 1
+            continue
+        m = _TOKEN_RE.match(src, pos)
+        if not m or m.end() == pos:
+            raise GhExprError(f"unsupported syntax at offset {pos}: {src[pos:pos + 30]!r}")
+        pos = m.end()
+        for kind in ("str", "op", "word"):
+            if m.group(kind) is not None:
+                out.append((kind, m.group(kind)))
+                break
+    return out
+
+
+def _truthy(value) -> bool:
+    """GitHub-expression truthiness: '' / false / null are falsy."""
+    if value is None or value is False:
+        return False
+    if value == "":
+        return False
+    return True
+
+
+def _walk(node, parts):
+    """Resolve a dotted context path against `node`.
+
+    [OPUS-5] #3508 adds GitHub's OBJECT-FILTER syntax `a.*.b`: it maps the
+    remaining path over an array (or an object's values) and yields an ARRAY of
+    the results — the shape that makes
+    `contains(github.event.pull_request.labels.*.name, 'fuzz-full')` work. An
+    absent path yields null (falsy), exactly as in GitHub, so a payload with no
+    `labels` key makes every such `contains(...)` false rather than erroring.
+    """
+    for idx, part in enumerate(parts):
+        if part == "*":
+            items = list(node.values()) if isinstance(node, dict) else list(node or [])
+            rest = parts[idx + 1:]
+            return [v for v in (_walk(item, rest) for item in items) if v is not None]
+        if not isinstance(node, dict) or part not in node:
+            return None  # an absent context value is null (falsy), as in GitHub
+        node = node[part]
+    return node
+
+
+class _GhExpr:
+    """Recursive-descent evaluator for the supported grammar (precedence:
+    ! > == > && > ||, matching GitHub's documented order)."""
+
+    def __init__(self, src: str, ctx: dict):
+        self.toks = _tokenize(src)
+        self.i = 0
+        self.ctx = ctx
+
+    def parse(self):
+        value = self._or()
+        if self.i != len(self.toks):
+            raise GhExprError(f"trailing tokens at {self.toks[self.i:]}")
+        return value
+
+    def _peek(self):
+        return self.toks[self.i] if self.i < len(self.toks) else (None, None)
+
+    def _eat(self, text):
+        if self._peek()[1] == text:
+            self.i += 1
+            return True
+        return False
+
+    def _or(self):
+        value = self._and()
+        while self._eat("||"):
+            right = self._and()
+            value = value if _truthy(value) else right
+        return value
+
+    def _and(self):
+        value = self._cmp()
+        while self._eat("&&"):
+            right = self._cmp()
+            value = right if _truthy(value) else value
+        return value
+
+    def _cmp(self):
+        left = self._unary()
+        for op in ("==", "!="):
+            if self._eat(op):
+                right = self._unary()
+                eq = left == right
+                return eq if op == "==" else not eq
+        return left
+
+    def _unary(self):
+        if self._eat("!"):
+            return not _truthy(self._unary())
+        return self._primary()
+
+    def _primary(self):
+        kind, text = self._peek()
+        if text == "(":
+            self.i += 1
+            value = self._or()
+            if not self._eat(")"):
+                raise GhExprError("unbalanced parenthesis")
+            return value
+        if kind == "str":
+            self.i += 1
+            return text[1:-1].replace("''", "'")
+        if kind == "word":
+            self.i += 1
+            if text == "true":
+                return True
+            if text == "false":
+                return False
+            if text in ("contains", "fromJSON") or self._peek()[1] == "(":
+                return self._call(text)
+            return self._lookup(text)
+        raise GhExprError(f"unexpected token {text!r}")
+
+    def _call(self, fn):
+        if not self._eat("("):
+            raise GhExprError(f"{fn}: expected '('")
+        args = []
+        if self._peek()[1] != ")":
+            args.append(self._or())
+            while self._eat(","):
+                args.append(self._or())
+        if not self._eat(")"):
+            raise GhExprError(f"{fn}: expected ')'")
+        if fn == "fromJSON":
+            return json.loads(args[0])
+        if fn == "contains":
+            haystack, needle = args
+            if isinstance(haystack, list):
+                return needle in haystack
+            return str(needle) in str(haystack or "")
+        # [SONNET-4.6] sq-6vshe.17: `always()` is GitHub's "run even if a needed job
+        # failed" status function — TRUE on every non-cancelled run, which is exactly the
+        # case these tests evaluate. Modelling it lets the always()-composed verdict jobs
+        # (the `coverage` aggregate, the demoted-lane filers) be checked BEHAVIOURALLY
+        # instead of by substring. `cancelled()`/`failure()`/`success()` stay unsupported
+        # on purpose — no job `if:` under test uses them, and guessing a value for them
+        # would silently mis-evaluate a real guard.
+        if fn == "always":
+            return True
+        raise GhExprError(f"unsupported function {fn}()")
+
+    def _lookup(self, path):
+        return _walk(self.ctx, path.split("."))
+
+
+def _marker_expr_of(name: str) -> str:
+    """The single `${{ … }}` substitution in a job `name:` (verbatim, braces included)."""
+    matches = re.findall(r"\$\{\{.*?\}\}", name)
+    assert len(matches) == 1, f"expected exactly one expression in {name!r}"
+    return matches[0]
+
+
+def render_job_name(name: str, ctx: dict) -> str:
+    """Render a job `name:` for a synthetic event payload by EVALUATING its
+    expression — the check-run name the gate would actually receive."""
+    expr = _marker_expr_of(name)
+    value = _GhExpr(expr[3:-2], ctx).parse()
+    if value is True:
+        value = "true"
+    elif value is False or value is None:
+        value = ""
+    return name.replace(expr, str(value))
+
+
+def pr_event(*, draft=False, action="synchronize", label=None, labels=None,
+             event="pull_request"):
+    """A synthetic `github` context for a pull_request (or other) event.
+
+    `label` is the SINGLE label of a labeled/unlabeled event payload;
+    `labels` ([OPUS-5] #3508) is the PR's standing label set, which the draft
+    escapes read via `github.event.pull_request.labels.*.name`. Omitting
+    `labels` leaves the key absent — the unlabelled-PR case.
+    """
+    ctx = {"event_name": event, "event": {}}
+    if event == "pull_request":
+        ctx["event"] = {"action": action, "pull_request": {"draft": draft}}
+        if label is not None:
+            ctx["event"]["label"] = {"name": label}
+        if labels is not None:
+            ctx["event"]["pull_request"]["labels"] = [{"name": n} for n in labels]
+    return {"github": ctx}
+
+
+def eval_job_if(cond: str, ctx: dict) -> bool:
+    """Evaluate a job `if:` the way GitHub does — the condition is an implicit
+    expression (no `${{ }}` wrapper), and its truthiness decides whether the job
+    runs. Returns True == the job RUNS."""
+    return _truthy(_GhExpr(" ".join(str(cond).split()), ctx).parse())
 
 
 class TestWiring(unittest.TestCase):
@@ -441,39 +685,68 @@ class TestPhase2LaneScoping(unittest.TestCase):
                          "already gated the PR head + re-runs on push-to-main; the noisy timing suite "
                          "moved to the nightly EC2 lane — keeping it on merge_group only dragged the queue)")
 
-    def test_bench_main_history_and_ratchet_exclude_schedule(self):
+    def test_bench_history_lane_scoping(self):
         # CRITICAL (design §6.1 continuity, criterion (d)): the auto-ratchet + history +
-        # dashboard writes must stay on the push-to-main path and NOT fire on the new
+        # dashboard WRITES must stay on the push-to-main path and NOT fire on the
         # nightly `schedule` backstop (a scheduled run shares the last main commit's SHA,
         # so writing history would append a duplicate point + ratchet off a non-landing
-        # run). Every such step's guard must exclude schedule.
+        # run). Every such write step's guard must exclude schedule + non-main.
         steps = self.bench["jobs"]["bench"]["steps"]
-        names = [
+        main_only_names = [
             "Auto-ratchet the perf floor (commit improvements back to main)",
             "Ensure benchmark-data history branch exists",
             "Seed Pages dashboard onto benchmark-data (if absent)",
-            # [SONNET-4.6] sq-mel85 nit: the cleanup step (restores Cargo.lock churn before
-            # the benchmark-data branch switch) must also be schedule-excluded — the nightly
-            # backstop never switches branches, so it needs no cleanup, and running it on
-            # schedule would be a no-op that can't break anything, but pinning the guard
-            # prevents silent removal of the schedule-exclusion that would leave the step
-            # active on a path where `git checkout -- .` could discard useful artefacts.
-            "Clean bench-induced tracked churn before history switch (main only)",
+            # [FABLE-5] the median-of-history hard zone gates ONLY main pushes: PR runs
+            # are --deterministic-only + perf-gate.py-gated, and the schedule backstop
+            # is a pure verification run — its guard must equal auto-push's (asserted
+            # exactly below) so the gate and the publish can never diverge.
+            "Hard zone — median-of-history regression gate (main pushes only)",
         ]
         by_name = {s.get("name"): s for s in steps}
-        for n in names:
+        for n in main_only_names:
             self.assertIn(n, by_name, f"bench.yml lost the '{n}' step")
             cond = str(by_name[n].get("if", ""))
             self.assertIn("github.event_name != 'schedule'", cond,
                           f"'{n}' must exclude the schedule backstop (main continuity)")
             self.assertIn("refs/heads/main", cond,
                           f"'{n}' must stay push-to-main scoped")
-        # The github-action-benchmark auto-push must also be schedule-excluded.
+        # [FABLE-5] The churn-clean step is UNCONDITIONAL — a previous revision
+        # (sq-mel85) schedule-excluded it on the WRONG claim that the nightly backstop
+        # "never switches branches": github-action-benchmark fetches + switches to
+        # benchmark-data to READ the comparison history on EVERY event regardless of
+        # auto-push (proven live by schedule run 29989729092 aborting on lockfile
+        # churn). Pin the absence of any event/ref guard so a well-meaning
+        # re-introduction of the old condition can't re-break the nightly run.
+        clean = by_name.get("Clean bench-induced tracked churn before history switch")
+        self.assertIsNotNone(
+            clean, "bench.yml lost the 'Clean bench-induced tracked churn before "
+            "history switch' step (and it must carry no ' (main only)' suffix)")
+        self.assertNotIn(
+            "if", clean,
+            "the churn-clean step must be UNCONDITIONAL: the Store action switches to "
+            "benchmark-data to read history on EVERY event, so schedule runs need the "
+            "clean too (live failure: nightly run 29989729092)")
+        # The github-action-benchmark auto-push stays schedule- and non-main-excluded.
         store = by_name.get("Store + compare against history")
         self.assertIsNotNone(store, "bench.yml lost the history Store step")
-        self.assertIn("github.event_name != 'schedule'",
-                      str(store.get("with", {}).get("auto-push", "")),
+        auto_push = str(store.get("with", {}).get("auto-push", ""))
+        self.assertIn("github.event_name != 'schedule'", auto_push,
                       "history auto-push must not fire on the schedule backstop")
+        self.assertIn("refs/heads/main", auto_push,
+                      "history auto-push must stay push-to-main scoped")
+        # The hard-zone guard must equal the auto-push expression EXACTLY (modulo the
+        # `${{ }}` wrapper `with:` inputs require): the gate runs before Store, and any
+        # drift between the two conditions would either publish an ungated point or
+        # gate a run that publishes nothing.
+        hardzone_cond = str(by_name[
+            "Hard zone — median-of-history regression gate (main pushes only)"].get("if", ""))
+        auto_push_expr = auto_push.strip()
+        if auto_push_expr.startswith("${{") and auto_push_expr.endswith("}}"):
+            auto_push_expr = auto_push_expr[3:-2].strip()
+        self.assertEqual(
+            hardzone_cond.strip(), auto_push_expr,
+            "the hard-zone gate's `if:` must equal the Store auto-push condition "
+            "exactly — the gate and the publish must cover the same runs")
 
     # ---- wasm lane (ci.yml) --------------------------------------------------------
     def test_wasm_job_guarded_by_its_seed_closure(self):
@@ -938,6 +1211,228 @@ class TestHeavyRecallMergeGroupDemotion(unittest.TestCase):
         )
 
 
+class TestCoverageMergeGroupDemotion(unittest.TestCase):
+    """[SONNET-4.6] sq-6vshe.17 (research/ci-mergequeue-speedup-2026-07.md §3.4a): the
+    instrumented per-crate coverage MEASUREMENT is DEMOTED off the merge_group blocking
+    path — it was the entry POLE whenever change-based selection skipped the test shards.
+    Coverage is a RATCHET, not a correctness test, so a floor regression slipping through a
+    queued BATCH is detectable + recoverable post-merge; that is the whole soundness
+    argument, and it only holds if the enforcement points below stay wired.
+
+    Pinned invariants (each asserted BEHAVIOURALLY by evaluating the live `if:`, so a
+    mutated expression REDs rather than a substring drifting):
+      * the measure legs SKIP on merge_group;
+      * they still RUN on a non-draft PR head (the PRIMARY gate) and on push-to-main —
+        the push leg is the sq-6vshe.14 EXEMPTION: if a future push-run skip lands and
+        does not exempt coverage, this test REDs;
+      * the fast no-compile FLOOR gates (`coverage-floors`) STILL RUN on merge_group, so a
+        batch can never LOWER a committed floor (the "floor is never silently lowered"
+        half of the invariant);
+      * the `coverage` aggregate still CONCLUDES on merge_group, so the ci-summary gate
+        never sees a dangling expected check;
+      * a post-merge measure-leg failure auto-files via the demoted-lane filer, under the
+        SAME lane token coverage-gate.py reads back for the ratchet-advance pause."""
+
+    # The regex the coverage-demoted-filer uses (in ci.yml) to find a FAILED DEMOTED
+    # measure leg by job name. Kept in sync with the workflow's `--jq ... test("...")`.
+    _DEMOTED_LEG_RE = re.compile(r"^coverage (ratchet \(shard |engine )")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = _load(CI_YML)
+        cls.cov_gate = _coverage_gate_module()
+
+    # The measure legs whose instrumented run left the queue.
+    DEMOTED_JOBS = ("coverage-measure", "coverage-engine-run")
+
+    def _runs(self, job_id, *, event="pull_request", draft=False, mode="full",
+              affected="[]", rust_changed="true"):
+        """Evaluate a coverage job's live `if:` against a synthetic payload."""
+        ctx = pr_event(event=event, draft=draft)
+        ctx["needs"] = {
+            "changes": {"outputs": {"rust_changed": rust_changed}},
+            "select": {"outputs": {"mode": mode, "affected": affected}},
+        }
+        return eval_job_if(self.ci["jobs"][job_id].get("if", ""), ctx)
+
+    # ---- the demotion itself -------------------------------------------------
+    def test_measure_legs_skip_on_merge_group(self):
+        for job_id in self.DEMOTED_JOBS:
+            self.assertFalse(
+                self._runs(job_id, event="merge_group"),
+                f"ci.yml:{job_id} must SKIP on the merge_group ref (sq-6vshe.17): the "
+                f"instrumented shards were the entry pole and coverage is a recoverable "
+                f"ratchet, not a correctness gate",
+            )
+
+    def test_measure_legs_still_run_on_a_pr_head_and_on_push_to_main(self):
+        """The demotion's soundness rests ENTIRELY on these two enforcement points
+        surviving: the PR head is the primary gate, and push-to-main is what catches the
+        batch-stacking case (two PRs individually >= floor merging to < floor).
+
+        The `push` half is also the sq-6vshe.14 COORDINATION PIN: that lever skips
+        queue-validated re-validation on push to main, and coverage must be EXEMPT from it
+        (post-merge, off the queue's critical path). If it lands without the exemption,
+        this assertion REDs instead of the ratchet silently losing its last enforcement
+        point."""
+        for job_id in self.DEMOTED_JOBS:
+            self.assertTrue(
+                self._runs(job_id, event="pull_request", draft=False),
+                f"ci.yml:{job_id} must still MEASURE on a non-draft PR head — that is the "
+                f"primary coverage gate after the merge_group demotion",
+            )
+            self.assertTrue(
+                self._runs(job_id, event="push"),
+                f"ci.yml:{job_id} must still MEASURE on push-to-main — it is the "
+                f"post-merge enforcement point the demotion depends on, and is EXEMPT "
+                f"from the sq-6vshe.14 push-run skip",
+            )
+
+    def test_engine_merge_skips_when_its_partitions_are_demoted(self):
+        """`coverage-engine-merge` has no event guard of its own — it must inherit the
+        demotion through `needs.coverage-engine-run.result == 'success'`. Evaluated with a
+        `skipped` upstream so a future rewrite to `!= 'failure'` (which would run the
+        merge over ZERO partitions and emit a false-low report) REDs here."""
+        cond = self.ci["jobs"]["coverage-engine-merge"].get("if", "")
+        for upstream in ("skipped", "cancelled", "failure"):
+            self.assertFalse(
+                eval_job_if(cond, {"needs": {"coverage-engine-run": {"result": upstream}}}),
+                f"coverage-engine-merge must not run when coverage-engine-run is "
+                f"'{upstream}'",
+            )
+        self.assertTrue(
+            eval_job_if(cond, {"needs": {"coverage-engine-run": {"result": "success"}}}),
+            "coverage-engine-merge must still run when its partitions succeeded",
+        )
+
+    # ---- what the queue KEEPS ------------------------------------------------
+    def test_floor_gates_still_run_on_merge_group(self):
+        """The fast, no-compile floor gates (test-presence / floor MONOTONICITY /
+        shard-partition) are NOT demoted: they cost well under a minute and they are what
+        makes "no committed floor is ever silently lowered" true of a QUEUED BATCH too.
+        Demoting these would break the stated invariant, not just the wall-clock."""
+        self.assertTrue(
+            self._runs("coverage-floors", event="merge_group"),
+            "coverage-floors must STILL run on merge_group — it is the batch-level "
+            "guarantee that no committed floor is lowered (sq-neq8 monotonicity)",
+        )
+        self.assertNotIn(
+            "merge_group", str(self.ci["jobs"]["coverage-floors"].get("if", "")),
+            "coverage-floors must carry NO merge_group exclusion",
+        )
+
+    def test_aggregate_still_concludes_on_merge_group(self):
+        """The `coverage` aggregate must still produce a TERMINAL check-run on the
+        merge_group ref (green off the skipped measure legs), or the ci-summary gate would
+        be left with an expected-but-missing coverage check."""
+        cond = str(self.ci["jobs"]["coverage"].get("if", ""))
+        self.assertIn("always()", cond,
+                      "the coverage aggregate must keep always() so it always concludes")
+        ctx = pr_event(event="merge_group")
+        ctx["needs"] = {}
+        self.assertTrue(eval_job_if(cond, ctx),
+                        "the coverage aggregate must still run on merge_group so the gate "
+                        "sees one terminal coverage verdict, never a dangling check")
+        # And its aggregation must keep counting a `skipped` measure leg as satisfied —
+        # that is what makes the demotion green rather than red.
+        body = "\n".join(str(s.get("run", "")) for s in self.ci["jobs"]["coverage"]["steps"])
+        self.assertIn("success|skipped", body,
+                      "the aggregate must treat a skipped (demoted) leg as satisfied")
+
+    # ---- the post-merge alarm + the advance pause ----------------------------
+    def test_advance_pause_step_wired_into_the_floor_gates(self):
+        """"Blocks further ratchet advances until green": the fast floor job must invoke
+        `coverage-gate.py --check-advance-allowed`, and needs only `issues: read` to probe
+        the alarm."""
+        job = self.ci["jobs"]["coverage-floors"]
+        body = "\n".join(str(s.get("run", "")) for s in job["steps"])
+        self.assertIn("--check-advance-allowed", body,
+                      "coverage-floors must run the ratchet-ADVANCE pause "
+                      "(scripts/coverage-gate.py --check-advance-allowed)")
+        self.assertIn("--check-monotonic", body,
+                      "the ratchet-DIRECTION gate (sq-neq8) must survive alongside it")
+        perms = job.get("permissions", {})
+        self.assertEqual(perms.get("issues"), "read",
+                         "the advance pause probes for an open alarm issue")
+        self.assertNotEqual(perms.get("issues"), "write",
+                            "the floor job must not gain write scope — the filer owns it")
+
+    def test_demoted_filer_job_wired(self):
+        """The demotion protocol requires a full-form-failure auto-filer so the demoted
+        lane cannot silently rot. Pin the safety-net job's existence, its
+        push-to-main-only guard, its scoped write perms, and its use of the filer."""
+        job = self.ci["jobs"].get("coverage-demoted-filer")
+        self.assertIsNotNone(job, "missing the coverage demoted-lane safety-net job")
+        cond = str(job.get("if", ""))
+        self.assertIn("github.event_name == 'push'", cond,
+                      "safety-net must run on push-to-main only")
+        self.assertIn("refs/heads/main", cond, "safety-net must be main-only")
+        self.assertIn("needs.coverage.result", cond,
+                      "safety-net must gate on the coverage aggregate's result")
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("coverage", needs, "safety-net must need the coverage aggregate")
+        perms = job.get("permissions", {})
+        self.assertEqual(perms.get("contents"), "write",
+                         "safety-net needs contents:write to append+push the bead")
+        self.assertEqual(perms.get("issues"), "write",
+                         "safety-net needs issues:write to file the GitHub issue")
+        self.assertEqual(perms.get("actions"), "read",
+                         "safety-net needs actions:read to inspect this run's jobs")
+        body = "\n".join(str(s.get("run", "")) for s in job.get("steps", []))
+        self.assertIn("scripts/ci-file-demoted-lane-failure.py", body,
+                      "safety-net must invoke the generic demoted-lane filer")
+        self.assertIn("--self-test", body,
+                      "safety-net must self-test the filer before using it")
+        # It must NOT fire on a merge_group / PR run (the demotion is only about main).
+        for event in ("merge_group", "pull_request", "schedule"):
+            ctx = pr_event(event=event)
+            ctx["needs"] = {"coverage": {"result": "failure"}}
+            self.assertFalse(eval_job_if(cond, ctx),
+                             f"the safety-net must not fire on a {event} run")
+
+    def test_filer_lane_token_matches_the_coverage_gate_module(self):
+        """The filer files the alarm under `--lane <token>`; coverage-gate.py reads the
+        SAME token back to decide whether to pause ratchet advances. If they drift, the
+        alarm is filed but the pause never triggers (silent half-protocol)."""
+        lane = self.cov_gate.COVERAGE_ALARM_LANE
+        body = "\n".join(str(s.get("run", ""))
+                         for s in self.ci["jobs"]["coverage-demoted-filer"]["steps"])
+        self.assertIn(f'--lane "{lane}"', body,
+                      f"the filer must file the alarm under the lane token "
+                      f"coverage-gate.py reads ({lane!r})")
+
+    def test_filer_leg_detection_regex_matches_the_real_demoted_job_names(self):
+        """The safety-net detects a failed DEMOTED leg by matching its JOB NAME. If a leg
+        is renamed and this regex is not, the filer would silently never fire (silent rot)
+        — and if the regex over-reaches to `coverage-floors` or the aggregate, a normal red
+        main build would be mis-filed as a demotion finding. Pin BOTH directions against
+        the real names GitHub renders."""
+        must_match = []
+        for job_id, var in (("coverage-measure", "shard"), ("coverage-engine-run", "part")):
+            tmpl = self.ci["jobs"][job_id]["name"]
+            for val in self.ci["jobs"][job_id]["strategy"]["matrix"][var]:
+                must_match.append(tmpl.replace("${{ matrix.%s }}" % var, str(val)))
+        must_match.append(self.ci["jobs"]["coverage-engine-merge"]["name"])
+        for real in must_match:
+            self.assertRegex(
+                real, self._DEMOTED_LEG_RE,
+                f"the filer's demoted-leg regex must match job name {real!r}")
+        # NEGATIVE half: the still-queued floor gates, the aggregate verdict, the nightly
+        # tier and the filer itself must NOT be read as demoted legs.
+        for job_id in ("coverage-floors", "coverage", "coverage-nightly",
+                       "coverage-demoted-filer"):
+            self.assertNotRegex(
+                self.ci["jobs"][job_id]["name"], self._DEMOTED_LEG_RE,
+                f"the filer regex must not match {job_id} — a red there is a normal red "
+                f"main build, not a demoted-lane finding")
+        # The regex literal must still be the one the workflow actually runs.
+        body = "\n".join(str(s.get("run", ""))
+                         for s in self.ci["jobs"]["coverage-demoted-filer"]["steps"])
+        self.assertIn("^coverage (ratchet \\\\(shard |engine )", body,
+                      "the workflow's --jq regex must match the one pinned here")
+
+
 class TestDraftTierWiring(unittest.TestCase):
     """[FABLE-5] Draft-tier CI (docs/branch-protection.md §Draft-tier CI): draft
     PR heads run a REDUCED matrix — coverage / bench / CodeQL / heavy shards
@@ -959,6 +1454,11 @@ class TestDraftTierWiring(unittest.TestCase):
     # disjunct => RUN; only a genuinely-draft PR head can skip.
     DRAFT_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.draft != true"
     MARKER_EXPR = "${{ github.event.pull_request.draft == true && ', draft-tier' || '' }}"
+    # [OPUS-5] #3781: ci-select's own marker expression is now THREE-valued (", no-leg"
+    # takes precedence over ", draft-tier" on a guarded label-flip no-op run), so it is
+    # no longer the same literal as the ci-summary gate's. Its BEHAVIOUR — not its text
+    # — is pinned by TestNoLegMarkerWiring, which evaluates the live expression.
+    DRAFT_MARKER_LITERAL = ", draft-tier"
 
     # Every gate-feeding workflow with a pull_request trigger. Advisory-only
     # workflows (pr-title, deploy-lint, deploy-terraform-lint) are deliberately
@@ -978,6 +1478,7 @@ class TestDraftTierWiring(unittest.TestCase):
         wfdir = REPO_ROOT / ".github" / "workflows"
         cls.ci = _load(CI_YML)
         cls.bench = _load(BENCH_YML)
+        cls.fuzz = _load(FUZZ_YML)  # [OPUS-5] #3508
         cls.sel = _load(SELECT_YML)
         cls.codeql = _load(wfdir / "codeql.yml")
         cls.vfo = _load(wfdir / "vectorized-feature-off.yml")
@@ -990,22 +1491,29 @@ class TestDraftTierWiring(unittest.TestCase):
     # ---- the tier marker (the gate's detection contract) ---------------------
     def test_select_job_name_carries_the_draft_tier_marker(self):
         name = self.sel["jobs"]["select"]["name"]
-        self.assertIn(self.MARKER_EXPR, name,
-                      "ci-select's job name must append the draft-tier marker on "
-                      "draft PR payloads (the gate's tier detection contract)")
         marker = self.gate.DRAFT_TIER_MARKER
-        self.assertIn(marker, self.MARKER_EXPR,
-                      "the YAML marker literal must be the gate's DRAFT_TIER_MARKER")
-        # Both RENDERED spellings must satisfy the SELECT_RE contract, carry no
-        # advisory token, and normalize to the same identity.
-        full = name.replace(self.MARKER_EXPR, "")
-        draft = name.replace(self.MARKER_EXPR, marker)
-        for rendered in (full, draft, f"select / {full}", f"select / {draft}"):
+        self.assertEqual(marker, self.DRAFT_MARKER_LITERAL)
+        self.assertIn(f"&& '{marker}'", name,
+                      "ci-select's job name must still append the draft-tier marker on "
+                      "draft PR payloads (the gate's tier detection contract)")
+        # Every RENDERED spelling must satisfy the SELECT_RE contract, carry no
+        # advisory token, and normalize to the same identity. ([OPUS-5] #3781 adds the
+        # third spelling, ", no-leg".)
+        expr = _marker_expr_of(name)
+        full = name.replace(expr, "")
+        draft = name.replace(expr, marker)
+        no_leg = name.replace(expr, self.gate.NO_LEG_MARKER)
+        for rendered in (full, draft, no_leg,
+                         f"select / {full}", f"select / {draft}", f"select / {no_leg}"):
             self.assertTrue(self.gate.is_select(rendered), rendered)
             self.assertFalse(self.gate.is_advisory(rendered), rendered)
         self.assertTrue(self.gate.is_draft_tier(draft))
         self.assertFalse(self.gate.is_draft_tier(full))
+        self.assertFalse(self.gate.is_draft_tier(no_leg),
+                         "a no-leg run must NOT be read as draft-tier — that is the "
+                         "#3781 deadlock")
         self.assertEqual(self.gate.normalized_name(draft), full)
+        self.assertEqual(self.gate.normalized_name(no_leg), full)
 
     # ---- draft skip guards ---------------------------------------------------
     def test_coverage_jobs_skip_on_draft_heads(self):
@@ -1024,6 +1532,58 @@ class TestDraftTierWiring(unittest.TestCase):
                       "bench.yml:bench must skip entirely on draft PR heads")
         self.assertIn(FAIL_CLOSED_DISJUNCT, cond,
                       "the selection disjunction must survive the draft guard")
+
+    def test_fuzz_job_skips_on_draft_heads(self):
+        """[OPUS-5] #3508 — the review-fix loop re-pushes a draft head many times
+        per PR and nothing in it reads a corpus-replay result, yet the job pays a
+        nightly-toolchain install + a `cargo fuzz build` of every target every
+        time. So the `fuzz` job is draft-skipped like bench/coverage and the
+        `ready_for_review` run re-replays at full tier. Asserted BEHAVIOURALLY by
+        evaluating the live `if:` (not by substring), because the two label
+        escapes are the part that a substring check would happily let rot."""
+        cond = self.fuzz["jobs"]["fuzz"].get("if", "")
+        self.assertIn(FAIL_CLOSED_DISJUNCT, str(cond),
+                      "the selection disjunction must survive the draft guard")
+
+        # mode=full => the selection disjunct is TRUE, so the draft guard alone
+        # decides. (mode=full is what push/schedule/dispatch always produce.)
+        def runs(**kw):
+            ctx = pr_event(**kw)
+            ctx["needs"] = {"select": {"outputs": {"mode": "full", "affected": "[]"}}}
+            return eval_job_if(cond, ctx)
+
+        self.assertFalse(runs(draft=True),
+                         "fuzz.yml:fuzz must SKIP on an unlabelled draft PR head")
+        self.assertFalse(runs(draft=True, labels=["review:changes"]),
+                         "an unrelated label must not resurrect the lane on a draft")
+        # FAIL-OPEN off the PR path: push / schedule / dispatch are byte-identical
+        # to before, so the randomized full-form runs (and the demotion auto-bead
+        # protocol they feed) are untouched.
+        for event in ("push", "schedule", "workflow_dispatch"):
+            self.assertTrue(runs(event=event), f"{event} must still run the fuzz lane")
+        self.assertTrue(runs(draft=False), "a non-draft PR head must still run it")
+        # LABEL ESCAPES. `fuzz-full` selects this job's RANDOMIZED budget (the
+        # budget step reads it), so a bare draft skip would silently neuter the
+        # label on exactly the drafts where a maintainer applies it.
+        for lbl in ("ci-full", "fuzz-full"):
+            self.assertTrue(runs(draft=True, labels=[lbl]),
+                            f"the {lbl} label must override the draft skip")
+        # The escapes compose with the #2546 label-trigger guard: a review:* flip
+        # stays a no-op on a draft even though the PR carries fuzz-full.
+        self.assertFalse(runs(draft=True, labels=["fuzz-full"],
+                              action="labeled", label="review:changes"),
+                         "a non-ci-full/fuzz-full label FLIP must stay a no-op")
+
+    def test_differential_smoke_is_not_draft_skipped(self):
+        """The sibling job in fuzz.yml is the wrong-answer gate, and a
+        wrong-answer regression IS review-relevant — #3508 scopes out the
+        corpus-replay lane only. Pinned so a later sweep does not quietly widen
+        the draft skip to a correctness gate."""
+        cond = str(self.fuzz["jobs"]["differential-smoke"].get("if", ""))
+        self.assertNotIn("draft", cond,
+                         "differential-smoke (the wrong-answer gate) must keep "
+                         "running on draft heads — see docs/branch-protection.md "
+                         "§Draft-tier CI")
 
     def test_codeql_analyze_skips_on_draft_heads(self):
         cond = str(self.codeql["jobs"]["analyze"].get("if", ""))
@@ -1148,6 +1708,9 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertEqual(perms.get("pull-requests"), "read",
                          "the gate needs pull-requests:read for the conclusion-time "
                          "draft re-check")
+        self.assertEqual(perms.get("actions"), "write",
+                         "#3505 needs actions:write only for the bounded once-only "
+                         "re-run of a newest cancelled workflow")
         step = next(s for s in self.summary["jobs"]["gate"]["steps"]
                     if "ci_summary_gate.py" in str(s.get("run", "")))
         env = step.get("env", {})
@@ -1167,6 +1730,229 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertIn("github.event.pull_request.number", str(conc.get("group", "")))
         self.assertTrue(conc.get("cancel-in-progress"),
                         "js.yml must cancel superseded PR runs")
+
+
+class TestNoLegMarkerWiring(unittest.TestCase):
+    """[OPUS-5] #3781 — the ", no-leg" marker, EVALUATED not string-matched.
+
+    THE DEFECT. `sparq-orchestrator[bot]` re-drafts a freshly-readied worker PR ~13
+    min after the ready and flips `review:needs` in the same breath. That label event
+    re-triggers ci.yml / bench.yml / feature-matrix.yml / fuzz.yml, whose #2546
+    label-trigger guard skips EVERY root job — measured on sparq #3472: 8 such runs,
+    each with exactly ONE non-skipped job (the unconditional select). Because the PR
+    was now a draft, each of those selects came out `…, draft-tier`, so the head
+    acquired four fresh draft-marked select instances whose full-tier successor could
+    never exist (only a NON-draft payload produces one). The gate burned all 155 polls
+    and refused a leg set with zero failing legs, three times in one pass.
+
+    THE CONTRACT PINNED HERE. ci-select.yml must name that job `…, no-leg` — never
+    `…, draft-tier` — on a guarded label-flip no-op, and must keep naming it
+    `…, draft-tier` on a genuinely draft-assembled run. Every case is checked by
+    EVALUATING the live expression (see the evaluator above) and feeding the rendered
+    name to the real gate predicates, so a mutated expression (a dropped `!`, a
+    widened label list, swapped ternary branches) REDs on behaviour."""
+
+    # The escape labels: on one of these at least one caller DOES do real work, so no
+    # no-leg claim may be made. Derived from the callers' own guards below.
+    ESCAPE_LABELS = ("ci-full", "bench-full", "fuzz-full")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sel = _load(SELECT_YML)
+        cls.gate = _gate_module()
+        cls.name = cls.sel["jobs"]["select"]["name"]
+
+    def _render(self, **kwargs) -> str:
+        return render_job_name(self.name, pr_event(**kwargs))
+
+    # ---- the load-bearing discrimination -------------------------------------
+    def test_guarded_label_flip_on_a_draft_pr_renders_no_leg_not_draft_tier(self):
+        """(a) THE FIX. A `review:needs` flip on a DRAFT PR — the exact #3472 event —
+        must render the no-leg marker. If it renders ", draft-tier" the run
+        manufactures an unsatisfiable hold and the whole parked backlog deadlocks."""
+        for action in ("labeled", "unlabeled"):
+            rendered = self._render(draft=True, action=action, label="review:needs")
+            self.assertIn(self.gate.NO_LEG_MARKER, rendered,
+                          f"{action} review:needs on a draft PR must render the "
+                          f"no-leg marker, got {rendered!r}")
+            self.assertFalse(
+                self.gate.is_draft_tier(rendered),
+                f"{action} review:needs on a draft PR must NOT be marked draft-tier: "
+                f"its run assembles ZERO legs, so the hold it would create can never "
+                f"be discharged while the PR stays a draft (#3781) — got {rendered!r}")
+            self.assertTrue(self.gate.is_no_leg_select(rendered), rendered)
+            self.assertTrue(self.gate.is_select(rendered), rendered)
+            self.assertFalse(self.gate.is_advisory(rendered), rendered)
+
+    def test_a_genuine_draft_run_still_renders_the_draft_tier_marker(self):
+        """(b) THE OTHER HALF OF THE DISCRIMINATION — the fix must not blind
+        draft-tier CI. An `opened`/`synchronize`/`reopened` run on a draft PR
+        assembles a REAL reduced leg set, so it must still be marked draft-tier and
+        still create the hold that keeps its legs out of the merge queue."""
+        for action in ("opened", "synchronize", "reopened"):
+            rendered = self._render(draft=True, action=action)
+            self.assertTrue(
+                self.gate.is_draft_tier(rendered),
+                f"a draft {action} run assembles real (reduced) legs and MUST stay "
+                f"draft-tier-marked — got {rendered!r}")
+            self.assertFalse(self.gate.is_no_leg_select(rendered), rendered)
+
+    def test_escape_label_flips_make_no_no_leg_claim(self):
+        """A ci-full/bench-full/fuzz-full flip DOES do real work in at least one
+        caller, so it must not claim to be evidence-free (conservative: the
+        pre-#3781 behaviour stands)."""
+        for label in self.ESCAPE_LABELS:
+            for draft in (True, False):
+                rendered = self._render(draft=draft, action="labeled", label=label)
+                self.assertFalse(
+                    self.gate.is_no_leg_select(rendered),
+                    f"{label} triggers real work — no no-leg claim allowed "
+                    f"(got {rendered!r})")
+                self.assertEqual(self.gate.is_draft_tier(rendered), draft, rendered)
+
+    def test_non_draft_and_non_pr_events_are_unchanged(self):
+        """push / merge_group / schedule and a non-draft synchronize must render the
+        BARE full-tier name, byte-identical to the pre-#3781 behaviour."""
+        bare = self.name.replace(_marker_expr_of(self.name), "")
+        self.assertEqual(self._render(draft=False, action="synchronize"), bare)
+        self.assertEqual(self._render(event="push"), bare)
+        self.assertEqual(self._render(event="merge_group"), bare)
+        self.assertEqual(self._render(event="schedule"), bare)
+        self.assertFalse(self.gate.is_draft_tier(bare))
+        self.assertFalse(self.gate.is_no_leg_select(bare))
+
+    def test_ready_for_review_renders_full_tier(self):
+        """The un-draft moment is the ONLY thing that can discharge a draft-tier
+        hold, so it must render the bare full-tier name."""
+        rendered = self._render(draft=False, action="ready_for_review")
+        self.assertFalse(self.gate.is_draft_tier(rendered))
+        self.assertFalse(self.gate.is_no_leg_select(rendered))
+
+    # ---- cross-file drift guards --------------------------------------------
+    def test_every_job_of_every_caller_is_inert_on_a_non_escape_label_flip(self):
+        """THE CLAIM BEHIND THE MARKER, checked by REACHABILITY, not by grep.
+
+        `…, no-leg` asserts the run assembled ZERO legs. That is true only because
+        every job of every ci-select caller is skipped on a non-escape label flip —
+        either by carrying the #2546 label-trigger guard itself, or by `needs:`-ing a
+        job that does, or by being restricted to a non-pull_request event. If any job
+        ever becomes reachable on such a flip, the shared select would claim `no-leg`
+        for a run that DID produce evidence, and the gate would then ignore that
+        evidence. Only the ci-select caller job is exempt — it is deliberately
+        unconditional, because a skipped select poisons the gate."""
+        guard = "contains(fromJSON('[\"labeled\",\"unlabeled\"]'), github.event.action)"
+        for wf_name in ("ci.yml", "feature-matrix.yml", "bench.yml", "fuzz.yml"):
+            wf = _load(REPO_ROOT / ".github" / "workflows" / wf_name)
+            jobs = wf["jobs"]
+
+            def needs_of(job_id):
+                raw = jobs[job_id].get("needs") or []
+                return [raw] if isinstance(raw, str) else list(raw)
+
+            def cond(job_id):
+                return " ".join(str(jobs[job_id].get("if", "")).split())
+
+            def event_restricted(job_id):
+                """`if:` pins the event to something that is not pull_request."""
+                text = cond(job_id)
+                return "github.event_name" in text and "pull_request" not in text
+
+            memo = {}
+
+            def inert(job_id):
+                if job_id in memo:
+                    return memo[job_id]
+                memo[job_id] = False  # a cycle can never prove inertness
+                text = cond(job_id)
+                alwaysish = "always()" in text or "!cancelled()" in text
+                memo[job_id] = (
+                    guard in text
+                    or event_restricted(job_id)
+                    or (bool(needs_of(job_id)) and not alwaysish
+                        and any(inert(n) for n in needs_of(job_id)))
+                )
+                return memo[job_id]
+
+            callers = [j for j, spec in jobs.items()
+                       if "ci-select.yml" in str(spec.get("uses", ""))]
+            self.assertEqual(len(callers), 1, f"{wf_name}: exactly one select caller")
+            live = sorted(j for j in jobs if j not in callers and not inert(j))
+            self.assertFalse(
+                live,
+                f"{wf_name}: {live} would still RUN on a non-escape label flip, so "
+                f"such a run does NOT assemble zero legs and the shared ci-select job "
+                f"must not claim `no-leg` for it — the gate would then ignore a run "
+                f"that produced real evidence (#3781 / the #2546 guard)")
+
+    def test_no_leg_condition_covers_every_caller_escape_label(self):
+        """Drift guard in the other direction: every label a caller treats as
+        'do real work' must be EXCLUDED from the no-leg condition, or a run that
+        does real work would be declared evidence-free and then IGNORED."""
+        expr = _marker_expr_of(self.name)
+        excluded = set()
+        for group in re.findall(
+            r"!contains\(fromJSON\('(\[[^']*\])'\), github\.event\.label\.name\)", expr
+        ):
+            excluded |= set(json.loads(group))
+        self.assertTrue(excluded, "the no-leg condition must exclude the escape labels")
+        self.assertEqual(excluded, set(self.ESCAPE_LABELS))
+        for wf_name in ("ci.yml", "feature-matrix.yml", "bench.yml", "fuzz.yml"):
+            text = (REPO_ROOT / ".github" / "workflows" / wf_name).read_text(
+                encoding="utf-8")
+            work_labels = set(
+                re.findall(r"github\.event\.label\.name == '([^']+)'", text)
+            )
+            for group in re.findall(
+                r"contains\(fromJSON\('(\[[^']*\])'\), github\.event\.label\.name\)",
+                text,
+            ):
+                work_labels |= set(json.loads(group))
+            missing = work_labels - excluded
+            self.assertFalse(
+                missing,
+                f"{wf_name} does real work on {sorted(missing)} — the no-leg "
+                f"condition must exclude those labels, or a run that produced real "
+                f"legs would be declared evidence-free and then IGNORED")
+
+    def test_the_step_summary_agrees_with_the_job_name(self):
+        """The human-facing step summary and the machine-facing job name must decide
+        `no-leg` from the SAME condition. A summary that said "Tier: draft" for a run
+        the gate is ignoring is exactly the misreading that cost a full drain pass to
+        unpick, so both expressions are evaluated side by side on every payload."""
+        step = next(s for s in self.sel["jobs"]["select"]["steps"]
+                    if "ci_select.py" in str(s.get("run", "")))
+        expr = str(step["env"]["IS_NO_LEG_RUN"])
+        cases = [
+            dict(draft=True, action="labeled", label="review:needs"),
+            dict(draft=True, action="unlabeled", label="review:pass"),
+            dict(draft=False, action="labeled", label="review:needs"),
+            dict(draft=True, action="labeled", label="ci-full"),
+            dict(draft=True, action="synchronize"),
+            dict(draft=False, action="ready_for_review"),
+            dict(event="push"),
+            dict(event="merge_group"),
+        ]
+        for case in cases:
+            ctx = pr_event(**case)
+            summary_says = _truthy(_GhExpr(expr[3:-2], ctx).parse())
+            name_says = self.gate.is_no_leg_select(render_job_name(self.name, ctx))
+            self.assertEqual(
+                summary_says, name_says,
+                f"{case}: the step summary and the job name disagree about whether "
+                f"this run assembled no legs (summary={summary_says}, "
+                f"name={name_says}) — one of the two conditions has drifted (#3781)")
+
+    def test_the_evaluator_itself_is_not_vacuous(self):
+        """A wiring test whose evaluator silently returns '' for everything would
+        pass every assertion above. Prove the evaluator discriminates."""
+        self.assertTrue(_GhExpr("true && 'x'", {}).parse())
+        self.assertEqual(_GhExpr("false && 'x' || 'y'", {}).parse(), "y")
+        self.assertEqual(_GhExpr("!false && 'x' || 'y'", {}).parse(), "x")
+        self.assertTrue(_GhExpr("contains(fromJSON('[\"a\"]'), 'a')", {}).parse())
+        self.assertFalse(_GhExpr("contains(fromJSON('[\"a\"]'), 'b')", {}).parse())
+        self.assertIsNone(_GhExpr("github.missing.path", {"github": {}}).parse())
+        with self.assertRaises(GhExprError):
+            _GhExpr("a $$ b", {}).parse()
 
 
 class TestContainerScanMergeGroupGate(unittest.TestCase):

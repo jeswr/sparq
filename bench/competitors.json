@@ -426,26 +426,48 @@
       "dashboard_engine_id": null
     },
     {
-      "id": "ann-benchmarks",
-      "name": "ann-benchmarks kernel peers (hnswlib / FAISS / ScaNN / DiskANN-ref)",
+      "id": "hnswlib",
+      "name": "hnswlib",
       "kind": "vector-lib",
-      "role": "[OPUS-4.8 sq-v02y] The STRONGEST honest-competition surface: recall@k vs exact-kNN is a fair, standard, deterministic comparator. The harness is ann-benchmarks-STYLE — it reports the recall-QPS PARETO at MATCHED recall, NEVER a single latency number (a faster engine at lower recall is not 'faster'). Kernel peers, all MIT/Apache/BSD -> publishable: hnswlib (primary, canonical in-RAM HNSW; the sparq-vectors HNSW peer), FAISS (quantizer/GPU + brute-force ground-truth oracle), ScaNN (the SOTA recall-QPS bar), DiskANN reference impl (the oracle for sparq's Vamana .spqg). Adapter kind `vector-lib` via scripts/bench-adapters/vector_lib_adapter.py (in-process, cross-language; build index -> query -> recall@k vs an exact-kNN numpy oracle, emitting the SAME recall_deficit_milli the suite gates on — design G4); the shared-adapter dispatch in gather-competitors.sh routes `vector-lib` engines to run_vector_lib_engine. UNCONTESTED surface value: NO competitor does ANN-INSIDE-SPARQL over dict-encoded entity ids (sparq's ANN is keyed by the store's dictionary term ids, joinable directly into a SPARQL plan; these kernels are standalone index structures).",
-      "pinned_version": "hnswlib / faiss-cpu / scann / DiskANN (pin each library's exact PyPI/release version at gather time)",
-      "version_source": "each library's version (hnswlib.__version__ / faiss / scann / DiskANN release), recorded in the gather results file.",
-      "install_recipe": "pip install numpy hnswlib faiss-cpu scann (+ build DiskANN reference) at gather time, plus a published ANN dataset (SIFT1M or GloVe-100-angular). gather-only — NOT committed (engines stay out of git per AGENTS.md); the big corpora are NOT redistributable in-repo (see the SIFT1M/GloVe recall-QPS follow-up bead).",
-      "run_recipe": "scripts/gather-competitors.sh --run --only ann-benchmarks dispatches scripts/bench-adapters/vector_lib_adapter.py: build the engine's index over the dataset, query top-k, compute exact-kNN ground truth (numpy), emit `<engine>\\t<recall_deficit_milli>\\t<query_us>` at a sweep of build/search params -> the recall-QPS Pareto. The per-commit suite uses the synthetic 50k corpus; the big SIFT1M/GloVe Pareto is gather-tier.",
+      "role": "[FABLE-5 sq-5o5.4] Primary in-memory HNSW kernel peer for sparq-vectors. The gather reports the recall-QPS Pareto at matched recall against the published dataset's exact-neighbour oracle; it never compares latency at unequal recall. hnswlib has no RDF/SPARQL surface, so this is a vector-kernel comparison only.",
+      "pinned_version": "hnswlib (record the exact installed distribution version at gather time)",
+      "version_source": "`python3 -m pip show hnswlib` on the gather box, recorded with the result envelope and host metadata.",
+      "install_recipe": "python3 -m pip install numpy hnswlib (plus h5py for GloVe-100-angular) on the gather box. The dependency and published corpus are gather-only and are not committed.",
+      "run_recipe": "SIFT1M: `VECTOR_DATASET=sift-128-euclidean VECTOR_ROOT=/data/ann scripts/gather-competitors.sh --run --only hnswlib`; GloVe-100: use `VECTOR_DATASET=glove-100-angular`. The shared vector-lib adapter builds one index, sweeps ef, scores recall@k against the corpus ground truth, and writes the git-ignored result envelope.",
       "adapter": {
         "kind_note": "python-lib (vector_lib_adapter.py) + exact-kNN numpy oracle (G4). Report the recall-QPS PARETO at MATCHED recall, never a single latency. Scope to what sparq-vectors implements (cosine/L2 top-k; HNSW + Vamana + PQ) or it is unfair."
       },
       "comparable_suites": [
         {
           "sparq_suite": "vector-ann-bench",
-          "note": "same dataset + exact-kNN ground truth; cross-check recall@10 (the recall_deficit_milli) at MATCHED recall before comparing QPS. hnswlib is the dashboard peer for the HNSW row; FAISS/ScaNN/DiskANN-ref are kernel references. NEVER compare a single latency — only the recall-QPS Pareto. No competitor does ANN-inside-SPARQL over dict-encoded ids (uncontested)."
+          "note": "Same SIFT1M or GloVe-100 corpus and ground truth; compare recall-QPS frontiers only at matched recall. hnswlib is the dashboard peer for the HNSW row."
         }
       ],
-      "version_env_metadata": "gather records each library version, the dataset name + checksum, the param sweep, python/numpy versions, and the host env block.",
+      "version_env_metadata": "gather records the installed hnswlib version, dataset name, parameter sweep, Python/numpy versions, and host env block.",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "hnswlib"
+    },
+    {
+      "id": "faiss",
+      "name": "FAISS",
+      "kind": "reference",
+      "role": "[FABLE-5 sq-5o5.4] Vector-kernel reference for exact Flat search and approximate IVF sweeps on the same SIFT1M/GloVe-100 corpora. It provides an independent exact-search oracle and recall-QPS frontiers for IVF variants; it has no RDF/SPARQL surface.",
+      "pinned_version": "faiss-cpu (record the exact installed distribution and `faiss.__version__` at gather time)",
+      "version_source": "`python3 -c 'import faiss; print(faiss.__version__)'` plus `python3 -m pip show faiss-cpu` on the gather box.",
+      "install_recipe": "python3 -m pip install numpy faiss-cpu (plus h5py for GloVe-100-angular) on the gather box. The dependency and published corpus are gather-only and are not committed.",
+      "run_recipe": "Run `python3 scripts/bench-adapters/gather_ann_pareto.py sift <results.json>` or replace `sift` with `glove`. This comprehensive gather measures FAISS Flat and IVF variants alongside hnswlib against the same corpus ground truth. The generic `gather-competitors.sh --only faiss` path is intentionally not dispatched until FAISS has a standalone vector-lib adapter.",
+      "adapter": {
+        "kind_note": "Gather-only comprehensive ANN Pareto harness. `reference` is intentionally inert in gather-competitors.sh; use gather_ann_pareto.py so FAISS and hnswlib share one loaded corpus and oracle."
+      },
+      "comparable_suites": [
+        {
+          "sparq_suite": "vector-ann-bench",
+          "note": "Same SIFT1M or GloVe-100 corpus and ground truth; compare approximate FAISS IVF and sparq-vectors only at matched recall. FAISS Flat is the exact kernel reference."
+        }
+      ],
+      "version_env_metadata": "gather records the installed FAISS version, dataset name, IVF parameter sweep, Python/numpy versions, and host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "faiss"
     },
     {
       "id": "vector-dbs",

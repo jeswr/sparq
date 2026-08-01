@@ -19,7 +19,7 @@ export const metadata: Metadata = {
     "Drag-drop, paste or fetch a W3C Verifiable Credential and run SPARQL over its claims — the sparq engine compiled to WebAssembly, entirely in your browser tab. Importing and querying is live; cryptographic verification and zero-knowledge proofs are the separate research-grade ZK estate (not externally audited).",
 };
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 export default function VerifiableCredentialsPage() {
   return (

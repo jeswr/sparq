@@ -1,10 +1,36 @@
-# [FABLE-5] sq-63ups. 🤖 SPARQ agent.
+# [FABLE-5] sq-63ups + registry jeswr/agent-account-registry#563 item 2. 🤖 SPARQ agent.
 #
-# ONLY the `default-miri` profile is configured here — the profile nextest selects
-# AUTOMATICALLY when running under `cargo miri nextest run` (verified on the work box:
-# "Nextest run ID … with nextest profile: default-miri"). Every normal `cargo nextest run`
-# in ci.yml uses the built-in `default` profile, which this file deliberately leaves
-# untouched, so adding this file changes NOTHING outside the Miri lane.
+# TWO profiles are configured here:
+#   • `default-miri` — the profile nextest selects AUTOMATICALLY when running under
+#     `cargo miri nextest run` (verified on the work box: "Nextest run ID … with
+#     nextest profile: default-miri"). Miri-lane only.
+#   • `ci` — the profile ci.yml's sharded `cargo nextest run --archive-file …` legs
+#     select EXPLICITLY via `--profile ci`. Local `cargo nextest run` invocations keep
+#     the built-in `default` profile (no retries), so a locally-reproducible flake
+#     stays loudly red on the work box.
+
+# [FABLE-5] registry#563 item 2 (maintainer-approved OSS adoption): CI retry profile.
+#
+# INCIDENT CLASS: flaky tests redding the single required `gate` check burn whole gate
+# evaluations and trigger review-fix ci-flavour re-dispatches for PRs that changed
+# nothing relevant — the retry belongs at the test runner, not in the fix lane.
+#
+# NOT A SILENT MASK: nextest marks a test that passes only on a retry as FLAKY in the
+# run log and repeats it in the end-of-run summary (`final-status-level = "flaky"`
+# below), so the flake signal still lands in the shard logs that the flake-triage
+# tooling (omnibus-flake-quarantine, bench-triage) reads. A test that fails every
+# attempt is a plain FAIL and reds the shard exactly as before — the floor is never
+# weakened. No JUnit emission: no CI consumer parses JUnit here, so the log/summary
+# flaky reporting is the surfaced signal.
+[profile.ci]
+# Moved from the inline `--retries 2` flag on ci.yml's shard run step (count unchanged
+# — sq-x4jy calibrated it for the transient binary race; sq-c76x kept it) so the retry
+# policy lives in ONE place next to the Miri profile instead of inside a shell array.
+retries = 2
+# Explicit pin of nextest's default: every flaky (retried-then-passed) test is repeated
+# in the final summary, so an upstream default change can never silently drop the flaky
+# signal this profile is obligated to surface.
+final-status-level = "flaky"
 
 [profile.default-miri]
 # The nightly miri lane (.github/workflows/miri.yml) was cancelled at its 90-minute job

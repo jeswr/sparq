@@ -18,6 +18,13 @@ them. It is the companion ontology to the **ISWC 2025** ZKP-SPARQL paper.
 | `sec-req:` | `https://w3id.org/zkp-sparql/sec-req#` | Three regulatory frameworks (eIDAS 2.0, NIST PQC migration, UK DVS) that pull on `sec-prop:` properties, with dated obligations. |
 | `prov-ext:` | `https://w3id.org/zkp-sparql/prov-ext#` | Minimal `bibo:`/`dcterms:`/`prov:` provenance extension (one coined term, `prov-ext:bibtexKey`) backing the `prov:wasDerivedFrom` citation chains. |
 
+The sparq-authored extension graphs reuse those stable namespaces:
+
+| Extension file | Namespace extended | Authorising work |
+|----------------|--------------------|------------------|
+| `secprop-ext.ttl` | `https://w3id.org/zkp-sparql/sec-prop#` | bead `sq-5oru9`, issue #1001 |
+| `sigimpl-ext.ttl` | `https://w3id.org/zkp-sparql/sig-impl#` | issue #2832 |
+
 ## Origin
 
 - **Origin repository:** `github.com/jeswr/sparql-zkp-ontologies` (private at
@@ -93,6 +100,41 @@ sparq-local namespace is performed. The sparq security-properties ontology
 (`research/security-properties-ontology-design.md`, epic `sq-0dksu`) **extends**
 this `sec-prop:` namespace; it does not fork it.
 
+The vendored `vocab/sec-prop.yaml.ld` still carries the upstream *"placeholder
+while the repo is private"* wording this resolution supersedes — deliberately, per
+the edit policy below.
+
+## Vendored-copy edit policy — and the known-stale upstream comments
+
+**Policy: the vendored files are not edited.** `vocab/*.yaml.ld` and
+`shapes/*.shapes.ttl` are byte-for-byte as of origin SHA
+`0fe80ea7d858de9f02bd29df29f6e50cdada14a0`, so the copy can be verified against
+the origin repo by a plain diff. That verifiability **is** the provenance
+guarantee, and it holds only while the files stay untouched — so a stale upstream
+comment is reconciled **in this record**, never by patching the vendored file.
+(`LICENSE` and this `PROVENANCE.md` are sparq-added files, not vendored ones;
+`secprop-ext.ttl` and `sigimpl-ext.ttl` are sparq *extensions* and are ours to
+edit.)
+
+The ML-DSA terms in `sigimpl-ext.ttl` were added by sparq on **2026-07-26**
+(issue #2832). They extend the existing `sig-impl:` namespace without changing
+the vendored ontology. Their sparq authorship and separation from the paper
+authors' graph are recorded both by the source-file boundary and by the
+`owl:Ontology` marker at `https://w3id.org/zkp-sparql/sig-impl-ext`.
+
+The consequence is that some upstream comments describe the **origin repository**
+rather than this copy. This record supersedes them; the known cases are:
+
+| Where | The upstream comment says | Superseded by |
+|-------|---------------------------|---------------|
+| `vocab/sec-prop.yaml.ld` lines 10–11 | IRIs under `https://w3id.org/zkp-sparql/` are "placeholder while the repo is private (see README and LICENSE-DRAFT.md)" | *Namespace resolution* above — the IRIs are **kept as-is, stable, public**, because w3id redirects are independent of any repo's visibility. The private state ended for this content on 2026-06-20 (vendored into public sparq) and 2026-06-21 (MIT). `LICENSE-DRAFT.md` has since been deleted (*Draft removed* above) and the origin `README.md` was never vendored, so both pointers dangle here. |
+| `vocab/*.yaml.ld` header comments and property prose | `scripts/render-jsonld.sh`, `scripts/render-turtle.sh`, `notes/research/08-bibliography.md`, `spec/disclosure.md`, `spec/config.md`, `proofs/` | These are **origin-repo-relative** and do not exist in this directory: the render pipeline, the bibliography, and the paper's spec/proof trees were not vendored (*Authoring / pipeline notes* below). The bibliography's BibTeX keys are materialised in-copy as `bibo:Document` instances in `vocab/prov-ext.yaml.ld`. |
+
+Decision recorded **2026-07-26** (bead `sq-j3p18`, issue #3263, raised in the
+PR #1005 review): *patch the vendored comment* was rejected — it would break the
+verbatim-diff guarantee for a comment that carries no data — in favour of
+*`PROVENANCE.md` as the single authoritative override*.
+
 ## Authoring / pipeline notes (from upstream)
 
 - **Source authoring is yaml-ld** (`vocab/*.yaml.ld`); upstream round-tripped it
@@ -120,7 +162,8 @@ be feature-gated to keep the lean core unaffected (strict additivity, design
 
 ## References
 
-- Epic `sq-0dksu` · vocab bead `sq-5oru9` · secprop precheck `sq-dt5hv`
+- Epic `sq-0dksu` · vocab bead `sq-5oru9` · secprop precheck `sq-dt5hv` ·
+  stale-comment reconciliation `sq-j3p18` (issue #3263)
 - Design record: `research/security-properties-ontology-design.md` (PR #972)
 - Open maintainer decisions: **#1001** (default assurance level) · **#1002**
   (DPV alignment depth)

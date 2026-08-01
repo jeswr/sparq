@@ -25,6 +25,23 @@ carry no challenge reduction, so M-1 does not touch them). All other gates are s
 as landed for the stated threat model. Verdicts cite `file:line` on the worktree
 branch.
 
+## What the per-finding labels mean (read before quoting one)
+
+This document previously labelled its per-finding dispositions `CLOSED`. In a document
+titled a *re-audit*, `CLOSED` reads as a **resolved security conclusion** — which is
+not something an internal single-model pass can earn while the external audit is
+outstanding. The labels are therefore:
+
+- **INTERNALLY MITIGATED (sq-qhy4 pending)** — this internal pass found the property
+  holds with the cited code evidence, and (where a defect was found) fixed it. It is
+  **not** an external sign-off and **nothing in this document should be read as
+  implying the external accredited-cryptographer audit (`sq-qhy4`) has occurred — it
+  has not.** No item here is closed in the audit sense until sq-qhy4 lands.
+- **FIXED** — a defect this pass found and fixed in code, with a regression test.
+- **CONFIRMED** — a structural fact verified by inspection (e.g. an absent construct).
+
+The standing NOT-yet-sound posture is unchanged by this document.
+
 ## Bottom-line verdict
 
 **The three membership/PoK members are SOUND as landed for the threat model
@@ -71,7 +88,7 @@ cannot byte-match. The canonical vk is recomputed per `CircuitId`
 
 ## Per-finding dispositions
 
-### 1. (load-bearing) hidden-issuer public-input reconstruction matches `main` — CLOSED
+### 1. (load-bearing) hidden-issuer public-input reconstruction matches `main` — INTERNALLY MITIGATED (sq-qhy4 pending)
 
 `bind_hidden_issuer_attestations` (`verifier.rs:3066-3069`) builds exactly
 `[nonce, m, key_set_root]` (three 32-byte BE words), matching
@@ -88,17 +105,79 @@ root → `HiddenIssuerRootMismatch`; a message not bound to a referenced commitm
 (`hidden_issuer_in_set_verifies_and_key_is_private`), `:4860` (out-of-set
 unprovable), `:4900` (forged signature unprovable), `:4939` (forged root rejected).
 
-### 2. (load-bearing) hidden-issuer key-set root is verifier-derived — CLOSED
+### 2. (load-bearing) hidden-issuer key-set root is verifier-derived — INTERNALLY MITIGATED (sq-qhy4 pending)
 
-`KeySet::hidden_issuer_root` (`verifier.rs:256`) → `issuer::key_set_root` folds the
+`KeySet::hidden_issuer_root` (`verifier.rs`) → `issuer::key_set_root_sparse`
+(sq-r6dq, since PR #3651; previously the dense `issuer::key_set_root`) folds the
 RP's OWN trusted keys in canonical `BTreeSet` order, leaf = `key_set_leaf(pk) =
 Poseidon2([pk.x, pk.y])` (`sig.rs:1117`), internal = `h2 = Poseidon2([l, r])`
 (`issuer.rs:59`) — bit-identical to `issuer.nr::key_leaf` / `h2` (cross-vector
 `issuer.rs:359`, `tests.nr` `h2(1,2)`). The prover commits the SAME order
 (`ordered_keys`), so the roots agree. A prover that proves membership in its OWN
-forged set fails the `key_set_root` byte-compare. Padding leaf `Fr::from(0)`; the
-membership fold binds the `index` bits, so a padding slot is never a usable member
-(`key_set_membership`, `issuer.nr`).
+forged set fails the `key_set_root` byte-compare.
+
+**What the sparse substitution is, stated precisely (do not shorten this to
+"scaling-only").** The sparse root is **value-equivalent to the dense root wherever
+the dense evaluation completes** — that is the property the tests pin, and it is the
+property the trust anchor needs: the anchor a prover's public root must byte-equal is
+unchanged at every depth the dense builder can still be run. It is **not** a
+behaviour-preserving change. Removing the dense builder's implicit `O(2^depth)` host
+cost means a **deep policy depth that previously aborted or exhausted memory before
+producing an anchor now produces one and the verifier reaches LATER states** — root
+derivation, key parsing, leaf hashing, the 96-byte public-input byte-compare, and the
+`canonical_vk` lookup. Those later states are themselves fail-closed (an
+uncompiled `hidden_issuer_d{depth}` member yields a `Driver` error from
+`canonical_vk`; there is no fallback to `d4` and no attacker-selected vk), but the
+reachable state space genuinely grew, and with it the work an unauthenticated
+submission can force before the verifier discovers the member is unavailable. That
+residual DoS surface is the RP's own `with_hidden_issuer_depth` configuration and is
+tracked separately, NOT closed here.
+
+**How far the equivalence is actually evidenced (do not read this as a
+cross-check at every depth).** Two DIFFERENT kinds of evidence exist and they must
+not be conflated:
+
+- **Dense cross-check (independent oracle), depths ≤ 12 only.** `issuer::tests`
+  `sparse_root_matches_dense_for_all_sizes` (every size, depths 0–6) and
+  `sparse_witness_matches_dense_for_all_indices` (depths 0–5) compare against the
+  independently-computed dense builder; `hidden_issuer_root_uses_sparse_builder_and_scales`
+  (`verifier.rs`) does the same for the real `KeySet` anchor at depths 4/8/12. Only
+  these are cross-checks.
+- **Self-consistency ONLY, deep trees (24, 28, 31).** `sparse_deep_tree_witness_refolds_to_root`
+  (depth 28), the depth-24 group in `hidden_issuer_root_uses_sparse_builder_and_scales`,
+  and `sparse_valid_depth_31_root_and_path_are_defined` check that a sparse witness
+  re-folds to the sparse root. Root and witness both come from `sparse_fold_leaves`,
+  so a **correlated common-mode error in that shared fold would pass both**. There is
+  no independent oracle at these depths (the dense builder cannot materialise
+  `2^24`+ leaves), so "a wrong anchor or a wrong sibling fails it" holds for an
+  ISOLATED error, not for a common-mode one. The equivalence claim at deep depths
+  rests on the induction argument (at level *k* the sparse prefix is exactly the
+  dense nodes intersecting populated subtrees and every omitted node is the
+  precomputed all-padding digest for that level) plus the ≤ 12 cross-checks — not on
+  a deep-tree oracle.
+
+The one genuinely independent end-to-end oracle is
+`e2e.rs::prove_hidden_issuer`, which builds the prover's root/path with the **dense**
+builders and attaches the **sparse** `KeySet::hidden_issuer_root` as the public input
+the verifier byte-compares, so `hidden_issuer_in_set_verifies_and_key_is_private`
+goes red on a single-bit divergence — through a real `bb` proof. Do not "simplify"
+that test to a single builder; the cross-builder asymmetry is what makes it an oracle.
+
+Padding leaf `Fr::from(0)`. **Correction to a previously asserted invariant:** this
+document (and `issuer.rs`'s module doc) claimed "the membership fold binds the
+`index` bits, so a padding slot is never a usable member". That claim is **false as
+stated** — index binding identifies WHICH slot, it cannot distinguish two **equal**
+leaf values, so a key whose `key_set_leaf(pk)` happened to equal the padding leaf
+could authenticate at any padding slot, and `is_prime_order()` does not prove the
+digest nonzero. Exploiting it requires a Poseidon2 zero-preimage (infeasible; no such
+key is known and none can be exhibited today), but the invariant was asserted as
+absolute while being unenforced by code. Tracked as a pre-existing soundness-claim
+defect in **sparq-org/sparq#3782** (host guard `key_set_leaf(pk) != padding_leaf()`
+in both `key_leaves` and `sparse_key_leaves`, plus the in-circuit
+`key_leaf != padding` assertion, which belongs to sq-qhy4 scope). What IS enforced
+today: `key_set_leaf` fail-closes on any non-prime-order (identity / torsion /
+off-curve) key, so such a key cannot enter `K` at all
+(`issuer::tests::unusable_key_is_rejected_by_both_builders`).
 
 ### 3. (CRITICAL→MARGIN, NEW finding) hidden-issuer challenge-reduction binding was not UNIQUE — FIXED (M-1)
 
@@ -141,7 +220,7 @@ Regression: `tests.nr` `reduction_no_wrap_*` (accepts honest top-bucket boundary
 low-quotient max; rejects the two wrap-window forge values). The `s < L` scalar
 needs no reduction binding (a signer output, range-checked only) — unaffected.
 
-### 4. (load-bearing) hidden-issuer on-curve / identity / `< L` guards — CLOSED
+### 4. (load-bearing) hidden-issuer on-curve / identity / `< L` guards — INTERNALLY MITIGATED (sq-qhy4 pending)
 
 `schnorr_verify` (`issuer.nr`) asserts `pk` and `R` on-curve (twist/small-subgroup
 forgery guard), rejects the neutral `(0,1)` issuer key (the identity-key universal
@@ -155,7 +234,7 @@ The Grumpkin-vs-Baby-JubJub note (`issuer.nr` header) is correct: the std
 silent wrong-curve verify would otherwise pass). Confirmed `scalar_mul` /
 `point_add` use the Baby-JubJub `BJJ_*` constants only.
 
-### 5. (load-bearing) holder-pok digest anchor is issuer-signed, not prover-trusted — CLOSED
+### 5. (load-bearing) holder-pok digest anchor is issuer-signed, not prover-trusted — INTERNALLY MITIGATED (sq-qhy4 pending)
 
 `bind_holder_pok` (`verifier.rs:3158`) reconstructs `[nonce, holder_pk_digest]`
 (`verifier.rs:3248-3249`), matching `holder_pok/src/main.nr` `main(challenge,
@@ -174,7 +253,7 @@ binding) → `HolderPokBindingMissing`; digest mismatch → `HolderPokDigestMism
 Tested: `holder_pok_binding.rs` (unreferenced/malformed default-lane;
 `#[ignore]` toolchain wrong-holder/tampered/valid).
 
-### 6. (load-bearing) holder-pok mandatory-possession sweep — CLOSED
+### 6. (load-bearing) holder-pok mandatory-possession sweep — INTERNALLY MITIGATED (sq-qhy4 pending)
 
 Under `HolderBindingPolicy::require_in_circuit_pok` AND a `HolderPop` binding,
 `bind_holder_pok` (`verifier.rs:3291-3301`) requires EVERY holder-bound
@@ -185,7 +264,7 @@ holder, so the sweep is correctly scoped out (mirrors the B1 `bind_holder_pop`
 `Challenge` early-return). Tested: `holder_pok_binding.rs`
 `holder_pok_required_but_absent_rejected` (`#[ignore]`).
 
-### 7. (load-bearing) holder-set root anchor + Merkle membership — CLOSED
+### 7. (load-bearing) holder-set root anchor + Merkle membership — INTERNALLY MITIGATED (sq-qhy4 pending)
 
 `bind_holder_set` (`verifier.rs:3345`) reconstructs `[nonce, holder_set_root]`
 (`verifier.rs:3414-3415`), matching `holder_set_d4/src/main.nr` `main(challenge,
@@ -213,7 +292,7 @@ no `(e, e_k)` quotient), because the holder relation has no Fiat-Shamir challeng
 scalar. So the M-1 wrap defect is structurally absent from both holder members
 (grep-confirmed: `REDUCTION_*` and `e_k` appear only in `issuer.nr`). No fix needed.
 
-### 9. (scope, documented) freshness, replay, vk, depth — CLOSED (inherited)
+### 9. (scope, documented) freshness, replay, vk, depth — INTERNALLY MITIGATED, inherited (sq-qhy4 pending)
 
 All three gates take the verifier nonce as public-input field 0 (audit #4), recompute
 the canonical vk per `CircuitId` (audit #2), and require the declared `depth` to

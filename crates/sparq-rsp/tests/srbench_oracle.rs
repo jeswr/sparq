@@ -51,11 +51,12 @@
 //! `axis_multi_window_r2s`. The floor counts only what is actually executed and
 //! checked.
 //!
-//! The floor const `RSP_EXPRESSIVITY_FLOOR` is read TEXTUALLY by the conformance
-//! crate's `tests/scoreboard_floors.rs` guard (the same hermetic mechanism the
-//! SHACL / geo / Solid / JSON-LD / ODRL / text-oracle crate-local floors use), so
-//! the scoreboard's mirrored value can never silently drift from what this runner
-//! enforces — and the dev-only conformance crate takes NO dependency edge on
+//! [SONNET-4.6] sq-z1xv8 — the floor is no longer MIRRORED anywhere. It is the one
+//! `sparq_conformance_floors::rsp::EXPRESSIVITY_FLOOR` const, which the central
+//! `sparq_conformance::scoreboard::SUITES` row imports too, so the enforced and the
+//! reported floor cannot drift by construction (previously the conformance crate's
+//! `tests/scoreboard_floors.rs` guard re-read this file's source). The dev-only
+//! conformance crate still takes NO dependency edge on
 //! sparq-rsp.
 
 use oxrdf::{Literal, NamedNode, Term};
@@ -73,8 +74,8 @@ use sparq_rsp::{
 /// drop is an S2R / R2R / EvalMode / join / R2S-diff regression. Pinned here and
 /// MIRRORED into the central conformance scoreboard (`sparq-conformance`
 /// `scoreboard::SUITES`, the `RSP expressivity / SRBench correctness` row), kept
-/// in lock-step by that crate's `tests/scoreboard_floors.rs` guard (read
-/// textually — no cross-crate dep). HONESTLY a sparq EXTENSION ratchet, NOT a
+/// in lock-step because both sides read the SAME shared const (sq-z1xv8), not a
+/// copy. HONESTLY a sparq EXTENSION ratchet, NOT a
 /// standards conformance claim (no normative RSP / SRBench test suite exists).
 /// [SONNET-4.6] sq-2n1q3.1 — raised from 149 (sq-mcb3q baseline) by:
 ///   +76 sliding_narrow_sum scenario (RANGE 10 STEP 5, 9 windows × 4 EvalModes)
@@ -84,7 +85,12 @@ use sparq_rsp::{
 ///   +10 ISTREAM/DSTREAM over the SRBench multi-window join (axis_multi_window_r2s)
 ///   +4  3-window join correctness + no-output-until-all-windows-populated property
 ///       (axis_three_window_joins)
-const RSP_EXPRESSIVITY_FLOOR: usize = 317;
+/// [SONNET-4.6] sq-z1xv8 — the VALUE now lives once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
+/// ONE `const` and cannot drift (replacing the old textual re-read of this file).
+/// Raise it THERE; the measurement narrative stays here.
+const RSP_EXPRESSIVITY_FLOOR: usize = sparq_conformance_floors::rsp::EXPRESSIVITY_FLOOR;
 
 /// Documented RSP-QL surface that sparq-rsp does NOT execute, so it is NOT
 /// ratcheted here (the honest move: a lower floor reflecting reality + a recorded
@@ -801,7 +807,7 @@ FROM NAMED WINDOW <http://ex/w1> ON <http://ex/obs> RANGE 10 STEP 10";
 //   w2 [20,30): {(stA,NY,9),(stC,CA,30)}               — 2 rows
 //   w3 [30,40): {}                                      — 0 rows (trailing empty)
 //
-// ISTREAM (cur ∖ prev, multiset hash diff):
+// ISTREAM (cur ∖ prev, exact term-level multiset difference):
 //   w0: prev={} → emit all 3 rows                      = 3
 //   w1: prev=w0 ∖ w1 matches = none (every value changed) → emit 2 rows = 2
 //   w2: prev=w1 ∖ w2 matches = none (every value changed) → emit 2 rows = 2

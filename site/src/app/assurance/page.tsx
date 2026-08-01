@@ -2,7 +2,7 @@
 // proof + testing estate, follow-up to sq-wir9k (root ASSURANCE.md, PR #1562).
 //
 // CANONICAL SOURCE. The authoritative, maintainer-facing walkthrough is the root
-//   ASSURANCE.md  (https://github.com/jeswr/sparq/blob/main/ASSURANCE.md)
+//   ASSURANCE.md  (https://github.com/sparq-org/sparq/blob/main/ASSURANCE.md)
 // This page is a concise, web-appropriate presentation of the SAME estate — the
 // 5-minute version + the layer table + the "what green does not mean" hedges — with
 // every layer linking straight to its ASSURANCE.md section for the deep path. It is
@@ -38,7 +38,7 @@ export const metadata: Metadata = {
     "How to check that sparq works, in 15 minutes — the 5-minute health check, the layer-by-layer proof and testing estate, and an honest account of what a green build does and does not mean.",
 };
 
-const REPO = "https://github.com/jeswr/sparq";
+const REPO = "https://github.com/sparq-org/sparq";
 const ASSURANCE_MD = `${REPO}/blob/main/ASSURANCE.md`;
 
 /** An external link to a repo artifact, with the small up-right glyph. */

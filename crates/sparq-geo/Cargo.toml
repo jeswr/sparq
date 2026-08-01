@@ -72,6 +72,17 @@ reproject = ["dep:proj4rs"]
 # skip the residual DE-9IM FILTER for certified rows. Without `engine`, the pure
 # geometry library gets the index-level refinement only.
 topology_index = ["sparq-engine?/spatial-exact-pushdown"]
+# `epsg_full` (opt-in, OFF by default; implies `reproject`): sq-248 — the FULL
+# embedded EPSG registry (`crs-definitions`: CC0-licensed proj4 strings for ~6k
+# codes) as a FALLBACK behind the curated `reproject` table, which always wins
+# where both have an entry. Registry defs whose transform would be unevaluable
+# or silently wrong are still refused (grid-shift datums like NAD27,
+# `+nadgrids=` files we do not ship, datum-less defs on non-WGS84-coincident
+# ellipsoids, projected defs whose easting/northing axis order the registry
+# WKT cannot prove) — see `reproject` module docs. OFF by default: the
+# registry is a few MiB of static strings most deployments never need.
+# [FABLE-5]
+epsg_full = ["reproject", "dep:crs-definitions"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -114,10 +125,24 @@ quick-xml = { version = "0.41", default-features = false }
 # Behind the `reproject` feature: pure-Rust proj4 (NOT the C `proj` binding —
 # the workspace's pure-Rust constraint holds). One transitive dep (thiserror).
 proj4rs = { version = "0.1", optional = true }
+# Behind the `epsg_full` feature: the embedded EPSG registry (CC0-licensed
+# proj4 definition strings; no_std, zero transitive deps). The `wkt` strings
+# are compiled in alongside `proj4` because they carry the AXIS metadata the
+# proj4 strings lack — the axis-order gate in `full_epsg_definition` accepts a
+# projected registry entry only when its WKT proves easting/northing order.
+# [FABLE-5]
+crs-definitions = { version = "0.5.0", default-features = false, features = ["proj4", "wkt"], optional = true }
 # Fast hash maps for the geometry-node -> feature mapping during index build.
 rustc-hash.workspace = true
 
 [dev-dependencies]
+# [SONNET-4.6] sq-z1xv8 — the shared ratchet-floor constants. DEV-ONLY (zero-dep,
+# `publish = false`): the conformance ratchet floor this crate's test runner enforces is
+# the SAME `const` sparq-conformance's central scoreboard reports, so the two cannot
+# drift, and the dep edge puts this crate in the floors crate's reverse-dependency
+# closure (which is what makes CI test-selection sound for the floor — it replaces the
+# guard test's old runtime read of this file's source).
+sparq-conformance-floors = { path = "../sparq-conformance-floors" }
 # [GPT-5.6] Random accepted WKT geometries for parse/serialize fixpoint coverage.
 proptest = "1"
 # Deterministic random geometries for property tests + the benchmark example.
@@ -131,3 +156,22 @@ rand = "0.10"
 # the dependency is dev-only and the shipped crate is unaffected. `default-features
 # = false` drops the rayon `parallel` feature the closure does not need here.
 sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features = false }
+# [SONNET-4.6] sq-ql2iy: TEST/EXAMPLE-ONLY feature addition. The GeoSPARQL
+# Compliance Benchmark ships its dataset as RDF/XML only, so the
+# `gsb_compliance` example needs `sparq-core`'s opt-in `rdfxml` loader. Declared
+# here rather than on the `[dependencies]` entry so the SHIPPED crate — and the
+# wasm bundle downstream of it — still links no `oxrdfxml`.
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["rdfxml"] }
+
+# [SONNET-4.6] sq-ql2iy — the 206-query GeoSPARQL Compliance Benchmark runner.
+# Needs the opt-in query-rewrite entry point (the QRW requirements R28–R30) and
+# the opt-in accessor functions (part of requirement R19), so it is skipped by a
+# default `cargo build --examples` and compiled under `--all-features`.
+# `test = true` so `cargo test --all-features` runs the harness's own unit tests
+# (the scoring table + the answer comparator) — the half of the runner that does
+# NOT need the gather-only benchmark download, and the half that decides whether
+# a run is scored correctly.
+[[example]]
+name = "gsb_compliance"
+required-features = ["geosparql_rewrite", "geof_accessors"]
+test = true

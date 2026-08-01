@@ -1,0 +1,5 @@
+{
+  "pr": 3755,
+  "date": "2026-07-23",
+  "reason": "[GPT-5.6] #3755 intentionally changes always-compiled sparq-core numeric-cache lookup code by inlining the dominant owned-cache probe and outlining the storage-variant dispatch. Because sparq-wasm consumes sparq-core in its default feature-OFF build, this hot-path implementation change is expected to move the generated wasm bytes; the separate wasm bundle-size ratchet continues to govern the accepted size."
+}

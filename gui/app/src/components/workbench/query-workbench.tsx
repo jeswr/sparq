@@ -91,6 +91,14 @@ import {
 /** The co-resident result views the panel toggles between (all over the same run). */
 type ResultView = "table" | "graph" | "json" | "ntriples";
 
+// [SONNET-4.6] #3602 — SELECT graph rendering is optional workbench code. Keep it out of the
+// initial GUI bundle and load it only when a user opens Graph for a SELECT result.
+const SelectResultGraphView = React.lazy(() =>
+  import("@/components/workbench/select-result-graph-view").then((module) => ({
+    default: module.SelectResultGraphView,
+  })),
+);
+
 const VIEWS: { id: ResultView; label: string }[] = [
   { id: "table", label: "Table" },
   { id: "graph", label: "Graph" },
@@ -611,10 +619,11 @@ function ResultBody({
             {outcome.rawJson}
           </pre>
         ) : view === "graph" ? (
-          <p className="p-3 text-sm text-muted-foreground">
-            The Graph view renders CONSTRUCT / DESCRIBE results. A SELECT is a solution table —
-            use the Table or Raw JSON view.
-          </p>
+          <React.Suspense
+            fallback={<p className="p-3 text-sm text-muted-foreground">Loading Graph view…</p>}
+          >
+            <SelectResultGraphView results={outcome.results} />
+          </React.Suspense>
         ) : (
           <p className="p-3 text-sm text-muted-foreground">
             N-Triples / Turtle applies to CONSTRUCT / DESCRIBE results.

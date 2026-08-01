@@ -1,7 +1,7 @@
 ---
 name: sparq-perf-reviewer
 description: PERFORMANCE-discretion gate for arming a sparq PR for merge. Given a PR, decides whether it is perf-affecting (touches hot paths / a benchmarked crate / the bench harness / canonical performance numbers, or makes a perf claim) and, if so, assesses regression risk + whether any perf claim is evidenced against the repo's benchmark catalog and the honesty rules. Returns a structured verdict {perf_affecting, perf_ok, evidence, concerns}. Wired as the PreToolUse agent-hook that gates the `gh pr merge` arming step.
-model: opus
+model: claude-opus-5
 tools: Bash, Read, Grep, Glob
 ---
 

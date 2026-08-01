@@ -1,5 +1,12 @@
 {
-  "_comment": "[OPUS-4.8] sq-1s2.1.2 comprehensive SPARQL ZK gate-cost catalog. A COVERAGE MAP (which circuit member each SPARQL 1.1 feature compiles to, or null for a gap) AND an OPTIMISATION-TARGET LIST (per-member bb-gates circuit_size, with the blake3-bound filter_* family flagged HIGH_GATE_* as the value-hook reduction target). circuit_size is JOINED from crates/sparq-zk-compose/tests/gate_count_snapshot.json (the regression-gated source of truth) so it can never drift; gaps carry null and are NEVER given a fabricated number. Regenerate with bench/zk-compose/scripts/sparql_catalog.py; gated by crates/sparq-zk-compose/tests/sparql_catalog.rs. Design: research/zk-field-native-encoding.md §6 (PR #765).",
+  "_comment": "[OPUS-4.8] sq-1s2.1.2 comprehensive SPARQL ZK gate-cost catalog. A COVERAGE MAP (which circuit member each SPARQL 1.1 feature compiles to, or null for a gap) AND an OPTIMISATION-TARGET LIST (per-member bb-gates circuit_size, with the blake3-bound filter_* family flagged HIGH_GATE_* as the value-hook reduction target). circuit_size is JOINED from crates/sparq-zk-compose/tests/gate_count_snapshot.json (the regression-gated source of truth) so it can never drift; gaps carry null and are NEVER given a fabricated number. STATUS derives from the verifier fragment gate (crates/sparq-zk/src/verify.rs::fragment_query): accepted-with-a-dedicated-member = covered, accepted-but-composed-verifier-side or accepted-under-a-BOUNDED-statement = partial, rejected-fail-closed = gap — NOT whether a desugared form merely compiles (sq-3kd2g.11 fixes the §1 Q13/Q14 drift). Regenerate with bench/zk-compose/scripts/sparql_catalog.py (--check asserts the committed copy is byte-identical); gated by crates/sparq-zk-compose/tests/sparql_catalog.rs. Design: research/zk-field-native-encoding.md §6 (PR #765) + research/zksparql-fragment-extension.md §§1,3-5 (epic sq-3kd2g / #1591). NOT a soundness or privacy claim: the ZK estate is internally re-audited but NOT externally audited (sq-qhy4), the composition verifier is NOT-yet-sound, and 'covered' means a member exists and dispatch binds it — never 'proved secure'.",
+  "status_vocabulary": {
+    "covered": "a real circuit member proves the feature as stated; circuit_size is joined",
+    "partial (verifier-side / desugars to a covered primitive)": "no dedicated member — composed verifier-side or desugared into a covered primitive, so circuit_size is null and the cost is the underlying member's",
+    "partial (BOUNDED in-circuit statement — the bound is a PUBLIC input; longer witnesses and completeness are NOT proved)": "a real member proving a STRICTLY WEAKER, explicitly bounded statement; the joined circuit_size is real but the row is NOT 'covered'",
+    "NO ZK CIRCUIT YET (gap)": "no circuit today; buildable in principle",
+    "NO ZK CIRCUIT YET (gap — EXCLUDED BY DESIGN: non-monotone / closed-world, not merely unbuilt)": "non-monotone / closed-world — excluded by design, not awaiting implementation"
+  },
   "tool": "bb gates -s ultra_honk",
   "bb_version": "5.0.0-nightly.20260324",
   "nargo_version": "1.0.0-beta.21",
@@ -7,9 +14,9 @@
   "high_gate_threshold": 17416,
   "summary": {
     "total_queries": 26,
-    "covered": 12,
-    "partial": 5,
-    "gaps": 9,
+    "covered": 13,
+    "partial": 6,
+    "gaps": 7,
     "high_gate_flagged": [
       "Q01_bgp_single_pattern",
       "Q02_bgp_multi_pattern",
@@ -19,7 +26,8 @@
       "Q06_filter_double_gt",
       "Q12_join_shared_var_hidden",
       "Q13_path_sequence",
-      "Q14_path_inverse"
+      "Q14_path_inverse",
+      "Q25_issuer_attestation_hidden"
     ]
   },
   "queries": {
@@ -89,9 +97,10 @@
         "filter_int_d3": 17416,
         "filter_int_d4": 17416
       },
+      "value_lane_member": "filter_value_dl_int",
+      "value_lane_circuit_size": 3033,
       "reduction_target": "value-hook (research/zk-field-native-encoding.md §2.6)",
-      "projected_after": "ESTIMATE ~3200 — MUST be re-measured with bb gates (NOT a measurement)",
-      "note": "The complex numeric FILTER family. Gate-identical across d (the blake3 token fits one 64-byte block for d<=19)."
+      "note": "The complex numeric FILTER family. Gate-identical across d (the blake3 token fits one 64-byte block for d<=19). The value hook has LANDED for this lane: `filter_value_dl_int` is the MEASURED dual-leaf sibling (see value_lane_circuit_size, joined — not a projection). It is legal ONLY against a commitment method that committed a value handle (`dual-leaf` / the `value-only` research dial, crates/sparq-zk-compose/src/dispatch.rs), so the blake3 digit-byte members remain the cost under `string-canonical`. The value lane carries the accepted INV-VL trusted-issuer-honesty downgrade (#769 / CR-G8, sq-qhy4)."
     },
     "Q04_filter_signed_integer_ge": {
       "feature": "FILTER signed xsd:integer (negative operands)",
@@ -123,9 +132,10 @@
       "circuit_size_per_member": {
         "filter_decimal_i3_f2": 17416
       },
+      "value_lane_member": "filter_value_dl_decimal",
+      "value_lane_circuit_size": 3070,
       "reduction_target": "value-hook (research/zk-field-native-encoding.md §2.6)",
-      "projected_after": "ESTIMATE ~3200 — MUST be re-measured with bb gates (NOT a measurement)",
-      "note": "Scaled-decimal lane (i integer digits, f fractional digits)."
+      "note": "Scaled-decimal lane (i integer digits, f fractional digits). The value hook has LANDED for this lane: `filter_value_dl_decimal` is the MEASURED dual-leaf sibling (joined, not projected), legal only under a value-committing method — same dispatch rule and same INV-VL downgrade as Q03."
     },
     "Q06_filter_double_gt": {
       "feature": "FILTER xsd:double (IEEE-754 compare)",
@@ -146,48 +156,54 @@
         "filter_f64_d4": 17416
       },
       "floor_member": "filter_f64",
-      "floor_circuit_size": 3113,
+      "floor_circuit_size": 3634,
+      "value_lane_member": "filter_value_dl_f64",
+      "value_lane_circuit_size": 4502,
       "reduction_target": "value-hook (research/zk-field-native-encoding.md §2.6)",
-      "projected_after": "ESTIMATE ~3200 — MUST be re-measured with bb gates (NOT a measurement)",
-      "note": "Manifest-composable double FILTER, blake3-bound like filter_int; the raw-compare floor `filter_f64` shows the achievable lower bound."
+      "note": "Manifest-composable double FILTER, blake3-bound like filter_int; the raw-compare floor `filter_f64` shows the achievable lower bound. The value hook has LANDED for this lane: `filter_value_dl_f64` is the MEASURED dual-leaf sibling (joined, not projected) — it sits above the raw-compare floor because it still binds the operand through the dual-leaf Poseidon2 components. Same dispatch rule and INV-VL downgrade as Q03."
     },
     "Q07_filter_boolean_eq": {
-      "feature": "FILTER boolean / term = literal",
+      "feature": "FILTER xsd:boolean (=, !=, and the degenerate order false < true)",
       "sparql": "SELECT ?x WHERE { ?x :active ?flag FILTER(?flag = true) }",
-      "zk_members": [],
-      "circuit_size": null,
-      "status": "NO ZK CIRCUIT YET (gap)",
-      "flag": "NO_ZK_CIRCUIT_YET",
-      "reduction_target": "boolean VALUE_HOOK proposed (research/zk-field-native-encoding.md §2.5)",
-      "note": "No boolean predicate circuit today; a boolean VALUE_HOOK is design-only."
+      "zk_members": [
+        "filter_value_dl_int"
+      ],
+      "circuit_size": 3033,
+      "status": "covered",
+      "flag": null,
+      "circuit_size_per_member": {
+        "filter_value_dl_int": 3033
+      },
+      "note": "Boolean value lane (sq-5xdlk, #3973) — it adds NO new Noir member: it REUSES `filter_value_dl_int` with the PUBLIC boolean `datatype_const` = blake3_field(xsd:boolean) and the value hooks {0 = false, 1 = true} inside that member's u64 comparison domain, so XSD's false<true order (and the degenerate LT/LE/GT/GE verdicts) falls out of the integer comparison unchanged. Lane separation is the public datatype_const and only that: an integer leaf recomputed under the boolean constant fails the member's leaf binding — a BINDING argument resting on Poseidon2 preimage resistance, NOT an audited soundness claim. Opt-in (`dual-leaf`) and only against a value-committing method; the blake3 digit-byte lane has no boolean member. The encoder is fail-closed on non-canonical lexicals (\"1\"/\"0\" are rejected). Inherits the value lane's INV-VL downgrade (#769 / CR-G8); NOT externally audited (sq-qhy4)."
     },
     "Q08_filter_string_ops": {
-      "feature": "FILTER string ops (STR, REGEX, CONTAINS, STRLEN)",
+      "feature": "FILTER string ops (STR, STRLEN, CONTAINS, STRSTARTS, STRENDS, SUBSTR, REGEX)",
       "sparql": "SELECT ?x WHERE { ?x :name ?n FILTER(CONTAINS(STR(?n), \"a\")) }",
       "zk_members": [],
       "circuit_size": null,
       "status": "NO ZK CIRCUIT YET (gap)",
       "flag": "NO_ZK_CIRCUIT_YET",
-      "note": "String lane commits the opaque term hash only; no in-circuit string predicate."
+      "reduction_target": "expression fragment, phase 3 (research/zksparql-fragment-extension.md §5.1) — needs a string VALUE_HOOK plus the EBV + error lane; REGEX would be admitted for the BOUNDED subset only (literal / anchored / char-class, sq-y73), full fn:matches stays a documented gap",
+      "note": "No in-circuit string predicate: the COMPOSITION layer commits the opaque lexical component of a literal and binds no function over it, so a string FILTER has no provable member and the fragment gate fail-closes. The string FUNCTION estate exists but OUT OF TREE (externalized to sparq-org/noir_XPath, #1599) and is not wired to a committed leaf. Locale collation is out of scope even after phase 3 (codepoint order only)."
     },
     "Q09_filter_datetime_compare": {
-      "feature": "FILTER xsd:dateTime compare",
+      "feature": "FILTER xsd:dateTime / date / time / duration compare",
       "sparql": "SELECT ?e WHERE { ?e :when ?d FILTER(?d >= \"2020-01-01T00:00:00Z\"^^xsd:dateTime) }",
       "zk_members": [],
       "circuit_size": null,
       "status": "NO ZK CIRCUIT YET (gap)",
       "flag": "NO_ZK_CIRCUIT_YET",
-      "reduction_target": "dateTime VALUE_HOOK design-only (research/zk-field-native-encoding.md §2.5)",
-      "note": "No dateTime ordering circuit; a dateTime VALUE_HOOK (epoch-seconds field handle) is design-only."
+      "reduction_target": "the dateTime VALUE_HOOK has LANDED for the xsd:dateTime / xsd:date HALF of this row (`filter_value_dl_datetime`, sq-wz99x, research/zk-field-native-encoding.md §13); xsd:time / xsd:duration remain design-only — expression fragment phase 3 (research/zksparql-fragment-extension.md §5.1)",
+      "note": "STILL A GAP AS STATED, but no longer for the reason it was: the `filter_value_dl_datetime` member IS now compiled (sq-wz99x — the epoch-based value handle on the dual-leaf value lane, ONE member serving BOTH the xsd:dateTime and xsd:date lanes via the public datatype_const), and it DOES bind a committed dateTime literal to an ordering claim. Three things keep this ROW a gap, and no gate number is joined onto it because a gap carries none: (1) `xsd:time` and `xsd:duration` — named in this row's feature — have NO value handle and no member; (2) the member's hookable domain is strict XSD-canonical `Z`-timezoned lexicals ONLY, so a bare (un-timezoned) or non-`Z`-offset operand is REJECTED fail-closed rather than compared — the §13.2 indeterminacy rule, matching the engine's own residual partial order (sq-2k5py); (3) the composition path is the value lane's usual audit-gated one (host commit-pipeline integration sq-j506, verify_manifest dispatch design bead 6). Timezone normalisation and the indeterminate-comparison case, previously 'unspecified for the ZK lane', are now PINNED by §13.2/§13.4 — the two documented widenings (offset normalisation; bare lexicals as a disjoint sub-lane) are recorded in §13.6 and deliberately NOT in this slice. Splitting this row so the landed dateTime/date half can be scored separately from time/duration is follow-up work. Inherits the value lane's INV-VL downgrade (#769 / CR-G8); the §13 rule set is itself an OPEN external-audit obligation — NOT externally audited (sq-qhy4)."
     },
     "Q10_optional": {
-      "feature": "OPTIONAL (left join)",
+      "feature": "OPTIONAL (LeftJoin)",
       "sparql": "SELECT ?s ?v WHERE { ?s :p ?o OPTIONAL { ?s :q ?v } }",
       "zk_members": [],
       "circuit_size": null,
-      "status": "partial (verifier-side / desugars to a covered primitive)",
-      "flag": "VERIFIER_SIDE_OR_DESUGARED",
-      "note": "Required side is a scan; the left-join itself is verifier-side, not an in-circuit relation."
+      "status": "NO ZK CIRCUIT YET (gap — EXCLUDED BY DESIGN: non-monotone / closed-world, not merely unbuilt)",
+      "flag": "NO_ZK_CIRCUIT_YET",
+      "note": "EXCLUDED BY DESIGN, not merely unbuilt (research/zksparql-fragment-extension.md §3.2): a solution that leaves the optional side UNBOUND asserts that no compatible extension exists — a closed-world, non-monotone claim a membership proof cannot carry. crates/sparq-zk/src/verify.rs fail-closes on LeftJoin (VerifyError::UnsupportedFragment) in BOTH the base and the extended fragment gate. The BOUND case is semantically a plain Join (Q12), so admitting OPTIONAL would add no sound expressiveness; authors rewrite to a Join or to a UNION of the explicit cases. (This row previously read `partial — the left-join is verifier-side`, which OVERCLAIMED: there is no verifier-side construction that makes the unbound case sound.)"
     },
     "Q11_union": {
       "feature": "UNION",
@@ -196,7 +212,7 @@
       "circuit_size": null,
       "status": "partial (verifier-side / desugars to a covered primitive)",
       "flag": "VERIFIER_SIDE_OR_DESUGARED",
-      "note": "Each branch is a scan proof; the union is composed verifier-side, not an in-circuit relation."
+      "note": "Monotone (eval is the set union of the branch evals) and ADMITTED by the extended fragment gate (crates/sparq-zk/src/verify.rs, sq-3kd2g.3) with PER-SOLUTION BRANCH ATTRIBUTION: each disclosed solution names the branch it witnesses, and the verifier re-derives that branch's pattern list from the query text and checks the branch's own sub-proofs. No new circuit primitive and no dedicated member — the cost is the witnessing branch's scan/join/path members (Q01/Q02/Q12/Q17), which is why circuit_size stays null here rather than double-counting them. Branch count is capped (MAX_FRAGMENT_BRANCHES) so a query cannot fan out unboundedly."
     },
     "Q12_join_shared_var_hidden": {
       "feature": "JOIN on a shared variable (hidden equi-join)",
@@ -244,7 +260,7 @@
         9254,
         34821
       ],
-      "note": "Desugars to a multi-pattern BGP (one extra scan slot per step) → the k=2 scan lattice."
+      "note": "Path syntax now ACCEPTED by the fragment gate (rewritten to a fresh-intermediate BGP — the SPARQL 1.1 translation, design §4); the desugared multi-pattern BGP maps to the k=2 scan lattice. (Pre-extension this row was 'covered' only because the desugared form compiled while the path syntax was still rejected — §1 drift, now resolved.)"
     },
     "Q14_path_inverse": {
       "feature": "Property path ^ (inverse)",
@@ -268,7 +284,7 @@
         5991,
         18850
       ],
-      "note": "Subject/object slot swap on a single BGP → the k=1 scan family (no extra cost over a forward pattern)."
+      "note": "Path syntax now ACCEPTED by the fragment gate (endpoint swap, design §4); maps to the k=1 scan family (no extra cost over a forward pattern). (Pre-extension this row was 'covered' only because the desugared form compiled while the path syntax was still rejected — §1 drift, now resolved.)"
     },
     "Q15_path_alternative": {
       "feature": "Property path | (alternative)",
@@ -277,7 +293,7 @@
       "circuit_size": null,
       "status": "partial (verifier-side / desugars to a covered primitive)",
       "flag": "VERIFIER_SIDE_OR_DESUGARED",
-      "note": "Desugars to a UNION of per-predicate scans; union composed verifier-side (as Q11)."
+      "note": "ACCEPTED by the fragment gate; desugars to a UNION of per-predicate branches and lands with exactly the Q11 branch attribution (research/zksparql-fragment-extension.md §4 table): the verifier re-derives the branches from the query text and checks the witnessing branch's sub-proofs. No dedicated member — the cost is that branch's own scan (Q01/Q02) or bounded-path (Q17/Q18) member."
     },
     "Q16_path_zero_or_one": {
       "feature": "Property path ? (zero-or-one)",
@@ -286,70 +302,108 @@
       "circuit_size": null,
       "status": "NO ZK CIRCUIT YET (gap)",
       "flag": "NO_ZK_CIRCUIT_YET",
-      "note": "Needs an optional/identity step (reflexive + one hop); no circuit today."
+      "reduction_target": "compile a `path_reach_d1_k{k}_n{n}` member — the `?` closure pins the depth bound to EXACTLY 1 and the family's smallest compiled depth is d=2; the relation itself already carries the zero-length case through the public `allow_zero` input, so this is a lattice extension, not new circuit logic",
+      "note": "NOT provable today. The extended fragment gate admits `?` and routes it to the path_reach family with allow_zero=true and a FIXED depth bound of 1 (PathClosure::ZeroOrOne.fixed_k() == 1), but no d=1 member is compiled — every compiled member is d>=2 — so dispatch fail-closes (PathDepthExceedsClosure, crates/sparq-zk-compose/src/verifier.rs). A DEEPER member is deliberately NOT accepted as a substitute: proofs at different depth bounds are DIFFERENT statements (research/zksparql-fragment-extension.md §4 req 1), and a d=2 member would prove a two-step path the query never asked for. p+/p* (Q17/Q18) are unaffected because their closures have no fixed depth (fixed_k() == None), so any compiled bound satisfies the dispatcher."
     },
     "Q17_path_one_or_more": {
-      "feature": "Property path + (one-or-more, transitive closure)",
+      "feature": "Property path + (one-or-more, transitive closure) — BOUNDED depth only",
       "sparql": "SELECT ?o WHERE { :s :p+ ?o }",
-      "zk_members": [],
-      "circuit_size": null,
-      "status": "NO ZK CIRCUIT YET (gap)",
-      "flag": "NO_ZK_CIRCUIT_YET",
-      "note": "Unbounded transitive closure; no in-circuit traversal — the single largest coverage gap."
+      "zk_members": [
+        "path_reach_d2_k1_n16",
+        "path_reach_d4_k1_n16",
+        "path_reach_d4_k2_n16",
+        "path_reach_d8_k1_n16"
+      ],
+      "circuit_size": 8322,
+      "status": "partial (BOUNDED in-circuit statement — the bound is a PUBLIC input; longer witnesses and completeness are NOT proved)",
+      "flag": "BOUNDED_DEPTH_EXISTENCE_ONLY",
+      "bounded": true,
+      "circuit_size_per_member": {
+        "path_reach_d2_k1_n16": 5156,
+        "path_reach_d4_k1_n16": 5497,
+        "path_reach_d4_k2_n16": 8322,
+        "path_reach_d8_k1_n16": 6180
+      },
+      "circuit_size_range": [
+        5156,
+        8322
+      ],
+      "reduction_target": "UNBOUNDED closure stays OUT (not circuit-realizable); reaching further is a compile-time lattice extension (larger d / n), and each d is a DISTINCT verification key by design so the bound cannot be silently widened",
+      "note": "ACCEPTED by the fragment gate and mapped to the bounded path_reach family (sq-3kd2g.2 #1591 / sq-3kd2g.6; opt-in `extended-fragment`). The member proves EXACTLY: there exists a chain of committed triples (t_1..t_l) with 1<=l<=D, each a member of a committed graph in the disclosed attribution set with predicate p, chained object-to-subject, connecting the endpoints — where D is a PUBLIC input (`depth_bound`, constant-constrained to the member's compiled d) and unused steps are constrained pass-throughs. EXISTENCE ONLY and MONOTONE: it never asserts that no longer path exists nor that the reachable set is complete, so eval_D is a SUBSET of eval and failing to prove at depth D proves NOTHING. Compiled lattice today: (d,k,n) in {(2,1,16),(4,1,16),(4,2,16),(8,1,16)}, EXACT-match dispatch (no wrong-bucket fallback). Reported as `partial`, not `covered`, because the proved statement is strictly weaker than SPARQL `p+` — the `bounded` honesty flag marks that explicitly. Padding soundness is forge-tested but NOT externally audited (sq-qhy4)."
     },
     "Q18_path_zero_or_more": {
-      "feature": "Property path * (zero-or-more, reflexive transitive closure)",
+      "feature": "Property path * (zero-or-more, reflexive transitive closure) — BOUNDED depth only",
       "sparql": "SELECT ?o WHERE { :s :p* ?o }",
-      "zk_members": [],
-      "circuit_size": null,
-      "status": "NO ZK CIRCUIT YET (gap)",
-      "flag": "NO_ZK_CIRCUIT_YET",
-      "note": "Reflexive transitive closure; no in-circuit traversal (as Q17 plus the identity step)."
+      "zk_members": [
+        "path_reach_d2_k1_n16",
+        "path_reach_d4_k1_n16",
+        "path_reach_d4_k2_n16",
+        "path_reach_d8_k1_n16"
+      ],
+      "circuit_size": 8322,
+      "status": "partial (BOUNDED in-circuit statement — the bound is a PUBLIC input; longer witnesses and completeness are NOT proved)",
+      "flag": "BOUNDED_DEPTH_EXISTENCE_ONLY",
+      "bounded": true,
+      "circuit_size_per_member": {
+        "path_reach_d2_k1_n16": 5156,
+        "path_reach_d4_k1_n16": 5497,
+        "path_reach_d4_k2_n16": 8322,
+        "path_reach_d8_k1_n16": 6180
+      },
+      "circuit_size_range": [
+        5156,
+        8322
+      ],
+      "reduction_target": "as Q17 — the unbounded closure stays OUT; only the compiled (d,k,n) lattice grows",
+      "note": "ACCEPTED by the fragment gate; the SAME path_reach members as Q17 — the closure is a PUBLIC input (`allow_zero` = true), not a separate member, and the verifier rejects a proof whose allow_zero disagrees with the closure re-derived from the query. Adds the zero-length case (0<=l<=D): it holds when the endpoints are the same term AND that term OCCURS in the committed union, so the circuit requires an occurrence witness rather than bare equality (research/zksparql-fragment-extension.md §4 req 5). Same bounded EXISTENCE-ONLY statement, same public depth bound, same `bounded` honesty flag and same not-externally-audited caveat (sq-qhy4) as Q17."
     },
     "Q19_aggregate_group_by": {
-      "feature": "Aggregate / GROUP BY (COUNT, SUM, AVG, MIN, MAX)",
+      "feature": "Aggregation (GROUP BY / HAVING / COUNT / SUM / AVG / MIN / MAX / GROUP_CONCAT / SAMPLE)",
       "sparql": "SELECT ?g (COUNT(?x) AS ?n) WHERE { ?x :inGroup ?g } GROUP BY ?g",
       "zk_members": [],
       "circuit_size": null,
-      "status": "NO ZK CIRCUIT YET (gap)",
+      "status": "NO ZK CIRCUIT YET (gap — EXCLUDED BY DESIGN: non-monotone / closed-world, not merely unbuilt)",
       "flag": "NO_ZK_CIRCUIT_YET",
-      "note": "No aggregate proof. The COUNT-forgery guard in scan.nr is anti-forgery over disclosed rows, NOT a proven aggregate."
+      "reduction_target": "re-entry requires a COMPOSED-PATTERN completeness obligation (a separate future program, research/zksparql-fragment-extension.md §3.2) — not a circuit-size problem, so there is nothing here to optimise toward",
+      "note": "EXCLUDED BY DESIGN: an aggregate VALUE is a completeness claim over the WHOLE pattern (\"exactly these solutions and no more\") — closed-world at pattern level. Only PER-BGP-SCAN completeness is proved today, never composed-pattern completeness, and double-counting across credentials is forgeable. The COUNT-forgery guard in scan.nr is anti-forgery over DISCLOSED rows, NOT a proven aggregate — reading it as one is the exact overclaim this row exists to prevent. crates/sparq-zk/src/verify.rs fail-closes on Group and on Extend-over-Group (the parse shape of `SELECT (COUNT(?x) AS ?n)`), so an aggregate is reported as aggregation, not BIND."
     },
     "Q20_subquery": {
-      "feature": "Subquery (nested SELECT)",
+      "feature": "Subquery (nested SELECT, no aggregates)",
       "sparql": "SELECT ?p WHERE { ?p :a ?x { SELECT ?p WHERE { ?p :b ?y } } }",
       "zk_members": [],
       "circuit_size": null,
       "status": "partial (verifier-side / desugars to a covered primitive)",
       "flag": "VERIFIER_SIDE_OR_DESUGARED",
-      "note": "Composed sub-proofs (no dedicated member); the outer/inner join is verifier-side."
+      "note": "Monotone when composed of in-fragment operators, and ADMITTED by the extended gate: a Project below the outer modifier stack is read as a subquery and its NON-projected variables are renamed apart, so an identically-named outer variable is never conflated (inner projection = existential quantification). No dedicated member — the cost is the inner branches' own members. Two carve-outs stay fail-closed: LIMIT / OFFSET INSIDE a subquery (a nondeterministic subset selection — a witness for the unrestricted inner evaluation is not a witness for every legal sliced evaluation), and subquery + aggregates (Q19)."
     },
     "Q21_bind_expression": {
-      "feature": "BIND (expression evaluation)",
+      "feature": "BIND (Extend — deterministic expression evaluation)",
       "sparql": "SELECT ?c WHERE { ?s :a ?a . ?s :b ?b BIND(?a + ?b AS ?c) }",
       "zk_members": [],
       "circuit_size": null,
       "status": "NO ZK CIRCUIT YET (gap)",
       "flag": "NO_ZK_CIRCUIT_YET",
-      "note": "No in-circuit expression evaluation (arithmetic / function eval over bound vars)."
+      "reduction_target": "expression fragment, phase 3 (research/zksparql-fragment-extension.md §5) — the same in-circuit evaluator as FILTER with its result bound into the disclosed solution; blocked on the EBV + error lane",
+      "note": "No in-circuit expression evaluation: the composition layer binds only single-comparison numeric lanes, so a DERIVED binding cannot be proved and the gate fail-closes on Extend. Monotone in principle (it only adds a derived binding), so it is a buildable gap rather than a design exclusion — unlike Q10/Q19/Q23. The non-deterministic builtins (RAND, UUID, STRUUID, BNODE, NOW) stay OUT permanently: they have no deterministic in-circuit meaning."
     },
     "Q22_values": {
-      "feature": "VALUES (inline data)",
+      "feature": "VALUES (inline data, including UNDEF cells)",
       "sparql": "SELECT ?x WHERE { VALUES ?x { :a :b } ?x :p ?o }",
       "zk_members": [],
       "circuit_size": null,
       "status": "partial (verifier-side / desugars to a covered primitive)",
       "flag": "VERIFIER_SIDE_OR_DESUGARED",
-      "note": "A constant-slot scan or a verifier-side membership filter; no dedicated member."
+      "note": "Monotone — the rows are PUBLIC constants in the query text — and admitted by the extended gate: the verifier re-derives the VALUES block from the query and checks each disclosed solution against it, with UNDEF cells treated as wildcards and a row index outside the block's range rejected. No new circuit primitive and no dedicated member; the cost is the accompanying BGP's scan member (Q01/Q02)."
     },
     "Q23_negation_minus_notexists": {
       "feature": "Negation (FILTER NOT EXISTS / MINUS)",
       "sparql": "SELECT ?s WHERE { ?s :p ?o FILTER NOT EXISTS { ?s :q ?v } }",
       "zk_members": [],
       "circuit_size": null,
-      "status": "NO ZK CIRCUIT YET (gap)",
+      "status": "NO ZK CIRCUIT YET (gap — EXCLUDED BY DESIGN: non-monotone / closed-world, not merely unbuilt)",
       "flag": "NO_ZK_CIRCUIT_YET",
-      "note": "Requires proven ABSENCE; scan completeness (scan.nr) is the closest primitive but is not a negation proof."
+      "reduction_target": "no optimisation target: absence is not provable in a monotone membership model at any circuit size. The monotone NEIGHBOURS are what can land — the negated property set !(p1|…|pn) (a per-triple inequality against public constants) and positive FILTER EXISTS, both DEFERRED (research/zksparql-fragment-extension.md §3.2, §4)",
+      "note": "EXCLUDED BY DESIGN: closed-world negation / set difference is non-monotone — it asserts ABSENCE, which a membership proof cannot carry (more committed data could falsify it). crates/sparq-zk/src/verify.rs fail-closes on Minus and on any (NOT) EXISTS inside a FILTER, in both gate stages. Per-BGP scan completeness (scan.nr) is the closest primitive and is NOT a negation proof: it is completeness over ONE committed graph's disclosed rows, not over the world."
     },
     "Q24_revocation_status": {
       "feature": "Revocation / status (hidden status-list index)",
@@ -371,11 +425,11 @@
       "zk_members": [
         "hidden_issuer_d4"
       ],
-      "circuit_size": 16946,
+      "circuit_size": 24452,
       "status": "covered",
-      "flag": null,
+      "flag": "HIGH_GATE_lattice",
       "circuit_size_per_member": {
-        "hidden_issuer_d4": 16946
+        "hidden_issuer_d4": 24452
       },
       "reduction_target": "scalar-mul projective coords (research/zk-age-gatecount-reduction.md §3.3; bead sq-hb75)",
       "note": "Hidden-issuer Schnorr verification; the scalar-mul is the dominant cost (reduction target)."

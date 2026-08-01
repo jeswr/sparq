@@ -19,11 +19,17 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./wasm-node": {
+      "types": "./wasm-node/sparq_wasm.d.ts",
+      "require": "./wasm-node/sparq_wasm.js",
+      "default": "./wasm-node/sparq_wasm.js"
     }
   },
   "files": [
     "dist",
     "wasm",
+    "wasm-node",
     "README.md",
     "AGENTS.md",
     "skills"
@@ -34,15 +40,18 @@
   },
   "scripts": {
     "_copy:wasm": "rm -rf wasm && mkdir wasm && cp ../crates/sparq-wasm/pkg/sparq_wasm.js ../crates/sparq-wasm/pkg/sparq_wasm.d.ts ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm.d.ts wasm/",
-    "build:wasm": "wasm-pack build ../crates/sparq-wasm --target web --profile release-wasm -- --features shacl,jsonld,serialize-rdf,scs,canon,explain-json --config profile.release-wasm.strip=false && npm run _copy:wasm",
+    "build:wasm": "wasm-pack build ../crates/sparq-wasm --target web --profile release-wasm -- --features shacl,jsonld,serialize-rdf,scs,canon,explain-json,native-ttl,bytes-ingest,forms --config profile.release-wasm.strip=false && npm run _copy:wasm",
     "build:wasm:lean": "wasm-pack build ../crates/sparq-wasm --target web --profile release-wasm -- --config profile.release-wasm.strip=false && npm run _copy:wasm",
+    "_copy:wasm:node": "node scripts/copy-wasm-node.mjs",
+    "build:wasm:node": "wasm-pack build ../crates/sparq-wasm --target nodejs --out-dir pkg-node --profile release-wasm -- --features shacl,jsonld,serialize-rdf,scs,canon,explain-json,native-ttl,bytes-ingest,forms --config profile.release-wasm.strip=false && npm run _copy:wasm:node",
     "build:reason-wasm": "wasm-pack build ../crates/sparq-reason-wasm --target web --profile release-wasm -- --features explain --config profile.release-wasm.strip=false",
     "build:rsp-wasm": "wasm-pack build ../crates/sparq-rsp-wasm --target web --profile release-wasm -- --config profile.release-wasm.strip=false",
     "build:text-wasm": "wasm-pack build ../crates/sparq-text-wasm --target web --profile release-wasm -- --config profile.release-wasm.strip=false",
     "build:ts": "tsc",
-    "build": "npm run build:wasm && npm run build:ts",
+    "build": "npm run build:wasm && npm run build:wasm:node && npm run build:ts",
     "typecheck": "tsc --noEmit",
     "typecheck:conformance": "tsc --noEmit -p tsconfig.conformance.json",
+    "pretest": "node guardrails/check-test-deps.mjs",
     "test": "node --test",
     "bench": "node bench/vs-oxigraph.mjs",
     "check:package": "node guardrails/check-package.mjs",
@@ -63,7 +72,7 @@
     "@rdfjs/dataset": "^2.0.2",
     "@rdfjs/types": "^2.0.1",
     "@types/n3": "^1.26.1",
-    "@types/node": "^26.0.0",
+    "@types/node": "^26.1.2",
     "n3": "^2.1.1",
     "typescript": "^6.0.3"
   },

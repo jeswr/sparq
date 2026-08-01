@@ -286,6 +286,14 @@ sparq-geo = { path = "../sparq-geo", default-features = false, optional = true }
 # feature set the server tests use (rt-multi-thread + net + time + sync for the shutdown
 # signal). OFF by default (optional, behind `service-loopback`).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"], optional = true }
+# [SONNET-4.6] sq-z1xv8 — the shared ratchet-floor constants for the ratchets whose
+# ENFORCING runner lives in ANOTHER crate (sparq-shacl / sparq-geo / sparq-solid /
+# sparq-policy / sparq-text / sparq-rsp). A plain dependency, not a dev one: the
+# `scoreboard::SUITES` rows that carry these floors live in `src/`. The crate is
+# zero-dependency + `publish = false`, so it adds nothing to any build but the
+# constants themselves — and it REPLACES `tests/scoreboard_floors.rs`'s old runtime
+# read of those crates' test SOURCES (the sq-m4bxc CI test-selection "residual 3").
+sparq-conformance-floors = { path = "../sparq-conformance-floors" }
 sparq-core = { path = "../sparq-core" }
 # [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` ON: the W3C conformance ratchet validates the
 # SHIPPED configuration — the sparq-cli / sparq-server binaries default-light the engine's

@@ -38,3 +38,8 @@ test = true
 # features and their dependencies arrive with later beads (sq-oy1f.32 / sq-oy1f.33).
 # The native document algorithms remain dependency-free, and the wasm bundle stays lean.
 [dependencies]
+
+[dev-dependencies]
+# [SONNET-4.6] Issue #3714 — keep the dependency-free runtime resolver pinned to
+# oxiri's RFC 3986 behaviour without adding a mandatory/shipping dependency.
+oxiri = "0.2"

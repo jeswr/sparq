@@ -77,6 +77,13 @@ cdomain = ["dep:sparq-substrate", "sparq-substrate/numeric"]
 # (soundness over completeness, the CR6 reachability side-condition preserved); unsupported
 # assertion shapes (data-property assertions, non-EL class expressions) stay counted skips
 # (fail-closed). No new dependency — reuses oxrdf + rustc-hash.
+#
+# [SONNET-4.6] sq-vkq9u: composed with `cdomain` this feature ALSO rescues a
+# `DataPropertyAssertion` whose literal lies in the exact numeric tier — `a q 5` becomes
+# `{a} ⊑ ∃q.{5}` over the very point range CR9 mints for `DataHasValue 5`, so CR8 threads an
+# asserted VALUE into the TBox's data-range obligations (tests/abox_cdomain.rs; the feature
+# CONJUNCTION has its own feature-matrix leg). With only ONE of the two features on, every
+# data-property assertion keeps the fail-closed counted skip described above.
 abox = []
 
 # [FABLE-5] sq-wy3i6 (Phase E4): PARALLEL saturation — `Classifier::classify_par` /
@@ -90,6 +97,19 @@ abox = []
 # the default build — and in particular the SINGLE-THREADED wasm port, where `std::thread`
 # cannot spawn — carries zero threading code. No new dependency (std scoped threads only).
 par = []
+
+# [SONNET-4.6] sq-clsv6 (Phase E5): INCREMENTAL classification under TBox edits —
+# `IncrementalClassifier`, a stateful classifier that keeps its CR1–CR6 saturation alive across
+# edits and folds a MONOTONE extension (added class axioms + brand-new class-expression nodes) into
+# it instead of re-running the fixpoint. Deliberately scoped: a RETRACTION — and any RBox /
+# concrete-domain / live-node change — falls back to a full re-classification, reported via
+# `IncrementalReport::disposition`, because EL saturation keeps no derivation provenance and the
+# DRed / affected-context repair (ELK, Kazakov & Klinov ISWC 2013) is NOT implemented. The
+# post-edit hierarchy equals a full re-classification on BOTH paths (tests/incremental.rs). OFF by
+# default so the stateless E1–E4 build (and the lean wasm port) carries zero edit-tracking state or
+# code; the `Classifier` / `classify_graph` entries are byte-identical in either feature state. No
+# new dependency — reuses oxrdf + rustc-hash. Spike: research/owl2-el-ql-reasoning-spike.md §5 (E5).
+incremental = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -119,3 +139,11 @@ required-features = ["hasse"]
 [[example]]
 name = "snomed_go_scale_bench"
 required-features = ["rbox", "hasse"]
+
+# [SONNET-4.6] sq-q0o82 (E4 follow-up): the parallel-saturation phase-attribution bench — the
+# first in-repo consumer of `classify_graph_par`'s thread-count knob, and the MEASUREMENT the
+# parallel-apply refinement is gated on. `required-features = ["par"]` keeps the default
+# `--all-targets` build (which passes no features) from compiling it against the gated API.
+[[example]]
+name = "par_phase_bench"
+required-features = ["par"]

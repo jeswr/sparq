@@ -570,8 +570,15 @@ mod tests {
         );
     }
 
-    // Fail-closed parity with the dense builder: identity key, overflow, depth>31,
-    // and out-of-range index all return None from the sparse builders too.
+    // Fail-closed parity with the dense builder for the three conditions this test
+    // ACTUALLY drives: overflow, `depth > 31`, and out-of-range index.
+    //
+    // [OPUS-5] sq-r6dq review round 3 (gpt-5.6-sol finding 2): this comment used to
+    // also claim "identity key" coverage, which the body did NOT contain — a comment
+    // asserting a guard that was not tested. The unusable-key guard
+    // (`key_set_leaf(pk)?` in `key_leaves` / `sparse_key_leaves`) now has its own
+    // test, `unusable_key_is_rejected_by_both_builders` below; it is deliberately
+    // NOT folded in here so the claim and the assertions cannot drift apart again.
     #[test]
     fn sparse_fail_closed_matches_dense() {
         let keys = keyset(&[100, 101, 102, 103]);
@@ -585,6 +592,128 @@ mod tests {
         // depth > 31 fail-closed
         assert_eq!(key_set_root_sparse(&keys, 32), None);
         assert_eq!(key_membership_witness_sparse(&keys, 32, 0), None);
+        // ...and at the leaf-taking core, so the two `depth > 31` guards
+        // (`sparse_key_leaves` and `sparse_fold_leaves`) cannot mask each other:
+        // deleting EITHER one individually now reddens this test.
+        assert_eq!(sparse_key_leaves(&keys, 32), None, "sparse_key_leaves rejects depth 32");
+        assert_eq!(
+            sparse_fold_leaves(vec![], 32, padding_leaf()),
+            None,
+            "sparse_fold_leaves rejects depth 32 independently of sparse_key_leaves"
+        );
+        assert_eq!(
+            sparse_witness_from_leaves(vec![], 32, 0, padding_leaf()),
+            None,
+            "sparse_witness_from_leaves inherits the depth-32 rejection"
+        );
+    }
+
+    // [OPUS-5] sq-r6dq review round 3 (gpt-5.6-sol finding 2): the `key_set_leaf(pk)?`
+    // FAIL-CLOSED guard — the one thing standing between an unusable (identity /
+    // torsion / off-curve) key and the committed key set K — had NO test in either
+    // builder, while `sparse_fail_closed_matches_dense`'s comment claimed it did.
+    //
+    // `PublicKey`'s inner point is a `pub` field, so a caller can construct a key
+    // around a non-prime-order point directly, bypassing `public_key_from_hex`
+    // (sq-l15mi audit H-1). `key_set_leaf` fail-closes on `!is_prime_order()`, and
+    // BOTH `key_leaves` (dense) and `sparse_key_leaves` (sparse) must propagate that
+    // `None` rather than substituting a placeholder leaf. This is the identity case,
+    // which is reachable without an arkworks dev-dependency; the torsion/off-curve
+    // cases go through the same `is_prime_order()` predicate and are pinned in
+    // `sparq_zk::sig::tests::torsion_key_rejected_from_key_set_and_witness`.
+    #[test]
+    fn unusable_key_is_rejected_by_both_builders() {
+        // The identity point: `Affine::default()` is `Affine::zero()`.
+        let identity = PublicKey(Default::default());
+        assert!(
+            !identity.is_prime_order(),
+            "the identity point is not a usable issuer key"
+        );
+        assert_eq!(
+            key_set_leaf(&identity),
+            None,
+            "key_set_leaf must fail closed on a non-prime-order key"
+        );
+
+        let good = keyset(&[100, 101, 102]);
+        // The unusable key in first, middle and last position, so a guard that only
+        // checks one end is still caught.
+        for pos in 0..=good.len() {
+            let mut keys = good.clone();
+            keys.insert(pos, identity);
+            assert_eq!(
+                key_set_root(&keys, 2),
+                None,
+                "DENSE builder must fail closed on an unusable key at position {pos} \
+                 (never commit a substitute/padding leaf for it)"
+            );
+            assert_eq!(
+                key_set_root_sparse(&keys, 2),
+                None,
+                "SPARSE builder must fail closed on an unusable key at position {pos} \
+                 (never commit a substitute/padding leaf for it)"
+            );
+            assert_eq!(
+                key_membership_witness(&keys, 2, 0),
+                None,
+                "DENSE witness must fail closed on an unusable key at position {pos}"
+            );
+            assert_eq!(
+                key_membership_witness_sparse(&keys, 2, 0),
+                None,
+                "SPARSE witness must fail closed on an unusable key at position {pos}"
+            );
+            assert_eq!(
+                sparse_key_leaves(&keys, 2),
+                None,
+                "sparse_key_leaves must fail closed on an unusable key at position {pos}"
+            );
+        }
+    }
+
+    // [OPUS-5] sq-r6dq review round 3 (gpt-5.6-sol finding 6): no test used a VALID
+    // depth 31, so tightening either `depth > 31` guard to `depth >= 31` — an
+    // off-by-one that silently disables the deepest supported policy — reddened
+    // nothing. Depth 31 is the LAST accepted depth (`1usize << 31` is representable
+    // even on a 32-bit host, which is why the bound is 31 and not 63).
+    //
+    // Honest scope: this is SELF-CONSISTENCY, not a dense cross-check. The dense
+    // builder would need `2^31` leaves, so no independent oracle exists here; the
+    // cross-checks against the dense builder stop at depth 6 / 12 (see
+    // `sparse_root_matches_dense_for_all_sizes` and the `verifier.rs` anchor test).
+    #[test]
+    fn sparse_valid_depth_31_root_and_path_are_defined() {
+        let depth = 31u32;
+        let keys = keyset(&[6001, 6002, 6003]);
+        let root = key_set_root_sparse(&keys, depth)
+            .expect("depth 31 is a VALID depth: the accepted bound is `depth > 31`, not `>= 31`");
+        // Not the empty-tree digest — the members really are folded in.
+        assert_ne!(
+            Some(root),
+            key_set_root_sparse(&[], depth),
+            "a populated depth-31 tree must not equal the all-padding depth-31 root"
+        );
+        for index in 0..keys.len() as u64 {
+            let sibs = key_membership_witness_sparse(&keys, depth, index)
+                .expect("depth 31 must yield an authentication path");
+            assert_eq!(sibs.len(), depth as usize, "one sibling per level");
+            let mut node = key_set_leaf(&keys[index as usize]).unwrap();
+            let mut pos = index;
+            for sib in &sibs {
+                let is_right = pos & 1 == 1;
+                node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+                pos /= 2;
+            }
+            assert_eq!(node, root, "depth-31 path for index {index} re-folds to the root");
+        }
+        // The bound is exactly 31: 32 is still rejected, so this test pins the edge
+        // from BOTH sides and cannot be satisfied by loosening the guard either way.
+        assert_eq!(key_set_root_sparse(&keys, 32), None, "depth 32 stays rejected");
+        assert_eq!(
+            key_membership_witness_sparse(&keys, 32, 0),
+            None,
+            "depth 32 stays rejected for the witness too"
+        );
     }
 
     // ============================================================

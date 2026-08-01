@@ -25,6 +25,11 @@ url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/
 [policy.spargebra]
 audit-as-crates-io = true
 
+[[exemptions.aead]]
+version = "0.5.2"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
+
 [[exemptions.ahash]]
 version = "0.8.12"
 criteria = "safe-to-deploy"
@@ -261,9 +266,24 @@ criteria = "safe-to-deploy"
 version = "1.1.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.chacha20]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
+
+[[exemptions.chacha20poly1305]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
+
 [[exemptions.chrono]]
 version = "0.4.45"
 criteria = "safe-to-deploy"
+
+[[exemptions.cipher]]
+version = "0.4.4"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
 
 [[exemptions.clap]]
 version = "4.6.1"
@@ -397,9 +417,14 @@ notes = "advisory-fix release for RUSTSEC-2026-0204 (unsound epoch pinning); del
 version = "0.8.21"
 criteria = "safe-to-deploy"
 
+[[exemptions.crs-definitions]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.crypto-bigint]]
 version = "0.5.5"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.crypto-common]]
 version = "0.1.7"
@@ -467,7 +492,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.ecdsa]]
 version = "0.16.9"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.ed25519]]
 version = "2.2.3"
@@ -483,7 +509,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.elliptic-curve]]
 version = "0.13.8"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.enum-ordinalize]]
 version = "4.3.2"
@@ -519,7 +546,8 @@ criteria = "safe-to-run"
 
 [[exemptions.ff]]
 version = "0.13.1"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.9"
@@ -640,7 +668,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.group]]
 version = "0.13.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.h2]]
 version = "0.4.15"
@@ -810,6 +839,11 @@ criteria = "safe-to-deploy"
 [[exemptions.indexmap]]
 version = "2.14.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.inout]]
+version = "0.1.4"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
 
 [[exemptions.instant-distance]]
 version = "0.6.1"
@@ -1065,6 +1099,11 @@ criteria = "safe-to-deploy"
 version = "1.70.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.opaque-debug]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
+
 [[exemptions.openssl-probe]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
@@ -1119,8 +1158,13 @@ criteria = "safe-to-deploy"
 
 [[exemptions.p256]]
 version = "0.13.2"
-criteria = "safe-to-run"
-notes = "solid-server-rs import pre-flight (sq-gg0qq.1): DEV-ONLY (safe-to-run) — mints test JWS access tokens + DPoP proofs in the incoming server's auth-middleware unit tests; RustCrypto ES256 stack, never in the shipped build. [FABLE-5]"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; direct dep of the OFF-by-default vc-bridge feature (needs safe-to-deploy — subsumes the solid-server-rs sq-gg0qq.1 DEV-ONLY ES256 test-token usage which only needs safe-to-run); no upstream audit covers this exact version [OPUS-4.8]"
+
+[[exemptions.p384]]
+version = "0.13.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; direct dep of the OFF-by-default vc-bridge feature (the ecdsa-rdfc-2019 P-384/SHA-384 profile, sq-txg1y). Deliberately the 0.13 line so it shares the already-exempted ecdsa/elliptic-curve/primeorder/sha2 with p256 — it adds NO other package to the lockfile. No upstream audit covers this exact version [OPUS-5]"
 
 [[exemptions.parking]]
 version = "2.2.1"
@@ -1200,6 +1244,11 @@ version = "1.0.1"
 criteria = "safe-to-deploy"
 notes = "dependabot 0.4.0->1.0.1 (#2242). Reviewed the delta [OPUS-4.8]: 1.0.0 broadens FutureExt to IntoFuture (additive) + stabilizes to 1.0; 1.0.1 is a docsrs doc_cfg build fix. No new deps, no new unsafe, no behavioural change — a minimal blocking-executor stabilization bump."
 
+[[exemptions.poly1305]]
+version = "0.8.0"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
+
 [[exemptions.portable-atomic]]
 version = "1.13.1"
 criteria = "safe-to-deploy"
@@ -1230,7 +1279,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.primeorder]]
 version = "0.13.6"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.profiling]]
 version = "1.0.18"
@@ -1373,7 +1423,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.rfc6979]]
 version = "0.4.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (ecdsa path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.ring]]
 version = "0.17.14"
@@ -1418,11 +1469,6 @@ criteria = "safe-to-deploy"
 [[exemptions.rustls-native-certs]]
 version = "0.8.4"
 criteria = "safe-to-deploy"
-
-[[exemptions.rustls-pemfile]]
-version = "2.2.0"
-criteria = "safe-to-deploy"
-notes = "solid-server-rs import pre-flight (sq-gg0qq.1): PEM cert-chain/key parse for the incoming mTLS serve path; archived-but-stable (see the deny.toml RUSTSEC-2025-0134 ignore + VEX entry); follow-up migrates to rustls-pki-types PemObject. [FABLE-5]"
 
 [[exemptions.rustls-pki-types]]
 version = "1.14.1"
@@ -1471,7 +1517,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.sec1]]
 version = "0.7.3"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.security-framework]]
 version = "3.7.0"
@@ -1508,7 +1555,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serdect]]
 version = "0.2.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.sha1]]
 version = "0.11.0"
@@ -1774,6 +1822,11 @@ criteria = "safe-to-deploy"
 [[exemptions.unicode-ident]]
 version = "1.0.24"
 criteria = "safe-to-deploy"
+
+[[exemptions.universal-hash]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
 
 [[exemptions.untrusted]]
 version = "0.7.1"
@@ -2092,6 +2145,11 @@ criteria = "safe-to-deploy"
 [[exemptions.writeable]]
 version = "0.6.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.x25519-dalek]]
+version = "2.0.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=false sparq-e2ee-ng crate (XChaCha20-Poly1305 + X25519 wrap); no trusted-import audit available upstream. [SONNET-4.6]"
 
 [[exemptions.x509-parser]]
 version = "0.18.1"

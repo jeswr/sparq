@@ -29,6 +29,7 @@ import {
   Code2,
   Info,
   Waypoints,
+  FileLock2,
 } from "lucide-react";
 
 /** Live-execution tier — drives the honesty badge colour + label. */
@@ -196,7 +197,7 @@ export const GROUPS: SurfaceGroup[] = [
       // page, only an honest native tier, one API line, and direct code/docs links.
       {
         slug: "graph-analytics",
-        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-algos",
+        href: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-algos",
         title: "Graph analytics",
         blurb:
           "PageRank, centrality, communities, SCCs, and topological order over a directed RDF projection.",
@@ -204,13 +205,13 @@ export const GROUPS: SurfaceGroup[] = [
         icon: Network,
         native: {
           snippet: "let ranks = sparq_algos::pagerank(&graph, Default::default());",
-          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-algos",
-          skill: "https://github.com/jeswr/sparq/blob/main/skills/graph-analytics/SKILL.md",
+          readme: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-algos",
+          skill: "https://github.com/sparq-org/sparq/blob/main/skills/graph-analytics/SKILL.md",
         },
       },
       {
         slug: "rdf-canon",
-        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-canon",
+        href: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-canon",
         title: "RDFC-1.0 canonicalization",
         blurb:
           "Canonical blank-node labelling for stable N-Quads, hashing, signing, and graph isomorphism.",
@@ -218,13 +219,13 @@ export const GROUPS: SurfaceGroup[] = [
         icon: Binary,
         native: {
           snippet: "let canonical = sparq_canon::canonicalize(&quads)?;",
-          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-canon",
-          skill: "https://github.com/jeswr/sparq/blob/main/skills/rdf-canon/SKILL.md",
+          readme: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-canon",
+          skill: "https://github.com/sparq-org/sparq/blob/main/skills/rdf-canon/SKILL.md",
         },
       },
       {
         slug: "arrow-columnar",
-        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-arrow",
+        href: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-arrow",
         title: "Arrow export",
         blurb:
           "Faithful SPARQL SELECT interchange through Arrow RecordBatch, Parquet, and Arrow IPC.",
@@ -232,8 +233,8 @@ export const GROUPS: SurfaceGroup[] = [
         icon: Database,
         native: {
           snippet: "let batch = sparq_arrow::to_record_batch(&result)?;",
-          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-arrow",
-          skill: "https://github.com/jeswr/sparq/blob/main/skills/arrow-columnar/SKILL.md",
+          readme: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-arrow",
+          skill: "https://github.com/sparq-org/sparq/blob/main/skills/arrow-columnar/SKILL.md",
         },
       },
     ],
@@ -242,7 +243,7 @@ export const GROUPS: SurfaceGroup[] = [
     id: "reason-validate",
     label: "Reason & validate",
     description:
-      "Derive, trace, and validate RDF — RDFS / OWL 2 RL / N3 closure, PROV-O lineage, and SHACL.",
+      "Derive, trace, validate, and govern RDF — RDFS / OWL 2 RL / N3 closure, PROV-O lineage, SHACL, and ODRL usage-control policy decisions.",
     surfaces: [
       {
         slug: "inference",
@@ -265,7 +266,7 @@ export const GROUPS: SurfaceGroup[] = [
       {
         // [GPT-5.6] sq-vw3ax.15 — PROV-O is a built opt-in crate, not an in-tab demo.
         slug: "prov-lineage",
-        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-prov",
+        href: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-prov",
         title: "PROV-O lineage",
         blurb:
           "PROV-O derivations for CONSTRUCT, DESCRIBE, UPDATE, and optional reasoner proof trees.",
@@ -273,9 +274,25 @@ export const GROUPS: SurfaceGroup[] = [
         icon: Waypoints,
         native: {
           snippet: "let derivation = sparq_prov::derive_construct(&graph, query, config)?;",
-          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-prov",
-          skill: "https://github.com/jeswr/sparq/blob/main/skills/prov-lineage/SKILL.md",
+          readme: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-prov",
+          skill: "https://github.com/sparq-org/sparq/blob/main/skills/prov-lineage/SKILL.md",
         },
+      },
+      {
+        slug: "policy",
+        href: "/surface/policy",
+        title: "ODRL usage control",
+        blurb:
+          "W3C ODRL 2.2 permission / prohibition / duty → fail-closed Permit / Deny, with purpose / recipient / dateTime / count constraints and deny-overrides.",
+        // [OPUS-4.8] sq-vw3ax.14: walkthrough tier. sparq-policy is an OPT-IN native crate
+        // (publish = false, dependency-of-nothing; `evaluate` is pure Rust, no I/O) that the
+        // lean wasm bundles never carry, and the static Pages site has no backend — so the
+        // honest surface REPLAYS the real evaluate() decision for each (policy, request) pair
+        // (each verdict pinned by a named crate test; src/lib/policy.ts), not a live in-tab run.
+        // A live evaluator would need a dedicated sparq-policy wasm bundle (a separate spike).
+        tier: "walkthrough",
+        icon: FileLock2,
+        built: true,
       },
     ],
   },
@@ -398,7 +415,7 @@ export const GROUPS: SurfaceGroup[] = [
       {
         // [GPT-5.6] sq-vw3ax.15 — the MCP front door is native and read-only by default.
         slug: "mcp-server",
-        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-mcp",
+        href: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-mcp",
         title: "MCP server",
         blurb:
           "Read-only-by-default MCP tools for SPARQL, schema introspection, stats, prefixes, and VoID.",
@@ -406,8 +423,8 @@ export const GROUPS: SurfaceGroup[] = [
         icon: Server,
         native: {
           snippet: "let mut server = sparq_mcp::McpServer::new(graph);",
-          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-mcp",
-          skill: "https://github.com/jeswr/sparq/blob/main/skills/agent-tools/SKILL.md",
+          readme: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-mcp",
+          skill: "https://github.com/sparq-org/sparq/blob/main/skills/agent-tools/SKILL.md",
         },
       },
       {

@@ -41,7 +41,7 @@ export const metadata: Metadata = {
     "How sparq stores its own project knowledge as RDF and queries it with sparq itself — the provenance-stamped PKG loop, the ingest workflow, the NL query tool, and the measured cost benefit.",
 };
 
-const REPO = "https://github.com/jeswr/sparq";
+const REPO = "https://github.com/sparq-org/sparq";
 
 function Artifact({
   href,

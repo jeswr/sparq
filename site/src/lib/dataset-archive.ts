@@ -9,7 +9,7 @@
 // `node --test` (Node ≥18 ships `DecompressionStream`). The actual RDF parse still
 // happens in the wasm Store — this layer only turns archive BYTES into RDF TEXT.
 //
-// Codec choice (native-first; anything else is LAZY-loaded — see `loadCodec`):
+// Codec choice (native-first; anything else is LAZY-loaded):
 //   • gzip (`.gz`, magic 1f 8b) — decoded by the native `DecompressionStream("gzip")`.
 //     Single-member only: browsers silently truncate multi-member gzip to the first
 //     member (measured in research/custom-parsers-D4 §3). Real-world RDF `.gz` dumps
@@ -21,12 +21,10 @@
 //     dependency (would add ~95 kB / ~45 kB to the bundle for a feature served by a
 //     browser-native API). Encrypted, ZIP64, and other compression methods are
 //     rejected with a clear message rather than silently mis-decoding.
-//   • zstd (`.zst`, magic 28 b5 2f fd) — [FABLE-5] sq-4ssz1 (#1046): no native browser
-//     codec, so it decodes through `fzstd` (pure JS, small), which `loadCodec` fetches
-//     via a dynamic `import()` ONLY when a zstd payload is actually being decoded —
-//     the decoder lives in its own lazy chunk, never in any route's first-load bundle.
-//     Same decoder the `@jeswr/sparq` package's `decompress.ts` uses; handles the
-//     multi-frame concatenated streams RFC 8878 allows, but NOT dictionary frames.
+//   • zstd (`.zst`, magic 28 b5 2f fd) — [GPT-5.6] #1046: delegated to the existing
+//     `js/src/decompress.ts` implementation. That shared path dynamically imports `fzstd`
+//     only when zstd is selected, so the decoder remains outside every route's first-load
+//     bundle. It handles the multi-frame streams RFC 8878 allows, but not dictionary frames.
 //
 // bzip2 stays out: there is no native browser codec and no small pure-JS decoder — a
 // wasm-blob decoder would be a heavy add for a rarely-shipped format (deferred in
@@ -44,6 +42,10 @@ export interface DecompressedArchive {
    *  when it cannot be determined — the caller then falls back to its own guess. */
   innerName: string | null;
 }
+
+/** Stable error used when bytes do not name one of the browser import codecs. */
+export const UNSUPPORTED_ARCHIVE_ERROR =
+  "Unrecognised compressed payload: expected a gzip (.gz), zip (.zip), or zstd (.zst) magic number.";
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -179,48 +181,13 @@ async function inflate(
 
 const utf8 = new TextDecoder();
 
-// ---------------------------------------------------------------------------
-// Lazy codec loading — the bundle-size rule (maintainer, #1046)
-// ---------------------------------------------------------------------------
-// gzip + zip decode through browser-native APIs, so they cost zero bundle bytes.
-// Any codec the platform does NOT provide natively (zstd today; every future
-// rarely-used format) MUST come through this dynamic-`import()` switch, so the
-// decoder is code-split into its own lazy chunk and fetched the FIRST time a user
-// actually decodes a payload of that type — never in a route's first-load bundle.
-// `scripts/check-bundle.mjs` pins `fzstd` as a dynamic split point (PRESENCE), so
-// regressing this to a static import fails the build.
-
-/** Codecs with no native browser API, decoded by a lazily-imported JS decoder. */
-export type LazyCodec = Extract<ArchiveCodec, "zstd">;
-
-/**
- * Dynamically imports the decoder for a non-native codec and returns its
- * bytes → bytes decode function. The `import()` here is the load-bearing part:
- * webpack splits each decoder into a separate chunk that only ever loads on demand.
- */
-export async function loadCodec(
-  codec: LazyCodec,
-): Promise<(bytes: Uint8Array) => Uint8Array> {
-  switch (codec) {
-    case "zstd": {
-      // fzstd: the small pure-JS zstd decoder the `@jeswr/sparq` package already
-      // uses (already a site dependency via the wasm-ESM bundler). Decodes RFC 8878
-      // multi-frame concatenated streams; dictionary frames are not supported.
-      const { decompress } = await import(
-        /* webpackChunkName: "codec-zstd" */ "fzstd"
-      );
-      return decompress;
-    }
-  }
-}
-
 /**
  * Decompresses a recognised dataset archive (`gzip`, `zip`, or `zstd`) to RDF text
  * plus the inner member name. `codec` defaults to sniffing the magic number; `name`
  * (the file/URL name) is used to break the single-stream codecs' "no inner name"
  * ambiguity (a zip carries its own member name). Throws a clear, actionable error for
  * an unrecognised / unsupported payload rather than mis-decoding. The zstd decoder is
- * lazy-loaded on first use (see {@link loadCodec}).
+ * lazy-loaded on first use by the shared JS package decompressor.
  */
 export async function decompressArchive(
   bytes: Uint8Array,
@@ -236,14 +203,17 @@ export async function decompressArchive(
     case "zip":
       return unzipFirstRdfMember(bytes);
     case "zstd": {
-      const decode = await loadCodec("zstd");
-      const out = decode(bytes);
+      // [GPT-5.6] #1046 — reuse the published JS surface's zstd path instead of
+      // maintaining a second site-local `fzstd` import. Both this module and `fzstd`
+      // remain literal dynamic split points and load only after a zstd import is invoked.
+      const { decompress } = await import(
+        /* webpackChunkName: "sparq-js-decompress" */ "../../../js/src/decompress.js"
+      );
+      const out = await decompress(bytes, "zstd");
       return { text: utf8.decode(out), innerName: innerNameForArchive(name) };
     }
     default:
-      throw new Error(
-        "Unrecognised compressed payload: expected a gzip (.gz), zip (.zip), or zstd (.zst) magic number.",
-      );
+      throw new Error(UNSUPPORTED_ARCHIVE_ERROR);
   }
 }
 

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- [FABLE-5] sq-hmd7l.24 — sparq-AUTHORED vendored case (NOT a W3C file). A valid,
+     safe RIF-Core document: SHOULD import → pass. -->
+<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload>
+    <Group>
+      <sentences>
+        <Forall>
+          <declare><Var>x</Var></declare>
+          <formula>
+            <Implies>
+              <if>
+                <Frame>
+                  <object><Var>x</Var></object>
+                  <slot>
+                    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/knows</Const>
+                    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/alice</Const>
+                  </slot>
+                </Frame>
+              </if>
+              <then>
+                <Member>
+                  <instance><Var>x</Var></instance>
+                  <class><Const type="http://www.w3.org/2007/rif#iri">http://example.org/Acquainted</Const></class>
+                </Member>
+              </then>
+            </Implies>
+          </formula>
+        </Forall>
+      </sentences>
+    </Group>
+  </payload>
+</Document>

@@ -21,6 +21,11 @@
 //! Model: Opus 4.8 (Fable 5 unavailable — flag for re-review/upgrade).
 
 pub mod build;
+// [OPUS-4.8] sq-1s2.3 (FL1 follow-up): package native per-circuit ProofArtifacts into
+// the browser-shippable captured car-hire ProofManifest (the /showcase/zk-car-hire
+// in-tab verify fallback). Pure serialization — no toolchain; research-grade, NOT
+// externally audited (sq-qhy4).
+pub mod capture;
 // [OPUS-4.8] sq-314: derivation steps + entailment-regime enforcement.
 pub mod derivation;
 // [OPUS-4.8] sq-cfmv: fail-closed (commitment-method × circuit) dispatch matrix.
@@ -40,14 +45,32 @@ pub mod issuer;
 #[cfg(feature = "zk-nullifier")]
 pub mod nullifier;
 pub mod manifest;
+// [OPUS-5] sq-rsd3v.3: witnessed-rule-shape N3 derivation — the host mirror of
+// the in-circuit relation, the fail-closed PROVABLE-SUBSET admission gate, and
+// the rule-graph commitment (the rule author as ISSUER, so a proof says WHOSE
+// rules). SEPARATE from `derivation` because an N3 rule set is DATASET-SUPPLIED,
+// not a fixed public table. Research-grade, NOT externally audited (sq-qhy4);
+// no manifest/dispatch wiring and no compiled member yet.
+pub mod n3;
 pub mod revocation;
+// [OPUS-5] sq-rsd3v.6: owl:sameAs EQUALITY reasoning — the host mirror of the
+// in-circuit union-find canonicalisation gadget, plus its witness builder.
+// SEPARATE from `derivation` on purpose: encoding-equality re-checks are the
+// wrong proxy under equality reasoning. Research-grade, NOT externally audited
+// (sq-qhy4); no manifest/dispatch wiring and no compiled member yet.
+pub mod sameas;
 pub mod toml;
 pub mod verifier;
 
 pub use manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
-    HiddenIndexRevocation, HolderPokProof, HolderSetProof, ProofInputs, ProofManifest,
-    RevocationStatus, StatusListSnapshot, SubProof,
+    FullyHiddenRevocation, HiddenIndexRevocation, HolderPokProof, HolderSetProof, ProofInputs,
+    ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
+};
+// [OPUS-4.8] sq-1s2.3 (FL1 follow-up): browser-shippable captured-manifest packaging.
+pub use capture::{
+    public_inputs_to_hex, CaptureError, CapturedCarHireManifest, CapturedSubProof,
+    CAR_HIRE_CAPTURE_NOTE,
 };
 // [OPUS-4.8] sq-3kd2g.6: the wave-1 extended-fragment presentation wrapper +
 // per-solution UNION branch attribution schema. Opt-in (`extended-fragment`).
@@ -55,6 +78,12 @@ pub use manifest::{
 pub use manifest::{BranchWitness, FragmentManifest};
 // [OPUS-4.8] sq-314: derivation-step capability + entailment regime end-to-end.
 pub use derivation::{regime_admits, DerivationStep, EntailmentRule};
+// [OPUS-5] sq-rsd3v.6: the owl:sameAs canonicalisation witness + host re-check.
+pub use sameas::{CanonEntry, CanonError, CanonTable, OWL_SAME_AS};
+// [OPUS-5] sq-rsd3v.3: the N3 witnessed-rule-shape types + the fail-closed
+// provable-subset gate. `N3RuleSet::commit` admits BEFORE it folds, so an
+// out-of-subset rule graph has no root and can never reach the circuit.
+pub use n3::{N3Builtin, N3Premise, N3Rule, N3RuleSet, N3Slot, N3SubsetError, MATH_NS};
 // [OPUS-4.8] sq-cfmv: the fail-closed (method × circuit) dispatch resolver.
 #[cfg(feature = "dual-leaf")]
 pub use dispatch::{resolve_circuit, resolve_circuit_for_scheme, DispatchError};
@@ -68,6 +97,17 @@ pub use verifier::{dispatch_fragment, verify_fragment_manifest, FragmentDispatch
 pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
+// [OPUS-5] sq-6qe / sq-kndw: the ACCEPTED-SET commitment host helpers — the relying
+// party's `(list, version, status_list_root)` trust anchor behind one Merkle root —
+// plus the FULLY-HIDDEN revocation prover path (witness builder + Prover.toml
+// renderer) for the compiled `revoke_hidden_ref_d10_a4` member. On that mode the
+// status-list IRI and version are NOT disclosed; the committed-index path still
+// discloses both. Opt-in via `RevocationPolicy::{with_hidden_index_depth,
+// with_accepted_set_depth}`. Not externally audited (sq-qhy4).
+pub use revocation::{
+    accepted_set_leaf, accepted_set_root, accepted_set_witness, hidden_ref_witness,
+    revoke_hidden_ref_prover_toml, AcceptedStatusEntry, HiddenRefWitness,
+};
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit
 // Schnorr-over-BabyJubJub + hidden-key set membership).
 // [OPUS-4.8] sq-8k3h: `*_sparse` are the `O(n·depth)` builders for a very large

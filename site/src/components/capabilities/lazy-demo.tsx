@@ -90,6 +90,10 @@ const DEMOS = {
     () => import("@/components/mpc-demo").then((m) => m.MpcDemo),
     { ssr: false, loading: () => <DemoSkeleton label="MPC federation" /> },
   ),
+  policy: dynamic(
+    () => import("@/components/policy-walkthrough").then((m) => m.PolicyWalkthrough),
+    { ssr: false, loading: () => <DemoSkeleton label="ODRL usage control" /> },
+  ),
 } satisfies Record<string, ComponentType>;
 
 /** The set of surface slugs that have a lazily-mountable inline demo on /capabilities. */

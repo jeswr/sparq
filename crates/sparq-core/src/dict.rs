@@ -1353,6 +1353,29 @@ impl Dict {
     // flat by invariant), then the table (blob base + appended arena). On a plain
     // arena dict only the table branch does work, so the bulk-load hot path keeps its
     // shape (two predictable never-taken branches).
+    //
+    // [OPUS-5] (sq-7d3dj.21b) HASH-BEFORE-MEMCMP — SCOPED HONESTLY, PER PATH. The bead asked to
+    // compare a stored 64-bit hash before falling through to the string compare ("skip if
+    // already done — verify first"). It is in place on the MMAP path only; the in-memory path
+    // keeps a weaker, tag-only prefilter BY CHOICE. What each dedup path actually does:
+    //   * `mapped_find` — FULL 64-bit gate. It binary-searches the SORTED 64-bit `dict-hash.bin`
+    //     array and calls `eq` only on entries whose FULL 64-bit hash matches; a miss costs zero
+    //     string compares. Pinned by `mapped_find_compares_full_hash_before_eq`.
+    //   * `self.table` (blob base + appended arena) — NO full-hash gate. It is a
+    //     `hashbrown::HashTable<Id>` storing bare ids, so there is no stored 64-bit hash to
+    //     compare: `find(hash, eq)` matches only the hash's top-7-bit `h2` tag against a SIMD
+    //     control group, so `eq` — and its string compare — CAN run for a probed entry whose
+    //     other 57 hash bits differ (~1 in 128 of probed slots). Correctness therefore rests on
+    //     `eq` itself, not on the tag. Pinned by `in_memory_dedup_has_only_the_h2_tag_prefilter`.
+    //   * the sharded merge (`ShardedDict::intern_partials`/`intern_terms`) and the spill path
+    //     (`dictspill`) route by `hash % n_leaf` — a shard SELECTOR, not a hash-equality gate —
+    //     and then land in one of the two above, inheriting whichever prefilter that path has.
+    // The in-memory full gate is deliberately not implemented: a per-entry stored `u64` means
+    // `HashTable<(Id, u64)>` — 4 → 16 bytes per entry after padding, i.e. ~3-4x the lookup table
+    // on a 100M-term dict (a `dict_bytes_per_term` ratchet regression) — to filter the ~0.8% of
+    // probes the `h2` tag already lets through. Rejected on that trade, not on effort. So: the
+    // bead's requirement is MET on the mmap path and CONSCIOUSLY DECLINED in memory; do not read
+    // the mmap guarantee as covering every dedup path.
 
     #[inline]
     fn find_iri(&self, hash: u64, iri: &str) -> Option<Id> {
@@ -1749,6 +1772,192 @@ impl Dict {
             remap.push(id);
         }
         remap
+    }
+
+    /// [GPT-5.6] (sq-eiv) Consumes this dictionary and builds a dense dictionary containing
+    /// only the real ids for which `retain` returns `true`. Returns the rebuilt dictionary
+    /// and an old-to-new remap where `remap[(old_id - 1) as usize]` is `NO_ID` for a dropped
+    /// term. Inline integers are not dictionary records, are not passed to `retain`, and keep
+    /// their value-carrying id when remapping payloads.
+    ///
+    /// RDF 1.2 triple terms make the filter dependency-aware: retaining a triple term also
+    /// retains its subject, predicate, object, and any recursively nested triple-term
+    /// components. Their remap entries are therefore populated even when `retain` returned
+    /// `false` for those component ids.
+    ///
+    /// The rebuild never materialises an `oxrdf::Term` and never re-interns survivors. It moves
+    /// the compact `Stored` payloads out of an arena dictionary (preserving their string
+    /// allocations), or copies compact records directly from a blob, mmap, or frozen base, then
+    /// rewrites only metadata and triple-component ids before building the lookup table once.
+    /// Prefix and datatype tables are filtered too, so dead metadata does not accumulate.
+    pub fn rebuild_filtered(mut self, mut retain: impl FnMut(Id) -> bool) -> (Dict, Vec<Id>) {
+        let old_len = self.len();
+
+        // First select the caller-visible survivors. The closure runs exactly once for each
+        // real dictionary id; dependency expansion below never calls it a second time.
+        let mut retained = vec![false; old_len];
+        let mut pending = Vec::new();
+        for (slot, retained_slot) in retained.iter_mut().enumerate() {
+            let id = slot as Id + 1;
+            if retain(id) {
+                *retained_slot = true;
+                pending.push(id);
+            }
+        }
+
+        // A structural triple record cannot outlive its components. Walk a small explicit
+        // worklist rather than reconstructing Terms (and rather than assuming only one nesting
+        // level). Valid dictionaries always reference earlier ids, but the visited bit also
+        // makes this total for a cyclic record forged by an in-crate producer.
+        while let Some(id) = pending.pop() {
+            let StoredRef::Triple(ids) = self.record(id) else {
+                continue;
+            };
+            for child in ids {
+                if is_inline(child) || child == NO_ID {
+                    continue;
+                }
+                let child_slot = (child - 1) as usize;
+                if child_slot < retained.len() && !retained[child_slot] {
+                    retained[child_slot] = true;
+                    pending.push(child);
+                }
+            }
+        }
+
+        // Dense ids preserve old-id order. That keeps every well-formed triple's children before
+        // the triple itself and makes rewriting structural component ids a direct table lookup.
+        let mut next_id: Id = 1;
+        let remap: Vec<Id> = retained
+            .iter()
+            .map(|&keep| {
+                if keep {
+                    let id = next_id;
+                    next_id += 1;
+                    id
+                } else {
+                    NO_ID
+                }
+            })
+            .collect();
+        let retained_len = (next_id - 1) as usize;
+
+        // Identify metadata referenced by survivors before consuming any arena fields.
+        let mut used_prefixes = vec![false; self.prefixes.len()];
+        let mut used_datatypes = vec![false; self.datatypes.len()];
+        for (slot, &keep) in retained.iter().enumerate() {
+            if !keep {
+                continue;
+            }
+            match self.record(slot as Id + 1) {
+                StoredRef::Iri { prefix, .. } => used_prefixes[prefix as usize] = true,
+                StoredRef::Lit { datatype, .. } => used_datatypes[datatype as usize] = true,
+                StoredRef::Blank(_) | StoredRef::Triple(_) => {}
+            }
+        }
+
+        // Arena mode can move each Box<str> survivor unchanged. Compact/frozen modes expose
+        // borrowed StoredRef records, so copy those compact fields directly exactly once.
+        let mut terms = Vec::with_capacity(retained_len);
+        if self.base == 0 {
+            for (slot, stored) in std::mem::take(&mut self.terms).into_iter().enumerate() {
+                if retained[slot] {
+                    terms.push(stored);
+                }
+            }
+        } else {
+            for (slot, &keep) in retained.iter().enumerate() {
+                if !keep {
+                    continue;
+                }
+                terms.push(match self.record(slot as Id + 1) {
+                    StoredRef::Iri { prefix, suffix } => Stored::Iri {
+                        prefix,
+                        suffix: suffix.into(),
+                    },
+                    StoredRef::Lit {
+                        value,
+                        datatype,
+                        lang,
+                    } => Stored::Lit {
+                        value: value.into(),
+                        datatype,
+                        lang: lang.map(Into::into),
+                    },
+                    StoredRef::Blank(label) => Stored::Blank(label.into()),
+                    StoredRef::Triple(ids) => Stored::Triple(ids),
+                });
+            }
+        }
+
+        // Move only live metadata, preserving its old-id order, and build the small reverse maps.
+        self.prefix_ids = FxHashMap::default();
+        let mut prefix_remap = vec![u32::MAX; self.prefixes.len()];
+        let mut prefixes = Vec::with_capacity(used_prefixes.iter().filter(|&&used| used).count());
+        let mut prefix_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        for (old, prefix) in std::mem::take(&mut self.prefixes).into_iter().enumerate() {
+            if used_prefixes[old] {
+                let new = prefixes.len() as u32;
+                prefix_remap[old] = new;
+                prefix_ids.insert(prefix.clone(), new);
+                prefixes.push(prefix);
+            }
+        }
+
+        self.datatype_ids = FxHashMap::default();
+        let mut datatype_remap = vec![u32::MAX; self.datatypes.len()];
+        let mut datatypes = Vec::with_capacity(used_datatypes.iter().filter(|&&used| used).count());
+        let mut datatype_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        for (old, datatype) in std::mem::take(&mut self.datatypes).into_iter().enumerate() {
+            if used_datatypes[old] {
+                let new = datatypes.len() as u32;
+                datatype_remap[old] = new;
+                datatype_ids.insert(datatype.as_str().into(), new);
+                datatypes.push(datatype);
+            }
+        }
+
+        let map_component = |old: Id| {
+            if is_inline(old) {
+                old
+            } else {
+                old.checked_sub(1)
+                    .and_then(|slot| remap.get(slot as usize).copied())
+                    .unwrap_or(NO_ID)
+            }
+        };
+        for stored in &mut terms {
+            match stored {
+                Stored::Iri { prefix, .. } => *prefix = prefix_remap[*prefix as usize],
+                Stored::Lit { datatype, .. } => {
+                    *datatype = datatype_remap[*datatype as usize];
+                }
+                Stored::Blank(_) => {}
+                Stored::Triple(ids) => {
+                    for id in ids {
+                        *id = map_component(*id);
+                    }
+                }
+            }
+        }
+
+        let mut rebuilt = Dict {
+            prefixes,
+            prefix_ids,
+            datatypes,
+            datatype_ids,
+            terms,
+            table: HashTable::new(),
+            blob: None,
+            #[cfg(feature = "mmap")]
+            mapped: None,
+            base: 0,
+            frozen: None,
+        };
+        // Release the old table/blob/mapping before allocating the rebuilt lookup table.
+        drop(self);
+        rebuilt.build_table();
+        (rebuilt, remap)
     }
 
     /// (Re)builds the content-hash lookup table from the term arena — for dictionaries
@@ -3159,6 +3368,110 @@ mod tests {
     }
 
     #[test]
+    fn filtered_rebuild_moves_arena_records_and_filters_metadata() {
+        let mut d = Dict::new();
+        let kept_iri = Term::NamedNode(NamedNode::new_unchecked("http://keep.example/a"));
+        let dead_iri = Term::NamedNode(NamedNode::new_unchecked("http://dead.example/b"));
+        let kept_lit = Term::Literal(Literal::new_typed_literal("1.5", xsd::DECIMAL));
+        let dead_lit = Term::Literal(Literal::new_typed_literal(
+            "gone",
+            NamedNode::new_unchecked("http://dead.example/type"),
+        ));
+        let kept_blank = Term::BlankNode(oxrdf::BlankNode::new_unchecked("kept"));
+        let kept_iri_id = d.intern(&kept_iri);
+        let dead_iri_id = d.intern(&dead_iri);
+        let kept_lit_id = d.intern(&kept_lit);
+        let dead_lit_id = d.intern(&dead_lit);
+        let kept_blank_id = d.intern(&kept_blank);
+        let old_len = d.len();
+
+        // Raw payload pointers prove the arena path MOVES the compact Boxes instead of
+        // reconstructing Terms (which would allocate new suffix/value strings).
+        let kept_suffix_ptr = match d.record(kept_iri_id) {
+            StoredRef::Iri { suffix, .. } => suffix.as_ptr(),
+            _ => panic!("kept IRI did not have an IRI record"),
+        };
+        let kept_value_ptr = match d.record(kept_lit_id) {
+            StoredRef::Lit { value, .. } => value.as_ptr(),
+            _ => panic!("kept literal did not have a literal record"),
+        };
+
+        let (rebuilt, remap) =
+            d.rebuild_filtered(|id| id == kept_iri_id || id == kept_lit_id || id == kept_blank_id);
+
+        assert_eq!(remap.len(), old_len);
+        assert_eq!(remap[(kept_iri_id - 1) as usize], 1);
+        assert_eq!(remap[(dead_iri_id - 1) as usize], NO_ID);
+        assert_eq!(remap[(kept_lit_id - 1) as usize], 2);
+        assert_eq!(remap[(dead_lit_id - 1) as usize], NO_ID);
+        assert_eq!(remap[(kept_blank_id - 1) as usize], 3);
+        assert_eq!(rebuilt.len(), 3);
+        assert_eq!(rebuilt.lookup(&kept_iri), 1);
+        assert_eq!(rebuilt.lookup(&kept_lit), 2);
+        assert_eq!(rebuilt.lookup(&kept_blank), 3);
+        assert_eq!(rebuilt.lookup(&dead_iri), NO_ID);
+        assert_eq!(rebuilt.lookup(&dead_lit), NO_ID);
+
+        // Metadata belonging only to dead records must be reclaimed as well.
+        assert_eq!(rebuilt.prefixes.len(), 1);
+        assert_eq!(rebuilt.prefix_ids.len(), 1);
+        assert_eq!(rebuilt.datatypes.len(), 1);
+        assert_eq!(rebuilt.datatype_ids.len(), 1);
+        match rebuilt.record(1) {
+            StoredRef::Iri { suffix, .. } => {
+                assert!(std::ptr::eq(suffix.as_ptr(), kept_suffix_ptr));
+            }
+            _ => panic!("rebuilt IRI did not have an IRI record"),
+        }
+        match rebuilt.record(2) {
+            StoredRef::Lit { value, .. } => {
+                assert!(std::ptr::eq(value.as_ptr(), kept_value_ptr));
+            }
+            _ => panic!("rebuilt literal did not have a literal record"),
+        }
+    }
+
+    #[test]
+    fn filtered_rebuild_from_blob_retains_nested_triple_dependencies() {
+        let mut d = Dict::new();
+        let inner = triple(
+            "http://ex/a",
+            "http://ex/b",
+            Term::Literal(Literal::new_simple_literal("v")),
+        );
+        let outer = triple("http://ex/x", "http://ex/p", inner.clone());
+        let outer_id = d.intern(&outer);
+        let inner_id = d.lookup(&inner);
+        let dead = Term::NamedNode(NamedNode::new_unchecked("http://dead.example/gone"));
+        let dead_id = d.intern(&dead);
+        let old_len = d.len();
+
+        // Select ONLY the outer triple. Its leaves and nested triple are implicit survivors.
+        let (rebuilt, remap) = d.into_blob().rebuild_filtered(|id| id == outer_id);
+        let new_outer = remap[(outer_id - 1) as usize];
+        let new_inner = remap[(inner_id - 1) as usize];
+        assert_ne!(new_outer, NO_ID);
+        assert_ne!(
+            new_inner, NO_ID,
+            "nested triple dependency must be retained"
+        );
+        assert_eq!(remap[(dead_id - 1) as usize], NO_ID);
+        assert_eq!(
+            rebuilt.len(),
+            old_len - 1,
+            "only the unrelated dead term is dropped"
+        );
+        assert!(
+            rebuilt.len() > 1,
+            "the one selected triple must retain its dependencies"
+        );
+        assert_eq!(rebuilt.term(new_outer), outer);
+        assert_eq!(rebuilt.term(new_inner), inner);
+        assert_eq!(rebuilt.lookup(&outer), new_outer);
+        assert_eq!(rebuilt.lookup(&dead), NO_ID);
+    }
+
+    #[test]
     fn triple_terms_intern_structurally_and_roundtrip() {
         let mut d = Dict::new();
         let tt = triple("http://ex/alice", "http://ex/age", int("30"));
@@ -3283,6 +3596,125 @@ mod tests {
         let mut sdok = ShardedDict::new(4);
         sdok.intern_partials(&[(pdok, Vec::<[Id; 3]>::new())])
             .expect("a well-formed triple-term partial must intern without error");
+    }
+
+    /// [OPUS-5] sq-7d3dj.21b — HASH-BEFORE-MEMCMP on the MMAP dedup path (and that path only —
+    /// the in-memory table's weaker tag-only prefilter is pinned separately by
+    /// `in_memory_dedup_has_only_the_h2_tag_prefilter`). Here it holds in its strongest form:
+    /// `mapped_find` binary-searches the sorted 64-bit hash array and calls the `eq`
+    /// (string-compare) closure ONLY for entries whose FULL 64-bit hash matches. The bead asked
+    /// for this filter to be added; the verification says it already exists here, so this test
+    /// pins it instead — a refactor that dropped the hash gate and linearly `eq`-scanned would
+    /// turn every miss from O(log n) hash probes + 0 compares into O(n) compares, which this
+    /// catches by COUNTING `eq` invocations rather than by timing.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mapped_find_compares_full_hash_before_eq() {
+        use std::cell::Cell;
+        let mut d = Dict::new();
+        for i in 0..64 {
+            d.intern(&Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/t{}", i))));
+        }
+        let dir = std::env::temp_dir().join(format!("sparq-dict-hashfirst-{}", std::process::id()));
+        d.save_mmap(&dir).unwrap();
+        let m = Dict::open_mmap(&dir).unwrap();
+
+        // (a) A hash that is present: `eq` runs for exactly the entries carrying that hash.
+        //     With 64 distinct terms and a 64-bit hash that is one entry, so one compare —
+        //     NOT the 64 a compare-everything scan would make.
+        let present = hash_iri("http://ex/t7");
+        let calls = Cell::new(0usize);
+        let found = m.mapped_find(present, |s| {
+            calls.set(calls.get() + 1);
+            stored_ref_is_iri(s, "http://ex/t7", &m.prefixes)
+        });
+        assert!(found.is_some(), "the term must be found through the mapped index");
+        assert_eq!(calls.get(), 1, "eq must run once — only for the entry whose 64-bit hash matched");
+
+        // (b) A hash that is absent: `eq` must NEVER run. This is the load-bearing half — it is
+        //     what makes a dictionary MISS cost zero string compares.
+        let calls = Cell::new(0usize);
+        let found = m.mapped_find(hash_iri("http://ex/absent"), |_| {
+            calls.set(calls.get() + 1);
+            true // would report a bogus hit if the hash gate were ever removed
+        });
+        assert_eq!(found, None, "an absent hash must not resolve to any id");
+        assert_eq!(calls.get(), 0, "eq must not run at all when no stored 64-bit hash matches");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-5] sq-7d3dj.21b — the OTHER half of the HASH-BEFORE-MEMCMP scope note on
+    /// `find_iri` & co., pinned so the mmap guarantee is never read as covering every dedup
+    /// path. The in-memory `self.table` stores bare ids and so has NO full-64-bit hash gate:
+    /// hashbrown matches only the top-7-bit `h2` tag, which means
+    ///   (a) `eq` DOES run for a probed entry whose remaining 57 hash bits differ, and
+    ///   (b) correctness therefore rests entirely on `eq` — an `h2` collision must never dedup
+    ///       two distinct terms onto one id.
+    /// Both are asserted below on a deterministically-found tag-colliding IRI pair (FxHasher is
+    /// seedless, so the search result is stable across runs and hosts).
+    #[test]
+    fn in_memory_dedup_has_only_the_h2_tag_prefilter() {
+        use std::cell::Cell;
+        use std::collections::HashMap;
+
+        // hashbrown's `h2` tag is the top 7 bits of the 64-bit hash.
+        let tag = |h: u64| h >> 57;
+        let mut first_per_tag: HashMap<u64, (String, u64)> = HashMap::new();
+        let mut pair = None;
+        for i in 0..4096u32 {
+            let iri = format!("http://ex/h{}", i);
+            let h = hash_iri(&iri);
+            match first_per_tag.get(&tag(h)) {
+                Some((prev_iri, prev_h)) if *prev_h != h => {
+                    pair = Some((prev_iri.clone(), *prev_h, iri, h));
+                    break;
+                }
+                Some(_) => {}
+                None => {
+                    first_per_tag.insert(tag(h), (iri, h));
+                }
+            }
+        }
+        let (a, ha, b, hb) =
+            pair.expect("two IRIs sharing the 7-bit h2 tag must exist among 4096 candidates");
+        assert_eq!(tag(ha), tag(hb), "the pair must share the h2 tag: {} / {}", a, b);
+        assert_ne!(ha, hb, "the pair must differ in the FULL 64-bit hash: {} / {}", a, b);
+
+        // (a) The in-memory prefilter is tag-only. Probing a `HashTable<Id>` exactly as
+        //     `find_iri` does (`table.find(hash, eq)`) invokes `eq` for the tag-colliding entry
+        //     even though the full hashes differ — a stored-full-hash gate would call it zero
+        //     times. This is the claim the source comment makes, asserted rather than asserted-
+        //     by-prose.
+        let mut table: HashTable<Id> = HashTable::new();
+        table.insert_unique(ha, 1, |_| ha);
+        let calls = Cell::new(0usize);
+        let hit = table.find(hb, |_| {
+            calls.set(calls.get() + 1);
+            false
+        });
+        assert!(hit.is_none(), "a tag-only collision must not resolve to an id");
+        assert_eq!(
+            calls.get(),
+            1,
+            "eq must run for the h2-tag-colliding entry — the in-memory path has no full-hash gate"
+        );
+
+        // (b) So `eq` is load-bearing for correctness: the colliding pair must intern to two
+        //     distinct ids, and each must still look up to its own id.
+        let (ta, tb) = (
+            Term::NamedNode(NamedNode::new_unchecked(a.clone())),
+            Term::NamedNode(NamedNode::new_unchecked(b.clone())),
+        );
+        let mut d = Dict::new();
+        let (ia, ib) = (d.intern(&ta), d.intern(&tb));
+        assert_ne!(ia, ib, "an h2-tag collision must not dedup {} and {} onto one id", a, b);
+        assert_eq!(d.intern(&ta), ia, "re-interning must dedup to the same id");
+        assert_eq!(d.intern(&tb), ib, "re-interning must dedup to the same id");
+        assert_eq!(d.lookup(&ta), ia);
+        assert_eq!(d.lookup(&tb), ib);
+        assert_eq!(d.term(ia), ta);
+        assert_eq!(d.term(ib), tb);
     }
 
     #[cfg(feature = "mmap")]

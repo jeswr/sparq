@@ -97,3 +97,64 @@ fn malformed_data_is_an_error() {
         "unparseable data must error"
     );
 }
+
+// [FABLE-5] sq-01xlp: the opt-in `stateful` feature's pre-parsed `ParsedGraph` handle —
+// parse once, validate many times. These drive the REAL wasm exports (including the
+// `JsError`-returning `parse`, which the native suite cannot run) under
+// `wasm-pack test --node --features stateful`.
+#[cfg(feature = "stateful")]
+mod stateful {
+    use super::DATA;
+    use sparq_shacl_wasm::{ParsedGraph, Validator};
+    use wasm_bindgen_test::*;
+
+    // A NAMED property shape: blank-node labels are randomized per parse, so an
+    // anonymous shape would make the cross-parse byte-identical assertion below
+    // flaky on `sourceShape`.
+    const SHAPES: &str = r#"
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://example.org/> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        ex:PersonShape a sh:NodeShape ;
+          sh:targetClass ex:Person ;
+          sh:property ex:AgeShape .
+        ex:AgeShape
+          sh:path ex:age ;
+          sh:datatype xsd:integer ;
+          sh:message "age must be an integer" .
+    "#;
+
+    /// Repeat validation off one pre-parsed data handle is deterministic and
+    /// byte-identical to the stateless one-shot surface over the same documents.
+    #[wasm_bindgen_test]
+    fn parsed_handle_matches_one_shot_and_is_reusable() {
+        let data = ParsedGraph::parse(DATA, "turtle").expect("parse data");
+        let shapes = ParsedGraph::parse(SHAPES, "turtle").expect("parse shapes");
+        let first = data.validate(&shapes);
+        assert_eq!(
+            first,
+            Validator::validate(DATA, SHAPES, "turtle").expect("one-shot"),
+            "pre-parsed and one-shot reports must agree"
+        );
+        assert_eq!(first, data.validate(&shapes), "repeat validation must be stable");
+        assert!(!data.conforms(&shapes, false));
+    }
+
+    /// The Turtle / text renderings are the same report surface as the stateless API.
+    #[wasm_bindgen_test]
+    fn parsed_handle_full_report_surface() {
+        let data = ParsedGraph::parse(DATA, "turtle").expect("parse data");
+        let shapes = ParsedGraph::parse(SHAPES, "turtle").expect("parse shapes");
+        assert!(data.validate_turtle(&shapes).contains("sh:ValidationReport"));
+        assert!(data.validate_text(&shapes).starts_with("Does not conform"));
+    }
+
+    /// A malformed document surfaces as a parse error (a `JsError`), not a panic.
+    #[wasm_bindgen_test]
+    fn malformed_document_is_an_error() {
+        assert!(
+            ParsedGraph::parse("@prefix bad", "turtle").is_err(),
+            "unparseable document must error"
+        );
+    }
+}

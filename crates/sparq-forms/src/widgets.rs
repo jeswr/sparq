@@ -821,8 +821,9 @@ mod tests {
             in_values: vec![crate::description::TermRef::from_term(&lit("a"))],
             ..Constraints::default()
         };
+        let value = lit("a");
         let ctx = WidgetContext {
-            value: Some(&lit("a")),
+            value: Some(&value),
             constraints: &e,
         };
         let res = r.resolve_editor(&ctx);

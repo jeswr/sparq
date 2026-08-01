@@ -37,7 +37,7 @@ function pdfHref(slug: string): string {
 // [OPUS-4.8] sq-1scgk — the paper's single Typst source on GitHub (the authoring artifact the
 // PDF + in-site render both compile from). Matches the site's source-link convention.
 function sourceHref(source: string): string {
-  return `https://github.com/jeswr/sparq/blob/main/site/papers/${source}`;
+  return `https://github.com/sparq-org/sparq/blob/main/site/papers/${source}`;
 }
 
 export default function PapersIndexPage() {

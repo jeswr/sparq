@@ -257,12 +257,12 @@ fn stratified_carried_blank_survives_a_colliding_source_label() {
 #[test]
 fn stratified_carried_existential_survives_a_colliding_source_label() {
     // The same collision, against a MINTED rule existential: stratum 1 derives
-    // `:a :q _:e` with `_:e` skolemized to `__sk1_e`, and stratum 2's source
-    // uses `_:__st0___sk1_e` — the label a fixed rename would have carried it
+    // `:a :q _:e` with `_:e` skolemized to `__sk0_1_e`, and stratum 2's source
+    // uses `_:__st0___sk0_1_e` — the label a fixed rename would have carried it
     // as. The carried existential must remain a distinct node.
     let (c, _) = strat_closure(&[
         "@prefix : <http://ex/> .\n:a :p :b .\n{ ?x :p ?y } => { ?x :q _:e } .",
-        "@prefix : <http://ex/> .\n_:__st0___sk1_e a :Other .",
+        "@prefix : <http://ex/> .\n_:__st0___sk0_1_e a :Other .",
     ]);
     let minted =
         c.iter().find(|(s, p, _)| s == &iri("a") && p == &iri("q")).expect("minted :q triple");

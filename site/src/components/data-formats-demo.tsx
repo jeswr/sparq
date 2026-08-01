@@ -12,8 +12,8 @@
 //      `DecompressionStream` and parse the decoded text → triple count. Plus
 //      ([FABLE-5] sq-4ssz1 / #1046) a real compressed-file upload: pick a `.gz` /
 //      `.zip` / `.zst` archive and it is decompressed in-tab (gzip/zip natively; zstd
-//      through the LAZY-loaded `fzstd` chunk `lib/dataset-archive.ts#loadCodec`
-//      fetches only when a zstd payload is actually decoded) and parsed by the engine.
+//      through the shared `js/src/decompress.ts` path, whose `fzstd` import loads only
+//      when a zstd payload is actually decoded) and parsed by the engine.
 //      bzip2 remains native-only (no small JS decoder — see the page's honest caveat).
 
 import * as React from "react";
@@ -49,10 +49,9 @@ import {
 import {
   sniffArchive,
   archiveCodecFromName,
-  decompressArchive,
   type ArchiveCodec,
 } from "@/lib/dataset-archive";
-import { guessFormat } from "@/lib/repl-dataset";
+import { bytesToRdf } from "@/lib/rdf-import";
 // [OPUS-4.8] sq-8uew — Turtle/TriG/N-Triples/N-Quads syntax-highlighting input editor.
 import { RdfEditor } from "@/components/rdf-editor";
 // [OPUS-4.8] sq-ixc3.1 — JSON-LD syntax-highlighting input editor (the remaining picker format).
@@ -190,8 +189,8 @@ export function DataFormatsDemo() {
 
   // [FABLE-5] sq-4ssz1 (#1046) — decode a REAL compressed archive picked from disk:
   // sniff the codec (magic number first, filename as fallback), decompress in-tab via
-  // the shared `decompressArchive` (gzip/zip natively; picking a `.zst` triggers the
-  // FIRST fetch of the lazy fzstd chunk — the decoder is not in this page's bundle),
+  // the shared `bytesToRdf` pipeline (gzip/zip natively; picking a `.zst` reaches
+  // js/src/decompress.ts and triggers the FIRST fetch of its lazy fzstd chunk),
   // guess the RDF format from the inner name, and parse with the wasm engine.
   const runArchive = React.useCallback(async (file: File) => {
     setArchive({ kind: "running" });
@@ -204,12 +203,7 @@ export function DataFormatsDemo() {
         );
       }
       const t0 = performance.now();
-      const { text: decoded, innerName } = await decompressArchive(
-        bytes,
-        file.name,
-        codec,
-      );
-      const fmt = guessFormat(innerName ?? file.name);
+      const { text: decoded, format: fmt } = await bytesToRdf(bytes, file.name);
       const Store = await loadSparq();
       setEngine("ready");
       const store = loadIntoStore(Store, decoded, fmt);

@@ -235,6 +235,12 @@ struct Vocab {
     property_chain_axiom: Id,
     #[cfg(feature = "rbox")]
     transitive_property: Id,
+    /// `owl:topObjectProperty` — the universal object property. The OWL 2 property-hierarchy
+    /// restriction unconditionally admits every chain axiom whose SUPERPROPERTY is top, so its
+    /// role id (when minted) is threaded into [`crate::rbox::told_rbox_regular`] (`NO_ID` if
+    /// the term is absent, which `Names::role_of` never resolves).
+    #[cfg(feature = "rbox")]
+    top_object_property: Id,
 }
 
 impl Vocab {
@@ -286,6 +292,8 @@ impl Vocab {
             property_chain_axiom: look(format!("{}propertyChainAxiom", OWL)),
             #[cfg(feature = "rbox")]
             transitive_property: look(format!("{}TransitiveProperty", OWL)),
+            #[cfg(feature = "rbox")]
+            top_object_property: look(format!("{}topObjectProperty", OWL)),
         }
     }
 }
@@ -338,6 +346,12 @@ struct Idx {
     cd_range: FxHashMap<Id, Concept>, // supported range / DataOneOf node -> range concept
     #[cfg(feature = "cdomain")]
     cd_exists: FxHashMap<Id, Concept>, // supported DataHasValue restriction node -> point concept
+    // [SONNET-4.6] sq-vkq9u (`abox` + `cdomain`): DataPropertyAssertion LITERAL -> its minted
+    // POINT-range concept. Filled by `resolve_cdomain` from the literals `abox_data_literals`
+    // pre-collected; read by `decode_abox` to internalize `a q 5` as `{a} ⊑ ∃q.{5}`. Empty
+    // unless the caller asked for ABox internalization (`ExtractOpts::abox`).
+    #[cfg(all(feature = "abox", feature = "cdomain"))]
+    cd_abox_point: FxHashMap<Id, Concept>,
     #[cfg(feature = "rbox")]
     sub_property: Vec<(Id, Id)>, // (r, s) from rdfs:subPropertyOf — a role inclusion r ⊑ s
     #[cfg(feature = "rbox")]
@@ -354,6 +368,127 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
     #[cfg(not(feature = "abox"))]
     let _ = opts;
     let v = Vocab::intern(dict);
+    #[cfg_attr(not(feature = "cdomain"), allow(unused_mut))]
+    let mut idx = build_idx(dict, triples, &v);
+
+    let mut names = Names::new();
+    // [FABLE-5] sq-pbz04.2.2 (CR7–CR9): resolve the concrete-domain candidates BEFORE
+    // decoding axioms, so `decode` can route supported faceted-range / point nodes to
+    // their minted concepts. Returns the CR7/CR8 axioms appended after normalization.
+    // [SONNET-4.6] sq-vkq9u (`abox` + `cdomain`): the ABox data-property-assertion literals must
+    // be minted in the SAME `Mint` registry as the TBox ranges — that is what makes `{5}` from
+    // `a q 5` and a TBox `[5, 5]` / `DataHasValue 5` ONE concept, so CR8 relates them — which
+    // means collecting them BEFORE this pre-pass. Empty unless the caller asked for ABox
+    // internalization, so `Classifier::classify` mints exactly what it minted before.
+    #[cfg(feature = "cdomain")]
+    let cd_axioms = {
+        #[cfg(feature = "abox")]
+        let abox_lits =
+            if opts.abox { abox_data_literals(dict, triples, &idx, &v) } else { Vec::new() };
+        #[cfg(not(feature = "abox"))]
+        let abox_lits: Vec<Id> = Vec::new();
+        resolve_cdomain(dict, triples, &mut idx, &v, &mut names, &abox_lits)
+    };
+    // Pre-seed ⊤/⊥ so the recognisers route owl:Thing/owl:Nothing dict ids to TOP/BOTTOM.
+    let mut report = Report::default();
+    let mut norm = Normalizer::new(&mut names);
+
+    // Decode every subClassOf / equivalentClass / disjointWith axiom into Expr -> Expr and
+    // hand each to the normalizer. `add_class_axiom` resolves both class nodes into an `Expr`,
+    // returning false (so the caller bumps the skip count) when either is a non-EL construct.
+    for &(a, b) in &idx.sub_class {
+        if !add_class_axiom(a, b, false, &idx, &v, &mut norm) {
+            report.skipped_axioms += 1;
+        }
+    }
+    for &(a, b) in &idx.equiv_class {
+        if !add_class_axiom(a, b, true, &idx, &v, &mut norm) {
+            report.skipped_axioms += 1;
+        }
+    }
+    // disjointWith(C, D)  ⇒  C ⊓ D ⊑ ⊥.
+    for &(a, b) in &idx.disjoint {
+        if !add_disjoint_axiom(a, b, &idx, &v, &mut norm) {
+            report.skipped_axioms += 1;
+        }
+    }
+
+    // [OPUS-4.8] sq-pbz04.2.5 (`abox`): internalize ABox assertions as safe-nominal axioms over
+    // the SAME normalizer + name table, so nominal + role ids stay consistent with the TBox
+    // concepts. `Classifier::classify` / `classify_graph` pass `abox = false`, so they never see
+    // these axioms (byte-identical, whatever the feature). `bottom_op_axiom` is the
+    // `owl:bottomObjectProperty` empty-role fact `∃⊥.⊤ ⊑ ⊥`, appended after `finish` only when
+    // that property actually occurred as a role (so `New-Feature-BottomObjectProperty-001`-shaped
+    // `{a} ⊑ ∃⊥.⊤` collapses to `{a} ⊑ ⊥`).
+    #[cfg(feature = "abox")]
+    let (bottom_op_axiom, abox_extras) = if opts.abox {
+        report.skipped_assertions = decode_abox(dict, triples, &idx, &v, &mut norm);
+        let bottom = norm
+            .names
+            .role_of(v.bottom_object_property)
+            .map(|r| Normal::ExistsSub(r, TOP, BOTTOM));
+        // [OPUS-4.8] sq-pbz04.2.8: E4 — extract `owl:hasKey` / negative property assertions /
+        // asserted `owl:differentFrom`, minting every referenced concept/role/nominal into the SAME
+        // name table BEFORE saturation so the readoff's S-set / R-link lookups are well-sized.
+        let extras =
+            decode_abox_e4(dict, triples, &idx, &v, norm.names, &mut report.skipped_assertions);
+        (bottom, extras)
+    } else {
+        (None, AboxExtras::default())
+    };
+
+    let axioms = norm.finish();
+    #[cfg(feature = "abox")]
+    let axioms = {
+        let mut axioms = axioms;
+        if let Some(ax) = bottom_op_axiom {
+            axioms.push(ax);
+        }
+        axioms
+    };
+    // [FABLE-5] sq-pbz04.2.2: append the concrete-domain axioms — `d ⊑ ⊥` for an EMPTY
+    // value space (CR7; the clash then reaches classes with an `∃p.d` obligation via CR5)
+    // and `d1 ⊑ d2` for every PROVEN value-space containment (CR8/CR9, threaded through
+    // data-property existentials by the ordinary CR1/CR3/CR4 machinery).
+    #[cfg(feature = "cdomain")]
+    let axioms = {
+        let mut axioms = axioms;
+        axioms.extend(cd_axioms);
+        axioms
+    };
+
+    // RBox normalization (E2): role inclusions + property chains + transitive roles into
+    // [`RoleAxiom`] forms. Done here while `names` is still borrowable so role ids agree with
+    // the existential links minted during concept decoding. No-op without the `rbox` feature.
+    // [SONNET-4.6] sq-oj06v: the told-RBox regularity verdict lands in the report — CR10/CR11
+    // stay sound + terminating on a non-regular (spec-illegal) RBox, but completeness is only
+    // argued for regular ones, so the flag is the honest "may be incomplete" surface.
+    #[cfg(feature = "rbox")]
+    let role_axioms = {
+        let (role_axioms, regular) = normalize_rbox(&idx, &v, &mut names);
+        report.rbox_non_regular = !regular;
+        role_axioms
+    };
+
+    report.named_classes = names.concept_count();
+    Extracted {
+        axioms,
+        names,
+        report,
+        #[cfg(feature = "rbox")]
+        role_axioms,
+        #[cfg(feature = "abox")]
+        abox_extras,
+    }
+}
+
+/// [SONNET-4.6] sq-clsv6: the ONE structural pass over `triples` — the axiom lists plus the
+/// restriction / list / nominal / self / (under `cdomain`) faceted-range edges every later
+/// decode step reads. Factored out of [`extract`] VERBATIM (same predicate dispatch, same
+/// `owl:oneOf` resolution tail) so the incremental delta path (`extract_added`) can build the
+/// same full-graph index without duplicating the recognition rules — any drift between the two
+/// would be a fragment-recognition bug.
+fn build_idx(dict: &Dict, triples: &[[Id; 3]], v: &Vocab) -> Idx {
     let mut idx = Idx::default();
     for &[s, p, o] in triples {
         if p == v.sub_class_of {
@@ -423,7 +558,7 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
             }
         } else {
             #[cfg(feature = "rbox")]
-            extract_rbox_triple(&mut idx, &v, s, p, o);
+            extract_rbox_triple(&mut idx, v, s, p, o);
         }
     }
 
@@ -436,7 +571,7 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
         .one_of_head
         .iter()
         .map(|(&node, &head)| {
-            let members = decode_list(head, &idx, &v);
+            let members = decode_list(head, &idx, v);
             // [FABLE-5] sq-pbz04.2.2: a singleton NON-individual member (third slot) is
             // DataOneOf — a concrete-domain point range, resolvable under `cdomain` when
             // it is a supported exact-numeric literal; it stays a skip otherwise.
@@ -456,111 +591,238 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
         }
     }
 
-    let mut names = Names::new();
-    // [FABLE-5] sq-pbz04.2.2 (CR7–CR9): resolve the concrete-domain candidates BEFORE
-    // decoding axioms, so `decode` can route supported faceted-range / point nodes to
-    // their minted concepts. Returns the CR7/CR8 axioms appended after normalization.
-    #[cfg(feature = "cdomain")]
-    let cd_axioms = resolve_cdomain(dict, triples, &mut idx, &v, &mut names);
-    // Pre-seed ⊤/⊥ so the recognisers route owl:Thing/owl:Nothing dict ids to TOP/BOTTOM.
-    let mut report = Report::default();
-    let mut norm = Normalizer::new(&mut names);
+    idx
+}
 
-    // Decode every subClassOf / equivalentClass / disjointWith axiom into Expr -> Expr and
-    // hand each to the normalizer. The `decode` closure resolves a class node into an Expr,
-    // returning None (and bumping the skip count) when the node is a non-EL construct.
-    let process = |a: Id, b: Id, equiv: bool, report: &mut Report, norm: &mut Normalizer| {
-        let mut cache = FxHashMap::default();
-        let lhs = decode(a, &idx, &v, norm.names, &mut cache, 0);
-        let rhs = decode(b, &idx, &v, norm.names, &mut cache, 0);
-        match (lhs, rhs) {
-            (Some(l), Some(r)) => {
-                norm.add_sub(&l, &r);
-                if equiv {
-                    norm.add_sub(&r, &l);
-                }
+/// [SONNET-4.6] sq-clsv6: decodes ONE top-level class axiom `a ⊑ b` (or, when `equiv`, the two
+/// inclusions of `a ≡ b`) into normal form through `norm`. Returns `false` when either side is
+/// outside the recognised fragment, so the caller counts the skip — shared by [`extract`] and
+/// (under `incremental`) [`extract_added`] so the full and delta paths cannot drift on WHICH
+/// axioms are recognised.
+fn add_class_axiom(a: Id, b: Id, equiv: bool, idx: &Idx, v: &Vocab, norm: &mut Normalizer) -> bool {
+    let mut cache = FxHashMap::default();
+    let lhs = decode(a, idx, v, norm.names, &mut cache, 0);
+    let rhs = decode(b, idx, v, norm.names, &mut cache, 0);
+    match (lhs, rhs) {
+        (Some(l), Some(r)) => {
+            norm.add_sub(&l, &r);
+            if equiv {
+                norm.add_sub(&r, &l);
             }
-            _ => report.skipped_axioms += 1,
+            true
         }
-    };
+        _ => false,
+    }
+}
 
-    for &(a, b) in &idx.sub_class {
-        process(a, b, false, &mut report, &mut norm);
+/// [SONNET-4.6] sq-clsv6: `owl:disjointWith(C, D)` ⇒ `C ⊓ D ⊑ ⊥`. Returns `false` (a counted
+/// skip) when either side is outside the recognised fragment. Companion of [`add_class_axiom`].
+fn add_disjoint_axiom(a: Id, b: Id, idx: &Idx, v: &Vocab, norm: &mut Normalizer) -> bool {
+    let mut cache = FxHashMap::default();
+    let lhs = decode(a, idx, v, norm.names, &mut cache, 0);
+    let rhs = decode(b, idx, v, norm.names, &mut cache, 0);
+    match (lhs, rhs) {
+        (Some(l), Some(r)) => {
+            norm.add_sub(&Expr::And(vec![l, r]), &Expr::Atom(BOTTOM));
+            true
+        }
+        _ => false,
     }
-    for &(a, b) in &idx.equiv_class {
-        process(a, b, true, &mut report, &mut norm);
-    }
-    // disjointWith(C, D)  ⇒  C ⊓ D ⊑ ⊥.
-    for &(a, b) in &idx.disjoint {
-        let mut cache = FxHashMap::default();
-        let lhs = decode(a, &idx, &v, norm.names, &mut cache, 0);
-        let rhs = decode(b, &idx, &v, norm.names, &mut cache, 0);
-        match (lhs, rhs) {
-            (Some(l), Some(r)) => norm.add_sub(&Expr::And(vec![l, r]), &Expr::Atom(BOTTOM)),
-            _ => report.skipped_axioms += 1,
+}
+
+/// [SONNET-4.6] sq-clsv6 (Phase E5, `incremental`): the class axioms carried by an ADDED triple
+/// batch, normalized into the CALLER'S existing [`Names`] so concept ids stay stable across the
+/// edit (the whole basis of resuming a saturation instead of rebuilding it).
+#[cfg(feature = "incremental")]
+pub(crate) struct AddedAxioms {
+    /// The normal-form axioms the added triples contribute.
+    pub axioms: Vec<Normal>,
+    /// Added class axioms outside the recognised fragment — folded into the running
+    /// `Report::skipped_axioms`, which then equals a from-scratch extraction's count because every
+    /// class-axiom triple is decoded exactly once over the graph's lifetime.
+    pub skipped: usize,
+}
+
+/// [SONNET-4.6] sq-clsv6 (Phase E5, `incremental`): extracts and normalizes ONLY the class axioms
+/// carried by `added`, minting into the EXISTING `names`.
+///
+/// `all_triples` is the FULL post-edit graph and is used to build the structural index, so a
+/// restriction / intersection / enumeration node is decoded with the same neighbourhood a
+/// from-scratch [`extract`] would see. `added` supplies the top-level axiom triples to decode —
+/// each must be genuinely new (the caller de-duplicates against the pre-edit graph), otherwise its
+/// axiom would be contributed twice.
+///
+/// PRECONDITION (the caller — `crate::incremental` — enforces it and otherwise falls back to a
+/// full re-classification): the edit only adds class axioms and brand-new class-expression nodes,
+/// touches no RBox vocabulary, and the graph carries no concrete-domain vocabulary. That is what
+/// makes it sound to skip `resolve_cdomain` / `normalize_rbox` here — neither has anything left to
+/// resolve, so `idx.cd_range` / `idx.cd_exists` being empty costs no recognition.
+#[cfg(feature = "incremental")]
+pub(crate) fn extract_added(
+    dict: &Dict,
+    all_triples: &[[Id; 3]],
+    added: &[[Id; 3]],
+    names: &mut Names,
+) -> AddedAxioms {
+    let v = Vocab::intern(dict);
+    let idx = build_idx(dict, all_triples, &v);
+    let mut skipped = 0usize;
+    let mut norm = Normalizer::new(names);
+    for &[s, p, o] in added {
+        let ok = if p == v.sub_class_of {
+            add_class_axiom(s, o, false, &idx, &v, &mut norm)
+        } else if p == v.equivalent_class {
+            add_class_axiom(s, o, true, &idx, &v, &mut norm)
+        } else if p == v.disjoint_with {
+            add_disjoint_axiom(s, o, &idx, &v, &mut norm)
+        } else {
+            continue; // a structural triple: it carries no axiom of its own.
+        };
+        if !ok {
+            skipped += 1;
         }
     }
+    AddedAxioms {
+        axioms: norm.finish(),
+        skipped,
+    }
+}
 
-    // [OPUS-4.8] sq-pbz04.2.5 (`abox`): internalize ABox assertions as safe-nominal axioms over
-    // the SAME normalizer + name table, so nominal + role ids stay consistent with the TBox
-    // concepts. `Classifier::classify` / `classify_graph` pass `abox = false`, so they never see
-    // these axioms (byte-identical, whatever the feature). `bottom_op_axiom` is the
-    // `owl:bottomObjectProperty` empty-role fact `∃⊥.⊤ ⊑ ⊥`, appended after `finish` only when
-    // that property actually occurred as a role (so `New-Feature-BottomObjectProperty-001`-shaped
-    // `{a} ⊑ ∃⊥.⊤` collapses to `{a} ⊑ ⊥`).
-    #[cfg(feature = "abox")]
-    let (bottom_op_axiom, abox_extras) = if opts.abox {
-        report.skipped_assertions = decode_abox(dict, triples, &idx, &v, &mut norm);
-        let bottom = norm
-            .names
-            .role_of(v.bottom_object_property)
-            .map(|r| Normal::ExistsSub(r, TOP, BOTTOM));
-        // [OPUS-4.8] sq-pbz04.2.8: E4 — extract `owl:hasKey` / negative property assertions /
-        // asserted `owl:differentFrom`, minting every referenced concept/role/nominal into the SAME
-        // name table BEFORE saturation so the readoff's S-set / R-link lookups are well-sized.
-        let extras =
-            decode_abox_e4(dict, triples, &idx, &v, norm.names, &mut report.skipped_assertions);
-        (bottom, extras)
-    } else {
-        (None, AboxExtras::default())
-    };
+/// [SONNET-4.6] sq-clsv6 (Phase E5, `incremental`): why an added-triple batch is NOT safe to fold
+/// into an existing saturation. Returned by [`addition_is_incrementally_safe`]; the classifier
+/// surfaces it as the honest reason a full re-classification was run instead.
+#[cfg(feature = "incremental")]
+pub(crate) enum AdditionBlocker {
+    /// A triple attaches structure to a node the graph ALREADY mentions, so it can CHANGE what an
+    /// existing axiom means rather than only adding axioms (a second `owl:someValuesFrom` on a live
+    /// restriction; an `owl:unionOf` that turns an in-fragment axiom into a skip; the first
+    /// structure on a node an existing axiom currently reads as an opaque class atom). The retained
+    /// closure could then hold a subsumption the post-edit TBox no longer entails — non-monotone.
+    ExistingNode,
+    /// A triple carries vocabulary whose effect is not delta-local: RBox role axioms (they change
+    /// the role automaton every EXISTING link is closed under) or concrete-domain facets (resolved
+    /// in a whole-graph pre-pass that mints datatype concepts).
+    Vocabulary,
+}
 
-    let axioms = norm.finish();
-    #[cfg(feature = "abox")]
-    let axioms = {
-        let mut axioms = axioms;
-        if let Some(ax) = bottom_op_axiom {
-            axioms.push(ax);
+/// [SONNET-4.6] sq-clsv6 (Phase E5, `incremental`): decides whether `added` is a MONOTONE
+/// EXTENSION of the graph whose terms are `pre_mentioned` (every id occurring in ANY position) —
+/// i.e. whether folding it into an existing saturation via `crate::classify::resaturate` yields
+/// exactly what a from-scratch classification of the post-edit graph would.
+///
+/// Two shapes are safe, and ONLY these two:
+///
+/// 1. **A top-level class axiom** (`rdfs:subClassOf` / `owl:equivalentClass` /
+///    `owl:disjointWith`). Adding one never changes how any OTHER axiom decodes — [`decode`] walks
+///    a class node's OUTGOING structure and an axiom triple adds none — so it can only ADD
+///    normal-form axioms. Safe whatever its subject is (a named class or a live restriction node).
+/// 2. **A class-expression edge on a BRAND-NEW node** (`owl:onProperty`, `owl:someValuesFrom`,
+///    `owl:hasValue`, `owl:hasSelf`, `owl:intersectionOf`, `owl:oneOf`, `rdf:first`, `rdf:rest`,
+///    `rdf:type owl:Restriction`, or a non-EL marker that merely makes the node a counted skip).
+///    Because the subject was not mentioned ANYWHERE before, no existing axiom's decode can reach
+///    it, so again the effect is purely additive. "Not a subject" would NOT be enough: a node that
+///    so far appears only as an OBJECT (`:A rdfs:subClassOf _:b`) decodes as an opaque class atom
+///    until it gains structure, and gaining it CHANGES that existing axiom rather than adding one.
+///
+/// Everything else is rejected — conservatively, so a `Vocabulary` / `ExistingNode` verdict on a
+/// technically-harmless triple costs a full re-classification, never correctness. Under `cdomain`
+/// the literal-valued `owl:hasValue` / `rdf:first` forms (`DataHasValue` / `DataOneOf` points) are
+/// rejected too: they are rescued by the whole-graph `resolve_cdomain` pre-pass the delta path
+/// does not run.
+#[cfg(feature = "incremental")]
+pub(crate) fn addition_is_incrementally_safe(
+    dict: &Dict,
+    pre_mentioned: &FxHashSet<Id>,
+    added: &[[Id; 3]],
+) -> Result<(), AdditionBlocker> {
+    let v = Vocab::intern(dict);
+    for &[s, p, o] in added {
+        if is_term(p, v.sub_class_of) || is_term(p, v.equivalent_class) || is_term(p, v.disjoint_with)
+        {
+            continue; // (1) a top-level class axiom — always additive.
         }
-        axioms
-    };
-    // [FABLE-5] sq-pbz04.2.2: append the concrete-domain axioms — `d ⊑ ⊥` for an EMPTY
-    // value space (CR7; the clash then reaches classes with an `∃p.d` obligation via CR5)
-    // and `d1 ⊑ d2` for every PROVEN value-space containment (CR8/CR9, threaded through
-    // data-property existentials by the ordinary CR1/CR3/CR4 machinery).
+        if pre_mentioned.contains(&s) {
+            return Err(AdditionBlocker::ExistingNode);
+        }
+        // (2) a class-expression edge on a brand-new node. `owl:hasValue` / `rdf:first` carry an
+        // object-vs-literal distinction that decides the CR6-nominal / concrete-domain split, so
+        // under `cdomain` only the OBJECT form (which needs no whole-graph resolution) is safe.
+        let structural = is_term(p, v.on_property)
+            || is_term(p, v.some_values_from)
+            || is_term(p, v.has_self)
+            || is_term(p, v.intersection_of)
+            || is_term(p, v.one_of)
+            || is_term(p, v.rdf_rest)
+            || (is_term(p, v.ty) && is_term(o, v.restriction))
+            || is_delta_safe_marker(&v, p)
+            || ((is_term(p, v.has_value) || is_term(p, v.rdf_first))
+                && is_delta_safe_value(dict, o));
+        if !structural {
+            return Err(AdditionBlocker::Vocabulary);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `id` IS the vocabulary term `term`. A term ABSENT from the dict interns to
+/// [`sparq_core::dict::NO_ID`], so a bare `id == term` would wave EVERY unresolvable id through as
+/// that term — `Vocab::intern` leaves absent terms at `NO_ID` precisely so they match nothing during
+/// extraction, and the fast-path whitelist must keep that property (a whitelist that accidentally
+/// matched would admit a non-delta-local triple as safe, which is the one direction that costs
+/// correctness rather than a wasted rebuild).
+#[cfg(feature = "incremental")]
+fn is_term(id: Id, term: Id) -> bool {
+    id == term && term != sparq_core::dict::NO_ID
+}
+
+/// Whether `p` is a non-EL marker whose ONLY effect is to make its node a counted skip, in EVERY
+/// feature state. Under `cdomain` the two faceted-range predicates are excluded: they feed the
+/// whole-graph `resolve_cdomain` pre-pass, so a delta carrying them is not delta-local.
+#[cfg(feature = "incremental")]
+fn is_delta_safe_marker(v: &Vocab, p: Id) -> bool {
+    // `Vocab::intern` leaves an ABSENT marker at `NO_ID`, so `non_el` can hold `NO_ID` — see
+    // [`is_term`] for why matching it would be the one unsafe direction.
+    if p == sparq_core::dict::NO_ID || !v.non_el.contains(&p) {
+        return false;
+    }
     #[cfg(feature = "cdomain")]
-    let axioms = {
-        let mut axioms = axioms;
-        axioms.extend(cd_axioms);
-        axioms
-    };
-
-    // RBox normalization (E2): role inclusions + property chains + transitive roles into
-    // [`RoleAxiom`] forms. Done here while `names` is still borrowable so role ids agree with
-    // the existential links minted during concept decoding. No-op without the `rbox` feature.
-    #[cfg(feature = "rbox")]
-    let role_axioms = normalize_rbox(&idx, &v, &mut names);
-
-    report.named_classes = names.concept_count();
-    Extracted {
-        axioms,
-        names,
-        report,
-        #[cfg(feature = "rbox")]
-        role_axioms,
-        #[cfg(feature = "abox")]
-        abox_extras,
+    if is_term(p, v.on_datatype) || is_term(p, v.with_restrictions) {
+        return false;
     }
+    true
+}
+
+/// Whether an `owl:hasValue` / `rdf:first` object is delta-local. Without `cdomain` every object
+/// is (a literal simply makes the node a counted skip); with it, a LITERAL is a `DataHasValue` /
+/// `DataOneOf` point resolved by the whole-graph concrete-domain pre-pass, so only individuals
+/// (IRIs / blank nodes) stay delta-local.
+#[cfg(feature = "incremental")]
+fn is_delta_safe_value(dict: &Dict, o: Id) -> bool {
+    #[cfg(feature = "cdomain")]
+    {
+        is_individual(dict, o)
+    }
+    #[cfg(not(feature = "cdomain"))]
+    {
+        let _ = (dict, o);
+        true
+    }
+}
+
+/// [SONNET-4.6] sq-clsv6 (Phase E5, `incremental` + `cdomain`): whether `triples` carry ANY
+/// concrete-domain vocabulary — a faceted range (`owl:onDatatype` / `owl:withRestrictions`) or a
+/// literal-valued `owl:hasValue` / `rdf:first` (a `DataHasValue` / `DataOneOf` point). Those nodes
+/// are minted by the whole-graph `resolve_cdomain` pre-pass, whose node-to-concept map the delta
+/// path cannot reconstruct, so their presence disables the incremental fast path outright.
+/// Deliberately a conservative SUPERSET of what `resolve_cdomain` actually rescues.
+#[cfg(all(feature = "incremental", feature = "cdomain"))]
+pub(crate) fn has_concrete_domain_vocab(dict: &Dict, triples: &[[Id; 3]]) -> bool {
+    let v = Vocab::intern(dict);
+    triples.iter().any(|&[_, p, o]| {
+        is_term(p, v.on_datatype)
+            || is_term(p, v.with_restrictions)
+            || ((is_term(p, v.has_value) || is_term(p, v.rdf_first)) && !is_individual(dict, o))
+    })
 }
 
 /// [FABLE-5] sq-pbz04.2.2 (CR7–CR9): pre-screens the concrete-domain candidates and hands
@@ -576,6 +838,11 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
 /// non-EL skip.
 /// Decoding just its range half would DROP that structure and STRENGTHEN the asserted
 /// axiom in a subclass (LHS) position, which is unsound.
+///
+/// [SONNET-4.6] sq-vkq9u: `abox_lits` carries the `DataPropertyAssertion` literals to rescue as
+/// point ranges (empty unless `ExtractOpts::abox`). They go through the SAME mint registry, so a
+/// value already minted by the TBox shares its concept; an out-of-tier literal is simply absent
+/// from `idx.cd_abox_point` and `decode_abox` keeps its counted skip.
 #[cfg(feature = "cdomain")]
 fn resolve_cdomain(
     dict: &Dict,
@@ -583,6 +850,7 @@ fn resolve_cdomain(
     idx: &mut Idx,
     v: &Vocab,
     names: &mut Names,
+    abox_lits: &[Id],
 ) -> Vec<Normal> {
     let structure = |n: Id| {
         idx.on_prop.contains_key(&n)
@@ -637,11 +905,22 @@ fn resolve_cdomain(
         .map(|(&n, &l)| (n, l))
         .collect();
     exists_points.sort_unstable();
-    let out = crate::cdomain::resolve(dict, triples, names, &ranges, &points, &exists_points, |h| {
-        decode_list(h, idx, v)
-    });
+    let out = crate::cdomain::resolve(
+        dict,
+        triples,
+        names,
+        &ranges,
+        &points,
+        &exists_points,
+        abox_lits,
+        |h| decode_list(h, idx, v),
+    );
     idx.cd_range = out.node_range;
     idx.cd_exists = out.node_exists;
+    #[cfg(feature = "abox")]
+    {
+        idx.cd_abox_point = out.lit_point;
+    }
     out.axioms
 }
 
@@ -665,27 +944,48 @@ fn extract_rbox_triple(idx: &mut Idx, v: &Vocab, s: Id, p: Id, o: Id) {
 /// through the shared [`Names`] table. A property chain of length `n` is left-folded into `n-1`
 /// binary compositions over fresh intermediate roles; a transitive property `r` becomes the
 /// composition `r ∘ r ⊑ r`. A degenerate chain (length 0/1) is treated as a plain inclusion.
+///
+/// [SONNET-4.6] sq-oj06v: also returns the TOLD-RBox regularity verdict (`true` = regular),
+/// computed by [`crate::rbox::told_rbox_regular`] over the PRE-binarization axioms — the told
+/// n-ary chains, not the left-folded binary forms (binarization introduces apparent cycles a
+/// told left-identity chain does not have). The caller surfaces `!regular` as
+/// [`crate::Report::rbox_non_regular`].
 #[cfg(feature = "rbox")]
-fn normalize_rbox(idx: &Idx, v: &Vocab, names: &mut Names) -> Vec<RoleAxiom> {
+fn normalize_rbox(idx: &Idx, v: &Vocab, names: &mut Names) -> (Vec<RoleAxiom>, bool) {
     let mut out: Vec<RoleAxiom> = Vec::new();
+    let mut told_incl: Vec<(Role, Role)> = Vec::new();
+    let mut told_chains: Vec<(Vec<Role>, Role)> = Vec::new();
     // r ⊑ s.
     for &(r, s) in &idx.sub_property {
         let (ri, si) = (names.role(r), names.role(s));
         out.push(RoleAxiom::Sub(ri, si));
+        told_incl.push((ri, si));
     }
     // owl:propertyChainAxiom: r1 ∘ … ∘ rn ⊑ super.
     for (&super_prop, &head) in &idx.chain_head {
         let members = decode_list(head, idx, v);
         let chain: Vec<Role> = members.iter().map(|&m| names.role(m)).collect();
         let sup = names.role(super_prop);
+        match chain[..] {
+            [] => {}
+            [r1] => told_incl.push((r1, sup)),
+            _ => told_chains.push((chain.clone(), sup)),
+        }
         fold_chain(&chain, sup, names, &mut out);
     }
     // owl:TransitiveProperty(r) ≡ r ∘ r ⊑ r.
     for &r in &idx.transitive {
         let ri = names.role(r);
         out.push(RoleAxiom::Chain(ri, ri, ri));
+        told_chains.push((vec![ri, ri], ri));
     }
-    out
+    // `owl:topObjectProperty`'s identity survives normalization (it is minted like any role),
+    // so the regularity check can apply the restriction's unconditional top-superproperty
+    // exemption. `role_of` is `None` when top never occurs as a role — then no chain can name
+    // it as superproperty and the exemption is vacuous.
+    let top = names.role_of(v.top_object_property);
+    let regular = crate::rbox::told_rbox_regular(&told_incl, &told_chains, top);
+    (out, regular)
 }
 
 /// Left-folds a property chain `r1 ∘ … ∘ rn ⊑ sup` into binary [`RoleAxiom::Chain`]s:
@@ -970,9 +1270,15 @@ fn is_literal(dict: &Dict, id: Id) -> bool {
 /// - `a p b`         (p a user-namespace object property, b an individual) ⇒ `{a} ⊑ ∃p.{b}`;
 /// - `a rdf:type owl:NamedIndividual` ⇒ register `a` (no axiom — a declaration).
 ///
+/// [SONNET-4.6] sq-vkq9u (`abox` + `cdomain`): additionally
+/// - `a q v` (v a LITERAL in the exact numeric tier) ⇒ `{a} ⊑ ∃q.{v}`, with `{v}` the point range
+///   `resolve_cdomain` minted for it. SOUNDNESS: `a q v` asserts `(a^I, v) ∈ q^I` and
+///   `v ∈ {v}^D`, so `a^I ∈ (∃q.{v})^I`. Without `cdomain` — or for a literal outside the exact
+///   tier — there is no point concept, so the assertion keeps the fail-closed skip below.
+///
 /// Returns the count of assertions DEFERRED as counted skips (`Report::skipped_assertions`): a
-/// `DataPropertyAssertion` (literal object — the `cdomain` point-range rescue is a sequenced
-/// follow-up bead) and a `ClassAssertion` whose class expression is outside the EL fragment.
+/// `DataPropertyAssertion` whose literal has no minted point range, and a `ClassAssertion` whose
+/// class expression is outside the EL fragment.
 /// SOUNDNESS: `{a} ⊑ C` holds because `{a}^I = {a^I} ⊆ C^I`; `{a} ⊑ ∃p.{b}` because
 /// `(a^I,b^I) ∈ p^I` with `b^I ∈ {b}^I`. Structural bnodes (restriction / intersection / list
 /// nodes) are never minted as individuals — realising one would be noise, not an entailment.
@@ -987,18 +1293,7 @@ fn decode_abox(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab, norm: &mu
         .filter(|&id| id != sparq_core::dict::NO_ID)
         .collect();
 
-    // A node the TBox pass uses as a class expression (restriction / intersection / oneOf / list
-    // cell) or a non-EL marker must never be minted as an ABox individual.
-    let structural = |n: Id| {
-        idx.is_restriction.contains(&n)
-            || idx.inter_head.contains_key(&n)
-            || idx.one_of_head.contains_key(&n)
-            || idx.first.contains_key(&n)
-            || idx.non_el_node.contains(&n)
-            // [OPUS-4.8] sq-pbz04.2.6: a self-restriction node (`∃r.Self`) is a class expression,
-            // never an ABox individual — it must not be minted as a nominal.
-            || idx.self_true.contains(&n)
-    };
+    let structural = |n: Id| is_class_expression_node(idx, n);
 
     let mut skipped = 0usize;
     for &[s, p, o] in triples {
@@ -1029,8 +1324,23 @@ fn decode_abox(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab, norm: &mu
                 let b = norm.names.nominal(o);
                 norm.add_sub(&Expr::Atom(a), &Expr::Exists(role, Box::new(Expr::Atom(b))));
             } else if is_literal(dict, o) {
-                // DataPropertyAssertion — deferred (fail-closed counted skip).
-                skipped += 1;
+                // DataPropertyAssertion. [SONNET-4.6] sq-vkq9u: under `cdomain` an exact-numeric
+                // literal was minted as the point range `{o}` by the `resolve_cdomain` pre-pass,
+                // so the assertion internalizes as `{s} ⊑ ∃p.{o}` and CR8 threads the asserted
+                // VALUE into the TBox's data-range obligations. Everything else — no `cdomain`, a
+                // string / lang-tagged / float-tier / ill-formed literal — keeps the fail-closed
+                // counted skip: no value space is ever guessed.
+                match abox_point(idx, o) {
+                    Some(point) => {
+                        let role = norm.names.role(p);
+                        let a = norm.names.nominal(s);
+                        norm.add_sub(
+                            &Expr::Atom(a),
+                            &Expr::Exists(role, Box::new(Expr::Atom(point))),
+                        );
+                    }
+                    None => skipped += 1,
+                }
             } else {
                 // ObjectPropertyAssertion whose OBJECT is a structural blank node (a
                 // restriction / intersection / list cell / non-EL node) — not a plain
@@ -1043,6 +1353,65 @@ fn decode_abox(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab, norm: &mu
         }
     }
     skipped
+}
+
+/// [OPUS-4.8] sq-pbz04.2.5 (`abox`): whether the TBox pass uses `n` as a CLASS EXPRESSION — a
+/// restriction / intersection / enumeration node, an RDF list cell, a non-EL-marked node, or
+/// ([OPUS-4.8] sq-pbz04.2.6) a self-restriction. Such a node must never be minted as an ABox
+/// individual: realising one would be noise, not an entailment.
+///
+/// [SONNET-4.6] sq-vkq9u: shared by [`decode_abox`] and [`abox_data_literals`] so the point-range
+/// pre-pass mints exactly the literals `decode_abox` will go on to internalize — a divergence
+/// would either mint an unused concept or leave a rescuable assertion counted as a skip.
+#[cfg(feature = "abox")]
+fn is_class_expression_node(idx: &Idx, n: Id) -> bool {
+    idx.is_restriction.contains(&n)
+        || idx.inter_head.contains_key(&n)
+        || idx.one_of_head.contains_key(&n)
+        || idx.first.contains_key(&n)
+        || idx.non_el_node.contains(&n)
+        || idx.self_true.contains(&n)
+}
+
+/// [SONNET-4.6] sq-vkq9u (`abox` + `cdomain`): the LITERALS of the graph's `DataPropertyAssertion`s
+/// — the objects [`decode_abox`] will reach through its data branch — deduplicated and sorted so
+/// the mint order (and therefore every minted concept id) depends only on the graph, not on triple
+/// order. The recogniser is deliberately IDENTICAL to `decode_abox`'s data branch: a non-`rdf:type`
+/// non-structural predicate, an individual non-class-expression subject, a literal object.
+/// Over-collecting would mint a concept for a literal that is never internalized (harmless but
+/// wasteful); under-collecting would silently keep a rescuable assertion as a skip.
+#[cfg(all(feature = "abox", feature = "cdomain"))]
+fn abox_data_literals(dict: &Dict, triples: &[[Id; 3]], idx: &Idx, v: &Vocab) -> Vec<Id> {
+    let mut lits: Vec<Id> = triples
+        .iter()
+        .filter(|&&[s, p, o]| {
+            p != v.ty
+                && !is_structural_predicate(dict, p)
+                && is_individual(dict, s)
+                && !is_class_expression_node(idx, s)
+                && is_literal(dict, o)
+        })
+        .map(|&[_, _, o]| o)
+        .collect();
+    lits.sort_unstable();
+    lits.dedup();
+    lits
+}
+
+/// [SONNET-4.6] sq-vkq9u: the minted POINT-range concept of a `DataPropertyAssertion` literal
+/// (`{5}` for `a q 5`), or `None` — which keeps [`decode_abox`]'s fail-closed counted skip.
+/// Always `None` without `cdomain`: there is no concrete-domain value tower to mint a point on,
+/// so the pre-sq-vkq9u skip behaviour is byte-identical in that feature state.
+#[cfg(all(feature = "abox", feature = "cdomain"))]
+fn abox_point(idx: &Idx, lit: Id) -> Option<Concept> {
+    idx.cd_abox_point.get(&lit).copied()
+}
+
+/// The no-`cdomain` counterpart of [`abox_point`]: no point range exists, so every
+/// `DataPropertyAssertion` stays a counted skip.
+#[cfg(all(feature = "abox", not(feature = "cdomain")))]
+fn abox_point(_idx: &Idx, _lit: Id) -> Option<Concept> {
+    None
 }
 
 /// [OPUS-4.8] sq-pbz04.2.8 (`abox`): whether a dict id is a NAMED (IRI) individual/property. Keys

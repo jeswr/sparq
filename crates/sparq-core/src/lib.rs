@@ -7,6 +7,13 @@ pub mod compress;
 pub mod dict;
 #[cfg(feature = "dict-spill")]
 pub mod dictspill;
+// [SONNET-4.6] sq-96hp1 (survey §A2 / research/data-structures.md §B1): the OPT-IN Elias-Fano
+// / Partitioned-Elias-Fano column codecs with compressed `next_geq` seek. OFF by default — it is
+// a MEASUREMENT-GATED prototype plus its A/B harness, deliberately NOT routed as a `PermData`
+// variant and not called by any join, so the shipped store keeps the varint block codec
+// bit-exactly and the lean default / wasm build pays nothing. Pure `std`, no new dependency.
+#[cfg(feature = "elias-fano")]
+pub mod eliasfano;
 #[cfg(feature = "mmap")]
 pub mod extsort;
 // [OPUS-4.8] (sq-7d3dj.18) Prefix-memoized IRI-validation fast path in FRONT of the full
@@ -27,6 +34,7 @@ mod ttl;
 #[cfg(feature = "shared")]
 pub mod shared;
 pub mod store;
+pub mod strdist;
 pub mod temporal;
 
 use dict::{Dict, Id};
@@ -197,8 +205,19 @@ enum NumData {
 impl NumData {
     /// The cached numeric value of a 1-based dictionary id, or `None` if it is not a
     /// (cached) numeric literal. The engine's O(1) numeric fast path.
-    #[inline]
+    // [FABLE-5] Keep the dominant dense-cache probe small enough that LTO reliably places it
+    // inside numeric gather loops; the larger storage-variant dispatch stays outlined.
+    #[inline(always)]
     fn lookup(&self, id: Id) -> Option<f64> {
+        if let NumData::Owned(values) = self {
+            let value = *values.get((id - 1) as usize)?;
+            return (!value.is_nan()).then_some(value);
+        }
+        self.lookup_non_owned(id)
+    }
+
+    #[inline(never)]
+    fn lookup_non_owned(&self, id: Id) -> Option<f64> {
         match self {
             NumData::Sparse(m) => m.get(&id).copied(),
             #[cfg(feature = "mmap")]
@@ -208,14 +227,7 @@ impl NumData {
                 // Beyond the mmap'd dense cache: a term appended after open.
                 None => extra.get(&id).copied(),
             },
-            NumData::Owned(v) => {
-                let v = *v.get((id - 1) as usize)?;
-                if v.is_nan() {
-                    None
-                } else {
-                    Some(v)
-                }
-            }
+            NumData::Owned(_) => unreachable!("Owned handled by lookup"),
             NumData::Forked { base, extra } => {
                 base.lookup(id).or_else(|| extra.get(&id).copied())
             }
@@ -4495,10 +4507,6 @@ fn newline_chunk_bounds(bytes: &[u8], target: usize) -> Vec<(usize, usize)> {
     bounds
 }
 
-/// Parses + interns N-Triples in parallel: each chunk builds a partial dictionary +
-/// local-id triples, then the partials are merged into one global dictionary with the
-/// local ids remapped. Interning is per-thread (no shared lock); the merge is linear.
-#[cfg(feature = "parallel")]
 /// Per-ISA software prefetch-for-read hint (x86 `prefetcht0`, aarch64 `prfm pldl1keep`, a no-op
 /// elsewhere). Correctness-neutral — a prefetch never faults and never changes architectural
 /// state; it only asks the CPU to pull a cache line in early.
@@ -4637,6 +4645,9 @@ pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
     best
 }
 
+/// Parses + interns N-Triples in parallel: each chunk builds a partial dictionary +
+/// local-id triples, then the partials are merged into one global dictionary with the
+/// local ids remapped. Interning is per-thread (no shared lock); the merge is linear.
 #[cfg(feature = "parallel")]
 fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
     Ok(merge_partials(parse_block(bytes)?))
@@ -10840,6 +10851,25 @@ mod tests {
         assert_eq!(by_val("nan"), None, "'nan'^^xsd:double must NOT hit the cache");
         // The genuine XSD spelling still hits with the infinity value.
         assert_eq!(by_val("INF"), Some(f64::INFINITY), "'INF'^^xsd:double still hits");
+    }
+
+    // [SONNET-4.6] Exercise the outlined storage dispatch directly so the coverage
+    // ratchet sees every non-mmap cache shape, not only the dominant owned fast path.
+    #[test]
+    fn numeric_cache_lookup_covers_outlined_storage_variants() {
+        let mut sparse_values = rustc_hash::FxHashMap::default();
+        sparse_values.insert(2, 2.5);
+        let sparse = NumData::Sparse(sparse_values);
+        assert_eq!(sparse.lookup(2), Some(2.5));
+        assert_eq!(sparse.lookup(1), None);
+
+        let base = std::sync::Arc::new(NumData::Owned(vec![1.5, f64::NAN]));
+        let mut extra = rustc_hash::FxHashMap::default();
+        extra.insert(3, 3.5);
+        let forked = NumData::Forked { base, extra };
+        assert_eq!(forked.lookup(1), Some(1.5));
+        assert_eq!(forked.lookup(2), None);
+        assert_eq!(forked.lookup(3), Some(3.5));
     }
 
     /// [OPUS-4.8] (sq-x32t) Recursively reads every regular file under `dir` and returns true iff

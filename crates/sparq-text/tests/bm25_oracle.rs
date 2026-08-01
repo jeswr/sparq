@@ -38,11 +38,13 @@
 //! fixed query battery makes; it may only RISE (more queries / corpora), and a
 //! drop means a genuine scoring regression.
 //!
-//! The floor const `TEXT_ORACLE_FLOOR` is read TEXTUALLY by the conformance
-//! crate's `tests/scoreboard_floors.rs` guard (the same hermetic mechanism the
-//! SHACL/geo/Solid/JSON-LD/ODRL crate-local floors use), so the scoreboard's
-//! mirrored value can never silently drift from what this runner enforces — and
-//! the dev-only conformance crate takes NO dependency edge on sparq-text.
+//! [SONNET-4.6] sq-z1xv8 — the floor is no longer MIRRORED anywhere. It is the one
+//! `sparq_conformance_floors::text::BM25_ORACLE_FLOOR` const, which the central
+//! `sparq_conformance::scoreboard::SUITES` row imports too, so the enforced and the
+//! reported floor cannot drift by construction (previously the conformance crate's
+//! `tests/scoreboard_floors.rs` guard re-read this file's source). The dev-only
+//! conformance crate still takes NO dependency edge on sparq-text: the shared floors
+//! crate is a zero-dependency leaf both sides depend on.
 
 use oxrdf::Term;
 use rand::rngs::StdRng;
@@ -57,14 +59,19 @@ use std::collections::BTreeMap;
 /// battery below makes against the reference BM25 scorer. It is the actual
 /// measured count — every `(corpus × query × mode)` triple that produces hits
 /// contributes one assertion per hit. May only RISE (the standard ratchet
-/// rule); pinned here and MIRRORED into the central conformance scoreboard
-/// (`sparq-conformance` `scoreboard::SUITES`, the `text-search differential
-/// oracle` row), kept in lock-step by that crate's `tests/scoreboard_floors.rs`
-/// guard (read textually — no cross-crate dep). The pinned value is the ACTUAL
+/// rule); the value lives in `sparq-conformance-floors` and is SHARED with the
+/// central conformance scoreboard (`sparq-conformance` `scoreboard::SUITES`, the
+/// `text-search differential oracle` row), so the two read one const and cannot
+/// drift. The pinned value is the ACTUAL
 /// measured count over the fixed-seed corpora + query battery below (printed as
 /// `text-search differential oracle assertions N (floor F)`), not a round
 /// number. [OPUS-4.8] sq-ripcg
-const TEXT_ORACLE_FLOOR: usize = 18750;
+/// [SONNET-4.6] sq-z1xv8 — the VALUE now lives once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
+/// ONE `const` and cannot drift (replacing the old textual re-read of this file).
+/// Raise it THERE; the measurement narrative stays here.
+const TEXT_ORACLE_FLOOR: usize = sparq_conformance_floors::text::BM25_ORACLE_FLOOR;
 
 /// BM25 parameters — MUST match `TextIndex`'s (`crate::index`): k1 = 1.2,
 /// b = 0.75, Robertson/Spärck-Jones idf with the `+1` floor. Re-declared here

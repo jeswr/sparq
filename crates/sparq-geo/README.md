@@ -70,8 +70,8 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   model is 2-D). Tessellated patches (`gml:Triangle` / `gml:TIN`) stay a clean
   `GeoError::Unsupported` (`bd list -l area:sparq-geo`).
 - **CRS handling** — CRS84 (default) / EPSG:4326 (axis-order normalised); other CRS IRIs
-  carried verbatim (relations valid within one CRS); opt-in CRS84 reprojection for a
-  curated EPSG set via the `reproject` feature (pure-Rust proj4rs).
+  carried verbatim (relations valid within one CRS); opt-in CRS84 reprojection (pure-Rust
+  proj4rs): a curated EPSG table (`reproject`) or the full EPSG registry (`epsg_full`).
 - **RDFS/OWL entailment + query rewrite** — GeoSPARQL ontology entailment runs through
   the GENERIC `sparq-reason` closure (no geo-specific reasoner). The OGC query-rewrite
   extension (`/conf/query-rewrite-extension`) — topology PROPERTY forms like

@@ -1,0 +1,13 @@
+[package]
+name = "site-policy-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# [GPT-5] #3557 — a site-test-only native harness. Keeping it outside the root
+# workspace prevents it from becoming a shipped capability or release package.
+[workspace]
+
+[dependencies]
+serde_json = "1"
+sparq-policy = { path = "../../../../crates/sparq-policy" }

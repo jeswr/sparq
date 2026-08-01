@@ -41,7 +41,7 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - name: Install cargo-deny
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-deny
       # Run advisories only; capture the human-readable report. `|| true` so we

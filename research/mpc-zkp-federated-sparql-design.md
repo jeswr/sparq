@@ -327,9 +327,12 @@ is the value. Each is opt-in, touches neither the lean core nor the audit postur
 5. **`sq-dt5hv`** *(OPEN)* — `secprop` property-admissibility pre-check in `sparq-trust::admit.rs`
    consuming the vendored `sec-prop:`/`sig-impl:` graphs. Wires the maintainer's ontology into the
    admission path.
-6. **`sq-aaop` / `sq-wj4k`** *(OPEN)* — the composition / UC posture design records (justify the
-   mid-pipeline `secure_equal` open; honest-majority-UC-without-setup; carry the coZK 2025/1026
-   caveat). Gate the collaborative-proof soundness story.
+6. **`sq-wj4k`** *(DONE)* / **`sq-aaop`** *(OPEN)* — the composition / UC posture design records
+   (justify the mid-pipeline `secure_equal` open; honest-majority-UC-without-setup; carry the coZK
+   2025/1026 caveat). `sq-wj4k` is recorded in
+   [`mpc-composition-uc-posture.md`](./mpc-composition-uc-posture.md) (posture + per-stage
+   obligations); `sq-aaop`, if retained, is the formal simulator-sketch/paper-grade write-up. Gate
+   the collaborative-proof soundness story.
 7. **`sq-bjl`** *(DEFERRED, P1)* — the in-circuit distributed-signature-over-secret-shared-witness
    SPIKE. Research-novel; do only as a deliberate, audit-gated spike after 1–2 + the audits.
 8. **`sq-qhy4`** *(OPEN, P0, EXTERNAL)* — the accredited-cryptographer audit that gates **every**

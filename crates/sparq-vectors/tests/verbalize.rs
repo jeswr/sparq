@@ -144,7 +144,7 @@ fn char_budget_truncates_but_keeps_the_label() {
 }
 
 #[test]
-fn verbalize_precision_at_k_fixture_is_not_worse_than_labels_only() {
+fn verbalize_precision_at_k_fixture_beats_labels_only() {
     // [GPT-5.6] Fixture-scale demonstration only: HashEmbedder is lexical and this is not a
     // benchmark or a general retrieval-quality claim. The richer passages disambiguate two equal
     // labels using their type and description.
@@ -206,8 +206,10 @@ ex:z-correct rdfs:label "Mercury" ;
 
     assert_eq!(full_hits.first().map(|h| &h.0), Some(&correct));
     assert_eq!(labels_hits.first().map(|h| &h.0), Some(&ambiguous));
+    // [SONNET-4.6] Keep the issue's retrieval-quality claim explicit: on this controlled fixture,
+    // type and description text must turn the label-only miss into a relevant top-one hit.
     assert!(
-        full_precision >= labels_precision,
+        full_precision > labels_precision,
         "fixture precision@1: verbalize={full_precision}, labels_only={labels_precision}"
     );
 

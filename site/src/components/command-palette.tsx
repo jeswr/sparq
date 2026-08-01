@@ -131,6 +131,10 @@ const TOP_PAGES: { href: string; title: string; blurb: string; external?: boolea
   // (sq-549m0) [FABLE-5] — the honest GenAI-retrieval status ledger: implemented (crate +
   // feature) vs proposed (bead id). Cmd-K only (like /assurance, /dogfooding) — bar stays at 6.
   { href: "/genai-retrieval", title: "GenAI retrieval — implemented vs proposed", blurb: "The honest status ledger for the RDF-native retrieval composition — ANN-in-SPARQL, embedding provenance, NL→SPARQL, citations — implemented vs designed-only." },
+  // (sq-vw3ax.16) [OPUS-4.8] — the honest competitive feature matrix: LEAD/PARITY/PARTIAL/GAP
+  // vs RDFox/Stardog/GraphDB/TopBraid/Ent., GAP rows kept, bead links, zero perf numbers.
+  // Cmd-K only (like /assurance, /genai-retrieval) — the slim top bar stays fixed.
+  { href: "/compare", title: "How sparq compares", blurb: "The honest competitive feature matrix — sparq vs RDFox, Stardog, GraphDB, TopBraid and the enterprise cluster, with the GAP rows kept visible and zero performance numbers." },
   { href: "/download", title: "Download", blurb: "Desktop GUI + CLI/server binaries (latest release)." },
   { href: "/#how-it-runs", title: "How it runs", blurb: "The honest \"what runs where\" tier model." },
 ];

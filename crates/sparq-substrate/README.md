@@ -55,12 +55,12 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   promotion ranks), `as_numeric` (classifies an `oxrdf::Literal` while keeping the **exact**
   integer / fixed-point `Dec` — a high-precision decimal is not silently flattened to `f64`),
   the arithmetic ops (`binop`/`neg`/`abs`/`ceil`/`floor`/`round`), the two serialisation
-  surfaces (`canonical_lexical` — finite float/double in XSD scientific form; `lexical` — the
-  plain form the W3C expected-result files use), and the shared lexical helpers
-  (`split_decimal`, `parse_xsd_f32`/`parse_xsd_f64`, `fmt_xsd_double`; the parsers delegate to
-  `sparq_core::parse_xsd_f64` — one shared body with the core numeric cache, sq-9781x).
-  `Num::cmp_relational` is the XPath relational compare (`<`/`>` FILTER; NaN → `None`), vs
-  `cmp_total` (NaN totalised for `ORDER BY`). [OPUS-4.8] sq-v5evr
+  surfaces (`canonical_lexical` — XSD scientific form; `lexical` — the plain form the W3C
+  expected-result files use), and the shared lexical helpers (`split_decimal`,
+  `parse_xsd_f32`/`parse_xsd_f64`, `fmt_xsd_double`; acceptance is one shared body with the
+  core numeric cache, sq-9781x). `Num::f32`/`Dec::f32` are the `xs:float` promotion — ONE
+  correctly-rounded conversion, never f64-then-narrow (#3796). `Num::cmp_relational` is the
+  XPath relational compare (`<`/`>`; NaN → `None`), vs `cmp_total` (`ORDER BY`). sq-v5evr
 - **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
   `build_table` / `build_partitioned` / `probe_emit` / `probe_gather_indices` / `hash_probe_serial`
   (hash, `JoinTable` type alias backed by `hashbrown::HashMap<Key, Posting, FxBuildHasher>`,
@@ -78,15 +78,15 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   the spec leaves cross-kind order undefined), value order only WITHIN a kind — numerics by
   exact rational value (`NaN` totalised FIRST, before `-INF`; an f64 tie rechecked exactly via
   `exact_cmp`, incl. the MIXED int/decimal-vs-float/double tie — `Num::cmp_total` under
-  `numeric`), dateTimes by timeline, else lexically — and the recursive component-wise
+  `numeric`), dateTimes by timeline, else lexically — plus the recursive component-wise
   triple-term order. Generic over a tiny `CompareTerm` trait (`term_class`/`literal_kind`/
   `value_str`/`as_f64`/`exact_cmp`/`strict_cmp`/`triple_parts`) the consumer implements for its
   term type — a **monomorphisation seam**, never a `dyn` object. Pure-`std`. The order laws
   (reflexivity, within-class totality, antisymmetry-consistency, transitivity — per kind AND
   across mixed kinds, all NaN INCLUDED incl. the 2^53 collapse) are machine-checked by Kani
   over a model impl — `cargo kani -p sparq-substrate --features compare` (sq-sqtk2.4 + sq-wjl8i).
-  Boundaries: the proofs cover the shared ALGORITHM over the bounded model, not the engine's
-  `Value` impl; the indeterminate mixed-timezone dateTime window falls back lexically.
+  Boundaries: they cover the shared ALGORITHM over the bounded model, not the engine's `Value`
+  impl, and assume `strict_cmp`'s sq-2k5py TOTALITY contract within the dateTime/date kinds.
 - **`overhead`** — the **zero-overhead DELTA harness** (the substrate half of the
   sparq-engine-systems paper §8): `overhead::OverheadReport::run` measures each shared kernel
   against a hand-SPECIALISED pre-extraction equivalent (SAME algorithm + data structure,

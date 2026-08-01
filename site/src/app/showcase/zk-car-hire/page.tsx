@@ -17,7 +17,7 @@ export const metadata: Metadata = {
     "Research-grade (not externally audited): a real zero-knowledge proof — age ≥ 25 over hidden credential data — generated in your browser via Noir + Barretenberg UltraHonk. The exact age is never disclosed in-circuit; the v1 verifier carries no production soundness guarantee.",
 };
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 export default function ZkCarHirePage() {
   return (

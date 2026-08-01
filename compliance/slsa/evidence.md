@@ -122,7 +122,7 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
 
 | Control | File / command |
 |---|---|
-| Two-person review (AR) | `CODEOWNERS` (catch-all `@jeswr` + high-risk path overrides); `docs/branch-protection.md` (≥1 approving review, require-code-owners, dismiss-stale, no admin bypass) |
+| Two-person review (AR) | `CODEOWNERS` (catch-all `@jeswr` + high-risk path overrides); `docs/branch-protection.md` records zero required approving reviews, no required code-owner review, no stale-review dismissal, and an always-on repository-administrator bypass; the automated landing path does not use the bypass |
 | Protected branch (AR) | `docs/branch-protection.md` — linear history, block force-push, block deletion |
 | Single required gate (IV) | `.github/workflows/ci-summary.yml` (`ci-summary / gate`); required-check record in `docs/branch-protection.md` |
 | Trusted dep sources (IV) | `deny.toml [sources]` (`unknown-registry/unknown-git = "deny"`); gated by `supply-chain.yml#audit` (`cargo deny check … sources`) |
@@ -176,8 +176,27 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
     `sparq`, workflow `publish.yml`, env `pypi`) — a PyPI-account act that cannot be a tracked repo
     file. Until then the upload step fails to mint a token by design (no static API token is stored).
     Do NOT claim PyPI provenance is *emitted* until that registration is confirmed live.
-- **No Build L3** evidence exists: provenance is generated in the build job, not by an
-  isolated trusted builder (GX-11). Do not interpret the L2 attestations as L3.
+- **No Build L3** evidence exists **yet**, and the L2 attestations must not be read as L3. The
+  *mechanism* now exists for every artifact the `release.yml`/`dist.yml` pipelines publish except the container image — `release.yml#provenance` (archives,
+  sq-toze.25), `release.yml#provenance-artifacts` (GUI bundles, SBOM/VEX, conformance report) and
+  `dist.yml#provenance` (tiered binaries), both of the latter added by #4570 — each calling the
+  isolated `slsa-github-generator` trusted builder in its own job. But `release.yml` is
+  tag/dispatch-triggered and `dist.yml` dispatch-only, so **no run has produced a
+  `sparq-cli-<version>.intoto.jsonl` / `sparq-artifacts-<version>.intoto.jsonl` /
+  `sparq-dist.intoto.jsonl`, and nobody has verified one**. Wiring is not evidence: this line stays
+  "no L3 evidence" until a `v*` tag emits bundles that `slsa-verifier verify-artifact <file>
+  --provenance-path <bundle> --source-uri github.com/jeswr/sparq` accepts. **Where that evidence
+  will come from (#4571):** after cutting the Release, `release.yml`'s `verify-provenance` job
+  calls `.github/workflows/release-verify.yml`,
+  which runs `scripts/verify-release-provenance.sh` over the *published* assets — both bundles
+  attached and listed in `SHA256SUMS`, `SHA256SUMS` matching the published bytes, and every asset
+  accepted by `slsa-verifier` against one of the two bundles (an uncovered asset, an empty asset
+  set, or a bundle covering nothing it published all red the run). The uploaded
+  `provenance-verification.log` + its run URL are the evidence to cite here, and the flip is
+  bounded to the artifacts that actually verified. **Verify (auditor, any published tag):**
+  `scripts/verify-release-provenance.sh --tag vX.Y.Z` — same checks, run locally. The **ghcr container
+  image** is the one artifact with no isolated lane at all — still attested in-band and L2 by
+  construction (GX-11, narrowed twice).
 - **Reproducible build — characterised, not yet bit-for-bit** (GX-8 / sq-toze.9):
   [`reproducible-build.md`](./reproducible-build.md) records a measured double-build of
   `sparq-cli` (`--release --locked`, same tier flags) → **identical size, byte-identical apart

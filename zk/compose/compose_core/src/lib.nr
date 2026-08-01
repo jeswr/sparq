@@ -37,5 +37,32 @@ pub mod join;
 // research/zksparql-fragment-extension.md sec 4 (depth D a compile-time constant
 // per member, disclosed by the VK identity; mechanism (a) on #1591).
 pub mod path;
+// [FABLE-5] sq-g91d: in-circuit RDFS single-step entailment -- proves a derived
+// triple's UNDISCLOSED antecedents are members of the committed graph (the
+// privacy upgrade for the Rdfs/Owl regimes over the host disclosed-base re-check
+// `bind_entailment`). Single-step / disclosed-base scope; NOT-yet-sound
+// (sq-qhy4). Compiled bin member + verifier wiring are follow-ups.
+pub mod entail;
+// [OPUS-4.8] sq-rsd3v.2 (#2614): in-circuit RDFS derivation relation (ZK over
+// HIDDEN antecedents -- design row A1). Research-grade, NOT externally audited
+// (sq-qhy4); the in-circuit relation only -- the off-circuit ProofTree->slot
+// witness mapper + a compiled bin-package monomorphisation are follow-ups.
+pub mod derivation;
+// [OPUS-5] sq-rsd3v.6 (#3265): owl:sameAs EQUALITY reasoning -- in-circuit
+// union-find canonicalisation + representative-membership. SEPARATELY gated
+// from `derivation` on purpose: encoding-equality re-checks are UNSOUND under
+// equality reasoning, so `owl:sameAs` must NOT ride the fixed-shape RDFS /
+// OWL-RL-minus-sameAs path. Research-grade, NOT externally audited (sq-qhy4);
+// no cost claim (`bb gates` not run) and no compiled bin package yet.
+pub mod sameas;
+// [OPUS-5] sq-rsd3v.3 (#2946): witnessed-rule-shape N3 derivation -- `derivation`
+// generalised from a FIXED public rule table to a DATASET-SUPPLIED rule graph
+// committed into `rules_root` (the rule author as issuer), plus the whitelisted
+// `math:` builtin gadgets. Enforces the declared PROVABLE SUBSET in-circuit --
+// notably SAFETY (every conclusion variable bound in the premise), without which
+// the private substitution would let a prover derive anything. Research-grade,
+// NOT externally audited (sq-qhy4); the relation only -- no compiled bin package,
+// no `bb gates` measurement, no `verify_manifest` dispatch.
+pub mod n3;
 
 mod tests;

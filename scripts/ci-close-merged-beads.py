@@ -84,7 +84,14 @@ _CLOSEABLE = {"open", "in_progress", "blocked"}
 
 # The migration's durable bead<->issue map: bd-to-issues.py stamps `<!-- bd-id:sq-… -->` into
 # every migrated issue body (its fetch_bd_map reads the SAME pattern — keep the two in sync).
-_MARKER_RE = re.compile(r"<!--\s*bd-id:(\S+?)\s*-->")
+#
+# The capture group is SHAPE-CONSTRAINED to a real bd id (audit-2026-07-25, issue #3797). The old
+# `(\S+?)` matched ANY non-space run, so PROSE that merely DOCUMENTS the marker — e.g. the sentence
+# "trusts unauthenticated `<!-- bd-id:… -->` markers" inside issues #2534 / #2535 / #3797 — was
+# scanned as a bead whose id is the literal ellipsis "…". That phantom id polluted the migration
+# map, and here it would have made a nonexistent bead look mapped (and, with three issues carrying
+# it, permanently "ambiguous"). Real ids are `sq-` + base36-ish stem + optional dotted subtask path.
+_MARKER_RE = re.compile(r"<!--\s*bd-id:(sq-[0-9a-z]+(?:\.\d+)*)\s*-->")
 
 # AUTHENTICATION (PR #2528 review): an issue BODY is written by its author — ANY GitHub user can
 # open a decoy issue copying a real `<!-- bd-id:… -->` marker, and a body-only mapping (with
@@ -328,6 +335,22 @@ def self_test() -> int:
     check("single authenticated mapping is not ambiguous", ambiguous, [])
     check("prose mention without a marker does not map",
           map_beads_to_open_issues(["sq-open1"], [open_issues[4]]), ([], [], ["sq-open1"], []))
+    # Phantom-marker regression (#3797): a body that DOCUMENTS the marker syntax with an elided id
+    # is not a bead mapping. The old `(\S+?)` capture scanned "…" as a bead id on three real issues
+    # (#2534/#2535/#3797) and injected that phantom into the migration map. Assert at the SCAN
+    # level — a map-level assertion is vacuous here, because an unrequested phantom bead is
+    # indistinguishable from no match at all.
+    check("prose marker with an elided id does not scan",
+          _MARKER_RE.search("fetch_bd_map trusts `<!-- bd-id:… -->` markers"), None)
+    check("non-bead marker payload does not scan",
+          _MARKER_RE.search("<!-- bd-id:not-a-bead -->"), None)
+    check("dotted subtask ids still scan", _MARKER_RE.search(
+        "<!-- bd-id:sq-7d3dj.32.2.3 -->").group(1), "sq-7d3dj.32.2.3")
+    # …and the phantom, if it were ever REQUESTED as a bead, must not map onto the prose issue.
+    prose = [{"number": 30, "body": "fetch_bd_map trusts `<!-- bd-id:… -->` markers",
+              "labels": [_MIGRATION_LABEL]}]
+    check("phantom bead id never maps onto the prose issue that documents the marker",
+          map_beads_to_open_issues(["…"], prose), ([], [], ["…"], []))
     check("unauthenticated marker ALONE does not map (fail closed to no-op)",
           map_beads_to_open_issues(["sq-open1"], [open_issues[0]]), ([], [], ["sq-open1"], []))
     # Duplicate AUTHENTICATED mapping (e.g. a double-created migration): fail closed — never

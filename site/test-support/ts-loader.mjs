@@ -25,6 +25,20 @@ export async function resolve(specifier, context, next) {
       // No sibling `.ts` — fall through to the default resolution of the real `.js`.
     }
   }
+  // [FABLE-5] Extensionless relative value imports (e.g. `import { curie } from "./curie"`)
+  // are what the site's real bundler resolution (tsconfig `moduleResolution: "bundler"`)
+  // uses between `src/` modules — but Node's default resolver, which `node --test` uses,
+  // requires an explicit extension. Resolve to the sibling `.ts` when it exists, so unit
+  // tests can import transpiled modules whose own imports follow the bundler convention.
+  if ((specifier.startsWith('./') || specifier.startsWith('../')) && !/\.[^/.]+$/.test(specifier)) {
+    try {
+      const tsUrl = new URL(specifier + '.ts', context.parentURL);
+      await access(fileURLToPath(tsUrl));
+      return next(tsUrl.href, context);
+    } catch {
+      // No sibling `.ts` — fall through to default resolution.
+    }
+  }
   return next(specifier, context);
 }
 

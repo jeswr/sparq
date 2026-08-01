@@ -42,6 +42,12 @@ use std::path::{Path, PathBuf};
 
 /// One shard's routed `(seq, serialized-term)` entries for a single ingest batch.
 type ShardEntries = Vec<(Id, Box<[u8]>)>;
+/// The byte-string-keyed ingest intern-cache map (`ShardState::cache`). Kept on FxHash:
+/// an A/B against foldhash (hashbrown's default hasher, already in-tree) on the
+/// custom-parsers-baseline synthetic corpus measured NO end-to-end win (sq-98w7z.6,
+/// hit-heavy and miss-heavy/epoch-reset regimes both) — hashing is a sub-fraction of the
+/// intern bucket, and these serialized-term keys are short enough that FxHash holds up.
+type ByteCache = FxHashMap<Box<[u8]>, u32>;
 /// A finalized per-shard record: `(record-file path, final seq count, epoch boundaries)`.
 type ShardFile = (PathBuf, u32, Vec<(u64, u32)>);
 
@@ -616,7 +622,7 @@ const CACHE_ENTRY_OVERHEAD: usize = 48;
 
 struct ShardState {
     /// serialized term -> seq, BOUNDED: cleared (epoch reset) when over budget.
-    cache: FxHashMap<Box<[u8]>, u32>,
+    cache: ByteCache,
     cache_bytes: usize,
     /// Per-shard occurrence counter; a cache miss's seq equals its record index.
     seq: u32,
@@ -681,7 +687,7 @@ impl SpillInterner {
         for s in 0..n {
             let rec_path = tmp.join(format!("dsp-rec{s}.bin"));
             shards.push(ShardState {
-                cache: FxHashMap::default(),
+                cache: ByteCache::default(),
                 cache_bytes: 0,
                 seq: 0,
                 rec: BufWriter::new(std::fs::File::create(&rec_path)?),
@@ -896,7 +902,7 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     let mut shard_files: Vec<ShardFile> = Vec::with_capacity(n);
     for mut s in std::mem::take(&mut st.shards) {
         s.rec.flush().map_err(io_err)?;
-        s.cache = FxHashMap::default();
+        s.cache = ByteCache::default();
         shard_files.push((s.rec_path, s.seq, s.epochs));
     }
     // [OPUS-4.8] (sq-jvbr) Move the in-RAM triple-term arena out before dropping the interner;
@@ -1665,7 +1671,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let rec_path = tmp.join("rec.bin");
         let mut st = ShardState {
-            cache: FxHashMap::default(),
+            cache: ByteCache::default(),
             cache_bytes: 0,
             seq: 0,
             rec: BufWriter::new(std::fs::File::create(&rec_path).unwrap()),

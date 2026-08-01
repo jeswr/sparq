@@ -39,7 +39,8 @@ cd "$(dirname "$0")/.."
 # geo/fts/vector/rsp/hdt/solid/nlq/zk). This is the FAST, DETERMINISTIC form of the per-PR / merge_group
 # bench gate (bench.yml): the deterministic byte-count RATCHET (scripts/perf-gate.py) still hard-gates
 # every PR against bench/perf-baseline.json — a pure function of the code, seconds not minutes, immune to
-# shared-runner noise — while the noisy latency suites are RELOCATED to the nightly EC2 lane (bench-ec2.yml)
+# shared-runner noise — while the noisy latency suites are RELOCATED to the EC2 full-suite lane
+# (bench-ec2.yml; [OPUS-5] #3784: MANUAL DISPATCH ONLY, cron retired with the descoped AWS OIDC role)
 # so they no longer drag the merge queue or flap the gate. The stanzas below are the EXACT same load/wasm
 # commands the full run uses (single source of truth), just without the timing/suite blocks.
 PARSE_ONLY=0
@@ -425,6 +426,15 @@ if [ -x "$SP2B_GEN" ] && [ -d "$SP2B_Q" ]; then
   else
     echo "note: sp2b skipped (generator unavailable — no network/g++?)" >&2
   fi
+fi
+
+# [SONNET-4.6] EC2/nightly-only SP2Bench heavy queries and full reference scales.
+# The runner applies a timeout to each query and fails closed on result-size drift.
+if [ "${SP2B_EC2:-0}" = 1 ]; then
+  bench/sp2b/run-ec2.sh > "$TMP/sp2b-ec2.tsv"
+  while IFS=$'\t' read -r name _rows us; do
+    [ -n "${us:-}" ] && add "$name" us "$us"
+  done < "$TMP/sp2b-ec2.tsv"
 fi
 
 # [OPUS-4.8] DBPSB/FEASIBLE per-commit subset. fetch.sh downloads ONE sha256-pinned DBpedia
@@ -847,8 +857,12 @@ if [ -n "$RSP_REF" ] && [ "$RSP_REF" != "refs/heads/main" ]; then
   echo "note: rsp skipped (PR tier — RSP-QL example build/run is main-only, like the javac/rapper suites)" >&2
 elif command -v cargo >/dev/null 2>&1 && [ -x "$RSP_RUN" ]; then
   # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
-  if ! cargo build --release -q -p sparq-rsp --example rsp_oracle; then
-    echo "ERROR: rsp_oracle example failed to build" >&2
+  # `replay_runner` (sq-3f5ay) is built alongside so run.sh's replay-FILE equivalence guard
+  # actually runs here (it self-skips when the example is missing): it re-derives the same
+  # per-window counts through the pinned replay FILES, catching an export/example drift the
+  # in-code oracle path cannot see.
+  if ! cargo build --release -q -p sparq-rsp --example rsp_oracle --example replay_runner; then
+    echo "ERROR: rsp_oracle / replay_runner examples failed to build" >&2
     exit 1
   fi
   if RSP_BIN="$RSP_BIN" bash "$RSP_RUN" > "$TMP/rsp.tsv" 2>"$TMP/rsp.err"; then

@@ -14,7 +14,6 @@ import {
   archiveCodecFromContentType,
   innerNameForArchive,
   decompressArchive,
-  loadCodec,
 } from "../src/lib/dataset-archive.ts";
 
 const SAMPLE_NT =
@@ -308,11 +307,6 @@ test("decompressArchive skips a leading zstd skippable frame", async () => {
   stream.set(ZST_FRAME_1, skip.length);
   const { text } = await decompressArchive(stream, "meta.nt.zst");
   assert.equal(text, SAMPLE_NT_LINE_1);
-});
-
-test("loadCodec returns a working zstd decoder via the dynamic import", async () => {
-  const decode = await loadCodec("zstd");
-  assert.equal(new TextDecoder().decode(decode(ZST_SAMPLE)), SAMPLE_NT);
 });
 
 test("decompressArchive surfaces a clear error for corrupt zstd bytes", async () => {

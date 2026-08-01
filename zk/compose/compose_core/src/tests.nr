@@ -10,13 +10,18 @@
 //! pipeline ports -- the bit-compatibility requirement for commitment
 //! recomputation in-circuit.
 
+use crate::derivation::{derivation_check, RULE_LEAF, RULE_RDFS9};
 use crate::filter_float::filter_f64_check;
 use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
-use crate::filter_signed::{filter_decimal_check, filter_signed_int_check};
+use crate::filter_signed::{filter_decimal_check, filter_signed_int_check, signed_int_encoding};
+use crate::n3::{
+    BUILTIN_GREATER_THAN, BUILTIN_NONE, n3_derivation_check, rule_leaf, SLOT_CONST, SLOT_VAR,
+};
 use crate::hashes::{commit_fold, h2, h3, TYPE_CODE_LITERAL};
 use crate::join::{JOIN_DOMAIN, join_eq_check, join_value_commitment};
 use crate::path::path_reach_check;
 use crate::revoke::{revoke_unset_check, revoke_unset_check_committed, SIG_DOMAIN_STATUS_IDX_COMMIT};
+use crate::sameas::{canon_of, sameas_entails_row};
 use crate::scan::{PatternSpec, scan_check};
 
 // ---------------------------------------------------------------------------
@@ -1929,4 +1934,1334 @@ fn nullifier_is_holder_sensitive() {
 #[test]
 fn nullifier_is_domain_separated_from_holder_digest() {
     assert(nullifier(HSK, NF_EPOCH) != HDIG);
+}
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-g91d: in-circuit RDFS single-step entailment (entail_step_check).
+// Proves a derived triple's UNDISCLOSED antecedents are members of the committed
+// graph (the privacy upgrade for the Rdfs/Owl regimes over the host disclosed-
+// base re-check `bind_entailment`). Coverage (noir-testing convention, message-
+// matched): accepts EN0/EN1 (single graph, both rules) + EN9 (K=2 split
+// antecedents, exact cross-graph attribution); should_fail per rejection clause --
+// rule shape (EN2), membership via BOTH the uncommitted-triple (EN3) and the
+// inactive-padding-slot (EN8) paths, commitment recompute (EN4), unknown rule
+// (EN5), attribution understated (EN6) and overstated cross-graph (EN12), bucket
+// bound (EN7), and the K>=2 strict commitment ordering via duplicate (EN10) and
+// descending (EN11) pairs. The committed graph's commitment is computed IN the
+// test from the same witnessed leaves, so the vectors are self-consistent with
+// the `commit_fold`/`h3` cross-vectors asserted at the top of this module.
+// NOT-yet-sound (sq-qhy4); no soundness property is asserted as achieved.
+// ---------------------------------------------------------------------------
+
+use crate::entail::{entail_step_check, RULE_RDFS7_SUBPROPERTY, RULE_RDFS9_SUBCLASS_TYPE};
+
+// Public schema-vocabulary encodings (stand-ins; the real verifier pins these to
+// the true rdf:type / rdfs:subClassOf / rdfs:subPropertyOf IRI encodings).
+global E_TYPE: Field = 1001;
+global E_SUBCLASS: Field = 1002;
+global E_SUBPROP: Field = 1003;
+
+// rdfs9 individuals/classes: x=(10) type c1=(20) subClassOf c2=(30).
+global E_X: Field = 10;
+global E_C1: Field = 20;
+global E_C2: Field = 30;
+
+// A committed graph (N=8, count=2) holding EXACTLY the two rdfs9 antecedents
+// (x type c1) and (c1 subClassOf c2), padded with zero rows. The commitment is
+// recomputed from these leaves, so `entail_step_check`'s step-1 recompute matches.
+fn rdfs9_graph() -> ([[[Field; 3]; 8]; 1], [u32; 1], [Field; 1]) {
+    let mut enc: [[[Field; 3]; 8]; 1] = [[[0; 3]; 8]; 1];
+    enc[0][0] = [E_X, E_TYPE, E_C1]; //      (x type c1)
+    enc[0][1] = [E_C1, E_SUBCLASS, E_C2]; // (c1 subClassOf c2)
+    let counts: [u32; 1] = [2];
+    let mut leaves: [Field; 8] = [0; 8];
+    for i in 0..8 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 2)];
+    (enc, counts, commitments)
+}
+
+// (EN0) ACCEPT rdfs9: derived (x type c2) is proved from the two COMMITTED,
+// UNDISCLOSED antecedents. Only `derived` (and the public schema encodings) is
+// disclosed; the antecedents are private witnesses.
+#[test]
+fn entail_rdfs9_accepts_committed_antecedents() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2], // derived (x type c2)
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN1) ACCEPT rdfs7: (p1 subPropertyOf p2),(x p1 y) |- (x p2 y), antecedents
+// committed + undisclosed. A distinct committed graph so the rule branch is
+// exercised end to end.
+#[test]
+fn entail_rdfs7_accepts_committed_antecedents() {
+    // p1=40, p2=50, subj=11, obj=12.
+    let mut enc: [[[Field; 3]; 8]; 1] = [[[0; 3]; 8]; 1];
+    enc[0][0] = [40, E_SUBPROP, 50]; // (p1 subPropertyOf p2)
+    enc[0][1] = [11, 40, 12]; //        (x p1 y)
+    let counts: [u32; 1] = [2];
+    let mut leaves: [Field; 8] = [0; 8];
+    for i in 0..8 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 2)];
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS7_SUBPROPERTY,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [11, 50, 12], // derived (x p2 y)
+        [true],
+        [[40, E_SUBPROP, 50], [11, 40, 12]],
+        counts,
+        enc,
+    );
+}
+
+// (EN2) REJECT malformed rule instance: the derived object does not match the
+// rule's consequent (derived (x type 999) instead of (x type c2)), so the
+// well-formedness disjunct fails though both antecedents ARE committed (isolating
+// the shape clause from the membership clause).
+#[test(should_fail_with = "derivation step is not a valid instance of its rule")]
+fn entail_rejects_malformed_consequent() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, 999], // wrong consequent object
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN3) REJECT ungrounded antecedent: an antecedent that is NOT a member of the
+// committed graph. The graph commits only (x type c1) + (c1 subClassOf c2); the
+// prover swaps a0 for (x type c9) (well-formed shape with c1:=c9, c2 stays), so
+// the shape holds but (x type c9) is not committed -- the membership clause fires.
+#[test(should_fail_with = "antecedent not a member of any committed graph")]
+fn entail_rejects_ungrounded_antecedent() {
+    // Commit (x type c9) is ABSENT: graph holds (x type c1),(c1 subClassOf c2).
+    // Present antecedents (x type C9),(C9 subClassOf c2) |- (x type c2): well-formed
+    // (shared class C9), but neither antecedent under C9 is committed.
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, 900], [900, E_SUBCLASS, E_C2]], // uncommitted shared class 900
+        counts,
+        enc,
+    );
+}
+
+// (EN4) REJECT commitment mismatch: a wrong public commitment cannot be
+// recomputed from the witnessed leaves (the step-1 bind that ties the antecedent
+// membership to the SCAN commitments).
+#[test(should_fail_with = "graph commitment mismatch")]
+fn entail_rejects_commitment_mismatch() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        [commitments[0] + 1], // tampered commitment
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN5) REJECT unknown rule: a `rule` selector outside {0, 1}.
+#[test(should_fail_with = "unknown entailment rule")]
+fn entail_rejects_unknown_rule() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        5, // not a registered rule
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN6) REJECT attribution understated: both antecedents live in graph 0, so the
+// true attribution is [true]; declaring [false] hides the contributing graph.
+#[test(should_fail_with = "attribution does not match the proved source graphs")]
+fn entail_rejects_attribution_understated() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [false], // understated
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN7) REJECT graph size exceeds bucket: a count above the compiled slot bound N.
+#[test(should_fail_with = "graph size exceeds circuit bucket")]
+fn entail_rejects_count_over_bucket() {
+    let (enc, _counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        [9], // 9 > N=8
+        enc,
+    );
+}
+
+// (EN8) REJECT antecedent hidden in an INACTIVE padding slot: the graph COMMITS
+// only (x type c1) -- count = 1, and `commit_fold`'s runtime count keeps slot 1
+// outside the absorbed message (pinned by
+// `commit_fold_padding_slots_do_not_enter_the_commitment`), so the step-1
+// recompute still matches. The second rdfs9 antecedent (c1 subClassOf c2) is
+// planted byte-for-byte in padding slot 1 (index 1 >= count): the rule instance
+// is well formed and the bytes ARE in `enc`, but `slot_active = i < counts[g]`
+// must exclude the slot from the membership sweep -- otherwise a prover could
+// smuggle an UNCOMMITTED antecedent through the padding region.
+#[test(should_fail_with = "antecedent not a member of any committed graph")]
+fn entail_rejects_antecedent_in_inactive_padding_slot() {
+    let mut enc: [[[Field; 3]; 8]; 1] = [[[0; 3]; 8]; 1];
+    enc[0][0] = [E_X, E_TYPE, E_C1]; //      (x type c1)          -- committed
+    enc[0][1] = [E_C1, E_SUBCLASS, E_C2]; // (c1 subClassOf c2)   -- PADDING, not committed
+    let counts: [u32; 1] = [1];
+    let mut leaves: [Field; 8] = [0; 8];
+    for i in 0..8 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 1)];
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// K=2 fixture: the two rdfs9 antecedents SPLIT across two committed graphs, one
+// active slot each. Commitments are recomputed from the witnessed leaves and the
+// graphs are laid out in CANONICAL ascending-commitment order (the circuit's
+// step-1b contract); the trailing assert fails LOUDLY here -- a clear fixture
+// bug -- if an encoding change ever flips the natural order (same convention as
+// `test_graphs`).
+//
+// Graph 0: { (c1 subClassOf c2) }  -- holds antecedent a1.
+// Graph 1: { (x type c1) }         -- holds antecedent a0.
+// (`commit_fold` is hash-like, so which graph commits to the smaller field
+// element is content-arbitrary; the subClassOf graph happens to be graph 0.)
+fn entail_k2_graphs() -> ([[[Field; 3]; 8]; 2], [u32; 2], [Field; 2]) {
+    let mut enc: [[[Field; 3]; 8]; 2] = [[[0; 3]; 8]; 2];
+    enc[0][0] = [E_C1, E_SUBCLASS, E_C2];
+    enc[1][0] = [E_X, E_TYPE, E_C1];
+    let counts: [u32; 2] = [1, 1];
+    let mut commitments: [Field; 2] = [0, 0];
+    for g in 0..2 {
+        let mut leaves: [Field; 8] = [0; 8];
+        for i in 0..8 {
+            leaves[i] = h3(enc[g][i][0], enc[g][i][1], enc[g][i][2]);
+        }
+        commitments[g] = commit_fold(leaves, counts[g]);
+    }
+    assert(
+        commitments[0].lt(commitments[1]),
+        "entail_k2_graphs fixture not in canonical ascending-commitment order",
+    );
+    (enc, counts, commitments)
+}
+
+// (EN9) ACCEPT K=2 split antecedents: a1 is a member of graph 0 only, a0 of
+// graph 1 only, so BOTH the cross-graph membership sweep and the per-graph
+// attribution accumulation are exercised -- the exact attribution is
+// [true, true], each graph contributing exactly one antecedent.
+#[test]
+fn entail_k2_accepts_split_antecedents_with_exact_attribution() {
+    let (enc, counts, commitments) = entail_k2_graphs();
+    entail_step_check::<2, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true, true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN10) REJECT duplicate commitments: the SAME committed graph presented twice
+// (the duplicate-inclusion / COUNT forgery shape the guard exists for). Both
+// slots recompute fine in step 1, but equality is non-strict, so the step-1b
+// ordering guard fires.
+#[test(should_fail_with = "per-graph commitments not strictly increasing")]
+fn entail_k2_rejects_duplicate_commitment() {
+    let (enc1, counts1, commitments1) = rdfs9_graph();
+    let enc: [[[Field; 3]; 8]; 2] = [enc1[0], enc1[0]];
+    let counts: [u32; 2] = [counts1[0], counts1[0]];
+    let commitments: [Field; 2] = [commitments1[0], commitments1[0]];
+    entail_step_check::<2, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true, true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN11) REJECT descending commitment order: the K=2 split fixture with both
+// graphs swapped CONSISTENTLY (enc/counts/commitments together), so each
+// commitment still recomputes in step 1 -- only the strictly-DECREASING pair
+// violates the canonical-order contract, isolating the ordering clause.
+#[test(should_fail_with = "per-graph commitments not strictly increasing")]
+fn entail_k2_rejects_descending_commitment_order() {
+    let (enc, counts, commitments) = entail_k2_graphs();
+    let enc_swapped: [[[Field; 3]; 8]; 2] = [enc[1], enc[0]];
+    let counts_swapped: [u32; 2] = [counts[1], counts[0]];
+    let commitments_swapped: [Field; 2] = [commitments[1], commitments[0]];
+    entail_step_check::<2, 8>(
+        commitments_swapped,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true, true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts_swapped,
+        enc_swapped,
+    );
+}
+
+// (EN12) REJECT overstated cross-graph attribution: BOTH antecedents live in
+// one graph; the other committed graph holds only an unrelated triple and
+// contributes nothing to the derivation. Claiming [true, true] overstates the
+// non-contributing graph -- the exact-set discipline (scan step 4) in the
+// cross-graph direction EN6's single-graph understatement cannot reach. The
+// [true, true] claim is wrong whichever index the contributing graph canonically
+// lands at, so this does not depend on the fixture's commitment order.
+#[test(should_fail_with = "attribution does not match the proved source graphs")]
+fn entail_k2_rejects_attribution_overstating_noncontributing_graph() {
+    let mut enc: [[[Field; 3]; 8]; 2] = [[[0; 3]; 8]; 2];
+    // One graph holds BOTH rdfs9 antecedents; the other an unrelated triple
+    // (canonical ascending-commitment order puts the unrelated graph at 0).
+    enc[0][0] = [11, 40, 12]; // unrelated: contributes NO antecedent
+    enc[1][0] = [E_X, E_TYPE, E_C1];
+    enc[1][1] = [E_C1, E_SUBCLASS, E_C2];
+    let counts: [u32; 2] = [1, 2];
+    let mut commitments: [Field; 2] = [0, 0];
+    for g in 0..2 {
+        let mut leaves: [Field; 8] = [0; 8];
+        for i in 0..8 {
+            leaves[i] = h3(enc[g][i][0], enc[g][i][1], enc[g][i][2]);
+        }
+        commitments[g] = commit_fold(leaves, counts[g]);
+    }
+    assert(
+        commitments[0].lt(commitments[1]),
+        "entail EN12 fixture not in canonical ascending-commitment order",
+    );
+    entail_step_check::<2, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true, true], // overstates the unrelated graph
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// derivation_check -- accept + forge-and-verify (sq-rsd3v.2, #2614). Tiny
+// (K=1, N=4, M=4) monomorphisation. Schema encodings are arbitrary distinct
+// nonzero constants (the relation only cares about equality structure).
+// ---------------------------------------------------------------------------
+
+global D_TYPE: Field = 31; // rdf:type
+global D_SUBCLASS: Field = 32; // rdfs:subClassOf
+global D_SUBPROP: Field = 33; // rdfs:subPropertyOf
+global D_DOMAIN: Field = 34; // rdfs:domain
+global D_RANGE: Field = 35; // rdfs:range
+global D_X: Field = 101; // an instance
+global D_C1: Field = 201; // a class
+global D_C2: Field = 202; // a superclass
+global D_GHOST: Field = 777; // a fabricated class NOT in the committed graph
+
+fn d_schema() -> [Field; 5] {
+    [D_TYPE, D_SUBCLASS, D_SUBPROP, D_DOMAIN, D_RANGE]
+}
+
+// The committed base graph: { (X type C1), (C1 subClassOf C2) } in an N=4
+// bucket. Returns (enc, counts, commitments). The rdfs9 firing over these two
+// facts entails (X type C2) -- WITHOUT disclosing the two base facts.
+fn d_graph() -> ([[[Field; 3]; 4]; 1], [u32; 1], [Field; 1]) {
+    let enc: [[[Field; 3]; 4]; 1] = [[
+        [D_X, D_TYPE, D_C1],
+        [D_C1, D_SUBCLASS, D_C2],
+        [0, 0, 0],
+        [0, 0, 0],
+    ]];
+    let counts: [u32; 1] = [2];
+    let mut leaves: [Field; 4] = [0; 4];
+    for i in 0..4 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 2)];
+    (enc, counts, commitments)
+}
+
+// ACCEPT: the honest DAG -- two anchored leaves feeding one rdfs9 firing whose
+// conclusion is the disclosed derived row (X type C2). The base facts are
+// HIDDEN (private `enc`/`prem`/`concl`); only `root` is public.
+#[test]
+fn derivation_accepts_grounded_rdfs9() {
+    let (enc, counts, commitments) = d_graph();
+    let rule: [u32; 4] = [RULE_LEAF, RULE_LEAF, RULE_RDFS9, RULE_LEAF];
+    let concl: [[Field; 3]; 4] = [
+        [D_X, D_TYPE, D_C1], // leaf, anchored to the graph
+        [D_C1, D_SUBCLASS, D_C2], // leaf, anchored to the graph
+        [D_X, D_TYPE, D_C2], // rdfs9 firing (the derived row)
+        [0, 0, 0], // inactive padding
+    ];
+    let prem: [[[Field; 3]; 2]; 4] = [
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[D_X, D_TYPE, D_C1], [D_C1, D_SUBCLASS, D_C2]], // chain to nodes 0,1
+        [[0, 0, 0], [0, 0, 0]],
+    ];
+    derivation_check::<1, 4, 4>(
+        commitments, d_schema(), [D_X, D_TYPE, D_C2], counts, enc, 3, rule, prem, concl,
+    );
+}
+
+// FORGE-AND-VERIFY (the core soundness regression): an rdfs9 firing whose
+// antecedents are about a FABRICATED class C_GHOST that is neither in the
+// committed graph nor derived by any earlier node. The rule SHAPE is satisfied
+// (so shape alone cannot catch it), but the premises are ungrounded -- there is
+// no anchored leaf and no earlier conclusion for them -- so the proof MUST fail
+// closed. This is the "ungrounded/forged antecedent must fail-closed" property.
+#[test(should_fail_with = "derivation premise not grounded")]
+fn derivation_rejects_ungrounded_antecedent() {
+    let (enc, counts, commitments) = d_graph();
+    // node0: a genuine anchored leaf; node1: the forged rdfs9 over C_GHOST.
+    let rule: [u32; 4] = [RULE_LEAF, RULE_RDFS9, RULE_LEAF, RULE_LEAF];
+    let concl: [[Field; 3]; 4] = [
+        [D_C1, D_SUBCLASS, D_C2], // leaf, anchored (real)
+        [D_X, D_TYPE, D_C2], // forged rdfs9 conclusion (still claims X type C2)
+        [0, 0, 0],
+        [0, 0, 0],
+    ];
+    let prem: [[[Field; 3]; 2]; 4] = [
+        [[0, 0, 0], [0, 0, 0]],
+        // shape-valid rdfs9 over a GHOST class: (X type GHOST),(GHOST sCO C2).
+        // Neither premise is an earlier conclusion nor a committed fact.
+        [[D_X, D_TYPE, D_GHOST], [D_GHOST, D_SUBCLASS, D_C2]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+    ];
+    derivation_check::<1, 4, 4>(
+        commitments, d_schema(), [D_X, D_TYPE, D_C2], counts, enc, 2, rule, prem, concl,
+    );
+}
+
+// FORGE variant: a LEAF claiming a base fact that is NOT in the committed graph
+// (a fabricated antecedent smuggled in as an "asserted" leaf) must fail the
+// membership anchor -- the privacy upgrade's soundness anchor (design step 3).
+#[test(should_fail_with = "derivation leaf not present in committed graph")]
+fn derivation_rejects_leaf_absent_from_graph() {
+    let (enc, counts, commitments) = d_graph();
+    let rule: [u32; 4] = [RULE_LEAF, RULE_LEAF, RULE_RDFS9, RULE_LEAF];
+    let concl: [[Field; 3]; 4] = [
+        [D_X, D_TYPE, D_GHOST], // leaf claiming a fact NOT in the graph
+        [D_GHOST, D_SUBCLASS, D_C2], // leaf claiming a fact NOT in the graph
+        [D_X, D_TYPE, D_C2],
+        [0, 0, 0],
+    ];
+    let prem: [[[Field; 3]; 2]; 4] = [
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[D_X, D_TYPE, D_GHOST], [D_GHOST, D_SUBCLASS, D_C2]],
+        [[0, 0, 0], [0, 0, 0]],
+    ];
+    derivation_check::<1, 4, 4>(
+        commitments, d_schema(), [D_X, D_TYPE, D_C2], counts, enc, 3, rule, prem, concl,
+    );
+}
+
+// REJECT: the disclosed derived row must bind to the DAG's terminal conclusion.
+// A prover who proves a valid derivation of (X type C2) cannot present it as a
+// proof of a DIFFERENT row.
+#[test(should_fail_with = "derivation root not bound to the disclosed derived row")]
+fn derivation_rejects_root_mismatch() {
+    let (enc, counts, commitments) = d_graph();
+    let rule: [u32; 4] = [RULE_LEAF, RULE_LEAF, RULE_RDFS9, RULE_LEAF];
+    let concl: [[Field; 3]; 4] = [
+        [D_X, D_TYPE, D_C1],
+        [D_C1, D_SUBCLASS, D_C2],
+        [D_X, D_TYPE, D_C2],
+        [0, 0, 0],
+    ];
+    let prem: [[[Field; 3]; 2]; 4] = [
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[D_X, D_TYPE, D_C1], [D_C1, D_SUBCLASS, D_C2]],
+        [[0, 0, 0], [0, 0, 0]],
+    ];
+    // The proof derives (X type C2) but claims the row (X type C1).
+    derivation_check::<1, 4, 4>(
+        commitments, d_schema(), [D_X, D_TYPE, D_C1], counts, enc, 3, rule, prem, concl,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sameas -- union-find canonicalisation + representative-membership
+// (sq-rsd3v.6, #3265). Tiny (K=1, N=8, U=4) monomorphisation. Term encodings
+// are arbitrary distinct nonzero constants (the relation only cares about
+// equality structure), exactly as the derivation_check tests above.
+// ---------------------------------------------------------------------------
+
+global SA_SAMEAS: Field = 41; // owl:sameAs (the PUBLIC vocabulary encoding)
+global SA_P: Field = 51; // <worksAt>
+global SA_O: Field = 61; // <acme>
+global SA_A: Field = 101; // <alice>
+global SA_B: Field = 102; // <alice-2>, committed sameAs <alice>
+global SA_C: Field = 103; // <alice-3>, committed sameAs <alice-2>
+global SA_GHOST: Field = 999; // a term with NO committed sameAs edge
+
+// The committed base graph, in an N=8 bucket:
+//   { (A P O), (A sameAs B), (B sameAs C) }
+// so A ~ B ~ C, and (C P O) is entailed under OWL-RL eq-rep-s WITHOUT
+// disclosing (A P O) or either equality.
+fn sa_graph() -> ([[[Field; 3]; 8]; 1], [u32; 1], [Field; 1]) {
+    let enc: [[[Field; 3]; 8]; 1] = [[
+        [SA_A, SA_P, SA_O],
+        [SA_A, SA_SAMEAS, SA_B],
+        [SA_B, SA_SAMEAS, SA_C],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+    ]];
+    let counts: [u32; 1] = [3];
+    let mut leaves: [Field; 8] = [0; 8];
+    for i in 0..8 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 3)];
+    (enc, counts, commitments)
+}
+
+// The HONEST spanning forest of the committed sameAs edges, rooted at A:
+//   entry 0: A -> A (root)
+//   entry 1: B -> A, parent 0, justified by (A sameAs B)
+//   entry 2: C -> A, parent 1, justified by (B sameAs C)
+// Entry 3 is inactive padding (entry_count = 3).
+fn sa_table() -> ([Field; 4], [Field; 4], [u32; 4], u32) {
+    ([SA_A, SA_B, SA_C, 0], [SA_A, SA_A, SA_A, 0], [0, 0, 1, 3], 3)
+}
+
+// canon_of reads the representative for a table member and is the IDENTITY on
+// a term with no entry (OWL-RL eq-ref: every term is its own class). Padding
+// entries are invisible.
+#[test]
+fn canon_of_maps_members_and_fixes_strangers() {
+    let (mem, rep, _parent, n) = sa_table();
+    assert(canon_of(mem, rep, n, SA_A) == SA_A);
+    assert(canon_of(mem, rep, n, SA_B) == SA_A);
+    assert(canon_of(mem, rep, n, SA_C) == SA_A);
+    // Not a member: its own representative.
+    assert(canon_of(mem, rep, n, SA_P) == SA_P);
+    assert(canon_of(mem, rep, n, SA_GHOST) == SA_GHOST);
+    // Idempotence (module-doc L3).
+    assert(canon_of(mem, rep, n, canon_of(mem, rep, n, SA_C)) == SA_A);
+}
+
+// ACCEPT: (C P O) is entailed from the hidden base triple (A P O) via the
+// two-edge equality chain A ~ B ~ C. Only `row` is public; the base triple,
+// its slot, and the whole equality chain stay private.
+#[test]
+fn sameas_accepts_row_rewritten_across_the_equality_chain() {
+    let (enc, counts, commitments) = sa_graph();
+    let (mem, rep, parent, n) = sa_table();
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_C, SA_P, SA_O], counts, enc, n, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE (the core soundness regression -- the OVER-MERGE): a prover adds a
+// table entry merging a fabricated term into A's class WITHOUT any committed
+// `A owl:sameAs GHOST` triple, then claims A's facts for it. Constraints 3a/3b
+// are all satisfied (the parent is earlier, the representative agrees), so
+// shape alone cannot catch it -- only the committed-edge anchor can.
+#[test(should_fail_with = "canon merge not justified by a committed owl:sameAs triple")]
+fn sameas_rejects_unjustified_merge() {
+    let (enc, counts, commitments) = sa_graph();
+    let mem: [Field; 4] = [SA_A, SA_B, SA_C, SA_GHOST];
+    let rep: [Field; 4] = [SA_A, SA_A, SA_A, SA_A];
+    let parent: [u32; 4] = [0, 0, 1, 0];
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_GHOST, SA_P, SA_O], counts, enc, 4, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: the representative must be constant along a tree edge. A non-root
+// that keeps its own representative would let a prover split a class (and, in
+// the general table, launder a merge through an intermediate).
+#[test(should_fail_with = "canon entry disagrees with its parent's representative")]
+fn sameas_rejects_representative_break() {
+    let (enc, counts, commitments) = sa_graph();
+    let mem: [Field; 4] = [SA_A, SA_B, SA_C, 0];
+    // Entry 1 is a non-root but claims itself as representative.
+    let rep: [Field; 4] = [SA_A, SA_B, SA_A, 0];
+    let parent: [u32; 4] = [0, 0, 1, 3];
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_C, SA_P, SA_O], counts, enc, 3, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: a forward-referencing parent. Without the strict-backwards rule a
+// prover could build a CYCLE of mutually-justifying entries with no root, and
+// the induction that makes the forest well-founded would have no base case.
+#[test(should_fail_with = "canon parent is not an earlier entry")]
+fn sameas_rejects_forward_parent() {
+    let (enc, counts, commitments) = sa_graph();
+    let mem: [Field; 4] = [SA_A, SA_B, SA_C, 0];
+    let rep: [Field; 4] = [SA_A, SA_A, SA_A, 0];
+    // Entry 1 points FORWARD at entry 2.
+    let parent: [u32; 4] = [0, 2, 1, 3];
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_C, SA_P, SA_O], counts, enc, 3, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: duplicate members would make `canon_of` multi-valued (the prover picks
+// whichever representative suits the row), breaking idempotence -- L3.
+#[test(should_fail_with = "duplicate member in canon table")]
+fn sameas_rejects_duplicate_member() {
+    let (enc, counts, commitments) = sa_graph();
+    // Entry 2 re-enters B (already at index 1). Its edge is separately
+    // justified by the committed (A sameAs B), so ONLY uniqueness catches it.
+    let mem: [Field; 4] = [SA_A, SA_B, SA_B, 0];
+    let rep: [Field; 4] = [SA_A, SA_A, SA_A, 0];
+    let parent: [u32; 4] = [0, 0, 0, 3];
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_B, SA_P, SA_O], counts, enc, 3, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: an HONEST table cannot license a row outside the proven class. GHOST
+// has no entry, so canon(GHOST) = GHOST != A = canon(A) -- the representative-
+// membership step is what refuses it.
+#[test(should_fail_with = "disclosed row is not the committed triple up to owl:sameAs")]
+fn sameas_rejects_row_outside_the_class() {
+    let (enc, counts, commitments) = sa_graph();
+    let (mem, rep, parent, n) = sa_table();
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_GHOST, SA_P, SA_O], counts, enc, n, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: the base triple must be an ACTIVE slot. Slot 5 is padding, so a
+// fabricated base fact smuggled into the padding region has no witness.
+#[test(should_fail_with = "witnessed base triple is not an active committed slot")]
+fn sameas_rejects_base_triple_in_padding() {
+    let (enc, counts, commitments) = sa_graph();
+    let (mem, rep, parent, n) = sa_table();
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_C, SA_P, SA_O], counts, enc, n, mem, rep, parent, 0, 5,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// n3_derivation_check -- witnessed-rule-shape N3 derivation over a
+// DATASET-SUPPLIED rule graph, plus the math: builtin gadget whitelist
+// (sq-rsd3v.3, #2946). Tiny (K=1, N=4, R=2, P=2, C=1, M=4, V=3, MD=2)
+// monomorphisation. IRI encodings are arbitrary distinct nonzero constants (the
+// relation only cares about equality structure), exactly as the
+// derivation_check / sameas tests above; LITERAL operand encodings are DERIVED
+// through `signed_int_encoding` because the builtin gadgets bind them to their
+// canonical xsd:integer token.
+// ---------------------------------------------------------------------------
+
+global N3_WORKS_AT: Field = 71;
+global N3_LOCATED_IN: Field = 72;
+global N3_BASED_IN: Field = 73;
+global N3_SALARY: Field = 74;
+global N3_HIGH_EARNER: Field = 75;
+global N3_YES: Field = 76;
+global N3_X: Field = 111; // a well-paid person based in NL
+global N3_Y: Field = 112; // a low-paid person (the comparison's negative case)
+global N3_ACME: Field = 113;
+global N3_NL: Field = 114;
+global N3_GHOST: Field = 777; // fabricated: in neither the graph nor the rules
+
+// Canonical MD=2 padding digits for an operand slot the gadget does not read.
+// "10" rather than "00" because a multi-digit magnitude may not lead with '0'
+// (the canonicality asserts inside `signed_int_encoding` run unmasked).
+fn n3_pad() -> [u8; 2] {
+    [49, 48]
+}
+
+// The committed base graph:
+//   { (X worksAt ACME), (ACME locatedIn NL), (X salary "50"), (Y salary "10") }
+fn n3_graph(l50: Field, l10: Field) -> ([[[Field; 3]; 4]; 1], [u32; 1], [Field; 1]) {
+    let enc: [[[Field; 3]; 4]; 1] = [[
+        [N3_X, N3_WORKS_AT, N3_ACME],
+        [N3_ACME, N3_LOCATED_IN, N3_NL],
+        [N3_X, N3_SALARY, l50],
+        [N3_Y, N3_SALARY, l10],
+    ]];
+    let counts: [u32; 1] = [4];
+    let mut leaves: [Field; 4] = [0; 4];
+    for i in 0..4 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 4)];
+    (enc, counts, commitments)
+}
+
+// The DATASET-SUPPLIED rule graph (the thing an N3 dataset ships and its author
+// signs), as witnessed shapes:
+//   rule 0: { ?x worksAt ?c . ?c locatedIn ?r }        => { ?x basedIn ?r }
+//   rule 1: { ?x salary ?s . ?s math:greaterThan 20 }  => { ?x highEarner yes }
+// Variable ids: ?x = 0, ?c/?s = 1, ?r = 2.
+//
+// Rule 1's comparison atom shows the slot-1 repurposing: a builtin's predicate
+// is carried by the TAG, so slot 1 holds no pattern (it is only an operand for
+// binary arithmetic). Slot 0 is `?s`, slot 2 the constant bound.
+fn n3_rules(
+    l20: Field,
+) -> ([u32; 2], [u32; 2], [[u32; 2]; 2], [[[u32; 3]; 2]; 2], [[[Field; 3]; 2]; 2], [[[u32; 3]; 2]; 2], [[[u32; 3]; 1]; 2], [[[Field; 3]; 1]; 2], [[[u32; 3]; 1]; 2]) {
+    let prem_len: [u32; 2] = [2, 2];
+    let concl_len: [u32; 2] = [1, 1];
+    let prem_builtin: [[u32; 2]; 2] =
+        [[BUILTIN_NONE, BUILTIN_NONE], [BUILTIN_NONE, BUILTIN_GREATER_THAN]];
+    let prem_kind: [[[u32; 3]; 2]; 2] = [
+        [[SLOT_VAR, SLOT_CONST, SLOT_VAR], [SLOT_VAR, SLOT_CONST, SLOT_VAR]],
+        [[SLOT_VAR, SLOT_CONST, SLOT_VAR], [SLOT_VAR, SLOT_CONST, SLOT_CONST]],
+    ];
+    let prem_konst: [[[Field; 3]; 2]; 2] = [
+        [[0, N3_WORKS_AT, 0], [0, N3_LOCATED_IN, 0]],
+        [[0, N3_SALARY, 0], [0, 0, l20]],
+    ];
+    let prem_var: [[[u32; 3]; 2]; 2] = [[[0, 0, 1], [1, 0, 2]], [[0, 0, 1], [1, 0, 0]]];
+    let concl_kind: [[[u32; 3]; 1]; 2] =
+        [[[SLOT_VAR, SLOT_CONST, SLOT_VAR]], [[SLOT_VAR, SLOT_CONST, SLOT_CONST]]];
+    let concl_konst: [[[Field; 3]; 1]; 2] =
+        [[[0, N3_BASED_IN, 0]], [[0, N3_HIGH_EARNER, N3_YES]]];
+    let concl_var: [[[u32; 3]; 1]; 2] = [[[0, 0, 2]], [[0, 0, 0]]];
+    (
+        prem_len, concl_len, prem_builtin, prem_kind, prem_konst, prem_var, concl_kind,
+        concl_konst, concl_var,
+    )
+}
+
+// The rule author as ISSUER: the root the rule graph is committed under. The
+// prover must reproduce every committed shape bit-for-bit to match it.
+fn n3_rules_root(
+    prem_len: [u32; 2],
+    concl_len: [u32; 2],
+    prem_builtin: [[u32; 2]; 2],
+    prem_kind: [[[u32; 3]; 2]; 2],
+    prem_konst: [[[Field; 3]; 2]; 2],
+    prem_var: [[[u32; 3]; 2]; 2],
+    concl_kind: [[[u32; 3]; 1]; 2],
+    concl_konst: [[[Field; 3]; 1]; 2],
+    concl_var: [[[u32; 3]; 1]; 2],
+) -> Field {
+    let mut leaves: [Field; 2] = [0; 2];
+    for r in 0..2 {
+        leaves[r] = rule_leaf(
+            prem_len[r],
+            concl_len[r],
+            prem_builtin[r],
+            prem_kind[r],
+            prem_konst[r],
+            prem_var[r],
+            concl_kind[r],
+            concl_konst[r],
+            concl_var[r],
+        );
+    }
+    commit_fold(leaves, 2)
+}
+
+// Operand witnesses for nodes whose premise atoms are all JOIN atoms: the
+// gadget is disabled, so only the (unmasked) canonicality checks run.
+fn n3_pad_ops() -> ([[[bool; 3]; 2]; 4], [[[[u8; 2]; 3]; 2]; 4]) {
+    ([[[false; 3]; 2]; 4], [[[n3_pad(); 3]; 2]; 4])
+}
+
+// ACCEPT: the honest DAG for the pure-join rule 0 -- two anchored leaves feeding
+// one firing whose conclusion is the disclosed derived row (X basedIn NL). The
+// base facts AND the rule text are HIDDEN (all private); only the commitments,
+// the rule-set root and `root` are public.
+#[test]
+fn n3_accepts_a_committed_join_rule() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]); // "50"
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]); // "10"
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]); // "20"
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits) = n3_pad_ops();
+
+    let node_is_leaf: [bool; 4] = [true, true, false, false];
+    let node_rule: [u32; 4] = [0, 0, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] =
+        [[0, 0, 0], [0, 0, 0], [N3_X, N3_ACME, N3_NL], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_X, N3_WORKS_AT, N3_ACME], // leaf, anchored to the graph
+        [N3_ACME, N3_LOCATED_IN, N3_NL], // leaf, anchored to the graph
+        [N3_X, N3_BASED_IN, N3_NL], // rule 0 firing (the derived row)
+        [0, 0, 0], // inactive padding
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_X, N3_BASED_IN, N3_NL],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        3,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// ACCEPT: the whitelisted `math:greaterThan` gadget. Rule 1 fires over the
+// hidden (X salary "50") with the committed bound "20"; the operand encodings
+// are bound to their canonical xsd:integer tokens and the verdict is
+// `signed_verdict` reused verbatim.
+#[test]
+fn n3_accepts_a_whitelisted_math_comparison() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits_pad) = n3_pad_ops();
+    let mut op_digits = op_digits_pad;
+    // Node 1, premise atom 1 (the comparison): operand slot 0 is ?s = "50",
+    // slot 2 the committed bound "20". Slot 1 is unread for a comparison.
+    op_digits[1][1][0] = [53, 48];
+    op_digits[1][1][2] = [50, 48];
+
+    let node_is_leaf: [bool; 4] = [true, false, false, false];
+    let node_rule: [u32; 4] = [0, 1, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] = [[0, 0, 0], [N3_X, l50, 0], [0, 0, 0], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_X, N3_SALARY, l50], // leaf, anchored to the graph
+        [N3_X, N3_HIGH_EARNER, N3_YES], // rule 1 firing (the derived row)
+        [0, 0, 0],
+        [0, 0, 0],
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_X, N3_HIGH_EARNER, N3_YES],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        2,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// FORGE-AND-VERIFY (the headline soundness regression for THIS bead): the
+// prover INVENTS a rule. Everything else is honest -- the graph is real, the
+// leaves are anchored, the firing is a perfectly well-formed instance of the
+// rule it cites, and the rule is even SAFE -- but the shape it cites is not the
+// shape the rule author committed, so only the rule-set root can catch it. This
+// is what "the proof says WHOSE rules" buys (design sec 4.1 move 1).
+#[test(should_fail_with = "rule-set commitment mismatch")]
+fn n3_rejects_an_uncommitted_rule_shape() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    // The root the rule AUTHOR published, over the honest shapes.
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits) = n3_pad_ops();
+
+    // The prover rewrites rule 0's conclusion to `{ ?x basedIn GHOST }` so a
+    // single honest firing "derives" a row about a place nobody asserted.
+    let mut ck2 = ck;
+    let mut cko2 = cko;
+    ck2[0][0] = [SLOT_VAR, SLOT_CONST, SLOT_CONST];
+    cko2[0][0] = [0, N3_BASED_IN, N3_GHOST];
+
+    let node_is_leaf: [bool; 4] = [true, true, false, false];
+    let node_rule: [u32; 4] = [0, 0, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] =
+        [[0, 0, 0], [0, 0, 0], [N3_X, N3_ACME, N3_NL], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_X, N3_WORKS_AT, N3_ACME],
+        [N3_ACME, N3_LOCATED_IN, N3_NL],
+        [N3_X, N3_BASED_IN, N3_GHOST],
+        [0, 0, 0],
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_X, N3_BASED_IN, N3_GHOST],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck2,
+        cko2,
+        cv,
+        3,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// FORGE: an UNSAFE rule -- one whose conclusion carries a variable the premise
+// never binds -- must be REJECTED, not approximated (design sec 4.3). Note the
+// rule set here is COMMITTED honestly (the root is recomputed over the unsafe
+// shape), i.e. the dataset really does ship this rule; it is still refused,
+// because the substitution is a PRIVATE witness, so an unbound conclusion
+// variable lets the prover CHOOSE the derived row (here: GHOST). This is the
+// safety condition doing real soundness work, not style.
+#[test(should_fail_with = "rule is unsafe: a conclusion variable is not bound in the premise")]
+fn n3_rejects_unsafe_rule_with_unbound_conclusion_variable() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl_honest, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let mut pl = pl_honest;
+    // Rule 0 loses its second premise atom, so ?r (var 2) is no longer bound --
+    // but the conclusion `{ ?x basedIn ?r }` still mentions it.
+    pl[0] = 1;
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits) = n3_pad_ops();
+
+    let node_is_leaf: [bool; 4] = [true, false, false, false];
+    let node_rule: [u32; 4] = [0, 0, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    // ?r is freely chosen as GHOST -- exactly the forgery safety forbids.
+    let node_subst: [[Field; 3]; 4] =
+        [[0, 0, 0], [N3_X, N3_ACME, N3_GHOST], [0, 0, 0], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_X, N3_WORKS_AT, N3_ACME],
+        [N3_X, N3_BASED_IN, N3_GHOST],
+        [0, 0, 0],
+        [0, 0, 0],
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_X, N3_BASED_IN, N3_GHOST],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        2,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// FORGE: an UNGROUNDED antecedent. The rule is committed and honest and the
+// firing satisfies its shape, but the substitution names a company nobody
+// asserted, so neither premise is an earlier conclusion nor an anchored leaf.
+#[test(should_fail_with = "n3 premise not grounded")]
+fn n3_rejects_ungrounded_premise() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits) = n3_pad_ops();
+
+    let node_is_leaf: [bool; 4] = [true, false, false, false];
+    let node_rule: [u32; 4] = [0, 0, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] =
+        [[0, 0, 0], [N3_X, N3_GHOST, N3_NL], [0, 0, 0], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_X, N3_WORKS_AT, N3_ACME], // a genuine anchored leaf
+        [N3_X, N3_BASED_IN, N3_NL], // fired over (X worksAt GHOST),(GHOST locatedIn NL)
+        [0, 0, 0],
+        [0, 0, 0],
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_X, N3_BASED_IN, N3_NL],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        2,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// FORGE: a LEAF claiming a base fact that is not in the committed graph -- a
+// fabricated antecedent smuggled in as an "asserted" fact. This is the
+// hidden-antecedent soundness anchor: because leaves are PRIVATE, membership in
+// C(G) is the only thing standing behind them.
+#[test(should_fail_with = "n3 derivation leaf not present in committed graph")]
+fn n3_rejects_leaf_absent_from_graph() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits) = n3_pad_ops();
+
+    let node_is_leaf: [bool; 4] = [true, true, false, false];
+    let node_rule: [u32; 4] = [0, 0, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] =
+        [[0, 0, 0], [0, 0, 0], [N3_X, N3_ACME, N3_GHOST], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_X, N3_WORKS_AT, N3_ACME],
+        [N3_ACME, N3_LOCATED_IN, N3_GHOST], // NOT a committed triple
+        [N3_X, N3_BASED_IN, N3_GHOST],
+        [0, 0, 0],
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_X, N3_BASED_IN, N3_GHOST],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        3,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// FORGE: the whitelisted comparison gadget must actually HOLD. Y's committed
+// salary is "10", which is NOT greater than the rule's bound "20", so rule 1
+// cannot fire for Y even though every operand binding is honest.
+#[test(should_fail_with = "math: comparison builtin does not hold")]
+fn n3_rejects_a_false_math_comparison() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits_pad) = n3_pad_ops();
+    let mut op_digits = op_digits_pad;
+    op_digits[1][1][0] = [49, 48]; // "10" -- Y's real, committed salary
+    op_digits[1][1][2] = [50, 48]; // "20" -- the rule's committed bound
+
+    let node_is_leaf: [bool; 4] = [true, false, false, false];
+    let node_rule: [u32; 4] = [0, 1, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] = [[0, 0, 0], [N3_Y, l10, 0], [0, 0, 0], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_Y, N3_SALARY, l10],
+        [N3_Y, N3_HIGH_EARNER, N3_YES],
+        [0, 0, 0],
+        [0, 0, 0],
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_Y, N3_HIGH_EARNER, N3_YES],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        2,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// FORGE: lying about a builtin OPERAND's value. Y's salary really is "10", but
+// the prover witnesses the digits "50" to make the comparison come out true.
+// The operand's term ENCODING is what the graph committed, so the canonical
+// token rebuild catches the substitution.
+#[test(should_fail_with = "builtin operand encoding mismatch")]
+fn n3_rejects_a_relabelled_builtin_operand() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits_pad) = n3_pad_ops();
+    let mut op_digits = op_digits_pad;
+    op_digits[1][1][0] = [53, 48]; // claims "50" while ?s is bound to "10"
+    op_digits[1][1][2] = [50, 48];
+
+    let node_is_leaf: [bool; 4] = [true, false, false, false];
+    let node_rule: [u32; 4] = [0, 1, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] = [[0, 0, 0], [N3_Y, l10, 0], [0, 0, 0], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_Y, N3_SALARY, l10],
+        [N3_Y, N3_HIGH_EARNER, N3_YES],
+        [0, 0, 0],
+        [0, 0, 0],
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_Y, N3_HIGH_EARNER, N3_YES],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        2,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// FORGE: citing a rule index outside the committed set (here `rule_count = 2`,
+// so index 5 names no rule at all). Fails closed rather than defaulting to some
+// rule.
+#[test(should_fail_with = "node cites a rule outside the committed rule set")]
+fn n3_rejects_a_rule_index_outside_the_committed_set() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits) = n3_pad_ops();
+
+    let node_is_leaf: [bool; 4] = [true, false, false, false];
+    let node_rule: [u32; 4] = [0, 5, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] =
+        [[0, 0, 0], [N3_X, N3_ACME, N3_NL], [0, 0, 0], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_X, N3_WORKS_AT, N3_ACME],
+        [N3_X, N3_BASED_IN, N3_NL],
+        [0, 0, 0],
+        [0, 0, 0],
+    ];
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_X, N3_BASED_IN, N3_NL],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        2,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
+}
+
+// REJECT: the disclosed derived row must bind to the DAG's terminal conclusion.
+// A prover who proves a valid derivation of (X basedIn NL) cannot present it as
+// a proof of a DIFFERENT row.
+#[test(should_fail_with = "n3 derivation root not bound to the disclosed derived row")]
+fn n3_rejects_root_mismatch() {
+    let (l50, _, _) = signed_int_encoding(false, [53, 48]);
+    let (l10, _, _) = signed_int_encoding(false, [49, 48]);
+    let (l20, _, _) = signed_int_encoding(false, [50, 48]);
+    let (enc, counts, commitments) = n3_graph(l50, l10);
+    let (pl, cl, pb, pk, pko, pv, ck, cko, cv) = n3_rules(l20);
+    let rules_root = n3_rules_root(pl, cl, pb, pk, pko, pv, ck, cko, cv);
+    let (op_neg, op_digits) = n3_pad_ops();
+
+    let node_is_leaf: [bool; 4] = [true, true, false, false];
+    let node_rule: [u32; 4] = [0, 0, 0, 0];
+    let node_concl: [u32; 4] = [0, 0, 0, 0];
+    let node_subst: [[Field; 3]; 4] =
+        [[0, 0, 0], [0, 0, 0], [N3_X, N3_ACME, N3_NL], [0, 0, 0]];
+    let node_out: [[Field; 3]; 4] = [
+        [N3_X, N3_WORKS_AT, N3_ACME],
+        [N3_ACME, N3_LOCATED_IN, N3_NL],
+        [N3_X, N3_BASED_IN, N3_NL],
+        [0, 0, 0],
+    ];
+    // The proof derives (X basedIn NL) but claims (X basedIn ACME).
+    n3_derivation_check::<1, 4, 2, 2, 1, 4, 3, 2>(
+        commitments,
+        rules_root,
+        [N3_X, N3_BASED_IN, N3_ACME],
+        counts,
+        enc,
+        2,
+        pl,
+        cl,
+        pb,
+        pk,
+        pko,
+        pv,
+        ck,
+        cko,
+        cv,
+        3,
+        node_is_leaf,
+        node_rule,
+        node_concl,
+        node_subst,
+        node_out,
+        op_neg,
+        op_digits,
+    );
 }

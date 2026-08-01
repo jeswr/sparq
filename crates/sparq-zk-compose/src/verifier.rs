@@ -113,7 +113,8 @@ use crate::manifest::{
     StatusListSnapshot,
 };
 // [OPUS-4.8] sq-314: derivation-step re-check for entailment-regime enforcement.
-use crate::derivation::regime_admits;
+// [OPUS-5] sq-rsd3v.7: the two UNBUILT completeness halves the refusal message names.
+use crate::derivation::{regime_admits, COMPLETENESS_UNDER_ENTAILMENT_UNBUILT};
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation root derivation.
 use crate::revocation::merkle_root;
 use sparq_zk::encode::encode_term;
@@ -130,7 +131,8 @@ use sparq_zk::field::{field_from_hex_str, field_to_be_bytes_32, field_to_hex, Fr
 use sparq_zk::sig::{
     commitment_message_with_holder, commitment_message_with_status, holder_key_digest,
     holder_pop_message, public_key_from_hex, signature_from_hex, status_list_id_to_field,
-    status_ref_commit_digest, status_ref_digest, verify as sig_verify, PublicKey, SignatureScheme,
+    status_ref_commit_digest, status_ref_digest, status_ref_fully_committed_digest,
+    verify as sig_verify, PublicKey, SignatureScheme,
 };
 use sparq_zk::verify::{
     fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
@@ -263,9 +265,60 @@ impl KeySet {
     /// `RevocationPolicy` derives the status root from its own snapshot), and which
     /// a `manifest.hidden_issuer_attestations` proof's PUBLIC `key_set_root` must
     /// byte-equal. `None` if the set overflows the tree or `depth` is implausible.
-    // [OPUS-4.8] sq-z9l.
+    ///
+    /// [OPUS-4.8] sq-r6dq: uses the SPARSE builder
+    /// ([`crate::issuer::key_set_root_sparse`], sq-8k3h) rather than the dense
+    /// `key_set_root`, so this derivation is `O(n·depth)` in the number of trusted
+    /// keys instead of `O(2^depth)`. The `depth` is a free policy parameter
+    /// ([`KeySet::with_hidden_issuer_depth`]), so a relying party with a large or
+    /// growing issuer registry can pick a deep tree without the verifier
+    /// materialising all `2^depth` leaves. Mirrors `revocation::merkle_root`, whose
+    /// sparse builder is likewise the default (sq-hwe). The matching deeper COMPILED
+    /// circuit member (`hidden_issuer_d{depth}` beyond `d4`) is a follow-up requiring
+    /// the nargo/bb toolchain lane to gate-baseline.
+    ///
+    /// # What the substitution guarantees (NOT "scaling-only")
+    /// The sparse root is **value-equivalent to the dense root wherever the dense
+    /// evaluation completes** — the trust anchor a prover's public root must
+    /// byte-equal is unchanged at every depth the dense builder can still be run.
+    /// It is NOT behaviour-preserving: dropping the dense builder's implicit
+    /// `O(2^depth)` host cost means a deep policy depth that previously aborted or
+    /// exhausted memory before yielding an anchor now yields one, so the verifier
+    /// reaches **later states** (key parsing, leaf hashing, the 96-byte public-input
+    /// byte-compare, the `canonical_vk` lookup). Those states are themselves
+    /// fail-closed — an uncompiled `hidden_issuer_d{depth}` makes
+    /// [`crate::driver::CircuitProver::canonical_vk`] error, with no fallback to
+    /// `d4` and no prover-selected vk — but the reachable state space genuinely
+    /// grew, and with it the work an unauthenticated submission can force before the
+    /// verifier discovers the member is unavailable. That residual DoS surface is
+    /// the RP's own `with_hidden_issuer_depth` choice and is tracked separately.
+    ///
+    /// # How far the equivalence is EVIDENCED (two different kinds of evidence)
+    /// - **Dense cross-check against an independent oracle — depths ≤ 12 only:**
+    ///   `issuer::tests::sparse_root_matches_dense_for_all_sizes` (all sizes,
+    ///   depths 0–6), `sparse_witness_matches_dense_for_all_indices` (depths 0–5),
+    ///   and part (a) of `hidden_issuer_root_uses_sparse_builder_and_scales`
+    ///   (depths 4/8/12) compare against the separately-implemented dense builder.
+    /// - **Self-consistency ONLY — deep trees (24, 28, 31):** the deep groups check
+    ///   that a sparse witness re-folds to the sparse root. Root and witness both
+    ///   come from `issuer::sparse_fold_leaves`, so a CORRELATED common-mode error
+    ///   in that shared fold would pass both. There is no independent oracle at
+    ///   those depths (the dense builder cannot materialise `2^24`+ leaves). Deep
+    ///   equivalence therefore rests on the induction argument plus the ≤ 12
+    ///   cross-checks, not on a deep-tree oracle.
+    ///
+    /// The one genuinely independent end-to-end oracle is `tests/e2e.rs`'s
+    /// `prove_hidden_issuer`, which builds the prover's root/path with the DENSE
+    /// builders and attaches this SPARSE anchor as the byte-compared public input,
+    /// so `hidden_issuer_in_set_verifies_and_key_is_private` reddens on a
+    /// single-bit divergence through a real `bb` proof. Do not "simplify" that test
+    /// to one builder — the cross-builder asymmetry is what makes it an oracle.
+    ///
+    /// See `research/zk-membership-pok-reaudit.md` §2. Nothing here is an external
+    /// soundness sign-off; the accredited-cryptographer audit `sq-qhy4` is PENDING.
+    // [OPUS-4.8] sq-z9l; sparse builder sq-r6dq.
     pub fn hidden_issuer_root(&self, depth: u32) -> Option<Fr> {
-        crate::issuer::key_set_root(&self.ordered_keys(), depth)
+        crate::issuer::key_set_root_sparse(&self.ordered_keys(), depth)
     }
 
     /// The 0-based index of `pk_hex` in the canonical leaf order, if it is a
@@ -530,14 +583,22 @@ impl HolderBindingPolicy {
 ///
 /// # Honest scope
 /// Accepting `Rdfs`/`Owl` here means "I accept a derivation re-checked against the
-/// disclosed base"; it does NOT (yet) mean an in-circuit closure proof (deferred —
-/// see the `derivation` module docs). A relying party that requires
-/// cryptographic-strength inference keeps the `Simple`-only default.
+/// disclosed base"; it does NOT (yet) mean an in-circuit closure proof. The
+/// in-circuit single-step relation exists (`compose_core::entail`, sq-g91d,
+/// research-grade / NOT-yet-sound sq-qhy4) but is not yet wired into this policy —
+/// see the `derivation` module docs. A relying party that requires
+/// cryptographic-strength inference keeps the `Simple`-only default. Accepting a
+/// regime also says NOTHING about COMPLETENESS under that regime — the separate,
+/// UNBUILT obligation `sq-rsd3v.7`; a relying party that needs it says so with
+/// [`EntailmentPolicy::require_completeness_under_entailment`] and is REFUSED
+/// rather than handed a soundness-only accept.
 // [OPUS-4.8] sq-314: entailment-regime policy (external, fail-closed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntailmentPolicy {
     accept_rdfs: bool,
     accept_owl: bool,
+    // [OPUS-5] sq-rsd3v.7: the relying party demands completeness-under-entailment.
+    require_completeness: bool,
 }
 
 impl Default for EntailmentPolicy {
@@ -549,7 +610,7 @@ impl Default for EntailmentPolicy {
 impl EntailmentPolicy {
     /// Accept ONLY `Simple` (no inference) — the fail-closed default.
     pub fn simple_only() -> Self {
-        EntailmentPolicy { accept_rdfs: false, accept_owl: false }
+        EntailmentPolicy { accept_rdfs: false, accept_owl: false, require_completeness: false }
     }
 
     /// Additionally accept `Rdfs` manifests (with grounded derivation steps).
@@ -564,6 +625,52 @@ impl EntailmentPolicy {
         self.accept_owl = true;
         self.accept_rdfs = true;
         self
+    }
+
+    /// Declare that this relying party requires **COMPLETENESS under entailment** —
+    /// "no entailed answer is MISSING from the disclosed result".
+    ///
+    /// That property is **UNBUILT in sparq and NOT claimed** (`sq-rsd3v.7`, design
+    /// `research/zk-inference-and-credentials.md` §3.7): it needs BOTH halves of
+    /// [`crate::derivation::COMPLETENESS_UNDER_ENTAILMENT_UNBUILT`], and the
+    /// fixpoint-saturation half exists nowhere in the estate. So setting this dial
+    /// does not enable a check — it makes the verifier REFUSE, fail-closed, every
+    /// non-`Simple` manifest with
+    /// [`CheckError::CompletenessUnderEntailmentUnavailable`]. The point is that a
+    /// relying party which needs completeness gets a MACHINE-CHECKABLE refusal
+    /// naming the gap, instead of an accept it could misread as completeness — the
+    /// soundness-of-derivation / completeness-under-entailment conflation this
+    /// crate must never allow.
+    ///
+    /// # Precisely what the refusal does and does NOT assert
+    /// It asserts only this: **no accepted proof under this policy rests on
+    /// entailment whose completeness sparq cannot check.** A `Simple` manifest is
+    /// NOT refused (there is no entailment closure for it to be complete over), but
+    /// passing one is *not* an assertion that its answer set is complete — that
+    /// rests on the `scan.nr` per-pattern sweep and the rest of the (not externally
+    /// audited, `sq-qhy4`) verifier, not on this dial. And this dial CANNOT detect
+    /// a closure materialised OFF-circuit and presented as `Simple` over the
+    /// materialised graph (design §3.6(a) trusted-materialiser mode): there the
+    /// regime field is honestly `Simple` and entailment is trusted to the
+    /// materialiser's signature, a DIFFERENT trust model the relying party must
+    /// evaluate itself.
+    ///
+    /// When the design's RE-ENTRY TRIGGER fires (a documented huge-closure case
+    /// plus a verifier demanding full completeness — §3.6(c),
+    /// `research/zkp-performance-landscape.md` §5 trigger 4), the unconditional
+    /// refusal is what gets replaced by a real check; until then it is the honest
+    /// answer.
+    // [OPUS-5] sq-rsd3v.7: enforced deferral — a demand for completeness REFUSES.
+    pub fn require_completeness_under_entailment(mut self) -> Self {
+        self.require_completeness = true;
+        self
+    }
+
+    /// Whether this relying party requires completeness under entailment
+    /// (`sq-rsd3v.7`) — always a REFUSAL for a non-`Simple` regime, since the
+    /// capability is unbuilt.
+    fn requires_completeness(&self) -> bool {
+        self.require_completeness
     }
 
     /// Whether this policy accepts `regime`.
@@ -659,6 +766,23 @@ pub struct RevocationPolicy {
     /// depth the prover used (the `revoke_unset_d{depth}` member).
     // [OPUS-4.8] sq-3e5 + sq-h2v: authoritative-root derivation depth.
     hidden_index_depth: Option<u32>,
+    /// [OPUS-5] sq-6qe / sq-kndw: OPTIONAL Merkle depth for the ACCEPTED-SET
+    /// commitment — the relying party's `(list, version, status_list_root)` trust
+    /// anchor moved behind a single root, so a fully-hidden revocation proof can
+    /// hide WHICH list/version it pertains to. `None` => the accepted-set anchor is
+    /// not derived AND the fully-hidden path is DISABLED (a
+    /// `manifest.fully_hidden_revocation` proof is rejected fail-closed — the
+    /// verifier will not accept an anchor it cannot itself derive). Setting it is
+    /// the relying party's opt-in; the clear-index and committed-index paths, which
+    /// still disclose the IRI + version, are unaffected.
+    // [OPUS-5] sq-kndw: accepted-set anchor depth = the fully-hidden opt-in.
+    accepted_set_depth: Option<u32>,
+    /// [OPUS-5] sq-kndw: an EXPLICIT epoch floor, overriding the one derived from
+    /// `now - freshness_window`. `None` => the derived floor. See
+    /// [`RevocationPolicy::with_min_version`] for why an explicit floor is
+    /// consistent rather than a second, conflicting freshness rule.
+    // [OPUS-5] sq-kndw: explicit public epoch floor.
+    explicit_min_version: Option<u64>,
 }
 
 impl RevocationPolicy {
@@ -673,6 +797,8 @@ impl RevocationPolicy {
             freshness_window,
             authoritative: std::collections::BTreeMap::new(),
             hidden_index_depth: None,
+            accepted_set_depth: None,
+            explicit_min_version: None,
         }
     }
 
@@ -685,6 +811,8 @@ impl RevocationPolicy {
             freshness_window: 0,
             authoritative: std::collections::BTreeMap::new(),
             hidden_index_depth: None,
+            accepted_set_depth: None,
+            explicit_min_version: None,
         }
     }
 
@@ -740,9 +868,136 @@ impl RevocationPolicy {
         self.hidden_index_depth
     }
 
-    /// The oldest version still considered fresh.
-    fn min_version(&self) -> u64 {
-        self.now.saturating_sub(self.freshness_window)
+    /// [OPUS-5] sq-6qe: derive the ACCEPTED-SET commitment (sub-option A of
+    /// `research/zk-statuslist-hide-iri-version.md` §3) at Merkle depth `depth`
+    /// (builder style) — the relying party's `(list, version, status_list_root)`
+    /// trust anchor folded into ONE root, so a fully-hidden revocation proof can
+    /// show "some accepted `(list, version)` has my hidden index unset" without
+    /// disclosing which.
+    ///
+    /// # [OPUS-5] sq-kndw: this now ENABLES a verification path
+    /// Setting it (together with [`Self::with_hidden_index_depth`]) is what OPTS
+    /// THE RELYING PARTY IN to the fully-hidden revocation mode: it makes
+    /// [`Self::accepted_set_root`] derivable, and `bind_fully_hidden_revocation`
+    /// binds a `revoke_hidden_ref_d{depth}_a{set_depth}` proof to that anchor.
+    /// Without it a `fully_hidden_revocation` proof is rejected
+    /// (`FullyHiddenRevocationNotEnabled`) — the verifier will not accept an anchor
+    /// it cannot itself derive. The clear-index and committed-index paths are
+    /// unaffected. Not externally audited (sq-qhy4).
+    ///
+    /// `depth` must be wide enough for the freshness-curated accepted set
+    /// (`2^depth >= |entries|`), else [`Self::accepted_set_root`] is `None`
+    /// (fail-closed — never a truncated anchor). The accepted-set root also
+    /// requires [`Self::with_hidden_index_depth`], since each entry carries the
+    /// status-list Merkle root derived at THAT depth.
+    // [OPUS-5] sq-6qe: opt-in accepted-set anchor depth.
+    pub fn with_accepted_set_depth(mut self, depth: u32) -> Self {
+        self.accepted_set_depth = Some(depth);
+        self
+    }
+
+    /// [OPUS-5] sq-6qe: the relying party's accepted `(list, version,
+    /// status_list_root)` entries in CANONICAL leaf order, FRESHNESS-CURATED.
+    ///
+    /// Order is the sorted `(status_list, version)` order of the authoritative
+    /// snapshot map — the canonical order both the relying party (deriving the
+    /// anchor) and the prover (building its membership path) must commit, exactly
+    /// as [`KeySet::hidden_issuer_root`] fixes the key-set order.
+    ///
+    /// # Freshness curation is the soundness-relevant part
+    /// Only snapshots whose version is INSIDE the policy's freshness window
+    /// `[min_version, now]` become entries. Because the future circuit's liveness
+    /// statement is membership in this set, a STALE (or future-dated) version is
+    /// not a member at all and no proof can be built against it — the audit-#12
+    /// freshness gate survives the move behind the commitment. The in-circuit
+    /// `version >= min_version` comparison of the design record is then
+    /// defence-in-depth on top of membership, not the only freshness check.
+    ///
+    /// `None` if the hidden-index depth is unset (there is no depth at which to
+    /// derive each entry's status-list root) or any snapshot's root is
+    /// underivable at that depth — fail-closed, never a partial anchor.
+    // [OPUS-5] sq-6qe: canonical, freshness-curated accepted entries.
+    pub fn accepted_entries(&self) -> Option<Vec<crate::revocation::AcceptedStatusEntry>> {
+        let depth = self.hidden_index_depth?;
+        let mut entries = Vec::new();
+        for ((list, version), snapshot) in &self.authoritative {
+            if !self.is_fresh(*version) {
+                continue;
+            }
+            let root = crate::revocation::merkle_root(snapshot, depth)?;
+            entries.push(crate::revocation::AcceptedStatusEntry {
+                status_list: list.clone(),
+                version: *version,
+                status_list_root: root,
+            });
+        }
+        Some(entries)
+    }
+
+    /// [OPUS-5] sq-6qe: the AUTHORITATIVE accepted-set Merkle root over
+    /// [`Self::accepted_entries`] at the policy's accepted-set depth — the public
+    /// input a future fully-hidden revocation proof would be bound to, derived
+    /// from the relying party's OWN curated snapshots (never the prover's).
+    ///
+    /// `None` if [`Self::with_accepted_set_depth`] / [`Self::with_hidden_index_depth`]
+    /// were not set, or the curated set overflows the depth (fail-closed).
+    // [OPUS-5] sq-6qe: accepted-set trust anchor (host side only — no gate yet).
+    pub fn accepted_set_root(&self) -> Option<Fr> {
+        let set_depth = self.accepted_set_depth?;
+        crate::revocation::accepted_set_root(&self.accepted_entries()?, set_depth)
+    }
+
+    /// [OPUS-5] sq-6qe: the 0-based slot of `(list, version)` in the canonical
+    /// accepted-set leaf order — the index a prover proves membership at (private
+    /// in-circuit; the verifier never needs it). `None` if the pair is not a
+    /// freshness-curated member. Mirrors [`KeySet::member_index`].
+    // [OPUS-5] sq-6qe: prover-side convenience.
+    pub fn accepted_member_index(&self, list: &str, version: u64) -> Option<usize> {
+        self.accepted_entries()?
+            .iter()
+            .position(|e| e.status_list == list && e.version == version)
+    }
+
+    /// The oldest version still considered fresh — the policy's epoch FLOOR.
+    ///
+    /// [OPUS-5] sq-6qe: this is also the public `min_version` input of the
+    /// fully-hidden revocation member (sq-kndw). It discloses only the relying
+    /// party's own policy floor, not the credential's epoch.
+    ///
+    /// [OPUS-5] sq-kndw: returns the EXPLICIT floor when [`Self::with_min_version`]
+    /// set one, else the window-derived `now - freshness_window`.
+    pub fn min_version(&self) -> u64 {
+        self.explicit_min_version
+            .unwrap_or_else(|| self.now.saturating_sub(self.freshness_window))
+    }
+
+    /// [OPUS-5] sq-kndw: pin an EXPLICIT public epoch floor (builder style),
+    /// replacing the `now - freshness_window` one.
+    ///
+    /// This is ONE floor, not a second freshness rule: [`Self::min_version`] is the
+    /// single definition of the floor and both the (private) freshness-window check
+    /// and [`Self::accepted_entries`] read it, so the clear-path freshness window,
+    /// the accepted-set curation, and the fully-hidden member's public
+    /// `min_version` input can never disagree.
+    /// Setting a floor BELOW the derived one deliberately widens what the relying
+    /// party accepts (its own policy call); setting one ABOVE narrows it. A floor
+    /// above `now` accepts nothing (the fresh window is then empty) — fail-closed.
+    ///
+    /// Useful when the floor is a published policy constant rather than a rolling
+    /// window, since it is a PUBLIC input of every fully-hidden proof: a rolling
+    /// floor changes the public input (and so the anchor a holder must prove
+    /// against) on every tick.
+    // [OPUS-5] sq-kndw: explicit epoch floor.
+    pub fn with_min_version(mut self, min_version: u64) -> Self {
+        self.explicit_min_version = Some(min_version);
+        self
+    }
+
+    /// [OPUS-5] sq-kndw: the accepted-set Merkle depth, if the relying party
+    /// enabled the fully-hidden path. `None` => the path is disabled (a
+    /// `manifest.fully_hidden_revocation` proof is then not accepted).
+    fn accepted_set_depth(&self) -> Option<u32> {
+        self.accepted_set_depth
     }
 
     /// Whether `v` is within the freshness window `[min_version, now]`.
@@ -1073,6 +1328,53 @@ pub enum CheckError {
     /// A query FILTER constrains a variable that does not bind to any scanned
     /// column of a BGP pattern (cannot be mapped to a `filter_int` operand).
     UnmappableFilterVar { variable: String },
+    /// `manifest.pattern_scans` is DECLARED (non-empty) but does not carry
+    /// exactly one entry per query BGP pattern (sq-q9r5e follow-up): the
+    /// pattern→scan mapping is indexed in query order like `attributions`, so a
+    /// mis-sized declaration cannot be interpreted and is rejected fail-closed.
+    /// (The FILTER/attribution obligations themselves are unaffected by a
+    /// declaration — see `check_pattern_scans`.)
+    // [OPUS-5] sq-q9r5e follow-up: explicit pattern→scan mapping.
+    PatternScanArityMismatch { patterns: usize, declared: usize },
+    /// A DECLARED `manifest.pattern_scans[pattern]` is EMPTY: the prover declared
+    /// the mapping but left this query BGP pattern with no answering scan. Every
+    /// pattern must be answered (the declared analogue of `UnboundPattern`).
+    // [OPUS-5] sq-q9r5e follow-up.
+    PatternScanUnbound { pattern: usize },
+    /// A DECLARED `manifest.pattern_scans[pattern]` names sub-proof `proof`,
+    /// which is out of range, is not a SCAN, or whose bb-bound
+    /// `pattern_is_const`/`pattern_const_enc` do NOT match the query pattern's
+    /// constant slots (audit #10). A declaration must not claim a scan answers a
+    /// pattern it provably does not.
+    // [OPUS-5] sq-q9r5e follow-up.
+    PatternScanMismatch { pattern: usize, proof: usize },
+    /// `manifest.pattern_scans` is DECLARED but scan sub-proof `proof` is named
+    /// by NO pattern: the manifest discloses that scan's rows while its own
+    /// declared reading gives them no pattern, which is incoherent, so it is
+    /// rejected fail-closed rather than recorded.
+    // [OPUS-5] sq-q9r5e follow-up.
+    PatternScanUndeclared { proof: usize },
+    /// A query BGP pattern uses the SAME variable at two slots (`{ ?v <p> ?v }`)
+    /// but a disclosed row of a scan that answers that pattern binds those two
+    /// slots to DIFFERENT terms — so the row does not satisfy the pattern it is
+    /// disclosed under, and a relying party would read `?v` as two terms at once.
+    /// `slots` is the `(first, offending)` slot pair within the pattern.
+    ///
+    /// The cross-pattern analogues of this obligation are the disclosed-path
+    /// `recheck` / `join_obligations` gate and the hidden-path `bind_joins` slot
+    /// binding; both iterate pattern PAIRS over per-pattern variable SETS, so the
+    /// WITHIN-pattern repetition is invisible to them. `scan_matches_pattern` only
+    /// compares per-slot const-ness/encodings and the scan circuit binds only the
+    /// CONSTANT slots to `pattern_const_enc`, so nothing else constrains it.
+    // [OPUS-5] #5240 (raised while fixing audit L-1 / sq-q9r5e). Research-grade,
+    // NOT externally audited (sq-qhy4).
+    RepeatedSlotMismatch {
+        pattern: usize,
+        proof: usize,
+        row: usize,
+        variable: String,
+        slots: (usize, usize),
+    },
     /// A scan sub-proof's commitment has no issuer attestation in the manifest
     /// (audit #3): `commitments[g]` is unsigned / prover-invented, so the
     /// "credential issued by X" claim has no cryptographic backing. Closes the
@@ -1294,6 +1596,71 @@ pub enum CheckError {
     /// (audit hardening; prover-controlled bytes never panic).
     // [OPUS-4.8] sq-3e5 + sq-h2v.
     HiddenRevocationMalformedProof,
+    /// [OPUS-5] sq-kndw: the revocation reference is in the FULLY-HIDDEN mode
+    /// (`ref_commitment` present, no clear IRI / index / version) but the manifest
+    /// carries NO `fully_hidden_revocation` proof. That mode moves the entire
+    /// liveness decision into the proof, so accepting without it would leave
+    /// revocation UNCHECKED — rejected (never skip revocation).
+    FullyHiddenRevocationRequired,
+    /// [OPUS-5] sq-kndw: a `fully_hidden_revocation` proof was presented WITHOUT a
+    /// fully-hidden revocation reference. There are then no ISSUER-SIGNED
+    /// `(ref_commitment, index_commitment)` values to cross-bind the proof to, so it
+    /// would be a free-floating liveness claim over an unbound credential. Rejected.
+    FullyHiddenRevocationUnbound,
+    /// [OPUS-5] sq-kndw: a FULLY-HIDDEN presentation ALSO attached a
+    /// `status_snapshots` entry. A snapshot names its `(status_list, version)`, so
+    /// attaching one discloses in the clear exactly what the mode exists to hide —
+    /// self-defeating, and never needed (the fully-hidden gate reads the relying
+    /// party's own curated snapshots, never the prover's). Rejected so a buggy
+    /// holder implementation cannot silently leak the credential's list + epoch.
+    FullyHiddenRevocationSnapshotDisclosed,
+    /// [OPUS-5] sq-kndw: a `fully_hidden_revocation` proof was presented but the
+    /// relying party has NOT enabled the fully-hidden path (no accepted-set depth /
+    /// hidden-index depth on the [`RevocationPolicy`], or the curated accepted set
+    /// does not fit the configured depth). Without an accepted-set anchor there is
+    /// no root to bind the proof to — rejected fail-closed.
+    FullyHiddenRevocationNotEnabled,
+    /// [OPUS-5] sq-kndw: the proof's declared `(depth, set_depth)` do not match the
+    /// relying party's policy depths, or name no COMPILED
+    /// `revoke_hidden_ref_d{depth}_a{set_depth}` member
+    /// ([`crate::build::derive_revoke_hidden_ref_id`]). The trees would be over
+    /// different layouts, so the proof cannot be bound to the verifier's anchors.
+    FullyHiddenRevocationDepthMismatch {
+        declared_depth: u32,
+        declared_set_depth: u32,
+        policy_depth: u32,
+        policy_set_depth: u32,
+    },
+    /// [OPUS-5] sq-kndw: the proof's declared `accepted_set_root` or `min_version`
+    /// does not equal the value the relying party derives from its OWN
+    /// freshness-curated policy. The prover does not get to choose the trust anchor
+    /// or the epoch floor.
+    FullyHiddenRevocationAnchorMismatch,
+    /// [OPUS-5] sq-kndw: the proof's declared `ref_commitment` / `index_commitment`
+    /// do not byte-equal the ISSUER-SIGNED ones in `manifest.revocation`. The
+    /// cross-binding that ties the in-circuit private `(list, version)` and index to
+    /// the issuer's reference is broken — rejected.
+    FullyHiddenRevocationCommitmentMismatch,
+    /// [OPUS-5] sq-kndw: the `(ref_commitment, index_commitment)` pair has been
+    /// presented BEFORE. The pair is a stable per-issuance handle, so re-presenting
+    /// it is exactly the cross-presentation linkage the fully-hidden mode exists to
+    /// prevent (`research/zk-statuslist-hide-iri-version.md` §4). Rejected so the
+    /// holder is forced to re-blind. Honest limit: this protects the holder only
+    /// against an HONEST relying party.
+    FullyHiddenRevocationLinkageReplay,
+    /// [OPUS-5] sq-kndw: the fully-hidden revocation proof did not verify — either
+    /// bb rejected the zero-knowledge ref-open / accepted-set-membership /
+    /// freshness / bit-unset statement against the canonical
+    /// `revoke_hidden_ref_d{depth}_a{set_depth}` vk and the reconstructed public
+    /// inputs, or the proof commits a DIFFERENT challenge than this verifier's
+    /// nonce (a proof minted for another session — caught before the bb call by
+    /// the public-input byte-compare).
+    FullyHiddenRevocationProofRejected,
+    /// [OPUS-5] sq-kndw: the `manifest.fully_hidden_revocation` proof blob is
+    /// malformed (non-hex / truncated length prefix), or a declared field is not a
+    /// parseable field element — rejected before any bb call (prover-controlled
+    /// bytes never panic).
+    FullyHiddenRevocationMalformedProof,
     /// A `manifest.hidden_issuer_attestations` entry was presented but the relying
     /// party has NOT enabled the hidden-issuer path (no `hidden_issuer_depth` in
     /// the KeySet) (sq-z9l): the verifier cannot derive an authoritative key-set
@@ -1487,6 +1854,29 @@ pub enum CheckError {
     /// `derivation` module; until then only the disclosed base grounds a step.)
     // [OPUS-4.8] sq-314.
     UngroundedDerivationAntecedent { step: usize, antecedent: usize },
+    /// The relying party requires COMPLETENESS under entailment
+    /// ([`EntailmentPolicy::require_completeness_under_entailment`]) but the
+    /// manifest declares a non-`Simple` regime, and that property is **UNBUILT in
+    /// sparq and NOT claimed** (`sq-rsd3v.7`): both halves of
+    /// [`crate::derivation::COMPLETENESS_UNDER_ENTAILMENT_UNBUILT`] would be needed
+    /// and the fixpoint-saturation half exists nowhere in the estate. Refused
+    /// fail-closed — a soundness-of-derivation accept must never be handed to a
+    /// relying party that asked for completeness (the conflation the design's §3.7
+    /// forbids). This is a CAPABILITY refusal, not a defect in the manifest.
+    // [OPUS-5] sq-rsd3v.7: enforced deferral of completeness-under-entailment.
+    CompletenessUnderEntailmentUnavailable { regime: &'static str },
+    /// A derivation step introduces or consumes an `owl:sameAs` fact
+    /// (sq-rsd3v.6): the `owl:sameAs` encoding stands in a predicate slot of an
+    /// antecedent or of the derived triple. The fixed-shape RDFS / OWL-RL-minus-
+    /// sameAs path re-checks rules by term-encoding equality, which is a term
+    /// IDENTITY test and is therefore the WRONG proxy under equality reasoning
+    /// (`owl:sameAs` quotients the term universe). Equality reasoning needs the
+    /// in-circuit union-find canonicalisation of the [`crate::sameas`] module,
+    /// which is a SEPARATE, not-yet-composable member — so such a step is
+    /// refused fail-closed rather than allowed to ride this path silently. See
+    /// [`crate::derivation::DerivationStep::mentions_equality_predicate`].
+    // [OPUS-5] sq-rsd3v.6 (#3265).
+    EqualityReasoningUnsupported { step: usize },
     /// [OPUS-4.8] sq-sfsi (hidden JOIN, step 4): a `JoinEdge` references a
     /// non-existent sub-proof index (`scan_a`/`scan_b`/`join_proof`) or a
     /// committed-graph index (`graph_a`/`graph_b`) outside the referenced scan's
@@ -1609,6 +1999,27 @@ impl std::fmt::Display for CheckError {
                 f,
                 "query FILTER on ?{variable} does not bind to any scanned column"
             ),
+            CheckError::PatternScanArityMismatch { patterns, declared } => write!(
+                f,
+                "manifest.pattern_scans declares {declared} entries for {patterns} query BGP patterns (the pattern→scan mapping is indexed per query pattern, like attributions)"
+            ),
+            CheckError::PatternScanUnbound { pattern } => write!(
+                f,
+                "manifest.pattern_scans[{pattern}] is empty: query BGP pattern {pattern} is declared to be answered by no scan sub-proof"
+            ),
+            CheckError::PatternScanMismatch { pattern, proof } => write!(
+                f,
+                "manifest.pattern_scans[{pattern}] names sub-proof {proof}, which is out of range, is not a scan, or whose bound pattern constants do not answer query BGP pattern {pattern} (audit #10: a declaration must not contradict the proof-bound constants)"
+            ),
+            CheckError::PatternScanUndeclared { proof } => write!(
+                f,
+                "scan sub-proof {proof} is named by no entry of the declared manifest.pattern_scans: the manifest discloses its rows but its own declared reading gives them no query BGP pattern (dangling scan)"
+            ),
+            CheckError::RepeatedSlotMismatch { pattern, proof, row, variable, slots } => write!(
+                f,
+                "query BGP pattern {pattern} binds ?{variable} at slots {} and {}, but disclosed row {row} of scan sub-proof {proof} (which answers that pattern) gives them different terms: the row does not satisfy the pattern it is disclosed under",
+                slots.0, slots.1
+            ),
             CheckError::UnattestedCommitment { proof, commitment } => write!(
                 f,
                 "sub-proof {proof}: commitment {commitment} has no issuer attestation (unsigned / prover-invented commitment — no credential provenance); applies to a BGP scan or an extended-fragment path sub-proof alike"
@@ -1729,6 +2140,51 @@ impl std::fmt::Display for CheckError {
             CheckError::HiddenRevocationMalformedProof => write!(
                 f,
                 "hidden-index revocation proof blob is malformed (sq-3e5/sq-h2v)"
+            ),
+            CheckError::FullyHiddenRevocationRequired => write!(
+                f,
+                "the revocation reference is FULLY HIDDEN (sq-kndw) but no fully_hidden_revocation proof is present — that mode moves the whole liveness decision into the proof, so accepting without it would leave revocation unchecked (fail-closed)"
+            ),
+            CheckError::FullyHiddenRevocationUnbound => write!(
+                f,
+                "a fully_hidden_revocation proof was presented without a fully-hidden revocation reference (sq-kndw): there are no issuer-signed (ref_commitment, index_commitment) values to cross-bind it to"
+            ),
+            CheckError::FullyHiddenRevocationSnapshotDisclosed => write!(
+                f,
+                "a FULLY-HIDDEN revocation presentation also attached a status-list snapshot (sq-kndw): a snapshot names its (status_list, version), which is exactly what this mode hides — drop it (the verifier reads its OWN curated snapshots)"
+            ),
+            CheckError::FullyHiddenRevocationNotEnabled => write!(
+                f,
+                "fully-hidden revocation proof present but the relying party has not enabled the path (needs RevocationPolicy::with_hidden_index_depth + with_accepted_set_depth, and a curated accepted set that fits) (sq-kndw)"
+            ),
+            CheckError::FullyHiddenRevocationDepthMismatch {
+                declared_depth,
+                declared_set_depth,
+                policy_depth,
+                policy_set_depth,
+            } => write!(
+                f,
+                "fully-hidden revocation proof depths (d{declared_depth}, a{declared_set_depth}) do not match the policy depths (d{policy_depth}, a{policy_set_depth}) or name no compiled member (sq-kndw)"
+            ),
+            CheckError::FullyHiddenRevocationAnchorMismatch => write!(
+                f,
+                "fully-hidden revocation proof's declared accepted_set_root / min_version do not equal the values the relying party derives from its OWN freshness-curated policy (sq-kndw: the prover does not choose the trust anchor)"
+            ),
+            CheckError::FullyHiddenRevocationCommitmentMismatch => write!(
+                f,
+                "fully-hidden revocation proof's ref_commitment / index_commitment do not byte-equal the ISSUER-SIGNED ones (sq-kndw: the cross-binding to the issuer's reference is broken)"
+            ),
+            CheckError::FullyHiddenRevocationLinkageReplay => write!(
+                f,
+                "the fully-hidden revocation (ref_commitment, index_commitment) pair has been presented before (sq-kndw): reusing it is exactly the cross-presentation linkage this mode exists to prevent — the holder must re-blind and the issuer re-sign per presentation"
+            ),
+            CheckError::FullyHiddenRevocationProofRejected => write!(
+                f,
+                "the fully-hidden revocation proof did not verify (sq-kndw: bb rejected the ref-open / accepted-set-membership / freshness / bit-unset statement, or the proof commits a challenge other than this verifier's nonce)"
+            ),
+            CheckError::FullyHiddenRevocationMalformedProof => write!(
+                f,
+                "fully-hidden revocation proof blob or declared field is malformed (sq-kndw)"
             ),
             CheckError::HiddenIssuerNotEnabled => write!(
                 f,
@@ -1857,6 +2313,15 @@ impl std::fmt::Display for CheckError {
             CheckError::UngroundedDerivationAntecedent { step, antecedent } => write!(
                 f,
                 "derivation step {step} antecedent {antecedent} is ungrounded (sq-314: it is neither an earlier step's derived triple nor a disclosed scan row — a derived triple cannot rest on an antecedent the proof does not establish)"
+            ),
+            CheckError::CompletenessUnderEntailmentUnavailable { regime } => write!(
+                f,
+                "the relying party requires completeness under entailment but regime `{regime}` cannot supply it (sq-rsd3v.7: UNBUILT and NOT claimed — it needs both an {} and a {}, and the saturation half exists nowhere in sparq; soundness of derivation is NOT completeness under entailment)",
+                COMPLETENESS_UNDER_ENTAILMENT_UNBUILT[0], COMPLETENESS_UNDER_ENTAILMENT_UNBUILT[1]
+            ),
+            CheckError::EqualityReasoningUnsupported { step } => write!(
+                f,
+                "derivation step {step} introduces or consumes an owl:sameAs fact (sq-rsd3v.6: encoding-equality re-checks are the wrong proxy under equality reasoning — owl:sameAs needs the separate in-circuit canonicalisation member, so it is refused fail-closed here)"
             ),
             CheckError::JoinDanglingEdge { edge } => write!(
                 f,
@@ -2011,6 +2476,20 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
         #[cfg(feature = "dual-leaf")]
         ProofInputs::FilterValueDlDecimal { .. } => match inputs.circuit_id() {
             CircuitId::FilterValueDlDecimal => Some(CircuitId::FilterValueDlDecimal),
+            _ => None,
+        },
+        // [OPUS-5] sq-wz99x: the DUAL-LEAF dateTime/date value-lane FILTER. Also
+        // DIGIT-COUNT-FREE, and additionally LANE-FREE: ONE member serves BOTH the
+        // `xsd:dateTime` and `xsd:date` classes, because the lane (and the
+        // sub-second scale `FS`) lives in the PUBLIC `datatype_const`, not the
+        // member id. So the derive only confirms the declared id is that single
+        // member; WHICH lane a proof is for is pinned by the public-input
+        // reconstruction below — `datatype_const` is a public input, so a lane swap
+        // changes the reconstructed vector and cannot byte-match the proof. The
+        // fail-closed `(method × circuit)` legality is `crate::dispatch` (sq-cfmv).
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlDateTime { .. } => match inputs.circuit_id() {
+            CircuitId::FilterValueDlDateTime => Some(CircuitId::FilterValueDlDateTime),
             _ => None,
         },
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN. The
@@ -2275,8 +2754,24 @@ fn prefilter_manifest_structure_impl(
     // so it is skipped here (documented unbound-terms limitation — the sub-proofs
     // still verify cryptographically, they are just not yet tied to the disclosed
     // solution terms).
+    //
+    // [OPUS-5] sq-q9r5e follow-up: stage 2a′ first — when the prover DECLARED a
+    // `manifest.pattern_scans` mapping, re-check it here. It is an ADDITIONAL
+    // fail-closed constraint only: the FILTER and attribution obligations below
+    // still run over the full constant-MEMBERSHIP relation, so a declaration can
+    // never shrink what the verifier demands (see `check_pattern_scans`).
+    //
+    // [OPUS-5] #5240: stage 2b′ last — a variable repeated WITHIN one BGP pattern
+    // (`{ ?v <p> ?v }`) constrains the two disclosed columns to be EQUAL, which no
+    // other gate enforced: `scan_matches_pattern` compares only const-ness and the
+    // constant encodings, and every shared-variable gate (`recheck` /
+    // `join_obligations` on the disclosed path, `bind_joins` on the hidden path)
+    // works across pattern PAIRS and so cannot see a within-pattern repeat. Placed
+    // AFTER the gates above so their (already-pinned) error precedence is unchanged.
     if !skip_query_binding {
+        check_pattern_scans(manifest)?;
         bind_query_correctness(manifest)?;
+        bind_repeated_pattern_slots(manifest)?;
     }
 
     // --- Stage 2e: cross-graph attribution binding (audit #8). ---
@@ -2596,9 +3091,7 @@ fn bind_issuer_attestations(
             // clear-index (audit #12) and committed-index paths and recomputes the
             // issuer-signed `status_ref` over the disclosed value the issuer signed
             // (clear index OR index commitment).
-            let list_id_fr = status_list_id_to_field(&rev.status_list);
-            let (status_ref, _mode) =
-                resolve_status_ref(rev, att_status, &list_id_fr, &c.0)?;
+            let (status_ref, _mode) = resolve_status_ref(rev, att_status, &c.0)?;
             // [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): select the signed-message
             // variant from the attestation's OPTIONAL fields. A HOLDER-BOUND
             // attestation (the issuer folded a holder-key digest into the signature,
@@ -2735,6 +3228,12 @@ enum StatusRefMode {
     /// `status_ref_commit_digest(list, index_commitment, version)`; liveness is the
     /// hidden-index proof cross-bound to that commitment.
     Committed,
+    /// [OPUS-5] sq-kndw: FULLY-COMMITTED (fully-hidden). The issuer signed
+    /// `status_ref_fully_committed_digest(ref_commitment, index_commitment)`, which
+    /// folds NEITHER a clear list id NOR a clear version — both are committed
+    /// inside `ref_commitment`. Liveness is the fully-hidden proof, cross-bound to
+    /// BOTH commitments and to the relying party's accepted-set anchor.
+    FullyCommitted,
 }
 
 /// Resolve the issuer-signed `status_ref` field element AND the disclosure mode
@@ -2747,23 +3246,80 @@ enum StatusRefMode {
 ///   what audit #12 did; the committed path recomputes the digest over the disclosed
 ///   `index_commitment` (which the issuer signed, never the clear index).
 ///
-/// Returns `(status_ref_fr, mode)`. `list_id_fr` is the caller-hashed list IRI.
+/// [OPUS-5] sq-kndw: the fully-hidden mode is the THIRD arm. The ATTESTED
+/// reference must be EXACTLY one of clear `index` / committed `index_commitment` /
+/// fully-committed `ref_commitment + index_commitment`, and the DISCLOSED `rev`
+/// must present the SAME mode with the SAME values. In the fully-hidden arm the
+/// digest is [`status_ref_fully_committed_digest`], which folds neither the list id
+/// nor the version — so `rev.status_list` / `rev.version` MUST be absent (a
+/// disclosed IRI or version alongside a fully-hidden reference is a mode
+/// disagreement, rejected: it would be a leak the signature does not cover).
+///
+/// Returns `(status_ref_fr, mode)`.
 // [OPUS-4.8] sq-ayv: mode-aware status-reference resolution.
+// [OPUS-5] sq-kndw: + the fully-hidden (IRI + version committed) mode.
 fn resolve_status_ref(
     rev: &crate::manifest::RevocationStatus,
     att_status: &crate::manifest::AttestedStatusRef,
-    list_id_fr: &Fr,
     commitment_hex: &str,
 ) -> Result<(Fr, StatusRefMode), CheckError> {
-    let att_committed = att_status.index_commitment.is_some();
+    let mode_invalid = || CheckError::RevocationReferenceModeInvalid {
+        commitment: commitment_hex.to_string(),
+    };
+    let mismatch = || CheckError::RevocationReferenceMismatch {
+        commitment: commitment_hex.to_string(),
+    };
+
+    let att_fully = att_status.ref_commitment.is_some();
+    let att_committed = att_status.index_commitment.is_some() && !att_fully;
     let att_clear = att_status.index.is_some();
-    // The ATTESTED reference must be EXACTLY one mode.
-    if att_committed == att_clear {
-        return Err(CheckError::RevocationReferenceModeInvalid {
-            commitment: commitment_hex.to_string(),
-        });
+    // The ATTESTED reference must be EXACTLY one mode. (`att_fully` implies
+    // `index_commitment` too, so it is checked as its own arm first.)
+    if att_fully {
+        if att_clear {
+            return Err(mode_invalid());
+        }
+    } else if att_committed == att_clear {
+        return Err(mode_invalid());
     }
-    if att_committed {
+
+    if att_fully {
+        // [OPUS-5] sq-kndw: FULLY-HIDDEN. The issuer signed only the two
+        // commitments; the list IRI and the version live inside `ref_commitment`.
+        let att_rc_hex = att_status.ref_commitment.as_ref().expect("att_fully");
+        // The attestation must carry BOTH commitments — the digest folds both, and
+        // an index-commitment-less fully-hidden reference has nothing to bind the
+        // proven-unset index to.
+        let Some(att_ic_hex) = att_status.index_commitment.as_ref() else {
+            return Err(mode_invalid());
+        };
+        // The DISCLOSED reference must be in the same mode: both commitments
+        // present, and NOTHING clear (no IRI, no index, no version). Disclosing any
+        // of those would defeat the mode and is not covered by the signature.
+        let (Some(rev_rc), Some(rev_ic)) = (&rev.ref_commitment, &rev.index_commitment) else {
+            return Err(mode_invalid());
+        };
+        if rev.index.is_some() || rev.status_list.is_some() || rev.version.is_some() {
+            return Err(mode_invalid());
+        }
+        // The attestation must likewise withhold the version (it is not folded into
+        // the digest, so a value there would be unbound metadata).
+        if att_status.version.is_some() {
+            return Err(mode_invalid());
+        }
+        // Compare as field elements so 0x-padding cannot slip a different value past.
+        let (Some(att_rc_fr), Some(rev_rc_fr)) = (att_rc_hex.to_field(), rev_rc.to_field()) else {
+            return Err(mode_invalid());
+        };
+        let (Some(att_ic_fr), Some(rev_ic_fr)) = (att_ic_hex.to_field(), rev_ic.to_field()) else {
+            return Err(mode_invalid());
+        };
+        if att_rc_fr != rev_rc_fr || att_ic_fr != rev_ic_fr {
+            return Err(mismatch());
+        }
+        let status_ref = status_ref_fully_committed_digest(&att_rc_fr, &att_ic_fr);
+        Ok((status_ref, StatusRefMode::FullyCommitted))
+    } else if att_committed {
         // Committed-index (sq-ayv). The disclosed reference must withhold the clear
         // index AND disclose a matching commitment + version.
         let att_ic_hex = att_status
@@ -2771,53 +3327,55 @@ fn resolve_status_ref(
             .as_ref()
             .expect("att_committed");
         let Some(rev_ic) = &rev.index_commitment else {
-            return Err(CheckError::RevocationReferenceModeInvalid {
-                commitment: commitment_hex.to_string(),
-            });
+            return Err(mode_invalid());
         };
         // A disclosed clear index alongside a committed reference is a mode
-        // disagreement (the index must be withheld on the committed path).
-        if rev.index.is_some() {
-            return Err(CheckError::RevocationReferenceModeInvalid {
-                commitment: commitment_hex.to_string(),
-            });
+        // disagreement (the index must be withheld on the committed path); so is a
+        // disclosed ref_commitment (that is the fully-hidden mode's field).
+        if rev.index.is_some() || rev.ref_commitment.is_some() {
+            return Err(mode_invalid());
         }
+        // The committed path still binds a CLEAR list IRI + version, so both must be
+        // disclosed (a `None` version is NOT defaulted to 0 — that would silently
+        // drop the freshness anchor).
+        let (Some(list), Some(rev_version), Some(att_version)) =
+            (&rev.status_list, rev.version, att_status.version)
+        else {
+            return Err(mode_invalid());
+        };
         // The disclosed commitment must equal the issuer-signed one (compare as
         // field elements so 0x-padding cannot slip a different value past), and
         // the version must match.
         let (Some(att_ic_fr), Some(rev_ic_fr)) = (att_ic_hex.to_field(), rev_ic.to_field())
         else {
-            return Err(CheckError::RevocationReferenceModeInvalid {
-                commitment: commitment_hex.to_string(),
-            });
+            return Err(mode_invalid());
         };
-        if att_ic_fr != rev_ic_fr || rev.version != att_status.version {
-            return Err(CheckError::RevocationReferenceMismatch {
-                commitment: commitment_hex.to_string(),
-            });
+        if att_ic_fr != rev_ic_fr || rev_version != att_version {
+            return Err(mismatch());
         }
-        let status_ref = status_ref_commit_digest(list_id_fr, &att_ic_fr, att_status.version);
+        let list_id_fr = status_list_id_to_field(list);
+        let status_ref = status_ref_commit_digest(&list_id_fr, &att_ic_fr, att_version);
         Ok((status_ref, StatusRefMode::Committed))
     } else {
         // Clear-index (audit #12), unchanged. The disclosed reference must carry the
         // same clear index + version and NOT carry a commitment.
         let att_index = att_status.index.expect("att_clear");
         let Some(rev_index) = rev.index else {
-            return Err(CheckError::RevocationReferenceMismatch {
-                commitment: commitment_hex.to_string(),
-            });
+            return Err(mismatch());
         };
-        if rev.index_commitment.is_some() {
-            return Err(CheckError::RevocationReferenceModeInvalid {
-                commitment: commitment_hex.to_string(),
-            });
+        if rev.index_commitment.is_some() || rev.ref_commitment.is_some() {
+            return Err(mode_invalid());
         }
-        if rev_index != att_index || rev.version != att_status.version {
-            return Err(CheckError::RevocationReferenceMismatch {
-                commitment: commitment_hex.to_string(),
-            });
+        let (Some(list), Some(rev_version), Some(att_version)) =
+            (&rev.status_list, rev.version, att_status.version)
+        else {
+            return Err(mode_invalid());
+        };
+        if rev_index != att_index || rev_version != att_version {
+            return Err(mismatch());
         }
-        let status_ref = status_ref_digest(list_id_fr, rev_index, att_status.version);
+        let list_id_fr = status_list_id_to_field(list);
+        let status_ref = status_ref_digest(&list_id_fr, rev_index, att_version);
         Ok((status_ref, StatusRefMode::Clear))
     }
 }
@@ -2896,10 +3454,15 @@ fn resolve_status_ref(
 /// always-on soundness floor); a relying party that does not need index-hiding can
 /// keep using it.
 ///
-/// HONEST REMAINING DISCLOSURE: the status-list IRI and the `version` are still
-/// disclosed in the clear (both issuer-bound); only the index + liveness bit are
-/// hidden on the committed path. Closing the IRI/version leak is sq-6qe (a new
-/// committed-reference circuit + sig path; see `research/zk-statuslist-hide-iri-version.md`).
+/// HONEST REMAINING DISCLOSURE ON *THIS* PATH: on the committed-index path the
+/// status-list IRI and the `version` are still disclosed in the clear (both
+/// issuer-bound); only the index + liveness bit are hidden.
+/// [OPUS-5] sq-kndw: that leak is now CLOSED by the THIRD mode — a FULLY-HIDDEN
+/// reference (`ref_commitment` present; `status_list` / `index` / `version` all
+/// `None`) discloses none of them, and this function routes it to
+/// [`bind_fully_hidden_revocation`] instead of resolving a snapshot by name. The
+/// committed-index path below is UNCHANGED and remains available for relying
+/// parties that do not need IRI/version hiding.
 /// [OPUS-4.8] sq-hwe: the host Merkle builder is now SPARSE
 /// ([`crate::revocation::merkle_root`]) — `O(set-bits * depth)`, independent of
 /// `2^depth` — so it no longer bounds the list size; the remaining size bound is
@@ -2919,24 +3482,74 @@ fn bind_revocation(
         // is in question — the check is vacuously satisfied.
         return Ok(());
     };
+    // [OPUS-5] sq-kndw: FULLY-HIDDEN reference. There is no clear `(list, version)`
+    // to resolve a snapshot by — that is the whole point of the mode — so the
+    // snapshot-shaped checks below cannot run and MUST NOT be skipped silently.
+    // Everything they would have established is instead established by
+    // `bind_fully_hidden_revocation` (bb stage) against the relying party's
+    // accepted-set anchor:
+    //   * freshness  -> membership is restricted to the policy's freshness-curated
+    //                   window (`accepted_entries`), plus the in-circuit
+    //                   `version >= min_version` on the policy's own public floor;
+    //   * authenticity of the liveness view -> the status-list root the fold runs
+    //                   against is bound INSIDE the accepted-set leaf, and that
+    //                   leaf's tree root is derived by the relying party from its
+    //                   OWN snapshots;
+    //   * bit-unset  -> the in-circuit `bit == 0` assertion.
+    // So here we only enforce the fail-closed structural requirement: the proof
+    // must be present. Its absence is never a silent skip.
+    if rev.ref_commitment.is_some() {
+        // A fully-hidden reference must not ALSO disclose the clear fields (the
+        // signature does not cover them in this mode). `resolve_status_ref` already
+        // enforces this for every scan-covering commitment; repeat it here so a
+        // `revocation` with no scan covering it cannot smuggle a half-hidden shape.
+        if rev.index.is_some() || rev.status_list.is_some() || rev.version.is_some() {
+            return Err(CheckError::RevocationReferenceModeInvalid {
+                commitment: String::new(),
+            });
+        }
+        if rev.index_commitment.is_none() {
+            return Err(CheckError::RevocationReferenceModeInvalid {
+                commitment: String::new(),
+            });
+        }
+        if manifest.fully_hidden_revocation.is_none() {
+            return Err(CheckError::FullyHiddenRevocationRequired);
+        }
+        // DISCLOSURE FLOOR: a prover snapshot names its (list, version) in the
+        // clear. On this mode it is both useless (the gate reads the relying
+        // party's own curated snapshots) and self-defeating, so it is refused
+        // rather than ignored — a silently-ignored leak is still a leak.
+        if !manifest.status_snapshots.is_empty() {
+            return Err(CheckError::FullyHiddenRevocationSnapshotDisclosed);
+        }
+        return Ok(());
+    }
+    // A fully-hidden PROOF without a fully-hidden REFERENCE has no issuer-signed
+    // commitments to bind to — reject rather than leave it unchecked.
+    if manifest.fully_hidden_revocation.is_some() {
+        return Err(CheckError::FullyHiddenRevocationUnbound);
+    }
+    // The clear + committed paths both bind a CLEAR list IRI and version. A `None`
+    // in either is a malformed mode — NOT a default-to-0/empty, which would drop
+    // the freshness anchor or resolve the wrong snapshot.
+    let (Some(list), Some(version)) = (rev.status_list.clone(), rev.version) else {
+        return Err(CheckError::RevocationReferenceModeInvalid {
+            commitment: String::new(),
+        });
+    };
     // Freshness FIRST, on the (issuer-bound) reference's version: a stale (or
     // future-dated) reference is rejected so a revoked-since-snapshot credential
     // cannot slip through on an old "active" view, regardless of whether the
     // relying party still holds that old version's snapshot.
-    if !policy.is_fresh(rev.version) {
-        return Err(CheckError::StatusListStale {
-            status_list: rev.status_list.clone(),
-            version: rev.version,
-        });
+    if !policy.is_fresh(version) {
+        return Err(CheckError::StatusListStale { status_list: list, version });
     }
     // Resolve the AUTHORITATIVE snapshot from the relying party's policy (NOT the
     // prover). No authoritative snapshot for the referenced (list, version) =>
     // the verifier cannot authenticate the liveness view => REJECT fail-closed.
-    let Some(authoritative) = policy.authoritative_snapshot(&rev.status_list, rev.version) else {
-        return Err(CheckError::StatusSnapshotMissing {
-            status_list: rev.status_list.clone(),
-            version: rev.version,
-        });
+    let Some(authoritative) = policy.authoritative_snapshot(&list, version) else {
+        return Err(CheckError::StatusSnapshotMissing { status_list: list, version });
     };
     // [OPUS-4.8] sq-ayv: the index-disclosure mode. A COMMITTED-index reference
     // (clear index withheld, `index_commitment` present) MOVES the liveness
@@ -2964,10 +3577,7 @@ fn bind_revocation(
             // reads the relying party's OWN authenticated bytes, so the verdict is
             // identical regardless of what snapshot the prover attached.
             if authoritative.bit(index) {
-                return Err(CheckError::CredentialRevoked {
-                    status_list: rev.status_list.clone(),
-                    index,
-                });
+                return Err(CheckError::CredentialRevoked { status_list: list.clone(), index });
             }
         }
         _ => {
@@ -2975,9 +3585,7 @@ fn bind_revocation(
             // attestation-side check `resolve_status_ref` already enforces the mode
             // for status-bound scans; this guards a `revocation` with no scan
             // covering it, fail-closed.)
-            return Err(CheckError::RevocationReferenceModeInvalid {
-                commitment: rev.status_list.clone(),
-            });
+            return Err(CheckError::RevocationReferenceModeInvalid { commitment: list });
         }
     }
     // Tamper tripwire: the authoritative bit is UNSET, but if the prover ALSO
@@ -2995,12 +3603,9 @@ fn bind_revocation(
     if manifest
         .status_snapshots
         .iter()
-        .any(|s| s.status_list == rev.status_list && s.version == rev.version && s.bits != authoritative.bits)
+        .any(|s| s.status_list == list && s.version == version && s.bits != authoritative.bits)
     {
-        return Err(CheckError::StatusSnapshotTampered {
-            status_list: rev.status_list.clone(),
-            version: rev.version,
-        });
+        return Err(CheckError::StatusSnapshotTampered { status_list: list, version });
     }
     Ok(())
 }
@@ -3055,7 +3660,9 @@ fn bind_revocation(
 /// 1024 indices) is COMPILED — the circuit relation is depth-generic, so compiling
 /// a deeper member is mechanical (tracked as follow-up). The soundness of the
 /// binding (root equality + bb verify + in-circuit bit-unset) holds at any supported
-/// depth. The status-list IRI + version are still disclosed in the clear (sq-6qe).
+/// depth. The status-list IRI + version are still disclosed in the clear on THIS
+/// (committed-index) path; [OPUS-5] sq-kndw hides them too on the fully-hidden path
+/// ([`bind_fully_hidden_revocation`]).
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation cryptographic gate.
 fn bind_hidden_revocation(
     manifest: &ProofManifest,
@@ -3086,18 +3693,30 @@ fn bind_hidden_revocation(
     let Some(rev) = &manifest.revocation else {
         return Ok(());
     };
-    let Some(authoritative) = policy.authoritative_snapshot(&rev.status_list, rev.version) else {
+    // [OPUS-5] sq-kndw: this gate is the COMMITTED-index one and needs a clear
+    // `(list, version)` to name the snapshot. A fully-hidden reference has neither
+    // (by design) and is handled by `bind_fully_hidden_revocation`; `bind_revocation`
+    // has already required that mode to carry its own proof, so refusing here is
+    // fail-closed, not a skip. A `hidden_revocation` proof attached to a
+    // fully-hidden reference has no clear root to bind to and is rejected.
+    let (Some(list), Some(version)) = (rev.status_list.as_deref(), rev.version) else {
         return Err(CheckError::HiddenRevocationRootUnavailable {
-            status_list: rev.status_list.clone(),
-            version: rev.version,
+            status_list: String::new(),
+            version: 0,
+        });
+    };
+    let Some(authoritative) = policy.authoritative_snapshot(list, version) else {
+        return Err(CheckError::HiddenRevocationRootUnavailable {
+            status_list: list.to_string(),
+            version,
         });
     };
     // Derive the AUTHORITATIVE root from the relying party's OWN snapshot (the
     // trust anchor). This is what the proof's public root must equal.
     let Some(auth_root) = merkle_root(authoritative, depth) else {
         return Err(CheckError::HiddenRevocationRootUnavailable {
-            status_list: rev.status_list.clone(),
-            version: rev.version,
+            status_list: list.to_string(),
+            version,
         });
     };
     // The proof's declared public root must byte-equal the authoritative root. A
@@ -3179,6 +3798,232 @@ fn bind_hidden_revocation(
         return Err(CheckError::HiddenRevocationProofRejected);
     }
     Ok(())
+}
+
+/// [OPUS-5] sq-kndw: the FULLY-HIDDEN revocation cryptographic gate — the privacy
+/// upgrade over [`bind_hidden_revocation`], closing the sq-6qe status-list
+/// IRI + version disclosure. Implements
+/// `research/zk-statuslist-hide-iri-version.md` §3 sub-option A, verifier side.
+///
+/// # What it proves and what stays hidden
+/// The prover supplies a `revoke_hidden_ref_d{depth}_a{set_depth}` bb proof whose
+/// PUBLIC inputs are the verifier's `challenge`, the issuer-signed
+/// `ref_commitment` and `index_commitment`, the relying party's
+/// `accepted_set_root`, and its public `min_version` floor. Everything else — the
+/// list id, the version, both blindings, the status-list Merkle root, the
+/// accepted-set slot and path, the holder's index, the leaf bit and the
+/// status-list path — is PRIVATE. So the relying party learns only:
+///
+/// > "some `(list, version)` in MY committed accepted set, at or above MY public
+/// > epoch floor, has the index the issuer committed to for this credential
+/// > UNSET."
+///
+/// It learns neither WHICH list, WHICH publication epoch, WHICH slot, nor the
+/// liveness bit of any other credential.
+///
+/// # Trust anchor (the audit-#12 anchor, moved behind a commitment — load-bearing)
+/// `accepted_set_root` and `min_version` are prover-committed public inputs but
+/// are NOT trusted as claims. Both are derived from the relying party's OWN
+/// [`RevocationPolicy`]: the accepted-set root over its freshness-curated
+/// `(list, version, status_list_root)` entries, and its own epoch floor. The
+/// declared values are byte-matched, and then the public-input vector fed to `bb`
+/// is rebuilt from the verifier's OWN values (never the prover's bytes) — the same
+/// discipline the clear and committed-index gates use. A prover that proves
+/// membership in its OWN forged accepted set fails the equality.
+///
+/// Crucially, each accepted-set leaf binds `(list_id, version, status_list_root)`
+/// ATOMICALLY, so the `status_list_root` the in-circuit bit-unset fold runs against
+/// is the one the RELYING PARTY published for that hidden `(list, version)` — a
+/// prover cannot pair list₁'s identity with list₂'s (all-zero) root. That is what
+/// lets the root stay private without losing the audit-#12 re-audit fix.
+///
+/// # Freshness survives the move behind the commitment
+/// [`RevocationPolicy::accepted_entries`] only admits versions inside
+/// `[min_version, now]`, so a stale or future-dated version is not a leaf and no
+/// membership proof exists for it. The in-circuit `version >= min_version` is
+/// defence-in-depth on top of that, not the only check.
+///
+/// # Re-blinding / linkage single-use (the privacy guarantee depends on it)
+/// `(ref_commitment, index_commitment)` is a stable per-issuance pair. Presenting
+/// it twice hands the relying party a perfect correlation handle and voids the
+/// whole point of the mode (design §4). This gate therefore records a
+/// DOMAIN-SEPARATED linkage tag `h3(ZKLINK, ref_commitment, index_commitment)` in
+/// the same durable [`SeenNonces`] store the audit-#4 nonce replay defence uses,
+/// and rejects a repeat with [`CheckError::FullyHiddenRevocationLinkageReplay`].
+/// The tag is a Poseidon2 image under a tag distinct from every `ZKSIG_*` /
+/// verifier-nonce value, so it can never collide with a real nonce.
+///
+/// HONEST LIMIT: single-use enforcement only helps against an HONEST relying
+/// party — a malicious one simply skips it, and has already observed the pair. The
+/// real fix is upstream (the issuer re-signs freshly-blinded commitments per
+/// presentation, or a re-randomisable commitment+signature scheme sparq does not
+/// implement). It is enforced anyway because it makes the requirement operational
+/// rather than advisory, and turns silent linkability into a visible rejection.
+///
+/// # Fail-closed
+/// - No `manifest.fully_hidden_revocation` => nothing to check here; the reference
+///   modes that need it already required it in [`bind_revocation`]. `Ok`.
+/// - A proof with no fully-hidden reference => `FullyHiddenRevocationUnbound`
+///   (also caught structurally upstream).
+/// - Path not enabled / no derivable anchor => `FullyHiddenRevocationNotEnabled`.
+/// - Depth mismatch or an uncompiled member => `FullyHiddenRevocationDepthMismatch`.
+/// - Anchor, commitment, linkage, blob, or bb failure => the named error.
+///
+/// NOT externally audited (sq-qhy4). Research-grade; no soundness / ZK-privacy
+/// property is asserted as achieved.
+// [OPUS-5] sq-kndw: fully-hidden revocation cryptographic gate.
+fn bind_fully_hidden_revocation(
+    manifest: &ProofManifest,
+    policy: &RevocationPolicy,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    challenge: &FieldHex,
+    seen: &dyn SeenNonces,
+) -> Result<(), CheckError> {
+    let Some(fh) = &manifest.fully_hidden_revocation else {
+        return Ok(());
+    };
+    // The ISSUER-SIGNED commitments are the trust anchor for the cross-binding —
+    // taken from `manifest.revocation` (validated under the issuer signature by
+    // `bind_issuer_attestations` / `resolve_status_ref`), never the prover's
+    // declared copies in `fh`.
+    let Some(rev) = &manifest.revocation else {
+        return Err(CheckError::FullyHiddenRevocationUnbound);
+    };
+    let (Some(rc_hex), Some(ic_hex)) = (&rev.ref_commitment, &rev.index_commitment) else {
+        return Err(CheckError::FullyHiddenRevocationUnbound);
+    };
+    let (Some(auth_ref_commitment), Some(auth_index_commitment)) =
+        (rc_hex.to_field(), ic_hex.to_field())
+    else {
+        return Err(CheckError::FullyHiddenRevocationMalformedProof);
+    };
+
+    // The relying party must have OPTED IN to both halves of the anchor: the
+    // status-list depth (each accepted entry's root is derived at it) and the
+    // accepted-set depth (the tree those entries are folded into).
+    let (Some(depth), Some(set_depth)) = (policy.hidden_index_depth(), policy.accepted_set_depth())
+    else {
+        return Err(CheckError::FullyHiddenRevocationNotEnabled);
+    };
+    // The declared depths must match the policy AND name a COMPILED member —
+    // `derive_revoke_hidden_ref_id` is the single source of the family list, so an
+    // unbuilt (depth, set_depth) is a clean refusal, not a proof attempt against a
+    // circuit that does not exist.
+    let depth_mismatch = || CheckError::FullyHiddenRevocationDepthMismatch {
+        declared_depth: fh.depth,
+        declared_set_depth: fh.set_depth,
+        policy_depth: depth,
+        policy_set_depth: set_depth,
+    };
+    if fh.depth != depth || fh.set_depth != set_depth {
+        return Err(depth_mismatch());
+    }
+    let Some(id) = crate::build::derive_revoke_hidden_ref_id(depth, set_depth) else {
+        return Err(depth_mismatch());
+    };
+
+    // Derive BOTH public anchors from the relying party's own curated policy.
+    let Some(auth_accepted_root) = policy.accepted_set_root() else {
+        return Err(CheckError::FullyHiddenRevocationNotEnabled);
+    };
+    let auth_min_version = policy.min_version();
+    // The declared values must byte-equal ours (field comparison so 0x-padding
+    // cannot slip a different value past). We then feed OUR values to bb.
+    let Some(declared_root) = fh.accepted_set_root.to_field() else {
+        return Err(CheckError::FullyHiddenRevocationMalformedProof);
+    };
+    if declared_root != auth_accepted_root || fh.min_version != auth_min_version {
+        return Err(CheckError::FullyHiddenRevocationAnchorMismatch);
+    }
+    // The declared commitments must byte-equal the ISSUER-SIGNED ones.
+    let (Some(declared_rc), Some(declared_ic)) =
+        (fh.ref_commitment.to_field(), fh.index_commitment.to_field())
+    else {
+        return Err(CheckError::FullyHiddenRevocationMalformedProof);
+    };
+    if declared_rc != auth_ref_commitment || declared_ic != auth_index_commitment {
+        return Err(CheckError::FullyHiddenRevocationCommitmentMismatch);
+    }
+
+    // Re-blinding enforcement: the (ref_commitment, index_commitment) pair is
+    // single-use. Recorded BEFORE the bb call, mirroring the audit-#4 nonce
+    // burn-on-presentation policy — a rejected presentation must not be a free
+    // retry that lets an attacker probe with the same linkage handle.
+    let linkage = VerifierNonce::from_field(linkage_tag(
+        &auth_ref_commitment,
+        &auth_index_commitment,
+    ));
+    if !seen.record_fresh(&linkage) {
+        return Err(CheckError::FullyHiddenRevocationLinkageReplay);
+    }
+
+    let blob =
+        hex_decode(&fh.proof_hex).ok_or(CheckError::FullyHiddenRevocationMalformedProof)?;
+    let art = decode_artifacts(&blob).ok_or(CheckError::FullyHiddenRevocationMalformedProof)?;
+
+    // Public-input layout for revoke_hidden_ref_d{depth}_a{set_depth} main, in
+    // DECLARATION order: challenge, ref_commitment, index_commitment,
+    // accepted_set_root, min_version — five 32-byte BE field words (the `u64`
+    // `min_version` is a field element in the ACIR public-input vector like every
+    // other input; `full_manifest_fully_hidden_revocation` pins this empirically
+    // against a real bb proof).
+    let challenge_fr = challenge
+        .to_field()
+        .ok_or(CheckError::FullyHiddenRevocationMalformedProof)?;
+    let mut reconstructed: Vec<u8> = Vec::with_capacity(160);
+    reconstructed.extend_from_slice(&field_to_be_bytes_32(&challenge_fr));
+    reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_ref_commitment));
+    reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_index_commitment));
+    reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_accepted_root));
+    reconstructed.extend_from_slice(&field_to_be_bytes_32(&Fr::from(auth_min_version)));
+    if reconstructed != art.public_inputs {
+        // Diagnose WHICH word diverged, so a genuine misconfiguration is not
+        // reported as a forgery (and vice versa). A wrong arity is malformed.
+        let pi = &art.public_inputs;
+        if pi.len() != 160 {
+            return Err(CheckError::FullyHiddenRevocationMalformedProof);
+        }
+        if pi[0..32] != field_to_be_bytes_32(&challenge_fr) {
+            // The proof commits a DIFFERENT challenge than this verifier's nonce
+            // (the manifest's declared binding was already checked equal to the
+            // nonce upstream) — a proof minted for another session.
+            return Err(CheckError::FullyHiddenRevocationProofRejected);
+        }
+        if pi[32..64] != field_to_be_bytes_32(&auth_ref_commitment)
+            || pi[64..96] != field_to_be_bytes_32(&auth_index_commitment)
+        {
+            return Err(CheckError::FullyHiddenRevocationCommitmentMismatch);
+        }
+        // Remaining: the accepted-set root and/or the epoch floor.
+        return Err(CheckError::FullyHiddenRevocationAnchorMismatch);
+    }
+
+    let sub_work = work_dir.join("fully_hidden_revocation");
+    let canonical_vk = prover
+        .canonical_vk(&id, &sub_work.join("vk"))
+        .map_err(CheckError::Driver)?;
+    let ok = prover
+        .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+        .map_err(CheckError::Driver)?;
+    if !ok {
+        return Err(CheckError::FullyHiddenRevocationProofRejected);
+    }
+    Ok(())
+}
+
+/// [OPUS-5] sq-kndw: the DOMAIN-SEPARATED single-use tag for a fully-hidden
+/// revocation presentation's `(ref_commitment, index_commitment)` linkage handle.
+///
+/// `Poseidon2([ZKLINK, ref_commitment, index_commitment])`. The tag
+/// (`0x5a4b_4c49_4e4b_5f31` = `"ZKLINK_1"`) is distinct from every `ZKSIG_*`
+/// domain in [`sparq_zk::sig`], and the value is a Poseidon2 IMAGE, so recording
+/// it in the shared [`SeenNonces`] store cannot collide with (or burn) a real
+/// verifier nonce except with negligible probability.
+// [OPUS-5] sq-kndw: re-blinding / linkage single-use tag.
+fn linkage_tag(ref_commitment: &Fr, index_commitment: &Fr) -> Fr {
+    const DOMAIN_LINKAGE: u64 = 0x5a4b_4c49_4e4b_5f31; // "ZKLINK_1"
+    sparq_zk::poseidon2::hash(&[Fr::from(DOMAIN_LINKAGE), *ref_commitment, *index_commitment])
 }
 
 /// Stage 3b (sq-z9l): the HIDDEN-ISSUER attestation cryptographic gate — the
@@ -3673,7 +4518,19 @@ fn bind_holder_set(
 /// preferred when present (the additive mode); the hidden entry's salt is the
 /// fallback so a commitment with no clear attestation can still have its `m`
 /// recomputed. `None` if neither source supplies a parseable salt.
+///
+/// # Disclosure posture (sq-93h, assessed)
+/// Every salt this can return belongs to a commitment the presentation ALREADY
+/// discloses in the clear (a scan's `commitments[g]`, byte-bound into the bb public
+/// inputs by [`reconstruct_public_inputs`]), so the salt is a DOMINATED correlator and
+/// withholding it behind an in-circuit salt-commitment would buy no unlinkability. That
+/// conclusion is conditional on TWO things: `C(G)` staying public — pinned on the real
+/// paths by `tests::hidden_only_salt_disclosure_is_dominated_by_the_clear_commitment` —
+/// and the audit-#9 ISSUANCE discipline that no salt is reused for two distinct graphs,
+/// of which only the within-manifest instance (`SaltReused`) is machine-checked. Argued
+/// in `research/zk-hidden-path-salt-disclosure.md`.
 // [OPUS-4.8] sq-xxg: salt source for hidden-only message reconstruction.
+// [OPUS-5] sq-93h: disclosure assessed NO-BUILD; the trip-wire guards the premise.
 fn resolve_commitment_salt(manifest: &ProofManifest, c_fr: &Fr) -> Option<Fr> {
     // Prefer the clear attestation's salt (the original sq-z9l additive path).
     if let Some(att) = manifest.commitment_attestations.iter().find(|a| {
@@ -3713,11 +4570,10 @@ fn scan_referenced_messages(
         // path requires the same issuer-bound reference the clear path does.
         return Ok(out);
     };
-    let list_id_fr = status_list_id_to_field(&rev.status_list);
     // [OPUS-4.8] sq-ayv: derive the status reference in the mode the credential
-    // uses (clear index OR committed index), matching the message
-    // `bind_issuer_attestations` verified the issuer signature over.
-    let Some(status_ref) = status_ref_from_revocation(rev, &list_id_fr) else {
+    // uses (clear index, committed index, or [OPUS-5] sq-kndw fully hidden),
+    // matching the message `bind_issuer_attestations` verified the signature over.
+    let Some(status_ref) = status_ref_from_revocation(rev) else {
         return Ok(out);
     };
     for sp in &manifest.sub_proofs {
@@ -3741,23 +4597,42 @@ fn scan_referenced_messages(
 /// commitment). The disclosed reference has ALREADY been cross-checked against the
 /// issuer signature by `bind_issuer_attestations`, so deriving from it here yields
 /// the genuine issuer-signed message.
+///
+/// [OPUS-5] sq-kndw: the FULLY-HIDDEN mode is the third arm —
+/// [`status_ref_fully_committed_digest`] over the two commitments, folding neither
+/// the list id nor the version. It is matched FIRST because a fully-hidden
+/// reference also carries an `index_commitment`, and it hashes the list IRI itself
+/// (there is none to hash on that path).
 // [OPUS-4.8] sq-ayv.
-fn status_ref_from_revocation(
-    rev: &crate::manifest::RevocationStatus,
-    list_id_fr: &Fr,
-) -> Option<Fr> {
+// [OPUS-5] sq-kndw: + the fully-hidden arm.
+fn status_ref_from_revocation(rev: &crate::manifest::RevocationStatus) -> Option<Fr> {
+    // FULLY-HIDDEN first: no clear list/version, both commitments present.
+    if let Some(rc_hex) = &rev.ref_commitment {
+        if rev.index.is_some() || rev.status_list.is_some() || rev.version.is_some() {
+            return None;
+        }
+        let rc = rc_hex.to_field()?;
+        let ic = rev.index_commitment.as_ref()?.to_field()?;
+        return Some(status_ref_fully_committed_digest(&rc, &ic));
+    }
+    // The clear + committed paths both bind a clear list IRI and version.
+    let list_id_fr = status_list_id_to_field(rev.status_list.as_deref()?);
+    let version = rev.version?;
     match (rev.index, &rev.index_commitment) {
-        (Some(index), None) => Some(status_ref_digest(list_id_fr, index, rev.version)),
+        (Some(index), None) => Some(status_ref_digest(&list_id_fr, index, version)),
         (None, Some(ic_hex)) => ic_hex
             .to_field()
-            .map(|ic| status_ref_commit_digest(list_id_fr, &ic, rev.version)),
+            .map(|ic| status_ref_commit_digest(&list_id_fr, &ic, version)),
         _ => None,
     }
 }
 
 /// Normalize a hex key for set membership: strip an optional `0x` prefix and
 /// lowercase, so K-membership is representation-insensitive.
-fn normalize_hex(h: &str) -> String {
+// [OPUS-5] sq-rsd3v.6: `pub(crate)` so `sameas`'s canon-table re-check
+// normalizes encodings through the SAME function `bind_entailment` grounds
+// derivation antecedents with (one source of truth, no drift).
+pub(crate) fn normalize_hex(h: &str) -> String {
     h.strip_prefix("0x").unwrap_or(h).to_ascii_lowercase()
 }
 
@@ -3800,6 +4675,99 @@ fn scan_matches_pattern(inputs: &ProofInputs, consts: &[Option<oxrdf::Term>; 3])
     true
 }
 
+/// Stage 2a′: re-check a DECLARED [`ProofManifest::pattern_scans`] pattern→scan
+/// mapping. A no-op when the field is empty (the ordinary case).
+///
+/// # This gate only ADDS obligations — it never narrows one
+/// The declaration is a prover-authored reading of which scan answers which query
+/// BGP pattern. It is NOT consulted by [`bind_query_correctness`] or
+/// [`bind_attributions`]: both still resolve pattern→scan by constant MEMBERSHIP
+/// (`scan_matches_pattern`), so the sq-q9r5e / audit-L-1 rule stands unweakened —
+/// the FILTER must be discharged at EVERY slot the filtered variable occupies
+/// across EVERY pattern a scan matches by constants, whatever the prover declares.
+/// Declaring a mapping can therefore only ever cause an ADDITIONAL rejection
+/// here; it can never buy an acceptance the membership regime would refuse.
+///
+/// # Why it does not narrow (the round-2 review finding — READ THIS BEFORE WIRING IT IN)
+/// The obvious use of the declaration is to demand only the DECLARED answering
+/// scan's slots, removing the membership over-demand on same-constant-layout
+/// queries (`{ ?x <age> ?v . ?x <age> ?c }` — both patterns `(?, <age>, ?)`; see
+/// `research/zk-audit-gpt56-2026-07.md` L-1). That is UNSOUND as the manifest
+/// stands. SPARQL evaluates each pattern over EVERY compatible committed row, and
+/// the query text authorises no prover-chosen partition of the committed data, so
+/// a prover free to exclude a constant-compatible scan from a pattern can drop
+/// that scan's rows out of the pattern's FILTER and attribution obligations while
+/// still disclosing them. The checks below (total assignment: no empty entry, no
+/// dangling scan, no declared pair that contradicts the bb-bound constants) pin
+/// only that the declaration is a TOTAL map of scans to labels — they establish
+/// nothing about whether an excluded scan contributes to the claimed result.
+///
+/// Narrowing needs the missing piece: a claimed result row bound to the selected
+/// scan rows, with all shared-variable joins enforced, so that "this scan does not
+/// contribute" is a VERIFIED property rather than a prover assertion the consumer
+/// is asked to take on faith. The flat `ProofManifest` carries no such claimed
+/// result row, so that witness is NOT built here and
+/// the flat verifier keeps full constant-membership obligations, including the
+/// over-demand, and the honest same-layout manifest stays REJECTED
+/// (`pattern_scans_do_not_narrow_the_filter_obligation`).
+///
+/// # What IS checked when a declaration is present
+/// Exactly one entry per query pattern ([`CheckError::PatternScanArityMismatch`]);
+/// no empty entry ([`CheckError::PatternScanUnbound`]); every named sub-proof in
+/// range, a scan, and with bb-bound `pattern_is_const`/`pattern_const_enc` that
+/// MATCH the pattern's constants ([`CheckError::PatternScanMismatch`], audit #10);
+/// and no scan sub-proof left undeclared
+/// ([`CheckError::PatternScanUndeclared`]). A declaration that survives all four
+/// is recorded metadata, nothing more.
+// [OPUS-5] sq-q9r5e follow-up: explicit pattern→scan mapping, validated but
+// deliberately NOT load-bearing. Research-grade, NOT externally audited (sq-qhy4).
+fn check_pattern_scans(manifest: &ProofManifest) -> Result<(), CheckError> {
+    if manifest.pattern_scans.is_empty() {
+        return Ok(());
+    }
+
+    let patterns = fragment_patterns(&manifest.query)?;
+    let consts = fragment_pattern_consts(&patterns);
+
+    if manifest.pattern_scans.len() != consts.len() {
+        return Err(CheckError::PatternScanArityMismatch {
+            patterns: consts.len(),
+            declared: manifest.pattern_scans.len(),
+        });
+    }
+
+    let mut declared_scans: BTreeSet<usize> = BTreeSet::new();
+    for (pi, decl) in manifest.pattern_scans.iter().enumerate() {
+        if decl.is_empty() {
+            return Err(CheckError::PatternScanUnbound { pattern: pi });
+        }
+        for &spi in decl {
+            // Out of range / not a scan / constants disagree all collapse to the
+            // same rejection: the declaration must not contradict the bb-bound
+            // pattern constants (audit #10).
+            let answers = manifest
+                .sub_proofs
+                .get(spi)
+                .is_some_and(|sp| scan_matches_pattern(&sp.inputs, &consts[pi]));
+            if !answers {
+                return Err(CheckError::PatternScanMismatch { pattern: pi, proof: spi });
+            }
+            declared_scans.insert(spi);
+        }
+    }
+
+    // No DANGLING scan: a declaration that discloses a scan's rows while naming it
+    // for no pattern is an incoherent reading, so it is rejected rather than
+    // recorded.
+    for (spi, sp) in manifest.sub_proofs.iter().enumerate() {
+        if matches!(sp.inputs, ProofInputs::Scan { .. }) && !declared_scans.contains(&spi) {
+            return Err(CheckError::PatternScanUndeclared { proof: spi });
+        }
+    }
+
+    Ok(())
+}
+
 /// Stage 2b/2c: bind every query BGP pattern's constants to a scan sub-proof
 /// (audit #10) and every query FILTER to a slot-bound, true-verdict
 /// `filter_int` sub-proof reached via a binding edge (audit #5/#6/#7).
@@ -3814,6 +4782,24 @@ fn scan_matches_pattern(inputs: &ProofInputs, consts: &[Option<oxrdf::Term>; 3])
 /// comparison-substitution); and (4) the filter's `expected == true` (audit
 /// #5/#6 — the verdict gates row inclusion; an `expected==false` row may not be
 /// presented as passing).
+///
+/// # EVERY slot, not the first (sq-q9r5e / audit L-1)
+/// A scan is matched to a query pattern by constant MEMBERSHIP, so ONE scan can
+/// answer SEVERAL patterns — and those patterns may place the filtered variable
+/// at DIFFERENT slots. The obligation is therefore per `(scan, row, slot)` over
+/// the FULL set of slots `?v` occupies across the patterns that scan answers,
+/// not the first such slot. Gating only the first accepted a manifest whose
+/// other disclosed ?v column was never proven against the FILTER (confirmed
+/// reachable; witness `filter_reject_ungated_second_slot_within_scan`).
+///
+/// This is deliberately FAIL-CLOSED on the pattern→scan ambiguity: where two
+/// patterns share a constant layout the verifier cannot tell which one a given
+/// scan was meant to answer, so it demands the FILTER be discharged for every
+/// slot that scan could be read at. A manifest that cannot supply those proofs
+/// is REJECTED rather than accepted on the strength of one of them. A prover's
+/// `manifest.pattern_scans` declaration does NOT relax this — see
+/// [`check_pattern_scans`] for why narrowing needs a verified result witness the
+/// flat manifest cannot yet express.
 ///
 /// A FILTER with no such edge ⇒ REJECT (audit #10 FILTER-add / a `filter_int`
 /// over the wrong operand). Stage 2 already enforced the edge's scanned-slot
@@ -3864,27 +4850,58 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
                 ProofInputs::Scan { rows, row_count, .. } => (rows, *row_count as usize),
                 _ => continue,
             };
-            // Is this scan the one that answers a pattern ?v binds in, and at
-            // which slot does ?v sit there?
-            let slot = positions.iter().find_map(|(pi, si)| {
-                consts
-                    .get(*pi)
-                    .filter(|c| scan_matches_pattern(&sp.inputs, c))
-                    .map(|_| *si)
-            });
-            let Some(slot) = slot else { continue };
+            // EVERY slot ?v sits at across EVERY query pattern this scan
+            // answers — not just the first.
+            //
+            // [OPUS-5] sq-q9r5e (audit L-1, `research/zk-audit-gpt56-2026-07.md`):
+            // this was a `find_map`, which took only the FIRST matching
+            // (pattern, slot) pair. Pattern→scan is resolved by constant
+            // MEMBERSHIP (`scan_matches_pattern`), not an explicit mapping, so
+            // ONE scan can answer SEVERAL query patterns — and when those
+            // patterns place the filtered variable at DIFFERENT slots (e.g. a
+            // `(?, P, ?)` scan answering both `(?s P ?v)` and `(?v P ?o)`),
+            // every one of those slots is a column the relying party reads ?v
+            // off. Gating only the first left the others ungated, so a row whose
+            // second-slot binding of ?v was never proven against the FILTER was
+            // presented as satisfying it (CONFIRMED reachable: the structural
+            // gate accepted such a manifest — witness
+            // `filter_reject_ungated_second_slot_within_scan` in `tests/e2e.rs`).
+            //
+            // Collecting ALL matching slots is the FAIL-CLOSED direction and
+            // matches the discipline `bind_attributions` already applies (it
+            // checks EVERY scan matching a pattern, never a first match). A
+            // BTreeSet dedups the case where two patterns place ?v at the same
+            // slot, and gives a deterministic order for the error path.
+            //
+            // [OPUS-5] sq-q9r5e follow-up: a `manifest.pattern_scans` declaration
+            // is deliberately NOT read here. Narrowing this set to the declared
+            // answering scan would let the prover drop a constant-compatible
+            // scan's rows out of the FILTER obligation on its own say-so; see
+            // `check_pattern_scans`.
+            let slots: BTreeSet<usize> = positions
+                .iter()
+                .filter(|(pi, _)| {
+                    consts.get(*pi).is_some_and(|c| scan_matches_pattern(&sp.inputs, c))
+                })
+                .map(|(_, si)| *si)
+                .collect();
+            if slots.is_empty() {
+                continue;
+            }
             any_scan_answered = true;
             // Every ACTIVE disclosed row must have a true-verdict filter_int
-            // edge at this slot with matching (op, bound).
+            // edge at EACH such slot with matching (op, bound).
             for row in 0..row_count.min(rows.len()) {
-                let gated = manifest.binding_edges.iter().any(|edge| {
-                    edge.from_proof == spi
-                        && edge.from_row == row
-                        && edge.from_slot == slot
-                        && filter_edge_true(manifest, edge.to_proof, *op, *bound)
-                });
-                if !gated {
-                    return Err(CheckError::UnboundFilter { variable: variable.clone() });
+                for &slot in &slots {
+                    let gated = manifest.binding_edges.iter().any(|edge| {
+                        edge.from_proof == spi
+                            && edge.from_row == row
+                            && edge.from_slot == slot
+                            && filter_edge_true(manifest, edge.to_proof, *op, *bound)
+                    });
+                    if !gated {
+                        return Err(CheckError::UnboundFilter { variable: variable.clone() });
+                    }
                 }
             }
         }
@@ -3893,6 +4910,112 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
             // that pattern: the FILTER cannot be discharged (FILTER-add on a
             // manifest missing the filtered pattern's scan).
             return Err(CheckError::UnboundFilter { variable: variable.clone() });
+        }
+    }
+    Ok(())
+}
+
+/// Stage 2b′: a variable repeated WITHIN a single query BGP pattern
+/// (`{ ?v <p> ?v }`) must bind ONE term, so every disclosed row of every scan that
+/// answers that pattern must carry EQUAL values at the repeated slots.
+///
+/// # Why this is not already covered (#5240)
+/// SPARQL evaluates a BGP by matching each pattern against the data with a single
+/// substitution, so a variable at two slots of one pattern constrains those two
+/// columns to be equal. Nothing in the flat manifest regime enforced that:
+///
+/// - [`scan_matches_pattern`] compares only per-slot CONST-NESS and the constant
+///   ENCODINGS. Both slots of `{ ?v <p> ?v }` are variables, so it accepts any
+///   `(?, <p>, ?)` scan regardless of what the rows hold.
+/// - The scan circuit binds each disclosed row's CONSTANT slots to
+///   `pattern_const_enc`; a variable slot is unconstrained by construction (that
+///   is what makes it a variable), so the in-circuit statement says nothing here.
+/// - The shared-variable gates all work CROSS-pattern and are therefore blind to
+///   it: `sparq_zk::verify::cross_graph_join_obligations` (the disclosed path,
+///   via [`recheck`]) iterates pattern PAIRS `i < j` over per-pattern variable
+///   SETS — a repeated variable collapses in the set and `i == j` is never
+///   considered — and [`bind_joins`] (the hidden path) likewise requires the
+///   shared variable to sit in two DISTINCT patterns (`pj != pi`).
+///
+/// Confirmed empirically reachable against [`prefilter_manifest_structure`]
+/// (the method used for audit L-1): a manifest disclosing `(alice, knows, bob)`
+/// under `SELECT ?v WHERE { ?v <knows> ?v }` was ACCEPTED, so a relying party
+/// read a solution binding `?v` to two different terms at once. Witness:
+/// `repeated_pattern_var_rejects_a_row_whose_slots_disagree` in `tests/e2e.rs`.
+///
+/// # Per-row, over every constant-matching scan (the sq-q9r5e regime)
+/// This mirrors the FILTER gate exactly. The disclosed result IS the scans' rows,
+/// so EVERY active disclosed row of a matching scan is presented as answering the
+/// pattern and must satisfy it — one bad row makes the pattern unproven for the
+/// disclosed set. And pattern→scan is resolved by constant MEMBERSHIP, not by the
+/// prover's [`ProofManifest::pattern_scans`] declaration, so the obligation runs
+/// over EVERY scan whose bound constants match. Where a query places a
+/// repeated-variable pattern and a distinct-variable pattern at the SAME constant
+/// layout (`{ ?v <p> ?v . ?a <p> ?b }`) that is an OVER-demand — the verifier
+/// cannot tell which pattern a given scan answers, so it demands the equality for
+/// both readings and REJECTS rather than accept on the prover's say-so. That is
+/// the same deliberate fail-closed trade sq-q9r5e made for FILTERs; see
+/// [`check_pattern_scans`] for why narrowing it needs a verified result witness
+/// the flat manifest cannot yet express.
+///
+/// Comparison is on canonical big-endian field bytes ([`field_hex_eq`]), so hex
+/// spelling/padding differences do not spuriously diverge and a malformed row hex
+/// fails CLOSED (the reconstruction stage also rejects it as `MalformedField`).
+///
+/// The `extended-fragment` regime does not need this gate: `bind_fragment_scans`
+/// already binds each variable slot of a selected row to the disclosed solution
+/// (projected vars) or to a per-branch coherence map (existentials), both keyed by
+/// variable NAME across slots, so a repeated variable's two slots are compared
+/// there by construction.
+// [OPUS-5] #5240: within-pattern slot equality. Research-grade, NOT externally
+// audited (sq-qhy4).
+fn bind_repeated_pattern_slots(manifest: &ProofManifest) -> Result<(), CheckError> {
+    let patterns = fragment_patterns(&manifest.query)?;
+    let consts = fragment_pattern_consts(&patterns);
+    let var_slots = variable_slots(&patterns);
+
+    for (pi, c) in consts.iter().enumerate() {
+        // The repeated-slot obligations of THIS pattern: for a variable occupying
+        // slots [s0, s1, ..], every later slot must equal the first (which chains
+        // into full pairwise equality). A pattern with no repeat contributes none.
+        let mut by_var: std::collections::BTreeMap<&str, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (v, p, s) in &var_slots {
+            if *p == pi {
+                by_var.entry(v.as_str()).or_default().push(*s);
+            }
+        }
+        let obligations: Vec<(&str, usize, usize)> = by_var
+            .iter()
+            .filter(|(_, slots)| slots.len() > 1)
+            .flat_map(|(v, slots)| slots[1..].iter().map(move |s| (*v, slots[0], *s)))
+            .collect();
+        if obligations.is_empty() {
+            continue;
+        }
+
+        for (spi, sp) in manifest.sub_proofs.iter().enumerate() {
+            let (rows, row_count) = match &sp.inputs {
+                ProofInputs::Scan { rows, row_count, .. } => (rows, *row_count as usize),
+                _ => continue,
+            };
+            if !scan_matches_pattern(&sp.inputs, c) {
+                continue;
+            }
+            let active = row_count.min(rows.len());
+            for (row, values) in rows.iter().take(active).enumerate() {
+                for &(variable, first, other) in &obligations {
+                    if !field_hex_eq(&values[first], &values[other]) {
+                        return Err(CheckError::RepeatedSlotMismatch {
+                            pattern: pi,
+                            proof: spi,
+                            row,
+                            variable: variable.to_string(),
+                            slots: (first, other),
+                        });
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -3975,7 +5098,34 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
 /// path + a FULL-bb accept test (sq-r2s8) and the forge-and-verify regression suite
 /// (sq-hlul) are the follow-ups. What IS enforced is the security-critical
 /// direction: a forged / cross-scan / wrong-slot / spurious hidden join is rejected.
+///
+/// # Cross-credential scope constraint (sq-cuvmj) — READ BEFORE CLAIMING THE USE CASE
+/// The headline use case for a hidden `JoinEdge` is joining two genuinely DIFFERENT
+/// credentials. In the current manifest schema that case only reaches this gate when
+/// both credentials carry the SAME issuer-signed status reference, because
+/// [`ProofManifest::revocation`] is SCALAR: [`resolve_status_ref`] (run earlier, in
+/// [`bind_issuer_attestations`]) requires EVERY scan-covering commitment's attested
+/// status to resolve to that ONE reference, so two credentials with distinct
+/// `(list, index, version)` slots cannot both be attested and the manifest is
+/// rejected upstream ([`CheckError::RevocationReferenceMismatch`]) before any join
+/// is inspected.
+///
+/// This is FAIL-CLOSED — it is an over-restriction, not a hole. The construction it
+/// blocks (present a live credential A alongside a REVOKED credential B, joined,
+/// hoping B's liveness goes unchecked because there is only one `revocation` field)
+/// has no false-accept: pointing `revocation` at A's slot makes B's attestation
+/// mismatch, and pointing it at B's slot makes [`bind_revocation`] read B's SET
+/// status bit and reject [`CheckError::CredentialRevoked`]
+/// (`research/zk-bind-composition-review.md` §Finding B, attempt 5).
+///
+/// The practical consequence for this gate: what it validates today is hidden joins
+/// ACROSS GRAPHS OF ONE CREDENTIAL (or across credentials sharing a status slot),
+/// NOT arbitrary multi-credential joins. Do not describe `bind_joins` as enabling
+/// arbitrary cross-credential joins until the manifest carries per-credential
+/// revocation references; the obligations such a migration owes are pre-registered
+/// on [`ProofManifest::revocation`].
 // [OPUS-4.8] sq-sfsi: bind_joins gate (commitment-matching + query slot binding).
+// [OPUS-5] sq-cuvmj: + the scalar-revocation cross-credential scope constraint.
 fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
     if manifest.join_edges.is_empty() {
         // No hidden joins declared: nothing for this gate to validate. A query
@@ -4276,9 +5426,10 @@ fn global_attributions(manifest: &ProofManifest) -> Vec<BTreeSet<usize>> {
 /// per-graph attribution each scan sub-proof carries (audit #8).
 ///
 /// For each query BGP pattern `pi`, find the scan sub-proof that answers it
-/// (constants match, `scan_matches_pattern`) and require
-/// `manifest.attributions[pi]` to be a SUPERSET of that scan's proof-bound
-/// matched-graph set (`attribution[g] == true`). Soundness:
+/// (constants match, `scan_matches_pattern` — a prover's `manifest.pattern_scans`
+/// declaration deliberately does NOT narrow this, see [`check_pattern_scans`])
+/// and require `manifest.attributions[pi]` to be a SUPERSET of that scan's
+/// proof-bound matched-graph set (`attribution[g] == true`). Soundness:
 /// - **Under-declaring** (the `[[0],[0]]` forge): a graph the scan proved a
 ///   contribution from but `manifest.attributions[pi]` omits is rejected. This
 ///   is the load-bearing #8 fix — the prover can no longer shrink the
@@ -4683,8 +5834,7 @@ fn verify_holder_attestation_signature(
     let Some(rev) = &manifest.revocation else {
         return Err(CheckError::RevocationReferenceMissing { proof: 0 });
     };
-    let list_id_fr = status_list_id_to_field(&rev.status_list);
-    let Some(status_ref) = status_ref_from_revocation(rev, &list_id_fr) else {
+    let Some(status_ref) = status_ref_from_revocation(rev) else {
         return Err(CheckError::InvalidIssuerSignature {
             commitment: commitment_hex,
         });
@@ -4722,6 +5872,10 @@ fn encode_iri_hex(iri: &str) -> Option<FieldHex> {
 /// `entailment_regime` a CHECKED claim rather than free metadata.
 ///
 /// Fail-closed contract:
+/// 0. if the relying party requires COMPLETENESS under entailment
+///    ([`EntailmentPolicy::require_completeness_under_entailment`]), every
+///    non-`Simple` manifest is REFUSED first — the capability is unbuilt
+///    (`sq-rsd3v.7`) — else `CompletenessUnderEntailmentUnavailable`;
 /// 1. the regime MUST be accepted by the relying party's [`EntailmentPolicy`]
 ///    (`Simple` always; `Rdfs`/`Owl` only on explicit opt-in) — else
 ///    `EntailmentRegimeNotAccepted`;
@@ -4740,13 +5894,26 @@ fn encode_iri_hex(iri: &str) -> Option<FieldHex> {
 /// each step may only ground on STRICTLY EARLIER steps (a forward-chained
 /// derivation), so there are no cyclic self-justifications.
 ///
-/// # Honest scope (what is NOT proved here — deferred)
-/// Grounding ties antecedents to the DISCLOSED base; it does NOT (yet) prove in
-/// zero-knowledge that an undisclosed antecedent is in the committed graph's
-/// closure. An antecedent that is neither disclosed nor chained to a disclosed
-/// triple is REJECTED (not assumed). The full in-circuit RDFS/OWL-RL closure proof
-/// is the inference-circuit deliverable; this stage makes the regime claim
+/// # Honest scope (what is NOT proved HERE — this host re-check)
+/// Grounding ties antecedents to the DISCLOSED base; THIS host path does NOT
+/// prove in zero-knowledge that an undisclosed antecedent is in the committed
+/// graph's closure. An antecedent that is neither disclosed nor chained to a
+/// disclosed triple is REJECTED (not assumed). This stage makes the regime claim
 /// non-vacuous and auditable over the disclosed-base fragment, fail-closed.
+///
+/// The in-circuit single-step privacy upgrade now exists as a research-grade Noir
+/// relation (`zk/compose/compose_core::entail`, sq-g91d — undisclosed antecedents
+/// proven members of the committed graph); it is NOT-yet-sound (sq-qhy4) and NOT
+/// yet wired into this verifier (no compiled member / manifest variant / dispatch
+/// arm), so until that follow-up lands this path stays disclosed-base only. See
+/// the `crate::derivation` module docs.
+///
+/// Everything above is SOUNDNESS of derivation ("every derived triple IS
+/// entailed"). It is NOT completeness under entailment ("no entailed answer is
+/// MISSING") — the distinct, UNBUILT obligation `sq-rsd3v.7`. Gate (0) below is
+/// the enforced deferral: a relying party that demands completeness is REFUSED
+/// before any other check, so the two obligations can never be conflated by
+/// reading an accept.
 // [OPUS-4.8] sq-314: entailment regime + derivation steps, end-to-end.
 fn bind_entailment(
     manifest: &ProofManifest,
@@ -4758,6 +5925,18 @@ fn bind_entailment(
         EntailmentRegime::Rdfs => "rdfs",
         EntailmentRegime::Owl => "owl",
     };
+    // (0) sq-rsd3v.7: the relying party demands COMPLETENESS under entailment. The
+    // capability is UNBUILT (no in-circuit closure-sweep, no fixpoint-saturation
+    // proof), so any manifest that RESTS on entailment is refused here rather than
+    // accepted on soundness-of-derivation grounds the relying party could misread
+    // as completeness. Checked FIRST so the diagnostic names the real gap (the
+    // unbuilt obligation) rather than the incidental one (regime not accepted).
+    // `Simple` is not refused: it carries no entailment for completeness to range
+    // over — see `require_completeness_under_entailment` for what that does and
+    // does NOT assert.
+    if policy.requires_completeness() && regime != EntailmentRegime::Simple {
+        return Err(CheckError::CompletenessUnderEntailmentUnavailable { regime: regime_name });
+    }
     // (1) The regime must be accepted by the relying party.
     if !policy.accepts(regime) {
         return Err(CheckError::EntailmentRegimeNotAccepted { regime: regime_name });
@@ -4792,10 +5971,22 @@ fn bind_entailment(
 
     // RDFS schema-vocabulary encodings (salt-independent IRIs). If any fails to
     // encode the whole check fails closed (it cannot happen for these constants).
-    let (Some(rdf_type), Some(rdfs_subclassof), Some(rdfs_subpropertyof)) = (
+    // [OPUS-5] sq-rsd3v.6: `owl:sameAs` joins the list — not as a rule term, but
+    // so the equality guard below can recognise (and refuse) an equality fact.
+    let (
+        Some(rdf_type),
+        Some(rdfs_subclassof),
+        Some(rdfs_subpropertyof),
+        Some(rdfs_domain),
+        Some(rdfs_range),
+        Some(owl_sameas),
+    ) = (
         encode_iri_hex("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subClassOf"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subPropertyOf"),
+        encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#domain"),
+        encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#range"),
+        encode_iri_hex(crate::sameas::OWL_SAME_AS),
     ) else {
         return Err(CheckError::MalformedDerivationStep { step: 0 });
     };
@@ -4804,9 +5995,23 @@ fn bind_entailment(
     // EARLIER steps (forward chaining only — no cyclic self-grounding).
     let mut derived_so_far: BTreeSet<[String; 3]> = BTreeSet::new();
     for (si, step) in steps.iter().enumerate() {
+        // 4a-0. EQUALITY GUARD (sq-rsd3v.6): `owl:sameAs` must never ride the
+        // fixed-shape path. Checked BEFORE the shape check, because the shapes
+        // that matter here are shape-VALID (an `rdfs7` whose sub-property is
+        // `owl:sameAs` consumes an equality; one whose super-property is
+        // `owl:sameAs` introduces one), so shape alone would let them through.
+        if step.mentions_equality_predicate(&owl_sameas) {
+            return Err(CheckError::EqualityReasoningUnsupported { step: si });
+        }
         // 4a. Well-formed rule instance AND the regime admits the rule.
         if !regime_admits(regime, step.rule)
-            || !step.is_well_formed(&rdf_type, &rdfs_subclassof, &rdfs_subpropertyof)
+            || !step.is_well_formed(
+                &rdf_type,
+                &rdfs_subclassof,
+                &rdfs_subpropertyof,
+                &rdfs_domain,
+                &rdfs_range,
+            )
         {
             return Err(CheckError::MalformedDerivationStep { step: si });
         }
@@ -5083,6 +6288,23 @@ fn verify_manifest_impl(
     // index. The challenge fed here is the verifier's nonce (audit #4), identical
     // to the sub-proof loop's binding.
     bind_hidden_revocation(manifest, revocation_policy, prover, work_dir, &challenge)?;
+
+    // --- sq-kndw: FULLY-HIDDEN revocation cryptographic gate. ---
+    // If the manifest carries a fully-hidden revocation proof, verify it against the
+    // relying party's OWN accepted-set root + epoch floor (derived from its curated
+    // authoritative snapshots) and the verifier's nonce, and enforce single-use of
+    // the (ref_commitment, index_commitment) linkage pair through the same durable
+    // store the nonce replay defence uses. The clear-index and committed-index
+    // liveness gates are UNCHANGED and still run for their own modes; this is the
+    // additive privacy upgrade that also hides the status-list IRI and the version.
+    bind_fully_hidden_revocation(
+        manifest,
+        revocation_policy,
+        prover,
+        work_dir,
+        &challenge,
+        seen,
+    )?;
 
     // --- sq-z9l: hidden-issuer attestation cryptographic gate. ---
     // If the manifest carries hidden-issuer attestation proofs, verify each
@@ -6817,6 +8039,33 @@ fn reconstruct_public_inputs(
             push_field(&mut out, datatype_const, proof, "datatype_const")?;
             push_uint(&mut out, u64::from(*expected));
         }
+        // [OPUS-5] sq-wz99x: filter_value_dl_datetime (DUAL-LEAF dateTime/date
+        // value lane) public inputs, in `main` declaration order: challenge (pushed
+        // above), operand_enc, op, bound_neg (bool -> {0,1}), bound_scaled_epoch
+        // (the FILTER constant instant as |T| in milliseconds on the XSD
+        // timeOnTimeline), datatype_const (SELECTS the dateTime or date lane AND
+        // folds the scale FS), expected. Cross-reference
+        // `zk/compose/filter_value_dl_datetime/src/main.nr`. The layout is the
+        // decimal member's with `bound_scaled` renamed — ONE member, and here ONE
+        // reconstruction, serves both lanes, because the lane is carried by the
+        // `datatype_const` public input (so a lane swap changes THIS vector).
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlDateTime {
+            operand_enc,
+            op,
+            bound_neg,
+            bound_scaled_epoch,
+            datatype_const,
+            expected,
+            ..
+        } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, u64::from(*bound_neg));
+            push_uint(&mut out, *bound_scaled_epoch);
+            push_field(&mut out, datatype_const, proof, "datatype_const")?;
+            push_uint(&mut out, u64::from(*expected));
+        }
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN
         // public inputs, in the `join_eq` member's `main` declaration order:
         // challenge (pushed above), commit_a, commit_b, join_commitment, slot_a,
@@ -6983,9 +8232,22 @@ fn test_attestation(
     salt: Fr,
     sk: &sparq_zk::sig::SecretKey,
 ) -> crate::manifest::CommitmentAttestation {
+    test_attestation_at_index(commitment, salt, sk, TEST_STATUS_INDEX)
+}
+
+/// As [`test_attestation`], but over a CHOSEN status-list `index` — the signature is
+/// formed over that index's `status_ref_digest`, so the attestation is internally
+/// valid and the manifest reaches the reference-resolution step. Lets a test build a
+/// presentation whose two credentials occupy DISTINCT status slots (sq-cuvmj).
+#[cfg(test)]
+fn test_attestation_at_index(
+    commitment: Fr,
+    salt: Fr,
+    sk: &sparq_zk::sig::SecretKey,
+    index: u64,
+) -> crate::manifest::CommitmentAttestation {
     let list_id = sparq_zk::sig::status_list_id_to_field(TEST_STATUS_LIST);
-    let status_ref =
-        sparq_zk::sig::status_ref_digest(&list_id, TEST_STATUS_INDEX, TEST_STATUS_VERSION);
+    let status_ref = sparq_zk::sig::status_ref_digest(&list_id, index, TEST_STATUS_VERSION);
     crate::manifest::CommitmentAttestation {
         commitment: FieldHex::from_field(&commitment),
         issuer_public_key: sparq_zk::sig::public_key_to_hex(&sk.public_key()),
@@ -6995,9 +8257,10 @@ fn test_attestation(
             .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(crate::manifest::AttestedStatusRef {
-            index: Some(TEST_STATUS_INDEX),
-            version: TEST_STATUS_VERSION,
+            index: Some(index),
+            version: Some(TEST_STATUS_VERSION),
             index_commitment: None,
+            ref_commitment: None,
         }),
         holder: None,
     }
@@ -7008,10 +8271,11 @@ fn test_attestation(
 #[cfg(test)]
 fn test_revocation() -> crate::manifest::RevocationStatus {
     crate::manifest::RevocationStatus {
-        status_list: TEST_STATUS_LIST.to_string(),
+        status_list: Some(TEST_STATUS_LIST.to_string()),
         index: Some(TEST_STATUS_INDEX),
-        version: TEST_STATUS_VERSION,
+        version: Some(TEST_STATUS_VERSION),
         index_commitment: None,
+        ref_commitment: None,
     }
 }
 
@@ -7022,6 +8286,158 @@ mod tests {
 
     fn fh(s: &str) -> FieldHex {
         FieldHex(s.to_string())
+    }
+
+    // [OPUS-4.8] sq-r6dq: the hidden-issuer trust-anchor derivation
+    // ([`KeySet::hidden_issuer_root`]) now uses the SPARSE key-set builder
+    // (sq-8k3h), so a relying party with a large/growing issuer registry can pick a
+    // deep tree without the verifier materialising `2^depth` leaves. Pin (a) the
+    // switch is VALUE-PRESERVING — the (sparse) anchor is bit-identical to the dense
+    // root at depths the dense builder can still compute — and (b) it is FEASIBLE
+    // AND SELF-CONSISTENT at a deep tree the dense builder could not materialise: a
+    // trusted member's sparse authentication path must re-fold (LSB-first index bits,
+    // the circuit's fold) to exactly the anchor the verifier derives.
+    //
+    // The two parts are NOT the same strength of evidence and must not be quoted as
+    // one. (a) is a CROSS-CHECK against an independently implemented oracle (the
+    // dense builder). (b) is SELF-CONSISTENCY ONLY: `hidden_issuer_root` and
+    // `key_membership_witness_sparse` both go through
+    // `issuer::sparse_fold_leaves`, so (b) catches an ISOLATED wrong anchor or
+    // wrong sibling but a CORRELATED common-mode error inside that shared fold
+    // would pass it. No dense oracle exists at depth 24 (2^24 leaves is not
+    // materialisable), which is exactly why (a) stops at depth 12. The independent
+    // deep oracle is `tests/e2e.rs::prove_hidden_issuer` (dense prover root vs
+    // sparse verifier anchor through a real bb proof), not this test.
+    #[test]
+    fn hidden_issuer_root_uses_sparse_builder_and_scales() {
+        use sparq_zk::sig::{key_set_leaf, public_key_to_hex, SecretKey};
+        let sks: Vec<SecretKey> = (0u64..5).map(|s| SecretKey::from_seed(9000 + s)).collect();
+        let hexes: Vec<String> = sks.iter().map(|sk| public_key_to_hex(&sk.public_key())).collect();
+        let k = KeySet::from_hex_keys(hexes).with_hidden_issuer_depth(8);
+        let ordered = k.ordered_keys();
+        assert_eq!(ordered.len(), 5, "all five real keys are trusted");
+
+        // (a) VALUE-PRESERVING: the sparse trust anchor equals the dense root over
+        // the SAME canonical key order, at depths the dense builder can compute.
+        for depth in [4u32, 8, 12] {
+            assert_eq!(
+                k.hidden_issuer_root(depth),
+                crate::issuer::key_set_root(&ordered, depth),
+                "sparse trust anchor must equal the dense root (depth {depth})"
+            );
+        }
+
+        // (b) FEASIBLE + CORRECT at a deep tree: 2^24 = 16.7M dense slots — only the
+        // sparse builder can derive this anchor. Every trusted member's sparse path
+        // must re-fold to exactly the anchor the verifier derives — the Merkle
+        // root/path consistency this test pins. (Only that narrow equality is
+        // demonstrated here; the hidden-issuer ZK construction overall remains
+        // research-grade, external cryptographer audit pending sq-qhy4.)
+        let deep = 24u32;
+        let anchor = k.hidden_issuer_root(deep).expect("deep-tree anchor");
+        for index in 0..ordered.len() as u64 {
+            let sibs = crate::issuer::key_membership_witness_sparse(&ordered, deep, index)
+                .expect("deep sparse path");
+            assert_eq!(sibs.len(), deep as usize);
+            let mut node = key_set_leaf(&ordered[index as usize]).unwrap();
+            let mut pos = index;
+            for sib in &sibs {
+                let is_right = pos & 1 == 1;
+                node = if is_right {
+                    sparq_zk::poseidon2::hash(&[*sib, node])
+                } else {
+                    sparq_zk::poseidon2::hash(&[node, *sib])
+                };
+                pos /= 2;
+            }
+            assert_eq!(
+                node, anchor,
+                "member {index}'s sparse path re-folds to the verifier's deep anchor"
+            );
+        }
+
+        // fail-closed parity retained: an implausible depth is still None.
+        assert_eq!(k.hidden_issuer_root(32), None);
+    }
+
+    /// [OPUS-5] sq-r6dq review round 3 (gpt-5.6-sol finding 7): the depth-mismatch
+    /// gate `hi.depth != depth` in [`bind_hidden_issuer_attestations`] had NO
+    /// functional test — only a `Display`-string test in `tests/verifier_errors.rs`,
+    /// which formats a hand-built `CheckError` and never runs the comparison. So
+    /// deleting the gate, or flipping `!=` to `==`, reddened nothing.
+    ///
+    /// This drives the REAL gate: an attestation declaring a depth other than the
+    /// policy's must be rejected with `HiddenIssuerDepthMismatch{declared, policy}`
+    /// carrying BOTH values, and the matching declared depth must get PAST the gate
+    /// (it then fails later on the deliberately unreferenced commitment, which is
+    /// how we know the depth check did not swallow it).
+    ///
+    /// Why the verifier's own VK selection is unaffected: `CircuitId::HiddenIssuer`
+    /// is built from `depth` — the POLICY depth — never from `hi.depth`. This gate
+    /// exists so a prover cannot silently present a proof for a different-depth
+    /// member; the vk it is verified against was never the attacker's to choose.
+    #[test]
+    fn hidden_issuer_declared_depth_must_equal_policy_depth() {
+        let mk = |declared: u32| crate::manifest::HiddenIssuerAttestation {
+            commitment: fh("0x7"),
+            depth: declared,
+            key_set_root: fh("0x8"),
+            message: fh("0x9"),
+            salt: None,
+            proof_hex: "00".into(),
+        };
+        // `revocation: None` => `scan_referenced_messages` returns an empty map
+        // WITHOUT error, so the depth gate is the first thing the loop evaluates.
+        let mut m = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        let prover = CircuitProver::from_crate_root();
+        let work = std::env::temp_dir().join("sq_r6dq_hi_depth_gate");
+        let policy_depth = 4u32;
+        let k = KeySet::empty().with_hidden_issuer_depth(policy_depth);
+        assert!(
+            k.hidden_issuer_root(policy_depth).is_some(),
+            "an empty KeySet still derives an all-padding anchor, so the gate under \
+             test is reached rather than short-circuited by RootUnavailable"
+        );
+
+        // MISMATCH (both directions: shallower and deeper than the policy) => reject,
+        // with the declared/policy pair reported.
+        for declared in [3u32, 5, 0, 31] {
+            m.hidden_issuer_attestations = vec![mk(declared)];
+            match bind_hidden_issuer_attestations(&m, &k, &prover, &work, &fh("0x2a")) {
+                Err(CheckError::HiddenIssuerDepthMismatch { declared: d, policy: p }) => {
+                    assert_eq!(d, declared, "the REJECTED declared depth is reported");
+                    assert_eq!(p, policy_depth, "the POLICY depth is reported");
+                }
+                other => panic!(
+                    "a hidden-issuer attestation declaring depth {declared} under a \
+                     depth-{policy_depth} policy must be HiddenIssuerDepthMismatch, got {other:?}"
+                ),
+            }
+        }
+
+        // MATCH => the depth gate passes and the entry proceeds to the referenced-
+        // commitment check, which rejects for a DIFFERENT (non-depth) reason. This is
+        // the half that fails if the gate is inverted (`==` instead of `!=`).
+        m.hidden_issuer_attestations = vec![mk(policy_depth)];
+        match bind_hidden_issuer_attestations(&m, &k, &prover, &work, &fh("0x2a")) {
+            Err(CheckError::HiddenIssuerUnreferencedCommitment { .. }) => {}
+            other => panic!(
+                "a MATCHING declared depth must pass the depth gate and fail later on \
+                 the unreferenced commitment, got {other:?}"
+            ),
+        }
+
+        // The gate fires BEFORE any per-entry proof work, and on the FIRST offending
+        // entry: a good entry followed by a bad one still rejects on depth.
+        m.hidden_issuer_attestations = vec![mk(policy_depth), mk(policy_depth + 1)];
+        assert!(
+            matches!(
+                bind_hidden_issuer_attestations(&m, &k, &prover, &work, &fh("0x2a")),
+                Err(CheckError::HiddenIssuerUnreferencedCommitment { .. })
+                    | Err(CheckError::HiddenIssuerDepthMismatch { .. })
+            ),
+            "a mixed batch must still be rejected fail-closed"
+        );
     }
 
     // [OPUS-4.8] EMPIRICAL anchor for audit #1: the reconstruction must equal
@@ -7526,6 +8942,7 @@ mod tests {
             key_set: vec![],
             commitment_attestations: vec![],
             attributions: vec![],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -7539,6 +8956,7 @@ mod tests {
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
             holder_set_proofs: vec![],
+            fully_hidden_revocation: None,
         }
     }
 
@@ -7607,6 +9025,364 @@ mod tests {
             "an unattested flat scan must be refused identically in both feature states"
         );
     }
+
+    /// A single-graph BGP `Scan` over a CHOSEN committed graph (the issuer gate
+    /// verifies the signature over the given commitment value; it never recomputes
+    /// it from triples, so a test may pick the commitment freely).
+    fn flat_scan_with_commit(commit: Fr) -> ProofInputs {
+        ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        }
+    }
+
+    /// [OPUS-5] sq-cuvmj: THE SCALAR-`revocation` TRIPWIRE.
+    ///
+    /// Pins the single-reference invariant `ProofManifest::revocation` documents: a
+    /// presentation carrying TWO credentials whose issuer-signed status references
+    /// occupy DISTINCT slots is structurally REJECTED, because every scan-covering
+    /// commitment must resolve to the ONE disclosed reference. Both attestations
+    /// here are internally VALID (key in K, signature verifies over each one's own
+    /// `status_ref_digest`, distinct salts), so the manifest reaches
+    /// `resolve_status_ref` and the rejection is the reference comparison itself —
+    /// not an incidental signature or salt failure.
+    ///
+    /// This is FAIL-CLOSED, not a false-accept (§Finding B of
+    /// `research/zk-bind-composition-review.md`): the second credential's liveness is
+    /// never skipped, it simply cannot be presented. The cost is that hidden
+    /// cross-credential joins ([`bind_joins`]) are restricted to credentials sharing
+    /// a status slot.
+    ///
+    /// TRIPWIRE: a future `Vec` migration of `revocation`/`hidden_revocation` WILL
+    /// turn this test red — that is the point. Before changing it, discharge the
+    /// per-commitment obligations pre-registered on `ProofManifest::revocation`;
+    /// flipping the expectation to "accepted" without them is exactly the
+    /// unchecked-second-credential regression this pins.
+    #[test]
+    fn two_credentials_with_distinct_status_refs_are_rejected() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let c_a = Fr::from(100u64); // credential A, status index TEST_STATUS_INDEX
+        let c_b = Fr::from(200u64); // credential B, a DIFFERENT slot on the same list
+        let other_index = TEST_STATUS_INDEX + 6;
+
+        let mut m = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        m.sub_proofs = vec![
+            crate::manifest::SubProof {
+                inputs: flat_scan_with_commit(c_a),
+                proof_hex: String::new(),
+            },
+            crate::manifest::SubProof {
+                inputs: flat_scan_with_commit(c_b),
+                proof_hex: String::new(),
+            },
+        ];
+        m.commitment_attestations = vec![
+            test_attestation(c_a, Fr::from(7u64), &sk),
+            test_attestation_at_index(c_b, Fr::from(9u64), &sk, other_index),
+        ];
+        // The ONE disclosed reference — A's slot. B's issuer-signed reference cannot
+        // also match it.
+        m.revocation = Some(test_revocation());
+
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::RevocationReferenceMismatch { .. }),
+            "two credentials on distinct status slots must be refused at the reference gate (sq-cuvmj fail-closed), got {err:?}"
+        );
+
+        // CONTROL: the SAME manifest with both credentials on the SAME slot is
+        // accepted — so the rejection above is the distinct-reference constraint,
+        // not a vacuous failure of the two-scan fixture itself.
+        let mut same_slot = m.clone();
+        same_slot.commitment_attestations = vec![
+            test_attestation(c_a, Fr::from(7u64), &sk),
+            test_attestation(c_b, Fr::from(9u64), &sk),
+        ];
+        assert!(
+            bind_issuer_attestations(&same_slot, &k, &std::collections::BTreeSet::new()).is_ok(),
+            "two credentials sharing one status slot must pass — the fixture is otherwise valid"
+        );
+    }
+
+    /// [OPUS-5] sq-93h: THE SALT-DISCLOSURE DOMINATION TRIP-WIRE.
+    ///
+    /// sq-93h asked whether the per-graph salt that `HiddenIssuerAttestation` carries
+    /// on the sq-xxg HIDDEN-ONLY path is a residual cross-presentation linkability
+    /// channel. Assessment (`research/zk-hidden-path-salt-disclosure.md`): NO — it is
+    /// DOMINATED, because the same graph's `C(G)` is disclosed in the clear on the very
+    /// same entry (and byte-bound into the scan sub-proof's bb public inputs). Any two
+    /// presentations linkable by salt are already linkable by `C(G)`, so hiding the salt
+    /// behind an in-circuit salt-commitment would buy zero unlinkability.
+    ///
+    /// That verdict rests on ONE premise — `C(G)` stays public. This test pins it on the
+    /// REAL paths, never on a test-local notion of "disclosed":
+    /// - the hidden-only salt fallback actually resolves (red if `resolve_commitment_salt`
+    ///   loses its hidden-entry arm);
+    /// - `reconstruct_public_inputs` — the function whose output the verifier
+    ///   BYTE-COMPARES against each proof's `public_inputs` — emits `C(G)` as scan
+    ///   public-input word 1, salt or no salt; and
+    /// - on the WIRE (serde round-trip of the salt-withheld manifest) `C(G)` survives
+    ///   while the salt is gone, and the round-tripped manifest still reconstructs the
+    ///   same `C(G)`-bearing public inputs.
+    ///
+    /// TRIP-WIRE: a future hidden / re-randomised-commitment tier stops emitting the
+    /// cleartext `C(G)` word and turns this red. That is the intended signal — at that
+    /// point the salt becomes the finest remaining correlator and sq-93h must be
+    /// RE-OPENED, not the assertion relaxed.
+    ///
+    /// SCOPE (do not over-read): this pins premise (D1) — `C(G)` disclosure — only.
+    /// Domination additionally assumes the ISSUANCE discipline that a salt is never
+    /// reused for two distinct graphs; the verifier machine-checks only the
+    /// within-manifest instance of that (`SaltReused`), so no test here can establish
+    /// it across presentations. See §3 of the research record.
+    #[test]
+    fn hidden_only_salt_disclosure_is_dominated_by_the_clear_commitment() {
+        let c = Fr::from(4242u64);
+        let salt = Fr::from(1357u64);
+
+        // A HIDDEN-ONLY presentation: one scan over `c`, one hidden-issuer entry over
+        // `c` carrying the salt, and NO clear attestation to read the salt from.
+        let mut with_salt = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        with_salt.sub_proofs = vec![crate::manifest::SubProof {
+            inputs: flat_scan_with_commit(c),
+            proof_hex: String::new(),
+        }];
+        with_salt.hidden_issuer_attestations = vec![crate::manifest::HiddenIssuerAttestation {
+            commitment: FieldHex::from_field(&c),
+            depth: 4,
+            key_set_root: fh("0x8"),
+            message: fh("0x9"),
+            salt: Some(FieldHex::from_field(&salt)),
+            proof_hex: String::new(),
+        }];
+        assert!(
+            with_salt.commitment_attestations.is_empty(),
+            "the fixture must be HIDDEN-ONLY — a clear attestation would supply the salt \
+             by the preferred path and the hidden fallback would go untested"
+        );
+
+        // (a) The hidden-only fallback resolves the salt (the sq-xxg behaviour).
+        assert_eq!(
+            resolve_commitment_salt(&with_salt, &c),
+            Some(salt),
+            "a hidden-only commitment must resolve its salt from the hidden entry"
+        );
+
+        // The counterfactual: the SAME presentation with the salt WITHHELD, i.e. what an
+        // in-circuit salt-commitment would achieve on the disclosure surface.
+        let mut without_salt = with_salt.clone();
+        without_salt.hidden_issuer_attestations[0].salt = None;
+        assert_eq!(
+            resolve_commitment_salt(&without_salt, &c),
+            None,
+            "withholding the salt must actually remove it from the disclosure surface — \
+             otherwise the comparison below is vacuous"
+        );
+
+        // (b) Premise (D1) on the REAL verification path: `C(G)` is not merely a JSON
+        // field, it is BYTE-BOUND into the scan sub-proof's bb public inputs — the blob
+        // stage 3a byte-compares against the prover's proof. Reconstruct it exactly as
+        // the verifier does (challenge = word 0, `commitments[k]` next).
+        let challenge = match &without_salt.binding {
+            BindingMode::Challenge { challenge } => challenge.clone(),
+            other => panic!("fixture must use the challenge binding, got {:?}", other),
+        };
+        let c_word = field_to_be_bytes_32(&c);
+        let pi = reconstruct_public_inputs(&without_salt.sub_proofs[0].inputs, &challenge, 0)
+            .expect("the scan sub-proof's public inputs must reconstruct");
+        assert_eq!(
+            pi.get(32..64),
+            Some(&c_word[..]),
+            "premise (D1): the committed graph's C(G) is emitted in the CLEAR as scan \
+             public-input word 1 even on the hidden-only path, so it cannot be withheld \
+             without redesigning the scan member — if this fails, sq-93h must be RE-OPENED"
+        );
+        assert_eq!(
+            pi,
+            reconstruct_public_inputs(&with_salt.sub_proofs[0].inputs, &challenge, 0)
+                .expect("the scan sub-proof's public inputs must reconstruct"),
+            "withholding the salt changes NOT ONE BYTE of the scan's public inputs — the \
+             salt is not among them, C(G) is"
+        );
+
+        // (c) DOMINATION on the wire: serialize the salt-withheld presentation (what an
+        // in-circuit salt-commitment would achieve on the disclosure surface) and confirm
+        // the salt is really gone while `C(G)` — the correlator a colluding verifier pair
+        // would use — survives, and still reconstructs the same public inputs.
+        let salt_hex = field_to_hex(&salt);
+        let with_json = serde_json::to_string(&with_salt).expect("manifest serializes");
+        let without_json = serde_json::to_string(&without_salt).expect("manifest serializes");
+        assert!(
+            with_json.contains(&salt_hex),
+            "the fixture must actually disclose the salt on the wire, else the \
+             counterfactual below is vacuous"
+        );
+        assert!(
+            !without_json.contains(&salt_hex),
+            "withholding must actually remove the salt from the wire form"
+        );
+        assert!(
+            without_json.contains(&field_to_hex(&c)),
+            "premise (D1) on the wire: C(G) survives the salt being withheld — hiding the \
+             salt buys no cross-presentation unlinkability (sq-93h NO-BUILD)"
+        );
+        let round: ProofManifest =
+            serde_json::from_str(&without_json).expect("salt-withheld manifest round-trips");
+        assert_eq!(
+            reconstruct_public_inputs(&round.sub_proofs[0].inputs, &challenge, 0)
+                .expect("the round-tripped scan's public inputs must reconstruct"),
+            pi,
+            "a verifier that only ever sees the salt-withheld wire form still reconstructs \
+             the SAME C(G)-bearing public inputs"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // [OPUS-5] sq-6qe: the ACCEPTED-SET trust anchor (host side).
+    // ---------------------------------------------------------------
+
+    fn status_snapshot(list: &str, version: u64, bits: Vec<u8>) -> StatusListSnapshot {
+        StatusListSnapshot { status_list: list.to_string(), version, bits }
+    }
+
+    /// A policy accepting versions 8..=10 with three attached snapshots — one
+    /// STALE (v7), two FRESH (v9, v10) — at hidden-index depth 4 and accepted-set
+    /// depth 3.
+    fn accepted_set_policy() -> RevocationPolicy {
+        RevocationPolicy::up_to(10, 2)
+            .with_snapshots([
+                status_snapshot("http://ex/a", 7, vec![0u8, 0]),
+                status_snapshot("http://ex/a", 9, vec![0u8, 0]),
+                status_snapshot("http://ex/b", 10, vec![0b0000_0100u8, 0]),
+            ])
+            .with_hidden_index_depth(4)
+            .with_accepted_set_depth(3)
+    }
+
+    // [OPUS-5] sq-6qe: the SOUNDNESS-relevant property of the accepted set — it is
+    // FRESHNESS-CURATED. Because the designed fully-hidden statement is membership
+    // in this set, a stale (or future-dated) version must not be a member at all,
+    // or moving the audit-#12 freshness gate behind the commitment would silently
+    // drop it. Also pins the CANONICAL leaf order (sorted by (list, version)) that
+    // the relying party and the prover must both commit.
+    #[test]
+    fn accepted_entries_are_freshness_curated_and_canonically_ordered() {
+        let policy = accepted_set_policy();
+        let entries = policy.accepted_entries().expect("entries derivable");
+        let names: Vec<(String, u64)> = entries
+            .iter()
+            .map(|e| (e.status_list.clone(), e.version))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("http://ex/a".to_string(), 9), ("http://ex/b".to_string(), 10)],
+            "stale v7 excluded; the rest in sorted (list, version) order"
+        );
+        assert_eq!(policy.min_version(), 8, "now=10, window=2");
+        assert_eq!(policy.accepted_member_index("http://ex/a", 9), Some(0));
+        assert_eq!(policy.accepted_member_index("http://ex/b", 10), Some(1));
+        assert_eq!(
+            policy.accepted_member_index("http://ex/a", 7),
+            None,
+            "a stale (list, version) is not a member — no proof can be built for it"
+        );
+
+        // A FUTURE-dated snapshot (beyond `now`) is likewise excluded.
+        let with_future = accepted_set_policy()
+            .with_snapshot(status_snapshot("http://ex/c", 11, vec![0u8, 0]));
+        assert_eq!(
+            with_future.accepted_member_index("http://ex/c", 11),
+            None,
+            "a future-dated version is outside [min_version, now] and not accepted"
+        );
+        assert_eq!(
+            with_future.accepted_set_root(),
+            accepted_set_policy().accepted_set_root(),
+            "an out-of-window snapshot must not move the anchor"
+        );
+    }
+
+    // [OPUS-5] sq-6qe: the anchor is derived from the relying party's OWN
+    // authoritative bitstrings — each entry's `status_list_root` is exactly
+    // `revocation::merkle_root` of its snapshot at the hidden-index depth, and the
+    // policy root is the accepted-set fold over those entries. So a change to the
+    // authoritative bits (a newly REVOKED credential) moves the anchor, which is
+    // what keeps the future in-circuit bit-unset fold bound to real liveness data.
+    #[test]
+    fn accepted_set_root_folds_the_policys_own_authoritative_roots() {
+        let policy = accepted_set_policy();
+        let entries = policy.accepted_entries().unwrap();
+        assert_eq!(
+            entries[0].status_list_root,
+            crate::revocation::merkle_root(&status_snapshot("http://ex/a", 9, vec![0u8, 0]), 4)
+                .unwrap(),
+            "entry root is merkle_root of the RP's own snapshot at hidden_index_depth"
+        );
+        assert_eq!(
+            policy.accepted_set_root(),
+            crate::revocation::accepted_set_root(&entries, 3),
+            "the policy anchor is the accepted-set fold over those entries"
+        );
+
+        // Revoking a bit in an authoritative snapshot changes that entry's root and
+        // therefore the whole anchor.
+        let revoked = RevocationPolicy::up_to(10, 2)
+            .with_snapshots([
+                status_snapshot("http://ex/a", 9, vec![0b0000_0001u8, 0]),
+                status_snapshot("http://ex/b", 10, vec![0b0000_0100u8, 0]),
+            ])
+            .with_hidden_index_depth(4)
+            .with_accepted_set_depth(3);
+        assert_ne!(
+            revoked.accepted_set_root(),
+            policy.accepted_set_root(),
+            "a revoked authoritative bit must move the accepted-set anchor"
+        );
+    }
+
+    // [OPUS-5] sq-6qe: fail-closed derivation. Without an opted-in accepted-set
+    // depth, or without the hidden-index depth each entry's status-list root is
+    // derived at, or when the curated set overflows the tree, the anchor is `None`
+    // — never a partial or truncated trust anchor.
+    #[test]
+    fn accepted_set_root_is_fail_closed_when_underspecified_or_overflowing() {
+        let base = RevocationPolicy::up_to(10, 2).with_snapshots([
+            status_snapshot("http://ex/a", 9, vec![0u8, 0]),
+            status_snapshot("http://ex/b", 10, vec![0u8, 0]),
+        ]);
+        assert_eq!(
+            base.clone().with_hidden_index_depth(4).accepted_set_root(),
+            None,
+            "no accepted-set depth opted in => no anchor"
+        );
+        assert_eq!(
+            base.clone().with_accepted_set_depth(3).accepted_set_root(),
+            None,
+            "no hidden-index depth => entry roots are underivable => no anchor"
+        );
+        assert_eq!(
+            base.clone()
+                .with_hidden_index_depth(4)
+                .with_accepted_set_depth(0)
+                .accepted_set_root(),
+            None,
+            "2 curated entries do not fit a 2^0 tree => fail closed, not truncated"
+        );
+        assert!(
+            base.with_hidden_index_depth(4)
+                .with_accepted_set_depth(1)
+                .accepted_set_root()
+                .is_some(),
+            "2 curated entries fit a 2^1 tree"
+        );
+    }
 }
 
 // [OPUS-4.8] sq-3kd2g.6: FAIL-CLOSED wave-1 fragment DISPATCH tests — the
@@ -7663,6 +9439,7 @@ mod fragment_dispatch_tests {
             key_set: vec![],
             commitment_attestations: vec![],
             attributions: vec![],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -7676,6 +9453,7 @@ mod fragment_dispatch_tests {
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
             holder_set_proofs: vec![],
+            fully_hidden_revocation: None,
         }
     }
 

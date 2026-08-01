@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [OPUS-5] **N3 incremental maintenance: the base↔layer ownership transfer no longer
+  re-materializes (`sparq-reason`, `sq-6tykl.6`)** — a fact that is both asserted and
+  derivable by a recursive-SCC layer is charged to the base while asserted, so mutating its
+  base copy hands ownership between the base and the layer without changing the closure. The
+  sign-homogeneous delta round could not express that hand-off and recovered with a full
+  (non-sticky) re-materialization. The affected layer's own local fixpoint — recomputed in
+  that round — now decides the hand-off directly: the layer step runs before the counted-rule
+  step, a fact the layer re-derives is put straight back and dropped from the round's delta,
+  and no derivation count is disturbed. The hand-off is settled whenever the affected layer is
+  recomputed, which makes it lazy in the assert direction: retracting the base copy enters the
+  round and normalizes ownership immediately, whereas asserting a fact the closure already
+  holds contributes nothing to the round, so the layer keeps its copy alongside the new base
+  one until a later delta recomputes that layer. The interim double ownership is
+  observationally inert — while the base copy exists the layer's entry can never suppress a
+  seed, and nothing consults it without the base guard. `full_rebuilds()` no longer
+  increments for these deltas. Behaviour-neutral for the closure (the from-scratch
+  differential oracle in `tests/incremental_n3_prop.rs` is unchanged and green); the TBox and
+  guard-predicate full-rebuild fallbacks are untouched and remain documented.
+
+- [SONNET-4.6] N3 rule-existential blank labels now use a source-fresh numbered
+  namespace, so closure output may mint labels such as `_:__sk0_1_e` instead of
+  the previous `_:__sk1_e` shape.
+
 - [GPT-5.6] **Breaking (`@jeswr/sparq`)** — `SparqStore.queryBindings(sparql, context?)` now
   returns `Promise<ResultStream<Bindings>>` instead of `Bindings[]`; await it and consume
   `data` / `end` / `error` events (or use `query()` for synchronous materialisation). Unsupported

@@ -25,6 +25,7 @@ import {
 
 import { CopyCommand } from "./copy-command";
 import {
+  DEMO_ENVIRONMENT,
   DEPLOY_OPTIONS,
   OPEN_BY_DEFAULT_CAVEAT,
   SECURE_DEFAULTS,
@@ -188,6 +189,72 @@ export default function DeployPage() {
               </Card>
             );
           })}
+        </div>
+      </section>
+
+      <section aria-labelledby="demo-heading" className="space-y-6">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 id="demo-heading" className="text-2xl font-semibold">
+              Ephemeral demo environment
+            </h2>
+            <Badge variant="warning">Throwaway, not production</Badge>
+          </div>
+          <p className="max-w-3xl text-muted-foreground">
+            The demo templates stand up a deliberately different Cloud Run
+            posture: two scale-to-zero services — the experimental Solid/LWS
+            server plus a bundled Community Solid Server acting as a throwaway
+            identity provider — that keep everything in memory, so an idle
+            scale-down wipes the environment. This page links no sparq-hosted
+            instance; the manifests deploy one into your own project.
+          </p>
+        </div>
+
+        <div
+          className="flex max-w-4xl gap-3 rounded-xl border border-warning/40 bg-warning/10 p-4"
+          role="note"
+          aria-label="Demo environment caveats"
+        >
+          <TriangleAlert
+            className="mt-0.5 size-5 shrink-0 text-warning"
+            aria-hidden
+          />
+          <div className="space-y-3">
+            {DEMO_ENVIRONMENT.caveats.map((caveat) => (
+              <div key={caveat.rule} className="space-y-1">
+                <p className="font-semibold">{caveat.rule}</p>
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  {caveat.detail}
+                </p>
+              </div>
+            ))}
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              Sign in with throwaway identities and upload throwaway data only.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-4">
+          <Button variant="outline" asChild>
+            <a
+              href={DEMO_ENVIRONMENT.manifestsHref}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Demo manifests and deploy steps
+              <ExternalLink aria-hidden />
+            </a>
+          </Button>
+          <Button variant="link" className="w-fit px-0" asChild>
+            <a
+              href={DEMO_ENVIRONMENT.designHref}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Read the demo design record
+              <ExternalLink aria-hidden />
+            </a>
+          </Button>
         </div>
       </section>
 

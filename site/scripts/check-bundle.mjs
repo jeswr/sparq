@@ -50,11 +50,14 @@ export const HEAVY_MODULE_SUFFIXES = [
   "-> @/components/mpc-demo",
   // The Home hero's in-browser SPARQL runner — pulls the editors + @sparq/client engine wasm glue.
   "-> @/components/home/hero-runner",
+  // [GPT-5] #3606 — the hero's optional Graph view must remain a nested split point so its SVG
+  // renderer and result-graph derivation load only when the visitor invokes that view.
+  "-> @/components/repl-graph-view",
   // The in-tab ZK prover (~MB each), dynamic-imported inside lib/zk-prover.ts.
   "-> @aztec/bb.js",
   "-> @noir-lang/noir_js",
-  // [FABLE-5] sq-4ssz1 (#1046) — the zstd decoder, dynamic-imported inside
-  // lib/dataset-archive.ts#loadCodec. Small, but the maintainer's standing rule is that
+  // [GPT-5.6] #1046 — the zstd decoder, dynamic-imported inside js/src/decompress.ts and
+  // reached through the site's bytesToRdf pipeline. The maintainer's standing rule is that
   // rarely-used codecs are fetched ONLY when a user actually decodes a file of that
   // type, so it must STAY a lazy split point (never fold into a route-entry bundle).
   "-> fzstd",

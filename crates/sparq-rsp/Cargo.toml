@@ -57,7 +57,7 @@ sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-feat
 oxrdf.workspace = true
 # Register-time validation only (SELECT-form check); already in the tree via sparq-engine.
 spargebra.workspace = true
-# ISTREAM/DSTREAM row-hash diffs (already in the tree via sparq-core).
+# CONSTRUCT set differences (already in the tree via sparq-core).
 rustc-hash.workspace = true
 
 # [OPUS-4.8] (sq-cxji) Test-only: PARSE the `examples/throughput.rs` `--json` emit back
@@ -65,5 +65,12 @@ rustc-hash.workspace = true
 # `format!`, mirroring `mpc_net_bench::cell_json`); serde_json is a dev-dependency so it
 # never enters the crate's published graph.
 [dev-dependencies]
+# [SONNET-4.6] sq-z1xv8 — the shared ratchet-floor constants. DEV-ONLY (zero-dep,
+# `publish = false`): the conformance ratchet floor this crate's test runner enforces is
+# the SAME `const` sparq-conformance's central scoreboard reports, so the two cannot
+# drift, and the dep edge puts this crate in the floors crate's reverse-dependency
+# closure (which is what makes CI test-selection sound for the floor — it replaces the
+# guard test's old runtime read of this file's source).
+sparq-conformance-floors = { path = "../sparq-conformance-floors" }
 proptest = "1"
 serde_json = "1"

@@ -553,6 +553,11 @@ run_vector_lib_engine() { # <id>
   if [ "$DO_RUN" -eq 1 ]; then
     have python3 || die "python3 needed for the vector-lib adapter"
     python3 -c 'import numpy, hnswlib' 2>/dev/null || die "vector-lib adapter needs numpy + hnswlib (pip install numpy hnswlib)"
+    # [FABLE-5] sq-5o5.4: record the resolved gather-box distribution, not the
+    # registry's intentionally version-agnostic placeholder.
+    local vector_version
+    vector_version="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("hnswlib"))')" \
+      || die "could not resolve the installed hnswlib distribution version"
     if [ -n "${VECTOR_DATASET:-}" ]; then
       # PARETO mode: published-dataset recall-QPS curve (sq-aiup).
       [ -n "${VECTOR_ROOT:-}" ] || die "vector-lib Pareto --run needs VECTOR_ROOT (dir holding the SIFT1M/GloVe corpus)"
@@ -566,13 +571,13 @@ run_vector_lib_engine() { # <id>
       PAYLOAD="$(tail -n1 "$errf" | jq -c . 2>/dev/null)"
       rm -f "$errf"
       [ -n "$PAYLOAD" ] || die "vector-lib Pareto produced no parseable --json envelope for $id"
-      write_result "$id" "vectors-recall-qps-${VECTOR_DATASET}" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+      write_result "$id" "vectors-recall-qps-${VECTOR_DATASET}" "$vector_version" "$PAYLOAD"
     else
       [ -n "${VECTOR_NPZ:-}" ] || die "vector-lib --run needs VECTOR_NPZ (npz with {data,queries}) or VECTOR_DATASET+VECTOR_ROOT (Pareto)"
       OUT="$(python3 "$ADAPTERS_DIR/vector_lib_adapter.py" --hnswlib --npz "$VECTOR_NPZ" --k "${VECTOR_K:-10}" --engine "$id" --json 2>/dev/null)" \
         || die "vector-lib adapter failed for $id"
       PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,d,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"recall_deficit_milli":int(d),"query_us":int(u)}))')"
-      write_result "$id" "vectors-recall" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+      write_result "$id" "vectors-recall" "$vector_version" "$PAYLOAD"
     fi
     check_df
   fi

@@ -21,6 +21,7 @@
 // a first Run before warm-up finishes simply shows a one-time "Starting engine…" substate.
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import { Play, Loader2, ArrowRight, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -29,13 +30,13 @@ import { rovingTabIndex, useRovingTablist } from "@/lib/use-roving-tablist";
 import { SparqlEditor } from "@/components/sparql-editor";
 import { RdfEditor } from "@/components/rdf-editor";
 import { ResultCell } from "@/components/repl-result-cells";
+import { isGraphShaped } from "@/lib/result-graph-shape";
 import {
   loadSparq,
   loadIntoStore,
   datasetSize,
   prewarmSparqWhenIdle,
   type SparqlResults,
-  type SparqlTerm,
 } from "@/lib/sparq-wasm";
 import {
   HERO_SAMPLE_TURTLE,
@@ -45,24 +46,29 @@ import {
   HERO_PREVIEW_ROWS,
 } from "@/data/hero-sample";
 import { withBasePath } from "@/lib/base-path";
+import { isNumericLiteral } from "@/lib/numeric-literal";
 
-const XSD = "http://www.w3.org/2001/XMLSchema#";
-const NUMERIC_XSD = new Set(
-  ["integer", "decimal", "double", "float", "long", "int", "short", "nonNegativeInteger", "positiveInteger"].map(
-    (t) => XSD + t,
-  ),
+// [review #3601] The node-link SVG renderer AND the full node/edge derivation (deriveGraph, which
+// repl-graph-view imports) load through a LITERAL dynamic import() only when the visitor actually
+// switches to the Graph view — neither may sit in this (already-lazy) hero chunk for the majority
+// who never open Graph (site policy: rarely-used net-new frontend code loads on the invocation
+// path). The CHEAP eligibility check that decides whether to even OFFER the toggle stays
+// synchronous — it is `isGraphShaped` (imported above), a cheap capped scan that exactly models
+// deriveGraph's decline conditions (including the MAX_GRAPH_NODES cap) WITHOUT building the
+// node/edge maps — so the Table | Graph toggle still appears the instant a result is graph-shaped,
+// without eagerly running the full derivation for every result.
+const ResultGraphView = dynamic(
+  () => import("@/components/repl-graph-view").then((m) => m.ResultGraphView),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center gap-2 px-3 py-10 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+        Loading graph view…
+      </div>
+    ),
+  },
 );
-
-/** Whether a term is a numeric literal — used to right-align a numeric result column. */
-function isNumericTerm(t: SparqlTerm | undefined): boolean {
-  return (
-    !!t &&
-    t.type === "literal" &&
-    typeof t.datatype === "string" &&
-    NUMERIC_XSD.has(t.datatype) &&
-    Number.isFinite(Number(t.value))
-  );
-}
 
 /** The first non-empty line of an engine error (keeps the compact strip to one line + any col). */
 function firstErrorLine(err: unknown): string {
@@ -93,7 +99,7 @@ function ResultsTable({
         const t = row[v];
         if (!t) continue;
         sawBound = true;
-        if (!isNumericTerm(t)) allNumeric = false;
+        if (!isNumericLiteral(t)) allNumeric = false;
       }
       m[v] = sawBound && allNumeric;
     }
@@ -200,6 +206,11 @@ export function HeroQueryRunner() {
   const [triples, setTriples] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [engineReady, setEngineReady] = React.useState(false);
+  // [OPUS-4.8] sq-vw3ax.10 — result view: the typed Table (default) or the node-link Graph. The
+  // Graph toggle only appears when the LIVE result is entity-relationship shaped (isGraphShaped is
+  // true); a non-graph result silently falls back to the table, so a stale "graph" choice can
+  // never render an empty picture.
+  const [resultView, setResultView] = React.useState<"table" | "graph">("table");
 
   // WARM-UP 1: pre-warm on this lazy chunk's hydration, on the next browser-idle slot so it never
   // competes with paint. Cancelled on unmount if it has not fired yet.
@@ -285,6 +296,15 @@ export function HeroQueryRunner() {
 
   const running = phase === "running";
   const rowCount = results?.results?.bindings?.length ?? 0;
+  // The node-link Graph view is offered only when the settled result is genuinely graph-shaped. We
+  // run only the CHEAP eligibility predicate here (isGraphShaped) — never the full node/edge
+  // derivation — so the majority who never open Graph don't pay for it; deriveGraph + the SVG
+  // renderer load lazily (ResultGraphView) the first time a visitor actually switches to Graph.
+  const graphAvailable = React.useMemo(
+    () => phase === "done" && results !== null && isGraphShaped(results),
+    [phase, results],
+  );
+  const showGraph = resultView === "graph" && graphAvailable;
 
   return (
     <div
@@ -409,13 +429,44 @@ export function HeroQueryRunner() {
         </div>
       )}
 
+      {/* View toggle: Table (default) | Graph — only when the live result is graph-shaped.
+          [OPUS-4.8] sq-vw3ax.10 — the node-link view for non-aggregate SELECT results, the
+          surviving home of the removed /try Graph view (the /app workbench is the other). */}
+      {graphAvailable && (
+        <div className="flex items-center gap-1 border-t bg-muted/15 px-3 py-1.5">
+          <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+            view
+          </span>
+          {(["table", "graph"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={resultView === v}
+              onClick={() => setResultView(v)}
+              className={cn(
+                "rounded-md px-2.5 py-0.5 text-xs font-medium capitalize transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                resultView === v
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Results area. */}
       <div className="relative border-t bg-background/40" data-hero-results>
         <div className="overflow-x-auto">
           {phase === "idle" ? (
             <PreviewTable />
           ) : results ? (
-            <ResultsTable results={results} dimmed={running || phase === "error"} />
+            showGraph ? (
+              <ResultGraphView results={results} />
+            ) : (
+              <ResultsTable results={results} dimmed={running || phase === "error"} />
+            )
           ) : (
             <PreviewTable />
           )}

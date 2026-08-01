@@ -1,0 +1,14 @@
+# [FABLE-5] sq-hmd7l.24 — PINNED per-case verdicts for the vendored sparq-authored
+# RIF subset (bench/rif/suite). Format: <TestType-dir>\t<case-id>\t<verdict>, where
+# verdict is `pass` or a named skip bucket (`skip:imports`, `skip:condition-shape`,
+# `skip:non-core`, `skip:unsupported-builtin`). The smoke lane asserts EXACT equality:
+# a case drifting in EITHER direction (pass->skip regression OR skip->pass graduation)
+# fails until re-pinned — pinned means pinned. Pinned SKIPs are deliberate: they pin
+# the vacuity guards (an unsupported construct never launders into a pass).
+PositiveEntailmentTest	sparq-frame-chain	pass
+PositiveEntailmentTest	sparq-member-class	pass
+NegativeEntailmentTest	sparq-no-converse	pass
+PositiveSyntaxTest	sparq-valid-rule	pass
+PositiveSyntaxTest	sparq-import-directive	skip:imports
+NegativeSyntaxTest	sparq-unsafe-head	pass
+NegativeSyntaxTest	sparq-arity3-atom	skip:condition-shape

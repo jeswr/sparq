@@ -159,8 +159,9 @@ fn range_string_ordering() {
 
 #[test]
 fn range_datetime_ordering_and_incomparability() {
-    // sh:maxInclusive a timezoned dateTime. A value with the SAME tz-presence
-    // compares; a tz-less value is INCOMPARABLE (not satisfied -> violation).
+    // sh:maxInclusive a timezoned dateTime. A tz-less value compares via
+    // XSD's ±14h rule: determinate when its 28h instant window falls wholly
+    // on one side of the bound, INCOMPARABLE inside the window (-> violation).
     let shapes = r#"
         ex:S a sh:NodeShape ; sh:targetNode ex:n ;
           sh:property [ sh:path ex:d ;
@@ -172,12 +173,19 @@ fn range_datetime_ordering_and_incomparability() {
         shapes,
     );
     assert!(ok.conforms, "{}", ok.to_text());
-    // A timezone-less value is incomparable with the timezoned bound ->
+    // A tz-less value months below the bound is determinately less -> conforms.
+    let ok = run(r#"ex:n ex:d "2024-01-01T00:00:00"^^xsd:dateTime ."#, shapes);
+    assert!(
+        ok.conforms,
+        "tz-less value below the ±14h window is determinately < the bound: {}",
+        ok.to_text()
+    );
+    // A tz-less value inside the bound's ±14h window is incomparable ->
     // constraint not satisfied -> violation.
-    let bad = run(r#"ex:n ex:d "2024-01-01T00:00:00"^^xsd:dateTime ."#, shapes);
+    let bad = run(r#"ex:n ex:d "2024-06-01T00:00:00"^^xsd:dateTime ."#, shapes);
     assert!(
         !bad.conforms,
-        "tz-less vs tz'd dateTime must be incomparable"
+        "tz-less vs tz'd dateTime inside ±14h must be incomparable"
     );
     assert_eq!(count_component(&bad, "MaxInclusiveConstraintComponent"), 1);
 }
@@ -1363,6 +1371,49 @@ fn per_statement_severity_is_occurrence_scoped() {
     assert_eq!(
         ml.severity, SH_VIOLATION,
         "un-annotated occurrence keeps the default Violation"
+    );
+}
+
+/// [SONNET-4.6] (sq-7os4t) The two qualified-count parameters are distinct
+/// causing statements even though the parser combines them into one component.
+/// Their annotations must therefore be selected independently for each result.
+#[test]
+fn per_statement_overrides_apply_to_qualified_count_causing_statement() {
+    let shapes = r#"
+        ex:S a sh:PropertyShape ; sh:targetNode ex:n ; sh:path ex:p ;
+          sh:qualifiedValueShape [ sh:nodeKind sh:IRI ] ;
+          sh:qualifiedMinCount 2 {| sh:severity sh:Warning |} ;
+          sh:qualifiedMaxCount 0 {| sh:message "qualified maximum" |} .
+    "#;
+    let r = run("ex:n ex:p ex:value .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(r.results.len(), 2, "{}", r.to_text());
+
+    let min = r
+        .results
+        .iter()
+        .find(|x| {
+            x.source_component
+                .ends_with("QualifiedMinCountConstraintComponent")
+        })
+        .expect("qualified minimum result");
+    assert_eq!(min.severity, SH_WARNING);
+
+    let max = r
+        .results
+        .iter()
+        .find(|x| {
+            x.source_component
+                .ends_with("QualifiedMaxCountConstraintComponent")
+        })
+        .expect("qualified maximum result");
+    assert_eq!(max.severity, SH_VIOLATION);
+    assert!(
+        max.effective_messages()
+            .iter()
+            .any(|m| matches!(m, Term::Literal(l) if l.value() == "qualified maximum")),
+        "qualified maximum result must use its statement annotation: {}",
+        r.to_text()
     );
 }
 

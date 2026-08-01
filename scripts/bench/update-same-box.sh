@@ -36,14 +36,23 @@
 #   CANONICAL   1 = a dedicated quiet-box run (default 0: NON-canonical)
 #   SPARQ_BIN   sparq-server binary path (default: build from workspace if not present)
 #   SPARQ_PORT  loopback port for sparq-server (default 7020)
-#   FUSEKI_PORT loopback port for the Fuseki Docker container (default 3030)
+#   FUSEKI_PORT loopback port for the local Fuseki server (default 3030)
+#   FUSEKI_VERSION apache-jena-fuseki version (default 5.4.0, archive.apache.org)
+#   FUSEKI_DIR  unpacked Fuseki distribution root (default /tmp/jena-fuseki/...)
 #   OXI_PORT    loopback port for the Oxigraph Docker container (default 7878)
 #
-# ENGINES NOT RUNNABLE (Docker unavailable, image pull fails, build fails):
+# ENGINES NOT RUNNABLE (java missing / dist download fails for Fuseki; Docker
+# unavailable or image pull fails for Oxigraph; build fails for sparq):
 #   A graceful skip with status "absent" in the envelope. Never a fabricated row.
 #
-# SCRATCH: container images are transient gather-only deps — NOT committed to git.
-# Delete them when done: docker rmi stain/jena-fuseki oxigraph/oxigraph
+# FUSEKI RECIPE (sq-l7diu): the direct apache-jena-fuseki dist (archive.apache.org
+# tarball + local java), NOT the stain/jena-fuseki container — the container never
+# became ready within 30 s on a fresh quiet box (wave-1 canonical run sq-hmd7l.26),
+# while the direct dist used by fts-same-box.sh was ready in seconds on the SAME box.
+#
+# SCRATCH: the Fuseki tarball and the Oxigraph image are transient gather-only deps —
+# NOT committed to git. Delete them when done:
+#   rm -rf /tmp/jena-fuseki && docker rmi oxigraph/oxigraph
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +66,8 @@ OUT_DIR="${OUT_DIR:-/tmp/update-same-box-results}"
 CANONICAL="${CANONICAL:-0}"
 SPARQ_PORT="${SPARQ_PORT:-7020}"
 FUSEKI_PORT="${FUSEKI_PORT:-3030}"
+FUSEKI_VERSION="${FUSEKI_VERSION:-5.4.0}"
+FUSEKI_DIR="${FUSEKI_DIR:-/tmp/jena-fuseki/apache-jena-fuseki-${FUSEKI_VERSION}}"
 OXI_PORT="${OXI_PORT:-7878}"
 SPARQ_BIN="${SPARQ_BIN:-${ROOT}/target/release/sparq-server}"
 
@@ -79,15 +90,16 @@ TMP="$(mktemp -d /tmp/update-same-box.XXXXXX)"
 
 # --- Cleanup: stop servers on EXIT -------------------------------------------
 SPARQ_PID=""
-FUSEKI_CID=""
+FUSEKI_PID=""
 OXI_CID=""
 
 cleanup() {
   if [[ -n "${SPARQ_PID}" ]]; then
     kill "${SPARQ_PID}" 2>/dev/null || true
   fi
-  if [[ -n "${FUSEKI_CID}" ]]; then
-    docker stop "${FUSEKI_CID}" >/dev/null 2>&1 || true
+  if [[ -n "${FUSEKI_PID}" ]]; then
+    kill "${FUSEKI_PID}" 2>/dev/null || true
+    wait "${FUSEKI_PID}" 2>/dev/null || true
   fi
   if [[ -n "${OXI_CID}" ]]; then
     docker stop "${OXI_CID}" >/dev/null 2>&1 || true
@@ -136,44 +148,53 @@ if want sparq; then
   fi
 fi
 
-# ---- 2. Fuseki (Docker / stain/jena-fuseki) ---------------------------------
+# ---- 2. Fuseki (direct apache-jena-fuseki dist; sq-l7diu) -------------------
 FUSEKI_STATUS=absent
-FUSEKI_VERSION=""
-FUSEKI_IMAGE="stain/jena-fuseki"
+FUSEKI_VER=""
 if want fuseki; then
-  if docker_ok; then
-    log "pulling ${FUSEKI_IMAGE} (if not cached)..."
-    if timeout 120 docker pull "${FUSEKI_IMAGE}" >/dev/null 2>&1; then
-      log "starting Fuseki on 127.0.0.1:${FUSEKI_PORT} (in-memory /ds, updates enabled)"
-      FUSEKI_CID="$(docker run -d --rm \
-        -p "127.0.0.1:${FUSEKI_PORT}:3030" \
-        "${FUSEKI_IMAGE}" \
-        --update --mem /ds 2>/dev/null)"
-      # probe the Fuseki ping endpoint (up to 30 s)
-      _ready=0
-      for _i in $(seq 1 60); do
-        if curl -sf --max-time 1 \
-              "http://127.0.0.1:${FUSEKI_PORT}/\$/ping" \
-              >/dev/null 2>&1; then
-          _ready=1
-          break
-        fi
-        sleep 0.5
-      done
-      if [[ "${_ready}" == "1" ]]; then
-        FUSEKI_STATUS=ok
-        FUSEKI_VERSION="${FUSEKI_IMAGE}"
-        log "Fuseki ready (container ${FUSEKI_CID})"
-      else
-        log "Fuseki did not become ready in 30 s; status=absent"
-        docker stop "${FUSEKI_CID}" >/dev/null 2>&1 || true
-        FUSEKI_CID=""
+  FUSEKI_SKIP=""
+  if ! command -v java >/dev/null 2>&1; then
+    FUSEKI_SKIP="java not available"
+  fi
+  if [[ -z "${FUSEKI_SKIP}" && ! -f "${FUSEKI_DIR}/fuseki-server.jar" ]]; then
+    log "downloading apache-jena-fuseki ${FUSEKI_VERSION} to /tmp/jena-fuseki (gather-only dep)"
+    mkdir -p /tmp/jena-fuseki
+    if ! curl -sSfL -o "/tmp/jena-fuseki/apache-jena-fuseki-${FUSEKI_VERSION}.tar.gz" \
+        "https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${FUSEKI_VERSION}.tar.gz" \
+        || ! tar xzf "/tmp/jena-fuseki/apache-jena-fuseki-${FUSEKI_VERSION}.tar.gz" -C /tmp/jena-fuseki; then
+      FUSEKI_SKIP="fuseki download/unpack failed"
+    fi
+  fi
+  if [[ -z "${FUSEKI_SKIP}" ]]; then
+    log "starting Fuseki on 127.0.0.1:${FUSEKI_PORT} (in-memory /ds, updates enabled)"
+    mkdir -p "${TMP}/fuseki-base"
+    FUSEKI_BASE="${TMP}/fuseki-base" java -jar "${FUSEKI_DIR}/fuseki-server.jar" \
+      --port="${FUSEKI_PORT}" --update --mem /ds \
+      > "${TMP}/fuseki.log" 2>&1 &
+    FUSEKI_PID=$!
+    # probe the Fuseki ping endpoint (up to 30 s)
+    _ready=0
+    for _i in $(seq 1 60); do
+      if curl -sf --max-time 1 \
+            "http://127.0.0.1:${FUSEKI_PORT}/\$/ping" \
+            >/dev/null 2>&1; then
+        _ready=1
+        break
       fi
+      sleep 0.5
+    done
+    if [[ "${_ready}" == "1" ]]; then
+      FUSEKI_STATUS=ok
+      FUSEKI_VER="apache-jena-fuseki-${FUSEKI_VERSION}"
+      log "Fuseki ready (pid ${FUSEKI_PID})"
     else
-      log "docker pull ${FUSEKI_IMAGE} failed; fuseki status=absent"
+      log "Fuseki did not become ready in 30 s; status=absent. Log tail:"
+      tail -20 "${TMP}/fuseki.log" >&2 || true
+      kill "${FUSEKI_PID}" 2>/dev/null || true
+      FUSEKI_PID=""
     fi
   else
-    log "Docker not available; fuseki status=absent"
+    log "fuseki SKIP: ${FUSEKI_SKIP}; status=absent"
   fi
 fi
 
@@ -231,18 +252,33 @@ fi
 # ---- 5. Run the workload through compare.py ----------------------------------
 COMPARE_JSON="${TMP}/compare-out.json"
 COMPARE_LOG="${TMP}/compare.log"
+COMPARE_EXIT=0
 
 if [[ "${#COMPARE_ARGS[@]}" -gt 0 ]]; then
+  if [[ "${SPARQ_STATUS}" != "ok" ]]; then
+    # compare.py defaults --sparq ON; an empty URL disables it so an ONLY= subset
+    # without sparq (or a failed sparq start) doesn't abort the whole workload.
+    COMPARE_ARGS+=(--sparq "")
+  fi
   log "running compare.py: iters=${ITERS}, engines=[${COMPARE_ARGS[*]}]"
-  if ! timeout "${TIMEOUT_S}" \
+  set +e
+  timeout "${TIMEOUT_S}" \
       python3 "${ROOT}/bench/pss-update-set/compare.py" \
       "${ITERS}" "${COMPARE_ARGS[@]}" \
       --json-out "${COMPARE_JSON}" \
-      > "${COMPARE_LOG}" 2>&1; then
+      > "${COMPARE_LOG}" 2>&1
+  COMPARE_EXIT=$?
+  set -e
+  if [[ "${COMPARE_EXIT}" -ne 0 ]]; then
     log "compare.py exited non-zero or timed out (see ${COMPARE_LOG})"
-    # write a minimal stub so the envelope assembly succeeds
-    printf '{"latency_ms":{},"throughput_s":{},"state_count":{},"state_agree":null,"parity_gate":"error","parity_note":"compare.py failed"}\n' \
-      > "${COMPARE_JSON}"
+    # [SONNET-4.6] A parity-gate failure is measured output: compare.py writes its
+    # complete JSON summary before exiting non-zero. Preserve that summary and use
+    # the stub only for a crash/timeout that left no valid machine-readable result.
+    if ! python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+        "${COMPARE_JSON}" >/dev/null 2>&1; then
+      printf '{"latency_ms":{},"throughput_s":{},"state_count":{},"state_agree":null,"parity_gate":"error","parity_note":"compare.py failed"}\n' \
+        > "${COMPARE_JSON}"
+    fi
   fi
   cat "${COMPARE_LOG}" >&2
 else
@@ -256,9 +292,10 @@ if [[ -n "${SPARQ_PID}" ]]; then
   kill "${SPARQ_PID}" 2>/dev/null || true
   SPARQ_PID=""
 fi
-if [[ -n "${FUSEKI_CID}" ]]; then
-  docker stop "${FUSEKI_CID}" >/dev/null 2>&1 || true
-  FUSEKI_CID=""
+if [[ -n "${FUSEKI_PID}" ]]; then
+  kill "${FUSEKI_PID}" 2>/dev/null || true
+  wait "${FUSEKI_PID}" 2>/dev/null || true
+  FUSEKI_PID=""
 fi
 if [[ -n "${OXI_CID}" ]]; then
   docker stop "${OXI_CID}" >/dev/null 2>&1 || true
@@ -272,7 +309,7 @@ OUT="${OUT_DIR}/update-${TS}.json"
 SPARQ_STATUS="${SPARQ_STATUS}" \
 SPARQ_VERSION="${SPARQ_VERSION}" \
 FUSEKI_STATUS="${FUSEKI_STATUS}" \
-FUSEKI_VERSION="${FUSEKI_VERSION}" \
+FUSEKI_VERSION="${FUSEKI_VER}" \
 OXI_STATUS="${OXI_STATUS}" \
 OXI_VERSION="${OXI_VERSION}" \
 ITERS="${ITERS}" \
@@ -378,3 +415,4 @@ print(out_path)
 PYEOF
 
 log "envelope: ${OUT}"
+exit "${COMPARE_EXIT}"

@@ -213,12 +213,30 @@ class NewBenchTest(unittest.TestCase):
         self.rules = flow_on.load_rules(RULES)
 
     def test_new_bench_suite_triggers_dashboard_row(self):
-        added = ["bench/widgets/benchmarks.toml", "bench/widgets/run.sh"]
-        fos = flow_on.evaluate(self.rules, 11, "add widgets bench", added, added, [])
+        added = ["bench/watdiv/benchmarks.toml", "bench/watdiv/run.sh"]
+        fos = flow_on.evaluate(self.rules, 11, "add watdiv bench", added, added, [])
         dash = [fo for fo in fos if fo.rule_id == "new-bench-dashboard-row"]
         self.assertTrue(dash)
-        self.assertEqual(dash[0].dedup_key, "dashboard-row-widgets")
-        self.assertIn("widgets", dash[0].title)
+        self.assertEqual(dash[0].dedup_key, "dashboard-row-watdiv")
+        self.assertIn("watdiv", dash[0].title)
+
+    def test_unfeatured_agent_token_harnesses_do_not_trigger_dashboard_row(self):
+        # [GPT-5.6] These registry entries explicitly set featured=false: their
+        # NON-CANONICAL token A/B verdicts never feed the performance dashboard.
+        for suite in ("pkg-dogfood", "terse"):
+            with self.subTest(suite=suite):
+                added = [f"bench/{suite}/run.sh"]
+                fos = flow_on.evaluate(
+                    self.rules, 11, f"add {suite} research harness", added, added, []
+                )
+                self.assertNotIn(
+                    "new-bench-dashboard-row", {fo.rule_id for fo in fos}
+                )
+
+    def test_unregistered_harness_does_not_trigger_dashboard_row(self):
+        added = ["bench/token-research-spike/run.sh"]
+        fos = flow_on.evaluate(self.rules, 11, "add token spike", added, added, [])
+        self.assertNotIn("new-bench-dashboard-row", {fo.rule_id for fo in fos})
 
 
 class ZkCircuitGatecountTest(unittest.TestCase):
@@ -314,8 +332,8 @@ class RoutingLabelsTest(unittest.TestCase):
                  title="add --explain flag",
                  pub_changed={"crates/sparq-cli/src/main.rs"}),
             # new-bench-dashboard-row
-            dict(changed=["bench/widgets/benchmarks.toml"],
-                 added=["bench/widgets/benchmarks.toml"], labels=[], title="bench",
+            dict(changed=["bench/watdiv/benchmarks.toml"],
+                 added=["bench/watdiv/benchmarks.toml"], labels=[], title="bench",
                  pub_changed=None),
             # competitor-feature-gather
             dict(changed=["crates/sparq-engine/src/exec/join.rs"], added=[],
@@ -359,7 +377,7 @@ class RoutingLabelsTest(unittest.TestCase):
         # issue will be born routed (labels line includes status:ready).
         with tempfile.TemporaryDirectory() as td:
             changed = Path(td) / "changed.txt"
-            changed.write_text("bench/widgets/benchmarks.toml\nbench/widgets/run.sh\n")
+            changed.write_text("bench/watdiv/benchmarks.toml\nbench/watdiv/run.sh\n")
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = flow_on.main(
@@ -383,11 +401,11 @@ class IdempotencyTest(unittest.TestCase):
         # [OPUS-4.8] (bead sq-l0a0) Repointed off the removed new-crate rule onto
         # the new-bench-dashboard-row follow-on, which still fires and produces a
         # stable, non-empty dedup key.
-        added = ["bench/widgets/benchmarks.toml"]
+        added = ["bench/watdiv/benchmarks.toml"]
         a = flow_on.evaluate(self.rules, 42, "t", added, added, [])
         b = flow_on.evaluate(self.rules, 42, "t", added, added, [])
         keys_a = sorted(fo.dedup_key for fo in a)
-        self.assertIn("dashboard-row-widgets", keys_a)
+        self.assertIn("dashboard-row-watdiv", keys_a)
         self.assertEqual(keys_a, sorted(fo.dedup_key for fo in b))
 
     def test_marker_round_trips(self):
@@ -410,7 +428,7 @@ class DryRunTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             changed = Path(td) / "changed.txt"
-            changed.write_text("bench/widgets/benchmarks.toml\nbench/widgets/run.sh\n")
+            changed.write_text("bench/watdiv/benchmarks.toml\nbench/watdiv/run.sh\n")
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = flow_on.main(
@@ -423,13 +441,13 @@ class DryRunTest(unittest.TestCase):
                         "--added-files",
                         str(changed),
                         "--title",
-                        "add widgets bench suite",
+                        "add watdiv bench suite",
                     ]
                 )
             out = buf.getvalue()
         self.assertEqual(rc, 0)
         self.assertIn("[dry-run] WOULD create", out)
-        self.assertIn("dashboard-row-widgets", out)
+        self.assertIn("dashboard-row-watdiv", out)
 
     def test_dry_run_on_new_crate_with_g1_artifacts_is_clean(self):
         # [OPUS-4.8] (bead sq-l0a0) A new-crate PR that ships its G1 artifacts

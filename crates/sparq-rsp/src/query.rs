@@ -14,7 +14,7 @@
 //! [`GraphResult`]s (with R2S set-diff semantics over the constructed
 //! triples). [`ContinuousAsk`] delivers one boolean per window.
 //!
-//! # R2S semantics (multiset, row-hash based)
+//! # R2S semantics (exact multiset differences)
 //!
 //! SPARQL SELECT results are multisets of rows. The three operators:
 //!
@@ -27,27 +27,25 @@
 //!   [`crate::window`]): a result only "disappears" when a later, possibly
 //!   empty, window closes without it.
 //!
-//! Diffs are computed over 64-bit **row hashes** (`FxHasher` over the bound
-//! terms), counted as multisets, so a row appearing twice in `cur` and once in
-//! `prev` ISTREAMs exactly once. Emission order is deterministic: ISTREAM
-//! preserves the engine's row order of the current window, DSTREAM the row
-//! order of the previous window. (A hash collision between two *different*
-//! rows inside one query's results could suppress a diff; with 64-bit hashes
-//! this is vanishingly unlikely and accepted for speed.)
+//! Diffs compare complete rows and count them as multisets, so a row appearing
+//! twice in `cur` and once in `prev` ISTREAMs exactly once. Emission order is
+//! deterministic: ISTREAM preserves the engine's row order of the current
+//! window, DSTREAM the row order of the previous window.
 //!
 //! CONSTRUCT results are triple SETS (the engine dedups), so
 //! [`ContinuousConstruct`]'s ISTREAM/DSTREAM are exact set differences over
 //! full triples — no hashing caveat.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 use oxrdf::{Term, Triple, Variable};
 use sparq_engine::PreparedQuery;
 use spargebra::Query;
 
+use crate::budget::BudgetSpec;
 use crate::eval::{EvalMode, WindowEval};
 use crate::window::WindowSpec;
+use sparq_engine::QueryBudget;
 
 /// The relation-to-stream operator: what part of each window's result is
 /// streamed to the callback.
@@ -134,10 +132,12 @@ pub struct ContinuousQuery {
     prepared: PreparedQuery,
     eval: WindowEval,
     r2s: R2S,
-    /// Previous window's full result, in engine row order, with row hashes —
+    /// Previous window's full result, in engine row order —
     /// the ISTREAM/DSTREAM diff base. Unused (empty) under RSTREAM.
     prev_rows: Vec<Vec<Option<Term>>>,
-    prev_hashes: Vec<u64>,
+    /// [SONNET-4.6] sq-xqu: the per-window-evaluation resource budget
+    /// (unlimited by default).
+    budget: BudgetSpec,
 }
 
 impl ContinuousQuery {
@@ -159,7 +159,7 @@ impl ContinuousQuery {
             eval: WindowEval::new(spec, EvalMode::default()),
             r2s: R2S::RStream,
             prev_rows: Vec::new(),
-            prev_hashes: Vec::new(),
+            budget: BudgetSpec::default(),
         })
     }
 
@@ -167,6 +167,51 @@ impl ContinuousQuery {
     /// `ContinuousQuery::register(q, spec)?.with_r2s(R2S::IStream)`.
     pub fn with_r2s(mut self, r2s: R2S) -> Self {
         self.r2s = r2s;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: sets the per-window-evaluation resource budget
+    /// (builder style). The budget is applied to EVERY window evaluation, and
+    /// every limit in it is COOPERATIVE: `max_rows`, `max_bytes` and the
+    /// `cancel` flag are observed at the executor's coarse polling sites, so
+    /// they take effect at the NEXT poll rather than instantly — an evaluation
+    /// that reaches no polling site (answered straight from the index, or
+    /// finished before the first poll) runs to completion unchecked.
+    /// `max_bytes` caps the executor-accounted ESTIMATED evaluation working
+    /// set, not total process memory nor the memory of the materialised
+    /// windows themselves. A `deadline` inside `budget` stays an ABSOLUTE
+    /// instant (it does not reset per window — once it passes, every later
+    /// window fails); for a deadline REFRESHED at each window evaluation use
+    /// [`with_window_timeout`](Self::with_window_timeout). A tripped budget
+    /// surfaces as the evaluation error of the `push`/`flush` that closed
+    /// the window (`"query budget exceeded (…)"`), so — like any evaluation
+    /// error — remaining closed windows are dropped.
+    pub fn with_budget(mut self, budget: QueryBudget) -> Self {
+        self.budget.base = budget;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: installs a REFRESHED deadline for EACH window
+    /// evaluation (builder style): at every window evaluation start the
+    /// effective budget's deadline becomes the EARLIER of the budget's own
+    /// absolute deadline (if any) and `now + timeout`, so one pathological
+    /// window aborts with `"query budget exceeded (timeout)"` instead of
+    /// stalling the embedder's push loop — and a refreshed window deadline
+    /// never grants time past the absolute one. Like the other limits the
+    /// deadline is observed CO-OPERATIVELY, at the executor's next polling
+    /// site, so it is not a strict cap on an evaluation's wall-clock
+    /// duration: an evaluation that reaches no polling site (answered from
+    /// the index, or finished before the first poll) is never checked. A
+    /// `timeout` so large
+    /// that `now + timeout` is unrepresentable can never trip and is treated
+    /// as unlimited (the budget's own absolute deadline, if any, still
+    /// applies). Native only — the engine's wall-clock deadline does not
+    /// exist on `wasm32` (where `std::time::Instant` is unusable); the
+    /// row/byte/cancel limits of [`with_budget`](Self::with_budget) stay
+    /// fully portable.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_window_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.budget.per_window_timeout = Some(timeout);
         self
     }
 
@@ -236,13 +281,16 @@ impl ContinuousQuery {
         let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev_rows = &mut self.prev_rows;
-        let prev_hashes = &mut self.prev_hashes;
+        let budget = &self.budget;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let result = sparq_engine::query_prepared(graph, prepared)?;
+            // [SONNET-4.6] sq-xqu: one effective budget per window evaluation
+            // (the per-window timeout's deadline is measured from NOW).
+            let result =
+                sparq_engine::query_prepared_with_budget(graph, prepared, &budget.window_budget())?;
             let rows = match r2s {
                 R2S::RStream => result.rows,
                 R2S::IStream | R2S::DStream => {
-                    diff_rows(r2s, result.rows, prev_rows, prev_hashes)
+                    diff_rows(r2s, result.rows, prev_rows)
                 }
             };
             on_result(WindowResult { start, end, vars: result.vars, rows });
@@ -284,6 +332,9 @@ pub struct ContinuousConstruct {
     r2s: R2S,
     /// Previous window's constructed graph (the ISTREAM/DSTREAM diff base).
     prev: Vec<Triple>,
+    /// [SONNET-4.6] sq-xqu: the per-window-evaluation resource budget
+    /// (unlimited by default).
+    budget: BudgetSpec,
 }
 
 impl ContinuousConstruct {
@@ -301,12 +352,34 @@ impl ContinuousConstruct {
             eval: WindowEval::new(spec, EvalMode::default()),
             r2s: R2S::RStream,
             prev: Vec::new(),
+            budget: BudgetSpec::default(),
         })
     }
 
     /// Sets the relation-to-stream operator (builder style).
     pub fn with_r2s(mut self, r2s: R2S) -> Self {
         self.r2s = r2s;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: sets the per-window-evaluation resource budget
+    /// (builder style). Semantics as
+    /// [`ContinuousQuery::with_budget`](crate::ContinuousQuery::with_budget):
+    /// applied to every window evaluation; a tripped budget is the evaluation
+    /// error of the `push`/`flush` that closed the window.
+    pub fn with_budget(mut self, budget: QueryBudget) -> Self {
+        self.budget.base = budget;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: installs a refreshed deadline for EACH window
+    /// evaluation (tightened to at most `now + timeout` per window).
+    /// Semantics as
+    /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
+    /// native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_window_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.budget.per_window_timeout = Some(timeout);
         self
     }
 
@@ -352,8 +425,13 @@ impl ContinuousConstruct {
         let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev = &mut self.prev;
+        let budget = &self.budget;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let cur = sparq_engine::construct_prepared(graph, prepared)?;
+            let cur = sparq_engine::construct_prepared_with_budget(
+                graph,
+                prepared,
+                &budget.window_budget(),
+            )?;
             let triples = match r2s {
                 R2S::RStream => cur.clone(),
                 // Constructed graphs are SETS: exact set difference, in the
@@ -376,6 +454,9 @@ pub struct ContinuousAsk {
     /// Parsed once at registration; executed per window via the prepared seam.
     prepared: PreparedQuery,
     eval: WindowEval,
+    /// [SONNET-4.6] sq-xqu: the per-window-evaluation resource budget
+    /// (unlimited by default).
+    budget: BudgetSpec,
 }
 
 impl ContinuousAsk {
@@ -391,7 +472,29 @@ impl ContinuousAsk {
             sparql: sparql.to_owned(),
             prepared,
             eval: WindowEval::new(spec, EvalMode::default()),
+            budget: BudgetSpec::default(),
         })
+    }
+
+    /// [SONNET-4.6] sq-xqu: sets the per-window-evaluation resource budget
+    /// (builder style). Semantics as
+    /// [`ContinuousQuery::with_budget`](crate::ContinuousQuery::with_budget):
+    /// applied to every window evaluation; a tripped budget is the evaluation
+    /// error of the `push`/`flush` that closed the window.
+    pub fn with_budget(mut self, budget: QueryBudget) -> Self {
+        self.budget.base = budget;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: installs a refreshed deadline for EACH window
+    /// evaluation (tightened to at most `now + timeout` per window).
+    /// Semantics as
+    /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
+    /// native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_window_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.budget.per_window_timeout = Some(timeout);
+        self
     }
 
     /// Sets the window materialisation strategy (builder style). Call BEFORE
@@ -434,60 +537,57 @@ impl ContinuousAsk {
 
     fn emit(&mut self, flush: bool, on_result: &mut impl FnMut(AskResult)) -> Result<(), String> {
         let prepared = &self.prepared;
+        let budget = &self.budget;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let value = sparq_engine::ask_prepared(graph, prepared)?;
+            let value =
+                sparq_engine::ask_prepared_with_budget(graph, prepared, &budget.window_budget())?;
             on_result(AskResult { start, end, value });
             Ok(())
         })
     }
 }
 
-/// Applies ISTREAM/DSTREAM to a SELECT result: multiset row-hash diff of the
-/// current window's full result against the previous window's, then advances
-/// the diff base.
+/// Applies ISTREAM/DSTREAM to a SELECT result: exact term-level multiset diff
+/// of the current window's full result against the previous window's, then
+/// advances the diff base.
 // [SONNET-4.6] sq-2n1q3.3: made pub(crate) so ContinuousMultiQuery can reuse it.
 pub(crate) fn diff_rows(
     r2s: R2S,
     cur_rows: Vec<Vec<Option<Term>>>,
     prev_rows: &mut Vec<Vec<Option<Term>>>,
-    prev_hashes: &mut Vec<u64>,
 ) -> Vec<Vec<Option<Term>>> {
-    let cur_hashes: Vec<u64> = cur_rows.iter().map(|r| row_hash(r)).collect();
     let emitted = match r2s {
         // cur ∖ prev, in current row order.
-        R2S::IStream => multiset_minus(&cur_rows, &cur_hashes, prev_hashes),
+        R2S::IStream => multiset_minus(&cur_rows, prev_rows),
         // prev ∖ cur, in previous row order.
-        R2S::DStream => multiset_minus(prev_rows, prev_hashes, &cur_hashes),
+        R2S::DStream => multiset_minus(prev_rows, &cur_rows),
         R2S::RStream => unreachable!("diff_rows() is only called for ISTREAM/DSTREAM"),
     };
     *prev_rows = cur_rows;
-    *prev_hashes = cur_hashes;
     emitted
 }
 
-/// `keep ∖ minus` as multisets of row hashes: each hash in `minus` cancels at
+/// `keep ∖ minus` as multisets of complete rows: each row in `minus` cancels at
 /// most that many occurrences in `keep`; survivors are returned in `keep`'s
 /// row order.
 fn multiset_minus(
     keep_rows: &[Vec<Option<Term>>],
-    keep_hashes: &[u64],
-    minus: &[u64],
+    minus: &[Vec<Option<Term>>],
 ) -> Vec<Vec<Option<Term>>> {
-    let mut budget: HashMap<u64, usize> = HashMap::with_capacity(minus.len());
-    for h in minus {
-        *budget.entry(*h).or_insert(0) += 1;
+    let mut budget: HashMap<&[Option<Term>], usize> = HashMap::with_capacity(minus.len());
+    for row in minus {
+        *budget.entry(row.as_slice()).or_insert(0) += 1;
     }
     keep_rows
         .iter()
-        .zip(keep_hashes)
-        .filter(|(_, h)| match budget.get_mut(h) {
+        .filter(|row| match budget.get_mut(row.as_slice()) {
             Some(n) if *n > 0 => {
                 *n -= 1;
                 false // cancelled by an occurrence on the other side
             }
             _ => true, // survives the difference: emit
         })
-        .map(|(row, _)| row.clone())
+        .cloned()
         .collect()
 }
 
@@ -498,10 +598,31 @@ fn set_minus(keep: &[Triple], minus: &[Triple]) -> Vec<Triple> {
     keep.iter().filter(|t| !minus.contains(*t)).cloned().collect()
 }
 
-/// 64-bit hash of one result row (bound terms + unbound positions).
-// [SONNET-4.6] sq-2n1q3.3: made pub(crate) so ContinuousMultiQuery can reuse it.
-pub(crate) fn row_hash(row: &[Option<Term>]) -> u64 {
-    let mut h = rustc_hash::FxHasher::default();
-    row.hash(&mut h);
-    h.finish()
+#[cfg(test)]
+mod tests {
+    use super::{diff_rows, R2S};
+    use oxrdf::{Literal, Term};
+
+    fn row(value: &str) -> Vec<Option<Term>> {
+        vec![Some(Literal::new_simple_literal(value).into()), None]
+    }
+
+    /// [SONNET-4.6] sq-ifv: cancellation is keyed by complete terms and retains
+    /// the multiplicity and input order of rows that do not cancel.
+    #[test]
+    fn select_diff_uses_exact_term_rows() {
+        let a = row("a");
+        let b = row("b");
+        let c = row("c");
+        let mut previous = vec![a.clone(), b.clone(), b.clone()];
+
+        let emitted = diff_rows(
+            R2S::IStream,
+            vec![b.clone(), c.clone(), b.clone(), c.clone()],
+            &mut previous,
+        );
+
+        assert_eq!(emitted, vec![c.clone(), c]);
+        assert_eq!(previous, vec![b.clone(), row("c"), b, row("c")]);
+    }
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DataFactory as DF, detectQueryForm, quadsToNQuads, termToNT } from '../dist/index.js';
+import { DataFactory as DF, detectQueryForm, quadsToNQuads, termFromSparqlJson, termToNT } from '../dist/index.js';
 
 test('DataFactory produces spec-compliant terms', () => {
   const n = DF.namedNode('http://ex/a');
@@ -46,6 +46,25 @@ test('termToNT and quadsToNQuads escape correctly', () => {
     DF.quad(DF.namedNode('http://ex/s'), DF.namedNode('http://ex/p'), DF.literal('o'), DF.namedNode('http://ex/g')),
   ]);
   assert.equal(nq, '<http://ex/s> <http://ex/p> "o" .\n<http://ex/s> <http://ex/p> "o" <http://ex/g> .\n');
+});
+
+test('termFromSparqlJson decodes the RDF 1.2 `its:dir` directional-literal channel', () => {
+  // The engine's SPARQL JSON serialiser keeps `xml:lang` (bare tag) and
+  // `its:dir` (base direction) apart for `"x"@en--ltr`; the parse side must
+  // reassemble them into a directional language-tagged literal.
+  const ltr = termFromSparqlJson({ type: 'literal', value: 'hello', 'xml:lang': 'en', 'its:dir': 'ltr' });
+  assert.ok(ltr.equals(DF.literal('hello', { language: 'en', direction: 'ltr' })));
+  assert.equal(ltr.direction, 'ltr');
+  assert.equal(ltr.datatype.value, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString');
+
+  const rtl = termFromSparqlJson({ type: 'literal', value: 'مرحبا', 'xml:lang': 'ar', 'its:dir': 'rtl' });
+  assert.ok(rtl.equals(DF.literal('مرحبا', { language: 'ar', direction: 'rtl' })));
+
+  // No `its:dir` → plain language-tagged literal, unchanged behaviour.
+  const lang = termFromSparqlJson({ type: 'literal', value: 'hello', 'xml:lang': 'en' });
+  assert.ok(lang.equals(DF.literal('hello', 'en')));
+  assert.equal(lang.direction, '');
+  assert.equal(lang.datatype.value, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString');
 });
 
 test('query-form detection skips prologue, comments, IRIs and strings', () => {

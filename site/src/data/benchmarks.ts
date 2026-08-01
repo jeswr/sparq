@@ -68,6 +68,10 @@ export interface SameBoxRow {
   rows: number;
   values: Record<string, number | null>;
   count_match: boolean | null;
+  // [SONNET-4.6] A row may use another workload's count oracle or a distinct
+  // corpus variant; the table surfaces both caveats beside the query.
+  sparq_oracle_workload?: string;
+  corpus_variant?: string;
   // [FABLE-5] sq-7d3dj.34 — present on HTTP/TTFB-panel suites (e.g. "sp2b-http") only:
   // `values` is then the keep-alive full-request best; these carry the TTFB and
   // fresh-connect twins (same best-of-gathers rule; see the entry's `connection` note).

@@ -183,13 +183,39 @@ mod ctx {
             phrase: &str,
             query_vec: Option<&[f32]>,
         ) -> Result<Resolution, TerseError> {
-            // ---- §6.4: lexical-first. ----
+            self.resolve_lazy(phrase, |_| query_vec.map(<[f32]>::to_vec))
+        }
+
+        /// [`Self::resolve`] with the query vector produced *on demand*: `embed` is invoked
+        /// only if the lexical path returns nothing AND a *usable* [`VectorStore`] is attached
+        /// — attached and fresh vs the graph (§6.5) — i.e. only when the vector fallback can
+        /// actually fire. Embedding free text is a model / network cost the design keeps the
+        /// caller's explicit opt-in (§6/§9 Q5), so a phrase the deterministic lexical linker
+        /// already binds must never pay it — this is the entry point
+        /// [`crate::terse_to_sparql_with`] uses so its per-phrase embedder contract ("called
+        /// only for a phrase that fails lexical linking") holds.
+        ///
+        /// Because the staleness guard runs *before* `embed`, a stale store is
+        /// [`TerseError::StaleStore`] regardless of what the embedder would have returned —
+        /// the loud, accurate error, and no phrase is disclosed to the model.
+        pub(crate) fn resolve_lazy(
+            &self,
+            phrase: &str,
+            embed: impl FnOnce(&str) -> Option<Vec<f32>>,
+        ) -> Result<Resolution, TerseError> {
+            // ---- §6.4: lexical-first — no model, no network, no embedder call. ----
             if let Some(res) = self.resolve_lexical(phrase) {
                 return self.gate_resolution(phrase, res);
             }
-            // ---- §6.4: vector fallback (only if a store + embedded query are supplied). ----
-            if let (Some(store), Some(qv)) = (self.store, query_vec) {
-                return self.resolve_vector(phrase, store, qv);
+            // ---- §6.4: vector fallback. Only NOW is the embedder worth its cost, and only
+            // when a store that can actually serve the search is attached. ----
+            if let Some(store) = self.store {
+                // §6.5 FIRST: a store that cannot serve the fallback must not cost the caller
+                // an embedding (a model/network round-trip that also discloses the phrase).
+                self.check_store_fresh(phrase, store)?;
+                if let Some(qv) = embed(phrase) {
+                    return self.resolve_vector(phrase, store, &qv);
+                }
             }
             // Nothing matched lexically and no usable vector fallback: loud failure.
             Err(TerseError::Unresolved {
@@ -231,25 +257,35 @@ mod ctx {
             })
         }
 
-        /// The staleness-guarded vector fallback (design §6.4/§6.5). Embeds-via-caller: the
-        /// supplied `query_vec` is searched against `store` over the graph; the nearest term
-        /// is the candidate. The staleness check is mandatory.
+        /// The §6.5 staleness guard, in one place: a store built against a different graph
+        /// generation is a hard [`TerseError::StaleStore`], never stale neighbours. Probing
+        /// via `check_graph` surfaces a mismatch even though the brute-force search takes a
+        /// raw vector (not a term).
+        ///
+        /// [`Self::resolve_lazy`] runs this *before* the embedder, so the fallback's single
+        /// call site enters [`Self::resolve_vector`] already validated. It is deliberately
+        /// not repeated there: `check_graph` recomputes the graph fingerprint (a scan of the
+        /// dictionary), so a second per-phrase call would be a real, redundant cost.
+        fn check_store_fresh(&self, phrase: &str, store: &VectorStore) -> Result<(), TerseError> {
+            store
+                .check_graph(self.graph)
+                .map_err(|detail| TerseError::StaleStore {
+                    phrase: phrase.to_string(),
+                    detail,
+                })
+        }
+
+        /// The vector fallback (design §6.4/§6.5). Embeds-via-caller: the supplied `query_vec`
+        /// is searched against `store` over the graph; the nearest term is the candidate.
+        ///
+        /// **Precondition:** `store` has already passed [`Self::check_store_fresh`] — the
+        /// mandatory §6.5 guard, hoisted into [`Self::resolve_lazy`] ahead of the embedder.
         fn resolve_vector(
             &self,
             phrase: &str,
             store: &VectorStore,
             query_vec: &[f32],
         ) -> Result<Resolution, TerseError> {
-            // §6.5 staleness guard: a store built against a different graph generation is a
-            // hard error, not stale neighbours. We probe it cheaply via check_graph so a
-            // mismatch surfaces as StaleStore even though the brute-force search below takes
-            // a raw vector (not a term).
-            if let Err(detail) = store.check_graph(self.graph) {
-                return Err(TerseError::StaleStore {
-                    phrase: phrase.to_string(),
-                    detail,
-                });
-            }
             // Top-2 nearest by cosine; map ids back to IRIs (skip non-NamedNode terms).
             let hits = sparq_vectors::ann::nearest_exact(store, query_vec, 8);
             let mut candidates: Vec<(NamedNode, f32)> = Vec::new();

@@ -26,8 +26,10 @@
 //! solution modifiers that do not change pattern input sets (DISTINCT /
 //! REDUCED / LIMIT-OFFSET / projection). Everything else — property paths,
 //! OPTIONAL, MINUS, UNION, `GRAPH` (contradictory with graph-set privacy,
-//! plan §2.4), VALUES, BIND, aggregates, SERVICE — is rejected as outside
-//! the verifiable fragment, failing closed.
+//! plan §2.4), `FROM` / `FROM NAMED` dataset clauses (which would re-define
+//! the dataset the fixed statement is about, so ignoring one mis-scopes the
+//! consumer's reading of the verdict — sq-p2hci), VALUES, BIND, aggregates,
+//! SERVICE — is rejected as outside the verifiable fragment, failing closed.
 //!
 //! **Wave-1 extended gate** (sq-3kd2g.3, epic sq-3kd2g / #1591): the separate
 //! [`fragment_query`] entry point additionally accepts the *monotone*
@@ -103,6 +105,32 @@ pub struct JoinEdge {
     pub patterns: (usize, usize),
 }
 
+/// Rejection reason for a `FROM` / `FROM NAMED` dataset clause. Shared by
+/// every query-text entry point so the two gates give one answer.
+const DATASET_CLAUSE_REASON: &str = "FROM / FROM NAMED (dataset clauses name graphs — contradictory with graph-set privacy; the committed union is the dataset)";
+
+/// Fails closed on a query carrying a `FROM` / `FROM NAMED` dataset clause
+/// (sq-p2hci).
+///
+/// A dataset clause RE-DEFINES the dataset the query is evaluated over, but
+/// the statement every zk entry point gates is fixed: *these solutions are in
+/// the answer over the **committed union***, with each pattern's witnesses
+/// drawn from the manifest's public attribution set. Ignoring the clause is
+/// therefore a CONSUMER-HONESTY defect, not merely an unsupported feature: a
+/// consumer reading `SELECT * FROM <g1> …` off the manifest reads the verdict
+/// as a claim scoped to `g1`, while the verified statement admits scans
+/// attributed to any committed graph — and, since the FROM-restricted answer
+/// is a *subset* of the union answer, a disclosed solution can be one the
+/// query as written does not produce. The clause also cannot be honoured
+/// here: the graph *set* is private by design (plan §2.4), so the verifier
+/// cannot check that the named graphs are the attributed ones. Fail closed.
+fn reject_dataset_clause(query: &Query) -> Result<(), VerifyError> {
+    if query.dataset().is_some() {
+        return Err(VerifyError::UnsupportedFragment(DATASET_CLAUSE_REASON.into()));
+    }
+    Ok(())
+}
+
 /// Re-derives the stage-1 fragment's BGP triple patterns from the query
 /// text, in query (text) order, as the same [`PatternKey`] shape the
 /// zk-trace records — so manifest pattern references can be cross-checked
@@ -120,6 +148,7 @@ pub fn fragment_patterns(sparql: &str) -> Result<Vec<PatternKey>, VerifyError> {
             return Err(VerifyError::UnsupportedFragment("DESCRIBE".into()))
         }
     };
+    reject_dataset_clause(&query)?;
     let mut out = Vec::new();
     collect_patterns(pattern, &mut out)?;
     Ok(out)
@@ -383,6 +412,7 @@ pub fn fragment_filters(sparql: &str) -> Result<Vec<QueryFilter>, VerifyError> {
         Query::Construct { .. } => return Err(VerifyError::UnsupportedFragment("CONSTRUCT".into())),
         Query::Describe { .. } => return Err(VerifyError::UnsupportedFragment("DESCRIBE".into())),
     };
+    reject_dataset_clause(&query)?;
     let mut out = Vec::new();
     collect_filters_gp(pattern, &mut out)?;
     Ok(out)
@@ -429,6 +459,479 @@ pub fn variable_slots(patterns: &[PatternKey]) -> Vec<(String, usize, usize)> {
         }
     }
     out
+}
+
+// =====================================================================
+// [OPUS-4.8] sq-3kd2g.8 (epic sq-3kd2g / #1591): query-side FILTER/BIND
+// expression-tree extraction. Generalizes the single-comparison
+// `FilterCmp`/`QueryFilter` extraction above to a full typed expression
+// tree over the design record (`research/zksparql-fragment-extension.md`)
+// §5.1 IN-fragment operator set, producing the neutral tree the compose
+// verifier (`sq-3kd2g.9`) binds a node-per-operator sub-proof estate
+// against (§5.2 Option C).
+//
+// INVARIANT: the tree is re-derived from the query text ALONE (an
+// independent `spargebra` parse), is EXACT (a structural image of the
+// parsed expression — `!=`/`NOT IN` stay `Not(Eq)`/`Not(In)`, operand
+// order is preserved, literal lexical forms are kept verbatim), and is
+// FAIL-CLOSED: any expression form outside the §5.1 IN set yields
+// `UnsupportedFragment`, never a silently-dropped or approximated node.
+//
+// This is the QUERY side only. Rooting each leaf variable to a scan-row
+// slot ([`expr_leaf_vars`] + [`variable_slots`]) and binding each node to
+// its datatype-bucketed circuit sub-proof is the compose verifier's job.
+// The existing `fragment_filters`/`QueryFilter`/`FilterCmp` path is kept
+// byte-identical: it still gates today's stage-1 compose verifier, whose
+// manifest schema cannot express expression trees yet.
+// =====================================================================
+
+/// The operator at an [`ExprTree`] interior node — one tag per §5.1
+/// IN-fragment operator class. Neutral: it names the SPARQL operator, not a
+/// circuit; the compose verifier maps each tag to its datatype-bucketed node
+/// circuit. `!=` and `NOT IN` are deliberately NOT tags — spargebra parses
+/// them as `Not(Equal(..))` / `Not(In(..))` and the tree keeps that exact
+/// structural shape (a `Not` over an `Eq`/`In` node).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExprOp {
+    // Logical connectives (§5.1 logical; three-valued EBV + error lane).
+    And,
+    Or,
+    Not,
+    // Comparisons — valid across every datatype lane (§5.1).
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    SameTerm,
+    // Membership against a constant list (§5.1 IN; `NOT IN` = `Not(In)`).
+    In,
+    // Conditionals (§5.1; need the error lane).
+    If,
+    Coalesce,
+    // Arithmetic (§5.1; the `/` decimal-as-double caveat is downstream).
+    Add,
+    Sub,
+    Mul,
+    Div,
+    UnaryPlus,
+    UnaryMinus,
+    // Term accessors (§5.1; over the leaf type/datatype/lang lanes).
+    Str,
+    Lang,
+    Datatype,
+    IsIri,
+    IsBlank,
+    IsLiteral,
+    IsNumeric,
+    // String functions (§5.1).
+    StrLen,
+    SubStr,
+    UCase,
+    LCase,
+    StrStarts,
+    StrEnds,
+    Contains,
+    StrBefore,
+    StrAfter,
+    EncodeForUri,
+    Concat,
+    // Numeric functions (§5.1).
+    Abs,
+    Ceil,
+    Floor,
+    Round,
+    // Date/time component accessors (§5.1; `TZ` excluded — estate gap).
+    Year,
+    Month,
+    Day,
+    Hours,
+    Minutes,
+    Seconds,
+    Timezone,
+    // Bounded `REGEX`/`REPLACE` subset ONLY (§5.1 / `sq-y73`): the pattern
+    // (and replacement/flags) must be constants within the literal/anchored
+    // subset — a "full" regex fails closed (see `bounded_regex_ok`).
+    Regex,
+    Replace,
+}
+
+/// A neutral, typed SPARQL expression tree re-derived from the query text —
+/// the representation the compose verifier binds a node-per-operator sub-proof
+/// estate against (design record §5.2 Option C). Independent of both the
+/// `spargebra` AST and the downstream manifest/circuit enums.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExprTree {
+    /// A variable leaf. Rooted to a scan-row slot by the compose verifier via
+    /// [`expr_leaf_vars`] + [`variable_slots`].
+    Var(String),
+    /// A constant term operand, parsed verbatim (lexical form preserved) from
+    /// the query text so re-derivation is byte-exact.
+    Const(oxrdf::Term),
+    /// `BOUND(?v)` — resolved statically downstream (OPTIONAL is out of the
+    /// fragment, so boundness is decidable from the query text alone, §5.1).
+    /// Extraction records only the referenced variable.
+    Bound(String),
+    /// An interior operator node with its ordered operands.
+    Node { op: ExprOp, args: Vec<ExprTree> },
+}
+
+/// One expression obligation re-derived from a query, in query order: either a
+/// FILTER condition (whose root EBV must hold, error-as-unsatisfied) or a BIND
+/// (`Extend`) target (the derived value bound into the disclosed solution).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExprObligation {
+    /// `FILTER(expr)` — the tree's root verdict is `true ∧ ¬error` (§5.2).
+    Filter(ExprTree),
+    /// `BIND(expr AS ?target)` — the tree evaluates to `?target`'s value.
+    Bind { target: String, expr: ExprTree },
+}
+
+/// Re-derive the neutral typed tree of one SPARQL expression, FAIL-CLOSED on
+/// any node outside the §5.1 IN set (EXISTS, non-deterministic builtins,
+/// term constructors, estate-gap functions, a REGEX beyond the bounded
+/// subset, custom / SPARQL-1.2 term functions, …). The tree is a structural
+/// image of the parse: operand order and literal lexical forms are preserved
+/// and `!=`/`NOT IN` remain `Not(Eq)`/`Not(In)`.
+pub fn extract_expr(e: &Expression) -> Result<ExprTree, VerifyError> {
+    use Expression as E;
+    match e {
+        E::Variable(v) => Ok(ExprTree::Var(v.as_str().to_string())),
+        E::NamedNode(n) => Ok(ExprTree::Const(oxrdf::Term::NamedNode(n.clone()))),
+        E::Literal(l) => Ok(ExprTree::Const(oxrdf::Term::Literal(l.clone()))),
+        E::Bound(v) => Ok(ExprTree::Bound(v.as_str().to_string())),
+        E::Or(a, b) => node2(ExprOp::Or, a, b),
+        E::And(a, b) => node2(ExprOp::And, a, b),
+        E::Equal(a, b) => node2(ExprOp::Eq, a, b),
+        E::SameTerm(a, b) => node2(ExprOp::SameTerm, a, b),
+        E::Greater(a, b) => node2(ExprOp::Gt, a, b),
+        E::GreaterOrEqual(a, b) => node2(ExprOp::Ge, a, b),
+        E::Less(a, b) => node2(ExprOp::Lt, a, b),
+        E::LessOrEqual(a, b) => node2(ExprOp::Le, a, b),
+        E::Add(a, b) => node2(ExprOp::Add, a, b),
+        E::Subtract(a, b) => node2(ExprOp::Sub, a, b),
+        E::Multiply(a, b) => node2(ExprOp::Mul, a, b),
+        E::Divide(a, b) => node2(ExprOp::Div, a, b),
+        E::UnaryPlus(a) => node1(ExprOp::UnaryPlus, a),
+        E::UnaryMinus(a) => node1(ExprOp::UnaryMinus, a),
+        E::Not(a) => node1(ExprOp::Not, a),
+        E::In(a, list) => {
+            let mut args = Vec::with_capacity(1 + list.len());
+            args.push(extract_expr(a)?);
+            for item in list {
+                // §5.1: IN is membership against a CONSTANT list only — the
+                // proof construction enumerates constant candidates. A
+                // variable or operator node on the RHS is outside the estate.
+                match item {
+                    E::NamedNode(_) | E::Literal(_) => args.push(extract_expr(item)?),
+                    other => {
+                        return Err(VerifyError::UnsupportedFragment(format!(
+                            "non-constant IN list item {other:?} (§5.1: IN takes a constant list)"
+                        )));
+                    }
+                }
+            }
+            Ok(ExprTree::Node { op: ExprOp::In, args })
+        }
+        E::If(a, b, c) => Ok(ExprTree::Node {
+            op: ExprOp::If,
+            args: vec![extract_expr(a)?, extract_expr(b)?, extract_expr(c)?],
+        }),
+        E::Coalesce(list) => {
+            let mut args = Vec::with_capacity(list.len());
+            for item in list {
+                args.push(extract_expr(item)?);
+            }
+            Ok(ExprTree::Node { op: ExprOp::Coalesce, args })
+        }
+        // EXISTS / NOT EXISTS (`Not(Exists(..))`) is closed-world / deferred:
+        // reject anywhere it appears, not just at a FILTER's root.
+        E::Exists(_) => Err(VerifyError::UnsupportedFragment(
+            "EXISTS / NOT EXISTS in a FILTER/BIND expression".into(),
+        )),
+        E::FunctionCall(f, args) => extract_function(f, args),
+    }
+}
+
+/// Build a unary operator node from one operand subtree.
+fn node1(op: ExprOp, a: &Expression) -> Result<ExprTree, VerifyError> {
+    Ok(ExprTree::Node { op, args: vec![extract_expr(a)?] })
+}
+
+/// Build a binary operator node, preserving operand order.
+fn node2(op: ExprOp, a: &Expression, b: &Expression) -> Result<ExprTree, VerifyError> {
+    Ok(ExprTree::Node { op, args: vec![extract_expr(a)?, extract_expr(b)?] })
+}
+
+/// Map a `spargebra` `Function` call to its [`ExprOp`], FAIL-CLOSED on every
+/// function outside the §5.1 IN estate. Non-deterministic builtins, term
+/// constructors, estate-gap functions, custom functions, SPARQL-1.2 term
+/// functions and `ADJUST` are all rejected (the last group via the catch-all,
+/// so no feature-gated variant needs naming here).
+fn extract_function(f: &spargebra::algebra::Function, args: &[Expression]) -> Result<ExprTree, VerifyError> {
+    use spargebra::algebra::Function as F;
+    let op = match f {
+        // Term accessors.
+        F::Str => ExprOp::Str,
+        F::Lang => ExprOp::Lang,
+        F::Datatype => ExprOp::Datatype,
+        F::IsIri => ExprOp::IsIri,
+        F::IsBlank => ExprOp::IsBlank,
+        F::IsLiteral => ExprOp::IsLiteral,
+        F::IsNumeric => ExprOp::IsNumeric,
+        // String functions.
+        F::StrLen => ExprOp::StrLen,
+        F::SubStr => ExprOp::SubStr,
+        F::UCase => ExprOp::UCase,
+        F::LCase => ExprOp::LCase,
+        F::StrStarts => ExprOp::StrStarts,
+        F::StrEnds => ExprOp::StrEnds,
+        F::Contains => ExprOp::Contains,
+        F::StrBefore => ExprOp::StrBefore,
+        F::StrAfter => ExprOp::StrAfter,
+        F::EncodeForUri => ExprOp::EncodeForUri,
+        F::Concat => ExprOp::Concat,
+        // Numeric functions.
+        F::Abs => ExprOp::Abs,
+        F::Ceil => ExprOp::Ceil,
+        F::Floor => ExprOp::Floor,
+        F::Round => ExprOp::Round,
+        // Date/time component accessors (`TZ` is an estate gap — below).
+        F::Year => ExprOp::Year,
+        F::Month => ExprOp::Month,
+        F::Day => ExprOp::Day,
+        F::Hours => ExprOp::Hours,
+        F::Minutes => ExprOp::Minutes,
+        F::Seconds => ExprOp::Seconds,
+        F::Timezone => ExprOp::Timezone,
+        // Bounded subset only — the pattern must be a constant literal within
+        // the literal/anchored subset (dispatched to a dedicated extractor).
+        F::Regex => return extract_regex_like(ExprOp::Regex, args),
+        F::Replace => return extract_regex_like(ExprOp::Replace, args),
+        // --- FAIL-CLOSED: outside the §5.1 IN estate. ---
+        // Non-deterministic builtins (§5.1 OUT — nothing provable).
+        F::Rand | F::Now | F::Uuid | F::StrUuid | F::BNode => {
+            return Err(VerifyError::UnsupportedFragment(format!(
+                "non-deterministic builtin {f:?} (§5.1 OUT — nothing provable)"
+            )));
+        }
+        // Term constructors — DEFERRED (need encoding-side term construction).
+        F::Iri | F::StrDt | F::StrLang => {
+            return Err(VerifyError::UnsupportedFragment(format!(
+                "term constructor {f:?} (deferred; needs encoding-side term construction)"
+            )));
+        }
+        // Estate gaps (§5.1): langMatches, TZ, hash digests — pending gap-fill.
+        F::LangMatches | F::Tz | F::Md5 | F::Sha1 | F::Sha256 | F::Sha384 | F::Sha512 => {
+            return Err(VerifyError::UnsupportedFragment(format!(
+                "estate gap {f:?} (pending gap-fill sq-3kd2g.4)"
+            )));
+        }
+        // Custom functions, SPARQL-1.2 term functions (Triple/Subject/…),
+        // ADJUST — all out.
+        other => {
+            return Err(VerifyError::UnsupportedFragment(format!(
+                "unsupported function {other:?}"
+            )));
+        }
+    };
+    let mut out = Vec::with_capacity(args.len());
+    for a in args {
+        out.push(extract_expr(a)?);
+    }
+    Ok(ExprTree::Node { op, args: out })
+}
+
+/// `REGEX(text, pattern[, flags])` / `REPLACE(text, pattern, replacement
+/// [, flags])` — accepted ONLY for the bounded subset (§5.1 / `sq-y73`):
+/// `pattern` (and any `replacement`/`flags`) MUST be constant string literals,
+/// `flags` MUST be absent or empty, and `pattern` MUST be literal-and-anchored
+/// (plain characters with an optional leading `^` and/or trailing `$`, no
+/// other regex metacharacter). Any non-constant pattern, non-empty flags, or a
+/// metacharacter/char-class/backslash makes it a "full" regex and FAILS
+/// CLOSED. This query-side subset is a deliberate STRICT under-approximation
+/// of the estate's bounded capability — under-accepting is the fail-closed
+/// direction. An accepted-and-empty `flags` argument is dropped so both the
+/// 2-arg and empty-3-arg spellings normalize to the same tree.
+fn extract_regex_like(op: ExprOp, args: &[Expression]) -> Result<ExprTree, VerifyError> {
+    let reject = |m: &str| -> Result<ExprTree, VerifyError> {
+        Err(VerifyError::UnsupportedFragment(format!(
+            "REGEX/REPLACE beyond the bounded subset: {m}"
+        )))
+    };
+    // REGEX: (text, pattern) or (text, pattern, flags).
+    // REPLACE: (text, pattern, replacement) or (…, replacement, flags).
+    let (fixed_len, has_replacement) = match op {
+        ExprOp::Regex => (2usize, false),
+        ExprOp::Replace => (3usize, true),
+        _ => return reject("internal: non-regex op"),
+    };
+    if args.len() != fixed_len && args.len() != fixed_len + 1 {
+        return reject("arity");
+    }
+    // The pattern operand (index 1) must be a constant, bounded literal.
+    let pattern_lex = match const_string(&args[1]) {
+        Some(s) => s,
+        None => return reject("non-constant pattern"),
+    };
+    if !bounded_regex_ok(&pattern_lex) {
+        return reject("pattern uses metacharacters outside the literal/anchored subset");
+    }
+    // REPLACE's replacement operand (index 2) must be a constant literal too.
+    if has_replacement && const_string(&args[2]).is_none() {
+        return reject("non-constant replacement");
+    }
+    // Any flags operand must be a constant, EMPTY literal.
+    if let Some(flags) = args.get(fixed_len) {
+        match const_string(flags) {
+            Some(s) if s.is_empty() => {}
+            _ => return reject("non-empty or non-constant flags"),
+        }
+    }
+    // Build the tree WITHOUT the (empty) flags operand — the constant operands
+    // are re-extracted (Const leaves), the `text` operand recurses.
+    let mut out = Vec::with_capacity(fixed_len);
+    for a in &args[..fixed_len] {
+        out.push(extract_expr(a)?);
+    }
+    Ok(ExprTree::Node { op, args: out })
+}
+
+/// xsd:string datatype IRI — the only literal category `const_string` accepts.
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+/// The lexical value of a constant STRING literal expression — a simple
+/// literal or an explicit `xsd:string` typed literal (oxrdf normalizes the
+/// two to the same value) — else `None`. Used to vet REGEX/REPLACE
+/// pattern/replacement/flags constancy. A typed non-string literal (numeric,
+/// boolean, date/time, …) or a language-tagged string is NOT a valid
+/// pattern/flags/replacement operand for the bounded string-matching circuit
+/// semantics and fails closed, per the SPARQL contract that these arguments
+/// are simple literals.
+fn const_string(e: &Expression) -> Option<String> {
+    match e {
+        Expression::Literal(l)
+            if l.language().is_none() && l.datatype().as_str() == XSD_STRING =>
+        {
+            Some(l.value().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Whether a regex pattern lexical is within the query-side bounded subset:
+/// plain literal characters with an OPTIONAL leading `^` and/or trailing `$`
+/// anchor, and NO other regex metacharacter (`. * + ? ( ) [ ] { } | \` or an
+/// interior `^`/`$`). Deliberately stricter than the estate's
+/// char-class-capable bounded subset (`sq-y73`) — under-approximating is the
+/// fail-closed direction.
+fn bounded_regex_ok(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut start = 0;
+    let mut end = bytes.len();
+    if bytes.first() == Some(&b'^') {
+        start = 1;
+    }
+    if end > start && bytes.get(end - 1) == Some(&b'$') {
+        end -= 1;
+    }
+    const META: &[u8] = b".*+?()[]{}|\\^$";
+    bytes[start..end].iter().all(|b| !META.contains(b))
+}
+
+/// Every variable a tree references at a leaf — plain `Var` leaves AND the
+/// argument of a static `BOUND`. The compose verifier extends the
+/// variable→(pattern,slot) map ([`variable_slots`]) to these expression leaves
+/// so each rooted operand binds to the scan row it reads (design record §5.2:
+/// "variable→(pattern,slot) mapping extended to expression leaves").
+pub fn expr_leaf_vars(tree: &ExprTree) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_expr_leaf_vars(tree, &mut out);
+    out
+}
+
+fn collect_expr_leaf_vars(tree: &ExprTree, out: &mut BTreeSet<String>) {
+    match tree {
+        ExprTree::Var(v) | ExprTree::Bound(v) => {
+            out.insert(v.clone());
+        }
+        ExprTree::Const(_) => {}
+        ExprTree::Node { args, .. } => {
+            for a in args {
+                collect_expr_leaf_vars(a, out);
+            }
+        }
+    }
+}
+
+/// Re-derive every FILTER condition and BIND (`Extend`) target expression tree
+/// from the query text alone (an independent `spargebra` parse), in query
+/// EVALUATION order — inner-first over the algebra (a later FILTER/BIND nests
+/// OUTSIDE an earlier one in spargebra, and a group's FILTERs apply at group
+/// end per the SPARQL translation), left-to-right across joins — so a BIND
+/// target is always emitted before any obligation that consumes it.
+/// FAIL-CLOSED on any expression or structural form outside the §5.1 IN set. The neutral trees are what the compose verifier (`sq-3kd2g.9`) binds a
+/// node-per-operator sub-proof estate against; this is the query side only.
+///
+/// This is a SEPARATE entry point from `fragment_filters` (the stage-1
+/// single-comparison path, kept intact) and from `fragment_query` (the wave-1
+/// structural gate, which still rejects BIND): it walks the same
+/// BGP/Join/modifier spine and additionally extracts FILTER + BIND expression
+/// trees. Structural forms it does not itself model (paths, UNION, VALUES,
+/// GRAPH, OPTIONAL, MINUS, aggregates, ORDER BY, SERVICE, …) fail closed.
+pub fn fragment_expr_trees(sparql: &str) -> Result<Vec<ExprObligation>, VerifyError> {
+    let query = spargebra::SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| VerifyError::Parse(e.to_string()))?;
+    let pattern = match &query {
+        Query::Select { pattern, .. } | Query::Ask { pattern, .. } => pattern,
+        Query::Construct { .. } => return Err(VerifyError::UnsupportedFragment("CONSTRUCT".into())),
+        Query::Describe { .. } => return Err(VerifyError::UnsupportedFragment("DESCRIBE".into())),
+    };
+    reject_dataset_clause(&query)?;
+    let mut out = Vec::new();
+    collect_expr_obligations_gp(pattern, &mut out)?;
+    Ok(out)
+}
+
+fn collect_expr_obligations_gp(
+    gp: &GraphPattern,
+    out: &mut Vec<ExprObligation>,
+) -> Result<(), VerifyError> {
+    match gp {
+        GraphPattern::Bgp { .. } => Ok(()),
+        // Spargebra nests LATER operations OUTSIDE earlier ones (a FILTER
+        // over a BIND parses as `Filter { inner: Extend { .. } }`), so
+        // evaluation order = inner-first: traverse the inner pattern BEFORE
+        // appending the enclosing obligation.
+        GraphPattern::Filter { expr, inner } => {
+            collect_expr_obligations_gp(inner, out)?;
+            out.push(ExprObligation::Filter(extract_expr(expr)?));
+            Ok(())
+        }
+        GraphPattern::Extend { inner, variable, expression } => {
+            collect_expr_obligations_gp(inner, out)?;
+            out.push(ExprObligation::Bind {
+                target: variable.as_str().to_string(),
+                expr: extract_expr(expression)?,
+            });
+            Ok(())
+        }
+        GraphPattern::Join { left, right } => {
+            collect_expr_obligations_gp(left, out)?;
+            collect_expr_obligations_gp(right, out)
+        }
+        GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. } => collect_expr_obligations_gp(inner, out),
+        // Everything else (paths, UNION, OPTIONAL, MINUS, GRAPH, VALUES,
+        // aggregates/Group — so HAVING over an aggregate — ORDER BY, SERVICE,
+        // …) is outside the structural surface this extractor models and FAILS
+        // CLOSED. (`fragment_query` owns the accepted extended structural
+        // fragment; this entry adds only FILTER + BIND expression extraction.)
+        other => Err(VerifyError::UnsupportedFragment(format!("{other:?}"))),
+    }
 }
 
 /// Per query-order BGP pattern, the constant term at each `(s, p, o)` slot
@@ -764,9 +1267,9 @@ pub fn fragment_query(sparql: &str) -> Result<FragmentQuery, VerifyError> {
     let query = spargebra::SparqlParser::new()
         .parse_query(sparql)
         .map_err(|e| VerifyError::Parse(e.to_string()))?;
-    let (pattern, dataset, ask) = match &query {
-        Query::Select { pattern, dataset, .. } => (pattern, dataset, false),
-        Query::Ask { pattern, dataset, .. } => (pattern, dataset, true),
+    let (pattern, ask) = match &query {
+        Query::Select { pattern, .. } => (pattern, false),
+        Query::Ask { pattern, .. } => (pattern, true),
         Query::Construct { .. } => {
             return Err(VerifyError::UnsupportedFragment(
                 "CONSTRUCT (graph-template result form, outside the result-membership property — instantiate templates client-side from a proved mapping)".into(),
@@ -778,11 +1281,7 @@ pub fn fragment_query(sparql: &str) -> Result<FragmentQuery, VerifyError> {
             ))
         }
     };
-    if dataset.is_some() {
-        return Err(VerifyError::UnsupportedFragment(
-            "FROM / FROM NAMED (dataset clauses name graphs — contradictory with graph-set privacy; the committed union is the dataset)".into(),
-        ));
-    }
+    reject_dataset_clause(&query)?;
 
     // Peel the OUTER solution-modifier stack (membership-indifferent:
     // LIMIT/OFFSET, DISTINCT/REDUCED) down to the query's own projection.
@@ -1275,6 +1774,47 @@ mod tests {
             fragment_patterns("SELECT WHERE"),
             Err(VerifyError::Parse(_))
         ));
+    }
+
+    /// sq-p2hci: a dataset clause RE-DEFINES the dataset the query is
+    /// evaluated over, but the stage-1 statement is fixed — "these solutions
+    /// are in the answer over the COMMITTED union". A consumer reading
+    /// `SELECT * FROM <g1> …` off the manifest would read the verdict as a
+    /// claim about `g1` alone, while the proof binds scans attributed to any
+    /// committed graph. The gate must fail closed on the clause instead of
+    /// silently ignoring it (the wave-1 gate already does).
+    #[test]
+    fn stage1_gate_rejects_dataset_clauses() {
+        for q in [
+            "SELECT * FROM <http://ex/g1> WHERE { ?s <http://ex/p> ?o }",
+            "SELECT * FROM NAMED <http://ex/g1> WHERE { ?s <http://ex/p> ?o }",
+            "SELECT * FROM <http://ex/g1> FROM NAMED <http://ex/g2> WHERE { ?s <http://ex/p> ?o }",
+            "ASK FROM <http://ex/g1> WHERE { ?s <http://ex/p> ?o }",
+        ] {
+            for (entry, got) in [
+                ("fragment_patterns", fragment_patterns(q).err()),
+                ("fragment_filters", fragment_filters(q).err()),
+                ("fragment_expr_trees", fragment_expr_trees(q).err()),
+                ("fragment_query", fragment_query(q).err()),
+                ("recheck", recheck(q, &attrs(&[&[0]]), &[]).err()),
+            ] {
+                match got {
+                    Some(VerifyError::UnsupportedFragment(msg)) => assert!(
+                        msg.contains("FROM / FROM NAMED"),
+                        "{entry}({q}): expected the dataset-clause reason, got `{msg}`"
+                    ),
+                    other => panic!("{entry}({q}): expected UnsupportedFragment, got {other:?}"),
+                }
+            }
+        }
+        // A dataset-free query of the same shape still passes every entry
+        // point — the rejection is the clause, not the shape.
+        let q = "SELECT * WHERE { ?s <http://ex/p> ?o }";
+        assert_eq!(fragment_patterns(q).unwrap().len(), 1);
+        assert!(fragment_filters(q).unwrap().is_empty());
+        assert!(fragment_expr_trees(q).unwrap().is_empty());
+        assert!(fragment_query(q).is_ok());
+        assert!(recheck(q, &attrs(&[&[0]]), &[]).unwrap().is_empty());
     }
 
     #[test]
@@ -1888,5 +2428,316 @@ mod tests {
         assert!(vs.contains(&("s".into(), 1, 0)));
         assert!(vs.contains(&("age".into(), 0, 2)));
         assert!(vs.contains(&("sal".into(), 1, 2)));
+    }
+
+    // =====================================================================
+    // [OPUS-4.8] sq-3kd2g.8: query-side FILTER/BIND expression-tree
+    // extraction. Two-sided table: every §5.1 IN form produces its EXACT
+    // expected tree; every OUT form fails closed. The REJECT side is the
+    // security surface — the extractor must never emit an approximated tree
+    // for a construct outside the §5.1 IN estate.
+    // =====================================================================
+
+    fn cint(v: u64) -> ExprTree {
+        ExprTree::Const(oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+            v.to_string(),
+            oxrdf::NamedNode::new(XSD_INTEGER).unwrap(),
+        )))
+    }
+    fn cstr(s: &str) -> ExprTree {
+        ExprTree::Const(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal(s)))
+    }
+    fn evar(n: &str) -> ExprTree {
+        ExprTree::Var(n.into())
+    }
+    fn en(op: ExprOp, args: Vec<ExprTree>) -> ExprTree {
+        ExprTree::Node { op, args }
+    }
+
+    /// Extract the single FILTER obligation's tree for `FILTER(<filter>)`.
+    fn filter_tree(filter: &str) -> ExprTree {
+        let q = format!("ASK {{ ?a <http://ex/p> ?b . ?b <http://ex/q> ?c FILTER({filter}) }}");
+        let obs = fragment_expr_trees(&q).unwrap_or_else(|e| panic!("`{filter}`: {e:?}"));
+        assert_eq!(obs.len(), 1, "one FILTER obligation for `{filter}`");
+        match obs.into_iter().next().unwrap() {
+            ExprObligation::Filter(t) => t,
+            other => panic!("expected a Filter obligation, got {other:?}"),
+        }
+    }
+
+    fn rejects_expr(q: &str) {
+        match fragment_expr_trees(q) {
+            Err(VerifyError::UnsupportedFragment(_)) => {}
+            other => panic!("expected UnsupportedFragment for `{q}`, got {other:?}"),
+        }
+    }
+
+    fn rejects_filter(filter: &str) {
+        let q = format!("ASK {{ ?a <http://ex/p> ?b . ?b <http://ex/q> ?c FILTER({filter}) }}");
+        rejects_expr(&q);
+    }
+
+    #[test]
+    fn expr_in_forms_extract_to_exact_trees() {
+        let xi = |v: u64| format!("\"{v}\"^^<{XSD_INTEGER}>");
+        let cases: Vec<(String, ExprTree)> = vec![
+            // Logical AND of two comparisons across lanes.
+            (
+                format!("?a >= {} && ?b < {}", xi(18), xi(5)),
+                en(
+                    ExprOp::And,
+                    vec![
+                        en(ExprOp::Ge, vec![evar("a"), cint(18)]),
+                        en(ExprOp::Lt, vec![evar("b"), cint(5)]),
+                    ],
+                ),
+            ),
+            // OR + logical NOT (structural, not folded to `!=`).
+            (
+                format!("?a = {} || !(?b = {})", xi(1), xi(2)),
+                en(
+                    ExprOp::Or,
+                    vec![
+                        en(ExprOp::Eq, vec![evar("a"), cint(1)]),
+                        en(ExprOp::Not, vec![en(ExprOp::Eq, vec![evar("b"), cint(2)])]),
+                    ],
+                ),
+            ),
+            // `!=` stays `Not(Eq)` — no dedicated Ne tag.
+            (
+                format!("?a != {}", xi(3)),
+                en(ExprOp::Not, vec![en(ExprOp::Eq, vec![evar("a"), cint(3)])]),
+            ),
+            // Operand order is preserved verbatim (const on the left).
+            (
+                format!("{} <= ?a", xi(7)),
+                en(ExprOp::Le, vec![cint(7), evar("a")]),
+            ),
+            // sameTerm.
+            (
+                "sameTerm(?a, ?b)".into(),
+                en(ExprOp::SameTerm, vec![evar("a"), evar("b")]),
+            ),
+            // IN constant list.
+            (
+                format!("?a IN ({}, {})", xi(1), xi(2)),
+                en(ExprOp::In, vec![evar("a"), cint(1), cint(2)]),
+            ),
+            // IN constant list with an IRI item.
+            (
+                format!("?a IN (<http://ex/x>, {})", xi(2)),
+                en(
+                    ExprOp::In,
+                    vec![
+                        evar("a"),
+                        ExprTree::Const(oxrdf::Term::NamedNode(
+                            oxrdf::NamedNode::new("http://ex/x").unwrap(),
+                        )),
+                        cint(2),
+                    ],
+                ),
+            ),
+            // NOT IN stays `Not(In)`.
+            (
+                format!("?a NOT IN ({})", xi(1)),
+                en(ExprOp::Not, vec![en(ExprOp::In, vec![evar("a"), cint(1)])]),
+            ),
+            // IF ternary nested in an equality.
+            (
+                format!("IF(?a > {}, {}, {}) = ?b", xi(0), xi(1), xi(2)),
+                en(
+                    ExprOp::Eq,
+                    vec![
+                        en(
+                            ExprOp::If,
+                            vec![en(ExprOp::Gt, vec![evar("a"), cint(0)]), cint(1), cint(2)],
+                        ),
+                        evar("b"),
+                    ],
+                ),
+            ),
+            // COALESCE.
+            (
+                format!("COALESCE(?a, {}) > {}", xi(0), xi(5)),
+                en(
+                    ExprOp::Gt,
+                    vec![en(ExprOp::Coalesce, vec![evar("a"), cint(0)]), cint(5)],
+                ),
+            ),
+            // Static BOUND — a leaf recording only the variable.
+            ("BOUND(?a)".into(), ExprTree::Bound("a".into())),
+            // Term accessors.
+            ("isIRI(?a)".into(), en(ExprOp::IsIri, vec![evar("a")])),
+            (
+                "STR(?a) = \"x\"".into(),
+                en(ExprOp::Eq, vec![en(ExprOp::Str, vec![evar("a")]), cstr("x")]),
+            ),
+            // String functions.
+            (
+                "CONTAINS(?a, \"ab\")".into(),
+                en(ExprOp::Contains, vec![evar("a"), cstr("ab")]),
+            ),
+            (
+                format!("STRLEN(?a) > {}", xi(3)),
+                en(ExprOp::Gt, vec![en(ExprOp::StrLen, vec![evar("a")]), cint(3)]),
+            ),
+            // Numeric functions + arithmetic.
+            (
+                format!("ABS(?a + {}) < {}", xi(1), xi(5)),
+                en(
+                    ExprOp::Lt,
+                    vec![
+                        en(ExprOp::Abs, vec![en(ExprOp::Add, vec![evar("a"), cint(1)])]),
+                        cint(5),
+                    ],
+                ),
+            ),
+            // Date component accessor.
+            (
+                format!("YEAR(?a) >= {}", xi(2000)),
+                en(ExprOp::Ge, vec![en(ExprOp::Year, vec![evar("a")]), cint(2000)]),
+            ),
+            // Bounded REGEX (literal + anchored).
+            (
+                "REGEX(?a, \"^abc$\")".into(),
+                en(ExprOp::Regex, vec![evar("a"), cstr("^abc$")]),
+            ),
+            // Bounded REGEX with an EMPTY flags argument normalizes to 2-arg.
+            (
+                "REGEX(?a, \"abc\", \"\")".into(),
+                en(ExprOp::Regex, vec![evar("a"), cstr("abc")]),
+            ),
+            // An explicit `xsd:string` typed pattern is the same accepted
+            // string category as a simple literal (oxrdf normalizes them).
+            (
+                format!("REGEX(?a, \"abc\"^^<{XSD_STRING}>)"),
+                en(ExprOp::Regex, vec![evar("a"), cstr("abc")]),
+            ),
+            // Bounded REPLACE (literal pattern + constant replacement) nested
+            // in an equality.
+            (
+                "REPLACE(?a, \"ab\", \"cd\") = \"x\"".into(),
+                en(
+                    ExprOp::Eq,
+                    vec![
+                        en(ExprOp::Replace, vec![evar("a"), cstr("ab"), cstr("cd")]),
+                        cstr("x"),
+                    ],
+                ),
+            ),
+        ];
+        for (filter, expected) in cases {
+            assert_eq!(filter_tree(&filter), expected, "tree mismatch for `{filter}`");
+            // Re-derivation from an independent parse is byte-identical.
+            assert_eq!(filter_tree(&filter), filter_tree(&filter), "`{filter}` not deterministic");
+        }
+    }
+
+    #[test]
+    fn expr_bind_target_is_extracted() {
+        let q = "SELECT * WHERE { ?s <http://ex/p> ?a BIND(UCASE(?a) AS ?u) }";
+        let obs = fragment_expr_trees(q).unwrap();
+        assert_eq!(
+            obs,
+            vec![ExprObligation::Bind {
+                target: "u".into(),
+                expr: en(ExprOp::UCase, vec![evar("a")]),
+            }]
+        );
+    }
+
+    #[test]
+    fn expr_obligations_are_in_evaluation_order() {
+        // BIND(?u), BIND(?n over ?u), FILTER(?n): spargebra nests each later
+        // step OUTSIDE the earlier one (`Filter { Extend(n) { Extend(u) {
+        // Bgp }}}`), so a pre-order emission would reverse the chain. The
+        // extractor must emit evaluation order — each BIND target before
+        // every obligation that consumes it.
+        let q = format!(
+            "SELECT * WHERE {{ ?s <http://ex/p> ?a \
+             BIND(UCASE(?a) AS ?u) \
+             BIND(STRLEN(?u) AS ?n) \
+             FILTER(?n > \"3\"^^<{XSD_INTEGER}>) }}"
+        );
+        let obs = fragment_expr_trees(&q).unwrap();
+        assert_eq!(
+            obs,
+            vec![
+                ExprObligation::Bind {
+                    target: "u".into(),
+                    expr: en(ExprOp::UCase, vec![evar("a")]),
+                },
+                ExprObligation::Bind {
+                    target: "n".into(),
+                    expr: en(ExprOp::StrLen, vec![evar("u")]),
+                },
+                ExprObligation::Filter(en(ExprOp::Gt, vec![evar("n"), cint(3)])),
+            ]
+        );
+    }
+
+    #[test]
+    fn expr_leaf_vars_covers_var_and_bound_leaves() {
+        // `(?a + 1 > ?b) && BOUND(?c)` references a, b, c at its leaves; a
+        // constant contributes nothing.
+        let tree = filter_tree(&format!(
+            "?a + \"1\"^^<{XSD_INTEGER}> > ?b && BOUND(?c)"
+        ));
+        let vars = expr_leaf_vars(&tree);
+        assert_eq!(
+            vars,
+            ["a", "b", "c"].iter().map(|s| s.to_string()).collect()
+        );
+    }
+
+    #[test]
+    fn expr_out_forms_fail_closed() {
+        // EXISTS / NOT EXISTS anywhere in a FILTER/BIND expression.
+        rejects_expr("ASK { ?a <http://ex/p> ?b FILTER EXISTS { ?a <http://ex/q> ?c } }");
+        rejects_expr("ASK { ?a <http://ex/p> ?b FILTER NOT EXISTS { ?a <http://ex/q> ?c } }");
+        rejects_filter("?a > \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> && EXISTS { ?a <http://ex/q> ?c }");
+
+        // Aggregates-in-expression (a HAVING over an aggregate Group).
+        rejects_expr(
+            "SELECT ?s WHERE { ?s <http://ex/p> ?o } GROUP BY ?s HAVING(COUNT(?o) > \"1\"^^<http://www.w3.org/2001/XMLSchema#integer>)",
+        );
+
+        // Non-deterministic builtins (§5.1 OUT — nothing provable).
+        rejects_filter("RAND() < ?b");
+        rejects_filter("?a < NOW()");
+        rejects_filter("?a = UUID()");
+        rejects_filter("?a = STRUUID()");
+        rejects_filter("isBlank(BNODE())");
+
+        // IN with a non-constant RHS item (§5.1: constant list only).
+        rejects_filter("?a IN (?b)"); // variable item
+        rejects_filter(
+            "?a IN (\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>, ?c + \"1\"^^<http://www.w3.org/2001/XMLSchema#integer>)",
+        ); // computed item
+
+        // REGEX/REPLACE constant operands must be STRING literals — a typed
+        // non-string literal or a language-tagged string fails closed.
+        rejects_filter("REGEX(?a, 123)"); // numeric pattern
+        rejects_filter("REGEX(?a, \"abc\"@en)"); // language-tagged pattern
+        rejects_filter("REGEX(?a, \"abc\", true)"); // non-string flags
+        rejects_filter("REPLACE(?a, \"ab\", 12) = \"x\""); // non-string replacement
+
+        // Full REGEX beyond the bounded literal/anchored subset.
+        rejects_filter("REGEX(?a, \"a.c\")"); // metacharacter `.`
+        rejects_filter("REGEX(?a, \"[a-z]+\")"); // char class + quantifier
+        rejects_filter("REGEX(?a, ?b)"); // non-constant pattern
+        rejects_filter("REGEX(?a, \"abc\", \"i\")"); // non-empty flags
+        rejects_filter("REGEX(?a, \"a^b\")"); // interior anchor
+        rejects_filter("REPLACE(?a, \"a.b\", \"c\") = \"x\""); // metachar pattern
+        rejects_filter("REPLACE(?a, \"ab\", ?b) = \"x\""); // non-constant replacement
+
+        // Term constructors (deferred) and estate-gap functions.
+        rejects_filter("?a = IRI(\"http://ex/z\")");
+        rejects_filter("langMatches(LANG(?a), \"en\")");
+        rejects_filter("?a = SHA256(\"x\")");
+        rejects_filter("TZ(?a) = \"Z\"");
+
+        // A structurally-unsupported spine (UNION) also fails closed here.
+        rejects_expr("ASK { { ?a <http://ex/p> ?b } UNION { ?a <http://ex/q> ?b } }");
     }
 }

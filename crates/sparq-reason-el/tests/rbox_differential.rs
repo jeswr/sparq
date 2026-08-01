@@ -82,6 +82,25 @@ fn cr10_does_not_lift_downward() {
 }
 
 #[test]
+fn cr10_lifts_self_restriction_to_super_role() {
+    // [SONNET-4.6] sq-l2o9e: r ⊑ s, A ⊑ ∃r.Self, ∃s.Self ⊑ D. The r-self loop is also
+    // locally reflexive for its super-role s, so CR-Self-2 must derive A ⊑ D. A generic
+    // existential `(A,A)` link remains insufficient; this fixture specifically carries
+    // `ObjectHasSelf` provenance.
+    let ttl = format!(
+        "{PRE}
+         :r rdfs:subPropertyOf :s .
+         :A rdfs:subClassOf [
+             a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>
+         ] .
+         [
+             a owl:Restriction ; owl:onProperty :s ; owl:hasSelf \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>
+         ] rdfs:subClassOf :D ."
+    );
+    assert_closure(&ttl, &["A", "D"], &[("A", "D")]);
+}
+
+#[test]
 fn cr11_transitive_role() {
     // r transitive (r ∘ r ⊑ r),  A ⊑ ∃r.B,  B ⊑ ∃r.D,  ∃r.D ⊑ E.
     // (A,B) ∈ R(r) and (B,D) ∈ R(r) compose to (A,D) ∈ R(r) (CR11), so CR4 over `∃r.D ⊑ E`
@@ -437,5 +456,129 @@ fn role_readoff_is_idempotent() {
         r2.emitted_role_subsumptions,
         0,
         "second call adds nothing (idempotent)"
+    );
+}
+
+// [SONNET-4.6] sq-oj06v: told-RBox regularity — the honest non-regular report (E2 follow-up).
+// The saturation is sound + terminating on ANY input, but EL+ completeness assumes a REGULAR
+// RBox (the OWL 2 global restrictions forbid non-regular ones); `Report::rbox_non_regular` is
+// the flag that keeps a spec-illegal input from being silently classified as if complete.
+
+#[test]
+fn regular_rbox_is_not_flagged() {
+    // Hierarchy + transitivity + a plain chain + SNOMED right identity: all regular.
+    let ttl = format!(
+        "{PRE}
+         :r rdfs:subPropertyOf :s .
+         :t rdf:type owl:TransitiveProperty .
+         :hasUncle owl:propertyChainAxiom ( :hasFather :hasBrother ) .
+         :partOf owl:propertyChainAxiom ( :properPartOf :partOf ) .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let (d2, t2) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let report = classify_graph(&mut dict, &mut triples);
+    assert!(!report.rbox_non_regular, "a regular RBox must not be flagged");
+    // The typed (non-mutating) entry reports identically.
+    let h = Classifier::classify(&d2, &t2);
+    assert!(!h.report().rbox_non_regular);
+}
+
+#[test]
+fn non_regular_chain_cycle_is_flagged() {
+    // The spec's classic non-regular pair: hasUncle depends on hasBrother AND hasBrother
+    // depends on hasUncle through chain constraints — no strict role order admits both.
+    let ttl = format!(
+        "{PRE}
+         :hasUncle owl:propertyChainAxiom ( :hasFather :hasBrother ) .
+         :hasBrother owl:propertyChainAxiom ( :hasUncle :hasFriend ) .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let (d2, t2) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let report = classify_graph(&mut dict, &mut triples);
+    assert!(
+        report.rbox_non_regular,
+        "a chain-constraint cycle must set rbox_non_regular"
+    );
+    let h = Classifier::classify(&d2, &t2);
+    assert!(h.report().rbox_non_regular, "typed entry flags it too");
+}
+
+#[test]
+fn non_regular_chain_fed_back_through_inclusion_is_flagged() {
+    // r ∘ q ⊑ s with s ⊑ r: the chain constraint r < s cycles back through the told
+    // inclusion — flagged by the (conservative) hierarchy-aware detection.
+    let ttl = format!(
+        "{PRE}
+         :s owl:propertyChainAxiom ( :r :q ) .
+         :s rdfs:subPropertyOf :r .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let report = classify_graph(&mut dict, &mut triples);
+    assert!(report.rbox_non_regular);
+}
+
+#[test]
+fn told_left_identity_long_chain_is_regular() {
+    // s ∘ p ∘ q ⊑ s — a TOLD left identity (admissible: p < s, q < s). Its left-folded
+    // BINARIZED form (s ∘ p ⊑ fresh, fresh ∘ q ⊑ s) looks like an s → fresh → s cycle; this
+    // pins that the regularity check runs on the told chain, not the binarization.
+    let ttl = format!(
+        "{PRE}
+         :s owl:propertyChainAxiom ( :s :p :q ) .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let report = classify_graph(&mut dict, &mut triples);
+    assert!(
+        !report.rbox_non_regular,
+        "a told left-identity chain is regular — binarization must not leak into the check"
+    );
+}
+
+#[test]
+fn top_superproperty_chain_is_regular() {
+    // The OWL 2 property-hierarchy restriction's FIRST case: every chain axiom whose
+    // superproperty is owl:topObjectProperty is admissible. The ternary top self-chain would
+    // false-positive via the `s < s` self-constraint without the exemption (binary transitivity
+    // does not cover n = 3).
+    let ttl = format!(
+        "{PRE}
+         owl:topObjectProperty owl:propertyChainAxiom
+             ( owl:topObjectProperty owl:topObjectProperty owl:topObjectProperty ) .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let (d2, t2) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let report = classify_graph(&mut dict, &mut triples);
+    assert!(
+        !report.rbox_non_regular,
+        "a top-superproperty chain is normatively admissible, never non-regular"
+    );
+    let h = Classifier::classify(&d2, &t2);
+    assert!(!h.report().rbox_non_regular, "typed entry agrees");
+}
+
+#[test]
+fn non_regular_saturation_still_terminates_and_stays_sound() {
+    // On a (spec-illegal) non-regular RBox the classifier still terminates and every emitted
+    // subsumption is sound; the flag is the ONLY behavioural difference. The chain cycle here
+    // still derives A ⊑ FoundUncle soundly via hasFather ∘ hasBrother ⊑ hasUncle.
+    let ttl = format!(
+        "{PRE}
+         :hasUncle owl:propertyChainAxiom ( :hasFather :hasBrother ) .
+         :hasBrother owl:propertyChainAxiom ( :hasUncle :hasFriend ) .
+         :A rdfs:subClassOf [ owl:onProperty :hasFather ; owl:someValuesFrom :M ] .
+         :M rdfs:subClassOf [ owl:onProperty :hasBrother ; owl:someValuesFrom :U ] .
+         [ owl:onProperty :hasUncle ; owl:someValuesFrom :U ] rdfs:subClassOf :FoundUncle ."
+    );
+    let (dict, triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let h = Classifier::classify(&dict, &triples);
+    assert!(h.report().rbox_non_regular, "non-regular input is flagged");
+    assert!(
+        h.is_subclass_of(iri(&dict, "A"), iri(&dict, "FoundUncle")),
+        "CR11 stays sound: A ⊑ FoundUncle via the composed chain"
     );
 }

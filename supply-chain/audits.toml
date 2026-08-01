@@ -1,4 +1,20 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.itertools]]
+who = "GPT-5.6 <noreply@openai.com>"
+criteria = "safe-to-deploy"
+delta = "0.14.0 -> 0.15.0"
+notes = "Reviewed the exact crates.io delta: pure-Rust iterator API additions and refactors; build remains disabled, the sole runtime dependency remains either, and no unsafe, proc-macro, network, filesystem, process, or dependency additions were introduced. [GPT-5.6]"
+
+[[audits.nix]]
+who = "GPT-5.6 <noreply@openai.com>"
+criteria = "safe-to-deploy"
+version = "0.31.3"
+notes = "Full audit of the checksum-matched crates.io package as pulled through object_store's default fs feature on Unix; nix itself is built with default features disabled and no optional nix features. Reviewed Cargo.toml, build.rs, lib.rs/macros, package-wide unsafe and suspicious-behavior call sites, the fcntl/stat/unistd filesystem surfaces, and the socket modules. The build script only declares target cfg aliases; there are no proc macros, generated payloads, hidden initialization, network use, or data exfiltration. Unsafe is ordinary libc syscall, path/buffer, and file-descriptor plumbing; libc, bitflags, cfg-if, and build-only cfg_aliases are already covered by repository policy/imports. [GPT-5.6]"
+
+[[audits.object_store]]
+who = "GPT-5.6 <noreply@openai.com>"
+criteria = "safe-to-deploy"
+delta = "0.13.2 -> 0.14.1"
+notes = "Reviewed the exact crates.io delta end to end (unsafe, build-script, proc-macro, dependency, network, and filesystem surfaces): API/refactor changes to the object-store abstraction; the notable change is a new optional nix dependency for local-filesystem metadata paths (nix itself audited separately). No build.rs additions, no proc-macros, no new network endpoints beyond the existing store backends. [GPT-5.6; entry restored by the orchestrator after the worker's recording step was lost — review evidenced in the worker transcript 2026-07-21]"

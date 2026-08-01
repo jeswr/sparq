@@ -3469,7 +3469,8 @@ mod tests {
             let body = r#"{"head":{"vars":["x","y"]},"results":{"bindings":[
                 {"x":{"type":"uri","value":"http://ex/1"},"y":{"type":"literal","value":"a"}},
                 {"x":{"type":"uri","value":"http://ex/2"}}]}}"#;
-            let tr = super::TransportAsReader(&super::Canned(body));
+            let transport = super::Canned(body);
+            let tr = super::TransportAsReader(&transport);
             let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
             let vars = eval_remote_into_read(&tr, "http://unused/", "SELECT * WHERE {}",
                 &mut |r| { rows.push(r); Ok(()) }).unwrap();

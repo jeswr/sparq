@@ -93,11 +93,12 @@ This is the load-bearing table. Each feature below cites which row it stands on.
 | P4 | Entailment-regime gate (`bind_entailment`) | **structural re-check, sound-as-landed; NOT ZK, NOT in-circuit, antecedents DISCLOSED** | `verifier.rs:4401`; `derivation.rs` |
 | P5 | Hidden-issuer set-membership (`pk_i ∈ K`) | **wired, NOT-yet-sound** (`sq-qhy4`) | `issuer.rs`; `issuer.nr`; `verifier.rs:3002` |
 | P6 | Hidden-holder PoK (`hpk = hsk·G`, digest match) | **wired, NOT-yet-sound** (`sq-qhy4`) | `holder.nr`; `verifier.rs:3158` |
-| A1 | In-circuit ZK-over-hidden-antecedent derivation (`sq-rsd3v.2`) | **GREENFIELD Noir — does not exist** | — (§3 deliverable) |
-| A2 | Witnessed-rule-shape N3 derivation step (`sq-rsd3v.3`) | **GREENFIELD Noir — does not exist** | — (§4 deliverable) |
+| A1 | In-circuit ZK-over-hidden-antecedent derivation (`sq-rsd3v.2`) | **relation landed, NOT-yet-sound (`sq-qhy4`); no zk-trace mapper, no compiled member, no dispatch** (§3.3 Status) | `derivation.nr` |
+| A2 | Witnessed-rule-shape N3 derivation step (`sq-rsd3v.3`) | **relation + host mirror landed; NOT-yet-sound (`sq-qhy4`), NOT `bb`-measured, NOT manifest-dispatched, no `ProofStep`→slot mapper** (§4.4) | `n3.nr`; `n3.rs` |
 | A3 | Single-use nullifier (computed in-circuit) (`sq-rsd3v.1`) | **ABSENT — new circuit-soundness surface** | — (§6 deliverable) |
 | A4 | Delegation chain-carry + per-request key-proof (`sq-rsd3v.4`) | **ZERO substrate today** | — (§5 deliverable) |
 | A5 | `sparq-trust` admission gate (`admit`) (`sq-rsd3v.8`) | **PoC only** (`sq-pfae.10`, PR #966); not the generalised gate | `crates/sparq-trust` (PoC) |
+| A6 | `owl:sameAs` in-circuit canonicalisation + representative-membership (`sq-rsd3v.6`) | **relation + host mirror landed; NOT-yet-sound (`sq-qhy4`), NOT `bb`-measured, NOT manifest-dispatched** | `sameas.nr`; `sameas.rs` (§3.5.1) |
 | X1 | Completeness-under-entailment (saturation proof) (`sq-rsd3v.7`) | **UNBUILT anywhere; NOT claimed** | — |
 
 **The crux honesty correction (per the SOUNDNESS lens):** rows P4 vs A1. What
@@ -134,10 +135,12 @@ deferred and NOT claimed** — and that deferral should be stated loudly.
 
 ### 3.2 What ships today (the honest starting point — row P4, not row A1)
 
-`crates/sparq-zk-compose/src/derivation.rs` (226 lines) ships `DerivationStep` +
-`EntailmentRule` for two RDFS rules — `rdfs9` (subClassOf-into-type transitivity)
-and `rdfs7` (subPropertyOf) — each with a **fixed antecedent/consequent shape**
-re-checked by `DerivationStep::is_well_formed` (`derivation.rs:48-170`).
+`crates/sparq-zk-compose/src/derivation.rs` ships `DerivationStep` +
+`EntailmentRule` for the six fixed-shape RDFS rules of the v1 scope (§3.5) —
+`rdfs9` (subClassOf-into-type transitivity), `rdfs7` (subPropertyOf), and (added
+under `sq-rsd3v.2`) `rdfs2` (domain), `rdfs3` (range), `rdfs5` (subPropertyOf
+transitivity), `rdfs11` (subClassOf transitivity) — each with a **fixed
+antecedent/consequent shape** re-checked by `DerivationStep::is_well_formed`.
 `verifier.rs:4401` `bind_entailment` enforces the manifest's `entailmentRegime`
 **end-to-end and fail-closed**:
 
@@ -176,6 +179,19 @@ has a HIDDEN committed-graph membership proof."* Concretely, a **new in-circuit
 
 A derivation DAG proves SOUNDNESS but **not** completeness, and **not** that
 leaves are themselves true unless each leaf is anchored — hence (3) is mandatory.
+
+**Status (`sq-rsd3v.2`):** the in-circuit RELATION landed as
+`zk/compose/compose_core/src/derivation.nr` (`derivation_check<K,N,M>`) —
+per-node rule variable-sharing equalities (1), premise-chaining by
+encoding-equality for internal DAG nodes (2), and DAG-leaf anchoring via the
+`scan.nr` whole-graph-in-circuit membership accumulator against `commitments[g]`
+(3), with a forge-and-verify Noir test (an ungrounded/forged antecedent fails
+closed). It is **research-grade, NOT externally audited (`sq-qhy4`), and NOT yet
+`bb`-compiled** in this tree — **no cost claim is made** (the per-node `~10²`
+figure remains a judgement to be confirmed by `bb gates`). Still to land: the
+off-circuit **zk-trace mapper** (`sparq-reason explain` `ProofTree` → witness
+slot indices), a compiled **bin-package monomorphisation**, and the verifier
+dispatch that binds a `derivation_check` proof into `verify_manifest`.
 
 **The C(G)-membership story and its cost (the SOUNDNESS-lens correction — read
 carefully).** Step (3) must NOT be misread as "reuse the hidden-issuer / holder-set
@@ -239,6 +255,94 @@ greenfield part.**
   encoding-equality re-checks are **UNSOUND under equality reasoning**: `sameAs`
   needs in-circuit union-find `canon(s) == canon(s')` with representative-
   membership witnesses (the cost cliff). It must NOT silently ride the v1/v2 path.
+  See §3.5.1 for the landed gadget and its soundness argument.
+
+### 3.5.1 `owl:sameAs`: the canonicalisation gadget and its soundness argument (`sq-rsd3v.6`)
+
+**Why the v1/v2 path cannot absorb it.** Every rule in §3.5 is re-checked — host-side
+in `derivation.rs`, in-circuit in `derivation.nr` — by **term-encoding equality**, and
+an encoding equality is a term **identity**. That proxy is exact for RDFS and for the
+OWL-RL rules whose antecedents are fixed-shape Datalog over ids. It breaks under
+equality reasoning, because `owl:sameAs` **quotients the term universe**: under
+OWL-RL's `eq-ref` / `eq-sym` / `eq-trans` / `eq-rep-{s,p,o}` two syntactically distinct
+terms may denote the same thing, so term identity is strictly **finer** than the
+entailment relation. Bolting `eq-rep-*` onto the fixed-shape path gives one of two bad
+outcomes: (a) it never fires, because encoding equality does not cross a `sameAs` link;
+or (b) — if the equality test is relaxed to "equal up to some claimed `sameAs`" — the
+claimed equalities become **trusted rather than proved**, which is exactly the
+PROVEN-vs-ASSUMED downgrade §3.3 refuses for the schema. Hence a separate member.
+
+**The gadget (landed).** `zk/compose/compose_core/src/sameas.nr` — `canon_of`,
+`canon_table_check`, `sameas_entails_row` — with the host mirror + witness builder in
+`crates/sparq-zk-compose/src/sameas.rs` (`CanonTable::{from_committed_sameas, canon,
+check, entails_row}`). The prover witnesses a **spanning forest** of the committed
+`owl:sameAs` edge graph as a `(mem, rep, parent)` table; the circuit checks it and then
+runs the ordinary encoding-equality test **over representatives**.
+
+**The soundness argument.** Write `~` for the equivalence relation on terms generated
+by `{(a, b) : (a, owl:sameAs, b) ∈ C(G)}` — precisely what `eq-ref`/`eq-sym`/`eq-trans`
+derive. The relation's constraints are: (3a) a non-root's `parent[u] < u` strictly;
+(3b) a root represents itself and a non-root shares its parent's representative;
+(3c) every tree edge is witnessed by a committed `(mem[u], sameAs, mem[parent[u]])` or
+`(mem[parent[u]], sameAs, mem[u])` triple; (4) active members are distinct.
+
+- **L1 (no over-merge).** Every active entry has `mem[u] ~ rep[u]`. Induction on `u`,
+  well-founded by (3a). Root: reflexivity via (3b). Non-root: (3c) gives
+  `mem[u] ~ mem[p]` (either orientation, `eq-sym`), the IH gives `mem[p] ~ rep[p]`, and
+  (3b) gives `rep[u] = rep[p]`; transitivity closes it.
+- **L2 (`canon` is class-preserving).** `canon(t) ~ t` for every term: a term with no
+  entry is its own representative (`eq-ref`); otherwise (4) makes the entry unique and
+  L1 applies.
+- **L3 (idempotence).** `canon(canon(t)) = canon(t)`, because `canon(t)` is a root's
+  member and, by (4), that root is THE entry for it. This is the lemma (4) exists for;
+  L1/L2 do not need it.
+- **THEOREM — *encoding-equality is preserved under the canonical representative*
+  (the bead's named deliverable).** `canon(x) = canon(y)` implies `x ~ y`:
+  `x ~ canon(x) = canon(y) ~ y` by L2 plus symmetry and transitivity. So encoding
+  equality **over canonical representatives** is a sound test for "the same thing under
+  equality reasoning" — the property the raw test lacks, and the property any future
+  lifting of the §3.5 fixed-shape rules over `~` would need.
+- **COROLLARY — representative-membership.** If a committed triple `(s₀,p₀,o₀)`
+  satisfies `canon(s₀)=canon(s)`, `canon(p₀)=canon(p)`, `canon(o₀)=canon(o)`, then
+  `C(G) ⊨ (s,p,o)` under OWL-RL: by the THEOREM `s₀ ~ s`, `p₀ ~ p`, `o₀ ~ o`, and
+  `eq-rep-s`/`eq-rep-p`/`eq-rep-o` rewrite the committed triple into the disclosed row.
+  Every `sameAs` fact those rules consume is committed (3c) or an `eq-*` consequence of
+  committed triples, so nothing is assumed. This is `sameas_entails_row`.
+
+**What is NOT claimed.** The converse of the THEOREM is false **by construction**: a
+prover may omit entries or edges, so `canon` is only a **refinement** of `~`.
+Under-merging costs provability, never soundness — a row the gadget cannot show
+entailed is **not** thereby shown non-entailed (the same existence-only posture as
+`path.nr`). Fixpoint saturation remains §3.7 / `sq-rsd3v.7`, unbuilt. Blank-node
+encodings are salt-dependent, so a `sameAs` edge touching a bnode is per-graph; the
+estate's cross-graph non-bnode (Q6) obligation is **unchanged and not discharged here**.
+The gadget is research-grade and **NOT externally audited** (`sq-qhy4`).
+
+**Cost — measured before claimed, and it has NOT been measured.** The dominant terms
+are `U·K·N` (each table edge looked up against the whole in-circuit graph — `C(G)` is a
+flat Poseidon2 sponge with no per-leaf authentication paths, so the `scan.nr`
+whole-graph discipline applies until the deferred `commit.rs` "shape-2" per-graph Merkle
+tree lands), `U²` (distinct members), and `K·N + U` for the row anchor. Naming the base
+triple by a witnessed private `(src_graph, src_slot)` — rather than canonicalising every
+slot of every graph — is what keeps the row anchor at `K·N + U` instead of `K·N·U`.
+**No gate figure is stated anywhere**: `bb gates` over a compiled monomorphisation MUST
+be run first, and it has not been.
+
+**Fail-closed: `owl:sameAs` cannot ride the v1/v2 path.** The refusal is enforced, not
+merely documented. `DerivationStep::mentions_equality_predicate` rejects any step whose
+`owl:sameAs` encoding stands in a predicate slot of an antecedent or of the derived
+triple, and `verifier::bind_entailment` returns `CheckError::EqualityReasoningUnsupported`
+for it **before** the shape check. That ordering matters, because the dangerous shapes
+are shape-VALID: `rdfs7` with `p1 = owl:sameAs` **consumes** an equality
+(`(sameAs subPropertyOf q), (x sameAs y) ⊢ (x q y)`) and with `p2 = owl:sameAs`
+**introduces** one. Both are legitimate *RDFS* entailments, so refusing them costs only
+provability — the conservative direction — while making a silent ride impossible.
+
+**Still to land (follow-ups, not claimed here).** A compiled `sameas_k{K}_n{N}_u{U}` bin
+package and its `bb gates` measurement; the `CircuitId` / `ProofInputs` / `verify_manifest`
+dispatch that would bind such a proof into a manifest; and composition with
+`derivation_check` (running the §3.5 rule shapes over canonical representatives), whose
+statement is licensed by the THEOREM above but whose *cost* is the open question.
 
 ### 3.6 Rejected approaches (with reasons)
 
@@ -268,6 +372,33 @@ closure-sweep over the flat full graph, AND (ii) a **fixpoint-SATURATION proof**
 (no rule fires producing a new triple). The saturation half is **UNBUILT anywhere
 in sparq and is NOT claimed.** A relying party that needs "the answer set is
 complete under entailment" cannot get it from this design today.
+
+**The deferral is now ENFORCED, not prose-only** (`sq-rsd3v.7`, landed): the two
+obligations cannot be conflated by reading an accept.
+`EntailmentPolicy::require_completeness_under_entailment()`
+(`crates/sparq-zk-compose/src/verifier.rs`) is how a relying party DECLARES it needs
+"no entailed answer is missing", and the verifier's entailment gate then REFUSES —
+fail-closed, before any other entailment check, with
+`CheckError::CompletenessUnderEntailmentUnavailable` — every non-`Simple` manifest.
+The refusal message names both missing halves from the single source of truth
+`derivation::COMPLETENESS_UNDER_ENTAILMENT_UNBUILT`, so the honest scope cannot decay
+into a doc only one side remembers. Precisely what the refusal asserts: *no accepted
+proof under that policy rests on entailment whose completeness sparq cannot check* —
+nothing more. Two limits are deliberate and documented in the API:
+
+- a `Simple` manifest is NOT refused (no entailment closure for completeness to range
+  over), but passing one is **not** a completeness assertion either — that rests on
+  the `scan.nr` per-pattern sweep and the rest of the not-externally-audited verifier
+  (`sq-qhy4`);
+- an off-circuit materialised closure presented as `Simple` over the materialised
+  graph (§3.6(a) trusted-materialiser mode) is INVISIBLE to the dial: there the regime
+  field is honestly `Simple` and entailment is trusted to the materialiser's
+  signature — a different trust model the relying party must evaluate itself.
+
+When the RE-ENTRY TRIGGER of §3.6(c) fires (a documented huge-closure case PLUS a
+verifier demanding full completeness; `research/zkp-performance-landscape.md` §5
+trigger 4), the unconditional refusal is precisely what a real check replaces. Until
+then it is the honest answer, and soundness-first (`sq-rsd3v.2`/`.3`) is the path.
 
 ---
 
@@ -329,6 +460,56 @@ with completeness, `sq-rsd3v.7`); `math:quotient` / `exponentiation` / floats;
 decomposition; `log:semantics` / `log:includes`; backward rules that don't reduce
 to a forward closure; any rule whose closure is unbounded. A rule outside the
 subset MUST be rejected, not silently approximated.
+
+### 4.4 Status (`sq-rsd3v.3`, row A2)
+
+The in-circuit RELATION landed as `zk/compose/compose_core/src/n3.nr`
+(`n3_derivation_check`), with the host mirror + commitment builder at
+`crates/sparq-zk-compose/src/n3.rs` (`N3Slot` / `N3Builtin` / `N3Premise` /
+`N3Rule` / `N3RuleSet` / `N3SubsetError`). What it states:
+
+- **§4.1 move 1 (whose rules).** `rules_root` is a PUBLIC input, recomputed
+  in-circuit by folding every witnessed rule shape (`rule_leaf` → `commit_fold`),
+  so a fired rule must be one the rule author committed. Signing that root is the
+  existing `sq-z9l` `issuer.nr` machinery and is NOT restated by this member.
+- **§4.1 move 2 (witnessed shape).** Each pattern slot is `(kind, konst, var)`;
+  the conclusion must be the rule's conclusion pattern under a substitution that
+  is CONSISTENT by construction (the substitution is an array indexed by variable
+  id, so one variable cannot take two values in a firing).
+- **Grounding.** Every JOIN premise atom chains to a strictly earlier node's
+  conclusion; leaves anchor to committed-graph membership, so the antecedents
+  stay hidden (the row-A1 privacy property, inherited).
+- **Safety is enforced in-circuit, and it is load-bearing.** The substitution is
+  a private witness, so an unbound conclusion variable would let the prover CHOOSE
+  the derived triple. `rule_subset_check` runs a BINDING SCHEDULE over the
+  witnessed shape (join atoms bind their variable slots; arithmetic builtins
+  require bound inputs and bind their output; comparisons bind nothing) and
+  refuses any rule whose conclusion uses an unbound variable.
+- **Builtin whitelist.** The `math:` comparisons reuse `filter_signed`'s
+  `signed_verdict` and its canonical-`xsd:integer` operand binding VERBATIM (both
+  were extracted to `pub(crate)` for exactly this, with the FILTER lane's assert
+  order preserved); `sum`/`difference`/`product` are exact field equations, sound
+  because every magnitude is `< 2^64` against a `~2^254` modulus, and fail CLOSED
+  (no canonical witness) when a true result leaves the representable range.
+- **Fail-closed outside the subset, structurally.** `N3RuleSet::commit` runs
+  `admit` BEFORE it folds, so an out-of-subset rule graph has **no root** and can
+  never reach the circuit; the circuit independently re-checks the same conditions
+  so a hand-rolled witness cannot bypass the host gate.
+
+**What is NOT built (do not read the above as more than it says):** the
+off-circuit witness generator that maps `sparq-reason`'s `reason_n3_proof` /
+`n3_proof_tree` `ProofStep`s onto these slots; a compiled
+`n3_k{K}_n{N}_r{R}_m{M}` bin package; its `bb gates` cost measurement (so **NO**
+cost figure is claimed — repo policy forbids an unmeasured one); and any
+`ProofManifest` / `CircuitId` / `verify_manifest` dispatch that would bind such a
+proof. Nothing here makes the composition verifier sound, and the whole member
+inherits §3's caveats — research-grade, **NOT externally audited (`sq-qhy4`)**.
+As with `derivation.nr` (§3.3) and `sameas.nr` (§3.5.1), the Noir `#[test]`
+accept/forge suite in `compose_core/src/tests.nr` is compiled by the zk lane but
+**executed by no CI lane** (nothing runs `nargo test`), so it is a
+maintainer-run suite, not a standing gate. The soundness obligation this member
+discharges is derivation-SOUNDNESS only; COMPLETENESS under entailment remains
+§3.7 / `sq-rsd3v.7`, unbuilt and not claimed.
 
 ---
 
@@ -521,8 +702,11 @@ byte-identical to today.
 Build order honours the dependency DAG: **(4) nullifier → (1) inference →
 (2) N3**, with **(3) delegation** and **(5) unlinkability** after (4), and
 **(6) integration** last (it consumes the rest and must FIRST generalise the PoC
-gate). Separately gated: `owl:sameAs` (`sq-rsd3v.6`) and completeness-under-
-entailment (`sq-rsd3v.7`), both deferred and NOT claimed.
+gate). Separately gated: `owl:sameAs` (`sq-rsd3v.6`) — its canonicalisation
+relation + host mirror have now landed (§3.5.1), but with NO compiled member, NO
+`bb gates` measurement, and NO manifest dispatch, so nothing composes it yet and
+no cost or soundness property is claimed — and completeness-under-entailment
+(`sq-rsd3v.7`), still deferred and NOT claimed.
 
 ---
 

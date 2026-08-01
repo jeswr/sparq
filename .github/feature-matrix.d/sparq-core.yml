@@ -3,8 +3,13 @@
 # One self-contained leg mapping per opt-in feature(group). Assembled into the
 # feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
 # (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
-# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# leg for THIS crate edits no OTHER crate's fragment, so concurrent opt-in-feature PRs for
 # DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+# SCOPE ([SONNET-4.6] issue #2384): adding/removing/renaming a leg changes the emitted
+# leg-name set, and THAT is a TWO-FILE change — this fragment AND
+# scripts/tests/feature-matrix-legnames.golden.txt. Every other edit here (features,
+# test, tier, tier-reason, comments) leaves the name set alone and is a SINGLE-file
+# change. See README.md in this directory.
 #
 # CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
 # discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
@@ -30,6 +35,21 @@
 - name: "sparq-core (jsonld)"
   crate: "sparq-core"
   features: "jsonld"
+  test: true
+
+# [SONNET-4.6] #3547: exercise the native Turtle parser's inline differential,
+# malformed-input parity, and loader tests on every feature-matrix run.
+- name: "sparq-core (native-ttl)"
+  crate: "sparq-core"
+  features: "native-ttl"
+  test: true
+
+# [SONNET-4.6] #3547: exercise the opt-in RFC-3987 IRI validation path. These
+# tests live in inline cfg(test) modules, so the structural C1 guard cannot infer
+# their need for a dedicated feature executor.
+- name: "sparq-core (iri-fast)"
+  crate: "sparq-core"
+  features: "iri-fast"
   test: true
 
 # [OPUS-4.8] sq-wihld (survey §A1): opt-in per-block Bloom filters on the high-NDV

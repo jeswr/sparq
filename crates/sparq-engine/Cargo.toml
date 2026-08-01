@@ -39,6 +39,11 @@ digest = ["dep:md-5", "dep:sha1", "dep:sha2"]
 # OFF by default (the wasm bundle and the default native build carry zero CS code);
 # results are identical either way — only join order is affected.
 cs-planner = []
+# [FABLE-5] (sq-dzbg2) Persistent, explicitly-built planner statistics.  The
+# catalog is stored beside a saved/mmap graph and contains deterministic
+# per-predicate cardinalities plus equi-depth subject/object value histograms.
+# OFF by default: ordinary planning and the lean wasm build are unchanged.
+persistent-stats = []
 # [FABLE-5] sq-7d3dj.32.2.7: forwards sparq-core's `spqcprm2` (SPQCPRM2 frame-of-reference
 # on-disk format). OFF by default so the default engine build is unchanged; enabling it lets
 # the storage cross-version differentials (`v2_saved_store_is_query_equivalent_to_v1`,
@@ -97,6 +102,19 @@ zk = []
 # `sparq_engine_service::service::*` (src/exec.rs), keeping the one allowlisted per-SERVICE-call
 # `Box<dyn Transport>` install point — never a per-row crossing (#1303 / RFC §D4).
 service = ["dep:sparq-engine-service", "sparq-engine-service/service"]
+# [OPUS-5] (sq-lsp7k.2.2) LOCAL rows-returning SERVICE handlers — the table-function seam.
+# Adds the `service_local` module (`LocalServiceRegistry` + `with_local_services`) and
+# teaches the executor to answer `SERVICE <iri> { … }` from an in-process handler when the
+# IRI is registered, joining the returned named-variable rows into the surrounding query
+# exactly as `VALUES` / a remote SERVICE relation is joined. The intercept happens BEFORE
+# the HTTP transport, so a handled SERVICE performs NO network I/O — it can only ever
+# REMOVE outbound reach, never add it: an unregistered IRI falls through to the unchanged
+# `service` path where the default-deny SSRF egress filter still applies in full (this
+# feature does not enable `service`; the two are independent and compose). OPT-IN and OFF
+# by default: when off, zero of this code compiles, the SERVICE dispatch is byte-identical
+# to before, and ZERO new dependencies enter the graph (oxrdf + spargebra are already
+# direct deps; no `unsafe`).
+service-local = []
 # [OPUS-4.8] (sq-678h) RDF serializer matrix: Turtle / TriG / N-Quads writers
 # (`serialize` module). The base build can already *parse* every format but only
 # *write* N-Triples (`triples_to_ntriples`, always on). This feature adds the missing

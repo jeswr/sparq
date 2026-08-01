@@ -28,7 +28,7 @@ import { SectionHeader } from "@/components/home/section-header";
 import { FlagshipCard } from "@/components/home/flagship-card";
 import { CapabilityCard } from "@/components/home/capability-card";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 // The honesty tiers, told ONCE here (the per-surface badge/dot is the per-page pointer).
 // Order mirrors the strongest → most-hedged execution model. Each is a real Tier so the

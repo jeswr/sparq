@@ -279,8 +279,15 @@ pub struct AttestedStatusRef {
     /// fail-closed by the verifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u64>,
-    /// The status-list version (as issuer-signed).
-    pub version: u64,
+    /// The status-list version (as issuer-signed). `None` ONLY on the sq-kndw
+    /// FULLY-HIDDEN path, where the version is folded into `ref_commitment` and is
+    /// therefore absent from the signed object as well as from the manifest. On the
+    /// clear-index and committed-index paths this is MANDATORY — a `None` version
+    /// there is rejected fail-closed ([`crate::verifier::CheckError::RevocationReferenceModeInvalid`]),
+    /// never silently defaulted to 0.
+    // [OPUS-5] sq-kndw: version withholdable on the fully-hidden path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
     /// [OPUS-4.8] sq-ayv: the hiding COMMITMENT to the index the issuer signed (in
     /// place of the clear `index`), hex. When `Some`, the issuer signed
     /// `status_ref_commit_digest(H(list), index_commitment, version)` and the clear
@@ -289,6 +296,65 @@ pub struct AttestedStatusRef {
     /// (audit #12) path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_commitment: Option<FieldHex>,
+    /// [OPUS-5] sq-kndw: the hiding COMMITMENT to the `(list IRI, version)` PAIR the
+    /// issuer signed, hex — [`sparq_zk::sig::status_ref_commitment`]`(H(list),
+    /// version, ref_blinding)`. When `Some`, the issuer signed the FULLY-COMMITTED
+    /// digest [`sparq_zk::sig::status_ref_fully_committed_digest`]`(ref_commitment,
+    /// index_commitment)`, which folds NEITHER the clear list id NOR the clear
+    /// version — so the signed object discloses nothing about which list or which
+    /// publication epoch the credential belongs to. `None` for the clear-index and
+    /// committed-index paths.
+    ///
+    /// Requires `index_commitment` to be `Some` and `index` / `version` to be
+    /// `None`; any other combination is a malformed mode and is rejected
+    /// fail-closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_commitment: Option<FieldHex>,
+}
+
+impl AttestedStatusRef {
+    /// The CLEAR-index attested reference (audit #12). The issuer signs
+    /// [`sparq_zk::sig::status_ref_digest`]`(H(list), index, version)`.
+    pub fn clear(index: u64, version: u64) -> Self {
+        AttestedStatusRef {
+            index: Some(index),
+            version: Some(version),
+            index_commitment: None,
+            ref_commitment: None,
+        }
+    }
+
+    /// The COMMITTED-index attested reference (sq-ayv). The issuer signs
+    /// [`sparq_zk::sig::status_ref_commit_digest`]`(H(list), index_commitment,
+    /// version)`; `index_commitment` must be
+    /// [`sparq_zk::sig::status_index_commitment`]`(index, blinding)`.
+    pub fn committed(index_commitment: &sparq_zk::Fr, version: u64) -> Self {
+        AttestedStatusRef {
+            index: None,
+            version: Some(version),
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: None,
+        }
+    }
+
+    /// [OPUS-5] sq-kndw: the FULLY-HIDDEN attested reference. The issuer signs
+    /// [`sparq_zk::sig::status_ref_fully_committed_digest`]`(ref_commitment,
+    /// index_commitment)` — no clear list id, no clear version. Build the inputs
+    /// with [`sparq_zk::sig::status_ref_commitment`]`(H(list), version,
+    /// ref_blinding)` and [`sparq_zk::sig::status_index_commitment`]`(index,
+    /// blinding)`.
+    ///
+    /// ⚠️ Both blindings MUST be freshly sampled per presentation and the
+    /// credential re-signed; a reused pair is a cross-presentation correlation
+    /// handle (see [`FullyHiddenRevocation`]).
+    pub fn fully_hidden(ref_commitment: &sparq_zk::Fr, index_commitment: &sparq_zk::Fr) -> Self {
+        AttestedStatusRef {
+            index: None,
+            version: None,
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: Some(FieldHex::from_field(ref_commitment)),
+        }
+    }
 }
 
 /// The ISSUER-ATTESTED holder binding carried by a [`CommitmentAttestation`]
@@ -397,18 +463,49 @@ impl AttestedHolderBinding {
 /// checks the disclosed status-list snapshot's bit at `index` is UNSET and the
 /// `version` is within its freshness window.
 ///
-/// # Privacy (interim, documented deferral)
-/// `index` is disclosed in the CLEAR here — a linkability channel (a relying
-/// party can correlate two presentations of the same credential by its index).
-/// The full-privacy upgrade is an IN-CIRCUIT hidden-index status-list inclusion +
-/// bit-unset proof bound to a disclosed list version, revealing only "the (hidden)
-/// index is in-range and unset in version V". See the verifier module docs
-/// (audit #12 remaining-step note).
+/// # The three disclosure MODES (exactly one is well-formed)
+/// | mode | `status_list` | `index` | `version` | `index_commitment` | `ref_commitment` |
+/// |---|---|---|---|---|---|
+/// | CLEAR (audit #12)          | `Some` | `Some` | `Some` | `None` | `None` |
+/// | COMMITTED-index (sq-ayv)   | `Some` | `None` | `Some` | `Some` | `None` |
+/// | FULLY-HIDDEN (sq-kndw)     | `None` | `None` | `None` | `Some` | `Some` |
+///
+/// Any other combination is a malformed mode and is rejected FAIL-CLOSED by
+/// [`crate::verifier`] (`RevocationReferenceModeInvalid`) — the mode is resolved
+/// at ONE chokepoint (`resolve_status_ref`) so a new mode cannot bypass the
+/// issuer-binding cross-check.
+///
+/// # Privacy (per mode, honest)
+/// - CLEAR: `index` is disclosed (a linkability channel — a relying party can
+///   correlate two presentations of the same credential by its list slot).
+/// - COMMITTED-index (sq-ayv): index + liveness bit hidden; the status-list IRI
+///   and the `version` are STILL disclosed (a coarser correlation channel — which
+///   list, which publication epoch).
+/// - FULLY-HIDDEN (sq-kndw / sq-6qe): IRI + version hidden too. Nothing
+///   holder-identifying is disclosed; the statement reduces to "some accepted
+///   `(list, version)` in the relying party's committed set, at or above its
+///   public epoch floor, has my hidden index unset". Requires a
+///   [`FullyHiddenRevocation`] proof. The residual disclosures are policy-side,
+///   not holder-side: the accepted-set root (the RP's own policy fingerprint), the
+///   public `min_version` floor, and the member depths `(D, A)` via the vk.
+///
+///   ⚠️ `ref_commitment` + `index_commitment` are HIDING but STABLE per issuance,
+///   so REUSING them across presentations reinstates full linkability and voids
+///   the guarantee. See [`FullyHiddenRevocation`] for the enforcement.
+///
+/// NOT externally audited (sq-qhy4); no soundness / privacy property is asserted
+/// as achieved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationStatus {
     /// IRI of the status-list credential (bound under the issuer signature via
-    /// [`sparq_zk::sig::status_list_id_to_field`]).
-    pub status_list: String,
+    /// [`sparq_zk::sig::status_list_id_to_field`]). `None` ONLY on the sq-kndw
+    /// FULLY-HIDDEN path, where the IRI is folded into `ref_commitment` and hence
+    /// absent from both the signed object and the manifest. MANDATORY on the clear
+    /// and committed-index paths — a `None` IRI there is a malformed mode and is
+    /// rejected fail-closed.
+    // [OPUS-5] sq-kndw: list IRI withholdable (fully-hidden path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_list: Option<String>,
     /// The CLEAR index into the list (the audit-#12 clear-index path). `None` when
     /// the credential uses the sq-ayv COMMITTED-index path — the clear index is
     /// WITHHELD and `index_commitment` carries a hiding commitment instead, so the
@@ -432,9 +529,17 @@ pub struct RevocationStatus {
     /// version-less manifests parseable, but the verifier's status check is
     /// mandatory and a version-0 reference still must match the issuer-signed
     /// digest and a fresh snapshot, so the default does not bypass the gate.
+    ///
+    /// [OPUS-5] sq-kndw: now `Option<u64>` — `None` on the FULLY-HIDDEN path,
+    /// where the version is committed inside `ref_commitment` and proven
+    /// `>= min_version` IN-CIRCUIT instead of being disclosed. On the clear and
+    /// committed-index paths a `None` version is a malformed mode and is rejected
+    /// fail-closed (it is NOT defaulted to 0 — that would let a manifest silently
+    /// drop the freshness anchor).
     // [OPUS-4.8] audit #12: issuer-bound, freshness-checked version.
-    #[serde(default)]
-    pub version: u64,
+    // [OPUS-5] sq-kndw: version withholdable (fully-hidden path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
     /// [OPUS-4.8] sq-ayv: the hiding COMMITMENT to the index (in place of the clear
     /// `index`), hex. When `Some`, the issuer signed
     /// `status_ref_commit_digest(H(list), index_commitment, version)` and the
@@ -445,6 +550,68 @@ pub struct RevocationStatus {
     /// then checked there, never skipped — fail-closed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_commitment: Option<FieldHex>,
+    /// [OPUS-5] sq-kndw: the hiding COMMITMENT to the `(list IRI, version)` pair,
+    /// hex — [`sparq_zk::sig::status_ref_commitment`]`(H(list), version,
+    /// ref_blinding)`. When `Some` (the FULLY-HIDDEN mode) the verifier
+    /// (a) recomputes the issuer-signed digest
+    /// [`sparq_zk::sig::status_ref_fully_committed_digest`]`(ref_commitment,
+    /// index_commitment)` from THIS field to check the signature, and (b) requires
+    /// the fully-hidden revocation proof's PUBLIC `ref_commitment` to byte-equal
+    /// it — the cross-binding that ties the in-circuit private `(list, version)` to
+    /// the reference the ISSUER signed. Without (b) the in-circuit "ref open"
+    /// relation would constrain nothing.
+    ///
+    /// A fully-hidden reference REQUIRES a [`ProofManifest::fully_hidden_revocation`]
+    /// proof (revocation is then checked there, never skipped — fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_commitment: Option<FieldHex>,
+}
+
+impl RevocationStatus {
+    /// The CLEAR-index disclosed reference (audit #12) — index and version in the
+    /// clear. Pairs with [`AttestedStatusRef::clear`].
+    pub fn clear(status_list: impl Into<String>, index: u64, version: u64) -> Self {
+        RevocationStatus {
+            status_list: Some(status_list.into()),
+            index: Some(index),
+            version: Some(version),
+            index_commitment: None,
+            ref_commitment: None,
+        }
+    }
+
+    /// The COMMITTED-index disclosed reference (sq-ayv) — the clear index is
+    /// withheld; the list IRI and version are still disclosed. Pairs with
+    /// [`AttestedStatusRef::committed`], and REQUIRES a
+    /// [`ProofManifest::hidden_revocation`] proof.
+    pub fn committed(
+        status_list: impl Into<String>,
+        index_commitment: &sparq_zk::Fr,
+        version: u64,
+    ) -> Self {
+        RevocationStatus {
+            status_list: Some(status_list.into()),
+            index: None,
+            version: Some(version),
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: None,
+        }
+    }
+
+    /// [OPUS-5] sq-kndw: the FULLY-HIDDEN disclosed reference — no list IRI, no
+    /// index, no version; only the two hiding commitments the issuer signed. Pairs
+    /// with [`AttestedStatusRef::fully_hidden`], and REQUIRES a
+    /// [`ProofManifest::fully_hidden_revocation`] proof (liveness is decided there,
+    /// never skipped).
+    pub fn fully_hidden(ref_commitment: &sparq_zk::Fr, index_commitment: &sparq_zk::Fr) -> Self {
+        RevocationStatus {
+            status_list: None,
+            index: None,
+            version: None,
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: Some(FieldHex::from_field(ref_commitment)),
+        }
+    }
 }
 
 /// A snapshot of a Bitstring/StatusList2021-style status list (audit #12): the
@@ -627,6 +794,39 @@ pub enum CircuitId {
     // (`dual-leaf`), research-grade, NOT externally audited.
     #[cfg(feature = "dual-leaf")]
     FilterValueDlDecimal,
+    /// `filter_value_dl_datetime` — DUAL-LEAF value-lane FILTER over a committed
+    /// `xsd:dateTime` OR `xsd:date` ([OPUS-5] sq-wz99x, the dateTime/date sibling
+    /// of [`Self::FilterValueDl`]; `research/zk-field-native-encoding.md` §13.5).
+    /// Structurally [`Self::FilterValueDlDecimal`] with a different value handle:
+    /// the `VALUE_HOOK` is the SIGNED SCALED EPOCH (milliseconds from
+    /// `1970-01-01T00:00:00Z` on the XSD proleptic-Gregorian `timeOnTimeline`, at
+    /// the lane-fixed sub-second scale `FS = 3`), so it reuses the member's
+    /// UNCHANGED signed fixed-point verdict with NO in-circuit blake3.
+    ///
+    /// ONE compiled member serves BOTH datatype classes. `xsd:date` is its own
+    /// lane only by its PUBLIC `datatype_const`
+    /// (`sparq_zk::dual_leaf_datetime::{datetime_datatype_const,
+    /// date_datatype_const}` — `blake3(IRI ‖ "@epochscale=3")`), which is folded
+    /// into `value_component`; a date's hook is the scaled epoch of its STARTING
+    /// instant and is therefore numerically EQUAL to the dateTime hook of that same
+    /// instant, so the lane constant is the only thing keeping the two apart (an
+    /// honest date witness rebinds to a different leaf under the dateTime constant
+    /// and fails the member's leaf assert). That is a BINDING argument resting on
+    /// Poseidon2 preimage resistance, NOT an audited soundness claim.
+    ///
+    /// The hookable DOMAIN (strict XSD-canonical `Z`-timezoned lexicals only) is
+    /// the host's §13.4 fail-closed predicate, not an in-circuit check — the same
+    /// division of labour the decimal member uses for its canonical fraction width.
+    /// LEGAL ONLY against `DualLeafV1` / `ValueOnlyV1` — fail-closed via
+    /// `crate::dispatch`.
+    ///
+    /// DOCUMENTED RISK: carries the INV-VL downgrade, and the whole §13 rule set is
+    /// itself an OPEN external-audit obligation (CR-G8 / sq-qhy4). NOT externally
+    /// audited; no soundness / privacy claim.
+    // [OPUS-5] sq-wz99x: dual-leaf value-lane dateTime/date FILTER member. Opt-in
+    // (`dual-leaf`), research-grade, NOT externally audited.
+    #[cfg(feature = "dual-leaf")]
+    FilterValueDlDateTime,
     /// `revoke_unset_d{depth}` — hidden-index status-list inclusion + bit-unset
     /// proof over a depth-`depth` Poseidon2 Merkle tree (sq-3e5 / sq-h2v). The
     /// proof's PUBLIC inputs are `challenge` + the status-list Merkle `root`; the
@@ -636,6 +836,32 @@ pub enum CircuitId {
     /// [`RevocationStatus`] check leaked). Supports lists up to `2^depth` indices.
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation circuit member.
     RevokeUnset { depth: u32 },
+    /// `revoke_hidden_ref_d{depth}_a{set_depth}` — the FULLY-HIDDEN revocation
+    /// member (sq-kndw, the deferred remainder of sq-6qe;
+    /// `research/zk-statuslist-hide-iri-version.md` §3 sub-option A). The privacy
+    /// upgrade over [`Self::RevokeUnset`]: it hides the status-list IRI and the
+    /// VERSION on top of the index and the liveness bit.
+    ///
+    /// The proof's PUBLIC inputs are `challenge`, `ref_commitment`,
+    /// `index_commitment`, `accepted_set_root` and `min_version`. The list id, the
+    /// version, both blindings, the status-list Merkle root, the accepted-set slot
+    /// and path, the holder's index, the leaf bit and the status-list path are all
+    /// PRIVATE. The relying party's `status_list_root` is bound PRIVATELY, inside
+    /// the accepted-set leaf `Poseidon2([ZKSIG_AL, list_id, version,
+    /// status_list_root])`, so it never has to name the snapshot to check the fold.
+    ///
+    /// `depth` is the status-list tree depth (`≤ 2^depth` indices, as
+    /// [`Self::RevokeUnset`]); `set_depth` is the accepted-set tree depth
+    /// (`≤ 2^set_depth` accepted `(list, version)` pairs). Both are disclosed by
+    /// the member name / vk — a cardinality bound, inherent to fixed-depth Merkle.
+    /// [`crate::build::derive_revoke_hidden_ref_id`] is the single source of the
+    /// compiled family list; a `(depth, set_depth)` outside it derives `None`
+    /// (fail-closed, no wrong-bucket fallback).
+    ///
+    /// Opt-in and research-grade: NOT externally audited (sq-qhy4); no soundness /
+    /// ZK-privacy property is asserted as achieved.
+    // [OPUS-5] sq-kndw: fully-hidden revocation circuit member.
+    RevokeHiddenRef { depth: u32, set_depth: u32 },
     /// `hidden_issuer_d{depth}` — in-circuit Schnorr-over-Baby-JubJub signature
     /// verification + hidden-key set membership over a depth-`depth` Poseidon2
     /// Merkle tree of the issuer key set K (sq-z9l). The proof's PUBLIC inputs are
@@ -761,7 +987,17 @@ impl CircuitId {
             CircuitId::FilterValueDlF64 => "filter_value_dl_f64".to_string(),
             #[cfg(feature = "dual-leaf")]
             CircuitId::FilterValueDlDecimal => "filter_value_dl_decimal".to_string(),
+            // [OPUS-5] sq-wz99x: the dateTime/date datatype-class sibling. ONE
+            // package for BOTH lanes — the lane lives in the public
+            // `datatype_const`, not the member name.
+            #[cfg(feature = "dual-leaf")]
+            CircuitId::FilterValueDlDateTime => "filter_value_dl_datetime".to_string(),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
+            // [OPUS-5] sq-kndw: the (status-list depth, accepted-set depth) pair
+            // names the compiled fully-hidden member, e.g. revoke_hidden_ref_d10_a4.
+            CircuitId::RevokeHiddenRef { depth, set_depth } => {
+                format!("revoke_hidden_ref_d{depth}_a{set_depth}")
+            }
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
             // [OPUS-4.8] sq-xqfg (HolderPoP T5): depth-free single member.
             CircuitId::HolderPok => "holder_pok".to_string(),
@@ -911,10 +1147,20 @@ pub enum ProofInputs {
     /// `datatype_const = blake3(datatype IRI)` is PUBLIC (it folds the datatype so
     /// a cross-datatype value collision cannot occur).
     ///
+    /// The `xsd:boolean` VALUE LANE SHARES THIS VARIANT (sq-5xdlk): the boolean
+    /// hooks `{0 = false, 1 = true}` lie inside this member's `u64` comparison
+    /// domain, so no new Noir member exists — the boolean lane simply carries
+    /// `datatype_const = `[`boolean_datatype_const`]`()` and `bound ∈ {0, 1}`, and
+    /// the lanes are separated by that public constant alone (it is folded into
+    /// `value_component`, so an integer leaf's honest witness cannot satisfy a
+    /// boolean member call, and vice versa). Build one with
+    /// [`crate::build::build_filter_value_dl_boolean`].
+    ///
     /// DOCUMENTED RISK: this carries the INV-VL downgrade (value↔lexical agreement
     /// is trusted-issuer-honesty, not machine-enforced; #769 accepted, CR-G8 /
     /// sq-qhy4). NOT externally audited; no soundness / privacy claim.
     // [OPUS-4.8] sq-xojl: dual-leaf value-lane FILTER inputs. Opt-in, NOT-yet-sound.
+    // [OPUS-5] sq-5xdlk: + the xsd:boolean lane, by datatype_const alone.
     #[cfg(feature = "dual-leaf")]
     #[serde(rename = "filter_value_dl")]
     FilterValueDl {
@@ -922,10 +1168,14 @@ pub enum ProofInputs {
         /// The hidden column's DUAL-LEAF term encoding (the scan-proof anchor).
         operand_enc: FieldHex,
         op: FilterOp,
-        /// The FILTER's constant operand (a non-negative integer).
+        /// The FILTER's constant operand — a non-negative integer, or (on the
+        /// `xsd:boolean` lane, sq-5xdlk) the boolean hook `0` = `false` / `1` =
+        /// `true`.
         bound: u64,
         /// `blake3(datatype IRI)` as a field — the public `DATATYPE_CONST` folded
-        /// into `value_component`.
+        /// into `value_component`. This is what SELECTS the datatype lane:
+        /// `blake3(xsd:integer)` for the integer lane,
+        /// [`boolean_datatype_const`]`()` for the boolean one.
         datatype_const: FieldHex,
         /// The disclosed verdict.
         expected: bool,
@@ -992,6 +1242,47 @@ pub enum ProofInputs {
         bound_scaled: u64,
         /// `blake3(xsd:decimal IRI ‖ "@scale=fd")` as a field — folds the datatype
         /// AND the canonical scale into the public `DATATYPE_CONST` (the B4 bind).
+        datatype_const: FieldHex,
+        /// The disclosed verdict.
+        expected: bool,
+    },
+    /// filter_value_dl_datetime: DUAL-LEAF value-lane FILTER over a committed
+    /// `xsd:dateTime` OR `xsd:date` ([OPUS-5] sq-wz99x). These fields are EXACTLY
+    /// the `pub` parameters of the `filter_value_dl_datetime` member `main`
+    /// (`zk/compose/filter_value_dl_datetime/src/main.nr`), in declaration order
+    /// AFTER the prepended `challenge`:
+    ///
+    /// ```text
+    /// [challenge, operand_enc, op, bound_neg, bound_scaled_epoch, datatype_const, expected]
+    /// ```
+    ///
+    /// `operand_enc` is the DUAL-LEAF `Enc` over the SIGNED SCALED EPOCH; the
+    /// `VALUE_HOOK` (sign + scaled epoch) and `lexical_component` are PRIVATE; the
+    /// FILTER's constant instant is carried sign-split + host-converted as
+    /// `(bound_neg, bound_scaled_epoch = |T_bound|` in milliseconds`)`, and
+    /// `datatype_const = blake3(<xsd:dateTime|xsd:date IRI> ‖ "@epochscale=3")` is
+    /// PUBLIC — it SELECTS the lane and folds the sub-second scale `FS` (the B4
+    /// bind). The dateTime and date lanes share this ONE member and are separated
+    /// by that constant alone. DOCUMENTED RISK: INV-VL downgrade, and the §13 rule
+    /// set is an OPEN external-audit obligation (CR-G8 / sq-qhy4); NOT externally
+    /// audited.
+    // [OPUS-5] sq-wz99x: dual-leaf dateTime/date value-lane FILTER inputs. Opt-in.
+    #[cfg(feature = "dual-leaf")]
+    #[serde(rename = "filter_value_dl_datetime")]
+    FilterValueDlDateTime {
+        id: CircuitId,
+        /// The hidden column's DUAL-LEAF dateTime/date term encoding (the scan-proof
+        /// anchor).
+        operand_enc: FieldHex,
+        op: FilterOp,
+        /// Sign of the FILTER's constant instant (`true` = pre-epoch).
+        bound_neg: bool,
+        /// `|T_bound|` in milliseconds — the FILTER constant on the same scaled-epoch
+        /// timeline as the value handle.
+        bound_scaled_epoch: u64,
+        /// `blake3(<datatype IRI> ‖ "@epochscale=3")` as a field — SELECTS the
+        /// dateTime lane ([`datetime_datatype_const`]) or the date lane
+        /// ([`date_datatype_const`]) and folds the scale.
         datatype_const: FieldHex,
         /// The disclosed verdict.
         expected: bool,
@@ -1110,6 +1401,9 @@ impl ProofInputs {
             ProofInputs::FilterValueDlF64 { id, .. } => id,
             #[cfg(feature = "dual-leaf")]
             ProofInputs::FilterValueDlDecimal { id, .. } => id,
+            // [OPUS-5] sq-wz99x: dual-leaf dateTime/date value-lane FILTER.
+            #[cfg(feature = "dual-leaf")]
+            ProofInputs::FilterValueDlDateTime { id, .. } => id,
             // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
             ProofInputs::JoinEq { id, .. } => id,
             // [OPUS-4.8] sq-3kd2g.6: bounded-depth path reachability.
@@ -1117,6 +1411,101 @@ impl ProofInputs {
             ProofInputs::PathReach { id, .. } => id,
         }
     }
+}
+
+/// The PUBLIC `datatype_const` of the DUAL-LEAF `xsd:boolean` value lane
+/// (sq-5xdlk) — `blake3_field(xsd:boolean IRI)`, exactly the constant
+/// `sparq_zk::dual_leaf_boolean::encode_boolean` (the host half, sq-hh7a4) folds
+/// into the committed leaf's `value_component`.
+///
+/// # The boolean lane adds NO new Noir member
+///
+/// It REUSES [`CircuitId::FilterValueDl`] (`filter_value_dl_int`): that member's
+/// `datatype_const` is already a PUBLIC input, and its `u64` comparison domain
+/// covers the boolean value hooks `{0 = false, 1 = true}` — so the XSD boolean
+/// order `false < true` (and hence the degenerate `LT`/`LE`/`GT`/`GE` results
+/// alongside `EQ`/`NE`) falls out of the integer comparison unchanged. The lane
+/// is therefore pure WIRING: host and verifier pick THIS constant instead of
+/// `blake3(xsd:integer)`.
+///
+/// # Lane separation is the public `datatype_const`, and only that
+///
+/// `datatype_const` is folded into `value_component = h3(VALUE_HOOK,
+/// DATATYPE_CONST, LANG_NONE)`, and `blake3(xsd:boolean) != blake3(xsd:integer)`.
+/// So the honest witness for a committed `"1"^^xsd:integer` leaf recomputes a
+/// DIFFERENT leaf under this constant and fails the member's
+/// `assert_eq(leaf, operand_enc)` binding — and symmetrically for a boolean leaf
+/// under the integer constant. That is a BINDING argument resting on Poseidon2
+/// preimage resistance (a prover free to search preimages is out of scope of this
+/// statement), NOT an audited soundness claim.
+///
+/// DOCUMENTED RISK: the boolean lane inherits the value lane's INV-VL downgrade
+/// — value↔lexical agreement is TRUSTED-ISSUER-HONESTY, not machine-enforced
+/// (#769 accepted; gap CR-G8 / sq-qhy4). The ZK estate is internally re-audited
+/// but NOT externally audited; nothing here is a soundness or privacy guarantee.
+// [OPUS-5] sq-5xdlk: boolean value-lane wiring. Opt-in (`dual-leaf`), NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn boolean_datatype_const() -> FieldHex {
+    FieldHex(field_to_hex(&sparq_zk::dual_leaf::datatype_const(
+        sparq_zk::dual_leaf_boolean::XSD_BOOLEAN,
+    )))
+}
+
+/// The PUBLIC `datatype_const` of the DUAL-LEAF `xsd:dateTime` value lane
+/// (sq-wz99x) — `blake3_field("<xsd:dateTime IRI>@epochscale=3")`, exactly the
+/// constant `sparq_zk::dual_leaf_datetime::encode_datetime` (the host half,
+/// sq-we9vs) folds into the committed leaf's `value_component`. It carries the
+/// lane-fixed sub-second scale `FS`, so a hook at one scale can never collide a
+/// hook at another (the B4 bind, the `@scale=` construction of the decimal lane).
+///
+/// Pair it with [`CircuitId::FilterValueDlDateTime`] /
+/// [`ProofInputs::FilterValueDlDateTime`]; build one with
+/// [`crate::build::build_filter_value_dl_datetime`].
+///
+/// DOCUMENTED RISK: inherits the value lane's INV-VL downgrade (#769 accepted,
+/// CR-G8 / sq-qhy4), and the §13 rule set is itself an OPEN external-audit
+/// obligation. NOT externally audited; no soundness / privacy claim.
+// [OPUS-5] sq-wz99x: dateTime lane constant. Opt-in (`dual-leaf`), NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn datetime_datatype_const() -> FieldHex {
+    FieldHex(field_to_hex(
+        &sparq_zk::dual_leaf_datetime::datetime_datatype_const(),
+    ))
+}
+
+/// The PUBLIC `datatype_const` of the DUAL-LEAF `xsd:date` value lane (sq-wz99x)
+/// — `blake3_field("<xsd:date IRI>@epochscale=3")`, the constant
+/// `sparq_zk::dual_leaf_datetime::encode_date` folds into the committed leaf.
+///
+/// # The date lane adds NO second Noir member
+///
+/// It shares [`CircuitId::FilterValueDlDateTime`] with the dateTime lane: that
+/// member's `datatype_const` is a PUBLIC input, and a date's `VALUE_HOOK` is the
+/// scaled epoch of the date's STARTING instant (midnight UTC — XSD orders dates by
+/// their starting moment), which lives in the SAME signed-`u64` domain the member
+/// already compares. So the lane is pure WIRING: host and verifier pick THIS
+/// constant instead of [`datetime_datatype_const`]`()`.
+///
+/// # Lane separation is the public `datatype_const`, and only that
+///
+/// A date's hook is NUMERICALLY EQUAL to the dateTime hook of the same starting
+/// instant (`"1970-01-02Z"` and `"1970-01-02T00:00:00Z"` both hook `86_400_000`),
+/// so the constant is the ONLY thing keeping the two terms apart. Because it is
+/// folded into `value_component = h3(VALUE_HOOK, DATATYPE_CONST, LANG_NONE)` and
+/// the two constants differ, an honest date witness recomputes a DIFFERENT leaf
+/// under the dateTime constant and fails the member's
+/// `assert_eq(leaf, operand_enc)` binding — and symmetrically. That is a BINDING
+/// argument resting on Poseidon2 preimage resistance, NOT an audited soundness
+/// claim.
+///
+/// DOCUMENTED RISK: as [`datetime_datatype_const`] (CR-G8 / sq-qhy4). NOT
+/// externally audited; no soundness / privacy claim.
+// [OPUS-5] sq-wz99x: date lane constant. Opt-in (`dual-leaf`), NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn date_datatype_const() -> FieldHex {
+    FieldHex(field_to_hex(
+        &sparq_zk::dual_leaf_datetime::date_datatype_const(),
+    ))
 }
 
 /// One composed sub-proof: the circuit member, its public inputs, and the
@@ -1443,6 +1832,62 @@ pub struct ProofManifest {
     /// BGP pattern may draw from) — fed to `verify::recheck` for the Q6
     /// cross-graph bnode-join guard.
     pub attributions: Vec<Vec<usize>>,
+    /// [OPUS-5] sq-q9r5e follow-up: the EXPLICIT per-pattern answering-scan
+    /// declaration — `pattern_scans[pi]` is the set of `sub_proofs` indices of
+    /// the SCAN sub-proofs that answer query BGP pattern `pi`. Indexed per query
+    /// pattern in query order, exactly like [`Self::attributions`].
+    ///
+    /// # It carries NO verification weight — do not read it as one
+    /// The verifier resolves pattern→scan by constant MEMBERSHIP
+    /// (`crate::verifier`'s `scan_matches_pattern`) for EVERY obligation it
+    /// derives: the FILTER slot gate (`bind_query_correctness`), the cross-graph
+    /// attribution gate (`bind_attributions`), the Q6 namespace
+    /// (`global_attributions`) and `bind_joins` all ignore this field. A
+    /// declaration therefore CANNOT shrink what the verifier demands — a manifest
+    /// carrying one is never accepted where the same manifest without one is
+    /// rejected; it can only fail ADDITIONALLY, on the well-formedness checks
+    /// below.
+    ///
+    /// # Why it does not narrow (the residual this field is a placeholder for)
+    /// The reason to declare a mapping is the same-constant-layout over-demand:
+    /// two query patterns sharing a constant layout — `{ ?x <age> ?v . ?x <age>
+    /// ?c }`, both `(?, <age>, ?)` — are BOTH matched by BOTH scan sub-proofs, so
+    /// under `FILTER(?v >= 18)` the fail-closed sq-q9r5e / audit-L-1 rule demands
+    /// a true-verdict `?v >= 18` proof over the `5` of a genuine solution
+    /// `(?x = alice, ?v = 25, ?c = 5)`, which no honest prover can supply. Letting
+    /// the declaration narrow that obligation would fix the over-demand and open a
+    /// hole: SPARQL evaluates each pattern over EVERY compatible committed row and
+    /// the query text authorises no prover-chosen partition of the data, so the
+    /// prover could drop a constant-compatible scan's rows out of a pattern's
+    /// FILTER and attribution obligations by fiat while still disclosing them. The
+    /// well-formedness checks below pin only that the declaration is a TOTAL map
+    /// of scans to patterns; they establish nothing about whether an excluded scan
+    /// contributes to the claimed result. Narrowing needs what the flat manifest
+    /// cannot yet express — a claimed result row bound to the selected scan rows
+    /// with all shared-variable joins enforced — so it is NOT done, and the
+    /// over-demand stands (`crate::verifier`'s `check_pattern_scans` carries the
+    /// full argument).
+    ///
+    /// # It is DECLARED, not trusted — the verifier re-checks it
+    /// `crate::verifier`'s `check_pattern_scans` gate rejects a declaration
+    /// that is mis-sized (not one entry per query pattern), leaves a pattern
+    /// unanswered (empty entry), names a sub-proof that is out of range / not a
+    /// scan / whose bb-bound `pattern_is_const`/`pattern_const_enc` do NOT match
+    /// the pattern's constants, or leaves a scan sub-proof DANGLING (declared for
+    /// no pattern at all). Those are ADDITIONAL rejections, never a relaxation.
+    ///
+    /// # EMPTY = not declared
+    /// An empty vector means "no declaration" and skips the checks above; the
+    /// obligations are identical either way, so omitting the field neither weakens
+    /// nor strengthens any gate.
+    ///
+    /// Checked by the FLAT stage-1 gates only. The `extended-fragment` regime
+    /// defers all query-text term binding (see `verify_fragment_manifest`), so a
+    /// declaration is neither validated nor used there.
+    // [OPUS-5] sq-q9r5e follow-up: explicit pattern→scan mapping. Research-grade,
+    // NOT externally audited (sq-qhy4).
+    #[serde(default)]
+    pub pattern_scans: Vec<Vec<usize>>,
     /// Declared non-bnode join obligations (manifest side of the layer-3
     /// gate). `(variable, pattern_i, pattern_j)`.
     #[serde(default)]
@@ -1467,6 +1912,59 @@ pub struct ProofManifest {
     /// ([`CommitmentAttestation::status`]) this MUST be present and match it —
     /// an omitted `revocation` for a status-bound credential is REJECTED
     /// (fail-closed; the prover cannot drop the reference to skip the check).
+    ///
+    /// # SCALAR by design — ONE reference per presentation (sq-cuvmj)
+    /// This field, [`Self::hidden_revocation`] and [`Self::fully_hidden_revocation`]
+    /// are all scalar `Option`s: a manifest carries exactly ONE status reference and
+    /// at most one liveness proof over it. `crate::verifier::resolve_status_ref`
+    /// requires EVERY scan-covering commitment's issuer-signed
+    /// [`CommitmentAttestation::status`] to resolve to this ONE reference, so a
+    /// presentation carrying two credentials with DISTINCT `(list, index, version)`
+    /// references is structurally REJECTED
+    /// (`crate::verifier::CheckError::RevocationReferenceMismatch`).
+    ///
+    /// That rejection is FAIL-CLOSED, not a false-accept: a revoked second
+    /// credential cannot be smuggled past the liveness check by pointing
+    /// `revocation` at the live one (the review's attempt-5 construction —
+    /// `research/zk-bind-composition-review.md` §Finding B). It is, however, an
+    /// over-restriction: it limits hidden cross-credential JOINs
+    /// (`crate::verifier::bind_joins`) to credentials sharing an IDENTICAL
+    /// issuer-signed status slot — in practice intra-credential multi-graph joins.
+    /// See that gate's `# Cross-credential scope constraint` section.
+    ///
+    /// # Pre-registered obligations for any future `Vec` migration (sq-cuvmj)
+    /// Promoting these fields to `Vec` to support genuine multi-credential
+    /// presentations is a SOUNDNESS-CRITICAL change: four verifier sites currently
+    /// read the single reference and would each silently cover only ONE credential.
+    /// A migration owes a PER-COMMITMENT re-derivation at every one of them —
+    /// dropping any leaves a second credential's liveness UNCHECKED:
+    ///
+    /// 1. `crate::verifier::bind_issuer_attestations` / `resolve_status_ref` — must
+    ///    resolve the reference belonging to THE COMMITMENT under inspection, and
+    ///    must still reject a commitment whose attested status matches NO reference
+    ///    (an unmatched commitment must never fall through as "no status bound").
+    /// 2. `crate::verifier::bind_revocation` — must run the authoritative-snapshot,
+    ///    freshness and `bit[index] == 0` checks once PER reference, and reject if
+    ///    any referenced credential is revoked or stale (not "some reference is
+    ///    live").
+    /// 3. `crate::verifier::bind_hidden_revocation` /
+    ///    `bind_fully_hidden_revocation` — each proof must be bound to the
+    ///    ISSUER-SIGNED `index_commitment` / `ref_commitment` of ITS OWN reference,
+    ///    and every reference in a hidden mode must have a matching proof (the
+    ///    existing fail-closed `HiddenRevocationRequired` /
+    ///    `FullyHiddenRevocationRequired` rule, applied per reference rather than
+    ///    once).
+    /// 4. `crate::verifier::scan_referenced_messages` and
+    ///    `verify_holder_attestation_signature` — both recompute an issuer-signed
+    ///    MESSAGE that folds the status digest, so each must fold the digest of the
+    ///    reference for THAT commitment; using a global/first reference would make
+    ///    the hidden-issuer and holder-binding messages unverifiable (or, worse,
+    ///    verifiable under the wrong credential's status).
+    ///
+    /// The current single-reference invariant is pinned by
+    /// `crate::verifier::tests::two_credentials_with_distinct_status_refs_are_rejected`,
+    /// which a `Vec` migration must consciously revisit. Not externally audited
+    /// (sq-qhy4).
     #[serde(default)]
     pub revocation: Option<RevocationStatus>,
     /// Disclosed status-list snapshots (audit #12): the bitstrings the verifier
@@ -1503,9 +2001,40 @@ pub struct ProofManifest {
     /// is never disclosed. The clear `RevocationStatus.index`/snapshot path remains
     /// the interim check; this field is the additive privacy layer. See
     /// `crate::verifier::bind_hidden_revocation`.
+    ///
+    /// SCALAR for the same reason [`Self::revocation`] is — one hidden-index proof
+    /// per presentation, bound to the one issuer-signed reference. The
+    /// multi-credential consequence and the obligations any `Vec` migration owes
+    /// are pre-registered on [`Self::revocation`] (sq-cuvmj).
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation proof (privacy upgrade).
     #[serde(default)]
     pub hidden_revocation: Option<HiddenIndexRevocation>,
+    /// [OPUS-5] sq-kndw: the FULLY-HIDDEN revocation proof — the privacy upgrade
+    /// over [`Self::hidden_revocation`], hiding the status-list IRI and version on
+    /// top of the index and the liveness bit. Present exactly when
+    /// `revocation` is in the FULLY-HIDDEN mode (`status_list`/`index`/`version`
+    /// all `None`, `ref_commitment` + `index_commitment` `Some`); a fully-hidden
+    /// reference WITHOUT this proof is rejected fail-closed
+    /// (`FullyHiddenRevocationRequired` — revocation is never skipped), and this
+    /// proof without a fully-hidden reference is likewise rejected (there would be
+    /// no issuer-signed commitments to bind it to).
+    ///
+    /// Deliberately a SEPARATE field from `hidden_revocation` rather than more
+    /// `Option`s inside it: the two modes have disjoint public-input vectors and
+    /// disjoint trust anchors (an authoritative status-list root vs an accepted-set
+    /// root), so keeping them apart makes the illegal mixed state unrepresentable
+    /// and leaves the audited committed-index gate's code path untouched.
+    ///
+    /// Gated by an opt-in [`crate::verifier::RevocationPolicy`] accepted-set depth
+    /// (`with_accepted_set_depth`) — with no accepted-set anchor the relying party
+    /// has no root to bind the proof to and rejects. NOT externally audited
+    /// (sq-qhy4).
+    ///
+    /// SCALAR for the same reason [`Self::revocation`] is; the `Vec`-migration
+    /// obligations are pre-registered on that field (sq-cuvmj).
+    // [OPUS-5] sq-kndw: fully-hidden revocation proof. Opt-in, research-grade.
+    #[serde(default)]
+    pub fully_hidden_revocation: Option<FullyHiddenRevocation>,
     /// OPTIONAL hidden-issuer attestation proofs (sq-z9l): zero-knowledge proofs
     /// that scan-covering commitments were each signed by SOME issuer whose key is
     /// in the committed key set K, WITHOUT disclosing which issuer. The privacy
@@ -1607,6 +2136,76 @@ pub struct HiddenIndexRevocation {
     pub proof_hex: String,
 }
 
+/// [OPUS-5] sq-kndw: a FULLY-HIDDEN revocation proof — the bb proof produced by
+/// the `revoke_hidden_ref_d{depth}_a{set_depth}` circuit
+/// ([`CircuitId::RevokeHiddenRef`]), together with the public inputs it commits.
+/// The privacy upgrade over [`HiddenIndexRevocation`]: the status-list IRI and the
+/// VERSION are hidden as well as the index and the liveness bit.
+///
+/// # Trust anchor (the audit-#12 anchor, moved behind a commitment)
+/// `accepted_set_root` and `min_version` are PUBLIC inputs the prover commits, but
+/// NEITHER is trusted as a prover claim. The verifier derives both from its OWN
+/// [`crate::verifier::RevocationPolicy`] — the accepted-set root over its
+/// freshness-curated `(list, version, status_list_root)` entries, and its own
+/// epoch floor — and rejects unless the declared values byte-equal them, then
+/// reconstructs the public-input vector from ITS OWN values before `bb verify`.
+/// So the liveness fact is still bound to the relying party's own authenticated
+/// status bytes; the only new thing hidden is WHICH of its accepted lists/epochs
+/// the credential belongs to. No new trust assumption is introduced.
+///
+/// Because membership is restricted to the freshness-curated window, a stale or
+/// future-dated version is not a leaf at all and no proof can be built against it
+/// — the audit-#12 freshness gate SURVIVES the move behind the commitment. The
+/// in-circuit `version >= min_version` is defence-in-depth on top of that.
+///
+/// # ⚠️ The re-blinding requirement (the guarantee depends on it)
+/// `ref_commitment` and `index_commitment` are HIDING but STABLE per issuance. A
+/// holder that presents the SAME pair twice hands the relying party a perfect
+/// cross-presentation correlation handle and voids the entire privacy guarantee
+/// — this is the single most important operational requirement of the design
+/// (`research/zk-statuslist-hide-iri-version.md` §4). The verifier therefore
+/// enforces SINGLE-USE of the pair through the same durable
+/// [`crate::verifier::SeenNonces`] store the nonce replay defence uses
+/// (`FullyHiddenRevocationLinkageReplay`). Honest limit: single-use enforcement
+/// protects the holder only against an HONEST relying party — a malicious one can
+/// simply not run it, and by then it has already observed the pair. The real fix
+/// is upstream: the ISSUER must mint a fresh `(ref_blinding, blinding)` pair and
+/// re-sign per presentation (a re-randomisable commitment + signature scheme,
+/// which sparq does NOT implement, would remove the round trip).
+///
+/// NOT externally audited (sq-qhy4). Research-grade; no soundness / ZK-privacy
+/// property is asserted as achieved.
+// [OPUS-5] sq-kndw: fully-hidden revocation proof (deferred remainder of sq-6qe).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FullyHiddenRevocation {
+    /// The status-list Merkle depth (the `d{depth}` half of the member name).
+    /// MUST equal the depth the relying party derives its per-entry status-list
+    /// roots with ([`crate::verifier::RevocationPolicy::with_hidden_index_depth`]).
+    pub depth: u32,
+    /// The accepted-set Merkle depth (the `a{set_depth}` half of the member name).
+    /// MUST equal [`crate::verifier::RevocationPolicy::with_accepted_set_depth`].
+    pub set_depth: u32,
+    /// The hiding `(list, version)` reference commitment the proof was produced
+    /// against (public input 1). Byte-matched against the ISSUER-SIGNED
+    /// [`RevocationStatus::ref_commitment`] — the cross-binding that ties the
+    /// in-circuit private `(list, version)` to the issuer's reference.
+    pub ref_commitment: FieldHex,
+    /// The hiding index commitment the proof was produced against (public input 2).
+    /// Byte-matched against the ISSUER-SIGNED [`RevocationStatus::index_commitment`]
+    /// exactly as on the committed-index path (sq-ayv).
+    pub index_commitment: FieldHex,
+    /// The accepted-set Merkle root the proof was produced against (public input
+    /// 3). Checked byte-equal to
+    /// [`crate::verifier::RevocationPolicy::accepted_set_root`].
+    pub accepted_set_root: FieldHex,
+    /// The public epoch FLOOR the proof was produced against (public input 4).
+    /// Checked equal to [`crate::verifier::RevocationPolicy::min_version`].
+    pub min_version: u64,
+    /// The bb proof blob (hex), in the same `len|proof|len|pi|vk` layout as a
+    /// [`SubProof::proof_hex`] (see [`crate::verifier::encode_artifacts`]).
+    pub proof_hex: String,
+}
+
 /// A hidden-issuer attestation (sq-z9l): a bb proof produced by the
 /// `hidden_issuer_d{depth}` circuit that the commitment message `m` was signed by
 /// SOME issuer whose public key is a member of the key set K committed as the
@@ -1659,7 +2258,23 @@ pub struct HiddenIssuerAttestation {
     /// exists — the original sq-z9l behaviour). A hidden-ONLY commitment (no clear
     /// attestation) MUST carry the salt here, or the verifier cannot recompute `m`
     /// and rejects the entry as unreferenced (fail-closed).
+    ///
+    /// # Why the salt is not withheld (sq-93h, assessed — do not re-litigate)
+    /// Disclosing it adds NO cross-presentation linkability, because [`Self::commitment`]
+    /// — the SAME graph's `C(G)` — is disclosed in the clear on this very entry and is
+    /// byte-bound into every scan sub-proof's bb public inputs. Given the audit-#9
+    /// ISSUANCE discipline that a salt is never reused for two distinct graphs (an
+    /// issuance-side assumption — the verifier machine-checks only the within-manifest
+    /// instance of it, `SaltReused`), the `graph -> salt` partition REFINES the
+    /// `graph -> C(G)` one, so the salt is a dominated correlator: a coalition that can
+    /// link two presentations by salt can already link them by `C(G)`. Moving `m`-reconstruction
+    /// behind an in-circuit salt-commitment (the sq-ayv index-commitment analogue) would
+    /// therefore buy zero unlinkability for a new circuit member and VK. Full analysis,
+    /// including the separate (non-linkability) guess-confirmation residual and the
+    /// trip-wire that fires if `C(G)` ever stops being disclosed:
+    /// `research/zk-hidden-path-salt-disclosure.md`.
     // [OPUS-4.8] sq-xxg: salt for hidden-only `m` reconstruction.
+    // [OPUS-5] sq-93h: assessed NO-BUILD — dominated by the clear `commitment`.
     #[serde(default)]
     pub salt: Option<FieldHex>,
     /// The bb proof blob (hex), same `len|proof|len|pi|vk` layout as a
@@ -2024,8 +2639,9 @@ mod holder_binding_tests {
             salt: Some(FieldHex::from_field(&salt)),
             status: Some(AttestedStatusRef {
                 index: Some(5),
-                version: 1,
+                version: Some(1),
                 index_commitment: None,
+                ref_commitment: None,
             }),
             holder: AttestedHolderBinding::from_holder_key(&hpk, true).ok(),
         };
@@ -2037,6 +2653,7 @@ mod holder_binding_tests {
             key_set: vec![public_key_to_hex(&issuer.public_key())],
             commitment_attestations: vec![att],
             attributions: vec![],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -2055,6 +2672,7 @@ mod holder_binding_tests {
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
             holder_set_proofs: vec![],
+            fully_hidden_revocation: None,
         };
 
         let json = manifest.to_json();
@@ -2315,6 +2933,7 @@ mod canonical_edge_tests {
             key_set: vec![],
             commitment_attestations: vec![],
             attributions: vec![],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -2330,6 +2949,7 @@ mod canonical_edge_tests {
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
             holder_set_proofs: vec![],
+            fully_hidden_revocation: None,
         }
     }
 
@@ -2604,6 +3224,7 @@ mod path_schema_tests {
             key_set: vec![],
             commitment_attestations: vec![],
             attributions: vec![],
+            pattern_scans: vec![],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
@@ -2617,6 +3238,7 @@ mod path_schema_tests {
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
             holder_set_proofs: vec![],
+            fully_hidden_revocation: None,
         };
         let fm = FragmentManifest::new(
             manifest.clone(),

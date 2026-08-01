@@ -755,9 +755,11 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
 /// reif-dtr recovers the classic vocabulary from as-written quotations, but reif-ctr
 /// never runs, so inference never mints a triple term (in particular the documented
 /// `owl:sameAs` bridge composition derives no variant quotation). Same in-place /
-/// return-count / idempotency contract as [`materialize_owl_rl`]. Batch-only for
-/// now: `MaterializedOwlGraph`'s Fallback re-materialization always runs the full
-/// bridge.
+/// return-count / idempotency contract as [`materialize_owl_rl`]. The incremental
+/// counterpart is `MaterializedOwlGraph::with_reify_mode`, whose Fallback
+/// re-materialization runs the mode it was constructed with (third increment); plain
+/// `MaterializedOwlGraph::new` is `ReifyMode::Bridge`, i.e. this function's
+/// [`materialize_owl_rl`] default.
 #[cfg(feature = "quoted-triples")]
 pub fn materialize_owl_rl_reify(
     dict: &mut Dict,
@@ -2286,6 +2288,65 @@ mod tests {
         );
     }
 
+    // [SONNET-4.6] sq-y4ll5: direct production-path coverage for prp-ifp and the
+    // OWL-RL guard against the excluded ReflexiveObjectProperty feature.
+    #[test]
+    fn sameas_and_inverse_functional() {
+        // ex:hasSSN a InverseFunctionalProperty ; a hasSSN s ; b hasSSN s
+        // ⊢ a sameAs b. Then eq-rep carries a's marker edge to b.
+        let mut dict = Dict::new();
+        let (ssn, a, b, value, mark) = (
+            ex(&mut dict, "hasSSN"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+            ex(&mut dict, "value"),
+            ex(&mut dict, "marker"),
+        );
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let inv_func = owl(&mut dict, "InverseFunctionalProperty");
+        let p = ex(&mut dict, "p");
+        let mut triples =
+            vec![[ssn, ty, inv_func], [a, ssn, value], [b, ssn, value], [a, p, mark]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        let same_as = [OWL, "sameAs"].concat();
+        assert!(
+            has(
+                &dict,
+                &set,
+                "http://ex/a",
+                &same_as,
+                "http://ex/b"
+            ),
+            "prp-ifp ⊢ sameAs"
+        );
+        assert!(
+            has(&dict, &set, "http://ex/b", "http://ex/p", "http://ex/marker"),
+            "eq-rep substitution after prp-ifp"
+        );
+    }
+
+    #[test]
+    fn reflexive_property_does_not_materialize_self_edges() {
+        // ReflexiveObjectProperty is excluded from OWL 2 RL. Merely declaring :p
+        // owl:ReflexiveProperty must therefore not invent :x :p :x for graph terms.
+        let mut dict = Dict::new();
+        let (p, x, y) = (ex(&mut dict, "p"), ex(&mut dict, "x"), ex(&mut dict, "y"));
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let reflexive = owl(&mut dict, "ReflexiveProperty");
+        let mut triples = vec![[p, ty, reflexive], [x, p, y]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(
+            !set.contains(&[x, p, x]),
+            "OWL-RL must not derive a reflexive edge for :x"
+        );
+        assert!(
+            !set.contains(&[y, p, y]),
+            "OWL-RL must not derive a reflexive edge for :y"
+        );
+    }
+
     fn rdf(dict: &mut Dict, frag: &str) -> Id {
         dict.intern_iri(&format!(
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#{frag}"
@@ -3046,7 +3107,7 @@ mod tests {
 
     // [OPUS-4.8] sq-350ms — SOUNDNESS guard (the other half of "completeness
     // hardening": adding coverage must never tip the closure into OVER-inference).
-    // The four conclusions below are the documented NON-RL divergences whose shape
+    // The conclusions below are the documented NON-RL divergences whose shape
     // is closest to something a careless extra rule might wrongly derive — a
     // differentFrom of disjoint-property fillers (the prp-pdw contrapositive) and
     // a sameAs that no functional/IFP premise licenses. RL has NO rule producing
@@ -3055,6 +3116,15 @@ mod tests {
     // New-Feature-DisjointObjectProperties-001 and owl2-rl-rules-fp-differentFrom,
     // pinned here as in-crate soundness guards so the divergence rationale and the
     // code can never silently disagree.)
+    //
+    // [SONNET-4.6] sq-qs485 extends the same pattern to two further entries of that
+    // divergence list, chosen because a careless extra rule could plausibly
+    // over-derive their conclusions: owl2-rl-rules-ifp-differentFrom (the prp-ifp
+    // contrapositive, symmetric to the prp-fp case above) and
+    // New-Feature-ReflexiveProperty-001 (RL has no prp-rfx —
+    // reflexive object property axioms are EXCLUDED from the RL grammar, Profiles
+    // §4.2 — so no self-loop, and hence no reflexive-vs-irreflexive clash, may
+    // appear in the closure).
     #[test]
     fn disjoint_property_fillers_do_not_get_a_differentfrom() {
         // :hasFather owl:propertyDisjointWith :hasMother ;
@@ -3123,6 +3193,104 @@ mod tests {
         assert!(
             !set.contains(&[y1, same_as, y2]) && !set.contains(&[y2, same_as, y1]),
             "prp-fp must NOT fire across DISTINCT subjects"
+        );
+    }
+
+    #[test]
+    fn inverse_functional_property_does_not_difference_distinct_objects() {
+        // :ifp a owl:InverseFunctionalProperty ; :X1 :ifp :Y1 ; :X2 :ifp :Y2 ;
+        // :X1 owl:differentFrom :X2
+        // Full OWL entails :Y1 owl:differentFrom :Y2 (the prp-ifp CONTRAPOSITIVE:
+        // were Y1 = Y2, prp-ifp would merge X1/X2 against their differentFrom), but
+        // RL has no differentFrom-producing rule and prp-ifp needs the SAME object
+        // (here Y1 ≠ Y2). The closure must derive neither a differentFrom nor a
+        // (wrong) sameAs, and must stay consistent.
+        let mut dict = Dict::new();
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let inv_func = owl(&mut dict, "InverseFunctionalProperty");
+        let (ifp, x1, x2, y1, y2) = (
+            ex(&mut dict, "ifp"),
+            ex(&mut dict, "X1"),
+            ex(&mut dict, "X2"),
+            ex(&mut dict, "Y1"),
+            ex(&mut dict, "Y2"),
+        );
+        let different_from = owl(&mut dict, "differentFrom");
+        let same_as = owl(&mut dict, "sameAs");
+        let mut triples = vec![
+            [ifp, ty, inv_func],
+            [x1, ifp, y1],
+            [x2, ifp, y2],
+            [x1, different_from, x2],
+        ];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(
+            !set.contains(&[y1, different_from, y2]) && !set.contains(&[y2, different_from, y1]),
+            "OWL 2 RL must NOT derive the prp-ifp contrapositive (differentFrom of the objects)"
+        );
+        assert!(
+            !set.contains(&[y1, same_as, y2]) && !set.contains(&[y2, same_as, y1]),
+            "prp-ifp must NOT fire across DISTINCT objects"
+        );
+        assert!(
+            !set.contains(&[x1, same_as, x2]) && !set.contains(&[x2, same_as, x1]),
+            "prp-ifp must NOT merge the subjects when their objects differ"
+        );
+        assert!(
+            inconsistencies(&dict, &triples).is_empty(),
+            "an IFP over DISTINCT objects with a differentFrom on the subjects is consistent"
+        );
+    }
+
+    #[test]
+    fn reflexive_property_self_loop_is_never_derived_nor_clashes() {
+        // :p a owl:ReflexiveProperty, owl:IrreflexiveProperty ;
+        // :q rdfs:subPropertyOf :p ; :a :q :b
+        // Full OWL entails :a :p :a and :b :p :b (universal self-loop), which then
+        // CLASHES with the irreflexivity of :p — full semantics is inconsistent.
+        // OWL 2 RL excludes reflexive object property axioms from its grammar
+        // (Profiles §4.2) and has NO prp-rfx rule, so the closure must contain no
+        // self-loop and therefore prp-irp must report NO inconsistency. The
+        // subPropertyOf edge is a positive control: spo1 still derives :a :p :b, so
+        // a vacuous "nothing was materialized" run cannot pass this test. Extends
+        // `reflexive_property_does_not_materialize_self_edges` past the
+        // asserted-only case to a property reached through a DERIVED edge.
+        let mut dict = Dict::new();
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let sp = dict.intern_iri(oxrdf::vocab::rdfs::SUB_PROPERTY_OF.as_str());
+        let reflexive = owl(&mut dict, "ReflexiveProperty");
+        let irreflexive = owl(&mut dict, "IrreflexiveProperty");
+        let (p, q, a, b) = (
+            ex(&mut dict, "p"),
+            ex(&mut dict, "q"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+        );
+        let mut triples = vec![
+            [p, ty, reflexive],
+            [p, ty, irreflexive],
+            [q, sp, p],
+            [a, q, b],
+        ];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(
+            set.contains(&[a, p, b]),
+            "positive control: prp-spo1 must still lift :a :q :b to the super-property"
+        );
+        assert!(
+            !set.contains(&[a, p, a]) && !set.contains(&[b, p, b]),
+            "OWL 2 RL has no prp-rfx: a ReflexiveProperty must NOT self-loop any term"
+        );
+        assert!(
+            !set.contains(&[a, q, a]) && !set.contains(&[b, q, b]),
+            "no prp-rfx self-loop may leak down to the SUB-property either"
+        );
+        assert!(
+            inconsistencies(&dict, &triples).is_empty(),
+            "with no prp-rfx there is no self-loop for prp-irp to clash on, so RL reports \
+             consistent where full OWL would not"
         );
     }
 

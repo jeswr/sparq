@@ -28,16 +28,18 @@ fn graph_for_masks(masks: &[u8]) -> Graph {
 }
 
 fn unweighted(graph: &Graph, mode: SignatureMode) -> Sim<'_> {
-    Sim::with_config(
-        graph,
-        SimConfig {
-            mode,
-            idf: false,
-            profile_fallback: false,
-            max_pair_frequency: usize::MAX,
-            ..SimConfig::default()
-        },
-    )
+    let cfg = SimConfig {
+        mode,
+        idf: false,
+        profile_fallback: false,
+        max_pair_frequency: usize::MAX,
+        ..SimConfig::default()
+    };
+    // Like `profile_fallback` above: fallback tiers append blocks scored on their own
+    // scale, so they are disabled to pin the exactly-scored ranking properties.
+    #[cfg(feature = "lexical")]
+    let cfg = SimConfig { lexical_fallback: false, ..cfg };
+    Sim::with_config(graph, cfg)
 }
 
 proptest! {

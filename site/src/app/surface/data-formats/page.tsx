@@ -68,8 +68,8 @@ export default function DataFormatsSurfacePage() {
           native-only — in the browser the in-memory streaming loader is used.
         </p>
       }
-      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-core"
-      skillHref="https://github.com/jeswr/sparq/blob/main/skills/data-formats/SKILL.md"
+      readmeHref="https://github.com/sparq-org/sparq/tree/main/crates/sparq-core"
+      skillHref="https://github.com/sparq-org/sparq/blob/main/skills/data-formats/SKILL.md"
       links={[{ href: withBasePath("/app/"), label: "Open the SPARQL workbench", external: true }]}
     >
       <DataFormatsDemo />

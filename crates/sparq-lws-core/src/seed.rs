@@ -56,7 +56,8 @@ pub async fn seed_conformance<S: Store>(
     seed_conformance_with_identity(store, base_url, issuer, None).await
 }
 
-/// [`seed_conformance`] with the OPTIONAL identity-host posture (`docs/design/webid-outside-pod.md`).
+/// [`seed_conformance`] with the OPTIONAL identity-host posture (`research/lws-design-records.md`
+/// §4).
 ///
 /// - `identity: None` — byte-identical to the pre-identity seed: the WebID is the in-pod
 ///   `/{u}/profile/card#me` carrying `pim:storage` + `solid:oidcIssuer`.
@@ -237,11 +238,11 @@ fn webid_profile_turtle(webid: &str, pod_root: &str, issuer: &str) -> ServerResu
 }
 
 /// Build the LOCKED identity document for `handle` — the provider-managed WebID doc served from the
-/// id host (identity mode; `docs/design/webid-outside-pod.md`). Subjects are on the IDENTITY origin
-/// (the served IRIs), never the reserved store key. Carries exactly the provider-locked statements:
-/// Person type, the locked `solid:oidcIssuer`, `pim:storage` → the pod root, the
-/// `<pod> solid:owner <webid>` back-link, and `rdfs:seeAlso` → the demoted in-pod card. Built via
-/// `oxrdf` triples (never hand-concatenated — the house rule).
+/// id host (identity mode; `research/lws-design-records.md` §4). Subjects are on the IDENTITY
+/// origin (the served IRIs), never the reserved store key. Carries exactly the provider-locked
+/// statements: Person type, the locked `solid:oidcIssuer`, `pim:storage` → the pod root, the `<pod>
+/// solid:owner <webid>` back-link, and `rdfs:seeAlso` → the demoted in-pod card. Built via `oxrdf`
+/// triples (never hand-concatenated — the house rule).
 fn identity_doc_turtle(
     config: &IdentityConfig,
     handle: &str,
@@ -327,7 +328,9 @@ const ACL_DEFAULT: &str = "http://www.w3.org/ns/auth/acl#default";
 const ACL_MODE: &str = "http://www.w3.org/ns/auth/acl#mode";
 const ACL_READ: &str = "http://www.w3.org/ns/auth/acl#Read";
 const ACL_WRITE: &str = "http://www.w3.org/ns/auth/acl#Write";
+const ACL_APPEND: &str = "http://www.w3.org/ns/auth/acl#Append";
 const ACL_CONTROL: &str = "http://www.w3.org/ns/auth/acl#Control";
+const ACL_AUTHENTICATED_AGENT: &str = "http://www.w3.org/ns/auth/acl#AuthenticatedAgent";
 const FOAF_AGENT: &str = "http://xmlns.com/foaf/0.1/Agent";
 
 /// A `NamedNode` from a server-constructed IRI (well-formed by construction; map an unexpected error
@@ -621,86 +624,67 @@ fn owner_only_acl_turtle(doc: &str, webid: &str) -> ServerResult<Vec<u8>> {
     serialize_triples(RdfFormat::Turtle, &triples)
 }
 
-// --- Demo playground seeding (dev-only; gated by SOLID_SERVER_SEED_DEMO) --------------------------
+// --- Demo playground seeding (demo-only; gated by SOLID_SERVER_SEED_DEMO) -------------------------
 //
-// Identical in nature to the conformance/bench seeds: it ONLY writes fixtures into the in-memory
-// store at boot and changes NO request-handling code path. It exists so a demo boot has something to
-// show WITHOUT standing up Keycloak or minting tokens:
-//   - a PUBLIC-readable `/{DEMO_USER}/` pod (pod-root ACL: public `acl:Read` by `acl:default`, owner
-//     full control) holding a small read-only welcome document to GET/query immediately,
-//   - an OPEN-SANDBOX `/{DEMO_USER}/playground/` container whose OWN `.acl` grants the public
-//     (`foaf:Agent`) `acl:Read` + `acl:Write` on the container AND (`acl:default`) on everything
-//     created inside it — so an anonymous visitor can create/edit resources there. NO public
-//     `acl:Control` anywhere: visitors can never rewrite an ACL, so the sandbox cannot be widened.
+// The PUBLIC-demo posture of `research/lws-demo-architecture.md` §3.2. Identical in nature to the
+// conformance/bench seeds: it ONLY writes fixtures into the in-memory store at boot and changes NO
+// request-handling code path. Behind a public URL the write friction this demo relies on is
+// REGISTRATION (any authenticated agent may write; anonymous visitors may not), so:
+//   - a shared root-level `/playground/` container whose `.acl` grants any AUTHENTICATED agent
+//     (`acl:agentClass acl:AuthenticatedAgent`) Read/Write/Append on the container AND
+//     (`acl:default`) on everything created inside it, plus the public (`foaf:Agent`) Read the same
+//     way — visitors with a (throwaway) WebID can write, anonymous visitors can only read. NO
+//     `acl:Control` is granted to ANY principal: Control governs reading and rewriting the ACL
+//     itself, so the sandbox can never be widened, locked, or hijacked over HTTP — the boot seed is
+//     the ACL's only writer. Consequence, stated plainly: v1 visitors share ONE playground and are
+//     NOT isolated from each other by WAC — only from anonymous writers.
+//   - a PUBLIC-read `/README` Turtle document carrying the ephemeral-demo banner, so the demo's
+//     properties are stated where every visitor can dereference them.
 
-/// The demo playground pod owner handle (a synthetic WebID — demo fixtures are not a real user).
-pub const DEMO_USER: &str = "demo";
+/// The `/README` label (`rdfs:label`) — what the demo instance calls itself.
+pub const DEMO_README_LABEL: &str = "sparq LWS public demo";
+/// The `/README` banner (`rdfs:comment`) — the §3.2 honesty print every visitor can dereference:
+/// ephemeral, all data public-readable, wiped on idle, throwaway identities, no visitor isolation.
+///
+/// [OPUS-5] sq-5ougp review round 3 (gpt-5.6-sol finding 7): "not isolated from each other"
+/// UNDER-DISCLOSED the consequence of the shared `acl:Write` grant. `acl:AuthenticatedAgent` +
+/// `acl:Write` means any registered visitor may OVERWRITE and DELETE anyone else's resources, and
+/// may publish arbitrary accepted RDF under the operator's origin. That posture is RATIFIED
+/// (`research/lws-demo-architecture.md` §3.2, surfaced via proceed-and-document #2329 with the
+/// steering window closed), so the fix is to DISCLOSE it plainly here — not to narrow the grant.
+/// Pinned by `tests/demo_seed.rs::demo_seed_readme_banner_discloses_the_shared_write_consequences`.
+pub const DEMO_README_BANNER: &str = "This is an EPHEMERAL public demo. Everything is wiped when \
+    the instance idles out. All data is public-readable. Identities are throwaway. All visitors \
+    share this one playground and are not isolated from each other: ANY registered visitor can \
+    overwrite and delete anything you put here, and anything you publish is served from this \
+    origin as-is. Do not store anything real, private, or of value here.";
 
 /// The IRIs the demo seed produced (echoed at boot so the log shows exactly what to point a demo at).
 #[derive(Debug, Clone)]
 pub struct DemoFixtures {
-    /// The demo pod root (public-readable).
-    pub pod: String,
-    /// The read-only welcome document (public-readable, NOT public-writable).
-    pub welcome_doc: String,
-    /// The open-sandbox container (public read + write, inherited by everything created inside).
+    /// The shared sandbox container (authenticated read/write/append, public read, no Control).
     pub playground: String,
-    /// The derived owner WebID the full-control grants name.
-    pub owner: String,
+    /// The public-read banner document.
+    pub readme: String,
 }
 
-/// Seed the demo playground fixtures into `store` (dev-only; see the module note above).
+/// Seed the §3.2 demo playground fixtures into `store` (demo-only; see the module note above).
 ///
 /// `base_url` is the server's public origin without a trailing slash. Idempotent-ish, like the other
 /// seeds: intended to run once at boot on a fresh in-memory store; a re-run does not error.
 pub async fn seed_demo<S: Store>(store: &S, base_url: &str) -> ServerResult<DemoFixtures> {
     let base = base_url.trim_end_matches('/');
 
-    // Root + the demo pod must exist before anything under them.
+    // The root must exist before its children (nothing else in the root gets an ACL: everything
+    // OUTSIDE the two seeded fixtures stays fail-closed).
     let root = format!("{base}/");
     ensure_container(store, &root, None).await?;
-    let pod = format!("{base}/{DEMO_USER}/");
-    ensure_container(store, &pod, Some(&root)).await?;
 
-    // The demo owner WebID the full-control grants name (derived, like the bench seed's default —
-    // no profile card is minted; an ACL grant only NAMES the IRI).
-    let owner = format!("{base}/{DEMO_USER}/profile/card#me");
-
-    // The pod-root ACL: PUBLIC Read by default (inherited by descendants) + owner full control —
-    // everything in the demo pod is world-readable; nothing is world-writable unless a descendant
-    // ACL (the playground's) says so.
-    let pod_acl = format!("{pod}.acl");
-    let pod_acl_body = public_read_default_acl_turtle(&pod, &owner)?;
-    store
-        .write(
-            &pod_acl,
-            Bytes::from(pod_acl_body),
-            RdfFormat::Turtle.media_type(),
-        )
-        .await?;
-
-    // (a) The read-only welcome document (inherits the pod-root public-read default).
-    let welcome_doc = format!("{base}/{DEMO_USER}/welcome");
-    let welcome_body = demo_doc_turtle(
-        &welcome_doc,
-        "sparq demo pod",
-        "A read-only sample resource. Create and edit resources under the playground/ container.",
-    )?;
-    store
-        .create_in_container(
-            &pod,
-            &welcome_doc,
-            Bytes::from(welcome_body),
-            RdfFormat::Turtle.media_type(),
-        )
-        .await?;
-
-    // (b) The playground container — the open sandbox. Its OWN `.acl` overrides the pod-root
-    // read-only default with public Read + Write (`acl:accessTo` + `acl:default`).
-    let playground = format!("{base}/{DEMO_USER}/playground/");
-    ensure_container(store, &playground, Some(&pod)).await?;
+    // (a) The shared playground container + its no-Control ACL.
+    let playground = format!("{base}/playground/");
+    ensure_container(store, &playground, Some(&root)).await?;
     let playground_acl = format!("{playground}.acl");
-    let playground_acl_body = public_read_write_default_acl_turtle(&playground, &owner)?;
+    let playground_acl_body = demo_playground_acl_turtle(&playground)?;
     store
         .write(
             &playground_acl,
@@ -709,12 +693,28 @@ pub async fn seed_demo<S: Store>(store: &S, base_url: &str) -> ServerResult<Demo
         )
         .await?;
 
-    Ok(DemoFixtures {
-        pod,
-        welcome_doc,
-        playground,
-        owner,
-    })
+    // (b) The public-read banner document + its read-only ACL.
+    let readme = format!("{base}/README");
+    let readme_body = demo_doc_turtle(&readme, DEMO_README_LABEL, DEMO_README_BANNER)?;
+    store
+        .create_in_container(
+            &root,
+            &readme,
+            Bytes::from(readme_body),
+            RdfFormat::Turtle.media_type(),
+        )
+        .await?;
+    let readme_acl = format!("{readme}.acl");
+    let readme_acl_body = public_read_acl_turtle(&readme)?;
+    store
+        .write(
+            &readme_acl,
+            Bytes::from(readme_acl_body),
+            RdfFormat::Turtle.media_type(),
+        )
+        .await?;
+
+    Ok(DemoFixtures { playground, readme })
 }
 
 /// A tiny demo RDF document: `<subject> rdfs:label "label" ; rdfs:comment "comment"`. Built via
@@ -742,30 +742,35 @@ fn demo_doc_turtle(subject_iri: &str, label: &str, comment: &str) -> ServerResul
     serialize_triples(RdfFormat::Turtle, &triples)
 }
 
-/// The playground ACL: the PUBLIC (`foaf:Agent`) gets `acl:Read` + `acl:Write` on the container
-/// (`acl:accessTo`) AND on everything created inside it (`acl:default`) — the open-sandbox grant —
-/// while the owner keeps full control. Deliberately NO public `acl:Control`: an anonymous visitor
-/// can never rewrite the ACL itself, so the sandbox cannot be widened or hijacked.
-fn public_read_write_default_acl_turtle(container: &str, webid: &str) -> ServerResult<Vec<u8>> {
+/// The §3.2 playground ACL: any AUTHENTICATED agent (`acl:agentClass acl:AuthenticatedAgent`) gets
+/// `acl:Read` + `acl:Write` + `acl:Append` on the container (`acl:accessTo`) AND on everything
+/// created inside it (`acl:default`); the public (`foaf:Agent`) gets `acl:Read` the same way.
+/// Deliberately NO `acl:Control` for ANY principal — Control governs reading and rewriting the ACL
+/// itself, so the sandbox can never be widened, locked, or hijacked over HTTP; the boot seed is the
+/// ACL's only writer.
+fn demo_playground_acl_turtle(container: &str) -> ServerResult<Vec<u8>> {
     let acl_doc = format!("{container}.acl");
-    let owner_auth = acl_nn(&format!("{acl_doc}#owner"))?;
+    let authed_auth = acl_nn(&format!("{acl_doc}#authenticated"))?;
     let public_auth = acl_nn(&format!("{acl_doc}#public"))?;
     let c = acl_nn(container)?;
-    let me = acl_nn(webid)?;
     let triples = vec![
-        // Owner: full control on the container + descendants.
+        // Authenticated: Read/Write/Append on the container + everything created inside it.
         Triple::new(
-            owner_auth.clone(),
+            authed_auth.clone(),
             acl_nn(RDF_TYPE)?,
             acl_nn(ACL_AUTHORIZATION)?,
         ),
-        Triple::new(owner_auth.clone(), acl_nn(ACL_AGENT)?, me),
-        Triple::new(owner_auth.clone(), acl_nn(ACL_ACCESS_TO)?, c.clone()),
-        Triple::new(owner_auth.clone(), acl_nn(ACL_DEFAULT)?, c.clone()),
-        Triple::new(owner_auth.clone(), acl_nn(ACL_MODE)?, acl_nn(ACL_READ)?),
-        Triple::new(owner_auth.clone(), acl_nn(ACL_MODE)?, acl_nn(ACL_WRITE)?),
-        Triple::new(owner_auth, acl_nn(ACL_MODE)?, acl_nn(ACL_CONTROL)?),
-        // Public: Read + Write on the container AND by default on everything created inside it.
+        Triple::new(
+            authed_auth.clone(),
+            acl_nn(ACL_AGENT_CLASS)?,
+            acl_nn(ACL_AUTHENTICATED_AGENT)?,
+        ),
+        Triple::new(authed_auth.clone(), acl_nn(ACL_ACCESS_TO)?, c.clone()),
+        Triple::new(authed_auth.clone(), acl_nn(ACL_DEFAULT)?, c.clone()),
+        Triple::new(authed_auth.clone(), acl_nn(ACL_MODE)?, acl_nn(ACL_READ)?),
+        Triple::new(authed_auth.clone(), acl_nn(ACL_MODE)?, acl_nn(ACL_WRITE)?),
+        Triple::new(authed_auth, acl_nn(ACL_MODE)?, acl_nn(ACL_APPEND)?),
+        // Public: Read-only, container + descendants (the all-data-public-readable banner claim).
         Triple::new(
             public_auth.clone(),
             acl_nn(RDF_TYPE)?,
@@ -778,8 +783,30 @@ fn public_read_write_default_acl_turtle(container: &str, webid: &str) -> ServerR
         ),
         Triple::new(public_auth.clone(), acl_nn(ACL_ACCESS_TO)?, c.clone()),
         Triple::new(public_auth.clone(), acl_nn(ACL_DEFAULT)?, c),
-        Triple::new(public_auth.clone(), acl_nn(ACL_MODE)?, acl_nn(ACL_READ)?),
-        Triple::new(public_auth, acl_nn(ACL_MODE)?, acl_nn(ACL_WRITE)?),
+        Triple::new(public_auth, acl_nn(ACL_MODE)?, acl_nn(ACL_READ)?),
+    ];
+    serialize_triples(RdfFormat::Turtle, &triples)
+}
+
+/// A PUBLIC-read-only `.acl` for a single document (`acl:agentClass foaf:Agent` → `acl:Read`,
+/// `acl:accessTo` only): world-readable, writable by no one, `acl:Control` granted to no one.
+fn public_read_acl_turtle(doc: &str) -> ServerResult<Vec<u8>> {
+    let acl_doc = format!("{doc}.acl");
+    let public_auth = acl_nn(&format!("{acl_doc}#public"))?;
+    let d = acl_nn(doc)?;
+    let triples = vec![
+        Triple::new(
+            public_auth.clone(),
+            acl_nn(RDF_TYPE)?,
+            acl_nn(ACL_AUTHORIZATION)?,
+        ),
+        Triple::new(
+            public_auth.clone(),
+            acl_nn(ACL_AGENT_CLASS)?,
+            acl_nn(FOAF_AGENT)?,
+        ),
+        Triple::new(public_auth.clone(), acl_nn(ACL_ACCESS_TO)?, d),
+        Triple::new(public_auth, acl_nn(ACL_MODE)?, acl_nn(ACL_READ)?),
     ];
     serialize_triples(RdfFormat::Turtle, &triples)
 }
@@ -1007,7 +1034,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seeds_demo_playground_public_read_write_sandbox() {
+    async fn seeds_demo_playground_authenticated_write_public_read() {
         use crate::authz::wac::{Decision, WacAuthorizer};
         use crate::authz::AccessMode;
 
@@ -1015,63 +1042,99 @@ mod tests {
         let base = "https://localhost:3000";
         let fx = seed_demo(&s, base).await.unwrap();
 
-        // The pod, welcome doc, and playground container all exist.
-        assert!(s.exists(&fx.pod).await.unwrap());
-        assert!(s.exists(&fx.welcome_doc).await.unwrap());
+        // The playground container and the README both exist, at the §3.2 root-level IRIs.
+        assert_eq!(fx.playground, format!("{base}/playground/"));
+        assert_eq!(fx.readme, format!("{base}/README"));
         assert!(s.exists(&fx.playground).await.unwrap());
-        assert_eq!(fx.owner, format!("{base}/{DEMO_USER}/profile/card#me"));
+        assert!(s.exists(&fx.readme).await.unwrap());
 
+        // The README carries the ephemeral-demo banner and is ANONYMOUSLY readable but writable by
+        // NO ONE (not even an authenticated visitor).
+        let readme = s.read(&fx.readme).await.unwrap();
+        let body = String::from_utf8(readme.body.to_vec()).unwrap();
+        assert!(body.contains("EPHEMERAL"), "banner text missing: {body}");
         let wac = WacAuthorizer::new(&s, base);
-        // The welcome doc is ANONYMOUSLY readable but NOT writable (read-only outside the sandbox).
+        let visitor = "https://css-idp.example/visitor/profile/card#me";
         assert!(matches!(
-            wac.authorize(&fx.welcome_doc, AccessMode::Read, None, None)
+            wac.authorize(&fx.readme, AccessMode::Read, None, None)
                 .await
                 .unwrap(),
             Decision::Allow(_)
         ));
         assert_eq!(
-            wac.authorize(&fx.welcome_doc, AccessMode::Write, None, None)
+            wac.authorize(&fx.readme, AccessMode::Write, None, None)
                 .await
                 .unwrap(),
             Decision::Unauthenticated
         );
+        assert_eq!(
+            wac.authorize(&fx.readme, AccessMode::Write, Some(visitor), None)
+                .await
+                .unwrap(),
+            Decision::Forbidden
+        );
 
-        // Inside the playground, ANONYMOUS visitors can read AND write — including a not-yet-existing
-        // child (creation flows through the container's `acl:default`).
+        // Inside the playground, ANY authenticated agent gets Read/Write/Append — including on a
+        // not-yet-existing child (creation flows through the container's `acl:default`) — while
+        // ANONYMOUS visitors get Read only.
+        let scratch = format!("{}scratch", fx.playground);
+        for mode in [AccessMode::Read, AccessMode::Write, AccessMode::Append] {
+            assert!(matches!(
+                wac.authorize(&fx.playground, mode, Some(visitor), None)
+                    .await
+                    .unwrap(),
+                Decision::Allow(_)
+            ));
+            assert!(matches!(
+                wac.authorize(&scratch, mode, Some(visitor), None)
+                    .await
+                    .unwrap(),
+                Decision::Allow(_)
+            ));
+        }
         assert!(matches!(
             wac.authorize(&fx.playground, AccessMode::Read, None, None)
                 .await
                 .unwrap(),
             Decision::Allow(_)
         ));
-        assert!(matches!(
+        assert_eq!(
             wac.authorize(&fx.playground, AccessMode::Write, None, None)
                 .await
                 .unwrap(),
-            Decision::Allow(_)
-        ));
-        let scratch = format!("{}scratch", fx.playground);
-        assert!(matches!(
+            Decision::Unauthenticated
+        );
+        assert_eq!(
             wac.authorize(&scratch, AccessMode::Write, None, None)
                 .await
                 .unwrap(),
-            Decision::Allow(_)
-        ));
-        // …but the public can NEVER touch the ACL itself (no public Control — the sandbox cannot be
-        // widened by a visitor).
+            Decision::Unauthenticated
+        );
+
+        // NOBODY has Control — the ACL cannot be widened, locked, or hijacked over HTTP.
+        assert_eq!(
+            wac.authorize(&fx.playground, AccessMode::Control, Some(visitor), None)
+                .await
+                .unwrap(),
+            Decision::Forbidden
+        );
         assert_eq!(
             wac.authorize(&fx.playground, AccessMode::Control, None, None)
                 .await
                 .unwrap(),
             Decision::Unauthenticated
         );
-        // The owner retains full control of the playground.
-        assert!(matches!(
-            wac.authorize(&fx.playground, AccessMode::Control, Some(&fx.owner), None)
-                .await
-                .unwrap(),
-            Decision::Allow(_)
-        ));
+        // Belt-and-braces: the serialized playground ACL carries NO acl:Control grant at all.
+        let acl = s
+            .read(&format!("{}.acl", fx.playground))
+            .await
+            .unwrap();
+        let acl_body = String::from_utf8(acl.body.to_vec()).unwrap();
+        assert!(
+            !acl_body.contains("acl#Control"),
+            "the playground ACL must grant no Control: {acl_body}"
+        );
+        assert!(acl_body.contains("acl#AuthenticatedAgent"));
     }
 
     #[tokio::test]
@@ -1082,7 +1145,9 @@ mod tests {
         // A second run must not error (already-exists short-circuits; ACL/doc writes overwrite).
         let again = seed_demo(&s, base).await.unwrap();
         assert_eq!(fx.playground, again.playground);
+        assert_eq!(fx.readme, again.readme);
         assert!(s.exists(&fx.playground).await.unwrap());
+        assert!(s.exists(&fx.readme).await.unwrap());
     }
 
     #[tokio::test]

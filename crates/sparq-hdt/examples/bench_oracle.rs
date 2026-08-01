@@ -27,8 +27,9 @@
 //!     with `$HDT_BENCH_N`). The full ~1M perf sketch + the direct-vs-upstream A/B
 //!     live in `examples/bench_load.rs` / `examples/bench_direct_vs_upstream.rs`.
 //!
-//! Usage: `cargo run --release -p sparq-hdt --example bench_oracle`
-//!        (honours `$HDT_BENCH_N` for the synthetic advisory archive size).
+//! Usage: `cargo run --release -p sparq-hdt --example bench_oracle [archive.hdt]`
+//!        (the archive also accepts `$HDT_ARCHIVE`; honours `$HDT_BENCH_N` for
+//!        the synthetic advisory archive size).
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -47,13 +48,21 @@ fn main() {
     // ---- 1. DETERMINISTIC gate: the vendored real-world snikmeta.hdt ---------------------
     // A real archive (NOT produced by our writer) so the gate pins the decode of a
     // hdt-cpp/java-shaped FourSectDict+BitmapTriples layout, not just a round-trip.
-    let hdt_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snikmeta.hdt");
+    // [SONNET-4.6] sq-45zbg — the deterministic suite keeps the fixture default,
+    // while same-box gathers may supply a scale-representative rdf2hdt archive.
+    let hdt_path = std::env::args_os()
+        .nth(1)
+        .or_else(|| std::env::var_os("HDT_ARCHIVE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snikmeta.hdt")
+        });
     if !hdt_path.exists() {
         eprintln!("[hdt] ERROR: fixture {} absent", hdt_path.display());
         std::process::exit(1);
     }
 
-    let g = sparq_hdt::load(&hdt_path).expect("loading snikmeta.hdt");
+    let g = sparq_hdt::load(&hdt_path).expect("loading benchmark HDT archive");
 
     // (a) load-and-decode-to-native: stored triple count + distinct dictionary terms.
     let triples = g.store.len();
@@ -73,7 +82,7 @@ fn main() {
     //     SAME bytes to byte-identical graphs. Emitted as a gate metric (1 == agree)
     //     so a translation regression that still round-trips through one path fails
     //     the suite. (The exhaustive form lives in `tests/roundtrip.rs`.)
-    let bytes = std::fs::read(&hdt_path).expect("reading snikmeta.hdt bytes");
+    let bytes = std::fs::read(&hdt_path).expect("reading benchmark HDT archive bytes");
     let upstream = sparq_hdt::load_reader_via_upstream(std::io::Cursor::new(bytes.clone()))
         .expect("upstream-oracle load");
     let direct_eq_upstream = (triple_set(&g) == triple_set(&upstream)
@@ -103,7 +112,7 @@ fn main() {
     let mut best_decode_s = f64::MAX;
     for _ in 0..RUNS {
         let t = Instant::now();
-        let timed = sparq_hdt::load(&hdt_path).expect("timed snikmeta decode");
+        let timed = sparq_hdt::load(&hdt_path).expect("timed benchmark archive decode");
         best_decode_s = best_decode_s.min(t.elapsed().as_secs_f64());
         std::hint::black_box(&timed);
     }

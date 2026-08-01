@@ -25,7 +25,11 @@
 // out; the peer is charged the same work for apples-to-apples). The peer's
 // validate-only time on pre-parsed datasets is recorded as an extra advisory
 // column (`peer_validate_only_us`), since RDF/JS apps typically hold a parsed
-// dataset.
+// dataset. [FABLE-5] sq-01xlp: when the artifact is built with the opt-in
+// `stateful` feature (run.sh FEATURES=stateful), the exported `ParsedGraph`
+// handle yields the SYMMETRIC sparq column (`sparq_validate_only_us`) —
+// validate-only on pre-parsed graphs, counts cross-checked against the
+// one-shot per iteration. Absent feature => absent column, never a 0.
 //
 // stdout : `<workload>\t<engine>\t<violations>\t<e2e_best_us>` rows (gated).
 // --out  : one canonical-competitor-results-shaped JSON envelope.
@@ -52,6 +56,8 @@ function parseArgs(argv) {
     else if (k === '--out') a.out = argv[++i];
     else if (k === '--canonical') a.canonical = argv[++i] === '1';
     else if (k === '--git-commit') a.gitCommit = argv[++i];
+    else if (k === '--sparq-features') a.sparqFeatures = argv[++i];
+    else if (k === '--peer-bundle') a.peerBundle = argv[++i];
     else if (k === '--allow-missing-peer') a.allowMissingPeer = true;
     else { process.stderr.write(`harness: unknown arg ${k}\n`); process.exit(2); }
   }
@@ -60,7 +66,8 @@ function parseArgs(argv) {
       'usage: node harness.mjs --pkg <wasm-pack out dir> --data abox.ttl ' +
       '--shapes-dir DIR [--shapes-dir DIR2] --expected expected.tsv ' +
       '[--modules-dir DIR] [--iters N] [--out envelope.json] [--canonical 0|1] ' +
-      '[--git-commit SHA] [--allow-missing-peer]\n');
+      '[--git-commit SHA] [--sparq-features CSV] [--peer-bundle bundle.json] ' +
+      '[--allow-missing-peer]\n');
     process.exit(2);
   }
   return a;
@@ -130,9 +137,11 @@ async function main() {
   const iters = Math.max(1, args.iters);
 
   // sparq-shacl-wasm: the wasm-pack --target nodejs artifact (CJS entry).
+  // `ParsedGraph` is exported only when the artifact was built with the opt-in
+  // `stateful` feature — its presence switches on the sparq validate-only column.
   const req = createRequire(import.meta.url);
   const pkgEntry = join(args.pkg, 'sparq_shacl_wasm.js');
-  const { Validator } = req(pkgEntry);
+  const { Validator, ParsedGraph } = req(pkgEntry);
 
   // peer: rdf-validate-shacl from the gather-only modules dir.
   let peer = null;
@@ -174,6 +183,12 @@ async function main() {
 
   const failures = [];
   const rows = {}; // per-workload envelope rows
+
+  // [FABLE-5] sq-01xlp: pre-parse the data graph ONCE for the stateful column
+  // (outside every timed section — exactly how the peer's validate-only
+  // pre-parsed datasets are treated).
+  const dataParsed = ParsedGraph ? ParsedGraph.parse(dataText, 'turtle') : null;
+
   for (const wl of workloads) {
     const exp = expected.get(wl.name);
     if (!exp) { failures.push(`${wl.name}: no expected.tsv entry`); continue; }
@@ -195,6 +210,27 @@ async function main() {
     } catch (e) {
       failures.push(`${wl.name}: sparq-shacl-wasm ERROR: ${e}`);
       continue;
+    }
+
+    // -- sparq stateful (opt-in `stateful`-feature artifact): validate-only on
+    //    pre-parsed graphs, best-of-N, counts cross-checked per iteration.
+    let sparqValidateOnlyUs = Infinity;
+    if (dataParsed) {
+      try {
+        const shapesParsed = ParsedGraph.parse(wl.text, 'turtle');
+        for (let i = 0; i < iters; i++) {
+          const t0 = performance.now();
+          const r = reduceSparqReport(dataParsed.validate(shapesParsed));
+          sparqValidateOnlyUs = Math.min(sparqValidateOnlyUs, (performance.now() - t0) * 1000);
+          if (r.violations !== sparq.violations || r.conforms !== sparq.conforms) {
+            throw new Error('stateful validate-only drift vs one-shot');
+          }
+        }
+        shapesParsed.free();
+      } catch (e) {
+        failures.push(`${wl.name}: sparq-shacl-wasm (stateful) ERROR: ${e}`);
+        continue;
+      }
     }
 
     // -- rdf-validate-shacl: same one-shot end-to-end, best-of-N (+ a
@@ -274,6 +310,7 @@ async function main() {
 
     // -- gate green: NOW (and only now) the timing rows.
     row.sparq_e2e_best_us = Math.round(sparqBestUs);
+    if (dataParsed) row.sparq_validate_only_us = Math.round(sparqValidateOnlyUs);
     process.stdout.write(`${wl.name}\tsparq-shacl-wasm\t${sparq.violations}\t${Math.round(sparqBestUs)}\n`);
     if (peerComparable && peer) {
       row.peer_e2e_best_us = Math.round(peerBestUs);
@@ -293,6 +330,33 @@ async function main() {
     }
   }
 
+  // [SONNET-4.6] sq-c6c2s: the PEER half of the byte column — bundle.mjs's
+  // esbuild-minified, tree-shaken browser bundle (run.sh stage 2b), folded in
+  // here so one envelope carries the whole comparison. Absent bundle => absent
+  // sub-column with the reason recorded, never a fabricated 0.
+  let peerBundle = { status: 'absent (run.sh stage 2b not run — see NO_BUNDLE / bundle.mjs)' };
+  if (args.peerBundle) {
+    try {
+      const b = JSON.parse(readFileSync(args.peerBundle, 'utf-8'));
+      peerBundle = {
+        source: args.peerBundle,
+        machine_independent: true,
+        reproducible: false,
+        reproducibility_note:
+          'Bytes only (no wall clock), but NOT reproducible and NOT canonical: the peer stack ' +
+          'and esbuild are installed unpinned (no committed lockfile), so a later gather can ' +
+          'emit different bytes. `package_versions` is provenance for the run below. See ' +
+          'bundle.mjs.',
+        peer: b.peer_minified_bundle,
+        sparq: b.sparq,
+        ratio: b.ratio,
+        wasm_opt_trim_probe: b.wasm_opt_trim_probe,
+      };
+    } catch (e) {
+      peerBundle = { status: `absent (could not read ${args.peerBundle}: ${e})` };
+    }
+  }
+
   if (args.out) {
     const envelope = {
       gather: 'shacl-wasm-same-runtime-comparison',
@@ -309,7 +373,11 @@ async function main() {
       engines: {
         'sparq-shacl-wasm': {
           version: args.gitCommit || 'unknown',
-          mode: 'wasm-pack --target nodejs --release; stateless Validator.validate one-shot end-to-end best-of-N (parse+validate+reduce in the timed section)',
+          features: args.sparqFeatures || '(default)',
+          mode: 'wasm-pack --target nodejs --release; stateless Validator.validate one-shot end-to-end best-of-N (parse+validate+reduce in the timed section)'
+            + (dataParsed
+              ? '; PLUS stateful-feature ParsedGraph validate-only on pre-parsed graphs (sparq_validate_only_us, counts cross-checked vs one-shot)'
+              : '; stateful column ABSENT (artifact built without the opt-in `stateful` feature)'),
         },
         'rdf-validate-shacl': peer ? {
           version: peerVersion,
@@ -320,9 +388,12 @@ async function main() {
       gate: 'per-workload #violations + conforms must match expected.tsv AND agree engine-vs-engine BEFORE any timing row; sh:sparql workloads are sparq-only (peer capability-absent => column absent)',
       count_crosscheck: rows,
       bundle_bytes: {
-        note: 'DETERMINISTIC per toolchain: the wasm-pack --release nodejs-target artifact (default features — no shacl-af). gzip-9 = the wire size a gzip-serving host ships.',
+        note: args.sparqFeatures
+          ? `NOT the canonical bundle-bytes record: artifact built with non-default features (${args.sparqFeatures}). The deterministic record is the DEFAULT-features artifact.`
+          : 'DETERMINISTIC per toolchain: the wasm-pack --release nodejs-target artifact (default features — no shacl-af). gzip-9 = the wire size a gzip-serving host ships.',
         wasm_pack: process.env.WASM_PACK_VERSION || 'unknown',
         artifacts: bundle,
+        peer_minified_bundle: peerBundle,
       },
       env: {
         host: os.hostname(),
@@ -334,6 +405,8 @@ async function main() {
     writeFileSync(args.out, JSON.stringify(envelope, null, 2) + '\n');
     process.stderr.write(`harness: envelope: ${args.out}\n`);
   }
+
+  if (dataParsed) dataParsed.free();
 
   if (failures.length) {
     for (const f of failures) process.stderr.write(`harness: FAIL ${f}\n`);

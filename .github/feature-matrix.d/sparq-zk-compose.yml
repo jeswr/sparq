@@ -1,0 +1,31 @@
+# Feature-matrix fragment for `sparq-zk-compose`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py.
+# Adding a leg for THIS crate edits no OTHER crate's fragment, so concurrent opt-in-feature PRs
+# for DIFFERENT crates never textually conflict (bead sq-ibrze).
+# SCOPE ([SONNET-4.6] issue #2384): adding/removing/renaming a leg changes the emitted
+# leg-name set, and THAT is a TWO-FILE change — this fragment AND
+# scripts/tests/feature-matrix-legnames.golden.txt. Every other edit here (features,
+# test, tier, tier-reason, comments) leaves the name set alone and is a SINGLE-file
+# change. See README.md in this directory.
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+
+# [OPUS-5] sq-5xdlk: the default-OFF `dual-leaf` VALUE LANE of sparq-zk-compose.
+# ci.yml's workspace lane passes no `--features`, so the value-lane surface — the
+# `CircuitId::FilterValueDl{,F64,Decimal}` members, the `dispatch` fail-closed
+# `(method × circuit)` matrix, the dedicated `filter_value_dl_*_prover_toml`
+# renderers, and the `#![cfg(feature = "dual-leaf")]` integration suite
+# `tests/dual_leaf_boolean_lane.rs` (the xsd:boolean lane cross-vectors) — compiles
+# EMPTY there and runs ZERO of those tests. This leg is the executor that makes them
+# actually run, closing the same silent-skip class (#1171) the sparq-zk legs close.
+# The feature adds NO new dependency (it only turns on sparq-zk's `dual-leaf`).
+# The lane is research-grade and NOT externally audited (INV-VL downgrade, CR-G8 /
+# sq-qhy4); this leg gates its BUILD/TEST/CLIPPY health, not any soundness claim.
+- name: "sparq-zk-compose (dual-leaf — value-lane members + dispatch matrix + boolean-lane cross-vectors)"
+  crate: "sparq-zk-compose"
+  features: "dual-leaf"
+  test: true

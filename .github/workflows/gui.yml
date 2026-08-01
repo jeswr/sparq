@@ -15,28 +15,33 @@
 # `merge_group` lane (ci-summary.yml never cross-workflow needs gui.yml). Re-runs on push to
 # main for post-merge cover.
 #
-# GATING vs ADVISORY (the `ci-summary / gate` aggregator polls EVERY check-run on the head
-# commit cross-workflow; it EXCLUDES only names matching the whole word `advisory`/
-# `informational` — `\b(advisory|informational)\b` — so a job's NAME decides whether it
-# gates). [OPUS-4.8] This bit gui.yml once (PR #748): a per-platform job WITHOUT the token is
-# treated as GATING, and a macOS/Windows runner-image/webview flake would then break the
-# `ci-summary / gate` for EVERY PR. So:
-#   * "shared TS client typecheck" and "site build + typecheck (consuming @sparq/client)"
-#     are the load-bearing deliverable and are PROVEN green (Linux, TS-only) — they GATE (no
-#     excluded keyword in their names).
+# GATING vs ADVISORY. The `ci-summary / gate` aggregator polls EVERY check-run on the head
+# commit cross-workflow and excludes ONLY the check names DECLARED in
+# `.github/advisory-registry.json` ([OPUS-5] #3773 — before that, exclusion was inferred from
+# the job NAME matching `\b(advisory|informational)\b`, which silently neutralised real gates
+# in THIS file). A job with no declaration GATES, whatever it is called. So:
+#   * "shared TS client typecheck", "site build + typecheck (consuming @sparq/client)", the
+#     operational-GUI frontend job, "GUI Playwright mocked-IPC lane" and — since #3773 —
+#     "GUI hermetic guards (browserName tripwire + no-sleep-gate)" have no registry entry and
+#     therefore GATE. [OPUS-4.8] This bit gui.yml once (PR #748): a per-platform job that is
+#     not declared advisory is GATING, and a macOS/Windows runner-image/webview flake would
+#     then break the `ci-summary / gate` for EVERY PR.
 #   * the per-platform Tauri "GUI build + clippy (…, advisory)" matrix and the
-#     "GUI tauri-driver e2e (Linux, advisory)" job carry the `advisory` keyword so the
-#     aggregator excludes them, AND set `continue-on-error: true`, so a webview/runner-image
-#     flake on a platform we have not yet proven reliably green can never turn `ci-summary`
-#     red. The Linux rows (ubuntu-latest x64 + ubuntu-24.04-arm) build green today; the
-#     macOS/Windows rows stay advisory until proven across the full matrix. [OPUS-4.8] sq-pnnl
-#     — the tauri-driver e2e is now a REAL launch+run-a-query assertion (gui/e2e, not the old
-#     no-op scaffold), but the headless WebKitWebDriver + tauri-driver + xvfb webview session
-#     is a NEW surface whose CI reliability is unproven, so it KEEPS the `advisory` token +
-#     `continue-on-error` and is strictly non-gating. Bead sq-var9 drops the keyword +
-#     `continue-on-error` (and the maintainer adds gui to the branch-protection
-#     required-contexts, a `needs:user` repo-settings action) to PROMOTE them to a hard gate
-#     once reliably green.
+#     "GUI tauri-driver e2e (Linux, advisory)" job ARE declared in the registry (and set
+#     `continue-on-error: true`), so a webview/runner-image flake on a platform we have not
+#     yet proven reliably green can never turn `ci-summary` red. The Linux rows (ubuntu-latest
+#     x64 + ubuntu-24.04-arm) build green today; the macOS/Windows rows stay advisory until
+#     proven across the full matrix. [OPUS-4.8] sq-pnnl — the tauri-driver e2e is a REAL
+#     launch+run-a-query assertion (gui/e2e, not the old no-op scaffold), but the headless
+#     WebKitWebDriver + tauri-driver + xvfb webview session is environment-coupled, so it
+#     KEEPS its declaration + `continue-on-error` and is strictly non-gating. Bead sq-var9
+#     deletes the registry entries + `continue-on-error` (and the maintainer adds gui to the
+#     branch-protection required-contexts, a `needs:user` repo-settings action) to PROMOTE
+#     them to a hard gate once reliably green.
+#   * HERMETIC checks (grep/find over checked-in files) must NOT live inside those advisory
+#     jobs: #3773 found the browserName tripwire + no-sleep-gate doing exactly that. They are
+#     now their own gating job; the registry's `gate_script_waiver` fields record the one
+#     remaining, deliberately-diagnostic re-run.
 #
 # Every action below is SHA-pinned (Scorecard Pinned-Dependencies); the lane is
 # least-privilege (contents: read).
@@ -101,7 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -141,7 +146,7 @@ jobs:
           shared-key: site-wasm
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -223,7 +228,7 @@ jobs:
           shared-key: site-wasm
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -321,7 +326,7 @@ jobs:
   #
   # PATH SCOPE: gui/** + packages/** (changes to the shared @sparq/client can affect the frontend).
   # The job is NOT in the `merge_group` event (ci-summary.yml cannot cross-workflow `needs:`); it
-  # participates in the `ci-summary / gate` aggregator by name (no advisory token).
+  # participates in the `ci-summary / gate` aggregator (it carries no advisory-registry entry).
   gui-mock-ipc:
     name: "GUI Playwright mocked-IPC lane"
     runs-on: ubuntu-latest
@@ -342,7 +347,7 @@ jobs:
           shared-key: site-wasm
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -400,6 +405,38 @@ jobs:
       - name: Run Playwright mocked-IPC tests
         working-directory: gui/e2e-playwright
         run: npm test
+
+  # [OPUS-5] #3773 — HARD hermetic guards, hoisted OUT of the advisory `tauri-e2e` lane.
+  #
+  # Both checks below are pure grep/find over checked-in source: no webview, no WebKitWebDriver,
+  # no xvfb, no Rust toolchain, no npm install. They therefore share NONE of the environment
+  # coupling that makes `tauri-e2e` legitimately advisory — yet they lived inside it, so
+  # `continue-on-error: true` PLUS the old advisory-NAME exclusion swallowed them twice and
+  # neither could fail anything:
+  #   1. the browserName regression guard (bead sq-t6492 / issue #1740) whose own comment claims
+  #      "this step FAILS if that regression is re-introduced" — it did not;
+  #   2. the gui/e2e no-sleep-gate (forbids `await sleep(` / `await setTimeout(` /
+  #      `waitForTimeout(` in the tauri-driver harness).
+  # This job carries NO entry in `.github/advisory-registry.json`, so `ci-summary / gate` waits
+  # on it. The VERSION-TRIPWIRE half of the drift script (dpkg/WebKitWebDriver version logging)
+  # is diagnostic and stays in `tauri-e2e`, where webkit2gtk is actually installed; the script
+  # exits 0 when those tools are absent, so the regression guard runs cleanly here.
+  gui-hermetic-guards:
+    name: "GUI hermetic guards (browserName tripwire + no-sleep-gate)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Issue #1740 regression guard: gui/e2e/run-e2e.mjs must NOT hard-code a browserName
+      # capability (WebKitGTK >= 2.48 hard-rejects a mismatching one, 0-byte driver log).
+      - name: Drift tripwire — browserName regression guard (issue #1740)
+        run: bash scripts/ci/tauri-driver-drift-tripwire.sh
+
+      # Determinism gate — forbids arbitrary time-based waits in the tauri-driver harness.
+      - name: Determinism gate — no arbitrary sleeps (no-sleep-gate)
+        working-directory: gui/e2e
+        run: bash support/no-sleep-gate.sh
 
   # [OPUS-4.8] sq-bu69 — per-platform Tauri build + clippy matrix.
   #
@@ -487,6 +524,14 @@ jobs:
       - name: Test (engine command layer)
         run: cargo test
 
+      # [SONNET-4.6] Native HDT import is opt-in. Exercise it independently so its dependency
+      # edge and command-layer tests cannot first fail in the tag-only release workflow.
+      - name: Clippy (hdt, -D warnings)
+        run: cargo clippy --all-targets --features hdt -- -D warnings
+
+      - name: Test (HDT import, native lane)
+        run: cargo test --features hdt
+
       # [FABLE-5] sq-ixc3.14 — the OPT-IN federation feature state: clippy + the native-lane
       # federated-SERVICE tests (federation.rs), which join the live workspace snapshot with a
       # LIVE loopback SPARQL endpoint through the real engine SERVICE client and prove the
@@ -509,6 +554,29 @@ jobs:
       - name: Test (ODRL policy tool, native lane)
         run: cargo test --features odrl
 
+      # [SONNET-4.6] Execute the feature-gated bridge tests that compare the native command
+      # serialization with sparq-forms directly; compiling them in the union lane is not enough.
+      - name: Clippy (forms, -D warnings)
+        run: cargo clippy --all-targets --features forms -- -D warnings
+
+      - name: Test (SHACL-derived forms, native lane)
+        run: cargo test --features forms
+
+      # [SONNET-4.6] Compile the exact optional-capability union shipped by release.yml to catch
+      # dependency feature-unification failures before a tag. `custom-protocol` is intentionally
+      # omitted here: unlike the bundle job, this job does not export gui/app/out for Tauri to
+      # embed at compile time. Keep this list in sync with release.yml's "Build Tauri desktop
+      # bundle" command. This lane also preserves the combined native capability coverage on
+      # every release platform.
+      - name: Clippy (release feature union, -D warnings)
+        run: cargo clippy --all-targets --features hdt,federation,odrl,forms -- -D warnings
+
+      # HDT's feature-on path is compile-covered above; the tests executed in this combined
+      # Linux state exercise the federation, ODRL, and forms paths together.
+      - name: Test (desktop release features, native lane)
+        if: runner.os == 'Linux'
+        run: cargo test --features hdt,federation,odrl,forms
+
   # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #
   # Shrunk from the multi-step sq-pnnl harness to exactly 3 meaningful assertions:
@@ -526,16 +594,20 @@ jobs:
   #   * xvfb-run --auto-servernum (already present; a virtual display is mandatory on Linux).
   #   * workers=1: the smoke is a single-process script (no parallelism; inherent).
   #   * No arbitrary sleeps: all waits use waitForExist / waitUntil with explicit conditions;
-  #     validated by support/no-sleep-gate.sh (step below). The startup port-poll uses a
-  #     callback-style setTimeout (not an awaited sleep) — gate-safe.
+  #     validated by support/no-sleep-gate.sh, which since #3773 runs in the HARD
+  #     `gui-hermetic-guards` job (it used to run here, where it gated nothing). The startup
+  #     port-poll uses a callback-style setTimeout (not an awaited sleep) — gate-safe.
   #   * Shell-level retry 1: if the first attempt fails (driver start flake, display-server
   #     race), the step retries once before counting as a failure. Evidence of failure is
   #     captured as artifacts (screenshot + driver logs) on BOTH attempts.
   #
-  # ADVISORY — DELIBERATELY KEPT. The job NAME carries the whole-word `advisory` token so
-  # the `ci-summary / gate` aggregator excludes it. `continue-on-error: true` ensures a
-  # driver/webview flake never turns ci-summary red. Promotion to a hard gate (bead sq-var9)
-  # requires 20 consecutive green runs of the flake probe (workflow_dispatch trigger above).
+  # ADVISORY — DELIBERATELY KEPT, and now DECLARED. This job has an entry in
+  # `.github/advisory-registry.json` (that declaration, not the name token, is what excludes
+  # it from `ci-summary / gate`); `continue-on-error: true` ensures a driver/webview flake
+  # never turns ci-summary red. Promotion to a hard gate (bead sq-var9) requires 20
+  # consecutive green runs of the flake probe (workflow_dispatch trigger above) and is done by
+  # DELETING the registry entry. [OPUS-5] #3773: only the environment-coupled webview work is
+  # legitimately advisory here — the two hermetic guards were hoisted out.
   tauri-e2e:
     name: "GUI tauri-driver e2e (Linux, advisory)"
     runs-on: ubuntu-latest
@@ -563,13 +635,13 @@ jobs:
             dbus-x11 \
             xvfb
 
-      # Drift tripwire + regression guard (bead sq-t6492 / issue #1740). The lane's persistent red
-      # was WebKitGTK 2.5x rejecting the client's `browserName: "wry"` capability ("Failed to match
-      # capabilities", 0-byte driver log); the fix is client-side — gui/e2e/run-e2e.mjs now OMITS
-      # browserName. This step FAILS if that regression is re-introduced, and logs the webkit2gtk +
-      # tauri-driver versions so the next runner-image drift is a one-line diagnosis. The version
-      # tripwire is diagnostic; this lane is advisory (continue-on-error) so the actual smoke decides.
-      - name: Drift tripwire — browserName regression guard + version log
+      # [OPUS-5] #3773 — the REGRESSION-GUARD half of this script is now HARD-gated in the
+      # `gui-hermetic-guards` job above (it needs no webview, so it never belonged in this
+      # environment-coupled advisory lane). It is re-run here ONLY for the VERSION TRIPWIRE:
+      # logging the runner's webkit2gtk + tauri-driver versions, which requires the apt packages
+      # this job installs, so the next runner-image drift is a one-line diagnosis. Diagnostic
+      # only — hence the `gate_script_waiver` on this job in .github/advisory-registry.json.
+      - name: Version tripwire — webkit2gtk + tauri-driver version log (diagnostic)
         run: bash scripts/ci/tauri-driver-drift-tripwire.sh --tauri-driver-version 2.0.6
 
       # wasm32 target is needed to build the lean WASM bundle the in-tab REPL runs.
@@ -586,7 +658,7 @@ jobs:
           shared-key: site-wasm
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -643,10 +715,9 @@ jobs:
         working-directory: gui/e2e
         run: npm ci
 
-      # Determinism gate — forbids await sleep / waitForTimeout in the harness.
-      - name: Determinism gate — no arbitrary sleeps (no-sleep-gate)
-        working-directory: gui/e2e
-        run: bash support/no-sleep-gate.sh
+      # [OPUS-5] #3773 — the no-sleep-gate MOVED to the HARD `gui-hermetic-guards` job above
+      # (it is a pure find+grep over gui/e2e/**; re-running it inside this advisory lane would
+      # gate nothing).
 
       # [1/3] LAUNCH [2/3] IPC LIVE [3/3] ROUND-TRIP — see run-e2e.mjs for the assertion map.
       #
@@ -733,7 +804,7 @@ jobs:
           shared-key: site-wasm
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 

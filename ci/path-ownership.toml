@@ -171,6 +171,15 @@ crates = ["sparq-conformance"]
 pattern = "bench/reason-diff/rl/**"
 crates = ["sparq-reason-diff"]
 
+# [OPUS-5] sq-3xsx0: the competitor Datalog encodings (Nemo `.rls`, VLog `.dlog`)
+# whose OWL-RL rules must stay set-identical to sparq's own closure. sparq-reason's
+# datalog_intersection_arity.rs reads both files at runtime (an
+# env!("CARGO_MANIFEST_DIR")-relative read) to assert `cls-int1` is the arity-generic
+# list walk, so an encoding edit must re-run that guard.
+[[map]]
+pattern = "bench/reason-encodings/**"
+crates = ["sparq-reason"]
+
 # ZK-compose gate-count + SPARQL-feature catalog fixtures (committed JSON),
 # include_str!'d by sparq-zk-compose's gate_count/sparql_catalog tests.
 [[map]]
@@ -196,12 +205,29 @@ crates = ["sparq-conformance"]
 # [FABLE-5] sq-tonhr.2: the COMMITTED cargo-fuzz seed corpus (fuzz/seeds/<target>/),
 # read via an env!("CARGO_MANIFEST_DIR")-relative path by sparq-conformance's parser
 # differential harness (tests/parser_differential.rs) as a known-tricky-input corpus
-# for the sparq-vs-oxttl line-syntax cross-check. The out-of-workspace fuzz/ crate
-# also consumes these seeds, but it is not a workspace member, so this map lists
-# the workspace-crate readers only (the fuzz lane itself is seeded via [lanes]).
+# for the sparq-vs-oxttl line-syntax cross-check. sparq-canon reads one seed of the
+# same corpus with `include_str!` (tests/fuzz_seed_dedup.rs), pinning the RDFC-1.0
+# set-semantics reproducer in the stable `cargo test` gate. The out-of-workspace
+# fuzz/ crate also consumes these seeds, but it is not a workspace member, so this
+# map lists the workspace-crate readers only (the fuzz lane itself is seeded via
+# [lanes]).
 [[map]]
 pattern = "fuzz/seeds/**"
-crates = ["sparq-conformance"]
+crates = ["sparq-conformance", "sparq-canon"]
+
+# [FABLE-5] sq-1s2.4 (PR #3622): the browser age-gate's precomputed `operand_enc`
+# anchors, read at runtime by sparq-zk-compose's build-time drift guard
+# (tests/site_age_enc_drift.rs) which pins the committed site constants against the
+# native encode_int_literal encoder. FIRST-MATCH-WINS: these two file entries sit
+# BEFORE the `site/**` safe entry below, so an anchor edit re-runs the drift guard
+# while the rest of site/ stays inert for the Rust matrix.
+[[map]]
+pattern = "site/src/lib/zk-prover.ts"
+crates = ["sparq-zk-compose"]
+
+[[map]]
+pattern = "site/scripts/capture-zk-manifest.mjs"
+crates = ["sparq-zk-compose"]
 
 # ---------------------------------------------------------------------------
 # ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — sibling-crate inputs read
@@ -282,8 +308,10 @@ safe = true
 pattern = "docs/**"
 safe = true
 
-# The marketing/explanatory website (Next.js). Owns its own CI lane (pages.yml);
-# no Rust crate reads site/.
+# The marketing/explanatory website (Next.js). Owns its own CI lane (pages.yml).
+# EXCEPTION (first-match-wins): the two zk-anchor files attributed to
+# sparq-zk-compose above (sq-1s2.4) are matched before this entry; NO other Rust
+# crate reads site/ (the out-of-crate-input audit re-verifies every run).
 [[map]]
 pattern = "site/**"
 safe = true

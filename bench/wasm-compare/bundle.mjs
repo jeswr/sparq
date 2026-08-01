@@ -11,8 +11,9 @@
 //     counts are exactly reproducible on any box. The local tarball sha256 is
 //     recorded in the envelope.
 //   - sparq: the shipped js/wasm/sparq_wasm_bg.wasm (the `js/ build:wasm`
-//     wasm-pack output, full feature set: shacl,jsonld,serialize-rdf,scs,canon
-//     — @jeswr/sparq is not yet published to npm, so the pin is the repo
+//     wasm-pack output, full feature set — the `--features` list in
+//     js/package.json `build:wasm` is authoritative — @jeswr/sparq is not yet
+//     published to npm, so the pin is the repo
 //     commit + the wasm-pack/binaryen versions recorded in the envelope).
 //     The pre-bindgen artifact is separately hard-gated by scripts/ci-bench.sh
 //     `wasm_bundle_bytes` (untouched by this script).

@@ -4,6 +4,18 @@ The heavy benchmarks (many-core/NUMA scaling, large-scale ingestion) can't run o
 runners. They run on EC2, but a **public** repo with EC2-triggering CI is dangerous if done wrong,
 and must stay **under $5/month**. This is the security + cost design.
 
+> **STATUS ([OPUS-5], #3784) — the automated lane is RETIRED; this record is now the revival spec.**
+> The AWS OIDC role this design depends on was deliberately descoped, so `bench-ec2.yml`'s crons
+> were removed: every scheduled tick failed in `Configure AWS credentials (OIDC)` before any
+> benchmark ran and — carrying no advisory declaration — that failure **gated** `main`. The workflow
+> is now **manual dispatch only** (`lane: heavy` / `lane: full-suite`), guarded by
+> `vars.AWS_BENCH_ROLE_ARN != ''` so a dispatch without the role skips instead of failing.
+> Everything below still describes what to create to bring the lane back, so the `schedule:` block
+> quoted later is **aspirational, not current** — re-add it in the same change that re-provisions the
+> role. Maintainer-run EC2 benchmarking outside this CI lane is NOT descoped.
+
+<!-- separate blockquotes (MD028) -->
+
 > **G2 — free per-commit perf CI (Pages toggle).** `.github/workflows/bench.yml` runs
 > `scripts/ci-bench.sh` on every push to `main` and on `pull_request` (PRs compute + comment but
 > do **not** auto-push, so the published series isn't polluted), storing points via

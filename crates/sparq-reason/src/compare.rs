@@ -338,8 +338,14 @@ impl CompareTerm for IdTerm<'_> {
             (Num(Some(a)), Num(Some(b))) => num_compare(a, b),
             (Str(a), Str(b)) => Some(a.cmp(b)),
             (Bool(Some(a)), Bool(Some(b))) => Some(a.cmp(&b)),
-            (DateTime(Some(a)), DateTime(Some(b))) => Timeline::cmp_tl(a, b),
-            (Date(Some(a)), Date(Some(b))) => Timeline::cmp_tl(a, b),
+            // [SONNET-4.6] sq-2k5py: the TOTAL timeline order, mirroring the engine's
+            // `CompareTerm::strict_cmp` (which extends `value_compare_strict` the same way).
+            // `Timeline::cmp_tl`'s indeterminate mixed-timezone window would drop the pair to
+            // `compare_terms`' lexical fallback INSIDE the DateTime/Date kind, which is
+            // intransitive; the reasoner has no relational operators, so the total order is
+            // the only consumer here.
+            (DateTime(Some(a)), DateTime(Some(b))) => Some(Timeline::cmp_tl_total(a, b)),
+            (Date(Some(a)), Date(Some(b))) => Some(Timeline::cmp_tl_total(a, b)),
             // Same language tag (case-insensitive): compare values (the suites' lenient
             // extension the engine applies).
             (Lang(t1, v1), Lang(t2, v2)) if t1 == t2 => Some(v1.cmp(v2)),

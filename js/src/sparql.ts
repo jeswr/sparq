@@ -12,6 +12,12 @@ export interface SparqlJsonTerm {
   type: 'uri' | 'literal' | 'typed-literal' | 'bnode';
   value: string;
   'xml:lang'?: string;
+  /**
+   * RDF 1.2 base direction of a directional language-tagged literal
+   * (`"x"@en--ltr`). SPARQL 1.2 JSON results keep it separate from
+   * `xml:lang`; sparq's engine emits the same split (`its:dir`).
+   */
+  'its:dir'?: 'ltr' | 'rtl';
   datatype?: string;
 }
 
@@ -29,7 +35,9 @@ export function termFromSparqlJson(term: SparqlJsonTerm): RDF.Term {
       return new BlankNode(term.value);
     case 'literal':
     case 'typed-literal': // legacy alias emitted by some endpoints
-      if (term['xml:lang'] !== undefined) return new Literal(term.value, term['xml:lang']);
+      if (term['xml:lang'] !== undefined) {
+        return new Literal(term.value, { language: term['xml:lang'], direction: term['its:dir'] });
+      }
       if (term.datatype !== undefined) return new Literal(term.value, new NamedNode(term.datatype));
       return new Literal(term.value);
     default:

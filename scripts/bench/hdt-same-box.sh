@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # [HAIKU-4.5] sq-hmd7l.4 — same-box HDT LOAD-AND-DECODE comparison harness:
-# sparq-hdt vs hdt-cpp on the SAME .hdt archive (snikmeta.hdt, 328 triples),
+# sparq-hdt vs hdt-cpp on the SAME .hdt archive (the snikmeta fixture by default),
 # decode-to-native ONLY (load+decode wall-clock), emitting one canonical-competitor-results
 # ENVELOPE per gather (the exact JSON shape of bench/canonical-competitor-results/2026-07-07/
 # canonical-<suite>-*.json, so scripts/bench/ingest-canonical-competitors.mjs's data flow can
@@ -34,7 +34,8 @@
 #   * per-run wall-clock cap (TIMEOUT_S); a timeout/error degrades to an honest ERROR row,
 #     never a fabricated number.
 #   * decoded triple-count cross-checked engine-vs-engine: sparq-hdt store.len() == hdt2rdf
-#     decoded line count (both should equal 328 for snikmeta). Only time if counts agree.
+#     decoded line count. The archive-derived sparq count is the expected count; no dataset
+#     size is pinned in this harness. Only trust timing if counts agree.
 #
 # USAGE
 #   scripts/bench/hdt-same-box.sh            # both engines
@@ -105,7 +106,7 @@ fi
 GIT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 # ---- 1. run decode for each engine -------------------------------------------
-log "=== HDT decode-only (snikmeta.hdt, 328 triples) ==="
+log "=== HDT decode-only ($(basename "$HDT_ARCHIVE")) ==="
 
 SCALE_TMP="$TMP"
 mkdir -p "$SCALE_TMP"
@@ -192,8 +193,9 @@ fi
 
 # ---- 2. assemble the envelope (canonical-competitor-results JSON shape) ----
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
-OUT="$OUT_DIR/hdt-snikmeta-${TS}.json"
-CANONICAL="$CANONICAL" HDT_ARCHIVE="$HDT_ARCHIVE" NTRIPLES="328" \
+ARCHIVE_STEM="$(printf '%s' "$(basename "$HDT_ARCHIVE" .hdt)" | tr -cs '[:alnum:]_.-' '-')"
+OUT="$OUT_DIR/hdt-${ARCHIVE_STEM}-${TS}.json"
+CANONICAL="$CANONICAL" HDT_ARCHIVE="$HDT_ARCHIVE" ARCHIVE_NAME="$(basename "$HDT_ARCHIVE")" \
 GIT_COMMIT="$GIT_COMMIT" SCALE_TMP="$SCALE_TMP" OUT="$OUT" ONLY="$ONLY" \
 TIMEOUT_S="$TIMEOUT_S" HDT_CPP_AVAILABLE="$HDT_CPP_AVAILABLE" \
 HDT_CPP_DIGEST="${HDT_CPP_DIGEST:-}" HDT_CPP_WALL_S="$HDT_CPP_WALL_S" \
@@ -264,14 +266,16 @@ if sparq_triples not in ("n/a", "ERROR"):
 if hdt_cpp_count not in ("n/a", "ERROR"):
     count_check["hdt_cpp_triples"] = hdt_cpp_count
 
-# Agreement check: all counts should be 328
+# [SONNET-4.6] sq-45zbg — derive the oracle from sparq's decoded store rather
+# than pinning the tiny fixture's count. hdt2rdf must agree before its timing is
+# considered comparable.
 agreement = {}
-expected = "328"
+expected = sparq_triples
 all_agree = True
-if sparq_triples not in ("n/a", "ERROR"):
+if expected not in ("n/a", "ERROR"):
     agreement["sparq"] = sparq_triples
-    if sparq_triples != expected:
-        all_agree = False
+else:
+    all_agree = False
 if hdt_cpp_count not in ("n/a", "ERROR"):
     agreement["hdt_cpp"] = hdt_cpp_count
     if hdt_cpp_count != expected:
@@ -291,7 +295,7 @@ envelope = {
     "canonical_note": note_canonical,
     "git_commit": os.environ["GIT_COMMIT"],
     "suite": "hdt",
-    "scale": f"snikmeta.hdt ({os.environ['NTRIPLES']} triples, {os.environ['HDT_ARCHIVE']})",
+    "scale": f"{os.environ['ARCHIVE_NAME']} ({expected} triples, {os.environ['HDT_ARCHIVE']})",
     "archive_path": os.environ["HDT_ARCHIVE"],
     "iters": 1,
     "mode": "decode-only (load+decode wall-clock); query-over-HDT is OUT OF SCOPE (not like-for-like)",
@@ -303,7 +307,7 @@ envelope = {
         "expected": expected,
         "observed": agreement,
         "all_agree": all_agree,
-        "note": "Decoded triple count must equal snikmeta's 328. Only time if counts agree."
+        "note": "Expected count is derived from sparq-hdt's decoded store; hdt2rdf must match. Only trust timing if counts agree."
     },
     "env": env,
 }
@@ -315,7 +319,7 @@ if sparq_data:
 # [FABLE-5] sq-hmd7l.33 — hdt-cpp NUMERIC decode timing: best-of-N in-container
 # hdt2rdf wall-clock (container spawn excluded). This is the field the ingest's
 # normalizeHdt renders as the hdt-cpp column cell.
-if os.environ.get("HDT_CPP_DECODE_US", "n/a") != "n/a":
+if all_agree and os.environ.get("HDT_CPP_DECODE_US", "n/a") != "n/a":
     envelope["hdt_cpp_metrics"] = {
         "decode_us": {
             "value": os.environ["HDT_CPP_DECODE_US"],
@@ -353,7 +357,10 @@ if "sparq" in only:
     statuses["sparq"] = "ok" if sparq_data else "failed"
 if "hdt-cpp" in only:
     if hdt_cpp_available:
-        statuses["hdt-cpp"] = "ok" if os.path.exists(hdt_cpp_path) and os.path.getsize(hdt_cpp_path) > 0 else "failed"
+        if os.path.exists(hdt_cpp_path) and os.path.getsize(hdt_cpp_path) > 0:
+            statuses["hdt-cpp"] = "ok" if all_agree else "count-mismatch"
+        else:
+            statuses["hdt-cpp"] = "failed"
     else:
         statuses["hdt-cpp"] = "absent"
 

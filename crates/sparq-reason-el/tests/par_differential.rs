@@ -26,7 +26,9 @@ use std::num::NonZeroUsize;
 use oxrdf::{NamedNode, Term as OTerm};
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;
-use sparq_reason_el::{classify_graph, classify_graph_par, Classifier};
+use sparq_reason_el::{
+    classify_graph, classify_graph_par, classify_graph_par_stats, Classifier, ParPhaseStats,
+};
 
 const PRE: &str = r#"
     @prefix : <http://ex/> .
@@ -388,6 +390,143 @@ fn par_thread_count_does_not_change_the_answer_api() {
             "threads={t}: CR4 must derive Neuron ⊑ NucleatedCell"
         );
     }
+}
+
+// --- sq-q0o82 (E4 follow-up): the phase-attribution surface ------------------------------
+//
+// `classify_graph_par_stats` is `classify_graph_par` plus the compute/apply split. Two
+// obligations: the instrumentation must not perturb the classification (same Report, same
+// triples, byte for byte), and the DERIVATION-WORK counters must be a function of the input
+// ALONE — chunking decides which worker derives a conclusion, never which conclusions are
+// derived. Both are asserted here so a phase number can never be reported for a run that
+// silently derived something else, and so a partitioning bug cannot hide behind "scheduling".
+
+#[test]
+fn par_phase_stats_does_not_perturb_the_classification() {
+    let ttl = synthetic_ontology(5, 30);
+    let (dict0, triples0) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+
+    let (mut dict_seq, mut triples_seq) = (dict0.clone(), triples0.clone());
+    let report_seq = classify_graph(&mut dict_seq, &mut triples_seq);
+
+    for t in THREAD_COUNTS {
+        let (mut dict_par, mut triples_par) = (dict0.clone(), triples0.clone());
+        let (report, stats) = classify_graph_par_stats(&mut dict_par, &mut triples_par, nz(t));
+        assert_eq!(
+            report, report_seq,
+            "threads={t}: classify_graph_par_stats Report differs from sequential"
+        );
+        assert_eq!(
+            triples_par, triples_seq,
+            "threads={t}: classify_graph_par_stats emitted triples differ from sequential"
+        );
+        // Non-vacuous: this ontology genuinely drives the round loop, so a stats surface that
+        // silently reported zeros (or was never wired into the loop) fails here.
+        assert!(
+            stats.rounds > 0 && stats.frontier_items > 0 && stats.derived_members > 0,
+            "threads={t}: expected non-zero phase work, got {stats:?}"
+        );
+        // The fixture's cross-chain existentials mean CR3 must have concluded links too.
+        assert!(
+            stats.derived_links > 0,
+            "threads={t}: expected CR3 link derivations, got {stats:?}"
+        );
+    }
+}
+
+#[test]
+fn par_phase_stats_work_counts_are_thread_count_invariant() {
+    let ttl = synthetic_ontology(6, 40);
+    let (dict0, triples0) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+
+    let mut reference: Option<(u64, u64, u64, u64)> = None;
+    for t in THREAD_COUNTS {
+        let (mut dict_par, mut triples_par) = (dict0.clone(), triples0.clone());
+        let (_report, s) = classify_graph_par_stats(&mut dict_par, &mut triples_par, nz(t));
+        let counts = (s.rounds, s.frontier_items, s.derived_members, s.derived_links);
+        match reference {
+            None => reference = Some(counts),
+            Some(r) => assert_eq!(
+                counts, r,
+                "threads={t}: derivation work counts drifted from the threads={} run",
+                THREAD_COUNTS[0]
+            ),
+        }
+    }
+}
+
+#[test]
+fn apply_fraction_is_the_sequential_share_of_measured_time() {
+    // Direct unit test of the decision metric — constructed values, so it is exact and
+    // independent of any clock.
+    let s = ParPhaseStats {
+        compute_nanos: 1,
+        apply_nanos: 3,
+        ..ParPhaseStats::default()
+    };
+    assert_eq!(s.apply_fraction(), 0.75);
+
+    let all_compute = ParPhaseStats {
+        compute_nanos: 8,
+        ..ParPhaseStats::default()
+    };
+    assert_eq!(all_compute.apply_fraction(), 0.0);
+
+    let all_apply = ParPhaseStats {
+        apply_nanos: 8,
+        ..ParPhaseStats::default()
+    };
+    assert_eq!(all_apply.apply_fraction(), 1.0);
+
+    // Nothing measured (an empty ontology derives nothing): defined as 0.0, never a NaN that
+    // would silently poison a comparison downstream.
+    assert_eq!(ParPhaseStats::default().apply_fraction(), 0.0);
+}
+
+#[test]
+fn apply_fraction_stays_in_range_when_the_timers_saturate_u64() {
+    // The timer fields are public, so `compute_nanos + apply_nanos` can exceed `u64::MAX`.
+    // The denominator must not overflow: that would panic in debug and wrap to a
+    // divide-by-zero (infinity/NaN) in release, making the documented `0.0..=1.0` contract
+    // build-profile-dependent.
+    let compute_heavy = ParPhaseStats {
+        compute_nanos: u64::MAX,
+        apply_nanos: 1,
+        ..ParPhaseStats::default()
+    };
+    let f = compute_heavy.apply_fraction();
+    assert!(f.is_finite(), "{:?} -> {}", compute_heavy, f);
+    assert!((0.0..=1.0).contains(&f), "{:?} -> {}", compute_heavy, f);
+    // 1 / 2^64, exactly representable in f64.
+    assert_eq!(f, 1.0 / 18_446_744_073_709_551_616.0);
+
+    let both_saturated = ParPhaseStats {
+        compute_nanos: u64::MAX,
+        apply_nanos: u64::MAX,
+        ..ParPhaseStats::default()
+    };
+    assert_eq!(both_saturated.apply_fraction(), 0.5);
+
+    let apply_heavy = ParPhaseStats {
+        compute_nanos: 1,
+        apply_nanos: u64::MAX,
+        ..ParPhaseStats::default()
+    };
+    let f = apply_heavy.apply_fraction();
+    assert!(f.is_finite(), "{:?} -> {}", apply_heavy, f);
+    assert!((0.0..=1.0).contains(&f), "{:?} -> {}", apply_heavy, f);
+}
+
+#[test]
+fn empty_graph_par_phase_stats_derives_nothing() {
+    let (mut dict, mut triples) = (Dict::new(), Vec::<[Id; 3]>::new());
+    let (report, stats) = classify_graph_par_stats(&mut dict, &mut triples, nz(4));
+    assert_eq!(report.emitted_subsumptions, 0);
+    // The seeding pass still queues the reflexive/⊤ memberships of the always-present ⊤/⊥
+    // concepts, so `frontier_items` is NOT zero — but with no axioms to fire, the compute
+    // phase must conclude nothing at all.
+    assert_eq!(stats.derived_members, 0, "{stats:?}");
+    assert_eq!(stats.derived_links, 0, "{stats:?}");
 }
 
 #[test]

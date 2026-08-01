@@ -173,6 +173,23 @@ jobs:
       - name: self-cert evidence check — GATING
         run: python3 scripts/check-bestpractices-evidence.py
 
+      # ---- Dependabot ecosystem coverage (sq-bqjv) — GATING ----
+      # [SONNET-4.6] A Dependabot entry aimed at a directory with no resolvable
+      # manifest/lock does NOT error — it just yields no PRs, which looks exactly like
+      # "no updates available". That silence hid a real hole: the npm entry pointed at
+      # the workspace MEMBER `/js` (whose lock is gitignored; only the repo-root lock is
+      # tracked), so `site` / `gui/*` / `packages/*` were uncovered, and the two
+      # digest-pinned Dockerfiles had no docker entry, so their base images were never
+      # refreshed for Debian/distroless security rebuilds. This asserts coverage
+      # structurally against the LIVE repo — every tracked npm lock root and Dockerfile
+      # directory is covered or carries a written, non-stale exclusion — so a newly
+      # added ecosystem cannot land uncovered. Pure-stdlib Python (re/subprocess/pathlib
+      # on the runner's 3.12), consistent with this job's other checks; runs
+      # unconditionally because its inputs are checked-in config, not the Rust
+      # dependency graph.
+      - name: Dependabot ecosystem-coverage check — GATING
+        run: python3 scripts/tests/test_dependabot_coverage.py
+
       # ---- JS/npm CycloneDX SBOMs (published WASM + shared browser clients) ----
       # [OPUS-4.8] sq-toze.27 / [GPT-5.6] sq-epbw4: SBOM both `@jeswr/sparq` and the
       # `@sparq/client` code bundled into the site/GUI artifacts. Each gets a strict runtime
@@ -180,7 +197,7 @@ jobs:
       # The generator derives transient member locks from the committed root lock without
       # dependency resolution, and fails unless the shared-client runtime view attests both
       # lazy codec dependencies.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - name: Generate JS SBOM (runtime + full tree)
@@ -230,7 +247,7 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - name: Install cargo-deny + cargo-vet + cargo-cyclonedx
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-deny,cargo-vet@0.10.2,cargo-cyclonedx
 
@@ -244,13 +261,16 @@ jobs:
       # parses CVSS v4.0 advisories, so the freshly-cloned RustSec DB loads and the
       # per-advisory `ignore` rules apply as intended. The deny.toml policy is fail-closed:
       # `yanked = "deny"` and (advisories v2) every unignored advisory FAILS the check;
-      # only the two justified `unmaintained` ignores (paste / rustls-pemfile, each with a
-      # documented reason + tracking bead) are tolerated. A REAL vulnerability or a yanked
-      # crate now blocks the PR. Verified: removing either justified ignore makes
-      # `cargo deny check advisories` exit non-zero ("advisories FAILED"); with the ignores
-      # in place it is "advisories ok". This is the PR-time gate; the daily watchdog
+      # only the justified ignores in `deny.toml [advisories].ignore` (each with a documented
+      # reason + tracking bead) are tolerated. A REAL vulnerability or a yanked crate now
+      # blocks the PR. Verified: removing a justified ignore makes `cargo deny check advisories`
+      # exit non-zero ("advisories FAILED"); with the ignores in place it is "advisories ok".
+      # This is the PR-time gate; the daily watchdog
       # (dependency-monitoring.yml) remains as defence-in-depth for advisories disclosed
       # between PRs.
+      # [OPUS-5] The preferred remediation is REMOVING the dependency, not adding an ignore —
+      # sq-5ah3p retired RUSTSEC-2025-0134 (`rustls-pemfile`) that way, migrating the mTLS PEM
+      # parse onto `rustls-pki-types`' `PemObject`.
       - name: cargo-deny check (advisories) — GATING
         if: steps.changes.outputs.rust_changed == 'true'
         run: cargo deny check advisories

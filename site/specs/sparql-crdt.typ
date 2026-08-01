@@ -519,6 +519,7 @@ The media type proposed for a single envelope is
 {
   "format": "sparq-crdt-delta/1",
   "dataset": "https://example.test/datasets/team",
+  "epoch": "3",
   "origin": "cGVlci1h",
   "sequence": "42",
   "basis": {
@@ -540,10 +541,12 @@ The media type proposed for a single envelope is
 }
 ```
 
-`origin` and replica components use unpadded base64url. Counters are non-zero unsigned
-decimal integers encoded as JSON strings, avoiding host-language JSON number limits. `quad`
-is one blank-node-free canonical N-Quads line. `basis` is the complete data causal context
-observed before evaluation. The data delta joined at a receiver is derived only as follows:
+`epoch` is the membership epoch in which the origin committed the operation. `origin` and
+replica components use unpadded base64url. Epochs are unsigned decimal integers; sequence and
+dot counters are non-zero unsigned decimal integers. All are encoded as JSON strings, avoiding
+host-language JSON number limits. `quad` is one blank-node-free canonical N-Quads line. `basis`
+is the complete data causal context observed before evaluation. The data delta joined at a
+receiver is derived only as follows:
 
 ```text
 delta.store   = each adds[i].quad -> { adds[i].dot }
@@ -554,10 +557,11 @@ delta.context = union(all adds[i].dot, all removes[i].dots)
   An envelope #strong[MUST] contain exactly the fields shown above; `adds` and `removes`
   #strong[MAY] be empty but not both empty unless the origin operation committed a semantic
   no-op that still requires an idempotency record. Replica bytes #strong[MUST] use unpadded
-  base64url per #cite("RFC4648"); counters #strong[MUST] use their shortest decimal string;
-  each quad #strong[MUST] use canonical N-Quads form per #cite("NQUADS") and
-  #cite("RDFC10"); and the complete document #strong[MUST] use the JSON Canonicalization
-  Scheme #cite("RFC8785") for hashing, equality, and transport.
+  base64url per #cite("RFC4648"); `epoch` #strong[MUST] use its shortest decimal string;
+  `sequence` and dot counters #strong[MUST] use their shortest non-zero decimal string; each
+  quad #strong[MUST] use canonical N-Quads form per #cite("NQUADS") and #cite("RDFC10"); and
+  the complete document #strong[MUST] use the JSON Canonicalization Scheme #cite("RFC8785")
+  for hashing, equality, and transport.
 ]
 
 #proposal("CRDT-WIRE-3")[
@@ -571,12 +575,13 @@ delta.context = union(all adds[i].dot, all removes[i].dots)
 
 #proposal("CRDT-WIRE-4")[
   Before journal commit, a receiver #strong[MUST] validate the format version, dataset
-  identifier, origin/sequence identity, canonical encoding, quad grammar, blank-node absence,
-  dot uniqueness, and all state invariants. An add dot #strong[MUST NOT] also occur in that
-  envelope's remove set. If a received dot is already known under another quad, the envelope
-  #strong[MUST] be rejected. Authentication and replica authorisation are deployment
-  responsibilities outside the CRDT algebra; unauthorised envelopes #strong[MUST] be rejected
-  before this validation path.
+  identifier, membership epoch, origin/sequence identity, canonical encoding, quad grammar,
+  blank-node absence, dot uniqueness, and all state invariants. An envelope whose `epoch` is
+  not the receiver's current membership epoch #strong[MUST] be rejected. An add dot
+  #strong[MUST NOT] also occur in that envelope's remove set. If a received dot is already
+  known under another quad, the envelope #strong[MUST] be rejected. Authentication and replica
+  authorisation are deployment responsibilities outside the CRDT algebra; unauthorised
+  envelopes #strong[MUST] be rejected before this validation path.
 ]
 
 == Journal frontier, relay, and catch-up
@@ -602,7 +607,8 @@ This separate namespace records delete-only and no-op envelopes, which mint no d
   causal context needed to suppress removed dots.
 ]
 
-No membership or causal-stability protocol is standardised here. A deployment that cannot
+The envelope epoch is an admission discriminator; no protocol for establishing or advancing
+membership epochs, or for causal stability, is standardised here. A deployment that cannot
 prove a stronger safe-compaction condition retains the compressed context. Replica identifiers
 are never recycled, so a retired replica cannot resurrect an old counter lineage.
 

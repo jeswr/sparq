@@ -57,6 +57,19 @@ const ok   = Validator.conforms(dataTurtle, shapesTurtle, "turtle", /* violation
   `--features shacl-af`, the bundle engages `sparq-shacl`'s SHACL-AF rule validation.
   It is OFF by default so the standard bundle carries zero rule code; CI builds and
   tests the bundle in BOTH feature states.
+- **Repeat validation without re-parse — opt-in `stateful` feature** (sq-01xlp).
+  A directional, NON-canonical work-box measurement found data-graph parsing coming
+  to dominate the one-shot cost as corpora grow
+  ([`research/shacl-wasm-stateful-2026-07.md`](../../research/shacl-wasm-stateful-2026-07.md);
+  canonical quiet-box evidence pending), so `--features stateful` adds a pre-parsed
+  `ParsedGraph` handle:
+  `ParsedGraph.parse(text, format)` once, then `.validate(shapes)` /
+  `.validateTurtle` / `.validateText` / `.conforms` per call — the same report
+  surface at validate-only cost (call `.free()` when finished; handles hold wasm
+  linear memory). OFF by default so the showcase artifact (and its deterministic
+  bundle-bytes record) is unchanged; CI covers every feature state. Note the lean
+  bundle's `Store.validate` is ALSO a stateless one-shot — this handle is the only
+  pre-parsed SHACL path on either wasm surface.
 - **Native correctness, thin binding.** Validation correctness is the native
   `sparq-shacl` engine's; this bundle only loads the two graphs and hand-serialises
   the report (no serde, mirroring the lean bundle's JSON path). The build is
@@ -78,6 +91,12 @@ const ok   = Validator.conforms(dataTurtle, shapesTurtle, "turtle", /* violation
   f=crates/sparq-shacl-wasm/pkg/sparq_shacl_wasm_bg.wasm
   echo "pre-gzip: $(stat -c%s "$f") bytes   gzip -9: $(gzip -9 -c "$f" | wc -c) bytes"
   ```
+
+  For the *comparative* wire-byte picture — this artifact against an
+  esbuild-minified, tree-shaken `rdf-validate-shacl` browser bundle, plus the
+  size-trim levers (cargo profile, binaryen headroom) — run
+  `bash bench/shacl-wasm/run.sh --bundle-only`; the levers are inventoried in
+  [`research/gap-shacl-wasm-2026-07.md`](../../research/gap-shacl-wasm-2026-07.md#size-trim-levers-sq-c6c2s).
 
 - **Status** — this crate delivers the wasm portability, the `Validator` entry
   points, the `shacl-af` opt-in, and a headless `wasm-pack test --node` smoke suite.

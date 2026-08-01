@@ -1,0 +1,6 @@
+{
+  "pr": 3739,
+  "bead": "sq-dzbg2",
+  "date": "2026-07-23",
+  "reason": "[SONNET-4.6] sq-dzbg2: feature-OFF posture declaration for sparq-engine's persistent planner statistics. The `persistent-stats` feature is default-OFF, the stats module is compiled only under `#[cfg(feature = \"persistent-stats\")]`, and the planner's catalog lookup is guarded by the same cfg. The lean sparq-wasm build therefore enables none of the catalog serialization, histogram, or planner-lookup behavior. The feature-OFF artifact movement reported by the byte-identity gate is an intentional consequence of the additive manifest/cfg source surface, not a default-on statistics capability; its size remains governed separately by the wasm bundle ratchet."
+}

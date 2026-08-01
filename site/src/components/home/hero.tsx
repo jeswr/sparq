@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { HeroQueryRunnerLazy } from "@/components/home/hero-runner-lazy";
 import { withBasePath } from "@/lib/base-path";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 export function Hero() {
   return (
