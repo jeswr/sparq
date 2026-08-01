@@ -72,7 +72,7 @@
 # (`#[cfg(feature = "streaming-serialization")]`), which pins streamed output byte-equal to the
 # buffered writers. Without the leg both would be silent gaps.
 # Verified: `cargo test -p sparq-cli --features streaming-serialization -- --list` shows the
-# 7 dump_streaming_cli tests.
+# 8 dump_streaming_cli tests.
 - name: "sparq-cli (streaming-serialization)"
   crate: "sparq-cli"
   features: "streaming-serialization"
