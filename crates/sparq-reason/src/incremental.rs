@@ -2376,102 +2376,11 @@ fn n3_sccs(n: usize, edges: &FxHashMap<usize, FxHashSet<usize>>) -> Vec<Vec<usiz
 }
 
 // ---- serialization (the fallback / oracle path) --------------------------------------------
-
-fn n3_quote_into(v: &str, out: &mut String) {
-    for c in v.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-}
-
-fn n3_write_term(t: &N3Term, out: &mut String) {
-    match t {
-        N3Term::Iri(i) => {
-            out.push('<');
-            out.push_str(i);
-            out.push('>');
-        }
-        N3Term::Lit(v, _, Some(lang)) => {
-            out.push('"');
-            n3_quote_into(v, out);
-            out.push('"');
-            out.push('@');
-            out.push_str(lang);
-        }
-        N3Term::Lit(v, dt, None) => {
-            out.push('"');
-            n3_quote_into(v, out);
-            out.push('"');
-            if dt != N3_XSD_STRING {
-                out.push_str("^^<");
-                out.push_str(dt);
-                out.push('>');
-            }
-        }
-        N3Term::Blank(l) => {
-            out.push_str("_:");
-            out.push_str(l);
-        }
-        N3Term::Var(v) => {
-            out.push('?');
-            out.push_str(v);
-        }
-        N3Term::List(ms) => {
-            out.push('(');
-            for m in ms {
-                out.push(' ');
-                n3_write_term(m, out);
-            }
-            out.push_str(" )");
-        }
-        N3Term::Formula(ts) => {
-            out.push('{');
-            for t in ts {
-                out.push(' ');
-                n3_write_term(&t[0], out);
-                out.push(' ');
-                n3_write_term(&t[1], out);
-                out.push(' ');
-                n3_write_term(&t[2], out);
-                out.push_str(" .");
-            }
-            out.push_str(" }");
-        }
-        // RDF-star quoted-triple term — round-trips through the N3 parser's
-        // `<< s p o >>` form (GH #2012). [FABLE-5]
-        N3Term::Triple(tr) => {
-            out.push_str("<< ");
-            n3_write_term(&tr[0], out);
-            out.push(' ');
-            n3_write_term(&tr[1], out);
-            out.push(' ');
-            n3_write_term(&tr[2], out);
-            out.push_str(" >>");
-        }
-    }
-}
-
-/// Serialize ground facts back to N3 (the fallback / differential-oracle path). Lossless for
-/// parser-shaped terms: blank labels round-trip verbatim, language tags are already
-/// lowercase, plain strings re-acquire `xsd:string`.
-fn n3_serialize<'a>(facts: impl Iterator<Item = &'a [N3Term; 3]>) -> String {
-    let mut out = String::new();
-    for f in facts {
-        n3_write_term(&f[0], &mut out);
-        out.push(' ');
-        n3_write_term(&f[1], &mut out);
-        out.push(' ');
-        n3_write_term(&f[2], &mut out);
-        out.push_str(" .\n");
-    }
-    out
-}
+//
+// [OPUS-5] sq-xqchl.2 — the writer itself now lives in `n3::serialize`, shared with the
+// rule writer that echoes rules back into an EYE `--pass-all` document. One definition, so
+// a serializer and its parser cannot drift apart.
+pub(crate) use crate::n3::serialize::serialize_facts as n3_serialize;
 
 // ---- the graph -----------------------------------------------------------------------------
 

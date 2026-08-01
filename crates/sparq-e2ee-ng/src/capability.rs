@@ -15,7 +15,9 @@
 //! admission, and the thing an admin signature authenticates) and **secret
 //! fields** (`K_read`, private keys) that MUST be recipient-wrapped
 //! ([`crate::wrap`]) or moved out of band — never placed in RDF, logs, URLs, or
-//! topic messages (§4.2).
+//! topic messages (§4.2). [`wrap_capability`] / [`unwrap_capability`] are the
+//! typed form of that recipient-wrapped path, under a fixed domain-separation
+//! AAD ([`CAPABILITY_WRAP_AAD`]).
 //!
 //! A grant is scoped to a **branch set** ([`ScopedBranch`]) — usually one
 //! branch, since a read secret and a topic are per-branch — and [`delegate`]
@@ -29,6 +31,7 @@ use crate::error::{Error, Result};
 use crate::ids::{BranchId, CapId, Epoch, RepoId, Secret32, TopicId};
 use crate::sign::{PublicVerifyingKey, SecretSigningKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use crate::suite::{check_suite, SUITE_V0};
+use crate::wrap::{self, RecipientPublicKey, RecipientSecretKey, WrappedSecret};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -505,37 +508,21 @@ impl PublicGrant {
         if version != Some(VERSION) {
             return Err(Error::Schema("capability version"));
         }
-        let suite = suite.ok_or(Error::Schema("missing suite"))?;
-        check_suite(&suite)?;
         // The wire authority array must ALREADY be canonical (sorted, deduplicated):
         // normalizing here would accept multiple byte encodings of one logical
         // grant, breaking the bytes-level contract behind cap_id / admin_sig.
+        // This is a *bytes-level* check, so it stays here rather than in
+        // `validate_structure`: an in-memory array is re-canonicalized by
+        // `signing_entries`, so only the wire form can be non-canonical.
         let authority = authority.ok_or(Error::Schema("missing authority"))?;
         if authority != canon_authorities(authority.clone()) {
             return Err(Error::NonCanonical("authority array not sorted/deduplicated"));
         }
-        let validity = validity.ok_or(Error::Schema("missing validity"))?;
-        if validity.not_before > validity.not_after {
-            return Err(Error::Schema("validity not_before > not_after"));
-        }
-        // The publisher public key is present iff publish is granted: a grant
-        // without publish authority must not carry (and have authenticated) an
-        // unrelated publisher key.
-        if authority.contains(&Authority::Publish) != publisher_pub.is_some() {
-            return Err(Error::Separation("publisher key presence must match publish authority"));
-        }
-        let epoch = epoch.ok_or(Error::Schema("missing epoch"))?;
-        // The ceiling is a forward bound on the grant's own scope: a grant whose
-        // max_epoch precedes the epoch it is scoped to could never be exercised,
-        // so it is a malformed grant rather than a maximally-narrow one.
-        if max_epoch.is_some_and(|m| m.0 < epoch.0) {
-            return Err(Error::Schema("max_epoch precedes the grant epoch"));
-        }
-        let branch = branch.ok_or(Error::Schema("missing branch"))?;
-        let topic = topic.ok_or(Error::Schema("missing topic"))?;
-        // An ABSENT field 18 is the single-branch form, so an empty array would
-        // be a second encoding of one logical grant — reject it rather than
-        // normalize, or `cap_id` stops being a function of the grant.
+        // Likewise bytes-level: an ABSENT field 18 is the single-branch form, so
+        // an empty array would be a second encoding of one logical grant —
+        // reject it rather than normalize, or `cap_id` stops being a function of
+        // the grant. (An in-memory empty `extra_branches` IS the single-branch
+        // form and is omitted by `signing_entries`.)
         let extra_branches = match extra_branches {
             Some(v) if v.is_empty() => {
                 return Err(Error::NonCanonical(
@@ -545,31 +532,64 @@ impl PublicGrant {
             Some(v) => v,
             None => Vec::new(),
         };
-        // Validated over the WHOLE set (primary entry first), so this also pins
-        // the primary branch as the lowest-ordered one: the same branch set can
-        // therefore only be encoded one way.
-        if !extra_branches.is_empty() {
-            let mut scope = Vec::with_capacity(1 + extra_branches.len());
-            scope.push(ScopedBranch { branch, topic });
-            scope.extend_from_slice(&extra_branches);
-            check_scope(&scope)?;
-        }
-        Ok(PublicGrant {
+        let g = PublicGrant {
             repo: repo.ok_or(Error::Schema("missing repo"))?,
-            branch,
-            epoch,
-            topic,
+            branch: branch.ok_or(Error::Schema("missing branch"))?,
+            epoch: epoch.ok_or(Error::Schema("missing epoch"))?,
+            topic: topic.ok_or(Error::Schema("missing topic"))?,
             authority,
-            validity,
+            validity: validity.ok_or(Error::Schema("missing validity"))?,
             brokers: brokers.ok_or(Error::Schema("missing brokers"))?,
-            suite,
+            suite: suite.ok_or(Error::Schema("missing suite"))?,
             cap_nonce: cap_nonce.ok_or(Error::Schema("missing cap_nonce"))?,
             publisher_pub,
             parent_grant_id: parent,
             max_epoch,
             extra_branches,
             admin_sig,
-        })
+        };
+        g.validate_structure()?;
+        Ok(g)
+    }
+
+    /// The structural invariants of a well-formed grant, checked on the
+    /// **in-memory** value rather than on its wire bytes.
+    ///
+    /// This is the shared routine behind both directions: [`Self::decode_from`]
+    /// runs it on every decoded grant, and [`wrap_capability`] runs it on a
+    /// caller-constructed one, so a grant that a caller assembled field-by-field
+    /// (every [`PublicGrant`] field is public) cannot be wrapped into bytes that
+    /// its intended recipient would then be forced to reject.
+    ///
+    /// The two *bytes-level* canonicality rules — a sorted/deduplicated wire
+    /// authority array and an omitted-not-empty extra-branch field — are
+    /// deliberately NOT here: `signing_entries` establishes both when it
+    /// encodes, so they can only be violated by a wire encoding, and
+    /// [`Self::decode_from`] checks them directly.
+    pub(crate) fn validate_structure(&self) -> Result<()> {
+        check_suite(&self.suite)?;
+        if self.validity.not_before > self.validity.not_after {
+            return Err(Error::Schema("validity not_before > not_after"));
+        }
+        // The publisher public key is present iff publish is granted: a grant
+        // without publish authority must not carry (and have authenticated) an
+        // unrelated publisher key.
+        if self.authority.contains(&Authority::Publish) != self.publisher_pub.is_some() {
+            return Err(Error::Separation("publisher key presence must match publish authority"));
+        }
+        // The ceiling is a forward bound on the grant's own scope: a grant whose
+        // max_epoch precedes the epoch it is scoped to could never be exercised,
+        // so it is a malformed grant rather than a maximally-narrow one.
+        if self.max_epoch.is_some_and(|m| m.0 < self.epoch.0) {
+            return Err(Error::Schema("max_epoch precedes the grant epoch"));
+        }
+        // Validated over the WHOLE set (primary entry first), so this also pins
+        // the primary branch as the lowest-ordered one: the same branch set can
+        // therefore only be encoded one way.
+        if !self.extra_branches.is_empty() {
+            check_scope(&self.branch_scope())?;
+        }
+        Ok(())
     }
 }
 
@@ -598,8 +618,12 @@ pub struct Delegation {
 
 /// A full capability, optionally bearing secrets. The secret fields never appear
 /// in the public grant; serialize them only via [`Capability::encode_secret`]
-/// for recipient-wrapped / out-of-band transfer.
-#[derive(Debug)]
+/// for recipient-wrapped / out-of-band transfer — or, for the recipient-wrapped
+/// case, prefer [`wrap_capability`] / [`unwrap_capability`], which do that under a
+/// fixed domain-separation AAD without exposing the plaintext to the caller.
+///
+/// Its [`Debug`](core::fmt::Debug) is hand-written and redacts every secret
+/// field — see the impl below.
 pub struct Capability {
     /// The public, signable grant.
     pub grant: PublicGrant,
@@ -609,6 +633,33 @@ pub struct Capability {
     pub publisher_sk: Option<[u8; 32]>,
     /// Admin private key seed (§8.2 field 12) — present for an admin capability.
     pub admin_sk: Option<[u8; 32]>,
+}
+
+/// Debug stand-in for a secret field: prints `REDACTED` where the bytes would
+/// go, so an `Option<[u8; 32]>` seed renders as `Some(REDACTED)` / `None`.
+struct Redacted;
+
+impl core::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("REDACTED")
+    }
+}
+
+/// Hand-written so `{:?}` NEVER prints private key material (§4.2: secret fields
+/// must not reach logs). `read_secret` is a [`Secret32`] and redacts through its
+/// own `Debug`, but `publisher_sk` / `admin_sk` are bare `[u8; 32]` seeds that a
+/// derived `Debug` would print verbatim. Only their *presence* is shown, which
+/// [`Capability::validate`] already ties one-to-one to the public grant's
+/// authority set.
+impl core::fmt::Debug for Capability {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Capability")
+            .field("grant", &self.grant)
+            .field("read_secret", &self.read_secret)
+            .field("publisher_sk", &self.publisher_sk.as_ref().map(|_| Redacted))
+            .field("admin_sk", &self.admin_sk.as_ref().map(|_| Redacted))
+            .finish()
+    }
 }
 
 impl Capability {
@@ -818,6 +869,93 @@ impl Drop for Capability {
     fn drop(&mut self) {
         self.zeroize_secrets();
     }
+}
+
+/// The fixed domain-separation AAD every capability wrapping is bound to.
+///
+/// [`wrap_capability`] / [`unwrap_capability`] always pass exactly these bytes as
+/// the AEAD associated data, so a capability wrapping can never be opened as — or
+/// substituted for — a wrapping made for another purpose (a per-object DEK, a bare
+/// `K_read`, a future wrapped payload), each of which carries its own label under
+/// the generic [`crate::wrap::wrap`]. The label is versioned like the key-schedule
+/// labels (§8.3): a v1 capability wrapping would use a distinct one.
+pub const CAPABILITY_WRAP_AAD: &[u8] = b"urn:jeswr:w3id:e2ee-ng:draft:2026-07 capability-wrap v0";
+
+/// Recipient-wrap a capability **including its secret fields** — the recommended
+/// secret-transfer path of §4.2.
+///
+/// This is [`Capability::encode_secret`] followed by [`crate::wrap::wrap`] under the
+/// fixed [`CAPABILITY_WRAP_AAD`], with two things the hand-rolled two-step does not
+/// give you: the caller never handles the bearer-secret plaintext (this helper
+/// zeroizes its own copy before returning), and the AAD is not a caller-chosen
+/// string that the two ends can disagree on.
+///
+/// The capability is validated first — both the read/publish/admin separation
+/// invariants ([`Capability::validate`]) and the public grant's structural ones
+/// (`PublicGrant::validate_structure`, the same routine
+/// [`PublicGrant::decode`] runs) — so a malformed one fails here rather than
+/// producing bytes that [`unwrap_capability`] would always reject. Every
+/// [`PublicGrant`] field is public, so the grant half needs checking too:
+/// separation-correct secrets can still sit on a grant carrying an unsupported
+/// suite, an inverted validity window, a `max_epoch` behind its epoch, or a
+/// non-canonical branch set.
+///
+/// Zeroizing covers this function's plaintext buffer; it does not retroactively
+/// erase the intermediate CBOR fragments `encode_secret` allocates internally —
+/// that exposure is unchanged from calling `encode_secret` directly.
+///
+/// ```
+/// use sparq_e2ee_ng::capability::{
+///     base_grant, unwrap_capability, wrap_capability, Capability, Validity,
+/// };
+/// use sparq_e2ee_ng::cbor::Limits;
+/// use sparq_e2ee_ng::ids::{BranchId, Epoch, RepoId, Secret32, TopicId};
+/// use sparq_e2ee_ng::wrap::RecipientSecretKey;
+///
+/// let grant = base_grant(
+///     RepoId::random(),
+///     BranchId::random(),
+///     Epoch(0),
+///     TopicId::random(),
+///     Validity { not_before: 0, not_after: 100 },
+///     vec!["wss://broker.example".to_string()],
+/// );
+/// let cap = Capability::new_read(grant, Secret32::random()).unwrap();
+///
+/// let recipient = RecipientSecretKey::generate();
+/// let wrapped = wrap_capability(&cap, &recipient.public()).unwrap();
+/// let opened = unwrap_capability(&recipient, &wrapped, Limits::default()).unwrap();
+/// assert_eq!(opened.grant, cap.grant);
+/// ```
+pub fn wrap_capability(cap: &Capability, recipient: &RecipientPublicKey) -> Result<WrappedSecret> {
+    use zeroize::Zeroize;
+    cap.validate()?;
+    cap.grant.validate_structure()?;
+    let mut plaintext = cap.encode_secret();
+    let wrapped = wrap::wrap(recipient, &plaintext, CAPABILITY_WRAP_AAD);
+    plaintext.zeroize();
+    wrapped
+}
+
+/// Open a capability wrapped by [`wrap_capability`], with the recipient's private
+/// key.
+///
+/// Fails closed as [`Error::Decrypt`] on a wrong key, tampered ciphertext, or a
+/// wrapping made under any other AAD (including one produced by the generic
+/// [`crate::wrap::wrap`] with a caller-chosen label); the decrypted plaintext then
+/// goes through [`Capability::decode_secret`], so canonical-encoding and
+/// read/publish/admin separation are still enforced on untrusted input. The
+/// decrypted plaintext buffer is zeroized before returning either way.
+pub fn unwrap_capability(
+    sk: &RecipientSecretKey,
+    wrapped: &WrappedSecret,
+    limits: Limits,
+) -> Result<Capability> {
+    use zeroize::Zeroize;
+    let mut plaintext = wrap::unwrap(sk, wrapped, CAPABILITY_WRAP_AAD)?;
+    let cap = Capability::decode_secret(&plaintext, limits);
+    plaintext.zeroize();
+    cap
 }
 
 /// Delegate a **new** public grant from `parent`, narrowing constraints, and
@@ -1050,6 +1188,43 @@ mod tests {
         assert_eq!(admin_cap.admin_sk, Some([5u8; 32]));
         admin_cap.zeroize_secrets();
         assert_eq!(admin_cap.admin_sk, Some([0u8; 32]));
+    }
+
+    /// `{:?}` must never disclose private key material: the two bare seed fields
+    /// are redacted like `read_secret`'s `Secret32` already is, so a capability
+    /// reaching a log/panic message leaks only which authorities it bears. A
+    /// derived `Debug` would print the seed bytes verbatim and fail here.
+    #[test]
+    fn debug_redacts_private_key_seeds() {
+        let mut base = base_grant(
+            RepoId::from_bytes([1u8; 32]),
+            BranchId::from_bytes([2u8; 32]),
+            Epoch(7),
+            TopicId::from_bytes([3u8; 32]),
+            Validity { not_before: 100, not_after: 200 },
+            vec!["wss://broker.example".to_string()],
+        );
+        // Pin the otherwise-random nonce so the whole rendering is deterministic
+        // and the "no seed byte anywhere" assertions below cannot flake.
+        base.cap_nonce = [4u8; 32];
+
+        // A seed byte distinct from every public field's fill byte, so a hit in
+        // the rendering can only have come from the seed itself.
+        let publisher = SecretSigningKey::from_seed([0xAB; 32]);
+        let write = Capability::new_write(base.clone(), Secret32([0xCD; 32]), &publisher).unwrap();
+        let s = format!("{write:?}");
+        assert!(s.contains("publisher_sk: Some(REDACTED)"), "{s}");
+        assert!(s.contains("admin_sk: None"), "{s}");
+        assert!(s.contains("read_secret: Some(Secret32(REDACTED))"), "{s}");
+        assert!(!s.contains("171"), "publisher seed byte leaked: {s}");
+        assert!(!s.contains("205"), "read secret byte leaked: {s}");
+
+        let admin = SecretSigningKey::from_seed([0xAB; 32]);
+        let admin_cap = Capability::new_admin(base, &admin).unwrap();
+        let s = format!("{admin_cap:?}");
+        assert!(s.contains("admin_sk: Some(REDACTED)"), "{s}");
+        assert!(s.contains("publisher_sk: None"), "{s}");
+        assert!(!s.contains("171"), "admin seed byte leaked: {s}");
     }
 
     /// The epoch ceiling is a forward bound, so a grant whose `max_epoch`

@@ -27,16 +27,18 @@
 #
 #   HARD gates (FAIL the build; picked up by the ci-summary aggregator):
 #     • markdownlint  — structural markdown defects over the user-facing + governance
-#                       doc surface (root docs, skills/, docs/, crates/, and — as of
-#                       sq-rqyo — research/ + zk/). Tuned to the repo's house style via
-#                       .markdownlint-cli2.jsonc.
+#                       doc surface (root docs, skills/, docs/, crates/, metrics/, the
+#                       book/ mdBook sources — added by issue #5020 — and, as of
+#                       sq-rqyo, research/ + zk/). Tuned to the repo's house style via
+#                       .markdownlint-cli2.jsonc, which carries the authoritative globs.
 #     • typos         — high-confidence spelling errors in those same docs (markdown
 #                       only), with a domain allowlist in _typos.toml.
-#     • internal-links — lychee --offline over the root docs, skills/, docs/, crates/,
-#                       and — as of sq-jyhr8 — the measurement surface metrics/ +
-#                       scripts/agent-telemetry/ (research/ + zk/ stay markdownlint-only,
-#                       they are not lychee inputs): every relative link AND
-#                       heading-anchor (#fragment) must resolve. Deterministic (no net).
+#     • internal-links — lychee --offline over the root docs, skills/, docs/, crates/, the
+#                       book/ mdBook sources (issue #5020), and — as of sq-jyhr8 — the
+#                       measurement surface metrics/ + scripts/agent-telemetry/ (research/ +
+#                       zk/ stay markdownlint-only, they are not lychee inputs): every
+#                       relative link AND heading-anchor (#fragment) must resolve.
+#                       Deterministic (no net).
 #     • privacy-claims — greps the OUTWARD claim surface for unqualified ZK/MPC
 #                       privacy/soundness claims (the empirical-honesty mandate; the v1
 #                       ZK verifier is pending external audit + sparq-mpc is semi-honest
@@ -181,18 +183,19 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: lychee@0.23.0
 
       # ---- former job: markdownlint (docs) ----
       - name: markdownlint (docs)
         # npx pins the exact cli2 version; the config (.markdownlint-cli2.jsonc) carries
-        # the tuned ruleset AND the HARD-scope globs (root docs + skills/ + docs/ + crates/).
+        # the tuned ruleset AND the authoritative HARD-scope globs (do not re-enumerate
+        # them here — the copy that used to live on this line had gone stale).
         run: npx --yes markdownlint-cli2@0.18.1
 
       # ---- former job: typos (docs) ----
@@ -235,12 +238,18 @@ jobs:
           # before those merged would have dangled. Both records are now on main, so the
           # cross-references the measurement docs make to research/, bench/ and the
           # harness scripts are gated like the rest of the doc surface.
+          # [OPUS-5] issue #5020: './book/**/*.md' added — the mdBook sources were in
+          # NEITHER this list nor the markdownlint HARD globs, so a broken intra-book
+          # ./*.md link shipped unchecked. No exclusion is needed for the pages'
+          # `{{#include ../../README.md:anchor}}` / `{{#rustdoc_include}}` directives:
+          # they are not markdown link syntax, so lychee's extractor never emits them
+          # as URIs (verified locally against lychee 0.23.0, the pinned version).
           args: >-
             --offline
             --include-fragments
             --no-progress
             README.md AGENTS.md ASSURANCE.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CLAUDE.md
-            './skills/**/*.md' './docs/**/*.md' './crates/**/*.md'
+            './skills/**/*.md' './docs/**/*.md' './crates/**/*.md' './book/**/*.md'
             './metrics/**/*.md' './scripts/agent-telemetry/**/*.md'
           fail: true
           # Don't post a tracking issue (read-only token; gating is enough).
@@ -548,7 +557,9 @@ jobs:
       # Both suites are hermetic (stdlib only, no gh/network):
       # the script's own rule self-test, plus the independent safety tests
       # (fail-closed / no unpark-without-an-area / no invented label / the three
-      # rule orderings that were measured wrong on the live backlog).
+      # rule orderings that were measured wrong on the live backlog / — since
+      # #5003 — the candidate fetch's REACH and its no-silent-truncation guards,
+      # which are fail-QUIET defects a live cron cannot surface on its own).
       - name: Self-test triage-area.py (needs:area classifier — fail-closed + no-drift)
         run: |
           python3 scripts/triage-area.py --self-test
@@ -599,6 +610,19 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [SONNET-4.6] sq-6vshe.11: every cargo-llvm-cov job MUST set a job-level RUSTFLAGS,
+      # and they must all set the SAME value. cargo picks ONE rustflags source (first match
+      # wins, never merged) and cargo-llvm-cov sets RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS to
+      # inject `-C instrument-coverage` — which silently DROPS ci.yml's workflow-level
+      # CARGO_TARGET_<triple>_RUSTFLAGS lld flag in exactly those jobs. Nothing fails when
+      # that happens; the flag just stops applying, which is how it went unnoticed from
+      # sq-6vshe.1 until it was measured. The sameness half additionally protects the engine
+      # coverage split, whose cross-runner .profraw merge is only valid while the run and
+      # merge jobs compile with identical inputs. Stdlib-only, no compile, no deps.
+      - name: Self-test coverage RUSTFLAGS gate (pure logic)
+        run: python3 scripts/check-coverage-rustflags.py --self-test
+      - name: "Enforce job-level RUSTFLAGS on every cargo-llvm-cov job — GATING"
+        run: python3 scripts/check-coverage-rustflags.py
       # [OPUS-4.8] sq-u59rq: the stacked-PR arm guard. A deterministic PreToolUse command-hook
       # (.claude/settings.json, sibling to the perf-reviewer) that DENIES `gh pr merge … --auto`
       # when the PR's baseRefName ≠ main — so we never squash-merge a stacked PR into its base
@@ -635,6 +659,26 @@ jobs:
         run: python3 scripts/check-dashboard-publish-wiring.py --self-test
       - name: "Enforce every served bench/dashboard asset is wired into the Pages publisher — GATING"
         run: python3 scripts/check-dashboard-publish-wiring.py
+      # [OPUS-5] sq-t099c: the drift class tests/scoreboard_floors.rs does NOT cover. That
+      # guard binds crate-test floor `const`s to the central registry; the two BINARY-runner
+      # suites' floors are hand-typed `RATCHET=<n>` shell literals in ci.yml, and the number
+      # compared against the inference one is grepped out of a report by heading text. So the
+      # emitter (inference/report.rs), ci.yml's grep, scoreboard.rs + its generated mirror, and
+      # the INTENTIONALLY-tracked inference-conformance-report.md all have to agree — and
+      # nothing checked that they did. Observed live on main: the emitter writes
+      # "## Overall (all inference suites)" while the committed report said "## Overall (all
+      # suites)" with a hand-added paragraph wedged between heading and totals, so ci.yml's own
+      # `grep -A2 <heading>` could not parse the artefact readers cite. It stayed silent because
+      # CI REGENERATES the report before parsing it — the tracked file is read by nothing. This
+      # gate binds heading, bucket spelling, grep-window parseability, both `RATCHET=` literals
+      # and the doc-comment floor list to the registry. It never regenerates the report (that
+      # needs the pinned suites + a release build), so a legitimately-lagging artefact is fine;
+      # only a heading/count contradiction is red. GATING: deterministic, in-repo, no network,
+      # stdlib-only. Mutation table in --self-test proves each check has teeth.
+      - name: Self-test inference report/scoreboard drift gate (mutation table)
+        run: python3 scripts/check-inference-report-drift.py --self-test
+      - name: "Enforce inference report ↔ ci.yml ratchet ↔ central scoreboard floor agree — GATING"
+        run: python3 scripts/check-inference-report-drift.py
       # [OPUS-4.8] sq-d8or: the built-docs-site link gate (scripts/check-site-links.sh) is
       # invoked on the publish path in pages.yml (after `next build`), where the static export
       # exists. Its remap of the /sparq GitHub-Pages base path + its TEETH (a broken internal
@@ -856,6 +900,23 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
+      # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
+      # outage there concluded `failure` with nothing measured and ejected an unrelated
+      # PR from the merge queue. It is now restored from an Actions cache. Same
+      # invisible-regression shape as the posture test above — drop the restore step and
+      # CI stays green while silently re-coupling to a third party's uptime. This runs
+      # the REAL bash `fetch_pinned_file` against a stub curl to prove the offline-on-hit
+      # property, pins the ci.yml wiring, and pins that the ratchet was NOT weakened.
+      - name: Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)
+        run: python3 scripts/tests/test_inference_corpus_cache.py
+      # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
+      # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
+      # versioned binary; reverting to `cargo install wasm-pack` would keep the lane
+      # green on a good day while re-exposing it to a transient crates.io blip
+      # (which red-gated PR #1131). Hermetic + stdlib-only (no PyYAML needed).
+      - name: js lane wasm-pack install posture (prebuilt + pinned — sq-khm3f)
+        run: python3 scripts/tests/test_js_wasm_pack_install.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
       # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;
@@ -959,6 +1020,17 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [SONNET-4.6] test_coverage_rustflags.py (17 tests) — supplements the
+      # check-coverage-rustflags.py --self-test + enforce run above: the pure
+      # fixtures (job-level vs step-level env, CSV `tool:` list, bare `run: cargo
+      # llvm-cov`, no-compile coverage job out of scope, value divergence), the
+      # scalar parser (a mis-parsed value would fake a divergence), the live
+      # workflows invariant, and TWO vacuity guards — the scan must find at least
+      # one cargo-llvm-cov job, and it must specifically cover the
+      # coverage-engine-{run,merge} pair whose RUSTFLAGS must match for the
+      # cross-runner .profraw merge to be valid. Stdlib-only, no git/network.
+      - name: Self-test check-coverage-rustflags.py (fixtures + live invariant — sq-6vshe.11)
+        run: python3 scripts/tests/test_coverage_rustflags.py
       # [OPUS-5] sparq-org/sparq#4652: the zero-dispatch merge-group watchdog
       # (scripts/merge-group-watchdog.py, .github/workflows/merge-group-watchdog.yml)
       # plus the CI_TIMEOUT routing split it feeds in merge-queue-feedback.yml. Both

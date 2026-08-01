@@ -537,8 +537,13 @@ jobs:
     # regardless of any check-run posting (sq-fmx4u.4).
     #
     # [OPUS-4.8] sq-ibrze (unchanged): legs are ASSEMBLED from the per-crate fragment
-    # files (`.github/feature-matrix.d/<crate>.yml`). To add a leg, edit ONLY the
-    # relevant crate fragment — do NOT reintroduce a static `include:` list here.
+    # files (`.github/feature-matrix.d/<crate>.yml`). To add a leg, edit the relevant
+    # crate fragment — do NOT reintroduce a static `include:` list here.
+    # [SONNET-4.6] issue #2384: that is a TWO-FILE change, not a one-file change. A
+    # leg's `name:` is pinned byte-for-byte by the gate-name golden, so adding /
+    # renaming / removing a leg ALSO requires regenerating
+    # `scripts/tests/feature-matrix-legnames.golden.txt`. Scope both files (never one)
+    # — see `.github/feature-matrix.d/README.md`.
     name: opt-in group (${{ matrix.group }})
     runs-on: ubuntu-latest
     permissions:

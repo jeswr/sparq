@@ -2,8 +2,10 @@
 # [SONNET-4.6] run_differential_harness.sh — PROOF M1 (sq-3x7dl.14.2).
 #
 # Drives the XPath differential oracle harness:
-#   1. Run the Rust harness's own unit tests (the F&O references, the self-expiring
-#      oracle-divergence guards, the per-test-function fault-injection coverage checks).
+#   1. Run the Rust harness's own unit tests (the F&O references, the CPython
+#      codepoint-slicing cross-check of the fn:substring window, the codepoint->byte
+#      boundary-conversion property test (sq-hjvte), the self-expiring oracle-divergence
+#      guards, the per-test-function fault-injection coverage checks).
 #   2. Build the harness (zk/xpath/differential/).
 #   3. Generate the oracle Noir test file — every expected value read back from sparq's
 #      own Rust SPARQL/XSD scalar evaluator, cross-checked bit-for-bit against native f64
@@ -28,7 +30,7 @@
 #
 # The noir_XPath source is NOT in this repo — it was externalized to the
 # sparq-org/noir_XPath face repo (sq-5reoy / #1599). Override the pinned dependency with:
-#   XPATH_GIT=https://github.com/sparq-org/noir_XPath  XPATH_TAG=v0.2.0
+#   XPATH_GIT=https://github.com/sparq-org/noir_XPath  XPATH_TAG=v0.3.0
 #   XPATH_DIRECTORY=xpath                       # the PACKAGE inside that repo's workspace
 #   XPATH_PATH=/local/checkout/xpath            # a local path dep instead of the git dep
 #
@@ -46,7 +48,7 @@ COMMITTED_ORACLE="${XPATH_DIR}/tests/differential_oracle/src/lib.nr"
 # Pinned released face repo. A floating default would silently change what is being
 # verified, so both the URL and the TAG are explicit and overridable.
 XPATH_GIT="${XPATH_GIT:-https://github.com/sparq-org/noir_XPath}"
-XPATH_TAG="${XPATH_TAG:-v0.2.0}"
+XPATH_TAG="${XPATH_TAG:-v0.3.0}"
 XPATH_PATH="${XPATH_PATH:-}"
 # The PACKAGE within the face repo's Nargo WORKSPACE — required for the git form, see
 # write_nargo_toml below.

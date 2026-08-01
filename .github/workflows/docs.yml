@@ -86,7 +86,7 @@ jobs:
       # Pinned, prebuilt mdbook (GitHub Releases binary — reproducible + fast, no
       # cargo compile). Explicit `tool:` is required by the sq-ur7o install-action lint.
       - name: Install mdbook (pinned)
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: mdbook@0.4.40
 

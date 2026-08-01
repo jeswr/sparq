@@ -53,6 +53,12 @@ const nextConfig: NextConfig = {
   // direct per-primitive imports at compile time, so only primitives actually used are bundled.
   // Purely mechanical (same symbols, same behaviour); lucide-react is already on Next's
   // built-in default list, radix-ui (the monolith) is not.
+  //
+  // [OPUS-5] sq-w728o — this line is a WORKAROUND for a missing upstream default. Getting
+  // `radix-ui` onto Next's built-in list is already proposed in vercel/next.js#76065 (open,
+  // unreviewed); see research/nextjs-optimize-package-imports-radix-upstream.md for the
+  // measured evidence prepared for that thread. DELETE this line once sparq's Next floor
+  // ships the default entry — it is then redundant, not load-bearing.
   experimental: { optimizePackageImports: ["radix-ui"] },
   // [FABLE-5] sq-ymr2e.10 — the visual-regression suite (SPARQ_VR=1, set only by scripts/vr.sh
   // inside the pinned Playwright container) screenshots pages served by `next dev`, and the dev

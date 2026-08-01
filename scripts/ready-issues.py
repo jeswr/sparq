@@ -421,6 +421,31 @@ def reserves_partition(key, exempt=None):
         return True
     exempt = non_reserving_partitions() if exempt is None else exempt
     return path[0] not in exempt
+
+
+def partition_dump(keys):
+    """`--dump-partitions`' payload: the partition contract, as JSON, offline and API-free.
+
+    [OPUS-5] sparq#4929 adds `non_reserving` + `reserves` alongside the roots/resolution #4365
+    exported. The registry has TWO occupancy legs and they do not read this repository the same
+    way: `dispatch.yml`'s readiness step `load_dispatch`es `scripts/dispatch-plan.py` and can call
+    `reserves_partition` directly, but the CLAIM/assemble leg (`dispatch-claim.py::
+    busy_packages_of_pulls`) is a separate script, and if it has no loaded planner then the ONLY
+    thing left for it to do is re-type `{"ci", "docs"}` into its own source — a second copy of the
+    declaration, which is the drift sparq#4929 reports rather than a fix for it. So the verdict is
+    published on the offline channel too, computed by the same validated predicate.
+
+    `reserves` is the per-key ANSWER (`reserves_partition`), not the set: a key that resolves INTO
+    an exempt partition (the live `ci-fragments`) is exempt with it, and exact-string membership
+    gets that wrong. `non_reserving` is the VALIDATED declaration, so a malformed one publishes the
+    empty set — fully reserving, today's behaviour — exactly as the in-process path does.
+    """
+    return {"roots": sorted(workspace_roots()),
+            "non_reserving": sorted(non_reserving_partitions()),
+            "resolved": {k: list(partition_path(k)) for k in keys},
+            "reserves": {k: reserves_partition(k) for k in keys}}
+
+
 # --- open blockers: NATIVE GitHub dependencies UNIONED with the legacy body markers -------------
 # [OPUS-5] Until this landed, BOTH readers of "is this issue blocked" (this file and the registry's
 # dispatch.yml planner step) derived `open_blockers` ONLY by regexing `Blocked-by: #NN` out of the
@@ -1336,6 +1361,19 @@ def _self_test():
               offered("ci"), [20])
     finally:
         globals()["NON_RESERVING_PARTITIONS"] = _declared
+    # [OPUS-5 2026-07-31] sparq#4929: the OFFLINE channel publishes the same verdict. The registry's
+    # CLAIM/assemble leg is a different script from its readiness step and may hold no loaded
+    # planner; if `--dump-partitions` does not carry the exemption, its only remaining option is to
+    # re-type the set, which is the drift #4929 reports. Asserted on the payload builder rather
+    # than on the CLI so the shape is pinned, not just the plumbing.
+    _dump = partition_dump(["ci", "ci-fragments", "deps"])
+    check("--dump-partitions publishes the validated exemption", _dump["non_reserving"],
+          ["ci", "docs"])
+    check("...and the per-key verdict, containment-aware (a set alone loses `ci-fragments`)",
+          _dump["reserves"], {"ci": False, "ci-fragments": False, "deps": True})
+    check("...without dropping the #4365 keys the registry already reads",
+          (sorted(_dump), _dump["resolved"]["ci-fragments"]),
+          (["non_reserving", "reserves", "resolved", "roots"], ["ci"]))
     # SCOPE: candidacy untouched, and a SELECTED candidate still reserves — per-tick width stays
     # one worker per partition, which is why the live frontier moved 1 -> 3 and not 1 -> ~50.
     check("candidate keying for ci/docs is unchanged", (packages_of({"area:ci"}),
@@ -1637,9 +1675,7 @@ def main():
     if args.self_test:
         return _self_test()
     if args.dump_partitions:
-        json.dump({"roots": sorted(workspace_roots()),
-                   "resolved": {k: list(partition_path(k)) for k in args.keys}},
-                  sys.stdout, indent=2, sort_keys=True)
+        json.dump(partition_dump(args.keys), sys.stdout, indent=2, sort_keys=True)
         print()
         return 0
     issues = _fetch(args.repo)

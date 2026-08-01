@@ -390,6 +390,14 @@ The deterministic exact / DiskANN / PQ paths keep the scalar reduction, so their
 `bench/vector/expected.tsv` deficits are byte-stable. Full recall-QPS + build-time evaluation matrix (SIMD vs instant-distance-scalar vs
 hnsw_rs, NON-CANONICAL): `research/gap-vector-ann-simd-2026-07.md`.
 
+[SONNET-4.6] (#5065) Which kernel actually runs is decided at runtime, so a test that only checks
+the dispatcher against a reference is satisfied by the scalar fallback and proves nothing about the
+intrinsic kernel. `simd::tests` therefore asserts the SELECTED kernel: on x86_64 it fails closed
+when `CI` is set and AVX2+FMA are absent, rather than reporting green on an unexecuted `l2_sq_avx2`.
+Set `SPARQ_VECTORS_REQUIRE_SIMD=1` to demand kernel execution on a dev box, or `=0` to accept
+scalar-only coverage on a runner that genuinely lacks the extension. The aarch64/NEON side is
+covered instead by the `vectors-aarch64` workflow's fail-closed `asimd` preflight (#5028).
+
 ```rust
 # #[cfg(feature = "approx-ann")] {
 use sparq_vectors::{nearest_exact, VectorIndex, HnswConfig};

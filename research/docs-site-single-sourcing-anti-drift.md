@@ -8,6 +8,11 @@
 > touch. Predecessors: sq-9jw5 (docs overhaul), sq-5fd1 (doc-lint CI),
 > sq-p26u (`include_str!` / docs.rs). Companion runbook:
 > [`docs/pages-cutover-runbook.md`](../docs/pages-cutover-runbook.md).
+> **Post-record status:** The separate sq-iigf Pages source-mode cutover is complete
+> on the repo side: the producer workflow exists. The Pages service setting is reported
+> as flipped but is not verified here; see the linked runbook's Provenance section.
+> The guide's Pages mount discussed in §8 remains open: `docs.yml` still has no deploy
+> job, and `pages.yml` still records the guide-at-root versus `/guide/` decision as open.
 
 ## 1. The requirement, restated
 

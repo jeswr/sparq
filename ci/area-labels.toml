@@ -7,10 +7,12 @@
 #
 # WHY THIS FILE EXISTS — the measured problem (reg#677, 2026-07-26 14:45Z).
 # The fleet scheduler (`dispatch-claim.py` / `scripts/ready-issues.py`) partitions work
-# by `area:<name>`: an in-flight PR RESERVES its areas, and a ready issue is deferred
-# while any of ITS areas is reserved. A PR with NO `area:` label maps to the
-# SERIALIZING `__global__` partition, so while it is in flight EVERY issue defers,
-# whatever crate it names. Measured: 84 of 87 open PRs carried no `area:` label,
+# by `area:<name>`, but PLAN and CLAIM treat an unattributable PR differently. PLAN's
+# occupancy rule reserves ONLY the PR's declared areas; a PR with NO `area:` label
+# reserves nothing there, by design, rather than seizing the whole fleet. CLAIM's
+# `busy_packages_of_pulls` instead maps that PR to the SERIALIZING `__global__`
+# partition because its blast radius is unknowable. Measured: 84 of 87 open PRs
+# carried no `area:` label,
 # because NOTHING in the pipeline ever applied one. Live layer chain that tick:
 # candidates 12 -> frontier 3 -> lease 3 -> max_concurrent 8 -> account pool 28,
 # i.e. min = 3 — 28 account slots idle while 3 workers ran. Raising max_concurrent or

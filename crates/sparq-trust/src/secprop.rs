@@ -163,6 +163,13 @@ pub const SECX_LINKABLE: &str = "https://w3id.org/zkp-sparql/sec-prop#Linkable";
 
 // ── [his] PostQuantumForgery levels + the nistLevel parameter ─────────────────
 
+/// `sec-prop:PostQuantumForgery` — the vendored post-quantum-forgery dimension
+/// (paper §7.7 #3). The IRI, label and `sec-prop:SecurityProperty` type are the
+/// original's; `secprop-ext.ttl` re-asserts them so the dimension is a declared
+/// subject there — the precondition for retiring the vendored-dimension exemption
+/// list in the cross-crate drift guards (`sq-mgxz8`).
+pub const SEC_PROP_POST_QUANTUM_FORGERY: &str =
+    "https://w3id.org/zkp-sparql/sec-prop#PostQuantumForgery";
 /// `secx:PQForgeryResistant`.
 pub const SECX_PQ_FORGERY_RESISTANT: &str =
     "https://w3id.org/zkp-sparql/sec-prop#PQForgeryResistant";
@@ -173,6 +180,10 @@ pub const SECX_NIST_LEVEL: &str = "https://w3id.org/zkp-sparql/sec-prop#nistLeve
 
 // ── [his] PostQuantumSnooping levels ──────────────────────────────────────────
 
+/// `sec-prop:PostQuantumSnooping` — the vendored harvest-now-decrypt-later dimension
+/// (paper §7.7 #4); the PQ-time slice of the general [`SECX_HIDING`] axis.
+pub const SEC_PROP_POST_QUANTUM_SNOOPING: &str =
+    "https://w3id.org/zkp-sparql/sec-prop#PostQuantumSnooping";
 /// `secx:PQHiding`.
 pub const SECX_PQ_HIDING: &str = "https://w3id.org/zkp-sparql/sec-prop#PQHiding";
 /// `secx:PQRevealable`.
@@ -192,6 +203,10 @@ pub const SECX_FULL_SOURCE_DISCLOSURE: &str =
 
 // ── [his] SignatureTypeLeakage levels ─────────────────────────────────────────
 
+/// `sec-prop:SignatureTypeLeakage` — the vendored signature-type-leakage dimension
+/// (paper §7.7 #5).
+pub const SEC_PROP_SIGNATURE_TYPE_LEAKAGE: &str =
+    "https://w3id.org/zkp-sparql/sec-prop#SignatureTypeLeakage";
 /// `secx:SchemeHidden`.
 pub const SECX_SCHEME_HIDDEN: &str = "https://w3id.org/zkp-sparql/sec-prop#SchemeHidden";
 /// `secx:SchemeRevealed`.
@@ -375,10 +390,12 @@ pub const ALL_SECPROP_IRIS: &[&str] = &[
     SECX_PER_PRESENTATION,
     SECX_LINKABLE,
     // [his] PostQuantumForgery
+    SEC_PROP_POST_QUANTUM_FORGERY,
     SECX_PQ_FORGERY_RESISTANT,
     SECX_PQ_FORGEABLE,
     SECX_NIST_LEVEL,
     // [his] PostQuantumSnooping
+    SEC_PROP_POST_QUANTUM_SNOOPING,
     SECX_PQ_HIDING,
     SECX_PQ_REVEALABLE,
     // [his] SourceCredentialDisclosure
@@ -386,6 +403,7 @@ pub const ALL_SECPROP_IRIS: &[&str] = &[
     SECX_ISSUER_SET_DISCLOSURE,
     SECX_FULL_SOURCE_DISCLOSURE,
     // [his] SignatureTypeLeakage
+    SEC_PROP_SIGNATURE_TYPE_LEAKAGE,
     SECX_SCHEME_HIDDEN,
     SECX_SCHEME_REVEALED,
     // [his] ProofSizeLeakage
