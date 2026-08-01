@@ -156,14 +156,17 @@ wrapped.**
 | `checked_mul` | `p: u128 = (mag_a as u128) * (mag_b as u128)` — widened *before* the multiply, per the rule above (`< 10^36 < 2^127`), then rescale by `10^S`: `q = p / 10^S`, `r = p % 10^S`, `q += (2r >= 10^S)` | assert `q < 10^18` |
 | `checked_div` | **`assert(mag_b != 0)`** first; `n: u128 = (mag_a as u128) * pow10(S)` — widened before the multiply (`< 10^36`), `q = n / mag_b`, `r = n % mag_b`, `q += (2r >= mag_b)`; sign is the xor | zero divisor is `err:FOAR0001` — **fail-closed, no Infinity escape**, matching the posture `numeric_divide_int_as_double` already takes for decimal operands |
 | `round_to_int(Ceil \| Floor \| HalfUp)` | mirrors `Dec::round_to_int`'s euclidean form on the signed value | total |
-| `from_i64` | magnitude via an **unsigned** absolute that cannot overflow: widen before negating — `m: u128 = if n < 0 { (-(n as i128)) as u128 } else { n as u128 }` — then `wide: u128 = m * 10^S` | `assert(wide < 10^18)` before narrowing to `u64`. `\|i64::MIN\|` is **not** representable as an `i64`, so a signed `-n`/`abs()` overflows *ahead of* any range assert; the widen is load-bearing, not stylistic. `m * 10^S` likewise must not be a `u64` multiply |
+| `from_i64` | magnitude first, in arithmetic that **never negates `i64::MIN`**: `m: u64 = if n < 0 { ((-(n + 1)) as u64) + 1 } else { n as u64 }` — for `n = i64::MIN`, `-(n + 1)` is `i64::MAX`, so every signed step stays inside `i64` and the `+ 1` happens in `u64`, where `2^63` is in range; then widen — `wide: u128 = (m as u128) * pow10(S)` | `assert(wide < 10^18)` before narrowing to `u64`. `\|i64::MIN\|` is **not** representable as an `i64`, so a direct `-n`/`abs()` overflows *ahead of* any range assert; the `n + 1` detour and the widen are both load-bearing, not stylistic. `m * 10^S` likewise must not be a `u64` multiply. Uses `i64`, `u64`, `u128` only — **no signed `i128`**, so this row does not depend on the §2.2 signed-tower question either way |
 | `numeric_divide_int_as_decimal` | `from_i64(a).checked_div(from_i64(b))` | the exact replacement for the `sq-3x7dl.4` approximation |
 
 Every intermediate — including the two conversions above — closes inside `u128`. The widest are
 `mag_a · mag_b` (`mul`), `mag_a · 10^S` (`div`), `mag · 10^delta` (alignment), each bounded by
 `10^36`, and `|i64::MIN| · 10^18 < 9.3·10^36` (`from_i64`); all are well under
-`u128::MAX ≈ 3.4·10^38`. `2r` is bounded by `2·10^18`. No step needs a wider type than Noir
-offers **[verify-at-impl]**.
+`u128::MAX ≈ 3.4·10^38`. `2r` is bounded by `2·10^18`. Every **signed** value stays inside `i64`
+— the widening above is `u128`, an *unsigned* type — so §2.2's rejection of variable scale (which
+needs a signed 128-bit mantissa) and the constructions here are consistent: nothing in this
+section requires a signed integer wider than `i64`. The only type-availability question left open
+is `u128` on the pinned `nargo` **[verify-at-impl]**.
 
 ### 2.4 Rounding — half away from zero, on results only
 
