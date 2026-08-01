@@ -238,10 +238,18 @@ pub mod rng;
 // [OPUS-4.8] sq-yyro: the DEALER-LESS correlated-randomness seam. `rng` fixes the
 // randomness QUALITY (CSPRNG); this fixes WHO draws it — the contract a PRSS /
 // honest-majority coin-toss / dealer-less VSS source must satisfy to replace the
-// single-trusted-dealer simulation. Design + seam only (the current `ShamirDealer`
-// reports `RandomnessModel::TrustedDealerSim`, `deployable() == false`); no
-// dealer-less crypto ships. See research/mpc-distributed-randomness-design.md.
+// single-trusted-dealer simulation. `ShamirDealer` reports
+// `RandomnessModel::TrustedDealerSim`; `crate::prss` is the first dealer-less
+// GENERATOR behind it. NO variant is `deployable()` — acceptance stays fail-closed.
+// See research/mpc-distributed-randomness-design.md.
 pub mod randomness;
+// [OPUS-5] sq-yyro follow-on (#3531): PRSS — replicated-PRF pseudo-random secret
+// sharing behind the `randomness` seam. Non-interactive (0 online rounds) degree-t
+// masks from a one-time replicated-seed setup; SMALL-n honest-majority only (the
+// C(n,t) seed count fails closed past `prss::MAX_PRSS_SEEDS`). The generator is
+// real; the SETUP is a simulated one-time trusted setup, dealer-less VSS is still
+// refused, and the source is still NOT `deployable()`. See the module docs.
+pub mod prss;
 // [OPUS-4.8] sq-m34i (MPC WI-1): Reed-Solomon consistency-checked + robust
 // (Berlekamp-Welch) reconstruction over Fp — detect-and-abort / correct tampered
 // shares when redundancy is present. Closes malicious-security gap (D) at the
