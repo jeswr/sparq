@@ -33,6 +33,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0", default-features = false }
 oxrdf.workspace = true
+# OPTIONAL — `secprop-leftoperands` feature only (sq-3705). The shared `secx:` IRI
+# constants, single-sourced in a ZERO-dependency leaf so this crate's `DIM_*` are the
+# SAME strings `sparq-trust` and `sparq-zk` use without any of them depending on each
+# other. It has no dependencies of its own, so the lean graph above is unchanged.
+sparq-secprop-vocab = { path = "../sparq-secprop-vocab", optional = true }
 
 [features]
 # [OPUS-4.8] sq-zi5w: STATEFUL `odrl:count` constraint enforcement — a usage-counter
@@ -59,7 +64,16 @@ count-enforcement = []
 # bridge NAMES the requireable security-property dimensions; it asserts NO security
 # property of any method (sparq's ZK estate is research-grade + externally UNAUDITED,
 # sq-qhy4 — the admissibility reduction itself is Phases 2/5, not this profile).
-secprop-leftoperands = []
+#
+# [OPUS-5] sq-3705: the dimension IRIs this profile ranges over are no longer a fourth
+# hand-kept copy — `DIM_*` are `pub use` aliases of `sparq-secprop-vocab`, the
+# ZERO-dependency leaf that owns the `secx:` constants, the canonical `secprop-ext.ttl`
+# and the single drift test. This crate could never take the `sparq-trust` edge (it
+# would drag sparq-zk + sparq-canon + sparq-shacl + sparq-reason onto a deliberately
+# lean graph) and so pinned its copies with a cross-package `include_str!` instead; the
+# leaf costs it a `const &str` table and nothing else, so the lean posture is intact and
+# the copies + the file reads are gone.
+secprop-leftoperands = ["dep:sparq-secprop-vocab"]
 
 # [GPT-5.6] sq-mu4au: deterministic, read-only aggregation of already-computed
 # authorization decisions. OFF by default and std-only; does not alter evaluation.

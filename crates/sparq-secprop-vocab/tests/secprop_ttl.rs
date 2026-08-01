@@ -1,20 +1,21 @@
 //! Parse-validation of the published `sec-prop:` extension vocabulary
-//! `ontologies/zkp-sparql/secprop-ext.ttl` (sq-5oru9). The Turtle a working group /
-//! reasoner reads MUST stay valid Turtle and MUST declare exactly the term set the
-//! Rust constants name. The `secprop::tests::secprop_ext_iris_match_rust_constants`
-//! unit test pins the IRIs against the constants; this test is the *syntactic* guard
-//! (the `vocab_ttl.rs` discipline applied to the extension).
+//! `ontologies/secprop-ext.ttl` (sq-5oru9). The Turtle a working group / reasoner
+//! reads MUST stay valid Turtle and MUST declare exactly the term set the Rust
+//! constants name. The `tests::secprop_ext_iris_match_rust_constants` unit test in
+//! `src/lib.rs` pins the IRIs against the constants as plain strings; this test is
+//! the *parsed*/syntactic guard (the `sparq-trust` `vocab_ttl.rs` discipline applied
+//! to the extension).
 //!
-//! Behind the default-OFF `secprop-vocab` feature — exercised by the matching
-//! feature-matrix.yml leg (the silent-skip guard, #1171).
+//! Unconditional: this crate is the dependency-free leaf that OWNS the vocabulary, so
+//! there is no feature to gate on — its consumers keep their own default-OFF gates.
 //!
-//! [OPUS-4.8] sq-5oru9 (epic sq-0dksu; design PR #972). 🤖 SPARQ agent —
-//! security-properties ontology.
-#![cfg(feature = "secprop-vocab")]
+//! [OPUS-5] sq-3705 (moved here from `sparq-trust/tests/secprop_ttl.rs` with the
+//! Turtle it validates). Originally sq-5oru9 (epic sq-0dksu; design PR #972).
+//! 🤖 SPARQ agent — security-properties ontology.
 
 use oxttl::TurtleParser;
 
-const TTL: &str = include_str!("../ontologies/zkp-sparql/secprop-ext.ttl");
+const TTL: &str = include_str!("../ontologies/secprop-ext.ttl");
 
 /// The published extension vocabulary is valid Turtle and non-empty.
 #[test]
@@ -30,16 +31,16 @@ fn secprop_ext_ttl_is_valid_turtle() {
     );
 }
 
-/// Every constant in `secprop::ALL_SECPROP_IRIS` appears as a SUBJECT in the parsed
+/// Every constant in `ALL_SECPROP_IRIS` appears as a SUBJECT in the parsed
 /// Turtle (a coarse presence check independent of the unit-test constant pinning, so
-/// a refactor of `secprop.rs` cannot silently drop a published term). The two reused
+/// a refactor of `src/lib.rs` cannot silently drop a published term). The two reused
 /// vendored class IRIs (`sec-prop:Unlinkability`, `sec-prop:SecurityProperty`) are
 /// referenced (range / owl:imports) but not re-declared as subjects in the extension
 /// file, so they are exempt — exactly the split the unit test makes.
 #[test]
 fn secprop_ext_ttl_declares_every_minted_term() {
     use oxrdf::NamedOrBlankNode;
-    use sparq_trust::secprop::{
+    use sparq_secprop_vocab::{
         ALL_SECPROP_IRIS, SEC_PROP_SECURITY_PROPERTY, SEC_PROP_UNLINKABILITY,
     };
 
@@ -77,7 +78,7 @@ fn secprop_ext_ttl_declares_every_minted_term() {
 #[test]
 fn secprop_ext_ttl_declares_the_vendored_dimension_subjects() {
     use oxrdf::{NamedNode, NamedOrBlankNode, Term};
-    use sparq_trust::secprop::{
+    use sparq_secprop_vocab::{
         SEC_PROP_POST_QUANTUM_FORGERY, SEC_PROP_POST_QUANTUM_SNOOPING,
         SEC_PROP_SECURITY_PROPERTY, SEC_PROP_SIGNATURE_TYPE_LEAKAGE,
     };
@@ -118,7 +119,7 @@ fn secprop_ext_ttl_declares_the_vendored_dimension_subjects() {
 #[test]
 fn secprop_ext_ttl_carries_the_assurance_axis_and_audit_gate() {
     use oxrdf::{NamedNode, NamedOrBlankNode, Term};
-    use sparq_trust::secprop::{
+    use sparq_secprop_vocab::{
         SECX_ASSURANCE_LEVEL, SECX_AUDIT_STATUS_CLASS, SECX_CLAIMED, SECX_CONJECTURED,
         SECX_EXTERNAL_SIGN_OFF_PENDING, SECX_PROVEN,
     };

@@ -65,7 +65,7 @@ over these verified surfaces, not a re-derivation:
 | Estate surface | Verified state | Evidence |
 |---|---|---|
 | Per-(source, statement-type) trust vocabulary (`trust:`, ten-term core + `forPredicate` sugar) | **Merged** | `crates/sparq-trust/ontologies/trust/trust.ttl`, byte-pinned to `src/vocab.rs` (`desugar_for_predicate`, sync test) |
-| Security-properties ontology + assurance axis (`sec-prop:` vendored, `secx:` extension, `Claimed`/`ExternalSignOffPending`) | **Merged** | `crates/sparq-trust/ontologies/zkp-sparql/` (vendored, ISWC 2025 companion), `secprop-ext.ttl`, `src/secprop.rs`; design `research/security-properties-ontology-design.md` |
+| Security-properties ontology + assurance axis (`sec-prop:` vendored, `secx:` extension, `Claimed`/`ExternalSignOffPending`) | **Merged** | `crates/sparq-trust/ontologies/zkp-sparql/` (vendored, ISWC 2025 companion); `secprop-ext.ttl` + the IRI constants in `crates/sparq-secprop-vocab/` (#3705); design `research/security-properties-ontology-design.md` |
 | Regulatory-framework instances — **eIDAS 2.0, UK DVS/DIATF, NIST PQC — already exist as `sec-req:Requirement` individuals** | **Merged (vendored)** | `crates/sparq-trust/ontologies/zkp-sparql/vocab/sec-req.yaml.ld` |
 | ODRL-driven proof-method admissibility (N3 ruleset + `admissible()`, ODRL leftOperand profile) | **Merged** | `crates/sparq-trust/src/admissibility.rs`, epic `sq-0dksu` Phases 1–5 |
 | Positive status attestation, clear path: signed Bitstring status lists with freshness window + RDF justification triples | **Merged** | `crates/sparq-trust/src/status_list.rs` (`SignedStatusList`, `VerifyingLiveStatusCheck`, `justify_status_decision`) |

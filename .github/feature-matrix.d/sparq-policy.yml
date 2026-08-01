@@ -46,14 +46,17 @@
 # the `tests/secprop_leftoperands.rs` integration suite are
 # `#![cfg(feature = "secprop-leftoperands")]`, so ci.yml's default-feature
 # `nextest archive` compiles them EMPTY and runs ZERO of them — the silent-skip
-# gap (#1171) this leg closes. The feature is dependency-free (`const &str` data
-# + a published `.ttl` drift test, strictly additive — it does NOT touch the
-# stateless `evaluate` path), so this leg is cheap and reaches every
-# secprop-leftoperands test. Verified locally: `cargo test -p sparq-policy
-# --features secprop-leftoperands` runs the 11 `secprop::tests` unit checks +
-# the 4 `secprop_leftoperands.rs` integration tests, and `clippy --all-targets
-# -D warnings` is clean in every state. Appended at the END to minimise the
-# recurring feature-matrix.yml conflict.
+# gap (#1171) this leg closes. The feature adds only `const &str` data + a
+# published `.ttl` drift test (strictly additive — it does NOT touch the
+# stateless `evaluate` path); since [OPUS-5] sq-3705 it also turns on the
+# `sparq-secprop-vocab` edge, a ZERO-dependency leaf the `DIM_*` constants are
+# now aliases of, so the crate's deliberately lean graph is unchanged and the
+# cross-package `include_str!` reads of sparq-trust/sparq-zk are gone. So this
+# leg is cheap and reaches every secprop-leftoperands test. Verified locally:
+# `cargo test -p sparq-policy --features secprop-leftoperands` runs 17
+# `secprop::tests` unit checks + the 6 `secprop_leftoperands.rs` integration
+# tests, and `clippy --all-targets -D warnings` is clean in every state.
+# Appended at the END to minimise the recurring feature-matrix.yml conflict.
 - name: "sparq-policy (secprop-leftoperands — ODRL security-property profile)"
   crate: "sparq-policy"
   features: "secprop-leftoperands"
