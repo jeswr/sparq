@@ -30,9 +30,10 @@
 #             Cargo feature names are crate-local, so both invariants key on
 #             the (crate, feature) PAIR — a test:true leg for feature F in
 #             crate A must never satisfy a sensitive F in crate B; OR
-#         (3) any ZERO-LEG cargo feature of a fragment-carrying crate is
-#             sensitive and is executed by no CI executor, with no written
-#             reason in scripts/feature-matrix-unlegged.allowlist.json
+#         (3) any ZERO-LEG cargo feature of an ENUMERATED crate (one that
+#             carries a feature-matrix fragment, or that the registry below
+#             names) is sensitive and is executed by no CI executor, with no
+#             written reason in scripts/feature-matrix-unlegged.allowlist.json
 #             (issue #5138 — the invariant-(2) blind spot: (2) derives its
 #             candidate set FROM the legs, so a feature declared in
 #             Cargo.toml with NO leg was never handed to the detector at
@@ -887,7 +888,7 @@ def workspace_members() -> set:
     return {str(m).rsplit("/", 1)[-1] for m in members}
 
 
-def executed_features(legs: List[dict], fte) -> dict:
+def executed_features(legs: List[dict], fte, extra_crates=()) -> dict:
     """Return ``{crate: set(features some CI executor activates)}``.
 
     Three executor sources, all mirroring cargo semantics via C1's closure:
@@ -903,6 +904,13 @@ def executed_features(legs: List[dict], fte) -> dict:
     Each expands to the TRANSITIVE closure of the crate's default features plus
     the named ones, so a feature with no leg of its own still counts as
     executed when another leg's feature implies it (e.g. ``a = ["b"]``).
+
+    ``extra_crates`` names crates that are enumerated WITHOUT carrying a leg
+    (invariant (3) enumerates every crate the unlegged registry names, fragment
+    or no fragment). They are credited with the workspace default lane on the
+    same terms as a legged crate — being membership in ``workspace.members``,
+    not having a leg — so a default-ON feature of a fragmentless crate is not
+    mis-reported as an unexecuted gap.
     """
     executed: dict = {}
 
@@ -917,6 +925,9 @@ def executed_features(legs: List[dict], fte) -> dict:
         executed.setdefault(crate, set()).update(closure)
 
     members = workspace_members()
+    for crate in sorted(set(extra_crates)):
+        if crate in members:
+            _add(crate, "")
     for leg in legs:
         crate = str(leg.get("crate", ""))
         if crate in members:
@@ -1042,10 +1053,24 @@ def _enforce_unlegged(legs: List[dict]) -> List[str]:
 
     Returns a list of violation strings (empty = clean).
 
-    Candidate set = for each crate that carries a fragment, every key of its
-    Cargo.toml ``[features]`` table (minus ``default``) that appears in NO leg
-    of that crate. Legged features are invariant (2)'s business; the two sets
-    are disjoint, so nothing is judged twice and nothing falls between them.
+    Candidate set = for each ENUMERATED crate, every key of its Cargo.toml
+    ``[features]`` table (minus ``default``) that appears in NO leg of that
+    crate. Legged features are invariant (2)'s business; the two sets are
+    disjoint, so nothing is judged twice and nothing falls between them.
+
+    An ENUMERATED crate is one that carries a feature-matrix fragment OR that
+    the registry itself names. The second half is what stops the guard being
+    switchable-off by deleting a file: were enumeration fragment-only, dropping
+    a crate's last fragment would retire BOTH its candidates and its registry
+    entries — every stale entry for it silently invisible — while ``--enforce``
+    still exited 0.
+
+    KNOWN RESIDUAL, stated rather than papered over: a crate with NEITHER a
+    fragment NOR a registry entry is enumerated by nothing, so deleting the
+    last fragment of a crate that has no entries still takes its features out
+    of view. All three invariants are fragment-driven, so closing that means
+    enumerating every ``workspace.members`` crate — a wider contract than this
+    guard states today, and a separate change.
 
     A candidate violates when the detector calls it SENSITIVE and no CI
     executor activates it. The single exit is a written reason in
@@ -1059,7 +1084,6 @@ def _enforce_unlegged(legs: List[dict]) -> List[str]:
     """
     violations: List[str] = []
     fte = _load_fte_module()
-    executed = executed_features(legs, fte)
     allowlist = load_unlegged_allowlist(UNLEGGED_ALLOWLIST_PATH)
     allow_reason = {
         (str(e["crate"]), str(e["feature"])): str(e["reason"]) for e in allowlist
@@ -1070,12 +1094,18 @@ def _enforce_unlegged(legs: List[dict]) -> List[str]:
         crate = str(leg.get("crate", ""))
         legged.setdefault(crate, set()).update(_features_from_leg(leg))
 
+    # Every crate the registry names is enumerated even with no fragment, so
+    # its entries are always validated (see the docstring). It then also needs
+    # the workspace-default-lane executor, which is otherwise leg-derived.
+    registry_crates = {crate for crate, _feature in allow_reason}
+    executed = executed_features(legs, fte, extra_crates=registry_crates)
+
     # (crate, feature) -> why it is NOT a live gap, for the staleness sweep.
     not_a_gap: dict = {}
     # crate -> its declared feature set, or None when the manifest is unreadable.
     declared_by_crate: dict = {}
 
-    for crate in sorted(legged):
+    for crate in sorted(set(legged) | registry_crates):
         crate_dir = _crate_dir(crate)
         declared = declared_features(crate_dir)
         declared_by_crate[crate] = None if declared is None else set(declared)
@@ -1084,8 +1114,9 @@ def _enforce_unlegged(legs: List[dict]) -> List[str]:
                 "VIOLATION(3) crate {!r}: cannot read/parse {}/Cargo.toml, so "
                 "its declared cargo features cannot be enumerated. The "
                 "zero-leg-feature guard is fail-closed: fix the manifest (or "
-                "the fragment's `crate:` value) rather than skipping the "
-                "crate.".format(crate, crate_dir)
+                "the fragment's `crate:` value, or — if the crate is gone — "
+                "drop its entries from {}) rather than skipping the "
+                "crate.".format(crate, crate_dir, _registry_display())
             )
             continue
         crate_executed = executed.get(crate, set())
@@ -1122,12 +1153,15 @@ def _enforce_unlegged(legs: List[dict]) -> List[str]:
                 )
             )
 
-    # Staleness sweep. Scoped to crates this run actually enforces: an entry
-    # for a crate whose fragment has been deleted is out of this guard's reach
-    # (it has no legs to judge), so it is left alone rather than mis-reported.
+    # Staleness sweep. Every entry is judged: naming a crate in the registry is
+    # itself what puts that crate in the enumerated set above, so an entry can
+    # never fall out of reach by having its crate's fragment deleted. The one
+    # skip is an unreadable manifest, which is ALREADY a VIOLATION(3) above —
+    # reporting the entry stale as well would be a second complaint about
+    # evidence the run could not read.
     for (crate, feature), reason in sorted(allow_reason.items()):
         declared = declared_by_crate.get(crate)
-        if crate not in legged or declared is None:
+        if declared is None:
             continue
         if feature not in declared:
             why = "it is not declared in the crate's Cargo.toml [features] table"
@@ -1163,10 +1197,12 @@ def cmd_enforce(legs: List[dict]) -> int:
         test:true leg FOR THAT CRATE. A sensitive (crate, feature) with no
         test:true leg => VIOLATION (sq-vya1 guard), unless a leg for that
         (crate, feature) carries a written `test-reason:` override.
-    (3) Every cargo feature a fragment-carrying crate DECLARES but that
-        appears in NO leg of that crate must be non-sensitive, or executed by
-        some CI executor, or carry a written reason in
-        scripts/feature-matrix-unlegged.allowlist.json. This closes the
+    (3) Every cargo feature an ENUMERATED crate DECLARES but that appears in
+        NO leg of that crate must be non-sensitive, or executed by some CI
+        executor, or carry a written reason in
+        scripts/feature-matrix-unlegged.allowlist.json. An enumerated crate is
+        one carrying a fragment, or one that the registry names — see
+        _enforce_unlegged for why the second half is load-bearing. This closes the
         invariant-(2) blind spot (issue #5138): (2) can only ever look at
         (crate, feature) pairs it read OFF a leg, so a feature declared in
         Cargo.toml with zero legs was never handed to the detector — it was

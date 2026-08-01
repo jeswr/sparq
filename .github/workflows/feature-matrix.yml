@@ -98,15 +98,18 @@
 #       all: INVISIBLE to the guard rather than sensitive-and-uncovered — the guard could
 #       not fire on the exact case it exists to catch. Proven on the tree by deleting the
 #       `sparq-lws-core (odrl-authz)` leg: the pre-#5138 detector still printed "0
-#       enforcement violations". (3) therefore enumerates every fragment-carrying crate's
-#       declared `[features]` and judges the ones NO leg mentions. (2) owns LEGGED
+#       enforcement violations". (3) therefore enumerates every ENUMERATED crate's declared
+#       `[features]` — a crate carrying a fragment, OR one the registry below names, so
+#       deleting a crate's last fragment cannot quietly retire its entries along with its
+#       candidates — and judges the ones NO leg mentions. (2) owns LEGGED
 #       features, (3) owns ZERO-LEG ones — disjoint sets, nothing judged twice, nothing
 #       falling between. A candidate is clean when some executor activates it: ci.yml's
 #       workspace default lane (so a DEFAULT-ON feature is never a gap), a `test: true`
 #       leg's transitive feature closure, or a `scripts/coverage.sh` case arm. The only
 #       exit is a written reason in `scripts/feature-matrix-unlegged.allowlist.json`,
 #       which is held STRICT in both directions — an entry that stops describing a live
-#       gap REDs too, so the file can only shrink. Prefer adding the leg.
+#       gap (or whose crate no longer parses) REDs too, so the file can only shrink.
+#       Prefer adding the leg.
 # The detector is FAIL-CLOSED: any parse/IO error classifies the leg SENSITIVE (keep the
 # full leg), never a silent demotion. Options (a)/(b) above are still exactly what you DO —
 # what changed is that skipping them is now caught mechanically.

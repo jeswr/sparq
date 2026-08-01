@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import stat
@@ -87,6 +88,30 @@ def _make_crate(tmpdir: str, src_files: dict = None, test_files: dict = None) ->
             fpath.write_text(content, encoding="utf-8")
 
     return root
+
+
+@contextlib.contextmanager
+def _empty_registry():
+    """Point the invariant-(3) registry at an EMPTY temp file for the block.
+
+    Any test that drives ``cmd_enforce`` with synthetic legs must isolate the
+    registry: invariant (3) enumerates every crate the registry NAMES (so that
+    deleting a crate's last fragment cannot retire its entries), which means
+    the live scripts/feature-matrix-unlegged.allowlist.json would otherwise
+    drag 13 real crates into a fixture-only run and RED it for reasons the
+    test is not about.
+    """
+    import json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "unlegged.allowlist.json"
+        path.write_text(json.dumps({"allowlist": []}), encoding="utf-8")
+        original = det.UNLEGGED_ALLOWLIST_PATH
+        det.UNLEGGED_ALLOWLIST_PATH = path
+        try:
+            yield path
+        finally:
+            det.UNLEGGED_ALLOWLIST_PATH = original
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +510,8 @@ class TestEnforceMode(unittest.TestCase):
                         "tier": "check",
                     }
                 ]
-                exit_code = det.cmd_enforce(legs)
+                with _empty_registry():
+                    exit_code = det.cmd_enforce(legs)
                 self.assertNotEqual(
                     exit_code,
                     0,
@@ -522,7 +548,8 @@ class TestEnforceMode(unittest.TestCase):
                         "tier-reason": "reviewed: tests run in default lane",
                     }
                 ]
-                exit_code = det.cmd_enforce(legs)
+                with _empty_registry():
+                    exit_code = det.cmd_enforce(legs)
                 self.assertEqual(
                     exit_code,
                     0,
@@ -559,7 +586,8 @@ class TestEnforceMode(unittest.TestCase):
                         # no tier: field => defaults to 'test', fine for invariant 1
                     }
                 ]
-                exit_code = det.cmd_enforce(legs)
+                with _empty_registry():
+                    exit_code = det.cmd_enforce(legs)
                 self.assertNotEqual(
                     exit_code,
                     0,
@@ -635,7 +663,8 @@ class TestCrossCrateFeatureNameCollision(unittest.TestCase):
                     },
                     leg_b,
                 ]
-                return det.cmd_enforce(legs)
+                with _empty_registry():
+                    return det.cmd_enforce(legs)
             finally:
                 det._crate_dir = original_crate_dir
 
@@ -1219,6 +1248,95 @@ class TestZeroLegFeature(unittest.TestCase):
             exit_code, 0, "A registry entry for an undeclared feature must RED."
         )
 
+    def test_stale_entry_red_when_crate_has_no_leg(self):
+        """A crate with NO leg is still enumerated when the registry names it.
+
+        Regression: the staleness sweep used to skip any crate absent from the
+        legs, so deleting a crate's last feature-matrix fragment retired ALL of
+        its registry entries at once — invisible, never RED, and the same edit
+        also removed the crate from candidate enumeration. Deleting a file must
+        not be a way to switch the guard off. Here `orphan` is not declared at
+        all, so the entry is stale and must RED even with zero fixture legs.
+        """
+        exit_code = self._run(
+            cargo_features='default = []\nother = []\n',
+            test_files={"plain.rs": "#[test]\nfn t() {}\n"},
+            legs=[],
+            registry={
+                "allowlist": [
+                    {
+                        "crate": "fixture",
+                        "feature": "orphan",
+                        "reason": "stale — the feature was deleted",
+                    }
+                ]
+            },
+        )
+        self.assertNotEqual(
+            exit_code,
+            0,
+            "A stale registry entry must RED even when its crate carries no "
+            "leg — otherwise deleting the fragment hides the entry.",
+        )
+
+    def test_live_gap_entry_for_legless_crate_still_passes(self):
+        """The converse: enumerating a legless registry crate must not over-fire.
+
+        Same shape as the test above, but the entry describes a LIVE gap
+        (`orphan` is declared, default-OFF, unlegged, unexecuted and sensitive),
+        so it is doing real work and must stay green. Enumerating a legless
+        registry crate must find its gaps, not invent them.
+        """
+        exit_code = self._run(
+            cargo_features='default = []\norphan = []\n',
+            test_files={"orphan_gated.rs": self.GATED_TEST},
+            legs=[],
+            registry={
+                "allowlist": [
+                    {
+                        "crate": "fixture",
+                        "feature": "orphan",
+                        "reason": "(B) RECORDED GAP — no executor yet.",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(
+            exit_code,
+            0,
+            "A registry entry describing a live gap must stay green even when "
+            "its crate carries no leg.",
+        )
+
+    def test_default_on_feature_of_legless_registry_crate_is_stale(self):
+        """A registry-named crate with no leg still gets the workspace lane.
+
+        `orphan` is DEFAULT-ON, so ci.yml's workspace lane executes it and the
+        entry is stale, not live. This pins `executed_features(extra_crates=…)`:
+        drop that argument and the executor set for a legless crate is empty,
+        so this entry would look like a live gap and silently pass.
+        """
+        exit_code = self._run(
+            cargo_features='default = ["orphan"]\norphan = []\n',
+            test_files={"orphan_gated.rs": self.GATED_TEST},
+            legs=[],
+            registry={
+                "allowlist": [
+                    {
+                        "crate": "fixture",
+                        "feature": "orphan",
+                        "reason": "stale — the workspace default lane runs it",
+                    }
+                ]
+            },
+        )
+        self.assertNotEqual(
+            exit_code,
+            0,
+            "An entry for a default-on feature is stale: the workspace lane "
+            "executes it whether or not the crate has a leg.",
+        )
+
     def test_unreadable_manifest_fails_closed(self):
         """A fragment crate whose Cargo.toml cannot be parsed must RED.
 
@@ -1235,16 +1353,17 @@ class TestZeroLegFeature(unittest.TestCase):
 
             det._crate_dir = patched_crate_dir
             try:
-                exit_code = det.cmd_enforce(
-                    [
-                        {
-                            "name": "fixture (other)",
-                            "crate": "fixture",
-                            "features": "other",
-                            "test": True,
-                        }
-                    ]
-                )
+                with _empty_registry():
+                    exit_code = det.cmd_enforce(
+                        [
+                            {
+                                "name": "fixture (other)",
+                                "crate": "fixture",
+                                "features": "other",
+                                "test": True,
+                            }
+                        ]
+                    )
             finally:
                 det._crate_dir = original_crate_dir
         self.assertNotEqual(
