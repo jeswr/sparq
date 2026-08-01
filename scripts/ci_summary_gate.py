@@ -249,12 +249,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
@@ -1798,6 +1800,41 @@ class PollOutcome:
     guard_sleep: bool = True
 
 
+def _is_count(value: object) -> bool:
+    """A non-negative poll/observation counter. `bool` is excluded deliberately —
+    it is an `int` subclass, and a carrier that stringifies a flag into a counter
+    slot is corrupt, not merely surprising."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_ff_key(value: object) -> bool:
+    """The fail-fast suspicion key: `sorted([name, id] for r in failures)`."""
+    return value is None or (
+        isinstance(value, list)
+        and all(
+            isinstance(pair, list) and len(pair) == 2
+            and isinstance(pair[0], str) and isinstance(pair[1], (int, str))
+            and not isinstance(pair[1], bool)
+            for pair in value
+        )
+    )
+
+
+#: Per-field acceptance for a persisted `GateState` record — see
+#: `GateState.rejection_reason`, which applies these as one atomic gate.
+_STATE_FIELD_VALIDATORS = {
+    "attempt": _is_count,
+    "prev_names": lambda v: v is None or (
+        isinstance(v, list) and all(isinstance(n, str) for n in v)),
+    "stable": _is_count,
+    "completed_hist": lambda v: isinstance(v, list) and all(_is_count(n) for n in v),
+    "consec_fetch_failures": _is_count,
+    "extension_started": lambda v: isinstance(v, bool),
+    "ff_suspect": _is_ff_key,
+    "unsat_polls": _is_count,
+}
+
+
 @dataclass
 class GateState:
     """Everything one evaluation carries to the next — the poll loop's former
@@ -1831,21 +1868,88 @@ class GateState:
         "consec_fetch_failures", "extension_started", "ff_suspect", "unsat_polls",
     )
 
+    #: bumped whenever PERSISTED or a field's meaning changes. A record stamped with
+    #: any other version is REJECTED WHOLE (see `rejection_reason`) rather than
+    #: field-merged: a field that means something different in another revision is
+    #: exactly as dangerous as a missing one.
+    SCHEMA_VERSION = 1
+
     def to_dict(self) -> dict:
-        return {k: getattr(self, k) for k in self.PERSISTED}
+        payload = {k: getattr(self, k) for k in self.PERSISTED}
+        payload["version"] = self.SCHEMA_VERSION
+        return payload
+
+    @classmethod
+    def rejection_reason(cls, payload: object) -> str | None:
+        """Why `payload` is not a usable carrier, or None if it is one ATOMICALLY.
+
+        [OPUS-5] #5259 review 1: the carrier is validated as ONE versioned record —
+        every persisted field present, correctly typed, in range, and consistent with
+        the others — because a field-by-field merge is unsound in the SHORTENING
+        direction. `{"attempt": max_total_polls - 1}` alone used to be accepted: it
+        preserved an almost-exhausted budget while resetting `stable`/`completed_hist`,
+        so ONE terminal-green observation drove `attempt` to the budget and the
+        settle condition was (correctly) unmet — landing on
+        `render_budget_exhausted`'s pending-zero graceful-timeout path, which renders
+        that single observation GREEN. A truncated-but-still-valid-JSON write, a
+        schema drift or a corrupt cache could therefore manufacture a premature pass.
+        Rejecting the whole record restarts the window, which only ever costs extra
+        evaluations."""
+        if not isinstance(payload, dict):
+            return f"not a mapping ({type(payload).__name__})"
+        if payload.get("version") != cls.SCHEMA_VERSION:
+            return (f"schema version {payload.get('version')!r} != "
+                    f"{cls.SCHEMA_VERSION}")
+        expected = set(cls.PERSISTED) | {"version"}
+        if set(payload) != expected:
+            missing = sorted(expected - set(payload))
+            unknown = sorted(set(payload) - expected)
+            return (f"field set mismatch (missing: {missing or 'none'}; "
+                    f"unknown: {unknown or 'none'})")
+        for key, ok in _STATE_FIELD_VALIDATORS.items():
+            if not ok(payload[key]):
+                return f"field {key!r} has an unusable value {payload[key]!r}"
+        # Cross-field invariants every real evaluation sequence maintains, so a
+        # record violating one cannot have been produced by `evaluate_once`:
+        # `attempt` increments once per evaluation, and each evaluation either
+        # appends one entry to `completed_hist` (after a successful fetch, which
+        # also zeroes `consec_fetch_failures`) or increments `consec_fetch_failures`.
+        # `stable`/`unsat_polls` are only ever touched on the append path.
+        hist = len(payload["completed_hist"])
+        if hist + payload["consec_fetch_failures"] > payload["attempt"]:
+            return ("attempt is smaller than the observations it must account for "
+                    f"({hist} completed_hist + {payload['consec_fetch_failures']} "
+                    f"consecutive fetch failures > attempt {payload['attempt']})")
+        for counter in ("stable", "unsat_polls"):
+            if payload[counter] > hist:
+                return f"{counter}={payload[counter]} exceeds {hist} observation(s)"
+        if payload["prev_names"] is not None and hist == 0:
+            return "prev_names carries an observation completed_hist does not"
+        return None
 
     @classmethod
     def from_dict(cls, payload: object) -> "GateState":
-        """Rebuild from a persisted mapping. Unknown keys are ignored and missing
-        keys fall back to the field default, so a state file written by an older
-        revision degrades to "start this field fresh" rather than crashing the one
-        check every merge depends on."""
+        """Rebuild from a persisted mapping, or start FRESH if it is not a complete,
+        self-consistent, current-version record (see `rejection_reason`).
+
+        There is deliberately no partial acceptance: a missing, stale-schema or
+        internally inconsistent carrier restarts the settle and startup-race
+        windows, which costs extra seconds-long evaluations and can never shorten
+        them — and only the shortening direction can turn a still-settling set into
+        a premature verdict."""
+        reason = cls.rejection_reason(payload)
+        if reason is not None:
+            if payload is not None:
+                print(
+                    "::notice::ci-summary: the carried gate state was rejected WHOLE "
+                    f"({reason}) — starting a fresh settle window. A partial or "
+                    "inconsistent carrier must never shorten it."
+                )
+            return cls()
         state = cls()
-        if not isinstance(payload, dict):
-            return state
         for key in cls.PERSISTED:
-            if key in payload:
-                setattr(state, key, payload[key])
+            value = payload[key]
+            setattr(state, key, list(value) if isinstance(value, list) else value)
         return state
 
 
@@ -2567,7 +2671,10 @@ def load_state_file(path: str) -> GateState:
     UNREADABLE/corrupt one also degrades to a fresh state, deliberately: restarting
     the settle window costs extra evaluations (seconds each), whereas honouring a
     half-written state could shorten it, and only the SHORTENING direction can turn
-    a still-settling set into a premature verdict."""
+    a still-settling set into a premature verdict. A file that parses as JSON but is
+    not a COMPLETE, self-consistent, current-schema record degrades the same way —
+    `GateState.from_dict` rejects it whole rather than merging the fields it can
+    read (a truncated write is still valid JSON often enough to matter)."""
     try:
         with open(path, encoding="utf-8") as fh:
             return GateState.from_dict(json.load(fh))
@@ -2579,8 +2686,21 @@ def load_state_file(path: str) -> GateState:
 
 
 def save_state_file(path: str, state: GateState) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(state.to_dict(), fh)
+    """Persist the carrier ATOMICALLY (temp file in the same directory, then
+    `os.replace`), so a crashed or evicted writer leaves either the previous record
+    or the new one — never a half-written prefix for the next evaluation to read."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".gate-state-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state.to_dict(), fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def main() -> int:

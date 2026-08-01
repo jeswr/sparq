@@ -3215,15 +3215,114 @@ class TestSlotlessTransportSeam(unittest.TestCase):
         self.assertEqual(restored.runs, [])
 
     def test_state_reload_degrades_safely(self):
-        """A missing / partial / corrupt carrier restarts the window (costs extra
-        seconds-long evaluations); it never shortens it, because only shortening can
-        turn a still-settling set into a premature verdict."""
-        self.assertEqual(g.GateState.from_dict(None).attempt, 0)
-        self.assertEqual(g.GateState.from_dict("not a mapping").attempt, 0)
-        partial = g.GateState.from_dict({"attempt": 4, "unknown_future_field": 1})
-        self.assertEqual(partial.attempt, 4)
-        self.assertEqual(partial.stable, 0)
-        self.assertEqual(partial.completed_hist, [])
+        """A missing / partial / corrupt carrier restarts the window COMPLETELY
+        (costing extra seconds-long evaluations); it never shortens it, because only
+        shortening can turn a still-settling set into a premature verdict.
+
+        `attempt` is the field that must restart with the rest: it is the budget, and
+        a carrier that preserves an almost-exhausted budget while resetting the
+        coupled settle state is exactly the premature-pass seam
+        (`test_partial_state_cannot_manufacture_a_premature_pass`)."""
+        fresh = g.GateState()
+        for label, payload in [
+            ("None", None),
+            ("not a mapping", "not a mapping"),
+            ("partial", {"attempt": 4, "version": g.GateState.SCHEMA_VERSION}),
+            ("unknown field", dict(g.GateState(attempt=4, completed_hist=[1],
+                                               prev_names=["a"]).to_dict(),
+                                   unknown_future_field=1)),
+            ("stale schema", dict(g.GateState(attempt=4, completed_hist=[1],
+                                              prev_names=["a"]).to_dict(),
+                                  version=g.GateState.SCHEMA_VERSION + 1)),
+            ("bad type", dict(g.GateState(attempt=4, completed_hist=[1],
+                                          prev_names=["a"]).to_dict(),
+                              stable="2")),
+            ("negative counter", dict(g.GateState(attempt=4, completed_hist=[1],
+                                                  prev_names=["a"]).to_dict(),
+                                      attempt=-1)),
+            # Cross-field: counters that no real evaluation sequence could produce.
+            ("stable > observations", dict(g.GateState(attempt=4, completed_hist=[1],
+                                                       prev_names=["a"]).to_dict(),
+                                           stable=3)),
+            ("attempt < observations", dict(g.GateState(
+                attempt=1, completed_hist=[1, 1, 1], prev_names=["a"]).to_dict())),
+        ]:
+            with self.subTest(carrier=label):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    restored = g.GateState.from_dict(payload)
+                for field_name in g.GateState.PERSISTED:
+                    self.assertEqual(
+                        getattr(restored, field_name), getattr(fresh, field_name),
+                        f"{label}: {field_name} was carried over from a rejected "
+                        f"record — a partial carrier must restart the window whole")
+        # A COMPLETE, self-consistent, current-schema record is still honoured.
+        good = g.GateState(attempt=4, completed_hist=[1, 1, 2, 2], prev_names=["a"],
+                           stable=2)
+        self.assertEqual(g.GateState.from_dict(good.to_dict()).attempt, 4)
+        self.assertEqual(g.GateState.from_dict(good.to_dict()).stable, 2)
+
+    def test_partial_state_cannot_manufacture_a_premature_pass(self):
+        """REAL PATH, the #5259 review-1 finding: an almost-exhausted PARTIAL carrier
+        on disk plus ONE terminal-green fetch must not pass.
+
+        Field-by-field reload used to accept `{"attempt": max_total_polls - 1}` —
+        keeping the budget nearly spent while resetting `stable`/`completed_hist`.
+        The single observation then drove `attempt` to the budget with the settle
+        condition unmet, landing on `render_budget_exhausted`'s pending-zero
+        graceful-timeout path, which renders that one observation GREEN. Rejecting
+        the record whole restarts the window instead, so the gate is still settling."""
+        import tempfile
+
+        cfg = tiny_cfg()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "gate-state.json")
+            Path(path).write_text(
+                json.dumps({"attempt": cfg.max_total_polls - 1,
+                            "version": g.GateState.SCHEMA_VERSION}),
+                encoding="utf-8")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                state = g.load_state_file(path)
+                code = g.run_gate_once(cfg, state, lambda: [GREEN, GREEN2], lambda: 0)
+        self.assertNotEqual(
+            code, 0,
+            "a partial carrier plus ONE terminal-green observation returned PASS — "
+            "the settle and startup-race windows were bypassed")
+        self.assertEqual(code, g.STILL_SETTLING_EXIT)
+        self.assertEqual(state.attempt, 1, "the rejected budget was not restarted")
+        self.assertIn("rejected WHOLE", out.getvalue())
+
+    def test_save_state_file_is_atomic_and_leaves_no_debris(self):
+        """A writer that dies mid-write must leave the PREVIOUS record intact, never
+        a truncated prefix. `from_dict` would reject the prefix anyway, but rejecting
+        costs a whole restarted settle window on every interrupted write — the
+        temp-file-plus-rename is what keeps that from being routine."""
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "gate-state.json")
+            g.save_state_file(path, g.GateState(attempt=2, completed_hist=[1, 2],
+                                                prev_names=["a"], stable=1))
+            # The writer dies after emitting a valid-JSON prefix of the NEW record.
+            def die(payload, fh):
+                fh.write('{"attempt": 9')
+                raise KeyboardInterrupt("runner evicted mid-write")
+
+            with mock.patch.object(g.json, "dump", die):
+                with self.assertRaises(KeyboardInterrupt):
+                    g.save_state_file(path, g.GateState(attempt=9))
+            reloaded = g.load_state_file(path)
+            self.assertEqual(reloaded.attempt, 2,
+                             "the interrupted write clobbered the previous record")
+            self.assertEqual(reloaded.stable, 1)
+            self.assertEqual([p.name for p in Path(tmp).iterdir()],
+                             ["gate-state.json"], "a temp file was left behind")
+            # ...and the normal path still replaces it.
+            g.save_state_file(path, g.GateState(attempt=3, completed_hist=[1, 2, 3],
+                                                prev_names=["a"], stable=1))
+            self.assertEqual(g.load_state_file(path).attempt, 3)
 
     def test_load_state_file_missing_and_corrupt(self):
         import tempfile

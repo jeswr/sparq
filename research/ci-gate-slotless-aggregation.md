@@ -145,6 +145,20 @@ code via the #997 graceful-timeout path, having burned the whole budget. Each of
 eight persisted fields was mutation-checked individually — deleting any one from
 `PERSISTED` REDs the suite.
 
+The carrier is also validated as **one atomic, versioned record** — every persisted
+field present, typed, in range, and consistent with the others (`stable`/`unsat_polls`
+cannot exceed the observations `completed_hist` records; `attempt` cannot be smaller
+than the observations it must account for) — or it is rejected WHOLE and the window
+restarts. A field-by-field merge was unsound in the shortening direction: a partial
+`{"attempt": max_total_polls - 1}` preserved an almost-exhausted budget while resetting
+the coupled settle state, so a single terminal-green observation reached the budget with
+the settle condition unmet and `render_budget_exhausted`'s pending-zero graceful-timeout
+path rendered that one observation GREEN. Writes are temp-file-plus-`os.replace` so an
+evicted runner leaves the previous record rather than a valid-JSON prefix. Both
+properties are pinned red-on-wrong-answer by
+`test_partial_state_cannot_manufacture_a_premature_pass` and
+`test_save_state_file_is_atomic_and_leaves_no_debris`.
+
 `--oneshot` is wired to **nothing**. `ci-summary.yml` still runs the resident loop, and
 `test_resident_transport_is_still_the_one_wired_to_the_required_check` REDs if that
 changes.
