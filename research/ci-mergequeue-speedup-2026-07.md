@@ -190,7 +190,7 @@ rebuild. The honest remaining deltas, in measured order:
 >   **SUPERSEDED IN PART by the 2026-08-01 note below** — the "nothing is wired" half is no
 >   longer true (a dispatch-only harness exists); the "no verdict, bar untested" half STILL
 >   HOLDS.
-
+>
 > **Status 2026-08-01 [OPUS-5] — item 3: the HARNESS is wired; the MEASUREMENT is still
 > not taken (issue #5164).** Read this as "the experiment is now runnable", NOT as a
 > result. The ≥60 s bar remains untested and sccache remains UNADOPTED.
