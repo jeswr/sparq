@@ -9,10 +9,12 @@ name: CI
 on:
   push:
     branches: [main]
-  # [FABLE-5] sq-fmx4u.5: react to labeled/unlabeled too so toggling the `ci-full`
-  # label re-evaluates the change-based selection (ci-select.yml maps the label to
+  # [FABLE-5] sq-fmx4u.5: react to `labeled` too so APPLYING the `ci-full` label
+  # re-evaluates the change-based selection (ci-select.yml maps the label to
   # `--full`). The default types (opened/synchronize/reopened) are listed explicitly
-  # so adding the label events does NOT drop `synchronize` (the push-to-PR trigger).
+  # so adding the label event does NOT drop `synchronize` (the push-to-PR trigger).
+  # [OPUS-5] #5215: the matching `unlabeled` type is deliberately NOT listed — see the
+  # asymmetry note on the `pull_request:` key below.
   # [FABLE-5] LABEL-TRIGGER GUARD: only the `ci-full` toggle may start real work off
   # these label events. The autonomous review pipeline flips review:*/status:* labels
   # several times per round on ~20 open PRs, and before this guard EVERY flip
@@ -40,8 +42,36 @@ on:
   # draft-tier guards below are independent and AND-compose on each affected job:
   # a non-`ci-full` label flip stays a no-op regardless of draft state, and a draft
   # head stays tier-reduced regardless of label events.
+  #
+  # [OPUS-5] #5215 — `unlabeled` REMOVED (the vacuous half of every label flip).
+  # A `pull_request` label event cannot be filtered by label NAME at the `on:` level,
+  # so every `review:*`/`status:*` flip the autonomous review pipeline performs starts
+  # this whole workflow on an unchanged head SHA. The #2546 label-trigger guard below
+  # already reduces such a run to a no-op — but a job SKIPPED BY `if:` STILL EMITS A
+  # CHECK-RUN, so each no-op run still deposits this file's whole job set (31 jobs,
+  # more once the static matrices expand) as skipped rows on the head SHA.
+  # Measured on #5081: 538 of 639 check-runs on one PR head (84%) were skipped no-ops,
+  # and re-reading that 7-page list every tick is the single largest cost in the
+  # agent-registry dispatcher's API budget (#5215). Note the mechanism the issue
+  # proposed — a dynamic matrix that emits nothing — is NOT available here: this repo
+  # already found that an empty matrix EXPLODES rather than vanishing (see the `legs`
+  # count workaround in feature-matrix.yml's `setup` outputs), so the only lever on
+  # the waste is to start fewer RUNS.
+  # A label flip is TWO events (`unlabeled` the old label, then `labeled` the new
+  # one), so dropping `unlabeled` removes half of the no-op runs: #3781 measured one
+  # flip on #3472 as 8 no-op runs with every job skipped, and there are exactly four
+  # ci-select callers — 2 events x 4 workflows.
+  # WHY THIS IS SAFE — THE TWO DIRECTIONS ARE NOT SYMMETRIC. The only labels these
+  # workflows read are the `ci-full`/`bench-full`/`fuzz-full` toggles, and those only
+  # ever force MORE work. `labeled` is the direction that must be honoured promptly
+  # (applying `ci-full` must widen the matrix now) and is KEPT. `unlabeled` only ever
+  # NARROWS: removing `ci-full` asks for a smaller matrix, and not re-evaluating
+  # simply leaves the wider, already-computed result standing until the next push. So
+  # this can never skip a job that runs today — it fails toward RUNNING MORE, the same
+  # direction every other guard here points. Pinned by
+  # scripts/tests/test_ci_select_wiring.py::test_label_toggle_reevaluates_selection.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
   # [OPUS-4.8] Merge queue: re-run the identical PR check-set on the queue's
   # merge_group ref so the required ci-summary gate finds the same siblings it finds
   # on a PR. The per-commit `coverage` job (if: event_name != 'schedule') runs here;

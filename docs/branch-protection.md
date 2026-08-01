@@ -332,7 +332,7 @@ belts, and rule 9 is diagnosis + a recorded decision rather than a belt (all in
    an old attempt that reused the run id from leaking into the verdict; the
    workflow-run conclusion supplies the verdict when an entire job evaporates.
 7. **A run that assembled NO LEGS is not evidence (#3781).** [OPUS-5] A
-   `labeled`/`unlabeled` `pull_request` event whose label is not
+   `labeled` `pull_request` event whose label is not
    `ci-full`/`bench-full`/`fuzz-full` is a guarded no-op for every `ci-select`
    caller: the #2546 label-trigger guard skips every root job of `ci.yml`,
    `bench.yml`, `feature-matrix.yml` and `fuzz.yml`, so the run's ONLY non-skipped
@@ -360,6 +360,22 @@ belts, and rule 9 is diagnosis + a recorded decision rather than a belt (all in
    EVALUATES the marker expression against synthetic payloads and proves, by
    `needs:`-graph reachability, that every caller job really is inert on such a
    flip — the claim, not just the string.
+
+   **Halving the no-op runs (#5215).** [OPUS-5] Rule 7 makes a vacuous label-flip run
+   harmless to the verdict, but not free: a job skipped by `if:` still emits a
+   check-run, so each such run still deposits its whole skipped job set on the head
+   SHA (measured on #5081: 538 of 639 check-runs on one PR head — 84% — were skipped
+   no-ops, which the agent-registry dispatcher then re-reads seven pages at a time
+   every tick). A label FLIP is two events, `unlabeled` the old label then `labeled`
+   the new one, so `ci.yml`, `feature-matrix.yml`, `fuzz.yml`, `bench.yml` and
+   `vectorized-feature-off.yml` subscribe to **`labeled` only**. The two directions
+   are not symmetric: applying `ci-full`/`bench-full`/`fuzz-full` asks for MORE work
+   and is honoured immediately; removing one only ever asks for LESS, and not
+   re-evaluating simply leaves the wider, already-computed result standing until the
+   next push — so nothing that runs today can be skipped by this, and the failure
+   direction stays "runs more than strictly needed".
+   `test_ci_select_wiring.py::test_label_toggle_reevaluates_selection` pins both
+   halves (`labeled` required, `unlabeled` forbidden).
 8. **An unsatisfiable hold REDs immediately, with the diagnosis (#3781).**
    [OPUS-5] Rule 4's hold is a WAIT for the `ready_for_review` full-tier re-runs.
    When every sibling has CONCLUDED, a draft-marked select still lacks a successor,

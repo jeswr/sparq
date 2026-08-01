@@ -493,21 +493,55 @@ class TestWiring(unittest.TestCase):
         # The label check must gate the --full branch (fail-open toward RUNNING more).
         self.assertIn('[ "$CI_FULL_LABEL" = "true" ]', run)
 
+    # [OPUS-5] #5215: every workflow that subscribes to PR label events and whose jobs
+    # are (or should be) inert on a non-escape flip. The first four are the ci-select
+    # callers; vectorized-feature-off.yml carries no label-trigger guard at all, so its
+    # jobs run for real on every label event — which makes dropping `unlabeled` there
+    # a compute saving as well as a check-run saving.
+    LABEL_SUBSCRIBERS = ("ci.yml", "feature-matrix.yml", "fuzz.yml", "bench.yml",
+                         "vectorized-feature-off.yml")
+
     def test_label_toggle_reevaluates_selection(self):
-        """[FABLE-5] sq-fmx4u.5. Toggling the ci-full label must re-run selection, so
-        both selection-consuming workflows react to labeled/unlabeled — and must NOT
-        drop the default `synchronize` (push-to-PR) trigger while doing so."""
-        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
+        """[FABLE-5] sq-fmx4u.5 / [OPUS-5] #5215. APPLYING the ci-full label must
+        re-run selection, so every selection-consuming workflow reacts to `labeled` —
+        and must NOT drop the default `synchronize` (push-to-PR) trigger while doing so.
+
+        [OPUS-5] #5215 — THE ASYMMETRY, PINNED. `unlabeled` must NOT be subscribed to.
+        A `pull_request` label event cannot be filtered by label NAME at the `on:`
+        level, so every `review:*`/`status:*` flip the autonomous review pipeline
+        performs starts these workflows on an unchanged head SHA; the #2546
+        label-trigger guard makes such a run a no-op, but a job skipped by `if:` STILL
+        EMITS A CHECK-RUN (measured on #5081: 538 of 639 check-runs on one PR head were
+        skipped no-ops). A flip is TWO events — `unlabeled` the old label, `labeled` the
+        new one — so not subscribing to `unlabeled` removes half of those runs.
+
+        It is safe in ONE direction only, which is why this test pins the direction
+        rather than just the count: the only labels these workflows read are the
+        `ci-full`/`bench-full`/`fuzz-full` toggles, and those only ever force MORE work.
+        `labeled` widens the matrix and must be honoured promptly => REQUIRED here.
+        `unlabeled` only ever narrows, and not re-evaluating leaves the wider,
+        already-computed result standing until the next push => FORBIDDEN here. Adding
+        `unlabeled` back reinstates the waste; dropping `labeled` would break the
+        ci-full escape hatch, which is the repo's only manual "test everything" lever.
+        """
+        for wf_name in self.LABEL_SUBSCRIBERS:
+            wf = _load(REPO_ROOT / ".github" / "workflows" / wf_name)
             on = _on_block(wf)
             pr = on.get("pull_request") or {}
             self.assertIsInstance(
                 pr, dict, f"{wf_name}: pull_request must carry a types list")
             types = pr.get("types", [])
-            for needed in ("labeled", "unlabeled"):
-                self.assertIn(needed, types,
-                              f"{wf_name}: pull_request must react to {needed} so the "
-                              f"ci-full label toggle re-evaluates selection")
+            self.assertIn("labeled", types,
+                          f"{wf_name}: pull_request must react to `labeled` so APPLYING "
+                          f"the ci-full label re-evaluates selection")
+            self.assertNotIn(
+                "unlabeled", types,
+                f"{wf_name}: pull_request must NOT react to `unlabeled` (#5215). Every "
+                f"label REMOVAL starts a run whose jobs are all skipped, and a skipped "
+                f"job still emits a check-run; removing a *-full label only ever asks "
+                f"for LESS work, so leaving the wider already-computed result standing "
+                f"is both cheaper and fail-safe. Re-adding this type doubles the "
+                f"vacuous label-flip runs on every PR head.")
             for keep in ("opened", "synchronize", "reopened"):
                 self.assertIn(keep, types,
                               f"{wf_name}: must keep the default {keep} trigger")

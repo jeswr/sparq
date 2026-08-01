@@ -58,10 +58,18 @@ on:
     branches: [main]
   # [FABLE-5] Draft-tier CI: default types + ready_for_review (the un-draft moment
   # must re-run the wasm-equality leg a draft head may have scoped out) +
-  # labeled/unlabeled (the `ci-full` label toggle must re-evaluate the draft-tier
+  # `labeled` (applying the `ci-full` label must re-evaluate the draft-tier
   # scope decision in the artifact-exact-equality decide step below).
+  # [OPUS-5] #5215: `unlabeled` REMOVED (full rationale + measurements: ci.yml's
+  # `pull_request:` note). Neither job here carries a job-level `if:`, so unlike the
+  # #2546-guarded callers every label event starts BOTH of them for real — two
+  # check-runs on the head SHA plus whatever their in-job scope decisions admit — and
+  # a flip is two events, so this halves them. Asymmetric
+  # on purpose: `labeled` (applying `ci-full` — force MORE work) is kept; `unlabeled`
+  # only ever narrows, and not re-evaluating leaves the wider, already-computed scope
+  # decision standing until the next push.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
   merge_group:
 
 permissions:

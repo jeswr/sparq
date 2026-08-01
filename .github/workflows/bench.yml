@@ -26,11 +26,11 @@ on:
     # ignoring the baseline path alone never masks a genuine bench-worthy push.
     paths-ignore:
       - 'bench/perf-baseline.json'
-  # [SONNET-4.6] sq-mel85 (design §5.2, phase 2b): react to labeled/unlabeled too so
-  # toggling the `ci-full` label re-evaluates the change-based selection for the bench
+  # [SONNET-4.6] sq-mel85 (design §5.2, phase 2b): react to `labeled` too so
+  # applying the `ci-full` label re-evaluates the change-based selection for the bench
   # lane (ci-select.yml maps the label to `--full`, which forces the perf gate to run).
   # The default types (opened/synchronize/reopened) are listed explicitly so adding the
-  # label events does NOT drop `synchronize` (the push-to-PR trigger).
+  # label event does NOT drop `synchronize` (the push-to-PR trigger).
   #
   # [FABLE-5] (sq-6vshe.6 heavy-lane placement, MAINTAINER-DIRECTED) On a PR the `bench`
   # job runs the FAST DETERMINISTIC form only — `ci-bench.sh --deterministic-only` — which
@@ -58,8 +58,15 @@ on:
   # entirely on draft PR heads — see its `if:` guard + docs/branch-protection.md
   # §Draft-tier CI). This is independent of the label guard above and AND-composes
   # with it on the `bench` job.
+  # [OPUS-5] #5215: `unlabeled` REMOVED (full rationale + measurements: ci.yml's
+  # `pull_request:` note). A skipped-by-`if:` job still emits a check-run, so each
+  # no-op label-flip run still deposits this workflow's skipped jobs on the head SHA;
+  # a flip is two events, so dropping `unlabeled` halves those runs. Asymmetric on
+  # purpose: `labeled` (applying `ci-full`/`bench-full` — force MORE work) is kept;
+  # `unlabeled` only ever narrows, and not re-evaluating leaves the already-run perf
+  # gate's result standing until the next push.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
   # [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) merge_group REMOVED. The deterministic
   # byte-count ratchet is a pure function of the code: it already ran + hard-gated on the
   # PR head (--deterministic-only above), it re-runs on push-to-main below, and the

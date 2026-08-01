@@ -72,11 +72,11 @@ name: fuzz
 on:
   push:
     branches: [main]
-  # [OPUS-4.8] sq-fmx4u.6: react to labeled/unlabeled too so toggling the `ci-full`
+  # [OPUS-4.8] sq-fmx4u.6: react to `labeled` too so applying the `ci-full`
   # label re-evaluates the change-based selection for the fuzz lane (ci-select.yml
   # maps the label to `--full`, which forces the fuzz smoke to run). The default
   # types (opened/synchronize/reopened) are listed explicitly so adding the label
-  # events does NOT drop `synchronize` (the push-to-PR trigger).
+  # event does NOT drop `synchronize` (the push-to-PR trigger).
   # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
   # the `ci-full` and `fuzz-full` toggles start real work off a label event — the
   # review pipeline's review:*/status:* flips otherwise restarted this workflow on an
@@ -92,7 +92,14 @@ on:
   pull_request:
     # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
     # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    # [OPUS-5] #5215: `unlabeled` REMOVED (full rationale + measurements: ci.yml's
+    # `pull_request:` note). A skipped-by-`if:` job still emits a check-run, so each
+    # no-op label-flip run still deposits this workflow's skipped jobs on the head
+    # SHA; a flip is two events, so dropping `unlabeled` halves those runs.
+    # Asymmetric on purpose: `labeled` (applying `ci-full`/`fuzz-full` — force MORE
+    # work) is kept; `unlabeled` only ever narrows, and not re-evaluating leaves the
+    # already-run fuzz lane's result standing until the next push.
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
   # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
   # REMOVED: the deterministic corpus-replay already ran + gated on the PR head
   # (select-scoped), the push-to-main run above re-replays POST-MERGE (a break on

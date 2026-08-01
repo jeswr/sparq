@@ -154,10 +154,10 @@ name: feature-matrix
 on:
   push:
     branches: [main]
-  # [FABLE-5] sq-fmx4u.5: react to labeled/unlabeled too so toggling the `ci-full`
+  # [FABLE-5] sq-fmx4u.5: react to `labeled` too so applying the `ci-full`
   # label re-evaluates change-based selection for the opt-in leg set as well (the
   # `setup` assembler filters legs by the selection outputs). Default types are
-  # listed explicitly so adding the label events does not drop `synchronize`.
+  # listed explicitly so adding the label event does not drop `synchronize`.
   # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
   # the `ci-full` toggle starts real work off a label event — the review pipeline's
   # review:*/status:* flips otherwise restarted this workflow on an unchanged head
@@ -172,8 +172,15 @@ on:
   # marker) and the required gate stops honouring the draft-tier-assembled set —
   # see docs/branch-protection.md §Draft-tier CI. Independent of the label guard
   # above: a non-`ci-full` label flip stays a no-op regardless of draft state.
+  # [OPUS-5] #5215: `unlabeled` REMOVED (full rationale + measurements: ci.yml's
+  # `pull_request:` note). A skipped-by-`if:` job still emits a check-run, so each
+  # no-op label-flip run still deposits this file's whole (skipped) leg set on the
+  # head SHA; a flip is two events, so dropping `unlabeled` halves those runs.
+  # Asymmetric on purpose: `labeled` (applying `ci-full` — force MORE work) is kept;
+  # `unlabeled` only ever narrows, and not re-evaluating leaves the wider,
+  # already-computed leg set standing until the next push.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
   # Merge queue: mirror the PR check-set onto the merge_group ref so the required
   # ci-summary gate finds the same legs it finds on a PR (matches ci.yml/ci-summary.yml).
   merge_group:
