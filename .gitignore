@@ -89,6 +89,12 @@ node_modules/
 .beads-credential-key
 .beads/proxieddb/
 
+# [OPUS-5] #5127: the `__global__` stock alarm's cross-tick memory
+# (scripts/global_stock_alarm.py --state-file). In CI it lives in an Actions cache and
+# never touches a tracked path; this rule is for a local run, whose one-file state dir
+# is a per-invocation observation of the live PR board and is never repo content.
+.global-stock-state/
+
 # [OPUS-4.8] Agent-metrics RUNTIME rows (bead sq-lhwo.1): per-PR/per-task metrics
 # rows carry NON-CANONICAL session-local numbers (and may reference session
 # transcripts), so the live append-only log is git-ignored. The COMMITTED data is the

@@ -1,0 +1,159 @@
+# global-stock-alarm — the `__global__` STOCK alarm ([OPUS-5] sparq-org/sparq#5127).
+# 🤖 SPARQ agent.
+#
+# WHAT: #4582's third bullet, deliberately left out of the attribution fix because it is
+# a MONITORING mechanism, not a deriver change. The fleet scheduler partitions work by
+# `area:<name>`; a PR whose whole unit of work declares no area is folded by the
+# registry's claim leg into the SERIALIZING `__global__` partition, where one PR defers
+# EVERY ready issue whatever crate that issue names.
+#
+# WHY THE DERIVER'S OWN RUN STATUS CANNOT CARRY THIS. #5127 records that `pr-area-label`
+# reported `success` on every run in which #4578 sat unattributed — emitting NO label IS
+# scripts/pr-area-labels.py's fail-closed contract, so those runs were honest. Per-run status
+# structurally cannot express "an active PR has been unattributable across N consecutive
+# dispatch ticks", which is the condition that is a fleet-wide stall. That needs a sweep
+# over the whole open-PR population, and MEMORY between sweeps.
+#
+# THE MEMORY IS THE LOAD-BEARING PART, and it is why this workflow has cache steps that
+# its sibling alarms do not. scripts/global_stock_alarm.py writes one tiny JSON file of
+# per-PR consecutive-sweep streaks; the restore/save pair below carries it from one run
+# to the next through an Actions cache, using the rolling `key: …-${{ github.run_id }}`
+# + `restore-keys:` prefix idiom this repo already uses for the fuzz corpus. Two
+# properties are deliberate:
+#   * SAVE RUNS ON `always()`. A sweep that finds a persistent stock exits 1 (that is the
+#     alarm), and a sweep whose issue-filing fails exits 2. Saving only on success would
+#     freeze the streaks at exactly the moment they matter most.
+#   * A COLD RESTORE IS FAIL-LOUD ONCE THE LANE HAS RUN. The script is handed this
+#     workflow's own file name; on a cold state read it asks the API how many runs of
+#     this lane have already COMPLETED. Zero means this is the first sweep — expected,
+#     and it exits 0 having recorded the stock. Non-zero means the memory did not
+#     survive, i.e. the detector silently lost the only thing that distinguishes a
+#     transient from a stall, and it would then report an empty alarming set forever.
+#     That case exits 2. Restoring nothing must never look like a clean board.
+#
+# SAVE FROM MAIN-SCOPED RUNS ONLY — the repo cache-save doctrine (sq-3sbrr / sq-6vshe.15):
+# an entry written from another ref is scoped to that ref and is unreachable churn
+# against the shared budget. A `workflow_dispatch` from a branch still RESTORES main's
+# entry (default-branch caches are readable from every ref), so a manual validation run
+# reads the real memory and cannot corrupt it.
+#
+# NOT A GATE (same posture as ci-latency-alarm.yml / formal-alarm.yml / review-alarm.yml):
+# scheduled on main, files issues, blocks NO merge. That holds because this job is
+# DECLARED in `.github/advisory-registry.json` — since #3773 the ONLY thing that can make
+# a check-run non-gating. It is NOT true because of where the check-run lands:
+# ci-summary.yml also runs on `push: branches: [main]`, so a scheduled run on main puts
+# its check-run on exactly the head SHA the push-triggered gate polls, and the gate waits
+# for the check-run name set to stabilise so a late sibling is picked up, not missed
+# (sq-huwr8). The registry entry, not the trigger type, is what makes this lane safe to
+# RED. Pinned by scripts/tests/test_alarm_lanes_non_gating.py, which DISCOVERS
+# `*alarm*.yml` from disk — this lane reds that suite on arrival if its declaration is
+# ever deleted.
+#
+# NO ARMING AUTHORITY, STRUCTURALLY. This job holds `issues: write`, `actions: read` and
+# `contents: read` and nothing else. In particular NO `pull-requests: write`: it reports
+# that a PR is unattributed, it can never label one itself. Attribution is
+# pr-area-label.yml's job and stays there — a detector that could fix its own finding
+# would be a second, unreviewed deriver.
+#
+# STANDING PRESSURE, NOT NOISE. A genuinely cross-cutting PR really does serialize the
+# fleet, so while one is open this lane stays red and keeps ONE issue alive (the body
+# marker caps it at one). That is the intended signal, not a false positive — the remedy
+# is to land, park, or attribute the PR.
+#
+# All actions are SHA-pinned (code-scanning / Scorecard posture). The script self-tests
+# hermetically as the FIRST step of every run (a detector is never trusted to watch
+# anything before it has proved itself on this tick's code), and its suite also gates
+# every PR via scripts/tests/test_global_stock_alarm.py in docs-quality.yml.
+name: global-stock-alarm
+
+on:
+  # Every three hours at :19 — explicit values (no */N) keep it auditable, and the minute
+  # is off every existing sub-hourly lane: auto-arm (4,14,…), verdict-bridge (1,11,…),
+  # rearm-sweeper (8,18,…), batch-merge (7,22,37,52), merge-group-watchdog (2,7,12,…),
+  # triage-area (25,55), ci-latency-alarm (:26). At the default two-sweep threshold that
+  # puts the detection floor at one sweep interval and its ceiling at two.
+  schedule:
+    - cron: "19 1,4,7,10,13,16,19,22 * * *"
+  # Manual run for validation / triage.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report the stock without filing or updating an issue"
+        type: boolean
+        default: false
+      min_ticks:
+        description: "Consecutive sweeps a PR must be unattributed before it alarms"
+        type: string
+        default: "2"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancel an in-flight sweep: a cancelled run skips its cache save, which would
+  # silently drop a tick of memory.
+  group: global-stock-alarm
+  cancel-in-progress: false
+
+jobs:
+  alarm:
+    name: __global__ stock alarm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read # count this lane's completed runs (the cold-state fail-loud)
+      issues: write # file/update the ONE deduped alarm issue — the only write it has
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          # ready-issues.py is an INPUT, not incidental: the detector imports its
+          # `source_issue_links` / `declared_packages` / `is_parked` rather than
+          # re-implementing them, so omitting it would make every sweep fail to load.
+          sparse-checkout: |
+            scripts/global_stock_alarm.py
+            scripts/ready-issues.py
+          sparse-checkout-cone-mode: false
+
+      # FIRST, unconditionally: a detector that cannot prove itself never gets to run.
+      - name: Self-test the alarm (hermetic fixtures)
+        run: python3 scripts/global_stock_alarm.py --self-test
+
+      - name: Restore the previous sweep's streaks
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .global-stock-state
+          key: global-stock-state-v1-${{ github.run_id }}
+          restore-keys: |
+            global-stock-state-v1-
+
+      - name: Sweep the open PRs for unattributed units
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          MIN_TICKS: ${{ inputs.min_ticks || '2' }}
+        # An args array, not an unquoted `$DRY_RUN` splat: word-splitting an env var into
+        # a flag is exactly the shellcheck SC2086 shape actionlint rejects, and here it
+        # would also let a crafted dispatch input inject an extra flag.
+        run: |
+          set -euo pipefail
+          args=(--state-file .global-stock-state/state.json
+                --workflow global-stock-alarm.yml
+                --min-ticks "$MIN_TICKS")
+          if [ -n "$DRY_RUN" ]; then
+            args+=(--dry-run)
+          fi
+          python3 scripts/global_stock_alarm.py "${args[@]}"
+
+      # `always()`: the sweep exits 1 when the stock is persistent and 2 when the
+      # detector itself breaks, and both of those ticks must still advance the memory.
+      # `hashFiles` guards the case where the run died before the script wrote anything —
+      # saving an absent path would warn, and saving a partial one would be worse.
+      - name: Persist this sweep's streaks for the next one (main-scoped runs)
+        if: always() && github.ref == 'refs/heads/main' && hashFiles('.global-stock-state/state.json') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .global-stock-state
+          key: global-stock-state-v1-${{ github.run_id }}

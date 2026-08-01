@@ -22,6 +22,13 @@
    "promotion_criteria": "NEVER promotable, same reason as `review-lane blind-spot alarm` — a detector that REDs when a nightly formal lane stopped producing verdicts is reporting on the LANE's health, not on the commit under test, so it must never gate a merge. Same silent-gating defect (sq-huwr8): scheduled on main, so its check-run lands on the same head SHA the push-triggered ci-summary gate polls. Delete this entry only if the workflow is removed.",
    "registered": "2026-07-27"
   },
+  "__global__ stock alarm": {
+   "workflow": "global-stock-alarm.yml",
+   "job_id": "alarm",
+   "owner_bead": "sparq-org/sparq#5127 (the third bullet of #4582 — the observability half of the area-attribution work)",
+   "promotion_criteria": "NEVER promotable, same reason as `review-lane blind-spot alarm` — this is a DETECTOR of a repo-wide SCHEDULER condition: active PRs whose whole unit of work is unattributable, which the claim leg folds into the serializing `__global__` partition. Every condition it REDs on is a property of the open-PR POPULATION across sweeps, never of the commit under test, so gating on it would block every merge on an unrelated backlog — the exact pressure that gets an alarm muted, which is the one outcome that destroys the signal. Note the specific perversity here: the PRs it names are themselves open PRs, so a gating version would red the very PRs it is reporting on. It also REDs fail-loud (exit 2) when the detector itself breaks, including when its cross-sweep memory silently stops persisting. Declared for the same silent-gating reason as its sibling lanes (sq-huwr8): it is scheduled on main, so its check-run lands on the same head SHA the push-triggered ci-summary gate polls. Delete this entry only if the workflow is removed.",
+   "registered": "2026-08-01"
+  },
   "nightly selection-bug alarm": {
    "workflow": "selection-alarm.yml",
    "job_id": "alarm",
