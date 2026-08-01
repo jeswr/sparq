@@ -28,11 +28,47 @@
 # It is cheap (no model spend) and complements the perf-reviewer: both run on the same
 # matcher and BOTH must allow for the arm to proceed (any deny blocks the tool call).
 #
-# FAIL-OPEN on its OWN errors, FAIL-CLOSED on a confirmed stacked base. If `gh` is
-# missing, errors, or the command can't be parsed, this guard ALLOWs (it must never
-# wedge the merge train on its own malfunction) — the perf-reviewer + ci-summary +
-# branch protection still gate the actual merge. It DENIES only when it positively
-# confirms baseRefName is something other than the trunk.
+# [OPUS-5] SECOND GUARD, issue #1135 — NEVER let an agent arm the release-plz RELEASE PR.
+# This hook is the choke point for AGENT-typed arms (`.claude/workflows/*.js`, hand-written
+# `gh pr merge … --auto`), which bypass scripts/auto-arm.py and scripts/rearm-sweeper.py
+# entirely. Merging the Release PR cuts a `v*` tag and — once `publish = true` lands in
+# release-plz.toml — `cargo publish`es 17 crates. A crates.io version can NEVER be
+# unpublished, so this branch is FAIL-CLOSED, keyed on branch/author/title
+# (scripts/release_pr_guard.py) and never on a label.
+#
+# FAILURE DISPOSITION — DIFFERENT PER AXIS, deliberately:
+#   * STACKED-BASE axis: unchanged, FAIL-OPEN on this guard's own errors. A wrongly-merged
+#     stacked PR is recoverable (#1023 was re-landed as #1028), and the perf-reviewer +
+#     ci-summary + branch protection still gate the merge.
+#   * RELEASE-PR axis: FAIL-CLOSED. [OPUS-5] #1135 CHANGES THE PRE-EXISTING BEHAVIOUR: a
+#     failed `gh pr view` now DENIES instead of allowing. Rationale: the outcome it
+#     protects against is irreversible, and the cost of the deny is near zero — if `gh pr
+#     view` cannot answer, the very next `gh pr merge` almost certainly cannot either, so
+#     the deny forfeits an arm that would have failed anyway. The operator retries, or a
+#     maintainer merges by hand.
+#
+# WHAT THIS HOOK DOES **NOT** COVER — stated so the coverage is not over-read (PR #4192):
+# `is_arm_command` matches `gh pr merge` + `--auto`, so this hook sees exactly the
+# `--auto` phrasings. Executed against a fake `gh`, these reach the tool unblocked:
+#   * `gh pr merge <n> --squash` (no `--auto`) and `--admin` — a DIRECT merge, which is
+#     the more dangerous operation; the deliberate scope choice is that this hook governs
+#     ARMING, and the self-test pins it,
+#   * `gh api graphql … enablePullRequestAutoMerge(…)` — the shape scripts/auto-arm.py
+#     itself uses — and `gh api -X PUT repos/:o/:r/pulls/<n>/merge`,
+#   * backslash line-continuation between `gh` and `pr merge`, and shell-variable
+#     indirection (`M="pr merge"; gh $M <n> --auto`).
+# What actually bounds all of those is the BELT, not this hook:
+# scripts/release-interval-guard.py runs inside release-plz.yml itself, so however the
+# Release PR is merged, no release can be cut inside MIN_RELEASE_INTERVAL.
+#
+# THE WRAPPER MUST NOT INVERT THIS. `.claude/settings.json` invokes this script from a
+# shell one-liner. That wrapper used to emit `allow` whenever the script could not RUN
+# (missing/unreadable/crashing, or `CLAUDE_PROJECT_DIR` unset), inverting the fail-closed
+# disposition above at the exact moment there is no guard. It now DENIES an unrunnable
+# guard for any `gh pr merge` and allows everything else (this hook matches every Bash
+# call, so a blanket deny would brick the fleet).
+# scripts/tests/test_release_publish_guard.py::TestSettingsJsonWrapperDoesNotInvertTheGuard
+# executes the wrapper string out of settings.json and reds if it reverts to `allow`.
 #
 # Usage:
 #   check-pr-arm-base.py                 # read hook JSON on stdin, emit decision JSON
@@ -52,6 +88,31 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# [OPUS-5] #1135. A missing guard module must NOT degrade to "allow": the stub denies
+# every arm. This hook is imported from an ordinary (non-sparse) checkout, so the stub
+# is a last-resort safety net, not an expected path.
+try:
+    import release_pr_guard
+
+    RELEASE_GUARD_DEGRADED = False
+except ImportError:  # pragma: no cover - see the self-test
+
+    class _FailClosedReleaseGuard:
+        _REASON = (
+            "release-pr-guard: scripts/release_pr_guard.py is not importable, so this "
+            "arm cannot be proven safe against the release-plz Release PR — denying "
+            "(fail-closed, #1135)"
+        )
+
+        @staticmethod
+        def arm_block_reason(**_kwargs) -> str:
+            return _FailClosedReleaseGuard._REASON
+
+    release_pr_guard = _FailClosedReleaseGuard  # type: ignore[assignment]
+    RELEASE_GUARD_DEGRADED = True
 
 DEFAULT_TRUNK = "main"
 
@@ -141,12 +202,26 @@ def parse_pr_number(command: str) -> str | None:
     return None
 
 
-def pr_base_ref(pr: str, trunk: str) -> tuple[str | None, str | None]:
-    """Return (baseRefName, error). error is set (and base None) if gh can't answer —
-    callers FAIL OPEN on error so the guard never wedges the train on its own fault."""
+def pr_facts(pr: str, trunk: str) -> tuple[dict | None, str | None]:
+    """Return (facts, error) for a PR.
+
+    ``facts`` carries every field both axes need:
+    ``{"base": str, "head_ref": str|None, "author_login": str|None, "title": str|None}``.
+    ``error`` is set (and facts None) when gh cannot answer. Callers FAIL OPEN on error
+    for the stacked-base axis and FAIL CLOSED for the release-PR axis (see the header).
+    """
     try:
         proc = subprocess.run(
-            ["gh", "pr", "view", pr, "--json", "baseRefName,headRefName,number"],
+            [
+                "gh",
+                "pr",
+                "view",
+                pr,
+                "--json",
+                # [OPUS-5] #1135: headRefName/author/title are the release-PR guard's
+                # inputs. Dropping one makes the guard fail CLOSED, never open.
+                "baseRefName,headRefName,number,author,title",
+            ],
             capture_output=True,
             text=True,
             timeout=30,
@@ -166,28 +241,68 @@ def pr_base_ref(pr: str, trunk: str) -> tuple[str | None, str | None]:
     base = data.get("baseRefName")
     if not isinstance(base, str) or not base:
         return None, "gh pr view returned no baseRefName"
-    return base, None
+    author = data.get("author")
+    return (
+        {
+            "base": base,
+            "head_ref": data.get("headRefName"),
+            "author_login": (
+                author.get("login") if isinstance(author, dict) else None
+            ),
+            "title": data.get("title"),
+        },
+        None,
+    )
 
 
 def decide(command: str, trunk: str, base_lookup) -> dict:
-    """Pure decision logic. `base_lookup(pr) -> (base, error)` is injected so the
-    self-test can exercise this without a network/gh dependency."""
+    """Pure decision logic. `base_lookup(pr) -> (facts, error)` is injected so the
+    self-test can exercise this without a network/gh dependency. `facts` is the dict
+    documented on :func:`pr_facts`; a bare ``str`` is accepted as a base-only shorthand."""
     if not is_arm_command(command):
         return _allow("not a `gh pr merge … --auto` arming command; base guard N/A")
     pr = parse_pr_number(command)
     if pr is None:
-        # Can't identify the PR — fail OPEN (the perf-reviewer + ci-summary still gate).
-        return _allow(
-            f"{SELF_ID}: could not parse a PR argument from the arm command; "
-            "allowing (other gates still apply)"
+        # [OPUS-5] #1135: an UNIDENTIFIABLE PR cannot be proven not to be the Release PR,
+        # and this is an arm command, so the release axis fails CLOSED here — a change
+        # from the previous allow. Denying costs one retry; admitting can publish.
+        return _deny(
+            f"{SELF_ID}: could not parse a PR argument from a `gh pr merge … --auto` "
+            "command, so it cannot be proven not to be the release-plz Release PR "
+            "(#1135). Re-issue the arm with an explicit PR number."
         )
-    base, error = base_lookup(pr)
+    facts, error = base_lookup(pr)
     if error is not None:
-        # Fail OPEN on our own lookup failure — never wedge the merge train.
-        return _allow(
-            f"{SELF_ID}: could not resolve PR #{pr} base ({error}); allowing "
-            "(other gates still apply)"
+        # [OPUS-5] #1135: the release axis fails CLOSED on a lookup failure. See the
+        # header — a `gh pr view` that cannot answer means the following `gh pr merge`
+        # almost certainly cannot either, so the deny forfeits little and the outcome it
+        # prevents (an irreversible crates.io publish) cannot be undone at all.
+        return _deny(
+            f"{SELF_ID}: could not resolve PR #{pr} ({error}), so it cannot be proven "
+            "not to be the release-plz Release PR — arming is refused (fail-closed, "
+            "#1135). Retry once `gh` responds, or have a maintainer merge by hand."
         )
+    if isinstance(facts, str):  # base-only shorthand
+        facts = {"base": facts, "head_ref": None, "author_login": None, "title": None}
+    base = facts.get("base")
+
+    # [OPUS-5] #1135 — the RELEASE-PR axis, checked BEFORE the stacked-base axis because
+    # the Release PR's base IS the trunk (so the stacked check would happily allow it).
+    release_reason = release_pr_guard.arm_block_reason(
+        head_ref=facts.get("head_ref"),
+        author_login=facts.get("author_login"),
+        title=facts.get("title"),
+    )
+    if release_reason:
+        return _deny(
+            f"{SELF_ID}: refusing to arm PR #{pr} — {release_reason}. Merging the "
+            "release-plz Release PR cuts a `v*` tag and, once `publish = true` in "
+            "release-plz.toml, publishes every crate in the version_group to crates.io. "
+            "A crates.io version can NEVER be unpublished. The Release PR is merged by a "
+            "MAINTAINER, by hand, deliberately — never armed. This decision is keyed on "
+            "the branch/author/title, so relabelling the PR cannot change it."
+        )
+
     if base == trunk:
         return _allow(
             f"{SELF_ID}: PR #{pr} base is `{trunk}` (not stacked) — arm OK"
@@ -206,14 +321,43 @@ def decide(command: str, trunk: str, base_lookup) -> dict:
 def self_test() -> int:
     trunk = "main"
 
+    def _facts(base, *, head_ref="sparq-agent/issue-1-worker", author="jeswr",
+               title="fix(engine): a change"):
+        return {
+            "base": base,
+            "head_ref": head_ref,
+            "author_login": author,
+            "title": title,
+        }
+
     def base_main(_pr):
-        return "main", None
+        return _facts("main"), None
 
     def base_stacked(_pr):
-        return "site/sq-1022-explain", None
+        return _facts("site/sq-1022-explain"), None
 
     def base_error(_pr):
         return None, "gh CLI not found"
+
+    # [OPUS-5] #1135: the release-plz Release PR — base IS `main`, so ONLY the release
+    # axis can catch it. Its head branch, author, and title are all release-plz's.
+    def base_release_pr(_pr):
+        return (
+            _facts(
+                "main",
+                head_ref="release-plz-main",
+                author="app/github-actions",
+                title="chore: release v0.2.0",
+            ),
+            None,
+        )
+
+    # A Release PR whose head branch gh did not report — must still be refused.
+    def base_release_pr_unknown_head(_pr):
+        return (
+            _facts("main", head_ref=None, author="app/github-actions", title=None),
+            None,
+        )
 
     cases = [
         # (label, command, base_lookup, expected_decision)
@@ -254,10 +398,20 @@ def self_test() -> int:
             "deny",
         ),
         (
-            "arm, gh lookup error → fail OPEN (allow)",
+            # [OPUS-5] #1135 BEHAVIOUR CHANGE (was: fail OPEN / allow). An arm whose PR
+            # cannot be resolved cannot be proven not to be the Release PR, and the
+            # outcome that admits — a crates.io publish — is irreversible.
+            "arm, gh lookup error → fail CLOSED (deny, #1135)",
             "gh pr merge 1023 --auto --squash",
             base_error,
-            "allow",
+            "deny",
+        ),
+        (
+            # Same reason: no parseable PR argument, so nothing can be proven.
+            "arm with no PR argument → fail CLOSED (deny, #1135)",
+            "gh pr merge --auto --squash",
+            base_main,
+            "deny",
         ),
         (
             "arm, --auto as --auto=… style still detected (base=stacked) → DENY",
@@ -269,6 +423,29 @@ def self_test() -> int:
             "substring 'autograph' must NOT count as --auto",
             "gh pr merge 1044 --autograph",
             base_stacked,
+            "allow",
+        ),
+        # ------------------------------------------------------- #1135 Release-PR axis
+        # THE CASE THE STACKED-BASE GUARD CANNOT CATCH: the Release PR's base IS `main`,
+        # so `base == trunk` allows it. Only the release axis denies. `base_main` above
+        # ALLOWS on the same command shape, which makes this a discriminating pair.
+        (
+            "arm the release-plz Release PR (base IS main) → DENY (#1135)",
+            "gh pr merge 900 --auto --squash",
+            base_release_pr,
+            "deny",
+        ),
+        (
+            "arm a Release PR whose head branch gh did not report → DENY (#1135)",
+            "gh pr merge 900 --auto --squash",
+            base_release_pr_unknown_head,
+            "deny",
+        ),
+        (
+            # NOT an arm command: the release axis must not police non-arming calls.
+            "`gh pr merge` on the Release PR WITHOUT --auto is not this hook's business",
+            "gh pr merge 900 --squash",
+            base_release_pr,
             "allow",
         ),
     ]
@@ -330,9 +507,68 @@ def self_test() -> int:
         )
         fake_gh.chmod(0o755)
 
+        # [OPUS-5] #1135 END-TO-END: a second fake `gh` that answers with the LIVE Release
+        # PR shape — base `main` (so the stacked axis allows it), head branch
+        # `release-plz-main`, author github-actions, title `chore: release …`. Running the
+        # REAL settings hook command against it proves the deny travels the whole wired
+        # path, not just `decide()`. The YAML/JSON seam is where vacuity lives.
+        release_bin = fixture_root / "release-bin"
+        release_bin.mkdir()
+        release_gh = release_bin / "gh"
+        release_gh.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            "'{\"baseRefName\":\"main\",\"headRefName\":\"release-plz-main\","
+            "\"number\":900,\"author\":{\"login\":\"app/github-actions\"},"
+            "\"title\":\"chore: release v0.2.0\"}'\n",
+            encoding="utf-8",
+        )
+        release_gh.chmod(0o755)
+
         fixture_env = os.environ.copy()
         fixture_env["CLAUDE_PROJECT_DIR"] = str(repo_root)
         fixture_env["PATH"] = f"{fake_bin}{os.pathsep}{fixture_env.get('PATH', '')}"
+
+        release_env = fixture_env.copy()
+        release_env["PATH"] = f"{release_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+        for release_label, release_command, release_expected in (
+            # base == main: ONLY the release axis can deny this. If the release axis were
+            # deleted, this same fixture would ALLOW — that is what makes it discriminate.
+            ("arm the Release PR", "gh pr merge 900 --auto --squash", "deny"),
+            # …and an ordinary non-arm command against the same PR is untouched.
+            ("non-arm command", "printf harmless", "allow"),
+        ):
+            for release_invocation, release_argv, release_cwd in (
+                ("direct", [sys.executable, str(guard_script)], repo_root),
+                ("settings hook", ["bash", "-c", hook_command], off_root_cwd),
+            ):
+                release_proc = subprocess.run(
+                    release_argv,
+                    cwd=release_cwd,
+                    env=release_env,
+                    input=json.dumps({"tool_input": {"command": release_command}}),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                try:
+                    release_got = json.loads(release_proc.stdout)[
+                        "hookSpecificOutput"
+                    ]["permissionDecision"]
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    release_got = None
+                release_ok = (
+                    release_proc.returncode == 0 and release_got == release_expected
+                )
+                print(
+                    f"  [{'PASS' if release_ok else 'FAIL'}] #1135 end-to-end "
+                    f"{release_label}, {release_invocation}: {release_got} "
+                    f"(want {release_expected})"
+                )
+                if not release_ok:
+                    if release_proc.stderr:
+                        print(f"    stderr: {release_proc.stderr.strip()}")
+                    failures += 1
 
         fixture_cases = [
             ("non-arm fixture", "printf harmless", "allow"),
@@ -375,9 +611,19 @@ def self_test() -> int:
                         print(f"    stderr: {proc.stderr.strip()}")
                     failures += 1
 
-        # A missing project script must produce an explicit allow with exit zero. A
-        # non-zero PreToolUse hook exit is fail-closed in Claude Code and caused the
-        # live all-Bash deadlock this regression test protects against.
+        # AN UNRUNNABLE GUARD. Two obligations pull in opposite directions and BOTH are
+        # pinned here, against the REAL settings.json wrapper:
+        #
+        #  (a) EXIT ZERO WITH AN EXPLICIT DECISION, always. A non-zero PreToolUse hook
+        #      exit is fail-closed in Claude Code across the whole `Bash` matcher and
+        #      caused a live all-Bash deadlock; that is what the exit-0 half protects.
+        #  (b) DENY THE ARM. [OPUS-5] PR #4192 review: the wrapper used to answer `allow`
+        #      here, which inverted this script's deliberate fail-closed release axis at
+        #      the exact moment there is no guard at all — an agent in a checkout where
+        #      the script is missing could arm the Release PR. It now denies.
+        #
+        # The non-arm row is what keeps (b) from re-creating (a): this hook matches EVERY
+        # Bash tool call, so the deny must be scoped to `gh pr merge` and nothing else.
         unavailable_projects = [
             ("missing guard script", fixture_root / "missing-project"),
             ("unreadable guard script", fixture_root / "unreadable-project"),
@@ -388,39 +634,46 @@ def self_test() -> int:
         unreadable_guard = unreadable_scripts / "check-pr-arm-base.py"
         unreadable_guard.write_text("raise SystemExit(1)\n", encoding="utf-8")
         unreadable_guard.chmod(0o000)
-        unavailable_payload = json.dumps(
-            {"tool_input": {"command": "gh pr merge 1023 --auto"}}
-        )
+        unavailable_commands = [
+            # armed, and the more dangerous UNarmed direct merge
+            ("arm", "gh pr merge 1023 --auto", "deny"),
+            ("direct merge", "gh pr merge 1023 --squash", "deny"),
+            # the discriminating row: ordinary work must not be bricked
+            ("ordinary command", "printf harmless", "allow"),
+        ]
         for unavailable_label, project_dir in unavailable_projects:
             unavailable_env = fixture_env.copy()
             unavailable_env["CLAUDE_PROJECT_DIR"] = str(project_dir)
-            unavailable_proc = subprocess.run(
-                ["bash", "-c", hook_command],
-                cwd=off_root_cwd,
-                env=unavailable_env,
-                input=unavailable_payload,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            try:
-                unavailable_output = json.loads(unavailable_proc.stdout)
-                unavailable_decision = unavailable_output["hookSpecificOutput"][
-                    "permissionDecision"
-                ]
-            except (KeyError, TypeError, json.JSONDecodeError):
-                unavailable_decision = None
-            unavailable_ok = (
-                unavailable_proc.returncode == 0 and unavailable_decision == "allow"
-            )
-            print(
-                f"  [{'PASS' if unavailable_ok else 'FAIL'}] {unavailable_label}, "
-                f"off-root cwd: {unavailable_decision} (want allow + exit 0)"
-            )
-            if not unavailable_ok:
-                if unavailable_proc.stderr:
-                    print(f"    stderr: {unavailable_proc.stderr.strip()}")
-                failures += 1
+            for command_label, command, expected in unavailable_commands:
+                unavailable_proc = subprocess.run(
+                    ["bash", "-c", hook_command],
+                    cwd=off_root_cwd,
+                    env=unavailable_env,
+                    input=json.dumps({"tool_input": {"command": command}}),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                try:
+                    unavailable_output = json.loads(unavailable_proc.stdout)
+                    unavailable_decision = unavailable_output["hookSpecificOutput"][
+                        "permissionDecision"
+                    ]
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    unavailable_decision = None
+                unavailable_ok = (
+                    unavailable_proc.returncode == 0
+                    and unavailable_decision == expected
+                )
+                print(
+                    f"  [{'PASS' if unavailable_ok else 'FAIL'}] {unavailable_label} + "
+                    f"{command_label}, off-root cwd: {unavailable_decision} "
+                    f"(want {expected} + exit 0)"
+                )
+                if not unavailable_ok:
+                    if unavailable_proc.stderr:
+                        print(f"    stderr: {unavailable_proc.stderr.strip()}")
+                    failures += 1
 
     if failures:
         print(f"\nself-test: {failures} case(s) FAILED")
@@ -458,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
         except json.JSONDecodeError:
             command = ""
 
-    out = decide(command, args.trunk, lambda pr: pr_base_ref(pr, args.trunk))
+    out = decide(command, args.trunk, lambda pr: pr_facts(pr, args.trunk))
     print(json.dumps(out))
     # A PreToolUse command hook signals its decision via the JSON above (exit 0). We
     # always exit 0 and let `permissionDecision` carry allow/deny — exit-code semantics

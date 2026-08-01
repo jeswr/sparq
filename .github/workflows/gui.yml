@@ -524,6 +524,14 @@ jobs:
       - name: Test (engine command layer)
         run: cargo test
 
+      # [SONNET-4.6] Native HDT import is opt-in. Exercise it independently so its dependency
+      # edge and command-layer tests cannot first fail in the tag-only release workflow.
+      - name: Clippy (hdt, -D warnings)
+        run: cargo clippy --all-targets --features hdt -- -D warnings
+
+      - name: Test (HDT import, native lane)
+        run: cargo test --features hdt
+
       # [FABLE-5] sq-ixc3.14 — the OPT-IN federation feature state: clippy + the native-lane
       # federated-SERVICE tests (federation.rs), which join the live workspace snapshot with a
       # LIVE loopback SPARQL endpoint through the real engine SERVICE client and prove the
@@ -545,6 +553,29 @@ jobs:
 
       - name: Test (ODRL policy tool, native lane)
         run: cargo test --features odrl
+
+      # [SONNET-4.6] Execute the feature-gated bridge tests that compare the native command
+      # serialization with sparq-forms directly; compiling them in the union lane is not enough.
+      - name: Clippy (forms, -D warnings)
+        run: cargo clippy --all-targets --features forms -- -D warnings
+
+      - name: Test (SHACL-derived forms, native lane)
+        run: cargo test --features forms
+
+      # [SONNET-4.6] Compile the exact optional-capability union shipped by release.yml to catch
+      # dependency feature-unification failures before a tag. `custom-protocol` is intentionally
+      # omitted here: unlike the bundle job, this job does not export gui/app/out for Tauri to
+      # embed at compile time. Keep this list in sync with release.yml's "Build Tauri desktop
+      # bundle" command. This lane also preserves the combined native capability coverage on
+      # every release platform.
+      - name: Clippy (release feature union, -D warnings)
+        run: cargo clippy --all-targets --features hdt,federation,odrl,forms -- -D warnings
+
+      # HDT's feature-on path is compile-covered above; the tests executed in this combined
+      # Linux state exercise the federation, ODRL, and forms paths together.
+      - name: Test (desktop release features, native lane)
+        if: runner.os == 'Linux'
+        run: cargo test --features hdt,federation,odrl,forms
 
   # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #

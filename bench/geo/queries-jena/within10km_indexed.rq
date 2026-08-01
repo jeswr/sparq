@@ -1,0 +1,13 @@
+# [SONNET-4.6] sq-enfy3 — Jena-indexed rendering of the `within10km`
+# workload. This query runs only against the feature-modelled corpus variant
+# from bench/geo/gen.sh; the fixed direct geo:asWKT corpus and its oracle stay
+# unchanged. Jena's property function uses latitude-longitude argument order
+# and metres. The explicit -1 limit requests all matches rather than relying
+# on the default. The owning-feature/index-granularity premise remains gated
+# by the oracle: COUNT must equal expected.tsv `within10km` before timing is
+# trusted; do not publish a timing from an unverified or count-different run.
+PREFIX spatial: <http://jena.apache.org/spatial#>
+PREFIX uom:     <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT (COUNT(?e) AS ?n) WHERE {
+  ?e spatial:withinCircle (51 0 10000 uom:metre -1) .
+}

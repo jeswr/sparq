@@ -29,6 +29,31 @@ Follow the **sub-agent shared contract** — `AGENTS.md` § *The sub-agent share
 - `rustfmt`: the workspace has an intentionally-deferred reformat (CI fmt is informational; clippy is the hard gate). Match the surrounding committed style; do NOT run `cargo fmt` over untouched files (huge unrelated diffs).
 - **README cap (GATING `readme-template`):** if you add or grow a crate `README.md`, run `python3 scripts/check-readme-template.py --enforce` → **0 deviations**; keep crate READMEs **≤120 lines** (**≤30** for a `publish = false` stub carrying the `<!-- internal-stub -->` directive). Verbose API detail belongs in rustdoc/`SKILL.md`. Also apply the public-API → `skills/<surface>/SKILL.md` rule for any new public surface.
 
+## Before you open the PR (HARD — identical in every worker brief) [OPUS-5]
+Run **`python3 scripts/preflight.py`** in your worktree. It runs every mechanical
+merge-gate against YOUR diff — G1 `gate-new-crate.py`, G2 `gate-api-skill.py`,
+G6 `check-config-documented.py`, `check-no-perf-numbers.py`,
+`check-readme-template.py`, `check-privacy-claims.sh`, plus a `guard-untested`
+check — so you learn in-worktree instead of on CI or in a review round. It must
+exit 0. These gates already block the merge; running them earlier lowers no bar.
+
+Then do the two things `preflight.py` prints but CANNOT decide for you. In a census
+of the 831 review verdicts on the registry `ledger` branch, these two classes are
+**130 of the 317 blocking round-1 findings** — the largest preventable share:
+
+1. **MUTATE YOUR HEADLINE GUARD** (63 findings). Take the feature named in your PR
+   title — it is disproportionately the one shipped with no red test. **DELETE or
+   INVERT it and RUN the suite.** If nothing goes red, your test is vacuous; that is
+   a blocking defect. Execute it, do not reason about it. Name the test that died in
+   your PR body. (`guard-untested` only catches a guard with NO test at all; a test
+   that asserts a bound, a type, or a marker string instead of the behaviour passes
+   the script and fails review.)
+2. **READ YOUR OWN PROSE AGAINST YOUR OWN DIFF** (67 findings). For every line of
+   doc-comment, README, `SKILL.md`, comment, research record or PR-body claim you
+   added, point at the code in THIS diff that makes it true. If you cannot, delete
+   the sentence or fix the code. Overclaiming is blocking, and citing a module,
+   flag, constant or test file the diff does not contain is the commonest form.
+
 ## Method
 1. **Read the spec + run the failing test FIRST** (`cargo test -p <crate> <test> -- --nocapture`). Confirm it fails for the stated reason. If it passes already, or does not exist, or does not actually pin the spec'd behaviour → escalate (`needs_architect=true`).
 2. **Sanity-check de-risk.** Skim the target crate's existing code + README + SKILL to confirm the bead really is single-crate and mechanical. The moment it is not — hard path with a non-obvious perf story, a needed design decision, a second crate, spec/test contradiction — STOP and escalate. Do not architect your way out.

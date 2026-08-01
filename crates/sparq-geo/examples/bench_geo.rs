@@ -1,7 +1,7 @@
 //! GeoIndex benchmark: build + query latency on ~100k points, PLUS a
 //! deterministic TSV-emitting bench mode (the G1 runner for `bench/geo/`).
 //!
-//! Two modes:
+//! Modes:
 //!
 //! ```sh
 //! # 1. Human-readable latency report (the original mode; numbers land in the README):
@@ -9,6 +9,9 @@
 //!
 //! # 2. Deterministic bench TSV (consumed by bench/geo/run.sh's self-asserting gate):
 //! cargo run --release -p sparq-geo --example bench_geo -- bench [corpus.nt] [iters]
+//!
+//! # 3. Untimed nearest-neighbour entity oracle (one IRI per line):
+//! cargo run --release -p sparq-geo --example bench_geo -- nearest-ids <corpus.nt> <k>
 //! ```
 //!
 //! ## Mode 2 contract — `name\tcount\tus`
@@ -34,7 +37,13 @@
 //! `geo_<name>_us` trend metrics). Correctness lives in `expected.tsv`, NOT in
 //! the binary — exactly like LUBM / SHACL. [OPUS-4.8] (sq-tf8n)
 //!
-//! ## Mode 3 — `query <corpus.nt> <query.rq> [iters]` (needs the `engine` feature)
+//! ## Mode 3 — `nearest-ids <corpus.nt> <k>`
+//!
+//! This untimed correctness oracle loads the corpus, builds the same index as
+//! bench mode, replays `index.nearest(QUERY_CENTER, k)`, and emits one entity
+//! IRI per line for exact competitor-result comparison.
+//!
+//! ## Mode 4 — `query <corpus.nt> <query.rq> [iters]` (needs the `engine` feature)
 //!
 //! The generic SPARQL runner for the Geographica real-world family
 //! (`bench/geo/queries-geographica/`, driven by `scripts/bench/geo-same-box.sh`
@@ -99,12 +108,44 @@ fn main() {
             print!("{}", generate_corpus(n));
         }
         Some("bench") => bench_mode(&args[1..]),
+        Some("nearest-ids") => nearest_ids_mode(&args[1..]),
         Some("query") => query_mode(&args[1..]),
         _ => report_mode(args.first().and_then(|a| a.parse().ok()).unwrap_or(CORPUS_N)),
     }
 }
 
-/// Mode 3: run one pinned SPARQL query file over a corpus with the `geof:`
+/// Emit the exact nearest-neighbour entity set for the same-box crosscheck.
+///
+/// This path is deliberately untimed: benchmark timings continue to come from
+/// `bench`, while the harness uses these sorted IDs as a correctness oracle.
+/// [SONNET-4.6] (sq-6jl8z)
+fn nearest_ids_mode(args: &[String]) {
+    let usage = "usage: bench_geo nearest-ids <corpus.nt> <k>";
+    let (corpus_path, k) = match (args.first(), args.get(1).and_then(|s| s.parse().ok())) {
+        (Some(path), Some(k)) => (path, k),
+        _ => {
+            eprintln!("{}", usage);
+            std::process::exit(2);
+        }
+    };
+    let nt = std::fs::read_to_string(corpus_path)
+        .unwrap_or_else(|e| panic!("read corpus {}: {}", corpus_path, e));
+    let graph =
+        Graph::load_str(&nt, "ntriples").unwrap_or_else(|e| panic!("parse corpus: {}", e));
+    let index = GeoIndex::build(&graph);
+    let center = Point::new(QUERY_CENTER.0, QUERY_CENTER.1);
+    let mut entities: Vec<String> = index
+        .nearest(center, k)
+        .into_iter()
+        .map(|(entity, _)| entity.to_string())
+        .collect();
+    entities.sort_unstable();
+    for entity in entities {
+        println!("{}", entity);
+    }
+}
+
+/// Mode 4: run one pinned SPARQL query file over a corpus with the `geof:`
 /// registry installed; emit `stem\tcount\tus`. [FABLE-5] (sq-hmd7l.29)
 #[cfg(feature = "engine")]
 fn query_mode(args: &[String]) {

@@ -23,9 +23,16 @@ assert!(verdict.is_pass()); // Pass | Violation (wrong result) | EngineFailure
 # Ok::<(), sparq_metamorph::EngineFailure>(())
 ```
 
-External engines (Fuseki, Virtuoso, Oxigraph, …) via the `protocol-drivers` cargo
-feature (off by default; pulls `ureq`): build an `EndpointConfig` preset, wrap it in an
-`HttpSparqlEngine`, and pass it to `check_differential` alongside sparq.
+External engines via the `protocol-drivers` cargo feature (off by default; pulls
+`ureq`): build an `EndpointConfig` preset — `fuseki`, `oxigraph`, `virtuoso`,
+`blazegraph`, `graphdb`, `qlever`, `millenniumdb`, or `generic` for anything else —
+wrap it in an `HttpSparqlEngine`, and pass it to `check_differential` alongside sparq.
+Each config carries a `PresetEvidence` recording what backs its URL/method/negotiation
+conventions, so a misconfigured endpoint cannot masquerade as a found bug. Presets are
+documentation-derived (`UpstreamDocs`) — building one contacts nothing; only
+`confirmed_live()`, called after a real exchange with that very endpoint, records
+`LiveInstance`, which is what the opt-in, off-CI `tests/preset_live_conformance.rs`
+probe does.
 
 ## ✨ Features
 
@@ -39,6 +46,25 @@ feature (off by default; pulls `ureq`): build an `EndpointConfig` preset, wrap i
   cross-checks cardinalities harness-side.
 - **Differential oracle** (`differential`): same query on ≥2 engines, compared through
   sparq-difftest's engine-independent multiset comparators (dependency only).
+- **`DISTINCT` variant** (`distinct`): the same partition recombined under **set**
+  semantics — `D(π(Ω))` is the set union of the deduplicated branches, not their multiset
+  union, because two solutions in different branches may project to the same row. With
+  `SELECT DISTINCT *` the branches are provably disjoint and the stronger multiset law is
+  checked as well. Exercises the duplicate-elimination path the base oracle never touches.
+- **Aggregate partitioning** (`aggregate`): `COUNT(*)`/`COUNT(e)`/`SUM(e)` over the three
+  branches must recombine to the base — an additive law plus an **error-status** law
+  (the base aggregate is unbound exactly when some branch's is), derived to be invariant
+  under both readings of SPARQL's aggregate error semantics. `SUM` carries an exactness
+  precondition (integer-valued expression) because a promoted floating-point fold is not
+  associative; a promoted cell is reported fail-closed as a harness failure.
+- **`ORDER BY` differential mode** (`differential::check_differential_ordered`): compares
+  ordered results up to permutation within each sort-key equivalence class
+  (`sparq_difftest::order_by_equal`), since SPARQL §15.1 specifies the result sequence only
+  partially. Catches a reordering the unordered oracle is structurally blind to, and does
+  *not* flag the reordering the spec permits.
+- **`EXISTS` stays excluded** from every oracle: its substitution semantics is a known
+  SPARQL 1.1 defect under revision for SPARQL 1.2, so a "violation" involving it would
+  measure the standard rather than an engine. Revisit when SPARQL 1.2 settles it.
 - **Strict verdicts** (`verdict`): wrong-result violations vs engine failures are never
   conflated; every oracle fails closed on an engine error.
 - **Seeded generator** (`generate`): in-crate SplitMix64, no wall clock or OS
@@ -47,7 +73,9 @@ feature (off by default; pulls `ureq`): build an `EndpointConfig` preset, wrap i
 - **Found-bug ledger** (`ledger`): JSONL entries **require** an upstream issue URL and
   a developer-confirmation status; unfiled observations are not entries.
 - **Non-vacuity self-tests**: a deliberately-injected wrong-result mutant
-  (`FilterDropsRow`) is flagged by all three oracles against the *real* sparq engine.
+  (`FilterDropsRow`) is flagged by every oracle against the *real* sparq engine. Because
+  it perturbs cardinality only, each extension carries a mutant aimed at the law it adds
+  (an off-by-one aggregate cell, a silently-unbound aggregate, a reversed result order).
 - **Nightly CI driver** (`harness` + the `metamorph-driver` binary): seeded window ->
   TLP + NoREC verdicts per seed, every verdict counted (fail-closed), deterministic
   repro on failure. Driven by `.github/workflows/metamorph.yml` (advancing nightly

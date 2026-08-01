@@ -34,9 +34,10 @@ const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 ///
 /// Returns `Err` if the RDF does not parse, if a query over it fails, or if the
 /// policy is REFUSED as ambiguous/degenerate (multiple `odrl:conflict`
-/// strategies, or a malformed/empty/nested RDF-collection combinator operand —
-/// see [`parse_policy`]). A well-formed RDF document with no ODRL rules parses
-/// to an empty [`Policy`] (which then denies everything — fail-closed).
+/// strategies, a malformed/empty/nested RDF-collection combinator operand, or a
+/// malformed RDF-collection `odrl:rightOperand` — see [`parse_policy`]). A
+/// well-formed RDF document with no ODRL rules parses to an empty [`Policy`]
+/// (which then denies everything — fail-closed).
 pub fn parse_policy_str(rdf: &str, format: &str) -> Result<Policy, String> {
     let graph = Graph::load_str(rdf, format)?;
     parse_policy(&graph)
@@ -51,13 +52,19 @@ pub fn parse_policy_str(rdf: &str, format: &str) -> Result<Policy, String> {
 /// (the `policy_conflict` precedent), or a LogicalConstraint combinator with a
 /// malformed (broken-tail/cyclic/forked), EMPTY (`( )`), or nested-list
 /// collection operand (`fold_list_operands` — degrading those per-operand would
-/// widen decisions on one rule kind or the other).
+/// widen decisions on one rule kind or the other), or a constraint whose
+/// `odrl:rightOperand` is a malformed (broken-tail/dangling/cyclic/forked, or a
+/// member-less cell asserting `rdf:rest` with no `rdf:first`) collection
+/// (`fold_rights` — honouring its valid prefix, or reading a member-less head as
+/// an ordinary unmatchable value, would drop authored members from the set
+/// encoding, likewise widening).
 pub fn parse_policy(graph: &Graph) -> Result<Policy, String> {
     let iri = policy_iri(graph)?;
-    // Bulk-load the graph's RDF collection cons cells ONCE, so a multi-valued
-    // `odrl:rightOperand ( <a> <b> )` list can be folded into the set encoding
-    // by every constraint parse below. [FABLE-5] sq-ueydm.
-    let lists = rdf_list_cells(graph)?;
+    // Bulk-load the graph's RDF collection shapes ONCE (cons cells + the member-less
+    // rest-only heads), so a multi-valued `odrl:rightOperand ( <a> <b> )` list can be
+    // folded into the set encoding — or refused — by every constraint parse below.
+    // [FABLE-5] sq-ueydm.
+    let lists = rdf_list_table(graph)?;
     let permissions = rules(graph, "permission", true, &lists)?;
     let prohibitions = rules(graph, "prohibition", false, &lists)?;
     let conflict = policy_conflict(graph)?;
@@ -185,13 +192,13 @@ fn group_by_first(graph: &Graph, sparql: &str) -> Result<BTreeMap<String, Vec<Te
 
 /// All rules of a kind (`"permission"`/`"prohibition"`). `with_duties` controls
 /// whether duty obligations are parsed (permissions only in the base case).
-/// `lists` is the graph's pre-loaded RDF-collection table (see `rdf_list_cells`),
+/// `lists` is the graph's pre-loaded RDF-collection table (see `rdf_list_table`),
 /// consumed by the constraint parses to fold list-valued right operands.
 fn rules(
     graph: &Graph,
     kind: &str,
     with_duties: bool,
-    lists: &BTreeMap<String, ListCell>,
+    lists: &ListTable,
 ) -> Result<Vec<Rule>, String> {
     // Enumerate the rule nodes first (keyed), then attach attributes by join.
     // (BIND a copy so the projection has two distinct variables — the engine
@@ -267,14 +274,42 @@ struct ListCell {
     ambiguous: bool,
 }
 
-/// Bulk-load every RDF collection cons cell in the graph (`?n rdf:first ?f`,
-/// optional `?n rdf:rest ?r`), keyed by node key, so a `rightOperand` bound to a
-/// list *head* can be folded into its member terms without per-constraint
-/// queries (the same bulk-query + in-memory-assembly pattern as
-/// [`logical_constraints_for`]). A malformed cell asserting several
+/// The graph's pre-loaded RDF-collection shape table (see [`rdf_list_table`]):
+/// every well-keyed cons cell, PLUS the member-less HEAD-position nodes that are
+/// collection-*shaped* but carry no `rdf:first`. Both are needed by every
+/// consumer, because a node's absence from `cells` alone does not mean "not a
+/// collection". [FABLE-5] sq-srjuc.
+struct ListTable {
+    /// Cons cells keyed by node key (`?n rdf:first ?f`).
+    cells: BTreeMap<String, ListCell>,
+    /// Nodes asserting `rdf:rest` but NO `rdf:first`. Such a node is invisible to
+    /// `cells` (which is keyed on `rdf:first`), so without this set it would read
+    /// as an ordinary IRI/blank-node value or operand and silently bypass
+    /// collection validation. (A MID-chain rest-only cell is already caught by
+    /// [`well_formed_list`]'s dangling-tail check; this set is what catches one in
+    /// HEAD position.) [FABLE-5] sq-dkuff.
+    rest_only: BTreeMap<String, ()>,
+}
+
+impl ListTable {
+    /// Is `key` collection-SHAPED — either a cons cell or a member-less rest-only
+    /// node? Both shapes must be validated as a collection rather than read as an
+    /// ordinary value/operand. [FABLE-5] sq-srjuc.
+    fn is_collection_shaped(&self, key: &str) -> bool {
+        self.cells.contains_key(key) || self.rest_only.contains_key(key)
+    }
+}
+
+/// Bulk-load the graph's RDF collection shapes ONCE: every cons cell (`?n rdf:first
+/// ?f`, optional `?n rdf:rest ?r`) keyed by node key, plus the `rest_only` set of
+/// nodes asserting `rdf:rest` with no `rdf:first`. A `rightOperand` or combinator
+/// operand bound to a list *head* can then be folded into its member terms — or
+/// refused — without per-constraint queries (the same bulk-query + in-memory-assembly
+/// pattern as [`logical_constraints_for`]). A malformed cell asserting several
 /// `rdf:first`/`rdf:rest` values keeps its first-bound pair (degenerate, but the
-/// fold stays deterministic and terminating). [FABLE-5] sq-ueydm.
-fn rdf_list_cells(graph: &Graph) -> Result<BTreeMap<String, ListCell>, String> {
+/// load stays deterministic and terminating) and is flagged `ambiguous`, so every
+/// consumer goes through [`well_formed_list`] and refuses it. [FABLE-5] sq-ueydm.
+fn rdf_list_table(graph: &Graph) -> Result<ListTable, String> {
     let q = format!(
         "SELECT ?n ?f ?r WHERE {{ \
            ?n <{RDF_NS}first> ?f . \
@@ -282,14 +317,15 @@ fn rdf_list_cells(graph: &Graph) -> Result<BTreeMap<String, ListCell>, String> {
          }}"
     );
     let res = sparq_engine::query(graph, &q)?;
-    let mut out: BTreeMap<String, ListCell> = BTreeMap::new();
+    let mut cells: BTreeMap<String, ListCell> = BTreeMap::new();
     for row in res.rows {
         let mut it = row.into_iter();
         let n = it.next().flatten();
         let f = it.next().flatten();
         let r = it.next().flatten();
         let (Some(n), Some(f)) = (n, f) else { continue };
-        out.entry(node_key(&n))
+        cells
+            .entry(node_key(&n))
             // A SECOND row for the same cell node = a genuinely different
             // `rdf:first`/`rdf:rest` binding (a triple matches at most once) —
             // mark the fork so well-formedness checks can refuse it. [FABLE-5]
@@ -301,20 +337,39 @@ fn rdf_list_cells(graph: &Graph) -> Result<BTreeMap<String, ListCell>, String> {
                 ambiguous: false,
             });
     }
-    Ok(out)
+    let rest_res = sparq_engine::query(
+        graph,
+        &format!("SELECT ?n ?r WHERE {{ ?n <{RDF_NS}rest> ?r }}"),
+    )?;
+    let mut rest_only: BTreeMap<String, ()> = BTreeMap::new();
+    for row in rest_res.rows {
+        let Some(Some(n)) = row.into_iter().next() else {
+            continue;
+        };
+        let key = node_key(&n);
+        if !cells.contains_key(&key) {
+            rest_only.insert(key, ());
+        }
+    }
+    Ok(ListTable { cells, rest_only })
 }
 
 /// Walk an RDF list from `head_key` and return its member terms ONLY when the
 /// collection is WELL-FORMED: every cell has an unambiguous `rdf:first`/`rdf:rest`
 /// pair, no cell repeats (no cycle), and the walk terminates at `rdf:nil`
 /// explicitly. Returns `None` for a broken tail (missing `rdf:rest`), a dangling
-/// tail (an `rdf:rest` pointing at a non-cell that is not `rdf:nil`), a cycle, or
-/// a forked (ambiguous) cell. [FABLE-5] sq-dkuff.
+/// tail (an `rdf:rest` pointing at a non-cell that is not `rdf:nil`), a cycle, a
+/// forked (ambiguous) cell, or a member-less rest-only node (`rdf:rest` with no
+/// `rdf:first` — absent from `cells`, so it never walks as a collection).
+/// [FABLE-5] sq-dkuff.
 ///
 /// A *prefix* of a malformed list must never be honoured where the members carry
 /// authorization semantics: dropping an authored member from an `odrl:and` operand
-/// set makes the compound EASIER to satisfy than authored (widening).
-fn well_formed_list(head_key: &str, lists: &BTreeMap<String, ListCell>) -> Option<Vec<Term>> {
+/// set makes the compound EASIER to satisfy than authored, and dropping one from an
+/// `odrl:rightOperand` set encoding weakens the set relation (`isNoneOf` excludes
+/// fewer values) — both the widening direction. Shared by [`fold_list_operands`]
+/// (sq-dkuff) and [`fold_rights`] (sq-srjuc).
+fn well_formed_list(head_key: &str, lists: &ListTable) -> Option<Vec<Term>> {
     let nil = format!("<{RDF_NS}nil>");
     let mut out = Vec::new();
     let mut seen: BTreeMap<String, ()> = BTreeMap::new();
@@ -323,7 +378,8 @@ fn well_formed_list(head_key: &str, lists: &BTreeMap<String, ListCell>) -> Optio
         if cur == nil {
             return Some(out);
         }
-        let cell = lists.get(&cur)?; // dangling tail / not a list at all
+        // Dangling tail / member-less rest-only cell / not a list at all.
+        let cell = lists.cells.get(&cur)?;
         if cell.ambiguous || seen.insert(cur.clone(), ()).is_some() {
             return None; // forked cell / cycle
         }
@@ -331,28 +387,6 @@ fn well_formed_list(head_key: &str, lists: &BTreeMap<String, ListCell>) -> Optio
         // Broken tail (an `rdf:first` with no `rdf:rest`) → not well-formed.
         cur.clone_from(cell.rest.as_ref()?);
     }
-}
-
-/// Walk an RDF list from `head_key`, collecting the member terms in list order.
-/// Terminates at `rdf:nil` / a dangling tail (any node absent from the cell
-/// table) and on a CYCLE: each cons cell is visited at most once, so a malformed
-/// cyclic list still terminates AND still yields its complete member set (every
-/// cell in the cycle is seen exactly once). [FABLE-5] sq-ueydm.
-fn expand_list(head_key: &str, lists: &BTreeMap<String, ListCell>) -> Vec<Term> {
-    let mut out = Vec::new();
-    let mut seen: BTreeMap<String, ()> = BTreeMap::new();
-    let mut cur = head_key.to_owned();
-    while let Some(cell) = lists.get(&cur) {
-        if seen.insert(cur.clone(), ()).is_some() {
-            break; // cycle — every cell already collected once
-        }
-        out.push(cell.first.clone());
-        match &cell.rest {
-            Some(next) => cur.clone_from(next),
-            None => break,
-        }
-    }
-    out
 }
 
 /// Is `op` one of the ODRL set-relation operators (`isPartOf`/`isAnyOf`/`isNoneOf`)
@@ -388,17 +422,48 @@ fn is_set_operator(op: Option<&Term>) -> bool {
 /// flattened (it stays a blank-node string — an unmatchable member, fail-closed),
 /// and an empty list (`rdf:nil` directly as the object) has no cons cell, so it
 /// falls through as the plain nil IRI — unmatchable by ordinary values, as before.
+///
+/// **A MALFORMED collection REFUSES the whole parse (`Err`)** — the
+/// [`fold_list_operands`] / [`policy_conflict`] precedent. A collection-SHAPED
+/// operand ([`ListTable::is_collection_shaped`] — a cons cell, or a member-less
+/// HEAD-position node asserting `rdf:rest` with no `rdf:first`) is expanded only
+/// when it is WELL-FORMED ([`well_formed_list`]); a broken/dangling tail, a
+/// cycle, or a forked cell would otherwise contribute the valid PREFIX of the
+/// collection, and dropping authored members from a set encoding WIDENS decisions in
+/// both directions: `isNoneOf` on a *permission* excludes fewer purposes than
+/// authored (a dropped member now grants), and any set-op constraint gating a
+/// *prohibition* narrows the carve-out (deny-overrides bypassed). Per-constraint
+/// degradation to the unsatisfiable guard is not a sound fallback either — an
+/// unsatisfiable constraint on a prohibition DISABLES it, the same widening
+/// direction — so the shape is refused outright, fail-closed on both rule kinds.
+/// That last hazard is exactly why a member-less rest-only head must be refused
+/// rather than read as an ordinary value: as a value it is an unmatchable blank
+/// node, which leaves a prohibition's constraint unsatisfied and lets a sibling
+/// permission grant. [FABLE-5] sq-srjuc.
 fn fold_rights(
     op: Option<&Term>,
     rights: &[Term],
-    lists: &BTreeMap<String, ListCell>,
-) -> Option<Value> {
+    lists: &ListTable,
+) -> Result<Option<Value>, String> {
     let mut members: Vec<Term> = Vec::new();
     let mut seen: BTreeMap<String, ()> = BTreeMap::new();
     for r in rights {
         let key = node_key(r);
-        let expanded = if lists.contains_key(&key) {
-            expand_list(&key, lists)
+        // Collection-SHAPED (a cons cell OR a member-less rest-only node) → it must
+        // validate as a collection; a rest-only head is invisible to the cell table,
+        // so testing only `cells` would read it as an ordinary value. [FABLE-5] sq-srjuc.
+        let expanded = if lists.is_collection_shaped(&key) {
+            well_formed_list(&key, lists).ok_or_else(|| {
+                format!(
+                    "a constraint has a MALFORMED collection rightOperand ({key}: \
+                     broken/dangling tail, cycle, forked cell, or a member-less cell \
+                     asserting `rdf:rest` with no `rdf:first`); honouring the valid \
+                     PREFIX would drop authored members and widen decisions (an \
+                     `isNoneOf` permission excludes fewer values than authored; a \
+                     set-op prohibition's carve-out narrows), so the policy is refused \
+                     (fail-closed)"
+                )
+            })?
         } else {
             vec![r.clone()]
         };
@@ -408,22 +473,22 @@ fn fold_rights(
             }
         }
     }
-    match members.len() {
+    Ok(match members.len() {
         0 => None, // no rightOperand object at all → missing-right (unsatisfiable)
         1 => Some(value_of(&members[0])), // single value stays TYPED (pre-fold path)
         _ => {
             if !is_set_operator(op) {
-                return None; // ambiguous multi-value under a non-set operator
+                return Ok(None); // ambiguous multi-value under a non-set operator
             }
             let strs: Vec<String> = members.iter().map(term_str).collect();
             if strs.iter().any(|s| {
                 s.is_empty() || s.contains(['|', ',']) || s.chars().any(char::is_whitespace)
             }) {
-                return None; // un-encodable member would corrupt the set encoding
+                return Ok(None); // un-encodable member would corrupt the set encoding
             }
             Some(Value::Str(strs.join("|")))
         }
-    }
+    })
 }
 
 /// Accumulator grouping one constraint node's result rows: a multi-valued
@@ -465,10 +530,12 @@ impl RawConstraint {
     }
 
     /// Fold the accumulated right operands (expanding RDF lists) and build the
-    /// [`Constraint`] — anything malformed degrades to the unsatisfiable guard.
-    fn build(self, lists: &BTreeMap<String, ListCell>) -> Constraint {
-        let right = fold_rights(self.op.as_ref(), &self.rights, lists);
-        build_constraint(self.left, self.op, right)
+    /// [`Constraint`] — anything malformed degrades to the unsatisfiable guard,
+    /// except a malformed COLLECTION right operand, which refuses the whole parse
+    /// (`Err`; see [`fold_rights`]). [FABLE-5] sq-srjuc.
+    fn build(self, lists: &ListTable) -> Result<Constraint, String> {
+        let right = fold_rights(self.op.as_ref(), &self.rights, lists)?;
+        Ok(build_constraint(self.left, self.op, right))
     }
 }
 
@@ -491,7 +558,7 @@ fn constraints_for(
     graph: &Graph,
     kind: &str,
     pred: &str,
-    lists: &BTreeMap<String, ListCell>,
+    lists: &ListTable,
 ) -> Result<BTreeMap<String, Vec<Constraint>>, String> {
     // One row per (rule, constraint-node, left, operator, right, is-logical).
     // LEFT/OP/RIGHT are OPTIONAL so a structurally incomplete constraint still
@@ -544,7 +611,7 @@ fn constraints_for(
         if raw.is_logical {
             continue;
         }
-        out.entry(rkey).or_default().push(raw.build(lists));
+        out.entry(rkey).or_default().push(raw.build(lists)?);
     }
     Ok(out)
 }
@@ -577,7 +644,7 @@ struct LcDef {
 fn logical_constraints_for(
     graph: &Graph,
     kind: &str,
-    lists: &BTreeMap<String, ListCell>,
+    lists: &ListTable,
 ) -> Result<BTreeMap<String, Vec<LogicalConstraint>>, String> {
     // (1) Every combinator edge in the graph: (lc-node, combinator, operand-node), in
     // graph order. A node appearing as a subject here is a LogicalConstraint.
@@ -641,33 +708,14 @@ fn logical_constraints_for(
     }
     let atoms: BTreeMap<String, Constraint> = atom_acc
         .into_iter()
-        .map(|(ckey, raw)| (ckey, raw.build(lists)))
-        .collect();
-
-    // (2a-bis) HEAD-position rest-only cons cells: a node asserting `rdf:rest` but no
-    // `rdf:first` is absent from the cells table (which is keyed on `rdf:first`), so as
-    // a combinator operand it would silently bypass collection validation and degrade.
-    // Collect the set so the fold can refuse it. (A MID-chain rest-only cell is already
-    // caught by `well_formed_list`'s dangling-tail check.) [FABLE-5] sq-dkuff.
-    let rest_res = sparq_engine::query(
-        graph,
-        &format!("SELECT ?n ?r WHERE {{ ?n <{RDF_NS}rest> ?r }}"),
-    )?;
-    let mut rest_only: BTreeMap<String, ()> = BTreeMap::new();
-    for row in rest_res.rows {
-        let Some(Some(n)) = row.into_iter().next() else {
-            continue;
-        };
-        let key = node_key(&n);
-        if !lists.contains_key(&key) {
-            rest_only.insert(key, ());
-        }
-    }
+        .map(|(ckey, raw)| raw.build(lists).map(|c| (ckey, c)))
+        .collect::<Result<_, String>>()?;
 
     // (2b) Fold LIST-valued combinator operands (`odrl:or ( <c1> <c2> )`) into their
     // member node keys before assembly; a malformed/degenerate collection REFUSES the
-    // whole parse (fail-closed on both rule kinds). [FABLE-5] sq-dkuff.
-    fold_list_operands(&mut lc_defs, &atoms, lists, &rest_only)?;
+    // whole parse (fail-closed on both rule kinds). HEAD-position rest-only cells come
+    // from the pre-loaded `lists.rest_only` set. [FABLE-5] sq-dkuff.
+    fold_list_operands(&mut lc_defs, &atoms, lists)?;
 
     // (3) The rule → direct-constraint-node map (which of a rule's `odrl:constraint`
     // objects are LogicalConstraint nodes), in rule/graph order.
@@ -736,8 +784,7 @@ fn logical_constraints_for(
 fn fold_list_operands(
     lc_defs: &mut BTreeMap<String, LcDef>,
     atoms: &BTreeMap<String, Constraint>,
-    lists: &BTreeMap<String, ListCell>,
-    rest_only: &BTreeMap<String, ()>,
+    lists: &ListTable,
 ) -> Result<(), String> {
     let nil = format!("<{RDF_NS}nil>");
     // Snapshot the compound-node keys: the mutation below never adds/removes defs,
@@ -746,9 +793,9 @@ fn fold_list_operands(
     // A node with NO constraint reading (neither compound nor atomic) — only such
     // nodes are folded/refused; a real constraint keeps its reading.
     let no_reading = |k: &str| !lc_keys.contains_key(k) && !atoms.contains_key(k);
-    let expandable = |k: &str| lists.contains_key(k) && no_reading(k);
+    let expandable = |k: &str| lists.cells.contains_key(k) && no_reading(k);
     let empty_op = |k: &str| *k == nil && no_reading(k);
-    let rest_only_op = |k: &str| rest_only.contains_key(k) && no_reading(k);
+    let rest_only_op = |k: &str| lists.rest_only.contains_key(k) && no_reading(k);
     for def in lc_defs.values_mut() {
         if !def
             .operands
@@ -786,9 +833,7 @@ fn fold_list_operands(
                 };
                 for member in members {
                     let mkey = node_key(&member);
-                    if (mkey == nil || lists.contains_key(&mkey) || rest_only.contains_key(&mkey))
-                        && no_reading(&mkey)
-                    {
+                    if (mkey == nil || lists.is_collection_shaped(&mkey)) && no_reading(&mkey) {
                         return Err(format!(
                             "a LogicalConstraint combinator collection operand ({okey}) has a \
                              NESTED-list member ({mkey}); nested collections are not a \

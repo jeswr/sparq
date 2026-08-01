@@ -1,0 +1,76 @@
+# [OPUS-5] sq-zgbso.2 — ODRL stateless core: stratum A0 (operand-shape guard).
+#
+# WHY THIS STRATUM EXISTS (fail-OPEN fix, PR #3458 review).
+# Every satisfaction fact the strata derive — `odrlx:atomicSat`, `odrlx:lcSat` — is
+# keyed on the constraint NODE, not on the individual operand triple. RDF puts no
+# cardinality bound on a node's properties, so a single node may carry SEVERAL
+# `odrl:leftOperand` / `odrl:operator` / `odrl:rightOperand` objects (and a logical
+# constraint may carry several combinators). The stratum-A rule bodies then match the
+# CROSS PRODUCT of those objects, and any ONE satisfiable combination marks the whole
+# node satisfied — i.e. "SOME operand is satisfied" standing in for the required
+# "EVERY operand is satisfied".
+#
+# The measured consequence: a permission constrained by `recipient eq alice` AND
+# `dateTime lteq 2000-01-01` on one node GRANTED long after expiry, while the Rust
+# reference evaluator (which folds an ambiguous multi-valued node into an
+# unsatisfiable guard) denied.
+#
+# This stratum runs FIRST and marks every such node `odrlx:shape odrlx:Ambiguous`.
+# The stratum-A/C satisfaction rules negate that mark (`log:notIncludes`, stratified
+# NAF over A0's COMPLETE output), so an ambiguous node is never marked satisfied and
+# the quantifier direction stops mattering: satisfaction is only ever derived for a
+# node carrying EXACTLY ONE operand tuple, where "some" and "every" coincide.
+#
+# This is the rule-layer half of the fix and is deliberately fail-CLOSED-only: it can
+# suppress a grant, never create one. It cannot make the deny side safe on its own —
+# suppressing an ambiguous PROHIBITION's satisfaction would DROP its deny and widen
+# access — so the Rust driver additionally REFUSES the whole call for any policy
+# carrying an ambiguous constraint node (`unambiguous_operands` in odrl_bridge.rs).
+# Both layers are load-bearing; neither subsumes the other.
+#
+# Stratification (5 strata now):
+#   A0 (this file): odrlx:shape odrlx:Ambiguous — operand/combinator-arity guard
+#   A  (odrl-a.n3): action facts + atomicSat + lcSat(or)   [NAF over A0]
+#   B  (odrl-b.n3): andSubUnsat + anyRuleConstrUnsat + unconstrained prohibMatches
+#   C  (odrl-c.n3): lcSat(and) + CONSTRAINED prohibMatches + deny emission
+#   D  (odrl-d.n3): permission grant emission
+#
+# odrlx: predicates are sparq-internal derivation facts; never exposed in the auth
+# view, and a caller-supplied policy may not mention them (validate_policy_for_n3).
+
+@prefix odrl:  <http://www.w3.org/ns/odrl/2/> .
+@prefix odrlx: <https://sparq.dev/ns/odrlx#> .
+@prefix log:   <http://www.w3.org/2000/10/swap/log#> .
+
+# ── ambiguous ATOMIC operand positions ───────────────────────────────────────
+# Two DISTINCT objects in one operand position: which one does the node mean? RDF
+# does not say, and there is no pairing between the positions, so the node denotes
+# a cross product of operand tuples rather than one comparison.
+
+{ ?c odrl:leftOperand ?a . ?c odrl:leftOperand ?b . ?a log:notEqualTo ?b . }
+=> { ?c odrlx:shape odrlx:Ambiguous } .
+
+{ ?c odrl:operator ?a . ?c odrl:operator ?b . ?a log:notEqualTo ?b . }
+=> { ?c odrlx:shape odrlx:Ambiguous } .
+
+{ ?c odrl:rightOperand ?a . ?c odrl:rightOperand ?b . ?a log:notEqualTo ?b . }
+=> { ?c odrlx:shape odrlx:Ambiguous } .
+
+{ ?c odrl:rightOperandReference ?a . ?c odrl:rightOperandReference ?b .
+  ?a log:notEqualTo ?b . }
+=> { ?c odrlx:shape odrlx:Ambiguous } .
+
+# A node giving BOTH a literal/IRI right operand and a right-operand REFERENCE is
+# ambiguous for the same reason (two candidate right values, no pairing).
+{ ?c odrl:rightOperand ?a . ?c odrl:rightOperandReference ?b . }
+=> { ?c odrlx:shape odrlx:Ambiguous } .
+
+# ── ambiguous LOGICAL-constraint combinators ─────────────────────────────────
+# A node carrying two different combinators is read by the or-rule as a disjunction
+# AND by the and-rule as a conjunction, so a satisfied `odrl:or` member would satisfy
+# it even with an unsatisfied `odrl:and` member — the same "some for every" fail-open
+# one level up. Mark it ambiguous so NEITHER lcSat rule fires.
+
+{ ?lc odrl:or  ?x . ?lc odrl:and  ?y . } => { ?lc odrlx:shape odrlx:Ambiguous } .
+{ ?lc odrl:or  ?x . ?lc odrl:xone ?y . } => { ?lc odrlx:shape odrlx:Ambiguous } .
+{ ?lc odrl:and ?x . ?lc odrl:xone ?y . } => { ?lc odrlx:shape odrlx:Ambiguous } .

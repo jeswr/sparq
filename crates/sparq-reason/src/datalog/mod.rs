@@ -13,7 +13,10 @@
 //! rederivation at stratum boundaries for `NOT`/`AGGREGATE` strata). [GPT-5.6]
 //! Phase 4 (sq-a7bmo) adds grouped `NOT`, projected `COUNT(DISTINCT ?v)`, the full
 //! numeric tower for `FILTER`, and conservative variable-predicate atoms. Surface
-//! wiring and an external-engine differential arm stay beaded from the design record.
+//! wiring stays beaded from the design record; the external-engine differential arm
+//! (sq-xzb9p) has SHIPPED as the test-only `souffle` module — Soufflé stratifies the
+//! translated program itself, so that arm also checks our stratification. See its
+//! module docs for the relational fragment it covers and why it stops there.
 //!
 //! # The dialect
 //!
@@ -40,6 +43,15 @@
 //!   de-duplicates `?v`; there are no rows for empty groups) by the `ON` variables and
 //!   binds the count (an `xsd:integer`) to `?c`. Body variables other
 //!   than the `ON` list are aggregate-local. `ON` may be omitted for a global count.
+//! * **`SUM`/`MIN`/`MAX`/`AVG`** read the same distinct body matches over the **whole**
+//!   shared XSD numeric tower — `xsd:float`/`xsd:double` are accepted alongside the exact
+//!   `integer`/`decimal` tiers, and a non-numeric value fails only that row (fail-closed,
+//!   as `FILTER` does). `SUM`/`AVG` mint a result under XPath operand promotion (so a
+//!   double operand yields an `xsd:double`; `AVG` over integers is an `xsd:decimal`);
+//!   `MIN`/`MAX` return an INPUT term verbatim. Because floating-point addition is not
+//!   associative, the fold order is PINNED so the closure stays a function of the
+//!   completed lower strata, and `NaN`/`-0.0` get an explicit rule — see
+//!   `eval::fold_numeric_group` for the full semantics.
 //! * **`FILTER(x op y)`** compares two bound-or-constant XSD numeric values with
 //!   `= != < <= > >=` via [`sparq_substrate::numeric::Num::cmp_relational`].
 //!   Float/double operands participate with XPath promotion; NaN and non-numeric
@@ -84,6 +96,8 @@ mod incr;
 #[cfg(test)]
 mod oracle;
 mod parser;
+#[cfg(test)]
+mod souffle;
 mod stratify;
 
 pub use incr::MaterializedProgram;

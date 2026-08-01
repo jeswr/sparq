@@ -35,12 +35,30 @@ VERSION="${VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always 2>/dev/nul
 OUT_DIR="${OUT_DIR:-sbom}"
 mkdir -p "$OUT_DIR"
 
+# [GPT-5] sq-a1fgx: cargo-cyclonedx invokes `cargo metadata`, which may download
+# registry crates even though it does not compile them. Keep transient crates.io
+# resets from aborting a release while still failing closed on a sustained outage.
+retry_cargo_cyclonedx() {
+  local attempt=1
+  local max_attempts=3
+
+  until cargo cyclonedx "$@"; do
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      echo "ERROR: cargo cyclonedx failed after $attempt attempts" >&2
+      return 1
+    fi
+    echo "cargo cyclonedx attempt $attempt failed; retrying in 10s..." >&2
+    sleep 10
+    attempt=$((attempt + 1))
+  done
+}
+
 echo "==> generating CycloneDX SBOMs (whole workspace, sparq ${VERSION})"
 # [OPUS-4.8] sq-toze.28 (GS-4 / CDX-3): emit CycloneDX 1.5 natively. cargo-cyclonedx
 # 0.5.9 (the pinned toolchain version) accepts --spec-version {1.3,1.4,1.5} and defaults
 # to 1.3; pinning 1.5 aligns the SBOM with the VEX (also 1.5) and unlocks the 1.5
 # metadata.lifecycles slot (populated, phase=build, by scripts/sbom-normalize.jq).
-cargo cyclonedx --all --format json --spec-version 1.5
+retry_cargo_cyclonedx --all --format json --spec-version 1.5
 
 # [OPUS-4.8] sq-toze.30 (GS-6 / F-6): cargo-cyclonedx 0.5.9 stamps the absolute build dir
 # into every workspace/path-dependency bom-ref (path+file:///abs/...#ver) and purl
@@ -78,7 +96,7 @@ find crates -name '*.cdx.json' -delete
 # CLI/server SBOMs above.
 if [ -f gui/src-tauri/Cargo.toml ]; then
   echo "==> generating CycloneDX SBOM (GUI shell, sparq ${VERSION})"
-  ( cd gui/src-tauri && cargo cyclonedx --format json --spec-version 1.5 )
+  ( cd gui/src-tauri && retry_cargo_cyclonedx --format json --spec-version 1.5 )
   gui_src="gui/src-tauri/sparq-gui.cdx.json"
   gui_dst="$OUT_DIR/sparq-gui-${VERSION}.sbom.cdx.json"
   jq -f "$NORMALIZE_JQ" "$gui_src" > "$gui_dst"

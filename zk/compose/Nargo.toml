@@ -41,12 +41,30 @@ members = [
     # dispatch) is the same follow-up as the integer member (design bead 6 / sq-j506).
     "filter_value_dl_f64",
     "filter_value_dl_decimal",
+    # [OPUS-5] sq-wz99x: the DUAL-LEAF value-lane FILTER member for the
+    # xsd:dateTime / xsd:date datatype classes (research/zk-field-native-encoding.md
+    # S13.5) -- the circuit half of the S13 lane whose host encoder is sq-we9vs.
+    # Structurally the decimal member with a scaled-epoch value handle (signed
+    # milliseconds on the XSD timeOnTimeline, lane-fixed FS=3), reusing the
+    # UNCHANGED signed_scaled_verdict. ONE package serves BOTH lanes: xsd:date is
+    # separated purely by its PUBLIC datatype_const, so there is no second Noir fn
+    # and no second compiled member. Same OFF-by-default `dual-leaf` feature,
+    # INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4), NOT externally audited.
+    "filter_value_dl_datetime",
     "filter_f64",
     "filter_f64_d1",
     "filter_f64_d2",
     "filter_f64_d3",
     "filter_f64_d4",
     "revoke_unset_d10",
+    # [OPUS-5] sq-kndw (deferred remainder of sq-6qe): the FULLY-HIDDEN revocation
+    # member -- hides the status-list IRI + version on top of the index/bit that
+    # revoke_unset_d10 already hides, by proving accepted-set membership of the
+    # (list, version, status_list_root) triple against the relying party's committed
+    # policy root (research/zk-statuslist-hide-iri-version.md sec 3 sub-option A).
+    # D=10 status-list depth, A=4 accepted-set depth. Opt-in; NOT externally
+    # audited (sq-qhy4) -- the verifier remains NOT-yet-sound.
+    "revoke_hidden_ref_d10_a4",
     "hidden_issuer_d4",
     "holder_pok",
     # [OPUS-4.8] sq-3c00: hidden-holder-SET anonymity tier (Merkle holder-set

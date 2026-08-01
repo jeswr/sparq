@@ -638,10 +638,25 @@ fn inline_num_binop(x: Num, y: Num, op: ArithOp) -> Option<Num> {
     fn f64_of(n: Num) -> f64 {
         n.f64()
     }
+    // [OPUS-5] issue #3796: the float tier promotes through the SHARED `Num::f32` helper —
+    // one correctly-rounded conversion — exactly as `Num::binop` does. The pre-fix body
+    // here was a verbatim copy of `numeric.rs`'s `f64() as f32` double rounding, so the
+    // defect lived in TWO places; both now route through the one helper and cannot drift.
+    fn f32_of(n: Num) -> f32 {
+        n.f32()
+    }
     fn to_dec(n: Num) -> Option<crate::numeric::Dec> {
         n.to_dec()
     }
     fn apply(a: f64, b: f64, op: ArithOp) -> f64 {
+        match op {
+            ArithOp::Add => a + b,
+            ArithOp::Sub => a - b,
+            ArithOp::Mul => a * b,
+            ArithOp::Div => a / b,
+        }
+    }
+    fn apply32(a: f32, b: f32, op: ArithOp) -> f32 {
         match op {
             ArithOp::Add => a + b,
             ArithOp::Sub => a - b,
@@ -654,8 +669,7 @@ fn inline_num_binop(x: Num, y: Num, op: ArithOp) -> Option<Num> {
         return Some(Num::Double(apply(f64_of(x), f64_of(y), op)));
     }
     if r == 2 {
-        let (a, b) = (f64_of(x) as f32, f64_of(y) as f32);
-        return Some(Num::Float(apply(a as f64, b as f64, op) as f32));
+        return Some(Num::Float(apply32(f32_of(x), f32_of(y), op)));
     }
     let (a, b) = (to_dec(x)?, to_dec(y)?);
     if op == ArithOp::Div {
@@ -970,6 +984,47 @@ mod tests {
     fn canonical_environment_sets_canonical_true() {
         let report = OverheadReport::run(1, "canonical", "test-canonical-host");
         assert!(report.to_json().contains("\"canonical\": true"));
+    }
+
+    /// The inline `Num::binop` replica must agree with the substrate method on the
+    /// `xsd:float` PROMOTION boundary, not merely on small exactly-representable values.
+    ///
+    /// This kernel is a deliberate byte-for-byte copy of the pre-extraction body, and the
+    /// copy carried its own instance of the `f64() as f32` double rounding (issue #3796):
+    /// fixing `numeric.rs` alone left the defect alive here, and the timing harness's
+    /// `agree` flag could not see it because it feeds small integers. The fixtures below
+    /// are the exact-rational-verified midpoint witnesses; the assertion is on
+    /// `f32::to_bits()` because the two candidates are ADJACENT floats. [OPUS-5]
+    #[test]
+    fn inline_num_binop_float_promotion_matches_substrate_bit_exactly() {
+        // `H +/- 1` around an f32 midpoint that is exactly representable in f64.
+        const UP: i64 = 4_611_686_293_305_294_849;
+        const DOWN: i64 = 4_611_686_843_061_108_735;
+        const UP_CORRECT: u32 = 0x5E80_0001;
+        const DOWN_CORRECT: u32 = 0x5E80_0001;
+        for (n, want) in [(UP, UP_CORRECT), (DOWN, DOWN_CORRECT)] {
+            for op in [ArithOp::Add, ArithOp::Sub] {
+                let hand = inline_num_binop(Num::Int(n), Num::Float(0.0), op);
+                let sub = Num::Int(n).binop(Num::Float(0.0), op);
+                let (hb, sb) = match (hand, sub) {
+                    (Some(Num::Float(h)), Some(Num::Float(s))) => (h.to_bits(), s.to_bits()),
+                    other => panic!("float tier expected, got {:?}", other),
+                };
+                assert_eq!(hb, sb, "inline replica diverged from Num::binop for n={}", n);
+                assert_eq!(hb, want, "inline replica double-rounded n={}", n);
+            }
+        }
+        // And the scaled-decimal promotion, which also routes through `Num::f32`.
+        let dec = Num::Dec(crate::numeric::Dec { mant: 46_116_862_933_052_948_481, scale: 1 });
+        let hand = inline_num_binop(dec, Num::Float(0.0), ArithOp::Add);
+        let sub = dec.binop(Num::Float(0.0), ArithOp::Add);
+        match (hand, sub) {
+            (Some(Num::Float(h)), Some(Num::Float(s))) => {
+                assert_eq!(h.to_bits(), s.to_bits());
+                assert_eq!(h.to_bits(), UP_CORRECT);
+            }
+            other => panic!("float tier expected, got {:?}", other),
+        }
     }
 
     #[test]

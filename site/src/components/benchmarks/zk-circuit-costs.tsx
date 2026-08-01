@@ -147,8 +147,10 @@ export function ZkCircuitCostBreakdown() {
               <strong className="text-foreground">In-circuit signature verification is expensive</strong>{" "}
               — <code className="font-mono">{ZK_ISSUER_MEMBER.member}</code> at{" "}
               <span className="tabular">{ZK_ISSUER_MEMBER.gate_count.toLocaleString()}</span>{" "}
-              gates (two ~251-bit twisted-Edwards scalar muls dominate; the heaviest
-              non-scan / non-filter operator).
+              gates (four ~251-bit twisted-Edwards scalar muls dominate — <code className="font-mono">s*G</code>{" "}
+              and <code className="font-mono">e*pk</code> for the Schnorr equation, plus the two{" "}
+              <code className="font-mono">[L]*P</code> prime-order-subgroup checks the sq-l15mi
+              torsion-key soundness fix added; the heaviest non-scan operator).
             </li>
           )}
           {flatFilter != null && (

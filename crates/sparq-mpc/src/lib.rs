@@ -137,7 +137,7 @@ pub mod compare;
 // the secret α). Reported as OperatorClass::Comparison @ Malicious+Abort. See the
 // module docs and `research/mpc-malicious-security-design.md`.
 pub mod auth_compare;
-// [OPUS-4.8] sq-6fv7 (sq-ka8m residual): the MALICIOUS-SECURE twin of
+// [OPUS-4.8] sq-6fv7 (sq-ka8m residual): the IT-MAC-HARDENED twin of
 // `compare::disclose_threshold_verdict` — the federation £100k path that operates
 // on an EXISTING secret-shared sum. sq-ka8m's `auth_compare` made the cleartext
 // fresh-operand comparison malicious-secure, but the disclose path's THREE
@@ -146,8 +146,26 @@ pub mod auth_compare;
 // routes all three through the §2.5 batched IT-MAC check: the existing sum is
 // authenticated (`MacSession::authenticate_existing`), the mask bits come from an
 // AUTHENTICATED square protocol, the masked open and the verdict are MAC-checked
-// BEFORE they are acted on, so a tamper on any of the three aborts fail-closed at
-// the minimal n=2t+1. Honest-majority, malicious-with-abort. See the module docs.
+// BEFORE they are acted on, so a tamper on any of those three OPENS aborts
+// fail-closed at the minimal n=2t+1. Honest-majority; see the tier correction below
+// before reading that as malicious-with-abort — it is not.
+// [OPUS-4.8] sq-km34.6: the production path is now the AUTHENTICATED RABBIT chain —
+// every product/reduce in the solved-bits / LTBits / ripple-add / ripple-sub wrap
+// recovery is a `MacSession::auth_mul`, lifting the malicious magnitude from the
+// masked-open 2^20 to the full 2^60 (parity with the semi-honest `compare` path).
+// Read the module docs' "What the MAC-check does NOT cover" before making any
+// tamper-detection claim: `auth_mul` ADOPTS a value tamper on its second operand and
+// `mac_check` only covers values that are opened, so "any tamper aborts" is NOT the
+// delivered property. [SONNET-4.6] Stronger than a caveat — it is EXPLOITABLE: the
+// range proof's zero-test mask sits in that adopted slot, so zeroing it switches the
+// range proof off and the path returns a WRONG VERDICT instead of aborting (witness
+// `a_zeroed_zero_test_mask_defeats_the_range_proof_and_flips_the_verdict`). The
+// delivered tier is therefore honest-majority TAMPER-EVIDENT-with-abort on the opened
+// values, NOT AXIS-1 `Malicious`; do not deploy it as the integrity tier until
+// `MacSession` gains multiplication-gate verification binding BOTH operands. Review
+// round 2 acted on that: the public entry point is now named
+// `experimental_tamper_evident_disclose_threshold_verdict`, so the API surface no
+// longer claims the tier the code misses. See the module docs.
 pub mod auth_disclose;
 // [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
 // harness + its deterministic communication/round/multiplication counter — the
@@ -201,6 +219,15 @@ pub mod term_encode;
 // explicit. Composes EXISTING primitives only; proof.prove stays the honest stub.
 pub mod pipeline;
 pub mod proof;
+// [OPUS-5] sq-34ml: the two NON-RESEARCH M4-v1 prerequisites split out of the
+// sq-bjl Q1 SPIKE (feasibility record §2/§4) — the out-of-circuit
+// freshness/replay binding (ZK audit #4 is NOT automatic when the issuer
+// signature is checked beside the proof rather than inside it) and the
+// federated/multi-source `reconstruct_public_inputs` layout spanning every
+// holder's commitments/rows/attribution, byte-compared unchanged (#1 generalised).
+// SCOPING + LAYOUT ONLY: still hard-gated on the ZK foundation (§5.1), and
+// `proof.rs` stays an honest `NotYetImplemented`.
+pub mod federated_binding;
 // [OPUS-4.8] sq-it50: the owned ChaCha20 CSPRNG backing SecureRng — private
 // implementation detail (not a public API), so its key schedule can be
 // ZeroizeOnDrop-scrubbed (which ecosystem rand_chacha cannot do from our side).
@@ -211,10 +238,18 @@ pub mod rng;
 // [OPUS-4.8] sq-yyro: the DEALER-LESS correlated-randomness seam. `rng` fixes the
 // randomness QUALITY (CSPRNG); this fixes WHO draws it — the contract a PRSS /
 // honest-majority coin-toss / dealer-less VSS source must satisfy to replace the
-// single-trusted-dealer simulation. Design + seam only (the current `ShamirDealer`
-// reports `RandomnessModel::TrustedDealerSim`, `deployable() == false`); no
-// dealer-less crypto ships. See research/mpc-distributed-randomness-design.md.
+// single-trusted-dealer simulation. `ShamirDealer` reports
+// `RandomnessModel::TrustedDealerSim`; `crate::prss` is the first dealer-less
+// GENERATOR behind it. NO variant is `deployable()` — acceptance stays fail-closed.
+// See research/mpc-distributed-randomness-design.md.
 pub mod randomness;
+// [OPUS-5] sq-yyro follow-on (#3531): PRSS — replicated-PRF pseudo-random secret
+// sharing behind the `randomness` seam. Non-interactive (0 online rounds) degree-t
+// masks from a one-time replicated-seed setup; SMALL-n honest-majority only (the
+// C(n,t) seed count fails closed past `prss::MAX_PRSS_SEEDS`). The generator is
+// real; the SETUP is a simulated one-time trusted setup, dealer-less VSS is still
+// refused, and the source is still NOT `deployable()`. See the module docs.
+pub mod prss;
 // [OPUS-4.8] sq-m34i (MPC WI-1): Reed-Solomon consistency-checked + robust
 // (Berlekamp-Welch) reconstruction over Fp — detect-and-abort / correct tampered
 // shares when redundancy is present. Closes malicious-security gap (D) at the
@@ -334,9 +369,18 @@ pub use compare::{
 // [OPUS-4.8] sq-ka8m: the malicious-secure (honest-majority, with-abort) comparison
 // surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.
 pub use auth_compare::{malicious_greater_than, malicious_threshold, open_auth_verdict};
-// [OPUS-4.8] sq-6fv7: the malicious-secure disclose path over an EXISTING sum — the
+// [OPUS-4.8] sq-6fv7: the IT-MAC-hardened disclose path over an EXISTING sum — the
 // three decomposition opens (a², c=sum+r, verdict) routed through the MAC-check.
-pub use auth_disclose::malicious_disclose_threshold_verdict;
+// [SONNET-4.6] Review round 2 — RENAMED from `malicious_disclose_threshold_verdict`.
+// The old name asserted a tier the code does not deliver (a demonstrated wrong-verdict
+// path under its own named adversarial setting), and a doc caveat on a `malicious_*`
+// drop-in is not containment. The break predates the sq-km34.6 Rabbit lift — the
+// pre-lift masked-open path fed `auth_secret_is_zero` the same adopted second-operand
+// mask twice — so reverting would hide it, not fix it; the fix is a `MacSession`
+// change (see the module docs). No alias is kept under the old name: an alias would
+// preserve exactly the misleading surface. Nothing in the workspace depends on
+// `sparq-mpc` (`publish = false`), so no caller is silently retargeted.
+pub use auth_disclose::experimental_tamper_evident_disclose_threshold_verdict;
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{
@@ -357,6 +401,14 @@ pub use pipeline::{
     OperatorRouting, Routing,
 };
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
+// [OPUS-5] sq-34ml: the M4-v1 out-of-circuit freshness/replay binding + the
+// federated public-input layout surface. A statement shape + a byte layout, NOT
+// a proof — see the module docs for the hard gate it does not close.
+pub use federated_binding::{
+    check_freshness, key_set_digest, BindingError, FederatedStatement, FieldWord, FreshnessBinding,
+    HolderSegment, InMemorySeenChallenges, SeenChallenges, ValidityWindow, VerifierChallenge,
+    COMMITMENT_DOMAIN_TAG, FRESHNESS_DOMAIN_TAG, HOLDER_DOMAIN_TAG, KEY_SET_DOMAIN_TAG, WORD_BYTES,
+};
 // [OPUS-4.8] sq-jnkm: the oblivious set-returning output path surface.
 pub use oblivious_join::{
     oblivious_join_output, oblivious_set_output, oblivious_set_output_hidden_keys, Candidate,

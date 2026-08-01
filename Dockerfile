@@ -72,8 +72,18 @@ RUN cargo auditable build --release --locked -p sparq-server ${CARGO_FLAGS}
 # -------- runtime --------
 # [OPUS-4.8] SHA-pinned (Scorecard PinnedDependencies). Tag kept on its own comment line
 # above the FROM (an inline trailing `# tag` breaks FROM's arg parser — see builder above).
+#
+# [OPUS-5] #2312: this digest is an OCI image INDEX, not a single-architecture manifest, so
+# it is the correct pin for the multi-platform release push (release.yml builds
+# `platforms: linux/amd64,linux/arm64`) — buildx selects the matching descriptor per target.
+# The index carries linux/amd64, linux/arm64/v8, linux/arm/v7, s390x and ppc64le; the builder
+# stage above is likewise pinned to an index. #2312 reported this pin as arm64-only and
+# therefore unbuildable for amd64; that is not the case — verified by resolving the digest
+# against gcr.io. Do NOT "fix" it by repinning. If you replace it, replace it with another
+# INDEX digest (`docker buildx imagetools inspect` must list both release platforms), never
+# with a per-architecture child manifest digest — that is what would actually break amd64.
 # Tag: gcr.io/distroless/cc-debian12:nonroot
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e
 
 LABEL org.opencontainers.image.title="sparq-server" \
       org.opencontainers.image.description="W3C SPARQL 1.1 Protocol server for the sparq RDF triplestore (dictionary-encoded, six permutation indexes, parallel execution)" \

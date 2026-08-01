@@ -249,7 +249,11 @@ not a silent hole (architecture §4.2 guarantee (D), §5.2 Q2; sq-uu0u DESIGN
    SPIKE — the Q1 research risk), `sq-f7bu` (the buildable M4-v1: verifier-side
    authenticated-input attestation gate, Dutta/Artemis commit-and-prove anchor),
    and `sq-34ml` (the M4-v1 freshness/replay binding + federated
-   `reconstruct_public_inputs` layout prerequisites). Feasibility record (the
+   `reconstruct_public_inputs` layout prerequisites) — **`sq-34ml` LANDED** as
+   `src/federated_binding.rs`: it is the *scoping + out-of-circuit binding* half
+   only (a deterministic multi-source public-input byte layout and a fail-closed
+   freshness/replay transcript), it closes **no** ZK-audit item, and `proof.rs`
+   remains an honest `NotYetImplemented`. Feasibility record (the
    EdDSA-Poseidon / Schnorr-Baby-JubJub constraint sizing):
    `research/mpc-m4-distributed-sig-feasibility.md`.
 
@@ -310,6 +314,20 @@ the disk-space + empirical-honesty discipline: check `df` during runs, cap
 dataset size, clean `/tmp` scratch, bench data git-ignored. Report real envelopes
 — minutes, not "seconds" — and never extrapolate to the WAN/dishonest-majority
 regime that has zero published data points.
+
+The sq-hoaj **ceiling-run HARNESS is built** — `scripts/mpc-ec2-ceiling.sh`,
+the orphan-proof EC2 orchestrator that sweeps the hidden-value join across
+N ∈ {7,9,11} × rows ∈ {100,1000,10000} (10⁴ rows = 10⁸ `secure_equal` opens, the
+deliberate ceiling probe) under the netem LAN profile on a box that HAS the
+`CAP_NET_ADMIN` the dev box lacks. It carries the full safety recipe (tag
+`purpose=sparq-bench`, `--instance-initiated-shutdown-behavior terminate`, two
+independent watchdogs + a `df` floor watchdog, `/tmp` cleanup, the 10⁴ row cap,
+and an `orphan-check-bench.sh` sweep on exit) and a hermetic `--self-test` that
+pins those rails without touching AWS. It records the dishonest-majority and
+WAN-at-scale regimes as explicit `no-data-research-risk` cells (never a fabricated
+number); the row cap is HARD (a larger scale is refused, not extrapolated).
+*Executing* it — producing the git-ignored minutes-envelope JSON — still needs a
+credentialed host, so the measured envelope is not baked into any doc.
 
 ---
 

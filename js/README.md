@@ -53,6 +53,36 @@ npm run build   # wasm-pack build ../crates/sparq-wasm (--features shacl) + tsc
 npm test        # node --test against the built dist/
 ```
 
+### Reproducing the `js` CI gate locally
+
+Install from the **repo root**, not from `js/` — this is the one step that differs
+from a normal single-package checkout, and skipping it is what makes the gate look
+irreproducible from a fresh worktree:
+
+```sh
+cd .. && npm ci   # repo-root npm workspaces install
+cd js && npm run build && npm test
+```
+
+`js/test/rdfjs-conformance.test.mjs` imports `@rdfjs-test/conformance` (the
+`packages/rdfjs-conformance` workspace member) and `js/test/solid-differential.test.mjs`
+imports `@solid/acl-check` / `@solidlab/policy-engine` / `rdflib` (resolved out of the
+repo-root install). Those are test-only and stay **out** of `js/package.json` on
+purpose, because the `js-sbom` lane derives the published `@jeswr/sparq` SBOM from
+this manifest and test deps there would pollute the runtime component list. An
+`npm ci` run inside `js/` installs only this member's own closure, so those imports
+fail with `ERR_MODULE_NOT_FOUND`; a root install hoists them and links the workspace
+member. `.github/workflows/js.yml` installs from the root for exactly this reason.
+
+`npm test`'s `pretest` guardrail (`guardrails/check-test-deps.mjs`) checks this up
+front and names the missing packages, rather than letting the suite fail two thirds
+of the way through. To run one file without a root install, invoke the runner
+directly — that path skips `pretest`:
+
+```sh
+node --test test/store.test.mjs
+```
+
 ### Pinning a git build (before the npm release)
 
 Until `@jeswr/sparq` is published to npm under its settled name, depend on it by
@@ -87,6 +117,37 @@ binary — it pulls in the SHACL engine + `regex` + the SPARQL query path for
 MiB, +~1.0 MiB / +85%, before gzip). If you do not need validation and bundle
 size matters, build the lean variant — `npm run build:wasm:lean` — which omits
 SHACL entirely (`SparqStore.validate` then throws a clear error if called).
+
+### CommonJS (`require`) consumers
+
+The main entry (`@jeswr/sparq`) is ESM-only: it is built from the `--target web`
+wasm-pack output, whose glue is a real ESM module. From CommonJS, reach it with a
+dynamic import — supported in CJS since Node 12.17, and the way to get the full
+RDF/JS wrapper (`SparqStore`, `Dataset`, `DataFactory`, …):
+
+```js
+const { SparqStore } = await import('@jeswr/sparq');   // inside an async function
+```
+
+`npm run build` **also** produces a `--target nodejs` build of the same engine,
+with the same feature set, into `wasm-node/`. That one is plain CommonJS and
+instantiates the module eagerly at `require()` time (it `readFileSync`s the
+`.wasm` next to the glue), so it is `require()`-able and needs **no `init()`**:
+
+```js
+const { Store } = require('@jeswr/sparq/wasm-node');   // synchronous, no await
+
+const store = Store.load('<http://e/a> <http://e/b> <http://e/c> .', 'ntriples');
+console.log(store.size, store.ask('ASK { ?s ?p ?o }'));   // `size` is a getter
+store.free();
+```
+
+That subpath exposes the **raw generated `Store`** (the same surface documented
+under *Raw wasm `Store`* in `skills/javascript-wasm/SKILL.md`) — strings in,
+SPARQL-JSON strings out, explicit `.free()` — not the RDF/JS wrapper. Use it when
+you want a synchronous engine in a CommonJS file; use `await import(...)` when you
+want `SparqStore`/`Dataset`. The two builds are separate artifacts, so a package
+that only ever uses one still downloads both in the tarball.
 
 ## Usage
 

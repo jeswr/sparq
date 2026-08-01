@@ -51,7 +51,11 @@ What the description carries (all serde `Serialize + Deserialize`):
 - **`shapes`** — the applicable-shape switcher: `sh:targetNode`,
   `sh:targetClass`/implicit class targets (focus `rdf:type` with
   `rdfs:subClassOf` closure in the data graph), `dash:applicableToClass`,
-  ranked strongest-first; `FormOptions::shape` forces an explicit choice.
+  then the `sh:targetSubjectsOf`/`sh:targetObjectsOf` predicate targets,
+  ranked strongest-first among concrete shapes (`dash:abstract` ones sort
+  last regardless of rationale — see `shapes[].abstract`), so the first entry
+  is the shape the form derives against; `FormOptions::shape` forces an
+  explicit choice.
 - **`groups[].fields[]`** — one field per property shape: SPARQL-path text
   (`^<p>` for `sh:inversePath` incoming references), label/description
   (`sh:name`/`sh:description`, `rdfs:label`/`rdfs:comment` fallbacks),
@@ -131,16 +135,18 @@ GUI renderer are follow-on beads (sq-lsp7k.1.2/.1.4); `sparq-shacl` (see
 graphs.
 
 _(status: Verified against sparq-forms 0.1.0 [OPUS-5] (sq-lsp7k.1.5,
-2026-07-26): 75 unit/integration tests (70 in the default feature state), incl.
-per-score widget tests, 3 golden-file fixtures (groups/order, enum + nested
-sh:node, inverse + multi-shape), and the F5 RDF 1.2 / roles / computed-field
-suites. Caveats: (1) widget scores follow datashapes.org/forms with documented
-(sparq) auto-selection extensions where DASH is manual-only — InstancesSelect on
-sh:class, SubClass on dash:rootClass, Details on sh:node. (2)
-sh:targetSubjectsOf/ObjectsOf and SHACL 1.2 sh:targetWhere/SPARQL targets do not
-drive form applicability. (3) computed fields evaluate the SHACL-AF
-node-expression algebra only — a SPARQL-valued `sh:values [ sh:select … ]`
-derives flagged-but-empty, since sparq-shacl exposes no public seam for that
-form. (4) annotation write-back covers IRI reifiers only; a blank-node reifier
-renders read-only. (5) the GUI widgets for annotation editing and computed
-fields are not part of this crate.)_
+2026-07-26) + [OPUS-4.8] (sq-vfcxv, 2026-07-27): 81 unit/integration tests (76
+in the default feature state), incl. per-score widget tests, 4 golden-file
+fixtures (groups/order, enum + nested sh:node, inverse + multi-shape, predicate
+targets), and the F5 RDF 1.2 / roles / computed-field suites. Caveats: (1)
+widget scores follow datashapes.org/forms with documented (sparq) auto-selection
+extensions where DASH is manual-only — InstancesSelect on sh:class, SubClass on
+dash:rootClass, Details on sh:node. (2) SHACL 1.2 sh:targetWhere and
+SPARQL-valued targets do not drive form applicability
+(sh:targetSubjectsOf/ObjectsOf now do, ranked below dash:applicableToClass —
+sq-vfcxv). (3) computed fields evaluate the SHACL-AF node-expression algebra
+only — a SPARQL-valued `sh:values [ sh:select … ]` derives flagged-but-empty,
+since sparq-shacl exposes no public seam for that form. (4) annotation
+write-back covers IRI reifiers only; a blank-node reifier renders read-only. (5)
+the GUI widgets for annotation editing and computed fields are not part of this
+crate.)_

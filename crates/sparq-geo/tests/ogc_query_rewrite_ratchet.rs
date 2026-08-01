@@ -63,7 +63,13 @@ use sparq_geo::{geof_registry, geosparql_rewrite, GeoError};
 /// `sfCrosses`, `ehEquals`, `ehCovers`, `rcc8eq`, `rcc8tppi`), each driven in
 /// BOTH the subject-variable and object-variable orientation, all pass = 48.
 /// Set to that actual count. [SONNET-4.6] sq-lk3aw.2
-const OGC_QUERY_REWRITE_FLOOR: usize = 48;
+/// [SONNET-4.6] sq-z1xv8 — the VALUE now lives once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
+/// ONE `const` and cannot drift (replacing the old textual re-read of this file).
+/// Raise it THERE; the measurement narrative stays here.
+const OGC_QUERY_REWRITE_FLOOR: usize =
+    sparq_conformance_floors::geo::OGC_QUERY_REWRITE_FLOOR;
 
 /// A named WKT geometry body assigned to a feature in the test graph.
 struct Feature {

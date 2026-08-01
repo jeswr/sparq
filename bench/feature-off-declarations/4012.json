@@ -1,0 +1,5 @@
+{
+  "pr": 4012,
+  "date": "2026-07-26",
+  "reason": "sq-2k5py: adds two always-compiled sparq-core public fns (Timeline::cmp_tl_total, Temporal::cmp_t_total) plus the private cmp_instants_total they share, and rewires the three always-compiled sparq-engine call sites that previously fell back to the LEXICAL form on the indeterminate mixed-timezone window (cmp_sort_cells, the minmax_temporal id-level fold, and CompareTerm::strict_cmp via the new cold temporal_total_cmp), deleting the now-dead cold cmp_sort_cells_lex helper. Codegen for the ORDER BY / MIN/MAX comparators in the default build therefore changes, moving bytes and panic-location line numbers in the feature-OFF sparq-wasm bundle. This is an intentional CORRECTNESS change, not a leak: the lexical fallback made the within-kind comparator intransitive, and the relational operators (< > =) keep the XPath type error unchanged. No new dependencies, no new features, no unsafe."
+}

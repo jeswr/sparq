@@ -765,6 +765,247 @@ fn q06_measure_250k() {
     assert_eq!(off.rows.len(), on.rows.len(), "q06 row count must be identical on vs off");
 }
 
+// ── budget cooperativeness (sq-qk6ac) ─────────────────────────────────────────
+//
+// [SONNET-4.6] The anti-join's per-left-row VERDICT is a whole probe of `B`, so an
+// exhausted budget must stop the verdict loop, not merely truncate the output build
+// afterwards. The serial strategy therefore computes each verdict INSIDE the
+// cooperative build loop (and the parallel fan-out re-checks a captured `Limits`
+// snapshot per row, raising the canonical budget error so its queued probes are
+// abandoned). These tests pin the OBSERVABLE half of that change: an ARMED but
+// unexhausted budget must not perturb the answer, on BOTH strategies — and, in
+// `the_parallel_verdict_fan_out_abandons_probing_when_the_budget_trips`, that a budget
+// tripping mid-probe on a >`PAR_THRESHOLD` fixture really does abandon the fan-out.
+//
+// Read the strategy axis (SIP-seed vs HASH) and the fan-out axis (serial vs rayon) as
+// INDEPENDENT: the two `armed_but_unexhausted_…` fixtures below are small, so both run
+// the SERIAL fused loop whichever strategy they select. Only the threshold-crossing test
+// reaches the `#[cfg(feature = "parallel")]` verdict branch.
+
+/// Runs `q` unbudgeted and under `budget`, returning both multisets.
+fn budgeted_vs_unbudgeted(
+    g: &Graph,
+    q: &str,
+    budget: &sparq_engine::QueryBudget,
+) -> (Table, Table) {
+    theta_antijoin_testing::set_enabled(true);
+    let plain = multiset(g, q);
+    let r = sparq_engine::query_with_budget(g, &format!("{PFX}{q}"), budget)
+        .expect("budgeted query must not trip an unexhausted budget");
+    let mut budgeted: Table = r
+        .rows
+        .iter()
+        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+        .collect();
+    budgeted.sort();
+    (plain, budgeted)
+}
+
+/// A budget generous enough never to trip: the fused serial verdict loop must return
+/// exactly the unbudgeted answer on the SIP-seed strategy (≤ 64 correlations).
+#[test]
+fn armed_but_unexhausted_budget_does_not_perturb_the_sip_strategy() {
+    let g = q06_dataset();
+    let budget = sparq_engine::QueryBudget {
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+        max_rows: Some(1_000_000),
+        ..sparq_engine::QueryBudget::unlimited()
+    };
+    let q = format!("SELECT ?yr ?name ?document WHERE {{\n{Q06_BODY}\n}}");
+    let (plain, budgeted) = budgeted_vs_unbudgeted(&g, &q, &budget);
+    assert_eq!(plain, budgeted, "an armed budget changed the SIP-seed anti-join answer");
+    assert_eq!(budgeted.len(), 5, "one surviving (earliest) document per author");
+}
+
+/// Same, on the HASH strategy (> 64 distinct correlations) — the branch whose verdict
+/// loop the budget gate guards.
+#[test]
+fn armed_but_unexhausted_budget_does_not_perturb_the_hash_strategy() {
+    let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
+    for a in 0..200usize {
+        ttl.push_str(&format!("ex:a{} foaf:name \"A{}\" .\n", a, a));
+        for i in 0..3usize {
+            let yr = 2000 + i;
+            ttl.push_str(&format!(
+                "ex:d{}_{} rdf:type ex:Article . ex:d{}_{} dcterms:issued \"{}\"^^xsd:integer . ex:d{}_{} dc:creator ex:a{} .\n",
+                a, i, a, i, yr, a, i, a
+            ));
+        }
+    }
+    let g = load(&ttl);
+    let budget = sparq_engine::QueryBudget {
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+        ..sparq_engine::QueryBudget::unlimited()
+    };
+    let q = format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}");
+    let (plain, budgeted) = budgeted_vs_unbudgeted(&g, &q, &budget);
+    assert_eq!(plain, budgeted, "an armed budget changed the hash anti-join answer");
+    assert_eq!(budgeted.len(), 200, "one surviving earliest document per author");
+    // Anti-vacuity: the fixture really is on the HASH strategy (> 64 correlations).
+    let (fired, bindings) = fired_stats(&g, &q);
+    assert!(fired && bindings > 64, "expected the hash strategy (>64 correlations): {}", bindings);
+}
+
+/// A query cancelled BEFORE it starts must surface the CANONICAL reason, never a
+/// silently truncated (partial) answer.
+///
+/// Deliberately labelled for what it actually covers: the flag is already `true` when
+/// evaluation begins, so the per-operator `budget::check(0)` at the FIRST
+/// `eval_graph_pattern_inner` raises the error and the anti-join is never entered. This
+/// pins the whole-query contract only; the anti-join's own verdict gates are covered by
+/// the fused serial loop's equivalence tests above and by
+/// `the_parallel_verdict_fan_out_abandons_probing_when_the_budget_trips` below.
+#[test]
+fn a_pre_cancelled_query_reports_the_canonical_reason() {
+    let g = q06_dataset();
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let budget = sparq_engine::QueryBudget::cancelled_by(flag);
+    theta_antijoin_testing::set_enabled(true);
+    let q = format!("{PFX}SELECT ?yr ?name ?document WHERE {{\n{Q06_BODY}\n}}");
+    assert_eq!(
+        sparq_engine::query_with_budget(&g, &q, &budget).map(|r| r.rows.len()),
+        Err("query budget exceeded (cancelled)".to_owned()),
+        "a cancelled query must error, never return a truncated result set"
+    );
+}
+
+/// [SONNET-4.6] (sq-qk6ac) The ANTI-VACUOUS regression for the PARALLEL verdict gate.
+///
+/// Every other budget test in this file stays far below `PAR_THRESHOLD` (50_000 left
+/// rows), so they only ever run the SERIAL fused loop — the rayon fan-out and its
+/// captured-`Limits` gate are untouched by them. This fixture CROSSES the threshold, so
+/// `left_b.rows.len() >= PAR_THRESHOLD` is the branch under test, and it pins both halves
+/// of that branch's contract:
+///
+///   * an ARMED but unexhausted budget returns exactly the unbudgeted answer, and every
+///     left row's verdict is still evaluated (no rows silently skipped); and
+///   * a budget that trips WHILE the fan-out is probing raises the CANONICAL error and
+///     ABANDONS the queued probes — far fewer verdicts are evaluated than there are left
+///     rows, which is precisely the wasted work the gate exists to cut.
+///
+/// The trip is DETERMINISTIC, not a race. `ex:probe` is an identity extension function
+/// planted in the OPTIONAL's residual: it is called exactly once per verdict evaluated
+/// (each left row's id bucket holds exactly one candidate), it counts those calls, and it
+/// flips the cancel flag on the `TRIP_AFTER`th. The flag can therefore only ever go true
+/// from INSIDE the verdict fan-out — never before it, which is what makes this test
+/// non-vacuous where `a_pre_cancelled_query_reports_the_canonical_reason` is not.
+#[test]
+#[cfg(feature = "parallel")]
+fn the_parallel_verdict_fan_out_abandons_probing_when_the_budget_trips() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // Minimally past PAR_THRESHOLD (50k), one DISTINCT key per item — so the HASH
+    // strategy is selected (> 64 correlations), every item survives the anti-join (no
+    // same-key lower-rank partner exists), and each left row's id bucket holds exactly
+    // ONE candidate. A full run therefore evaluates the residual exactly `N` times: the
+    // closed-form baseline the abandonment assertion is measured against.
+    const N: usize = 50_001;
+    const TRIP_AFTER: usize = 256;
+    let mut ttl = String::with_capacity(N * 48);
+    for i in 0..N {
+        ttl.push_str(&format!(
+            "ex:i{} ex:key ex:k{} . ex:i{} ex:rank \"1\"^^xsd:integer .\n",
+            i, i, i
+        ));
+    }
+    let g = load(&ttl);
+
+    let probes = Arc::new(AtomicUsize::new(0));
+    let armed = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut fns = sparq_engine::FunctionRegistry::new();
+    {
+        let (probes, armed, cancel) =
+            (Arc::clone(&probes), Arc::clone(&armed), Arc::clone(&cancel));
+        // Identity on its argument, so the residual still means exactly `?r2 < ?r`; and
+        // because it is a COMPARISON OPERAND it cannot be short-circuited away, so one
+        // call == one verdict genuinely evaluated (on the calling thread or a worker).
+        fns.register("http://example.org/probe", move |args| {
+            let n = probes.fetch_add(1, Ordering::SeqCst) + 1;
+            if armed.load(Ordering::SeqCst) && n >= TRIP_AFTER {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            Ok(args[0].clone())
+        });
+    }
+
+    // Anti-join: an item with NO OTHER item of the same key and a lower rank.
+    let q = format!(
+        "{}SELECT ?i WHERE {{
+            ?i ex:key ?k . ?i ex:rank ?r
+            OPTIONAL {{
+              ?i2 ex:key ?k2 . ?i2 ex:rank ?r2
+              FILTER (?k = ?k2 && ex:probe(?r2) < ?r)
+            }} FILTER(!bound(?k2))
+        }}",
+        PFX
+    );
+    // The projected `?i` column as a sorted multiset (`?i` is certain in the left BGP).
+    let sorted = |rows: &[Vec<Option<oxrdf::Term>>]| -> Vec<String> {
+        let mut v: Vec<String> =
+            rows.iter().map(|row| row[0].as_ref().expect("?i is bound").to_string()).collect();
+        v.sort();
+        v
+    };
+
+    theta_antijoin_testing::set_enabled(true);
+
+    // (1) Unbudgeted reference, and the anti-vacuity evidence that this really is the
+    //     parallel hash branch: it FIRED, over > 64 correlations, with >= PAR_THRESHOLD
+    //     surviving left rows (every item survives, so the row count IS the left count).
+    theta_antijoin_testing::reset_stats();
+    let plain = sparq_engine::query_with_functions(&g, &q, &fns).expect("unbudgeted query");
+    let (fired, _rows, bindings) = theta_antijoin_testing::stats();
+    let plain = sorted(&plain.rows);
+    assert_eq!(plain.len(), N, "each of the {} distinct-key items must survive", N);
+    assert!(fired && bindings > 64, "expected the hash strategy (>64 correlations): {}", bindings);
+    assert!(plain.len() >= 50_000, "fixture must cross PAR_THRESHOLD (50k left rows)");
+    let full_probes = probes.swap(0, Ordering::SeqCst);
+    assert_eq!(full_probes, N, "a full run must evaluate exactly one verdict per left row");
+
+    // (2) An ARMED but unexhausted budget must not perturb the answer — and must not
+    //     skip a single verdict — on that same parallel branch.
+    let generous = sparq_engine::QueryBudget {
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+        max_rows: Some(1_000_000),
+        ..sparq_engine::QueryBudget::unlimited()
+    };
+    let budgeted = sparq_engine::query_with_functions_and_budget(&g, &q, &fns, &generous)
+        .expect("an unexhausted budget must not trip the parallel verdict gate");
+    assert_eq!(plain, sorted(&budgeted.rows), "an armed budget changed the parallel answer");
+    assert_eq!(
+        probes.swap(0, Ordering::SeqCst),
+        N,
+        "the gate skipped verdicts under a budget that had not been exhausted"
+    );
+
+    // (3) The regression itself: the flag flips DURING the fan-out, so the branch must
+    //     raise the canonical error and stop probing well short of all `N` left rows.
+    armed.store(true, Ordering::SeqCst);
+    let budget = sparq_engine::QueryBudget::cancelled_by(Arc::clone(&cancel));
+    assert_eq!(
+        sparq_engine::query_with_functions_and_budget(&g, &q, &fns, &budget).map(|r| r.rows.len()),
+        Err("query budget exceeded (cancelled)".to_owned()),
+        "a mid-probe cancellation must raise the canonical budget error, never a partial answer"
+    );
+    let evaluated = probes.load(Ordering::SeqCst);
+    assert!(
+        evaluated >= TRIP_AFTER,
+        "the fixture never reached the trip point ({} probes) — the test would be vacuous",
+        evaluated
+    );
+    // Abandonment: only the probes already in flight when the flag flipped may finish
+    // (one per rayon worker at most), so the count stays near TRIP_AFTER and nowhere near
+    // `N`. The halfway margin is deliberately loose so this cannot flake on a big box.
+    assert!(
+        evaluated * 2 < full_probes,
+        "probing was not abandoned: {} of {} verdicts still evaluated after cancellation",
+        evaluated,
+        full_probes
+    );
+}
+
 #[test]
 fn public_toggle_and_stats() {
     // Direct unit coverage of the public `theta_antijoin_testing` surface (one direct

@@ -364,7 +364,10 @@ impl MaterializedGraph {
 //   restrictions/cardinality/hasKey/oneOf/intersection/union — run in **fallback mode**:
 //   every mutation re-materializes via `materialize_owl_rl` (correct, just not incremental).
 //   On realistic ABox-update workloads these features live in the (static) TBox, so the mode
-//   is decided once at load; the hot path is the counting mode.
+//   is decided once at load; the hot path is the counting mode. With the `quoted-triples`
+//   feature the re-materialization runs `materialize_owl_rl_reify` in the graph's
+//   construction-time `ReifyMode` instead (`Bridge` for `new`, i.e. exactly
+//   `materialize_owl_rl`) — sq-afun3 third increment.
 // * Deltas mentioning the occurrence-guarded vocabulary (`owl:Thing`/`owl:Nothing`, the XSD
 //   numeric-tower datatypes) rebuild, because the batch engine's `pre_monotone` facts are
 //   occurrence-dependent.
@@ -566,6 +569,14 @@ pub struct MaterializedOwlGraph {
     virtual_facts: FxHashSet<[Id; 3]>,
     // ---- fallback mode ----
     fallback_closure: FxHashSet<[Id; 3]>,
+    /// [Kern] `quoted-triples` (third increment, sq-afun3): which reify bridge rules the
+    /// Fallback re-materialization runs — [`crate::ReifyMode::Bridge`] (the
+    /// [`MaterializedOwlGraph::new`] default, matching [`crate::materialize_owl_rl`]) or the
+    /// STRICT-OPACITY [`crate::ReifyMode::DestructureOnly`] from
+    /// [`MaterializedOwlGraph::with_reify_mode`]. The reify vocabulary always routes a base
+    /// to Fallback, so this single site is where the mode is observable.
+    #[cfg(feature = "quoted-triples")]
+    reify_mode: crate::reify::ReifyMode,
     // ---- rebuild triggers ----
     tbox_preds: FxHashSet<Id>,
     axiom_types: FxHashSet<Id>,
@@ -580,7 +591,52 @@ impl MaterializedOwlGraph {
     /// Build the graph from `base_triples` and fully materialize the OWL 2 RL closure (same
     /// result as [`crate::materialize_owl_rl`]), recording whatever supporting state the
     /// detected [`OwlMode`] needs for incremental updates.
+    ///
+    /// With the `quoted-triples` feature this runs the FULL reify bridge (reif-dtr +
+    /// reif-ctr), exactly like [`crate::materialize_owl_rl`]; the feature-gated
+    /// `with_reify_mode` is the strict-opacity variant.
     pub fn new(dict: &mut Dict, base_triples: &[[Id; 3]]) -> Self {
+        let mut g = Self::seed(dict, base_triples);
+        g.rematerialize(dict);
+        g.rebuilds = 0; // the initial materialization is not a fallback
+        g
+    }
+
+    /// Kern `quoted-triples` (third increment, sq-afun3): build the graph with the reify
+    /// bridge driven in an explicit [`ReifyMode`](crate::ReifyMode) — the incremental
+    /// counterpart of [`crate::materialize_owl_rl_reify`], which
+    /// [`MaterializedOwlGraph::new`] previously left unreachable (the Fallback
+    /// re-materialization always ran the full bridge, so strict opacity was batch-only).
+    ///
+    /// `ReifyMode::Bridge` is exactly [`MaterializedOwlGraph::new`].
+    /// [`ReifyMode::DestructureOnly`](crate::ReifyMode::DestructureOnly) is STRICT OPACITY:
+    /// every re-materialization — the initial one and every mutation's — runs reif-dtr alone,
+    /// so the graph's closure never contains an inference-minted triple term, and the
+    /// invariant this type promises still holds against the matching batch oracle
+    /// (`materialize_owl_rl_reify(dict, base, mode)` from scratch). The mode is a property of
+    /// the graph, not of a mutation: it cannot change after construction, so the
+    /// closure-equals-from-scratch property is stable across the whole edit sequence.
+    ///
+    /// Mode DETECTION is unchanged — a base (or a mutation) mentioning the reification
+    /// vocabulary routes to [`OwlMode::Fallback`] in both reify modes, since the counting
+    /// modes model neither bridge rule.
+    #[cfg(feature = "quoted-triples")]
+    pub fn with_reify_mode(
+        dict: &mut Dict,
+        base_triples: &[[Id; 3]],
+        reify_mode: crate::reify::ReifyMode,
+    ) -> Self {
+        let mut g = Self::seed(dict, base_triples);
+        g.reify_mode = reify_mode;
+        g.rematerialize(dict);
+        g.rebuilds = 0; // the initial materialization is not a fallback
+        g
+    }
+
+    /// The un-materialized graph: interned vocabulary, the base, and empty incremental state.
+    /// Split out of [`MaterializedOwlGraph::new`] so every constructor shares one struct
+    /// literal and differs only in the state it sets before the first `rematerialize`.
+    fn seed(dict: &mut Dict, base_triples: &[[Id; 3]]) -> Self {
         let v = Vocab::intern(dict);
         let ow = OwlIds::intern(dict);
         let tbox_preds: FxHashSet<Id> = [
@@ -609,7 +665,7 @@ impl MaterializedOwlGraph {
         .collect();
         let axiom_types: FxHashSet<Id> =
             [ow.symmetric, ow.transitive, ow.functional, ow.inv_functional].into_iter().collect();
-        let mut g = MaterializedOwlGraph {
+        MaterializedOwlGraph {
             v,
             ow,
             base: base_triples.iter().copied().collect(),
@@ -628,15 +684,14 @@ impl MaterializedOwlGraph {
             e0: FxHashMap::default(),
             virtual_facts: FxHashSet::default(),
             fallback_closure: FxHashSet::default(),
+            #[cfg(feature = "quoted-triples")]
+            reify_mode: crate::reify::ReifyMode::default(),
             tbox_preds,
             axiom_types,
             rebuilds: 0,
             #[cfg(feature = "explain")]
             explain: OwlExplain::default(),
-        };
-        g.rematerialize(dict);
-        g.rebuilds = 0; // the initial materialization is not a fallback
-        g
+        }
     }
 
     /// Does mutating `t` require a full rebuild (TBox / axiom typing / occurrence-guarded id)?
@@ -780,6 +835,14 @@ impl MaterializedOwlGraph {
         if fallback {
             self.mode = OwlMode::Fallback;
             let mut all: Vec<[Id; 3]> = self.base.iter().copied().collect();
+            // [Kern] `quoted-triples` (sq-afun3): drive the graph's configured reify mode, so
+            // a `with_reify_mode(…, DestructureOnly)` graph is strict on EVERY
+            // re-materialization (the mode is immutable after construction). `Bridge` — the
+            // `new` default — is exactly `materialize_owl_rl`, so the default path is
+            // byte-identical to before this plumbing existed.
+            #[cfg(feature = "quoted-triples")]
+            crate::materialize_owl_rl_reify(dict, &mut all, self.reify_mode);
+            #[cfg(not(feature = "quoted-triples"))]
             crate::materialize_owl_rl(dict, &mut all);
             self.fallback_closure = all.into_iter().collect();
             return;
@@ -1232,7 +1295,8 @@ impl MaterializedOwlGraph {
     }
 
     /// The full materialized closure (base ∪ derived), deduplicated and sorted — identical as
-    /// a set to running [`crate::materialize_owl_rl`] from scratch on the current base.
+    /// a set to running [`crate::materialize_owl_rl`] from scratch on the current base (or,
+    /// for a `with_reify_mode` graph, `materialize_owl_rl_reify` in that same mode).
     pub fn closure(&self) -> Vec<[Id; 3]> {
         let mut set: FxHashSet<[Id; 3]> = if self.mode == OwlMode::Fallback {
             self.fallback_closure.clone()
@@ -1281,6 +1345,14 @@ impl MaterializedOwlGraph {
     /// The active maintenance regime (telemetry; re-decided at every rebuild).
     pub fn mode(&self) -> OwlMode {
         self.mode
+    }
+
+    /// Kern `quoted-triples` (sq-afun3): the reify bridge mode this graph maintains —
+    /// fixed at construction ([`crate::ReifyMode::Bridge`] for
+    /// [`MaterializedOwlGraph::new`]), never re-decided by a rebuild.
+    #[cfg(feature = "quoted-triples")]
+    pub fn reify_mode(&self) -> crate::reify::ReifyMode {
+        self.reify_mode
     }
 
     /// How many times a mutation fell back to full re-materialization (TBox mutations,
@@ -1403,7 +1475,24 @@ fn tc_pairs(pairs: &FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
 //   (the generalization of the OWL `prp-trp` transitive layer): the layer's fact set is the
 //   local fixpoint of its rules over the facts of its input + SCC predicates, recomputed —
 //   cost proportional to those predicates' extents, never the dataset — whenever a delta
-//   touches them, and the old/new diff joins the propagation as virtual facts. Counting
+//   touches them, and the old/new diff joins the propagation as virtual facts. A fact that is
+//   BOTH asserted and layer-derivable is charged to the base (it seeds the local fixpoint, so
+//   it is excluded from the layer's derived set), so asserting or retracting its base copy
+//   hands ownership over without changing the closure; that hand-off is settled by the same
+//   local layer re-derivation (`sq-6tykl.6`) rather than by a full rematerialization.
+//   The hand-off is LAZY, and deliberately so: a mutation whose facts are all already settled
+//   (asserting a fact the closure already has; retracting one the layer or a count still
+//   supports) contributes NOTHING to `pending`, so `propagate` recomputes no layer and
+//   `layer_derived` keeps its copy while `base` also holds one. That transient double
+//   ownership is INERT, not stale — `recompute_layer`'s `stale_own` test is guarded by
+//   `!base && !counts`, so while the base copy exists the layer's entry can never suppress a
+//   seed, and the layer's local fixpoint is identical whether the fact arrives as a seed or
+//   as its own derivation. The first recompute that layer does see re-attributes it (the fact
+//   turns up in that round's `removed`, which is exactly what the hand-off branch in
+//   `propagate` absorbs). Nothing in between can observe the difference: the only consult
+//   that reads `layer_derived` without the base guard is `delete`'s `in_any_layer`
+//   short-circuit, and there the entry is accurate — the layer really does still derive the
+//   fact, because a mutation that could have changed that would have hit `pending`. Counting
 //   handles everything outside the SCCs exactly: per derived fact, the count of rule firings
 //   (computed with the classic delta-rewriting: for a delta at plain-atom position i, atoms
 //   before i match the pre-delta store, atom i the delta, atoms after i the post-delta store
@@ -2287,102 +2376,11 @@ fn n3_sccs(n: usize, edges: &FxHashMap<usize, FxHashSet<usize>>) -> Vec<Vec<usiz
 }
 
 // ---- serialization (the fallback / oracle path) --------------------------------------------
-
-fn n3_quote_into(v: &str, out: &mut String) {
-    for c in v.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-}
-
-fn n3_write_term(t: &N3Term, out: &mut String) {
-    match t {
-        N3Term::Iri(i) => {
-            out.push('<');
-            out.push_str(i);
-            out.push('>');
-        }
-        N3Term::Lit(v, _, Some(lang)) => {
-            out.push('"');
-            n3_quote_into(v, out);
-            out.push('"');
-            out.push('@');
-            out.push_str(lang);
-        }
-        N3Term::Lit(v, dt, None) => {
-            out.push('"');
-            n3_quote_into(v, out);
-            out.push('"');
-            if dt != N3_XSD_STRING {
-                out.push_str("^^<");
-                out.push_str(dt);
-                out.push('>');
-            }
-        }
-        N3Term::Blank(l) => {
-            out.push_str("_:");
-            out.push_str(l);
-        }
-        N3Term::Var(v) => {
-            out.push('?');
-            out.push_str(v);
-        }
-        N3Term::List(ms) => {
-            out.push('(');
-            for m in ms {
-                out.push(' ');
-                n3_write_term(m, out);
-            }
-            out.push_str(" )");
-        }
-        N3Term::Formula(ts) => {
-            out.push('{');
-            for t in ts {
-                out.push(' ');
-                n3_write_term(&t[0], out);
-                out.push(' ');
-                n3_write_term(&t[1], out);
-                out.push(' ');
-                n3_write_term(&t[2], out);
-                out.push_str(" .");
-            }
-            out.push_str(" }");
-        }
-        // RDF-star quoted-triple term — round-trips through the N3 parser's
-        // `<< s p o >>` form (GH #2012). [FABLE-5]
-        N3Term::Triple(tr) => {
-            out.push_str("<< ");
-            n3_write_term(&tr[0], out);
-            out.push(' ');
-            n3_write_term(&tr[1], out);
-            out.push(' ');
-            n3_write_term(&tr[2], out);
-            out.push_str(" >>");
-        }
-    }
-}
-
-/// Serialize ground facts back to N3 (the fallback / differential-oracle path). Lossless for
-/// parser-shaped terms: blank labels round-trip verbatim, language tags are already
-/// lowercase, plain strings re-acquire `xsd:string`.
-fn n3_serialize<'a>(facts: impl Iterator<Item = &'a [N3Term; 3]>) -> String {
-    let mut out = String::new();
-    for f in facts {
-        n3_write_term(&f[0], &mut out);
-        out.push(' ');
-        n3_write_term(&f[1], &mut out);
-        out.push(' ');
-        n3_write_term(&f[2], &mut out);
-        out.push_str(" .\n");
-    }
-    out
-}
+//
+// [OPUS-5] sq-xqchl.2 — the writer itself now lives in `n3::serialize`, shared with the
+// rule writer that echoes rules back into an EYE `--pass-all` document. One definition, so
+// a serializer and its parser cannot drift apart.
+pub(crate) use crate::n3::serialize::serialize_facts as n3_serialize;
 
 // ---- the graph -----------------------------------------------------------------------------
 
@@ -2490,7 +2488,7 @@ impl MaterializedN3Graph {
         let Some(compiled) = self.compiled.clone() else { return false };
         let unsupported = Cell::new(false);
         while !pending.is_empty() {
-            let pend_set: FxHashSet<[N3Term; 3]> = pending.iter().cloned().collect();
+            let mut pend_set: FxHashSet<[N3Term; 3]> = pending.iter().cloned().collect();
             for f in &pending {
                 if inserting {
                     self.index.insert(f.clone());
@@ -2498,7 +2496,82 @@ impl MaterializedN3Graph {
                     self.index.remove(f);
                 }
             }
-            // 1. Counted rules: the delta-rewriting emission multiset.
+            let mut next: Vec<[N3Term; 3]> = Vec::new();
+            let mut queued: FxHashSet<[N3Term; 3]> = FxHashSet::default();
+            // 1. Recursive layers (dependency order), recomputed when touched. This runs
+            //    BEFORE the counted-rule step so a base↔layer ownership transfer is settled
+            //    while the round's delta can still be corrected — no derivation count has
+            //    been decremented yet (see the hand-off note below). Layers are emitted in
+            //    dependency-first order, so re-inserting a fact a later layer owns cannot
+            //    invalidate an already-recomputed earlier layer.
+            for li in 0..compiled.layers.len() {
+                let def = &compiled.layers[li];
+                let relevant = |f: &[N3Term; 3]| {
+                    n3_pred_iri(&f[1]).is_some_and(|p| def.relevant.contains(p))
+                };
+                if !pending.iter().any(relevant) {
+                    continue;
+                }
+                let (added, removed) = self.recompute_layer(&compiled, li, &unsupported);
+                if unsupported.get() {
+                    self.data_fallback =
+                        Some("evaluation met data outside the builtin-parity whitelist".into());
+                    return false;
+                }
+                // Monotone rules + fixed guards ⇒ diffs normally share the round's sign. The
+                // exception is a base↔layer OWNERSHIP TRANSFER: a fact that is both asserted
+                // and layer-derivable is excluded from `layer_derived` while asserted (it
+                // seeds the local fixpoint), so deleting its base copy makes it APPEAR in the
+                // layer diff (and asserting an already-derived fact makes it vanish) without
+                // its closure membership changing. That is a state hand-off, not a data
+                // disqualification — and the layer fixpoint just recomputed above IS the
+                // targeted local re-derivation that decides it, so settle it here instead of
+                // re-materializing the whole closure. Anything the hand-off does not explain
+                // is still a genuine opposite-sign diff: bail and let the caller rebuild.
+                if inserting {
+                    // A fact may only leave the layer because it is now independently
+                    // present (asserted, counted, or owned by another layer).
+                    let handed_off = removed.iter().all(|f| {
+                        self.index.contains(f)
+                            && (self.base.contains(f)
+                                || self.counts.contains_key(f)
+                                || self.in_any_layer(f))
+                    });
+                    if !handed_off {
+                        return false;
+                    }
+                    for f in added {
+                        if !self.index.contains(&f) && queued.insert(f.clone()) {
+                            next.push(f);
+                        }
+                    }
+                } else {
+                    // A fact may only enter the layer because this round removed the base
+                    // copy it was charged to; it never left the closure, so put it back and
+                    // drop it from the round's delta — nothing downstream of it changed.
+                    if !added.iter().all(|f| pend_set.contains(f)) {
+                        return false;
+                    }
+                    for f in &added {
+                        self.index.insert(f.clone());
+                        pend_set.remove(f);
+                    }
+                    if !added.is_empty() {
+                        pending.retain(|f| pend_set.contains(f));
+                    }
+                    for f in removed {
+                        if self.index.contains(&f)
+                            && !self.base.contains(&f)
+                            && !self.counts.contains_key(&f)
+                            && !self.in_any_layer(&f)
+                            && queued.insert(f.clone())
+                        {
+                            next.push(f);
+                        }
+                    }
+                }
+            }
+            // 2. Counted rules: the delta-rewriting emission multiset.
             let mut emissions: Vec<[N3Term; 3]> = Vec::new();
             {
                 let cx = N3Cx {
@@ -2526,8 +2599,6 @@ impl MaterializedN3Graph {
                     Some("evaluation met data outside the builtin-parity whitelist".into());
                 return false;
             }
-            let mut next: Vec<[N3Term; 3]> = Vec::new();
-            let mut queued: FxHashSet<[N3Term; 3]> = FxHashSet::default();
             if inserting {
                 for g in emissions {
                     let c = self.counts.entry(g.clone()).or_insert(0);
@@ -2555,49 +2626,6 @@ impl MaterializedN3Graph {
                             }
                         }
                         None => debug_assert!(false, "N3 derivation-count underflow"),
-                    }
-                }
-            }
-            // 2. Recursive layers (dependency order), recomputed when touched.
-            for li in 0..compiled.layers.len() {
-                let def = &compiled.layers[li];
-                let relevant = |f: &[N3Term; 3]| {
-                    n3_pred_iri(&f[1]).is_some_and(|p| def.relevant.contains(p))
-                };
-                if !pending.iter().any(relevant) && !next.iter().any(relevant) {
-                    continue;
-                }
-                let (added, removed) = self.recompute_layer(&compiled, li, &unsupported);
-                if unsupported.get() {
-                    self.data_fallback =
-                        Some("evaluation met data outside the builtin-parity whitelist".into());
-                    return false;
-                }
-                // Monotone rules + fixed guards ⇒ diffs normally share the round's sign.
-                // The exception is a base↔layer OWNERSHIP TRANSFER: a fact that is both
-                // asserted and layer-derivable is excluded from `layer_derived` while
-                // asserted (it seeds the local fixpoint), so deleting its base copy makes
-                // it APPEAR in the layer diff (and inserting an already-derived fact makes
-                // it vanish) without its closure membership changing. The sign-homogeneous
-                // propagation below cannot express that hand-off — recover correctness by
-                // a full re-materialization (NON-sticky: the rules still qualify for
-                // counting; this is a state hand-off, not a data disqualification).
-                if (inserting && !removed.is_empty()) || (!inserting && !added.is_empty()) {
-                    return false;
-                }
-                for f in added {
-                    if !self.index.contains(&f) && queued.insert(f.clone()) {
-                        next.push(f);
-                    }
-                }
-                for f in removed {
-                    if self.index.contains(&f)
-                        && !self.base.contains(&f)
-                        && !self.counts.contains_key(&f)
-                        && !self.in_any_layer(&f)
-                        && queued.insert(f.clone())
-                    {
-                        next.push(f);
                     }
                 }
             }

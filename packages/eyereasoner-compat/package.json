@@ -38,7 +38,8 @@
     "_copy:wasm": "node scripts/copy-wasm.mjs",
     "build:wasm": "wasm-pack build ../../crates/sparq-reason-wasm --target web --release --out-dir pkg-eyereasoner-compat && npm run _copy:wasm",
     "build:ts": "tsc",
-    "build": "npm run build:wasm && npm run build:ts",
+    "build:iife": "node scripts/build-iife.mjs",
+    "build": "npm run build:wasm && npm run build:ts && npm run build:iife",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
     "check:package": "node guardrails/check-package.mjs",
@@ -60,7 +61,8 @@
   ],
   "devDependencies": {
     "@rdfjs/types": "^2.0.1",
-    "@types/node": "^22.10.0",
+    "@types/node": "^26.1.2",
+    "esbuild": "^0.25.12",
     "typescript": "^6.0.3"
   }
 }

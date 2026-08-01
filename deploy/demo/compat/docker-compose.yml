@@ -1,0 +1,114 @@
+# [OPUS-5] sq-iib9h — LOCAL CSS↔sparq-lws-core Solid-OIDC compatibility harness.
+#
+# The go/no-go de-risk of "CSS as the throwaway IdP" from research/lws-demo-architecture.md §1:
+# it stands up a real Community Solid Server and two locally-built sparq-lws-core instances and
+# lets `smoke.sh` prove the pairing on REAL, CSS-minted, DPoP-bound access tokens.
+#
+# ############################################################################################
+# # THIS IS A LOCAL DEVELOPMENT HARNESS. IT IS NOT A DEPLOYMENT MANIFEST.                     #
+# #                                                                                           #
+# # It deliberately sets SOLID_SERVER_ALLOW_LOOPBACK=1 — the dev/IT-only escape hatch that    #
+# # lets the SSRF gate accept an `http:`/loopback IdP + WebID host — because the whole point  #
+# # is to run CSS and LWS on loopback with no TLS and no public DNS. §4.3 of the design       #
+# # record BANS that variable (and SEED_CONFORMANCE / SEED_BENCH / ALLOW_SEED_NONMEMORY) from #
+# # the public demo manifests in `deploy/demo/` root, which is a SEPARATE subtree from this   #
+# # one. Nothing in this directory is ever deployed anywhere.                                 #
+# ############################################################################################
+#
+# Topology — one network namespace, three processes:
+#
+#   css              :3000   the throwaway Solid-OIDC IdP  (issuer + JWKS + WebID host)
+#   lws-strict       :3001   sparq-lws-core, SOLID_SERVER_AUDIENCE=solid   → must ACCEPT
+#   lws-defaultaud   :3002   sparq-lws-core, SOLID_SERVER_AUDIENCE unset   → must REJECT
+#
+# The two LWS services join the CSS network namespace (`network_mode: service:css`) so that
+# `localhost:<port>` means the SAME thing to the host, to CSS and to both LWS instances. That
+# single-namespace trick is what makes the URLs byte-identical everywhere, which matters a
+# great deal here: the verifier compares the token `iss` to SOLID_SERVER_TRUSTED_ISSUER by
+# exact string equality, CSS binds its DPoP proofs to the literal `htu`, and the bidirectional
+# check dereferences the `webid` claim as written. Any host/port rewriting between the three
+# parties would turn a genuine compatibility failure into an artefact of the harness.
+#
+# `lws-strict` and `lws-defaultaud` are the SAME image with ONE environment difference —
+# SOLID_SERVER_AUDIENCE. That difference is the experiment: smoke.sh sends the identical
+# CSS-minted token to both and asserts 201 from the first and 401 from the second, which is
+# what proves the `SOLID_SERVER_AUDIENCE=solid` line in the demo manifest is load-bearing
+# rather than decorative. Do not "tidy" the second service away.
+#
+#   Run it:   bash deploy/demo/compat/smoke.sh
+
+name: sparq-lws-compat
+
+services:
+  # --- The throwaway IdP ------------------------------------------------------------------
+  # Pinned to the multi-arch (amd64 + arm64) index digest of the 7.2.0 release so a re-run
+  # tests the same CSS, and a deliberate upgrade shows up as a diff here.
+  #
+  # NOTE the CSS_CONFIG override. The published image defaults to `config/file.json` with
+  # CSS_ROOT_FILE_PATH=/data (see its Dockerfile) — that is FILE storage, not the in-memory
+  # posture the design record assumes for the demo. `config/default.json` is the one that
+  # imports `storage/backend/memory.json`, so accounts, keys and pods all die with the
+  # container and every run starts from a clean IdP.
+  css:
+    image: docker.io/solidproject/community-server:7.2.0@sha256:73465522db316ec2c7c0417bdf5b1b2eab432c70fab44fb25ba2f2098e21b9e5
+    environment:
+      CSS_CONFIG: config/default.json
+      # Trailing slash intentional: this is the exact byte string CSS reports as its OIDC
+      # `issuer`, and therefore the exact byte string both LWS services must trust.
+      CSS_BASE_URL: http://localhost:3000/
+      CSS_PORT: "3000"
+      CSS_LOGGING_LEVEL: warn
+    # All three services' ports are published here, because the LWS containers share this
+    # container's network namespace and so cannot declare `ports:` of their own.
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:3002:3002"
+
+  # --- The system under test: correctly-configured LWS ------------------------------------
+  lws-strict:
+    image: sparq-lws-compat:local
+    build:
+      context: ../../..
+      dockerfile: crates/sparq-lws-core/Dockerfile
+    network_mode: "service:css"
+    depends_on:
+      - css
+    environment:
+      SOLID_SERVER_BIND: 0.0.0.0:3001
+      SOLID_SERVER_BASE_URL: http://localhost:3001
+      SOLID_SERVER_TRUSTED_ISSUER: http://localhost:3000/
+      # THE LOAD-BEARING LINE. CSS mints tokens with aud="solid" (its IdP factory pins
+      # `audience: 'solid'`); LWS defaults its audience to its own base URL, which no CSS
+      # token can ever match. `lws-defaultaud` below is the control that proves it.
+      SOLID_SERVER_AUDIENCE: solid
+      # Default, restated so a silent upstream default-flip is visible in the diff: the
+      # WebID must point back at the issuer or the request 401s.
+      SOLID_SERVER_BIDIRECTIONAL: strict
+      # Creates /playground/ (authenticated Read/Write/Append, public Read, no Control) and
+      # the public-read /README banner. Without it there is nothing writable to PUT into.
+      SOLID_SERVER_SEED_DEMO: "1"
+      PSS_SPARQ_BACKEND: memory
+      # LOCAL HARNESS ONLY — see the banner at the top of this file.
+      SOLID_SERVER_ALLOW_LOOPBACK: "1"
+
+  # --- The control: identical except for the audience -------------------------------------
+  lws-defaultaud:
+    image: sparq-lws-compat:local
+    build:
+      context: ../../..
+      dockerfile: crates/sparq-lws-core/Dockerfile
+    network_mode: "service:css"
+    depends_on:
+      - css
+    environment:
+      SOLID_SERVER_BIND: 0.0.0.0:3002
+      SOLID_SERVER_BASE_URL: http://localhost:3002
+      SOLID_SERVER_TRUSTED_ISSUER: http://localhost:3000/
+      # SOLID_SERVER_AUDIENCE is DELIBERATELY UNSET so it falls back to the base URL
+      # (http://localhost:3002). Setting it here would destroy the experiment.
+      SOLID_SERVER_BIDIRECTIONAL: strict
+      SOLID_SERVER_SEED_DEMO: "1"
+      PSS_SPARQ_BACKEND: memory
+      # LOCAL HARNESS ONLY — see the banner at the top of this file.
+      SOLID_SERVER_ALLOW_LOOPBACK: "1"

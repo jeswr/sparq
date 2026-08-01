@@ -266,6 +266,15 @@ required-features = ["approx-ann"]
 name = "sift_ef_sweep"
 required-features = ["approx-ann"]
 
+# [SONNET-4.6] sq-pm6i2 (follow-up sq-ose80.2): the BUILD-TIME-ONLY HNSW scaling harness times
+# `VectorIndex::build_with` at the shipped `HnswConfig` presets, so it needs `approx-ann`. Gating it
+# keeps `cargo build --all-targets` (default features) green when the heavy ANN crate is out of the
+# build. It measures build wall-clock ONLY — no recall, no QPS, no oracle — so it adds no gate and
+# makes no accuracy claim.
+[[example]]
+name = "hnsw_build_scaling"
+required-features = ["approx-ann"]
+
 # [GPT-5.6] sq-0ut5x: the internal matched-recall build Pareto harness compares HNSW with the
 # always-available DiskANN/PQ implementations, so only the HNSW side needs this opt-in feature.
 [[example]]

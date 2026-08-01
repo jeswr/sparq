@@ -6,8 +6,9 @@ owns a single-threaded in-memory pod and drives the real axum router as a Tower
 service. The JavaScript host supplies the HTTP listener and authenticated WebID.
 
 > This local-development adapter is not a production Solid server. Storage is
-> process-local and ephemeral; TLS and OIDC verification stay in the host; PoP,
-> notifications, networking, and persistent backends are excluded from wasm.
+> in linear memory and ephemeral unless the host opts into snapshots; TLS and
+> OIDC verification stay in the host; PoP, notifications, networking, and remote
+> storage backends are excluded from wasm.
 
 ## 🚀 Quickstart
 
@@ -59,6 +60,21 @@ console.log(response.status);
 - [SONNET-4.6] A `console_error_panic_hook` is installed at module init so any
   Rust panic emits a diagnostic to `console.error` before the wasm `unreachable`
   trap propagates to the host as `WebAssembly.RuntimeError`.
+- [SONNET-4.6] A bounded `#[global_allocator]` tracks live linear-memory bytes, and
+  `handleRequest` refuses a request whose projected peak would cross the ceiling with
+  a clean HTTP 507 instead of trapping at the linear-memory wall. `lwsMemoryLiveBytes`,
+  `lwsMemoryPeakBytes`, `lwsMemoryCeilingBytes`, and `lwsSetMemoryCeilingBytes` expose
+  the counters and the knob. The total is of live bytes rather than pages ever grown, so
+  bytes returned to the allocator restore headroom — but that an LDP `DELETE` frees enough
+  to re-admit a refused request is not yet demonstrated end to end.
+- [GPT-5.6] Persistence is opt-in and lives behind the same `Store` trait.
+  `SolidServer.withSnapshot(baseUrl, ownerWebid, bytes)` builds the pod behind a
+  journaling store decorator; `snapshot()` returns the bytes the host writes to
+  `node:fs` or IndexedDB, and handing them back to `withSnapshot` rebuilds the
+  pod's contents after a listener restart. `new SolidServer(...)` is unchanged
+  and journals nothing, so `snapshot()` is `undefined` for it. Restart preserves
+  the content-derived `ETag` but re-stamps `Last-Modified`; the host owns the
+  durable medium and the flush policy.
 - No Tokio reactor, native listener, filesystem, TLS, OIDC verifier, PoP,
   notifications, or network backend is linked into the wasm artifact.
 
@@ -73,7 +89,10 @@ console.log(response.status);
   development only; OIDC verification remains outside this wasm crate.
 - [SONNET-4.6] The Node host catches `WebAssembly.RuntimeError` and recycles the
   `SolidServer` instance before the next request (sq-250si). A single wasm trap no
-  longer bricks the process; the triggering request receives HTTP 503.
+  longer bricks the process; the triggering request receives HTTP 503. The bounded
+  allocator (sq-wubkf) removes the *sustained*-pressure form of that trap ahead of
+  time; a single request whose own transient peak overshoots the remaining headroom
+  still traps and still relies on trap recovery.
 
 ## License
 

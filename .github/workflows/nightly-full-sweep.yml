@@ -32,10 +32,15 @@
 #     SPARQ_NIGHTLY_A11Y=1 in the a11y-sweep job below. The moderate/minor ratchet (beyond the
 #     zero serious/critical tier) is a planned follow-up bead — first nightly run calibrates counts.
 #   • The full-surface visual sweep (sq-ledny) is now implemented in e2e/visual/full-surface.spec.ts
-#     and runs via the container-pinned `npm run vr` path below. Baselines were NOT committed with
-#     the initial PR (container not available in the authoring environment); the first nightly run
-#     will mint them. Until then the first nightly-visual-diffs run may fail — run `npm run
-#     vr:update` after the first scheduled run to seed the missing baselines.
+#     and runs via the container-pinned `npm run vr` path below. Its baselines ARE committed under
+#     site/e2e/visual/baselines/ (seeded #1783, refreshed #1801) — the earlier "the first nightly
+#     run will mint them" note here was both stale and never operationally true: Playwright writes
+#     a MISSING snapshot but still fails the run, and nothing in CI commits it back. [SONNET-4.6]
+#     sq-hfd82: because this sweep runs only NIGHTLY (the per-PR site-visual lane matches
+#     key-layouts.spec.ts only), full-surface drift from ordinary site changes is invisible until
+#     the nightly, so it accumulates and the lane reads as permanently red. Recovery is the
+#     `refresh_visual_baselines: true` + `mode: full` dispatch below — it re-mints inside the same
+#     pinned container and uploads the PNGs for review; commit them in a PR.
 #   • firefox/webkit and the macOS/Windows tauri rows are documented-untested in THIS
 #     environment; the smoke-mode `--list` validation of each was reproduced locally, the full
 #     runs mirror the proven per-PR recipes and are validated on the first scheduled run.
@@ -61,6 +66,10 @@ on:
         description: "Open/refresh consolidated issues on failure. Set false for a safe scratch-branch demo (routing runs dry, files nothing)."
         type: boolean
         default: true
+      refresh_visual_baselines:
+        description: "Re-MINT every visual baseline inside the pinned container and upload them as an artifact for review (requires mode=full). Comparison is skipped and routing is forced OFF."
+        type: boolean
+        default: false
 
 # Least-privilege default: read-only. Only the routing job elevates to issues: write.
 permissions:
@@ -83,6 +92,7 @@ jobs:
       mode: ${{ steps.cfg.outputs.mode }}
       route: ${{ steps.cfg.outputs.route }}
       force_fail: ${{ steps.cfg.outputs.force_fail }}
+      vr_refresh: ${{ steps.cfg.outputs.vr_refresh }}
     steps:
       - id: cfg
         env:
@@ -90,6 +100,7 @@ jobs:
           IN_MODE: ${{ inputs.mode }}
           IN_ROUTE: ${{ inputs.route_failures }}
           IN_FORCE: ${{ inputs.force_fail_categories }}
+          IN_VR_REFRESH: ${{ inputs.refresh_visual_baselines }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = "schedule" ]; then
@@ -97,15 +108,32 @@ jobs:
               echo "mode=full"
               echo "route=true"
               echo "force_fail=none"
+              echo "vr_refresh=false"
             } >> "$GITHUB_OUTPUT"
-            echo "scheduled nightly → mode=full route=true"
+            echo "scheduled nightly → mode=full route=true vr_refresh=false"
           else
+            MODE="${IN_MODE:-smoke}"
+            ROUTE="${IN_ROUTE:-true}"
+            VR_REFRESH="${IN_VR_REFRESH:-false}"
+            # [SONNET-4.6] sq-hfd82 — the baseline-refresh dispatch. It needs the full-mode
+            # prerequisites (wasm bundle + the pinned container), and it must NOT route: a
+            # refresh run trivially "succeeds", and route_sweep_failures.py auto-closes the
+            # consolidated visual issue on recovery — which would close the red BEFORE the
+            # regenerated baselines have been reviewed and committed.
+            if [ "$VR_REFRESH" = "true" ]; then
+              if [ "$MODE" != "full" ]; then
+                echo "::error::refresh_visual_baselines=true requires mode=full (it needs the wasm build + container steps)."
+                exit 1
+              fi
+              ROUTE=false
+            fi
             {
-              echo "mode=${IN_MODE:-smoke}"
-              echo "route=${IN_ROUTE:-true}"
+              echo "mode=${MODE}"
+              echo "route=${ROUTE}"
               echo "force_fail=${IN_FORCE:-none}"
+              echo "vr_refresh=${VR_REFRESH}"
             } >> "$GITHUB_OUTPUT"
-            echo "manual dispatch → mode=${IN_MODE:-smoke} route=${IN_ROUTE:-true} force_fail=${IN_FORCE:-none}"
+            echo "manual dispatch → mode=${MODE} route=${ROUTE} force_fail=${IN_FORCE:-none} vr_refresh=${VR_REFRESH}"
           fi
 
   # ── Category 1: a11y / full-surface sweep (chromium) ─────────────────────────────────────
@@ -160,7 +188,9 @@ jobs:
       # absent — a presence check, not a feature check. The lean bundle omits the `shacl` feature,
       # so `sparqShaclValidate` is undefined at runtime → the validator can't run → the report
       # never renders → the specs fail (this was the a11y-sweep red, issue #1738). The full bundle
-      # (js `build:wasm`, features shacl,jsonld,serialize-rdf,scs,canon) makes those engine-gated
+      # (js `build:wasm` — js/package.json is the single source of truth for the published
+      # feature list; as of #3546 it is shacl,jsonld,serialize-rdf,scs,canon,explain-json,
+      # native-ttl,bytes-ingest,forms) makes those engine-gated
       # SHACL states actually execute — exactly the wider net this nightly lane is meant to be. The
       # Typst → spec/paper fragments the surface-sweep asserts on (mirrors site-e2e.yml) build
       # below, then the chromium suite runs.
@@ -304,10 +334,35 @@ jobs:
       # (including full-surface.spec.ts). Without this flag, vr.sh only runs key-layouts.spec.ts
       # (the per-PR subset) and the full-surface captures are skipped.
       - name: Visual full-surface sweep vs committed baselines (digest-pinned container)
-        if: needs.config.outputs.mode == 'full'
+        if: needs.config.outputs.mode == 'full' && needs.config.outputs.vr_refresh != 'true'
         env:
           SPARQ_NIGHTLY_VR: "1"
         run: npm run vr
+
+      # [SONNET-4.6] sq-hfd82 — the RE-BASELINE path (workflow_dispatch only).
+      #
+      # The committed baselines are Linux-container-only by policy (e2e/visual/README.md), so
+      # they can be minted ONLY inside the digest-pinned image. That left the lane with no
+      # recovery route for anyone without a local docker daemon: the nightly could report the
+      # drift but nobody in that position could fix it, and the sweep stayed red across
+      # successive site changes. This step runs `npm run vr:update` in the SAME pinned container
+      # the nightly compares in, and uploads the regenerated PNGs for the reviewed-artifact
+      # workflow — download, EYEBALL every changed image (a refresh blesses whatever rendered,
+      # including a genuine regression), and commit them in a PR.
+      - name: Re-mint visual baselines (digest-pinned container, dispatch-only)
+        if: needs.config.outputs.mode == 'full' && needs.config.outputs.vr_refresh == 'true'
+        env:
+          SPARQ_NIGHTLY_VR: "1"
+        run: npm run vr:update
+      - name: Upload regenerated baselines for review
+        if: always() && needs.config.outputs.vr_refresh == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: refreshed-visual-baselines
+          path: site/e2e/visual/baselines/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload visual diff artifacts on failure
         if: failure() && needs.config.outputs.mode == 'full'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

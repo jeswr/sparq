@@ -1,4 +1,6 @@
 # [FABLE-5] sq-i858h — build/gather outputs only; the harness + vendored ABox
 # + expected.tsv are committed.
 /pkg/
+# [SONNET-4.6] sq-c6c2s — TRIM_SWEEP=1 cargo-profile variant artifacts.
+/pkg-*/
 /results/

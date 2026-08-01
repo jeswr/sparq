@@ -427,12 +427,28 @@ fn parse_export(export_text: &str) -> Result<MiniGraph, String> {
     Ok(MiniGraph { triples })
 }
 
-/// Select the DIRECT-arm test cases from the manifest graph — the shared selection both
-/// arms use (DIRECT semantics, not `test:Rejected`, carrying at least one check kind or a
-/// `ProfileIdentificationTest` typing). Returns the selected cases plus the count of
-/// `Rejected`-status cases dropped. [FABLE-5] sq-pbz04.4.17 (extracted verbatim from
-/// `run_direct_arm` so the round-trip arm cannot drift from the L5 selection).
-fn collect_cases(g: &MiniGraph) -> (Vec<Case>, usize) {
+/// Which `test:semantics` sanction selects a case. Every REASONING / PROFILE lane is
+/// [`Self::Direct`] and stays so; only the purely-syntactic render round-trip arm also
+/// runs the [`Self::RdfBasedOnly`] slice (sq-pbz04.4.18). [SONNET-4.6]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SemanticsArm {
+    /// `test:semantics test:DIRECT` present — the selection every lane of this module
+    /// used before sq-pbz04.4.18, unchanged.
+    Direct,
+    /// `test:semantics test:RDF-BASED` present AND `test:DIRECT` ABSENT. Deliberately the
+    /// COMPLEMENT of [`Self::Direct`] rather than "all RDF-BASED": the two slices are then
+    /// DISJOINT, so the two round-trip floors cannot double-count a dual-tagged case's
+    /// documents. Note the local name is `RDF-BASED` (hyphenated) in the export.
+    RdfBasedOnly,
+}
+
+/// Select test cases from the manifest graph for one [`SemanticsArm`] — the shared
+/// selection every arm uses (matching semantics, not `test:Rejected`, carrying at least
+/// one check kind or a `ProfileIdentificationTest` typing). Returns the selected cases
+/// plus the count of `Rejected`-status cases dropped WITHIN that arm. [FABLE-5]
+/// sq-pbz04.4.17 (extracted verbatim from `run_direct_arm` so the round-trip arm cannot
+/// drift from the L5 selection); parameterised by arm in sq-pbz04.4.18 [SONNET-4.6].
+fn collect_cases_for(g: &MiniGraph, arm: SemanticsArm) -> (Vec<Case>, usize) {
     // Pre-scan the top-level `owl:NegativePropertyAssertion` nodes for the EXPLICIT-NEGATIVE
     // profile lane (sq-pbz04.4.16). A manifest-level profile negation is an NPA whose
     // `assertionProperty` is `test:profile`, `sourceIndividual` is a TestCase IRI, and
@@ -455,7 +471,15 @@ fn collect_cases(g: &MiniGraph) -> (Vec<Case>, usize) {
         };
         // The DIRECT arm: only tests sanctioned under the Direct semantics. The
         // RDF-Based runs of dual-tagged tests stay in the owl_suite / el_suite lanes.
-        if !iri_objs("semantics").iter().any(|s| s == &format!("{}DIRECT", T)) {
+        // The RDF-BASED-only arm (sq-pbz04.4.18) is the disjoint complement, and feeds
+        // ONLY the syntactic render round-trip — no reasoning verdict is claimed for it.
+        let semantics = iri_objs("semantics");
+        let sanctioned = |name: &str| semantics.iter().any(|s| s == &format!("{}{}", T, name));
+        let selected = match arm {
+            SemanticsArm::Direct => sanctioned("DIRECT"),
+            SemanticsArm::RdfBasedOnly => sanctioned("RDF-BASED") && !sanctioned("DIRECT"),
+        };
+        if !selected {
             continue;
         }
         let status = g
@@ -531,7 +555,7 @@ fn collect_cases(g: &MiniGraph) -> (Vec<Case>, usize) {
 /// parse) — per-case problems are accounted in the report, never dropped.
 pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
     let g = parse_export(export_text)?;
-    let (cases, rejected) = collect_cases(&g);
+    let (cases, rejected) = collect_cases_for(&g, SemanticsArm::Direct);
     let mut report = DlReport { rejected_cases: rejected, ..DlReport::default() };
     for case in &cases {
         run_case(case, &mut report);
@@ -540,21 +564,59 @@ pub fn run_direct_arm(export_text: &str) -> Result<DlReport, String> {
 }
 
 // -----------------------------------------------------------------------------------------
-// Render round-trip arm (sq-pbz04.4.17)
+// Render round-trip arms (sq-pbz04.4.17 DIRECT; sq-pbz04.4.18 RDF-BASED-only)
 // -----------------------------------------------------------------------------------------
 
-/// Report of the RENDER ROUND-TRIP arm ([`run_render_roundtrip_arm`], sq-pbz04.4.17):
-/// the L1 forward renderer's `extract → render → re-extract` invariant, checked over
-/// every ontology document of the DIRECT-arm corpus (the same case selection as
-/// [`run_direct_arm`]). A belt-and-suspenders completeness check for the renderer's 13
-/// hand-written round-trip tests — purely syntactic (no tableau, no reasoning), so it
+/// Which corpus slice a [`RenderRoundTripReport`] measures — the two slices are DISJOINT,
+/// so their document counts and floors add without double-counting. [SONNET-4.6]
+/// sq-pbz04.4.18
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RoundTripArm {
+    /// The DIRECT-sanctioned cases ([`run_render_roundtrip_arm`], sq-pbz04.4.17).
+    #[default]
+    Direct,
+    /// The RDF-BASED-only cases — `test:RDF-BASED` WITHOUT `test:DIRECT`
+    /// ([`run_render_roundtrip_rdf_based_arm`], sq-pbz04.4.18).
+    RdfBasedOnly,
+}
+
+impl RoundTripArm {
+    /// Short human label for the accounting heading.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "Direct-Semantics",
+            Self::RdfBasedOnly => "RDF-Based-only",
+        }
+    }
+
+    /// Stable key segment for violation rows, so a Direct and an RDF-BASED-only row for
+    /// the same case identifier never collide if the two reports are concatenated.
+    fn key_segment(self) -> &'static str {
+        match self {
+            Self::Direct => "owl2-dl",
+            Self::RdfBasedOnly => "owl2-rdf-based",
+        }
+    }
+}
+
+/// Report of the RENDER ROUND-TRIP arm ([`run_render_roundtrip_arm`], sq-pbz04.4.17;
+/// [`run_render_roundtrip_rdf_based_arm`], sq-pbz04.4.18): the L1 forward renderer's
+/// `extract → render → re-extract` invariant, checked over every ontology document of one
+/// corpus slice (the same case selection as [`run_direct_arm`], or its disjoint
+/// RDF-BASED-only complement). A belt-and-suspenders completeness check for the renderer's
+/// 13 hand-written round-trip tests — purely syntactic (no tableau, no reasoning), so it
 /// carries no verdict semantics: it can only certify that the forward mapping is a
-/// faithful inverse of the reverse mapping ON the fragment L1 actually accepts.
-/// [FABLE-5] 🤖 SPARQ agent.
+/// faithful inverse of the reverse mapping ON the fragment L1 actually accepts. This is
+/// exactly why the RDF-BASED-only slice is admissible here while it is NOT admissible in
+/// any reasoning lane: round-tripping a document makes no claim about which semantics
+/// sanctions it. [FABLE-5] 🤖 SPARQ agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RenderRoundTripReport {
+    /// Which corpus slice this report measures.
+    pub arm: RoundTripArm,
     /// Ontology documents examined: each PRESENT premise / input / conclusion /
-    /// non-conclusion RDF/XML literal of each selected DIRECT-arm case counts once
+    /// non-conclusion RDF/XML literal of each selected case of [`Self::arm`] counts once
     /// (documents are per-slot, not de-duplicated by content — the accounting mirrors
     /// the corpus shape, and the arm is cheap enough not to need dedup).
     pub documents: usize,
@@ -594,7 +656,8 @@ impl RenderRoundTripReport {
         let mut md = String::new();
         let _ = writeln!(
             md,
-            "OWL 2 Direct-Semantics arm — L1 render round-trip (scoped ALCH fragment; sq-pbz04.4.17)"
+            "OWL 2 {} arm — L1 render round-trip (scoped ALCH fragment; sq-pbz04.4.17/.18)",
+            self.arm.label()
         );
         let _ = writeln!(
             md,
@@ -621,13 +684,60 @@ impl RenderRoundTripReport {
 /// the round-trip invariant is per-DOCUMENT and purely syntactic, so the imports closure
 /// is irrelevant — the literal text is round-tripped as-is.
 ///
+/// See [`run_render_roundtrip_rdf_based_arm`] for the disjoint RDF-BASED-only slice
+/// (sq-pbz04.4.18).
+///
 /// # Errors
 /// Returns `Err` only on an export-level failure (the RDF/XML export itself failed to
 /// parse) — per-document problems are accounted in the report, never dropped.
 pub fn run_render_roundtrip_arm(export_text: &str) -> Result<RenderRoundTripReport, String> {
+    run_render_roundtrip_for(export_text, SemanticsArm::Direct, RoundTripArm::Direct)
+}
+
+/// Run the L1 render round-trip arm over the export's **RDF-BASED-only** slice — the cases
+/// carrying `test:semantics test:RDF-BASED` and NOT `test:DIRECT`, which the DIRECT arm
+/// ([`run_render_roundtrip_arm`]) never sees. Same invariant, same EMPTY-violations
+/// discipline, DISJOINT corpus.
+///
+/// This extends the renderer-fidelity check, NOT the reasoning claim: nothing here decides
+/// consistency or entailment, and no verdict of any kind is attributed to an RDF-BASED
+/// test.
+///
+/// Marginal value is honestly LOW, and SMALLER than the bead estimated. sq-pbz04.4.18
+/// expected "several hundred MORE ontology documents"; MEASURED, 479 of the export's 493
+/// cases are DUAL-tagged (DIRECT ∧ RDF-BASED) and already covered by
+/// [`run_render_roundtrip_arm`], so this slice is only **7 cases / 13 documents** — and the
+/// DIRECT arm already exercises every ALCH axiom / class-expression shape the renderer
+/// emits. The bead also expected refusals to dominate the slice (OWL-Full-heavy); they do
+/// not — these 7 are OWL-1-era WebOnt cases, and only 3 of the 13 documents are refused.
+/// It is worth running anyway because it is closed-form and cheap, and because it makes
+/// coverage exhaustive over the ELIGIBLE slice — every non-`Rejected` case with a
+/// recognised check kind, sanctioned DIRECT and/or RDF-BASED — rather than merely large.
+/// That is NOT the whole export: the 1 case tagged with neither semantics, and any case
+/// carrying no recognised check kind, is outside BOTH arms and stays unmeasured. Exact
+/// counts are pinned in `tests/dl_suite.rs` (`DL_RDF_BASED_ROUNDTRIP_*`).
+///
+/// # Errors
+/// Returns `Err` only on an export-level failure (the RDF/XML export itself failed to
+/// parse) — per-document problems are accounted in the report, never dropped.
+///
+/// [SONNET-4.6] sq-pbz04.4.18
+pub fn run_render_roundtrip_rdf_based_arm(
+    export_text: &str,
+) -> Result<RenderRoundTripReport, String> {
+    run_render_roundtrip_for(export_text, SemanticsArm::RdfBasedOnly, RoundTripArm::RdfBasedOnly)
+}
+
+/// Shared body of both round-trip arms — identical per-document logic, only the case
+/// selection and the violation-key segment differ. [SONNET-4.6] sq-pbz04.4.18
+fn run_render_roundtrip_for(
+    export_text: &str,
+    semantics: SemanticsArm,
+    arm: RoundTripArm,
+) -> Result<RenderRoundTripReport, String> {
     let g = parse_export(export_text)?;
-    let (cases, _rejected) = collect_cases(&g);
-    let mut report = RenderRoundTripReport::default();
+    let (cases, _rejected) = collect_cases_for(&g, semantics);
+    let mut report = RenderRoundTripReport { arm, ..RenderRoundTripReport::default() };
     for case in &cases {
         let base = format!("http://owl.semanticweb.org/id/{}", case.ident);
         for (slot, doc) in [
@@ -662,7 +772,8 @@ pub fn run_render_roundtrip_arm(export_text: &str) -> Result<RenderRoundTripRepo
                     Ok(onto2) => Err(roundtrip_mismatch_diagnostic(&onto1, &onto2)),
                 })
             }));
-            let key = format!("owl2-dl/render-roundtrip/{}: {}", slot, case.ident);
+            let key =
+                format!("{}/render-roundtrip/{}: {}", arm.key_segment(), slot, case.ident);
             match outcome {
                 Ok(None) => report.extraction_refused += 1,
                 Ok(Some(Ok(()))) => report.round_tripped += 1,
@@ -1227,6 +1338,7 @@ mod tests {
     #[test]
     fn render_roundtrip_accounting_closed_detects_drops() {
         let mut report = RenderRoundTripReport {
+            arm: RoundTripArm::Direct,
             documents: 3,
             round_tripped: 1,
             extraction_refused: 1,

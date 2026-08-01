@@ -2,8 +2,13 @@
 #
 # One self-contained leg mapping per opt-in feature(group). Assembled into the
 # feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py.
-# Adding a leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs
+# Adding a leg for THIS crate edits no OTHER crate's fragment, so concurrent opt-in-feature PRs
 # for DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+# SCOPE ([SONNET-4.6] issue #2384): adding/removing/renaming a leg changes the emitted
+# leg-name set, and THAT is a TWO-FILE change — this fragment AND
+# scripts/tests/feature-matrix-legnames.golden.txt. Every other edit here (features,
+# test, tier, tier-reason, comments) leaves the name set alone and is a SINGLE-file
+# change. See README.md in this directory.
 #
 # CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
 # discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
@@ -24,7 +29,18 @@
 # here builds + tests + clippies the real join-probe + term-ordering paths (and matches the
 # `--features numeric,join,compare,rows` set the coverage + mutation ratchets measure). The
 # DEFAULT (feature-OFF) build is still covered by the workspace lane.
-- name: "sparq-substrate (rows, numeric, join, compare — shared eval-substrate correctness core)"
+# [OPUS-5] PR #3799 review: ADDED `overhead`. `src/overhead.rs` is behind
+# `#[cfg(feature = "overhead")]` (lib.rs) and carries its own `#[cfg(test)] mod tests` —
+# including `inline_num_binop_float_promotion_matches_substrate_bit_exactly`, the ONLY guard
+# on the hand-rolled `inline_num_binop` replica of `Num::binop`. With `overhead` absent from
+# this leg NO required check compiled that module, so a whole-hunk revert of the replica's
+# float tier left the gating set at 143 passed / 0 failed. This is precisely the sq-vya1
+# guard's own rule (feature-matrix.yml lines 56-73) applied to a `src/`-inline test module —
+# a shape `scripts/check-feature-test-execution.py` documents that it does NOT detect (it
+# scans `crates/*/tests/**` and Cargo `required-features` only), so the gap was silent.
+# `overhead = ["join", "numeric", "compare"]`, so this set is now the crate's MAXIMAL one and
+# also builds the `substrate_overhead` example (`required-features = ["overhead"]`).
+- name: "sparq-substrate (rows, numeric, join, compare, overhead — shared eval-substrate correctness core)"
   crate: "sparq-substrate"
-  features: "rows,numeric,join,compare"
+  features: "rows,numeric,join,compare,overhead"
   test: true

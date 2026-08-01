@@ -28,7 +28,12 @@ const SH: &str = "http://www.w3.org/ns/shacl#";
 
 /// Pass-rate floor: the rate achieved at the pinned suite commit (98/98).
 /// Regressions below this fail the build.
-const BASELINE_PASS: usize = 98;
+/// [SONNET-4.6] sq-z1xv8 — the VALUE now lives once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
+/// ONE `const` and cannot drift (replacing the old textual re-read of this file).
+/// Raise it THERE; the measurement narrative stays here.
+const BASELINE_PASS: usize = sparq_conformance_floors::shacl::CORE_FLOOR;
 
 fn suite_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

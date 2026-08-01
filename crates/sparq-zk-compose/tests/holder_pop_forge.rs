@@ -130,9 +130,10 @@ fn fixture_snapshot(revoked: bool) -> StatusListSnapshot {
 }
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
-        status_list: STATUS_LIST.to_string(),
+        ref_commitment: None,
+        status_list: Some(STATUS_LIST.to_string()),
         index: Some(STATUS_INDEX),
-        version: STATUS_VERSION,
+        version: Some(STATUS_VERSION),
         index_commitment: None,
     }
 }
@@ -187,8 +188,9 @@ fn attest_bearer(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestat
             .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
+            ref_commitment: None,
             index: Some(STATUS_INDEX),
-            version: STATUS_VERSION,
+            version: Some(STATUS_VERSION),
             index_commitment: None,
         }),
         holder: None,
@@ -218,8 +220,9 @@ fn attest_holder(
             .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
+            ref_commitment: None,
             index: Some(STATUS_INDEX),
-            version: STATUS_VERSION,
+            version: Some(STATUS_VERSION),
             index_commitment: None,
         }),
         holder: Some(
@@ -248,12 +251,14 @@ fn holder_manifest(
     issuer_sk: &SecretKey,
 ) -> ProofManifest {
     ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
         key_set: vec![public_key_to_hex(&issuer_sk.public_key())],
         commitment_attestations: attestations,
         attributions: vec![vec![0]],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],

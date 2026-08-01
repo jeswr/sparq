@@ -51,6 +51,22 @@
 //! permits its sub-actions in the evaluator — so the bridge maps the **request**
 //! action, which is concrete).
 //!
+//! ## SPARQL-query profile decision — [SONNET-4.6] sq-lrtc3.2
+//!
+//! A SPARQL query is represented by the standard `odrl:read` action; sparq does
+//! **not** mint a profile-specific query action IRI. Query execution observes graph
+//! content and therefore fits the existing `read` action and [`Mode::Read`] exactly,
+//! while a new action would require every policy producer and ODRL processor to learn
+//! sparq-specific vocabulary without providing a narrower enforcement mode.
+//!
+//! This contract does not map `odrl:use` transitively. The ODRL evaluator may use the
+//! action hierarchy to decide that a `use` permission covers a concrete `read`
+//! request, but materialization maps the **request action**, never the permission's
+//! ancestor action. A request presented merely as `odrl:use` remains unmapped because
+//! that umbrella also covers mutation actions; treating it as query/read would silently
+//! narrow an ambiguous request and could grant the wrong capability. Callers must
+//! present SPARQL query requests as `odrl:read`.
+//!
 //! # Prohibitions → `auth:deny<Mode>` (deny-overrides) — [OPUS-4.8] sq-w693
 //!
 //! A matched ODRL **Prohibition** is the dual of a Permit: it carves an action out
@@ -117,9 +133,45 @@ use oxrdf::{Literal, NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
 use sparq_policy::{
-    conflict_admissibility, evaluate, matched_prohibition, prohibition_status, Operator, Policy,
-    ProhibitionStatus, Request, Rule, Value,
+    conflict_admissibility, evaluate, matched_prohibition, parse_policy_str, prohibition_status,
+    Operator, Policy, ProhibitionStatus, Request, Rule, Value,
 };
+use sparq_reason::n3::compiled::{compile, eval, intern_facts, CompiledRuleSet};
+use std::fmt::Write as _;
+use std::sync::OnceLock;
+
+/// [OPUS-5] Stratum A0 — the operand/combinator-arity guard whose `odrlx:shape
+/// odrlx:Ambiguous` marks stratum A's and C's satisfaction rules negate. See
+/// `rules/odrl-a0.n3` for why the satisfaction rules cannot be sound without it.
+const ODRL_A0: &str = include_str!("../rules/odrl-a0.n3");
+const ODRL_A: &str = include_str!("../rules/odrl-a.n3");
+const ODRL_B: &str = include_str!("../rules/odrl-b.n3");
+const ODRL_C: &str = include_str!("../rules/odrl-c.n3");
+const ODRL_D: &str = include_str!("../rules/odrl-d.n3");
+
+/// The five ODRL strata (`rules/odrl-{a0,a,b,c,d}.n3`, in evaluation order) lowered to
+/// the id-level compiled IR, once per process — the same `OnceLock` shape
+/// `crate::materialize`'s `wac_rules`/`acp_rules` use after sq-zgbso.4.
+///
+/// [SONNET-4.6] sq-zgbso.5: compilation is deterministic over `const` rule text, so the
+/// result is cached verbatim — including a failure, which is returned as an ordinary
+/// `Err` (a rule leaving the compiled subset must surface as a materialize error and a
+/// refusal, never a panic and never a silently empty auth view).
+fn odrl_rules() -> Result<&'static [CompiledRuleSet; 5], String> {
+    static RULES: OnceLock<Result<[CompiledRuleSet; 5], String>> = OnceLock::new();
+    RULES
+        .get_or_init(|| {
+            Ok([
+                compile(ODRL_A0)?,
+                compile(ODRL_A)?,
+                compile(ODRL_B)?,
+                compile(ODRL_C)?,
+                compile(ODRL_D)?,
+            ])
+        })
+        .as_ref()
+        .map_err(|e| format!("ODRL rules: {}", e))
+}
 
 /// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
 pub const ODRL_NS: &str = sparq_policy::ODRL_NS;
@@ -1851,44 +1903,6 @@ fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
     }
 }
 
-#[cfg(test)]
-mod set_tighter_tests {
-    //! [OPUS-4.8] sq-0q7n — `set_tighter` keeps the instant-tightest window bound when
-    //! two same-side `odrl:dateTime` constraints intersect. The pre-fix lexical `<`/`>`
-    //! picked the wrong bound for mixed timezone offsets (a fail-open: a wider persisted
-    //! window than the constraints allow). These pin the offset-aware behavior.
-    use super::set_tighter;
-
-    #[test]
-    fn upper_bound_keeps_earlier_instant_across_offsets() {
-        // Two notAfter bounds: 12:00Z (= 12:00Z) and 13:00+02:00 (= 11:00Z). The EARLIER
-        // instant is the offset form (11:00Z); lexically "12…Z" < "13…+02:00" so the OLD
-        // code wrongly kept 12:00Z (later instant → wider window).
-        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
-        set_tighter(&mut slot, "2026-06-16T13:00:00+02:00", /*keep_earlier=*/ true);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T13:00:00+02:00"), "kept earlier instant");
-    }
-
-    #[test]
-    fn lower_bound_keeps_later_instant_across_offsets() {
-        // Two notBefore bounds: 12:00Z and 09:00-02:00 (= 11:00Z). The LATER instant is
-        // 12:00Z; lexically "09…-02:00" < "12…Z" — verify the tighter (later) is kept.
-        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
-        set_tighter(&mut slot, "2026-06-16T09:00:00-02:00", /*keep_earlier=*/ false);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "kept later instant");
-        // And a genuinely-later offset bound DOES replace.
-        set_tighter(&mut slot, "2026-06-16T16:00:00+02:00", /*keep_earlier=*/ false); // = 14:00Z
-        assert_eq!(slot.as_deref(), Some("2026-06-16T16:00:00+02:00"), "later instant wins");
-    }
-
-    #[test]
-    fn unparseable_candidate_never_widens() {
-        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
-        set_tighter(&mut slot, "not-a-date", true);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "malformed never replaces");
-    }
-}
-
 // ============================================================================
 // [OPUS-4.8] sq-58mh — STATEFUL `odrl:count` enforcement wired THROUGH the bridge so a
 // bridged grant SELF-RETRACTS on exhaustion (the sq-zi5w follow-up).
@@ -2128,5 +2142,694 @@ pub(crate) mod count {
             rule.constraints.retain(|c| c.left != ODRL_COUNT);
         }
         out
+    }
+}
+
+// ============================================================================
+// [SONNET-4.6] sq-zgbso.2 — N3-stratum ODRL bridge.
+// Runs the stateless ODRL core as five stratified rule evaluations
+// (rules/odrl-{a0,a,b,c,d}.n3), mirroring the WAC/ACP stratification pattern —
+// on the id-level COMPILED evaluator since sq-zgbso.5, as WAC/ACP are since
+// sq-zgbso.4.
+// Decision-equivalent to the one-shot Rust bridge for the supported constraint
+// types (dateTime lteq/gteq over the canonical UTC lexical subset, recipient
+// eq/neq, odrl:or, odrl:and) — on permissions AND prohibitions.
+// ============================================================================
+
+/// Materialize an ODRL policy's auth-view triples via five stratified N3 rule
+/// strata (`rules/odrl-{a0,a,b,c,d}.n3`), installing the result into the dataset's
+/// `<urn:sparq:auth>` and `<urn:sparq:auth-bridged>` views exactly as the
+/// one-shot Rust bridge does.
+///
+/// # Relationship to the Rust reference path (the honest claim)
+///
+/// The N3 path is **never more permissive** than [`materialize_policy`]: for every
+/// policy and request, either this call returns `Err` (refusing the policy as a whole,
+/// materializing nothing — the caller must fail closed), or every allow triple it emits
+/// is also emitted by the Rust path AND every deny triple the Rust path emits is also
+/// emitted here. `tests/odrl_n3_differential.rs` checks that property over a generated
+/// policy corpus, not a hand-picked sample.
+///
+/// Within the **supported stateless scope** the two paths are decision-EQUIVALENT
+/// (same auth-triple set, checked case-by-case against an independently-stated
+/// expectation): permissions AND prohibitions over `odrl:dateTime` lteq/gteq windows
+/// (canonical UTC lexical forms only, see below) and `odrl:recipient` eq/neq, combined
+/// by at most one `odrl:or`/`odrl:and` logical constraint per rule, each constraint node
+/// carrying exactly ONE operand tuple, under an admissible `odrl:conflict` strategy.
+/// Everything outside that scope is refused or denied, never granted:
+///
+/// - an unsupported construct on a *permission* produces NO grant (fail-closed);
+/// - an unsupported construct on a *prohibition* — which the Rust evaluator might
+///   satisfy, so silently ignoring it would drop a deny and WIDEN access — makes the
+///   whole call refuse with `Err`;
+/// - an `odrl:conflict` strategy the bridge cannot honour (`odrl:perm`, an unknown
+///   strategy IRI, or `odrl:invalid` with a detected conflict) makes the whole call
+///   refuse with `Err`, via the SAME [`sparq_policy::conflict_admissibility`] verdict
+///   the Rust path's refusal uses. [OPUS-5]
+/// - a constraint node carrying more than one operand triple per position, or more than
+///   one logical combinator, makes the whole call refuse with `Err`. Satisfaction is
+///   keyed on the constraint NODE, so such a node would otherwise be decided from a
+///   single cross-product combination — "some operand satisfied" where "every operand
+///   satisfied" is required. [OPUS-5]
+///
+/// # Injection safety
+///
+/// `policy_ttl` is parsed **strictly as Turtle** first (N3 implication rules
+/// `=>`, quoted graphs, and every other Turtle-extension construct are syntax
+/// errors → `Err`), and only the parsed ground terms are re-serialized — with
+/// IRI validation and literal escaping — into the reasoner input. The raw text
+/// never reaches the reasoner — the strata are compiled separately, from `const`
+/// rule text, and the policy/request facts enter through a fact-ONLY interner
+/// (`sparq_reason::n3::compiled::intern_facts`) that rejects outright any document
+/// carrying rules — so a crafted policy cannot smuggle rules or
+/// out-of-band triples that derive `auth:*` grants directly. The request is
+/// serialized the same way, as validated RDF terms (`<urn:odrl-req>` subject,
+/// `odrl:dateTime` for the temporal evidence): a request field that is not a
+/// valid IRI (embedded `>`, quote, whitespace, …) is an `Err`, never an
+/// interpolated triple.
+///
+/// Parsing alone does NOT make caller facts trusted: strict Turtle can still
+/// *assert* engine-owned ground facts — an `auth:*` grant triple, an internal
+/// `odrlx:` derivation (`atomicSat`/`prohibMatches`/`mode`/…), a `string:`/
+/// `log:` builtin fact, facts about the reserved `<urn:odrl-req>` request
+/// subject, or a fresh `a odrl:Request`-typed subject the grant rules would
+/// bind `?req` to — which the strata would forward into the closure as if the
+/// engine had derived them. So the parsed policy is additionally
+/// vocabulary-checked: any triple whose subject/predicate/object is a
+/// reserved/engine-owned IRI term is an `Err` and nothing is materialized
+/// (see the crate-internal `validate_policy_for_n3`).
+///
+/// # Canonical dateTime subset
+///
+/// The strata compare `xsd:dateTime` values lexically (`string:notGreaterThan`),
+/// which equals XSD dateTime VALUE order only on the canonical UTC form
+/// `YYYY-MM-DDTHH:MM:SSZ` (fixed length, `Z` only, no fractional seconds,
+/// hour ≤ 23). Every `xsd:dateTime` literal in the policy and the request time
+/// is validated against that subset (and against the Rust evaluator's own
+/// parser, so both paths denote the same instants); offsets, fractional
+/// seconds, and other equivalent-but-different lexical forms are rejected with
+/// `Err` before reasoning rather than mis-ordered.
+///
+/// # Errors
+///
+/// Returns `Err` — materializing NOTHING — when `policy_ttl` is not strict
+/// Turtle, does not parse as an ODRL policy for the Rust reference evaluator, declares
+/// an `odrl:conflict` strategy the bridge cannot honour, a policy triple mentions a
+/// reserved/engine-owned IRI term (the
+/// `https://sparq.dev/ns/` vocabulary, the reasoner's `swap` builtin
+/// namespaces, `<urn:odrl-req>`, or the `odrl:Request` class), an
+/// `xsd:dateTime` lexical form is outside the canonical UTC subset,
+/// a constraint node is ambiguous (several operand triples in one position, or several
+/// logical combinators), a prohibition is outside the supported stateless scope, a rule
+/// carries more than one logical constraint, a request field is not a valid IRI, the
+/// reasoner rejects the assembled fact source, or a rule file falls outside the compiled
+/// evaluator's N3 subset (a build-time property of the `const` `rules/odrl-*.n3`, so in
+/// practice that last one cannot fire at runtime — but it is reported as an error rather
+/// than a panic, and nothing is materialized).
+pub fn materialize_odrl_n3(
+    graph: &mut Graph,
+    policy_ttl: &str,
+    request: &Request,
+) -> Result<BridgeOutcome, String> {
+    // 0. STRICT Turtle parse + ground-term re-serialization (injection guard), then
+    //    the canonical-dateTime / prohibition-scope validation (fail-closed).
+    let policy_graph = Graph::load_dataset(policy_ttl, "turtle").map_err(|e| {
+        format!("policy is not strict Turtle (N3/Turtle-extension constructs are rejected): {}", e)
+    })?;
+    let policy_triples = crate::loader::graph_triples(&policy_graph);
+
+    // 0a. [OPUS-5] Run the SAME `odrl:conflict` admissibility guard every Rust
+    //     materialise entry point runs, FIRST. This call previously skipped it entirely,
+    //     so a policy declaring `odrl:conflict odrl:perm` (permissions override
+    //     prohibitions — unrepresentable by the bridge's `∪ allow ∖ ∪ deny`) or an
+    //     unrecognised strategy IRI yielded Rust `refused=true` but an N3-materialised
+    //     grant: a fail-OPEN. Sharing `sparq_policy::conflict_admissibility` (rather than
+    //     re-deriving a coarser rule here) is what makes the two paths refuse exactly the
+    //     same policies — including the CONDITIONAL `odrl:invalid` case, which is
+    //     admissible only when no permission/prohibition conflict is detected.
+    //
+    //     The policy is re-parsed into the `sparq_policy` model for this: a policy the
+    //     Rust evaluator cannot even parse is refused here too (strictly more restrictive
+    //     than materialising from a shape only one path understands).
+    let parsed_policy = parse_policy_str(policy_ttl, "turtle").map_err(|e| {
+        format!(
+            "policy does not parse as an ODRL policy for the Rust reference evaluator \
+             ({}); the N3 path refuses what the reference path cannot read (fail-closed)",
+            e
+        )
+    })?;
+    if let Some(refusal) = refuse_unimplementable_conflict(&parsed_policy) {
+        return Err(refusal.reasons.join("; "));
+    }
+
+    validate_policy_for_n3(&policy_triples)?;
+    let policy_facts = triples_to_n3(&policy_triples);
+    let req_n3 = serialize_request_n3(request)?;
+
+    // [SONNET-4.6] sq-zgbso.5 — the five strata, in evaluation order:
+    //   A0: the operand/combinator-arity guard (odrlx:shape odrlx:Ambiguous) the
+    //       stratum A/C satisfaction rules negate [OPUS-5]
+    //   A:  action facts + atomicSat + lcSat(or)
+    //   B:  andSubUnsat + anyRuleConstrUnsat + unconstrained prohibMatches/denies
+    //   C:  lcSat(and) + CONSTRAINED prohibMatches/denies
+    //   D:  permission grants (NAF over the now-complete prohibMatches)
+    //
+    // They now chain entirely at the id level, in ONE dictionary, over the compiled IR
+    // (`odrl_rules()`) — each stratum's closure IS the next one's fact set, so a negated
+    // predicate is still complete before the stratum that negates it runs (design doc
+    // §3.5) and the four intermediate closure → N3 text → re-parse round trips are gone.
+    // The stratification, the rule text, and the fact set entering stratum A0 are all
+    // unchanged: this is a behaviour-identical switch of the evaluation seam, and
+    // `tests/odrl_n3_differential.rs` is the oracle that says so.
+    let rules = odrl_rules()?;
+    let mut dict = Dict::new();
+    let mut closure = intern_facts(&mut dict, &format!("{}\n{}", policy_facts, req_n3))?;
+    for stratum in rules {
+        closure = eval(&mut dict, &closure, stratum);
+    }
+
+    // Extract auth:* triples from the final closure.
+    let mut new_triples: Vec<[Term; 3]> = Vec::new();
+    let mut grant_triple: Option<(String, String, String)> = None;
+    let mut deny_triple: Option<(String, String, String)> = None;
+
+    for t in &closure {
+        let Term::NamedNode(p) = dict.term(t[1]) else { continue };
+        let p_str = p.as_str();
+        if !p_str.starts_with(AUTH_NS) {
+            continue;
+        }
+        let Term::NamedNode(s) = dict.term(t[0]) else { continue };
+        let Term::NamedNode(o) = dict.term(t[2]) else { continue };
+        let triple = [
+            Term::NamedNode(NamedNode::new_unchecked(s.as_str())),
+            Term::NamedNode(NamedNode::new_unchecked(p_str)),
+            Term::NamedNode(NamedNode::new_unchecked(o.as_str())),
+        ];
+        let local = p_str.strip_prefix(AUTH_NS).unwrap_or("");
+        if local.starts_with("deny") {
+            deny_triple = Some((s.as_str().to_owned(), p_str.to_owned(), o.as_str().to_owned()));
+        } else {
+            grant_triple = Some((s.as_str().to_owned(), p_str.to_owned(), o.as_str().to_owned()));
+        }
+        new_triples.push(triple);
+    }
+
+    if !new_triples.is_empty() {
+        append_bridged_triples(graph, &new_triples);
+    }
+
+    let emitted = new_triples;
+    Ok(BridgeOutcome {
+        granted: grant_triple.is_some(),
+        prohibited: deny_triple.is_some(),
+        grant_triple,
+        deny_triple,
+        emitted,
+        ..BridgeOutcome::default()
+    })
+}
+
+/// The `xsd:dateTime` datatype IRI (canonical-subset validation on the N3 path).
+const XSD_DATETIME_IRI: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
+
+/// Whether `s` is in the canonical UTC `xsd:dateTime` lexical subset
+/// `YYYY-MM-DDTHH:MM:SSZ` on which LEXICAL order equals XSD dateTime VALUE order:
+/// fixed length, `Z` offset only, no fractional seconds, hour ≤ 23 (XSD's
+/// `24:00:00` denotes the next day's midnight and would break lexicographic
+/// monotonicity). Additionally the Rust evaluator's own parser must accept it
+/// (`cmp_datetime` self-compare), so a calendar-invalid form the two paths could
+/// disagree on is rejected too.
+fn canonical_utc_datetime(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return false;
+    }
+    const DIGITS: [usize; 14] = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    if DIGITS.iter().any(|&i| !b[i].is_ascii_digit()) {
+        return false;
+    }
+    let field = |i: usize, j: usize| -> u32 { s[i..j].parse().unwrap_or(u32::MAX) };
+    (1..=12).contains(&field(5, 7))
+        && (1..=31).contains(&field(8, 10))
+        && field(11, 13) <= 23
+        && field(14, 16) <= 59
+        && field(17, 19) <= 59
+        && sparq_policy::cmp_datetime(s, s) == Some(std::cmp::Ordering::Equal)
+}
+
+/// Whether `t` is the named node `iri`.
+fn is_named(t: &Term, iri: &str) -> bool {
+    matches!(t, Term::NamedNode(n) if n.as_str() == iri)
+}
+
+/// The objects of every `subject predicate ?o` triple in `triples`.
+fn objects_of<'a>(
+    triples: &'a [[Term; 3]],
+    subject: &'a Term,
+    predicate: &'a str,
+) -> impl Iterator<Item = &'a Term> + 'a {
+    triples.iter().filter(move |t| &t[0] == subject && is_named(&t[1], predicate)).map(|t| &t[2])
+}
+
+/// Engine-owned IRI prefixes/terms a caller-supplied policy may never mention as
+/// an actual RDF term (any position). The policy is UNTRUSTED data, but the N3
+/// strata forward every input fact into the closure, and closure extraction /
+/// rule bodies trust these vocabularies as engine-derived — so a caller
+/// asserting them would cross the trust boundary (inject an `auth:*` grant,
+/// fake an `odrlx:` derivation like `atomicSat`/`prohibMatches`/`mode`, assert
+/// a `string:`/`log:` builtin result, or steer the rules with facts about the
+/// reserved request subject). `https://sparq.dev/ns/` covers ALL sparq-internal
+/// vocabularies at once (`auth#`, `odrlx#`, `solidx#`, `odrl-spike#`, and any
+/// future one) rather than enumerating them.
+const RESERVED_IRI_PREFIXES: [&str; 2] =
+    ["https://sparq.dev/ns/", "http://www.w3.org/2000/10/swap/"];
+
+/// The reserved request subject IRI `serialize_request_n3` emits — the ONLY
+/// legitimate source of request facts on the N3 path.
+const REQUEST_IRI: &str = "urn:odrl-req";
+
+/// Fail-closed input validation for the N3 path, over the PARSED policy terms:
+///
+/// 0. no triple may mention a reserved/engine-owned IRI term in ANY position —
+///    a prefix of [`RESERVED_IRI_PREFIXES`], the reserved [`REQUEST_IRI`]
+///    request subject, or the `odrl:Request` class (the grant/deny rules bind
+///    `?req` to ANY `a odrl:Request`-typed node, so a caller-minted request
+///    would be matched exactly like the real one). Parsing/escaping stops
+///    source-syntax injection but does not make untrusted RDF facts trusted;
+///    this rule is what keeps caller assertions out of the engine-owned fact
+///    space (see the docs on [`RESERVED_IRI_PREFIXES`]);
+/// 1. every `xsd:dateTime` literal must be in the canonical UTC lexical subset
+///    ([`canonical_utc_datetime`]) — the strata compare dateTimes lexically,
+///    which is value-correct only there;
+/// 2. no rule (permission or prohibition) may carry more than one logical
+///    constraint — the strata satisfy a rule on ANY satisfied LC while the Rust
+///    evaluator requires ALL, so a second LC could widen; likewise no
+///    `odrl:duty`/`odrl:obligation` anywhere — the strata do not check duty
+///    discharge, so granting a duty-carrying permission would widen;
+/// 3. no constraint node (a rule's own, or a member of its logical constraint) may
+///    be AMBIGUOUS — several distinct `odrl:leftOperand`/`odrl:operator`/right-operand
+///    objects, or several distinct logical combinators, on one node
+///    (`unambiguous_operands`). This is the driver half of the stratum-A0 fail-OPEN
+///    fix and applies to BOTH rule kinds. [OPUS-5];
+/// 4. no rule (permission or prohibition) may carry MORE THAN ONE distinct
+///    `odrl:action`/`odrl:target`/`odrl:assignee` object — the strata bind each
+///    attribute as a triple pattern and so match a request that agrees with ANY
+///    asserted value, whereas the Rust reference evaluator selects exactly ONE
+///    (the first) per attribute (`first_str`). A second action/target/assignee
+///    could therefore make an N3 grant fire (or a prohibition match) for a value
+///    the Rust path never selected — widening. Refuse rather than decide the
+///    rule from a subset of its attribute values (the rule-attribute analogue of
+///    the constraint-node `unambiguous_operands` guard). [OPUS-4.8];
+/// 5. every PROHIBITION must name `odrl:action`/`odrl:target`/`odrl:assignee`
+///    (the strata match prohibitions structurally on all three; the Rust
+///    evaluator treats a missing attribute as matching ANY request) and every
+///    prohibition constraint — atomic, or each `odrl:or`/`odrl:and` member —
+///    must be inside the supported stateless scope; `odrl:xone` on a
+///    prohibition is refused, as is a prohibition on the `odrl:use` umbrella
+///    action (the strata match actions by exact IRI while the Rust evaluator's
+///    use-umbrella denies any non-transfer action). The Rust evaluator can
+///    satisfy out-of-scope
+///    prohibition constructs (purpose, count, isPartOf, …), so an N3 stratum
+///    that cannot see them satisfied would silently drop the deny and WIDEN
+///    access. (On a PERMISSION an out-of-scope construct merely never grants —
+///    already fail-closed — so permissions are not scope-guarded.)
+fn validate_policy_for_n3(triples: &[[Term; 3]]) -> Result<(), String> {
+    let request_class = format!("{}Request", ODRL_NS);
+    for t in triples {
+        for term in t {
+            let Term::NamedNode(n) = term else { continue };
+            let iri = n.as_str();
+            if RESERVED_IRI_PREFIXES.iter().any(|p| iri.starts_with(p))
+                || iri == REQUEST_IRI
+                || iri == request_class
+            {
+                return Err(format!(
+                    "policy mentions the reserved/engine-owned term <{}>: a \
+                     caller-supplied policy is untrusted data and may not assert \
+                     auth-view grants, internal odrlx: derivations, reasoner \
+                     builtin facts, facts about the reserved request subject, or \
+                     request-typed subjects — refusing (fail-closed)",
+                    iri
+                ));
+            }
+        }
+    }
+    for t in triples {
+        if let Term::Literal(l) = &t[2] {
+            if l.datatype().as_str() == XSD_DATETIME_IRI && !canonical_utc_datetime(l.value()) {
+                return Err(format!(
+                    "xsd:dateTime literal {:?} is outside the canonical UTC subset \
+                     YYYY-MM-DDTHH:MM:SSZ the N3 strata compare correctly; refusing \
+                     (fail-closed) rather than mis-order it lexically",
+                    l.value()
+                ));
+            }
+        }
+    }
+    for duty_local in ["duty", "obligation"] {
+        let duty_p = format!("{}{}", ODRL_NS, duty_local);
+        if triples.iter().any(|t| is_named(&t[1], &duty_p)) {
+            return Err(format!(
+                "odrl:{} is outside the N3 strata's scope (they do not check duty \
+                 discharge; the Rust evaluator requires it for a Permit) — granting \
+                 regardless would widen access; refusing (fail-closed)",
+                duty_local
+            ));
+        }
+    }
+    let permission = format!("{}permission", ODRL_NS);
+    let prohibition = format!("{}prohibition", ODRL_NS);
+    let constraint = format!("{}constraint", ODRL_NS);
+    let or_p = format!("{}or", ODRL_NS);
+    let and_p = format!("{}and", ODRL_NS);
+    let xone_p = format!("{}xone", ODRL_NS);
+    for t in triples {
+        let is_prohib = is_named(&t[1], &prohibition);
+        if !is_prohib && !is_named(&t[1], &permission) {
+            continue;
+        }
+        let rule = &t[2];
+        // [OPUS-4.8] Reject a MULTI-VALUED rule attribute on EITHER rule kind. The N3
+        // strata bind odrl:action/target/assignee as triple patterns, so a rule asserting
+        // several distinct values matches a request agreeing with ANY of them, while the
+        // Rust reference evaluator selects exactly ONE (`first_str`). A second value could
+        // fire an N3 grant (or a prohibition match) the Rust path never selects — widening.
+        // Refuse the whole call (fail-closed) rather than decide the rule from a subset of
+        // its attribute values — the rule-attribute analogue of `unambiguous_operands`.
+        for attr in ["action", "target", "assignee"] {
+            let pred = format!("{}{}", ODRL_NS, attr);
+            if distinct_objects(triples, rule, std::slice::from_ref(&pred)).len() > 1 {
+                return Err(format!(
+                    "rule with more than one distinct odrl:{} object is outside the N3 \
+                     strata's scope (they bind the attribute as a triple pattern and match \
+                     ANY asserted value, while the Rust evaluator selects exactly one) — a \
+                     second value could widen an N3 grant or prohibition match; refusing \
+                     (fail-closed)",
+                    attr
+                ));
+            }
+        }
+        if is_prohib {
+            for attr in ["action", "target", "assignee"] {
+                let pred = format!("{}{}", ODRL_NS, attr);
+                if objects_of(triples, rule, &pred).next().is_none() {
+                    return Err(format!(
+                        "prohibition without odrl:{} is outside the N3 strata's scope \
+                         (they match prohibitions structurally on action/target/assignee, \
+                         while the Rust evaluator treats the missing attribute as matching \
+                         ANY request) — silently ignoring it would widen access; refusing \
+                         (fail-closed)",
+                        attr
+                    ));
+                }
+            }
+            let action_p = format!("{}action", ODRL_NS);
+            let use_iri = format!("{}use", ODRL_NS);
+            if objects_of(triples, rule, &action_p).any(|a| is_named(a, &use_iri)) {
+                return Err(
+                    "prohibition with the odrl:use umbrella action is outside the N3 \
+                     strata's scope (they match actions by exact IRI; the Rust \
+                     evaluator's use-umbrella denies any non-transfer action) — \
+                     silently ignoring it would widen access; refusing (fail-closed)"
+                        .to_owned(),
+                );
+            }
+        }
+        let mut lc_count = 0usize;
+        for c in objects_of(triples, rule, &constraint) {
+            let xone_subs: Vec<&Term> = objects_of(triples, c, &xone_p).collect();
+            let has_xone = !xone_subs.is_empty();
+            let subs: Vec<&Term> =
+                objects_of(triples, c, &or_p).chain(objects_of(triples, c, &and_p)).collect();
+            if has_xone || !subs.is_empty() {
+                lc_count += 1;
+                if lc_count > 1 {
+                    return Err(
+                        "rule with more than one logical constraint is outside the N3 \
+                         strata's scope (they satisfy a rule on ANY satisfied logical \
+                         constraint; the Rust evaluator requires ALL) — refusing \
+                         (fail-closed)"
+                            .to_owned(),
+                    );
+                }
+            }
+            // [OPUS-5] Operand-ARITY guard on BOTH rule kinds — the driver half of the
+            // stratum-A0 fix. The strata key satisfaction on the constraint NODE, so a
+            // node carrying several operand triples (or several combinators) is decided
+            // from ONE cross-product combination. Refuse the whole call rather than
+            // evaluate a subset of the operands.
+            unambiguous_operands(triples, c)?;
+            for sub in subs.iter().chain(xone_subs.iter()) {
+                unambiguous_operands(triples, sub)?;
+            }
+            if !is_prohib {
+                continue;
+            }
+            if has_xone {
+                return Err(
+                    "odrl:xone on a prohibition is outside the N3 strata's scope; the Rust \
+                     evaluator may satisfy it, so silently ignoring it would drop the deny \
+                     and widen access — refusing (fail-closed)"
+                        .to_owned(),
+                );
+            }
+            if subs.is_empty() {
+                prohibition_atomic_supported(triples, c)?;
+            } else {
+                for sub in subs {
+                    prohibition_atomic_supported(triples, sub)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The DISTINCT objects `c` carries across `predicates`, in `triples` order.
+fn distinct_objects<'a>(
+    triples: &'a [[Term; 3]],
+    c: &'a Term,
+    predicates: &'a [String],
+) -> Vec<&'a Term> {
+    let mut seen: Vec<&'a Term> = Vec::new();
+    for p in predicates {
+        for o in objects_of(triples, c, p) {
+            if !seen.contains(&o) {
+                seen.push(o);
+            }
+        }
+    }
+    seen
+}
+
+/// Refuse (fail-closed) a constraint node whose operand or combinator positions are
+/// AMBIGUOUS: more than one distinct `odrl:leftOperand`, `odrl:operator`, or
+/// right-operand object (`odrl:rightOperand`/`odrl:rightOperandReference`), or more
+/// than one distinct logical combinator (`odrl:and`/`odrl:or`/`odrl:xone`) on the same
+/// node. [OPUS-5] — the driver half of the stratum-A0 fail-OPEN fix.
+///
+/// RDF puts no cardinality bound on a node's properties, and the strata key
+/// satisfaction on the constraint NODE rather than on an individual operand triple. A
+/// node with several operand triples is therefore matched as the CROSS PRODUCT of those
+/// objects, and ANY ONE satisfiable combination marks the whole node satisfied — "some
+/// operand is satisfied" where "every operand is satisfied" is required. Measured
+/// consequence before this guard: a permission constrained by `recipient eq alice` AND
+/// `dateTime lteq 2000-01-01` on one node GRANTED long after expiry, while the Rust
+/// reference evaluator folded the ambiguous node into an unsatisfiable guard and denied.
+///
+/// `rules/odrl-a0.n3` suppresses satisfaction for these nodes inside the rules, which
+/// closes the grant direction. It cannot close the DENY direction: suppressing an
+/// ambiguous prohibition's satisfaction would drop its deny and widen access. So the
+/// driver refuses the whole call — the only disposition that is fail-closed on both
+/// sides. Both layers are load-bearing; neither subsumes the other.
+fn unambiguous_operands(triples: &[[Term; 3]], c: &Term) -> Result<(), String> {
+    let positions: [(&str, Vec<String>); 4] = [
+        ("odrl:leftOperand", vec![format!("{}leftOperand", ODRL_NS)]),
+        ("odrl:operator", vec![format!("{}operator", ODRL_NS)]),
+        (
+            "right-operand",
+            vec![
+                format!("{}rightOperand", ODRL_NS),
+                format!("{}rightOperandReference", ODRL_NS),
+            ],
+        ),
+        (
+            "logical combinator",
+            vec![
+                format!("{}and", ODRL_NS),
+                format!("{}or", ODRL_NS),
+                format!("{}xone", ODRL_NS),
+            ],
+        ),
+    ];
+    for (label, predicates) in &positions {
+        // A combinator legitimately takes SEVERAL operand objects (`odrl:and c1, c2`),
+        // so what is ambiguous there is several distinct combinator PREDICATES, not
+        // several objects of one.
+        let ambiguous = if *label == "logical combinator" {
+            predicates.iter().filter(|p| objects_of(triples, c, p).next().is_some()).count() > 1
+        } else {
+            distinct_objects(triples, c, predicates).len() > 1
+        };
+        if ambiguous {
+            return Err(format!(
+                "constraint node {} is AMBIGUOUS in its {} position (several distinct \
+                 values on one node). The N3 strata key satisfaction on the constraint \
+                 NODE, so such a node is matched as the cross product of its operands and \
+                 is marked satisfied as soon as ANY ONE combination holds — while the Rust \
+                 reference evaluator folds it into an unsatisfiable guard. Refusing \
+                 (fail-closed) rather than deciding the node from a subset of its operands",
+                c, label
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether one PROHIBITION atomic constraint is inside the stateless scope the N3
+/// strata decide: `odrl:dateTime` under `lteq`/`gteq`, or `odrl:recipient` under
+/// `eq`/`neq`. Anything else is refused — the Rust evaluator may satisfy it, and
+/// a satisfied prohibition constraint the N3 side cannot see would silently drop
+/// its deny (widening access).
+///
+/// [OPUS-5] This used to read only `.next()` of `odrl:leftOperand`/`odrl:operator` and
+/// was therefore structurally BLIND to any further operand on the node: a constraint
+/// carrying `recipient eq …` (in scope) *and* `purpose eq …` (out of scope) was waved
+/// through on its first pair alone. It now inspects EVERY operand object and declines
+/// unless the node carries exactly ONE complete, in-scope operand tuple — a constraint
+/// whose operands it cannot fully evaluate is refused, never evaluated in part. The
+/// exactly-one requirement is deliberately re-checked here rather than delegated to
+/// [`unambiguous_operands`], so this predicate is sound on its own terms regardless of
+/// the order the validator's guards run in.
+fn prohibition_atomic_supported(triples: &[[Term; 3]], c: &Term) -> Result<(), String> {
+    let left_preds = [format!("{}leftOperand", ODRL_NS)];
+    let op_preds = [format!("{}operator", ODRL_NS)];
+    let right_preds =
+        [format!("{}rightOperand", ODRL_NS), format!("{}rightOperandReference", ODRL_NS)];
+    let lefts = distinct_objects(triples, c, &left_preds);
+    let ops = distinct_objects(triples, c, &op_preds);
+    let rights = distinct_objects(triples, c, &right_preds);
+    let single_tuple = lefts.len() == 1 && ops.len() == 1 && rights.len() == 1;
+    let supported = single_tuple
+        && ((is_named(lefts[0], &format!("{}dateTime", ODRL_NS))
+            && (is_named(ops[0], &format!("{}lteq", ODRL_NS))
+                || is_named(ops[0], &format!("{}gteq", ODRL_NS))))
+            || (is_named(lefts[0], &format!("{}recipient", ODRL_NS))
+                && (is_named(ops[0], &format!("{}eq", ODRL_NS))
+                    || is_named(ops[0], &format!("{}neq", ODRL_NS)))));
+    if supported {
+        Ok(())
+    } else {
+        Err(format!(
+            "prohibition constraint {} is outside the supported stateless scope \
+             (exactly one operand tuple: dateTime lteq/gteq, or recipient eq/neq; \
+             found {} leftOperand / {} operator / {} rightOperand objects): the Rust \
+             evaluator may satisfy it, so silently ignoring it — or deciding it from a \
+             subset of its operands — would drop the deny and widen access; refusing \
+             (fail-closed)",
+            c,
+            lefts.len(),
+            ops.len(),
+            rights.len()
+        ))
+    }
+}
+
+/// Serialize parsed ground triples as N-Triples-style N3 facts for the reasoner
+/// input — `oxrdf`'s `Display` does the IRI/literal escaping, so no policy-
+/// controlled string reaches the source unescaped.
+fn triples_to_n3(triples: &[[Term; 3]]) -> String {
+    let mut out = String::with_capacity(triples.len() * 64);
+    for t in triples {
+        let _ = writeln!(out, "{} {} {} .", t[0], t[1], t[2]);
+    }
+    out
+}
+
+/// Serialize a `Request` as N3 ground facts using `<urn:odrl-req>` as the IRI.
+///
+/// Every field is serialized as a VALIDATED RDF term — IRIs through
+/// [`NamedNode::new`] (an embedded `>`, quote, or whitespace is an `Err`, never
+/// an injected triple) and the time as an escaped `xsd:dateTime` literal
+/// restricted to the canonical UTC subset the strata compare correctly.
+fn serialize_request_n3(req: &Request) -> Result<String, String> {
+    fn iri(value: &str, what: &str) -> Result<NamedNode, String> {
+        NamedNode::new(value).map_err(|e| {
+            format!(
+                "request {} {:?} is not a valid IRI ({}); refusing to serialize it \
+                 into N3 (fail-closed)",
+                what, value, e
+            )
+        })
+    }
+    let mut out = String::new();
+    let _ = writeln!(out, "<urn:odrl-req> a <{}Request> ;", ODRL_NS);
+    let _ = writeln!(out, "    <{}action> {} ;", ODRL_NS, iri(&req.action, "action")?);
+    if let Some(target) = &req.target {
+        let _ = writeln!(out, "    <{}target> {} ;", ODRL_NS, iri(target, "target")?);
+    }
+    if let Some(party) = &req.party {
+        let _ = writeln!(out, "    <{}assignee> {} ;", ODRL_NS, iri(party, "party")?);
+    }
+    if let Some(v) = req.request_time() {
+        let s = v.as_str();
+        if !canonical_utc_datetime(s) {
+            return Err(format!(
+                "request time {:?} is outside the canonical UTC subset \
+                 YYYY-MM-DDTHH:MM:SSZ the N3 strata compare correctly; refusing \
+                 (fail-closed)",
+                s
+            ));
+        }
+        let lit = Literal::new_typed_literal(s, NamedNode::new_unchecked(XSD_DATETIME_IRI));
+        let _ = writeln!(out, "    <{}dateTime> {} ;", ODRL_NS, lit);
+    }
+    let _ = writeln!(out, "    .");
+    Ok(out)
+}
+
+#[cfg(test)]
+mod set_tighter_tests {
+    //! [OPUS-4.8] sq-0q7n — `set_tighter` keeps the instant-tightest window bound when
+    //! two same-side `odrl:dateTime` constraints intersect. The pre-fix lexical `<`/`>`
+    //! picked the wrong bound for mixed timezone offsets (a fail-open: a wider persisted
+    //! window than the constraints allow). These pin the offset-aware behavior.
+    use super::set_tighter;
+
+    #[test]
+    fn upper_bound_keeps_earlier_instant_across_offsets() {
+        // Two notAfter bounds: 12:00Z (= 12:00Z) and 13:00+02:00 (= 11:00Z). The EARLIER
+        // instant is the offset form (11:00Z); lexically "12…Z" < "13…+02:00" so the OLD
+        // code wrongly kept 12:00Z (later instant → wider window).
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "2026-06-16T13:00:00+02:00", /*keep_earlier=*/ true);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T13:00:00+02:00"), "kept earlier instant");
+    }
+
+    #[test]
+    fn lower_bound_keeps_later_instant_across_offsets() {
+        // Two notBefore bounds: 12:00Z and 09:00-02:00 (= 11:00Z). The LATER instant is
+        // 12:00Z; lexically "09…-02:00" < "12…Z" — verify the tighter (later) is kept.
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "2026-06-16T09:00:00-02:00", /*keep_earlier=*/ false);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "kept later instant");
+        // And a genuinely-later offset bound DOES replace.
+        set_tighter(&mut slot, "2026-06-16T16:00:00+02:00", /*keep_earlier=*/ false); // = 14:00Z
+        assert_eq!(slot.as_deref(), Some("2026-06-16T16:00:00+02:00"), "later instant wins");
+    }
+
+    #[test]
+    fn unparseable_candidate_never_widens() {
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "not-a-date", true);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "malformed never replaces");
     }
 }

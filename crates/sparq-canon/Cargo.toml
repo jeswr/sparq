@@ -49,8 +49,10 @@ oxttl01 = { package = "oxttl", version = "0.1.8" }
 digest = "0.10"
 
 # [OPUS-4.8] sq-hslb: SHA-256 backing the OPT-IN, OFF-BY-DEFAULT non-standard
-# `rdf12-triple-terms` profile (native HNDQ over oxrdf-0.3 triple terms). Only
-# compiled in when that feature is on, so the default build is byte-identical.
+# `rdf12-triple-terms` profile (native HNDQ over oxrdf-0.3 triple terms), and the
+# SHA-256/384/512 outer digests of the equally opt-in `concept` verifier. Only
+# compiled in when one of those features is on, so the default build is
+# byte-identical.
 # Pinned to 0.10 alongside the suite's `sha2` dev-dep (rdf-canon 0.15.3 / digest
 # 0.10 — lift only when rdf-canon publishes a digest-0.11 release).
 sha2 = { version = "0.10", optional = true }
@@ -74,6 +76,14 @@ bridge-lowcopy = []
 # crate is byte-identical to before and the standard paths still reject triple
 # terms with `CanonError::TripleTerm`.
 rdf12-triple-terms = ["dep:sha2"]
+# OFF BY DEFAULT. `urn:concept:` record verification (GitHub #1746): the
+# multibase/multihash envelope plus the recompute-and-byte-compare guard over
+# this crate's RDFC-1.0 digest. Deliberately does NOT define which quads make up
+# a concept record — the caller supplies them; the scope-extraction rule is owned
+# by the concept-hash definition (#1683) and its profile freeze (#1746), neither
+# vendored here (`research/genai-urn-concept-verifier-design.md`). With this OFF
+# the crate is byte-identical to before.
+concept = ["dep:sha2"]
 
 [dev-dependencies]
 sparq-engine = { path = "../sparq-engine" }

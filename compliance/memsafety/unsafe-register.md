@@ -7,9 +7,11 @@
 Modelled on the `unsafe-rust-attestation` pattern and the prod-solid-server
 compliance discipline: every `unsafe` site in the workspace's first-party crates is
 enumerated here with the invariant it relies on, why that invariant holds, and how it
-is tested or bounded. The register is kept at **100% coverage** mechanically by
-`scripts/unsafe-gate.py` (the unsafe-count **ratchet**) — see
-[§ Ratchet](#ratchet--how-this-stays-honest).
+is tested or bounded. `scripts/unsafe-gate.py` (the unsafe-count **ratchet**) mechanically
+bounds the per-crate **count** so no PR can add an `unsafe` site without a reviewed re-seed —
+see [§ Ratchet](#ratchet--how-this-stays-honest). Matching each counted site to a **row** here
+(and keeping the file:line current) is still a **review-time** obligation, not a mechanical one:
+sq-vopxw found a stale duplicate `sparq-vectors` row that the count ratchet could not see. [OPUS-5]
 
 > This register covers **first-party `unsafe` only** (the `crates/` tree). Third-party
 > `unsafe` (e.g. inside `memmap2`, `libc`, `rayon`, the `hdt` dependency) is out of
@@ -42,16 +44,20 @@ register distinguishes two trust classes of `unsafe`:
 | `mmap_corruption_oracle` test (`crates/sparq-core/tests/`, run under `--features mmap,dict-spill`) + `fuzz` lane's mmap-loader target | the **B5** mmap sites Miri structurally cannot run (file-backed mappings): hostile/corrupt index → loader must reject or stay in-bounds, never UB. |
 | `#![forbid(unsafe_code)]` across the safe-only crates (sq-emay) | proves the unsafe surface is confined; a new `unsafe` in those crates fails to compile. |
 | `scripts/unsafe-gate.py --check` (this PR, GX-5) | the count **ratchet** — a PR cannot add `unsafe` without updating this register + re-seeding the snapshot. |
+| `vectors-aarch64` lane (`.github/workflows/vectors-aarch64.yml`, #5028) [SONNET-4.6] | the **aarch64/NEON** `#[target_feature]` sites in `sparq-vectors`' `simd.rs`. Their guard (`simd::tests`) calls the *dispatcher*, so it is arch-generic and verifies whichever kernel the HOST selects — and every other lane that runs these tests is `ubuntu-latest` (x86_64). Before this lane the NEON kernels were compile-checked but never EXECUTED in CI, so their numeric-agreement argument rested on a test that had not run on the arch it was about. The lane runs the crate's suite on `ubuntu-24.04-arm` and fails closed if the host is not aarch64+`asimd` or if `mod simd` was not compiled into the run. |
 | `// SAFETY:` argument on every site, **enforced by `clippy::undocumented_unsafe_blocks`** | the per-site argument lives next to the code. The lint is set at crate root on unsafe-bearing library crates (including `sparq-engine`) and locally on unsafe-bearing test/example crates, so the existing `clippy --all-targets -D warnings` gate **mechanically** rejects any `unsafe` block/impl that lacks a literal `// SAFETY:` comment. Combined with the **register + review + count ratchet** (a new `unsafe` cannot land without a register row, the `// SAFETY:` comment, and a re-seed). Closes gap MS-G2 (sq-8wbn) in [`gap-register.md`](./gap-register.md). [OPUS-4.8] |
 
 ## Register
 
-**87 `unsafe` sites** across 8 crates (the other crates contain no first-party `unsafe`).
+**92 `unsafe` sites** across 9 crates (the other crates contain no first-party `unsafe`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
-must equal `bench/unsafe-snapshot.json`. One crate is a special NON-SHIPPING case:
+must equal `bench/unsafe-snapshot.json`. Two crates are special allocator cases:
 **`sparq-lws-core`** (sq-gg0qq.2) ships a `forbid(unsafe_code)` lib + bin
 with its 8 sites confined to two **example benchmark harnesses'** counting allocators, which
-a custom `#[global_allocator]` unavoidably requires (see each crate's subsection below).
+a custom `#[global_allocator]` unavoidably requires; **`sparq-lws-wasm`** (sq-wubkf) is the one
+crate whose 4 allocator sites are **SHIPPING** — a `#[global_allocator]` is the only way to bound
+wasm32 linear memory, so that crate's root is `deny(unsafe_code)` with a single
+`#[allow(unsafe_code)]` module rather than `forbid` (see each crate's subsection below).
 
 Recurring invariant shorthands used below:
 - **POD-bytes** — `[u32;3]` / `u32` / `u64` / `f64` are plain-old-data with no invalid
@@ -63,7 +69,7 @@ Recurring invariant shorthands used below:
   borrow's duration and is not mutated by us; external concurrent mutation is explicitly
   out of contract (documented stance, same as the rest of the mmap surface).
 
-### `sparq-core` — 50 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
+### `sparq-core` — 51 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build, N-Triples span decode)
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
@@ -106,6 +112,7 @@ Recurring invariant shorthands used below:
 | `src/dictspill.rs:723` | `unsafe impl Send for SlotPtr` | `*mut u64` only touches its own hash-routed slot | disjoint writes, no reads until the parallel scope ends. |
 | `src/dictspill.rs:726` | `unsafe impl Sync for SlotPtr` | same as 723 | `Copy` handle shared; writes disjoint. |
 | `src/dictspill.rs:741` | ptr `write` (scatter) | `i < len`; slot hash-routed to this shard | `debug_assert!(i<len)`; disjoint by hash routing. (`dict-spill` feature ⇒ outside the `miri` lane; covered by the deterministic corruption oracle + fuzz.) |
+| `src/nt.rs:525` | `from_utf8_unchecked` | **`CHUNK-UTF8`** — the chunk buffer was proved valid UTF-8 by `validate_chunk_utf8` at the entry point, and the span ends are ASCII delimiters, hence character boundaries | The `nt` module has exactly TWO entry points (`parse_chunk`, `parse_quads_chunk`) and both validate the whole chunk on their first line, before any byte is scanned; every span this module cuts is bounded by a byte the scanner matched against an ASCII constant (`<` `>` `"` `\` `_` `:` `.` `@`, whitespace, `is_ascii_alphanumeric()`), and UTF-8 is self-synchronising, so those indices are character boundaries. Bounded by: `debug_assert!` re-check of the full precondition on EVERY call in debug/test builds; the `miri` lane (this module is default-features, no mmap — squarely in scope); `parse_chunk_rejects_invalid_utf8` / `parse_quads_chunk_rejects_invalid_utf8` pin the entry-point validation, `multibyte_spans_at_every_delimiter_round_trip` / `escaped_and_multibyte_literal_span_round_trips` / `language_tag_terminated_by_multibyte_errors_cleanly` pin the boundary argument at each delimiter. NOT a **B5** site: the input is an in-memory chunk that is fully validated in-process before any unchecked access, so hostile input yields a clean `Err` with a byte offset, never UB. See the full `CHUNK-UTF8` argument in the source doc-comment. (sq-7d3dj.21) [OPUS-5] |
 | `src/extsort.rs:15` | slice reinterpret (write) | POD-bytes | `as_bytes` over `[Id;3]` for writing a run. |
 | `src/extsort.rs:38` | `unchecked_advise_range` | read-only map, range already consumed | `DontNeed`/`FreeReusable` only drops the resident copy of clean file pages; never read again. |
 | `src/extsort.rs:85` | `Mmap::map` | own-for-lifetime | run files written by us, not mutated during the merge. |
@@ -118,23 +125,30 @@ Recurring invariant shorthands used below:
 | `src/compress.rs:2104` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] corrupt_magic_is_loud_error_never_misdecode`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the loud-error `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
 | `src/compress.rs:2120` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] corrupt_magic_is_loud_error_never_misdecode`, sq-7d3dj.32.2.7): read-only map of a second temp perm file the same test created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
 
-### `sparq-vectors` — 13 sites (aligned vector blobs + mmap'd `.spqv` / DiskANN + the SIMD ANN kernel)
+### `sparq-vectors` — 12 sites (aligned vector blobs + the ONE shared mmap backing for `.spqv`/`.spqg` + the SIMD ANN kernel)
+
+(sq-vopxw.) This section previously listed **13** rows against a live/snapshot count of **12**.
+The extra row was a stale duplicate: `VectorStore::open` and `DiskAnnIndex::open` used to each
+carry their own `Mmap::map`, and sq-98c unified both behind the single `store::open_backing`
+helper + the `Bytes` backing enum, so the `.spqv` and `.spqg` loaders now share **one** map site
+(`store.rs:195`). On `wasm32` (memmap2 target-gated out) `open_backing` takes the owned
+`AlignedBytes` branch instead, which contains no `unsafe` of its own. Every file:line below was
+re-derived from `scripts/unsafe-gate.py --list`. [OPUS-5]
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
-| `src/store.rs:80` | mut slice reinterpret | `words` is u32-aligned, holds ≥ `len` bytes; region exclusively owned | `AlignedBytes` over-allocates to a word boundary; `copy_from_slice` fills it. |
-| `src/store.rs:88` | slice reinterpret (read) | u32-aligned, ≥ `len` initialised bytes | reads the bytes copied in above; base ≥ 4-byte aligned by construction. |
-| `src/store.rs:190` | `Mmap::map` | own-for-lifetime | read-only map of a `.spqv` file; then `open_validated` bounds every offset. **B5**. |
-| `src/store.rs:348` | slice reinterpret (write) | f32 has no invalid bit patterns; `align(f32) ≥ align(u8)` | f32→LE bytes for write; big-endian targets rejected at create/open. |
-| `src/store.rs:488` | slice reinterpret (read) | `start` is a multiple of 4 ⇒ f32-aligned; range validated in `open` | the backing is u32-aligned (review 1874 fixed a UB align bug here); f32 accepts any bit pattern. **B5**. |
-| `src/store.rs:611` | slice reinterpret (write) | f32 no invalid patterns; align ok | f32→LE bytes for write. |
-| `src/diskann.rs:395` | slice reinterpret (read) | f32 no invalid patterns; align ok | f32→LE bytes; LE target asserted; borrows `b.vectors`. |
-| `src/diskann.rs:509` | `Mmap::map` | own-for-lifetime | read-only map of a DiskANN file; `open` validates after. **B5**. |
-| `src/diskann.rs:596` | slice reinterpret (read) | page-align; `start` a multiple of 4 ⇒ f32-aligned; range validated in `open` | `debug_assert_eq!` checks alignment; f32 accepts any bit pattern; borrows the map. **B5**. |
-| `src/simd.rs:40` (`approx-ann`) | `#[target_feature(enable="neon")]` call | the `neon` ISA extension is present at runtime | entered ONLY inside `if is_aarch64_feature_detected!("neon")` on the line above; `l2_sq_neon` reads exactly `a.len()==b.len()` lanes. [OPUS-4.8] sq-lfo84 |
-| `src/simd.rs:50` (`approx-ann`) | `#[target_feature(enable="avx2,fma")]` call | both `avx2` and `fma` are present at runtime | entered ONLY inside `if is_x86_feature_detected!("avx2") && …("fma")` on the line above; `l2_sq_avx2` reads exactly `a.len()` lanes via unaligned loads. [OPUS-4.8] sq-lfo84 |
-| `src/simd.rs:86` (`approx-ann`) | `unsafe fn l2_sq_neon` (NEON L2² kernel) | caller confirmed `neon`; `a.len()==b.len()` | 16-wide FMA body + 4-wide drain + scalar tail (`get_unchecked` only for `i<len`), so every `vld1q_f32` load is in-bounds. Verified vs an f64 reference for dim 0..=257 (`simd::tests`). [OPUS-4.8] sq-lfo84 |
-| `src/simd.rs:129` (`approx-ann`) | `unsafe fn l2_sq_avx2` (AVX2+FMA L2² kernel) | caller confirmed `avx2`+`fma`; `a.len()==b.len()` | 16-wide FMA body + 8-wide drain + scalar tail (`get_unchecked` only for `i<len`); `_mm256_loadu_ps` is unaligned so no alignment precondition. Numeric output verified by `simd::tests` on the x86_64 CI runner (this aarch64 box cannot execute AVX2). [OPUS-4.8] sq-lfo84 |
+| `src/store.rs:146` | mut slice reinterpret | `words` is u32-aligned, holds ≥ `len` bytes; region exclusively owned | `AlignedBytes::from_vec` over-allocates to a word boundary (`len.div_ceil(4)` u32s); `copy_from_slice` fills exactly `len` bytes of the freshly-allocated, unaliased buffer. |
+| `src/store.rs:154` | slice reinterpret (read) | u32-aligned, ≥ `len` initialised bytes | `AlignedBytes::as_bytes` reads the bytes copied in above; base ≥ 4-byte aligned by construction (review 1874). |
+| `src/store.rs:195` | `Mmap::map` (`open_backing`) | own-for-lifetime | the SINGLE read-backing map site, shared by `VectorStore::open` (`.spqv`) and `DiskAnnIndex::open` (`.spqg`); `open_validated` bounds every offset afterwards. Native-only — wasm32 takes the owned-bytes branch. **B5**. |
+| `src/store.rs:653` | slice reinterpret (write) | f32 has no invalid bit patterns; `align(f32) ≥ align(u8)` | `finalize`: the f32 data section → LE bytes for `write_all`; big-endian targets rejected at create/open. |
+| `src/store.rs:939` | slice reinterpret (read) | `start` is a multiple of 4 ⇒ f32-aligned; range validated in `open` | `slot_vector`: the backing is u32-aligned for BOTH branches — page-aligned map, or `AlignedBytes` (review 1874 fixed a UB align bug here); `debug_assert_eq!` checks it; f32 accepts any bit pattern. **B5**. |
+| `src/store.rs:1459` | slice reinterpret (write) | f32 no invalid patterns; align ok | the streaming builder's `put`: f32→LE bytes for `write_all` after `validate_vector`. |
+| `src/diskann.rs:461` | slice reinterpret (read) | f32 no invalid patterns; align ok | build path: f32→LE bytes copied into the fixed-width record; LE target asserted; borrows `b.vectors`. |
+| `src/diskann.rs:808` | slice reinterpret (read) | `start` a multiple of 4 ⇒ f32-aligned; range validated in `open_validated` | `node_vector`: `debug_assert_eq!` checks alignment; both backings are ≥ 4-byte aligned; f32 accepts any bit pattern; borrows the backing. **B5**. |
+| `src/simd.rs:96` (`approx-ann`) | `#[target_feature(enable="neon")]` call | the `neon` ISA extension is present at runtime | entered ONLY when `active_kernel()` answers `Neon`, which it does ONLY inside `if is_aarch64_feature_detected!("neon")`; `l2_sq_neon` reads exactly `a.len()==b.len()` lanes. [OPUS-4.8] sq-lfo84 |
+| `src/simd.rs:106` (`approx-ann`) | `#[target_feature(enable="avx2,fma")]` call | both `avx2` and `fma` are present at runtime | entered ONLY when `active_kernel()` answers `Avx2`, which it does ONLY inside `if is_x86_feature_detected!("avx2") && …("fma")`; `l2_sq_avx2` reads exactly `a.len()` lanes via unaligned loads. [OPUS-4.8] sq-lfo84 |
+| `src/simd.rs:142` (`approx-ann`) | `unsafe fn l2_sq_neon` (NEON L2² kernel) | caller confirmed `neon`; `a.len()==b.len()` | 16-wide FMA body + 4-wide drain + scalar tail (`get_unchecked` only for `i<len`), so every `vld1q_f32` load is in-bounds. Verified vs an f64 reference for dim 0..=257 (`simd::tests`), **executed on a real aarch64 host** by the `vectors-aarch64` lane (#5028) — before that lane this kernel was compile-checked only, since every test lane was x86_64. [OPUS-4.8] sq-lfo84 [SONNET-4.6] #5028 |
+| `src/simd.rs:185` (`approx-ann`) | `unsafe fn l2_sq_avx2` (AVX2+FMA L2² kernel) | caller confirmed `avx2`+`fma`; `a.len()==b.len()` | 16-wide FMA body + 8-wide drain + scalar tail (`get_unchecked` only for `i<len`); `_mm256_loadu_ps` is unaligned so no alignment precondition. Numeric output verified by `simd::tests` on the x86_64 CI runner — `ci.yml`'s nextest matrix is `ubuntu-latest` (the aarch64 work box sq-lfo84 was authored on cannot execute AVX2). Those guards are arch-GENERIC and the scalar fallback satisfies them, so that evidence was previously compatible with the kernel never having run; `simd::tests::avx2_kernel_is_the_one_the_dispatcher_actually_ran` now asserts `active_kernel() == Avx2` and **fails closed under `CI`**, so a runner without AVX2+FMA reds the lane instead of silently supplying scalar-path evidence. [OPUS-4.8] sq-lfo84 [SONNET-4.6] #5065 |
 
 ### `sparq-cli` — 2 sites (the `dump-perm` debug command)
 
@@ -261,12 +275,47 @@ the examples run on the standard toolchain.
 | `examples/support/mod.rs:83` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. |
 | `examples/support/mod.rs:86` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; `new_size` is only read into the byte counter. |
 
+### `sparq-lws-wasm` — 4 sites (the SHIPPING bounded `#[global_allocator]`) [SONNET-4.6]
+
+(sq-wubkf.) The only **shipping** `#[global_allocator]` sites in the register. On `wasm32` the
+whole Solid pod lives in one linear memory; when growth fails, the allocation-error handler aborts,
+which under the release profile's `panic=abort` lowers to an `unreachable` trap that poisons the
+instance and answers the request with nothing. `memory::BoundedAlloc` keeps a running live-byte
+total so `handleRequest` can refuse a request whose projected peak crosses a configured ceiling
+with a clean HTTP 507 *before* the router runs. A `#[global_allocator]` unavoidably requires
+`unsafe` (the `GlobalAlloc` trait is `unsafe` by definition, and there is no safe substitute for a
+process-wide live-byte counter), so this crate alone relaxes its root from `forbid(unsafe_code)` to
+`deny(unsafe_code)` plus a single `#[allow(unsafe_code)] pub mod memory;` — every other module in
+the crate still fails to compile on `unsafe`.
+
+**Not** a B5 (untrusted-input) surface, and the same forward-to-`System` class as the
+`sparq-engine` / `sparq-lws-core` counting allocators above: every method delegates verbatim to
+`System` with the identical arguments, so `System` discharges all of `GlobalAlloc`'s obligations.
+The wrapper only reads `Layout::size()`/`new_size` and bumps `Relaxed` atomics; no pointer `System`
+returns is ever dereferenced, retained, or aliased, and it **never refuses an allocation** (a null
+return from `GlobalAlloc::alloc` routes into `handle_alloc_error` → abort, i.e. exactly the trap
+this module removes — the bound is enforced at the request boundary instead, the only layer where a
+refusal can be an HTTP status). `alloc_zeroed` is deliberately left as the trait default, which
+routes through `BoundedAlloc::alloc` and is therefore accounted without a fourth forwarding method.
+Bounded by **review + the trivial forward-to-`System` argument**, the crate-root
+`clippy::undocumented_unsafe_blocks` (the `unsafe impl` carries a `// SAFETY:` comment), and the
+host-side unit tests in `src/memory.rs` that cover the accounting and ceiling arithmetic on the
+standard toolchain. Miri does not model a `#[global_allocator]` that calls `System`.
+
+| File:line | Kind | Invariant relied on | Why sound / how bounded |
+|---|---|---|---|
+| `src/memory.rs:144` | `unsafe impl GlobalAlloc for BoundedAlloc` | forward-to-`System` | every method delegates verbatim to `System` with the same args; the wrapper adds only `Relaxed` live/peak counter updates and never alters the returned pointer or the requested layout. |
+| `src/memory.rs:145` | `unsafe fn alloc` | caller's `layout` contract forwarded | `System.alloc(layout)` unchanged; only the returned pointer's nullness is inspected before recording `layout.size()`, so a failed allocation is not counted as live. |
+| `src/memory.rs:153` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. The counter decrement is balanced by construction — the allocator is installed before the first allocation, so no pointer predates it. |
+| `src/memory.rs:158` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; only the returned pointer's nullness is inspected before recording the `layout.size()` → `new_size` delta, so a failed realloc leaves the old size counted (which it still is). |
+
 ## NEEDS-REVIEW
 
-**None.** Every one of the 87 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 92 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
 `clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]) — set
-at crate root on unsafe-bearing libraries and file-local on the `sparq-engine`
+at crate root on unsafe-bearing libraries (including `sparq-lws-wasm`, sq-wubkf)
+and file-local on the `sparq-engine`
 integration test and the `sparq-lws-core` example files that carry counting
 allocators. The 6 sites that
 previously relied on an adjacent block comment — the two `unsafe impl Send`/`Sync for

@@ -7,7 +7,8 @@ Context Processing, Expansion, Flattening, Compaction, Framing, and RDF
 [JSON-LD 1.1]: https://www.w3.org/TR/json-ld11/
 
 > [GPT-5.6] Build-out status reconciled in `sq-ci15w`; implementation provenance remains
-> recorded on the individual algorithms.
+> recorded on the individual algorithms. [OPUS-5] (`sq-ghdfw`) Re-verified against the
+> tree: `to_rdf` and `api` are the only remaining stubs.
 > Epic `sq-oy1f` (design record `research/jsonld-1.1-design.md`).
 
 ## 🚀 Quickstart
@@ -71,7 +72,7 @@ container maps, `@nest`, `@reverse`, `@included`, `@json`, keyword aliases (bead
   context, vocab-relative suffix, `prefix:suffix` compact IRIs, base-relative paths.
 - **Term Selection** (internal to `context::inverse`) — §7.2: the container ×
   preferred-value walk, consumed by `compact_iri` and by the document Compaction
-  Algorithm (bead `sq-oy1f.27`, not yet landed).
+  Algorithm (bead `sq-oy1f.27`, since landed — see below).
 
 Bead `sq-oy1f.26` adds **Node Map Generation** (`generate_node_map`, §7.2) with a
 deterministic `_:bN` blank-node issuer, and the document-level **Flattening Algorithm**
@@ -92,7 +93,9 @@ Compaction** (`compact::compact` / `compact::compact_expanded`): scoped
 `@nest`, `@reverse` redistribution, keyword aliasing, and the `compactArrays` /
 `compactToRelative` / `ordered` options. The `compact` conformance lane compares
 against the W3C **expected** documents (the normative oracle; see
-`sparq-conformance`'s `floors::compact` for the honest fail/skip buckets).
+`sparq-conformance`'s `floors::compact` for the honest fail/skip buckets). Bead `sq-gzsky`
+turned the `expand`/`compact` **negative lanes** ON — each `NegativeEvaluationTest` passes iff
+the exact `expectErrorCode` is raised, which is what makes the closed [`JsonLdErrorCode`](src/error.rs) enum load-bearing — and fixed seven spec divergences it surfaced.
 
 Beads `sq-oy1f.27` / `.29` add the document-level **Framing Algorithm**
 (`frame::frame` / `frame::frame_expanded`): frame matching and value patterns,

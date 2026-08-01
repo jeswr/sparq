@@ -243,17 +243,62 @@ Multiplication is where authentication needs real work, because `α·(x·y) ≠ 
 degree reduction is itself a deviation surface (Hole 2). Two interoperable routes, both fitting
 the existing in-process structure:
 
-**(a) Authenticate the product after the BGW degree-reduce (the lightest change to the current
-code).** Today `secure_equal` does `mul_shares_raw` (`join.rs:432`) then opens at degree `2t`;
-the chained path does `mul_shares_raw` then `degree_reduce` (`shamir.rs:406`). To authenticate
-the product `z = x·y`, after obtaining `[z]` (degree-`t`, post-reduction) the parties must also
-obtain `[m_z] = [α·z]`. The cheapest honest-majority way is **one extra multiplication of `[z]`
-by the shared `[α]`** (a second `mul_shares_raw` + `degree_reduce`), producing `[α·z]`. This
-doubles the multiplication cost (value-mult + MAC-mult) but is conceptually trivial and reuses
-`degree_reduce` verbatim. The KEY POINT for malicious security: the **re-sharing in
-`degree_reduce` (Hole 2) is now itself covered** — because the *same* MAC is computed over the
-*reduced* result, a party that fed a wrong re-sharing produces a `[z]` whose value no longer
-satisfies `m_z = α·z`, and the batched check (§2.5) catches it.
+**(a) Carry the MAC forward through the INPUT MAC — two independent mult-then-reduce rounds
+(the honest-majority route, no preprocessing).** Today `secure_equal` does `mul_shares_raw`
+(`join.rs:432`) then opens at degree `2t`; the chained path does `mul_shares_raw` then
+`degree_reduce` (`shamir.rs:406`). To authenticate the product `z = x·y` the parties run **two
+independent mult-then-reduce rounds over DIFFERENT input shares**:
+
+- the value `[z] = reduce([x]·[y])`;
+- the MAC `[m_z] = [α·z] = reduce([α·x]·[y])`, from the **input** MAC `[α·x]` times the **input**
+  value `[y]` — correct because `(α·x)·y = α·(x·y) = α·z`.
+
+This doubles the multiplication cost (value-mult + MAC-mult), reuses `degree_reduce` verbatim,
+and is the standard honest-majority malicious-multiplication shape (Chida et al., "Fast
+Large-Scale Honest-Majority MPC for Malicious Adversaries", CRYPTO'18).
+
+**Why this covers Hole 2 — the INDEPENDENCE is what is load-bearing.** Adversary model:
+static, up to `t` corruptions with `n ≥ 2t+1`, rushing, and *fully coordinated* — the corrupted
+parties may deviate in **both** reduces of the same multiplication, choosing the deviations
+jointly and adaptively on their own views. A party deviating inside a re-sharing shifts that
+reduce's secret by a value it controls; write `δ_v` for the net shift of the value reduce and
+`δ_m` for the net shift of the MAC reduce. Because the two reduces consume *disjoint* input
+sharings (`[x]·[y]` vs `[α·x]·[y]`), the pair the adversary lands on is
+`(z + δ_v, α·z + δ_m)`, and the §2.5 check computes
+
+  `σ = m_z − z·α = (α·z + δ_m) − (z + δ_v)·α = δ_m − α·δ_v`.
+
+So `σ = 0` iff `δ_m = α·δ_v` — for any `δ_v ≠ 0` that pins `α`, which the adversary's view is
+independent of (`≤ t` shares of `[α]` are independent of `α`), so it succeeds with probability
+`1/p ≈ 2^-61`. Tampering only the value reduce (`δ_m = 0`) gives `σ = −α·δ_v ≠ 0`; only the MAC
+reduce (`δ_v = 0`) gives `σ = δ_m ≠ 0`. The re-sharing in `degree_reduce` (Hole 2) is therefore
+**MAC-covered in both rounds, including under coordinated deviation** — not because the reduce
+gained a check, but because the MAC is derived from inputs the value reduce never touched.
+
+> **REJECTED variant — recompute the MAC from the reduced value (this record's original
+> route (a); do NOT implement).** An earlier draft of this section specified the "cheapest"
+> shape: after obtaining `[z]`, get `[m_z]` by **one extra multiplication of `[z]` by the shared
+> `[α]`**, i.e. `[α·z] = reduce([z]·[α])`. **That construction does not close Hole 2 and must not
+> be used.** Its claimed key point ("the *same* MAC is computed over the *reduced* result, so a
+> wrong re-sharing breaks `m_z = α·z`") is backwards: computing the MAC *from* the tampered `[z]`
+> makes the MAC **track** the tamper. With a value-reduce shift `δ_v` the pair is
+> `(z + δ_v, α·(z + δ_v))`, so `σ = 0` and the batched check **passes on a wrong product** — a
+> silent incorrect result, exactly the failure Hole 2 describes. (It still catches a deviation in
+> the second reduce, `σ = δ_m`; that is not enough.) Only a MAC computed from inputs *independent*
+> of the value reduce covers the first round, which is why route (a) is specified as
+> `reduce([α·x]·[y])` above. `[SONNET-4.6] 2026-07-26 — correction made during the sq-km34.3
+> implementation review; the implementation was already the independent-input construction, this
+> record was not.`
+
+**Where this lives in code, and what pins it.** `MacSession::auth_mul` (`shamir.rs`) implements
+the two-independent-reduce route above. The discrimination is pinned by
+`auth_compare::tests::mac_carry_soundness_distinguished_by_in_reduce_tamper` (bead sq-81gd),
+which injects the genuine Hole-2 deviation *inside* the value re-sharing and asserts the two
+carries diverge: the independent-input MAC aborts, the rejected `[z]·[α]` recompute passes. The
+coordinated-`(δ_v, δ_m)` case above is pinned by
+`auth_compare::tests::coordinated_tamper_in_both_reduces_is_caught`. Note the honesty caveat that
+applies to this whole record: none of it carries external accredited-cryptographer sign-off
+(`sq-qhy4`); the argument here is an internal one.
 
 **(b) Authenticated Beaver triples (the SPDZ-canonical route, and what a dishonest-majority
 backend would share).** Preprocess authenticated triples `([[u]],[[v]],[[w]])` with `w = u·v`.
@@ -281,8 +326,35 @@ adapted to Shamir-over-`F_p`:
    per pair: the masked product `m`). Each has an authenticated sharing `[[y_j]] = ([y_j],
    [m_{y_j}])` with `m_{y_j} = α·y_j`.
 2. Draw public random challenge coefficients `χ_1..χ_k ∈ F_p` (Fiat–Shamir / a jointly-tossed
-   coin; in the sim, from the session RNG — but derived *after* shares are fixed, so a party
-   cannot adapt to it).
+   coin), derived *after* shares are fixed, so a party cannot adapt to it. **As implemented
+   (sq-km34.4):** Fiat–Shamir — a domain-separated SHA-512 transcript over `(n, t, k)` and both
+   halves `([y_j], [α·y_j])` of every authenticated sharing under check, expanded to one `χ_j`
+   per value and folded into `F_p`. That makes "after the shares are fixed" *structural*: the
+   coin is a function of exactly those shares, so it cannot precede them and re-randomises under
+   any tamper — where a draw from the dealer's private RNG gave that by call ordering only.
+
+   **What is NOT implemented (scope, honesty).** The transcript is the *complete* share
+   vectors, which exist in one place only because the backend is an in-process simulation of
+   all `n` parties; a real party holds only its own share, and broadcasting the vectors would
+   reconstruct the opened values and leak MAC-sharing material. So the implemented coin is
+   **not jointly derivable by the protocol parties and does not remove the trusted dealer** —
+   it is scoped to the trusted-dealer simulation, and the tests (one `MacSession` holding every
+   share) are correspondingly silent on the distributed property. A genuinely public coin needs
+   the step this crate does not yet have: each party broadcasts a *binding commitment* to its
+   own fixed shares (or the parties run commit-then-reveal coin tossing), then
+   `χ = H(commitments)`, with specified broadcast, verification and abort behaviour — a
+   different transcript needing its own soundness argument.
+
+   **Grinding (correction).** An earlier revision of this section claimed testing a candidate
+   `χ` requires the secret `α`. That is false in general: with the MACs left unchanged
+   (`δ_m = 0`) the deficit is `σ = −α·Σ_j χ_j·δ_{y,j}`, so `σ = 0` iff `Σ_j χ_j·δ_{y,j} = 0` —
+   a relation between the hash-derived `χ` and the attacker's own deviations, checkable without
+   `α`. The `≥ 1 − 1/p` bound below therefore holds against a deviation fixed *before* `χ` is
+   known; an adversary that can vary the transcript and re-derive the coin grinds at `≈ 1/p`
+   per trial, i.e. `≈ p ≈ 2^61` expected work. In a 61-bit field that is a **computational**
+   bound, not the information-theoretic one step 5 states. The distributed protocol above must
+   therefore bind each contribution before `χ` is derived; until it exists with a written
+   argument over a stated adversary model, the ideal-public-coin claim is not made here.
 3. Open the values `y_j` (the actual results). Compute the public linear combination
    `y = Σ_j χ_j·y_j`.
 4. Each party locally forms its share of `[σ] = Σ_j χ_j·[m_{y_j}] − y·[α]` (all linear → free,
@@ -292,7 +364,9 @@ adapted to Shamir-over-`F_p`:
    consistent matching change to `m_{y_j}` (it cannot, not knowing `α`), so `σ ≠ 0` with
    probability `≥ 1 − 1/p ≈ 1 − 2^-61` over the random `χ`. (The single-MAC soundness is `1/p`;
    the random-linear-combination batching keeps it `≈ 1/p`, the field-size statistical
-   parameter.)
+   parameter.) This is the ideal-coin bound, and it is stated against a deviation fixed before
+   `χ` is known — see step 2's grinding note for what the Fiat–Shamir instantiation actually
+   gives.
 6. **`σ ≠ 0` ⇒ ABORT** (`MpcError::Tampered` / a new `MpcError::MacCheckFailed`). No value is
    trusted; the protocol returns an error rather than a wrong/leaky answer.
 
@@ -433,7 +507,7 @@ sq-tg6b — so these are *predictions the harness will confirm*, not claims):
   (§2.3); still **zero communication rounds** for the SUM aggregate. `multiplications` counter
   unchanged for linear ops (stays 0). The aggregate stays the zero-round sweet spot.
 - **Multiplication: ~2× the multiplication cost + 1 MAC-mult per product.** Route (a)
-  (§2.4): each secure product now also multiplies the result by `[α]` → an extra
+  (§2.4): each secure product runs a second, independent `[α·x]·[y]` product → an extra
   `mul_shares_raw` + `degree_reduce` per multiplication, roughly **doubling `multiplications`
   and the degree-reduce rounds**. Route (b) (Beaver) shifts this into an **offline
   preprocessing** phase (record it explicitly via the `requires_preprocessing` field, sq-4i39,
@@ -470,10 +544,12 @@ sq-pwr — ids recorded in the report:
    (`shamir.rs:586–650`) to value *and* MAC, with the public-constant term using `[α]`.
    Acceptance: authenticated SUM aggregate round-trips; MAC stays consistent; zero extra rounds.
    Depends on (1).
-3. **MAC-carrying multiplication + authenticated degree-reduce.** Route (a): after
-   `mul_shares_raw` + `degree_reduce`, compute `[α·z]` via a second mult-then-reduce; the
-   re-sharing (Hole 2) becomes MAC-covered. Acceptance: `a·b·c` chain authenticated and
-   tamper-evident; a wrong re-sharing is caught by the §2.5 check. Depends on (1),(2), and
+3. **MAC-carrying multiplication + authenticated degree-reduce.** Route (a): alongside the
+   value's `mul_shares_raw` + `degree_reduce`, compute `[α·z] = reduce([α·x]·[y])` via a second
+   mult-then-reduce over the INPUT MAC (not from the reduced `[z]` — see the rejected variant in
+   §2.4); the re-sharing (Hole 2) becomes MAC-covered in both rounds. Acceptance: `a·b·c` chain
+   authenticated and tamper-evident; a wrong re-sharing in the value reduce, in the MAC reduce,
+   or in **both** (coordinated) is caught by the §2.5 check. Depends on (1),(2), and
    sq-dvuc (CLOSED).
 4. **Batched MAC-check at open (the catch-everything step).** §2.5: random-challenge batched
    check before `reconstruct_degree` / `reconstruct_disclosed`; `MpcError::MacCheckFailed` on
@@ -512,8 +588,10 @@ backend (sq-j5ok) — documented as the next axis, out of scope here.)
 Attach one information-theoretic MAC `m_x = α·x` to every secret-shared value under a single
 session-global, secret-shared MAC key `[α]` no party knows; carry the MAC through addition and
 scaling for free (apply each existing local linear op to both `[x]` and `[m_x]`), and through
-each multiplication by also multiplying the reduced product by `[α]` (route (a), reusing the
-now-built BGW `degree_reduce`) so the trusted re-sharing becomes MAC-covered; then, just before
+each multiplication by a SECOND, independent mult-then-reduce over the input MAC,
+`[α·z] = reduce([α·x]·[y])` (route (a), reusing the now-built BGW `degree_reduce`; *not* by
+multiplying the reduced product by `[α]`, which would make the MAC track a tampered value —
+§2.4) so the trusted re-sharing becomes MAC-covered; then, just before
 any value is opened (the equality verdict, the sum, the comparison boolean), run **one batched
 random-challenge MAC-check** — open a leakage-free `σ = Σχ_j·[m_{y_j}] − (Σχ_j·y_j)·[α]` and
 abort iff `σ ≠ 0`. Because soundness comes from the secret `α` (`≈ 1 − 2^-61` per check over

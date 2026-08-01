@@ -33,8 +33,14 @@ pub use wac::wac_corpus;
 
 /// The agreed scenario floors (the guard the parity tests assert and the differential
 /// oracle inherits): 13 WAC + 13 ACP minimal-per-construct scenarios.
-pub const WAC_SCENARIO_FLOOR: usize = 13;
-pub const ACP_SCENARIO_FLOOR: usize = 13;
+///
+/// [SONNET-4.6] sq-z1xv8 — the VALUES now live once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floors and the reported floors are
+/// ONE pair of `const`s and cannot drift (replacing the old textual re-read of this
+/// file). Raise them THERE; the corpus narrative stays here.
+pub const WAC_SCENARIO_FLOOR: usize = sparq_conformance_floors::solid::WAC_SCENARIO_FLOOR;
+pub const ACP_SCENARIO_FLOOR: usize = sparq_conformance_floors::solid::ACP_SCENARIO_FLOOR;
 
 /// Test WebIDs / origins shared by both corpora. Kept here so the two corpus modules — and
 /// any second consumer — name the same principals.

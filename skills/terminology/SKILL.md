@@ -73,6 +73,29 @@ prefer the precise term:
 - **blank node** (two words, lowercase): not "bnode" in prose (the `bnode` token is fine
   in code/identifiers), not "anonymous node". [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/)
 
+## Banned terms beyond RDF/SPARQL wording
+
+The gate is **data-driven**: every banned term lives in `scripts/banned-terminology.json`,
+and each one declares its **own file surface**. Adding a term is one object there — no code
+change. Terms currently enforced beyond the RDF 1.2 / SPARQL 1.2 table above:
+
+| Banned | Say instead | Surface |
+|---|---|---|
+| the trust-container term *(`TrustEnvelope`, `trust_envelope`, `trust-envelope`, "trust envelope")* <!-- terminology-allow: the guide must name the banned term in order to ban it --> | **"trust requirements"** for the TR document; a request/response-symmetric carrier name (e.g. `ContractRequest`) for the *(query, requirements, nonce)* triple | source **and** vocabulary: `.rs`, `.ttl`, `.md`, `.typ`, `.nr`, manifests, workflows |
+
+Two things that rule out a blind find-and-replace here:
+
+- "trust requirements" already names a **distinct** type (`TrustRequirements`, the TR
+  graph). The carrier is a *superset* of TR, so it needs its own non-banned name.
+- Only the **compound** is banned. Bare "envelope" is legitimate and common elsewhere
+  (leakage envelope, JSON envelope, SD-JWT envelope, noise envelope, console envelope) and
+  is deliberately **not** matched.
+
+Why the surface matters: this gate used to scan `*.md` only, so a banned term reached a
+merged-ready PR as a `pub` Rust type **and** a published `rdfs:comment` with a fully green
+`ci-summary / gate` (issue #3811). A term banned from public API must be checked in the
+files that carry public API.
+
 ## Allowed exceptions
 
 The banned spellings are *correct* in a few legitimate places. The CI gate
