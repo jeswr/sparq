@@ -24,7 +24,7 @@
 //! group-document triple whose predicate is in `solidx:` space — the analogue of the
 //! `urn:sparq:` reserved-principal guard ([`validate_principal_iri`]).
 
-use crate::{AccessProvenance, SOLIDX_NS};
+use crate::{AccessProvenance, VerifiedCredentials, SOLIDX_NS};
 use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::{Dict, Id};
@@ -163,18 +163,24 @@ fn xsd_true() -> Term {
 }
 
 /// Assemble the full fact set: structural facts + the access-control graphs +
-/// (ACP only) the TRUSTED per-resource creator/owner facts from `provenance`.
-/// Errors if any agent/client/origin/creator/owner value collides with the reserved
-/// principal encoding (see [`validate_principal_iri`]).
+/// (ACP only) the TRUSTED per-resource creator/owner facts from `provenance` and the
+/// TRUSTED verified-credential holdings from `credentials`.
+/// Errors if any agent/client/origin/creator/owner/credential-holder value collides with
+/// the reserved principal encoding (see [`validate_principal_iri`]).
 ///
 /// [OPUS-4.8] sq-3jtd.5: `provenance` is the trusted channel for `acp:CreatorAgent` /
 /// `acp:OwnerAgent`. Its `<r> solidx:creator|owner <webid>` facts are synthesized HERE,
 /// from the caller-supplied map ONLY — never read from the resource graphs (design doc
 /// §2.4). For WAC (no creator/owner vocabulary) `provenance` is ignored.
+///
+/// [SONNET-4.6] sq-ysv3u: `credentials` is the exactly analogous trusted channel for ACP
+/// `acp:vc`. Its `<webid> solidx:holdsVc <requirement>` facts are synthesized HERE and
+/// nowhere else. WAC has no credential vocabulary, so `credentials` is ignored for it.
 pub(crate) fn assemble_facts(
     graph: &Graph,
     system: System,
     provenance: &AccessProvenance,
+    credentials: &VerifiedCredentials,
 ) -> Result<Vec<[Term; 3]>, String> {
     let mut out: Vec<[Term; 3]> = Vec::new();
     let suffix = if system == System::Wac { ACL_SUFFIX } else { ACR_SUFFIX };
@@ -301,6 +307,17 @@ pub(crate) fn assemble_facts(
                 out.push([named(resource), named(&format!("{SOLIDX_NS}owner")), named(o)]);
             }
         }
+        // [SONNET-4.6] sq-ysv3u: TRUSTED `acp:vc` holdings (ACP only), on exactly the same
+        // footing as the creator/owner facts above — emitted ONLY from the caller-supplied
+        // map, never from pod or `.acr` content (design doc §2.4; the solidx: guard at the
+        // top of this pass drops any forged `holdsVc` smuggled into a control document).
+        // A holder becomes a candidate agent, so its WebID goes through the SAME
+        // reserved-encoding validation and is marked isWebId.
+        for (agent, requirement) in credentials.iter() {
+            validate_principal_iri(agent)?;
+            webids.insert(agent.to_owned());
+            out.push([named(agent), named(&format!("{SOLIDX_NS}holdsVc")), named(requirement)]);
+        }
     }
     for a in &webids {
         out.push([named(a), is_webid.clone(), xsd_true()]);
@@ -319,8 +336,9 @@ pub(crate) fn assemble_input_ids(
     graph: &Graph,
     system: System,
     provenance: &AccessProvenance,
+    credentials: &VerifiedCredentials,
 ) -> Result<Vec<[Id; 3]>, String> {
-    let facts = assemble_facts(graph, system, provenance)?;
+    let facts = assemble_facts(graph, system, provenance, credentials)?;
     Ok(facts
         .iter()
         .map(|t| [dict.intern(&t[0]), dict.intern(&t[1]), dict.intern(&t[2])])
@@ -340,9 +358,10 @@ pub(crate) fn assemble_input(
     graph: &Graph,
     system: System,
     provenance: &AccessProvenance,
+    credentials: &VerifiedCredentials,
 ) -> Result<String, String> {
     use std::fmt::Write;
-    let facts = assemble_facts(graph, system, provenance)?;
+    let facts = assemble_facts(graph, system, provenance, credentials)?;
     let mut out = String::new();
     for t in &facts {
         let _ = writeln!(out, "{} {} {} .", t[0], t[1], t[2]);

@@ -65,6 +65,19 @@
   features: "pattern-scope"
   test: true
 
+# [SONNET-4.6] sq-ysv3u (issue #2935): the opt-in `acp-vc` trust-the-issuer backend for the
+# ACP `acp:vc` matcher. The whole of tests/acp_vc_backend.rs is `#![cfg(feature = "acp-vc")]`
+# (sign a credential with `sparq-vc`, verify its `eddsa-rdfc-2022` Data Integrity proof,
+# admit the resulting holding, then satisfy an `acp:vc` matcher end-to-end), and
+# `VcRequirement` + `VerifiedCredentials::admit_data_integrity` only compile here — so
+# without this leg the backend NEVER runs in CI. The `acp:vc` MATCHER semantics themselves
+# are unconditional and are covered in BOTH feature states by tests/acp_vc.rs. Pulls only
+# the workspace-internal `sparq-vc` dependency — keeps the opt-in ON path from rotting.
+- name: "sparq-solid (acp-vc)"
+  crate: "sparq-solid"
+  features: "acp-vc"
+  test: true
+
 # [SONNET-4.6] sq-s5tkx (issue #2854): the COMBINED state — every opt-in feature at once,
 # i.e. what `cargo test -p sparq-solid --all-features` runs. This is the feature
 # INTERACTION none of the single-feature legs above can see. It was red on `main` and no
@@ -113,5 +126,5 @@
 # no new external dependency beyond what the single-feature legs already pull.
 - name: "sparq-solid (all opt-in features combined)"
   crate: "sparq-solid"
-  features: "odrl-bridge,count-enforcement,trust-graph,trust-graph-did,pattern-scope,legacy-union-default-graph"
+  features: "odrl-bridge,count-enforcement,trust-graph,trust-graph-did,pattern-scope,legacy-union-default-graph,acp-vc"
   test: true

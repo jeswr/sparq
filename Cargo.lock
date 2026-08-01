@@ -5677,6 +5677,7 @@ dependencies = [
  "sparq-policy",
  "sparq-reason",
  "sparq-trust",
+ "sparq-vc",
  "sparq-zk",
  "wasm-bindgen-test",
 ]
