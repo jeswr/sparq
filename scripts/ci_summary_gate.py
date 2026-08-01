@@ -361,6 +361,17 @@ NO_LEG_MARKER = ", no-leg"
 # the sibling set (see run_gate).
 GATE_CHECK_NAME = "gate"
 DRAFT_TIER_GATE_NAME = GATE_CHECK_NAME + DRAFT_TIER_MARKER
+# [OPUS-5] sq-lfmvd — EVENT-DRIVEN (SLOTLESS) EVALUATION, see §EVENT-DRIVEN below.
+# The commit-status context the short-lived evaluator publishes, and the evaluator
+# job's own check-run name. The evaluator is the SAME brain on a different
+# TRANSPORT: its check-runs are aggregator artifacts, never legs, so they are
+# excluded from every sibling set exactly like `gate, draft-tier` is
+# (is_status_evaluator_artifact). This is NOT a #3773 advisory waiver — the
+# evaluator executes no tests and reports no property of the commit; it is the
+# aggregator observing itself, and including it would make the legacy `gate` wait
+# on a job that is waiting on the legacy `gate`.
+STATUS_CONTEXT = "ci-summary/status"
+STATUS_EVALUATOR_NAMES = frozenset({"ci-summary status"})
 # Conclusions a LATER same-workflow/name check-run may excuse after authoritative
 # workflow-run resolution. Deliberately ONLY check-level supersession artifacts;
 # failures from OLDER workflow runs are removed by resolve_newest_workflow_runs,
@@ -913,6 +924,33 @@ def is_draft_gate_artifact(name: str) -> bool:
     self-exclusion comment in ci-summary.yml), and cancelled `gate` predecessors
     are handled by forgive_superseded instead."""
     return name == DRAFT_TIER_GATE_NAME
+
+
+def is_status_evaluator_artifact(name: str) -> bool:
+    """[OPUS-5] sq-lfmvd: is this check-run the SLOTLESS EVALUATOR's own job?
+
+    The event-driven evaluator (.github/workflows/ci-summary-status.yml) runs the
+    verdict brain in this file and publishes the answer as a COMMIT STATUS. Its
+    workflow_run-triggered runs inherit the triggering run's head SHA, so its job
+    check-run lands on the very commit being aggregated (the empirically observed
+    behaviour recorded for `nightly selection-bug alarm` in
+    .github/advisory-registry.json). That check-run is an AGGREGATOR ARTIFACT, not
+    a leg — the same class as `gate, draft-tier`:
+      * it executes no tests and asserts no property of the commit;
+      * it fires once per sibling completion, so an in-flight evaluation would hold
+        the legacy `gate`'s settle window open on a job whose only work is to
+        observe that gate; and
+      * a run cancelled by the evaluator's debounce concurrency group would
+        otherwise survive as a `cancelled` conclusion with no same-name successor
+        and RED the legacy gate outright.
+    EXACT, case-insensitive, whole-name match against STATUS_EVALUATOR_NAMES —
+    fail-closed like PLATFORM_MANAGED_ADVISORY_NAMES: an unknown/renamed job GATES.
+    Deliberately NOT an advisory-registry declaration (#3773): the registry declares
+    jobs that report a real property and are waived from gating, whereas this is
+    self-exclusion of the aggregator's own transport — and a registry entry could
+    not fix the pending-hold half above, because `pending` is counted BEFORE the
+    advisory filter."""
+    return (name or "").strip().lower() in STATUS_EVALUATOR_NAMES
 
 
 def _order_key(run: dict) -> tuple:
@@ -1824,6 +1862,9 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             r for r in kept
             if not is_self(r, cfg.self_run_id)
             and not is_draft_gate_artifact(r.get("name", ""))
+            # [OPUS-5] sq-lfmvd: the slotless evaluator's own job — an aggregator
+            # artifact of the SAME gate on a different transport, never a leg.
+            and not is_status_evaluator_artifact(r.get("name", ""))
         ]
         total = len(runs)
         pending = sum(1 for r in runs if r.get("status") != "completed")
@@ -2112,6 +2153,334 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     return 1
 
 
+# ------------------- EVENT-DRIVEN (SLOTLESS) EVALUATION — sq-lfmvd -------------------
+#
+# [OPUS-5] research/ci-gate-slotless-aggregation.md §2. run_gate above is a WAITER: it
+# occupies a hosted-runner slot for the whole life of a PR's CI. This section is the
+# same brain on a NON-RESIDENT transport — a short-lived evaluation, triggered by
+# sibling workflow events, that fetches the head commit's checks ONCE and publishes the
+# answer as a COMMIT STATUS (`STATUS_CONTEXT`). Slot cost drops from O(minutes-to-an-
+# hour) per PR to O(seconds) per sibling event.
+#
+# STAGED, NOT SWAPPED (design record §3.1 — the load-bearing risk). This does NOT
+# remove or alter the `ci-summary / gate` job. Both run; `gate` stays the single
+# REQUIRED branch-protection context and `ci-summary/status` is published ALONGSIDE it
+# for parity observation. Making the status required — and only then dropping the job —
+# is a ruleset edit that needs maintainer sign-off (docs/branch-protection.md
+# §Slotless status migration). A missing "expected" required check blocks every merge,
+# so the order is: publish → observe parity → add as required → drop the job.
+#
+# HOW THE §3 RISKS ARE RESOLVED HERE (each is pinned by a test):
+#  1. Required-check migration — staged, above. Nothing about the required set changes
+#     in this change.
+#  2. Trust model — the evaluator has NO `pull_request` trigger at all. It is
+#     `workflow_run`-only, so GitHub always executes the DEFAULT-BRANCH copy of the
+#     workflow (#3474's pattern) and its `statuses: write` token is unreachable from
+#     PR-head content. A `pull_request` seed job would have been the exact #3474 hole:
+#     same-repo agent branches receive repository secrets and PR-head content defines
+#     the workflow, so a PR could have edited the seed to publish a forged SUCCESS on
+#     its own head. The seed is instead the `requested` half of the workflow_run
+#     trigger (below), which is equally default-branch-defined.
+#  3. Bootstrap / quiet PRs — `types: [requested, completed]`. `requested` fires when
+#     any sibling workflow is CREATED, which is the earliest observable moment on a new
+#     head, and it publishes the initial `pending`. Because `ci-summary` itself runs on
+#     every PR, every head — including a docs-only one that triggers nothing else —
+#     produces at least one requested + one completed event, so no head can be left
+#     with no evaluation at all. The FORK path works for the same reason the trust
+#     model does: the token belongs to the default-branch workflow_run run, not to the
+#     fork's PR run, so a fork PR's status is publishable.
+#  4. merge_group — the evaluator keys entirely off `workflow_run.head_sha`, which for
+#     a merge-group-triggered sibling IS the merge-group ref's commit (the same SHA
+#     ci-summary.yml's `github.sha` fallback uses today), so the status lands where a
+#     ruleset checking the merge-group head would look for it.
+#  5. Event storms — one evaluation per sibling event is dozens per push. Debounced by
+#     a per-head-SHA concurrency group with `cancel-in-progress: FALSE`: GitHub keeps
+#     at most one PENDING run per group (a newer arrival supersedes the older PENDING
+#     one), so a storm collapses to "the one running + the latest", the final event's
+#     evaluation always executes, and — critically — a RUNNING evaluation is never
+#     cancelled mid-publish.
+#  6. Startup-race parity — run_gate's MIN_POLLS floor + SETTLE_POLLS window have three
+#     counterparts here, all of which can only ever DOWNGRADE a verdict to `pending`:
+#       (a) TRIGGER VISIBILITY: a `completed` evaluation refuses to conclude until the
+#           triggering run itself is visible in the fetched set. Otherwise the snapshot
+#           predates the event that caused it and "all terminal" is an artifact of API
+#           lag, not of the tree.
+#       (b) SETTLE CONFIRM: a would-be TERMINAL verdict is re-fetched after a short
+#           pause and must be re-derived identically; anything else publishes `pending`.
+#       (c) The `requested` transport may publish `pending` ONLY — never a terminal
+#           verdict — because a just-created sibling's checks have not registered yet.
+#           It also publishes NOTHING when it sees an all-terminal set, so a late
+#           `requested` event can never downgrade an already-published SUCCESS.
+#
+# WHAT IS NOT RE-IMPLEMENTED: the verdict. `forgive_superseded` / `is_self` /
+# `is_advisory` / `failfast_failures` / `fm_report_status` / `draft_selects_unsuperseded`
+# / `render_verdict` are called unchanged, so the two transports cannot drift on
+# semantics (design record §4).
+#
+# KNOWN, DELIBERATE DIVERGENCES from run_gate (they exist because the evaluator is
+# non-resident; each is a `pending`, i.e. fail-closed, and each must be closed or
+# accepted in writing BEFORE the required check moves):
+#   * DRAFT TIER — the evaluator publishes `pending` for a PR that is CURRENTLY a
+#     DRAFT, rather than reproducing the draft-tier evaluation. A draft's reduced leg
+#     set must never produce a mergeable verdict (docs/branch-protection.md §Draft-tier
+#     CI), and an unreadable draft state is treated the same way. `ready_for_review`
+#     re-runs every tiered workflow, whose events re-drive this evaluator at full tier.
+#   * CANCELLED NEWEST RUN — run_gate holds `actions: write` to re-dispatch one
+#     cancelled run. The evaluator deliberately does not: it fires per event, so a
+#     bounded-once retry cannot be enforced across processes (each run starts with an
+#     empty attempted-set) and every event would POST another re-run. It publishes
+#     `pending` and lets the legacy gate's bounded retry do the recovery.
+
+STATE_SUCCESS = "success"
+STATE_FAILURE = "failure"
+STATE_PENDING = "pending"
+# Publish nothing at all (distinct from `pending`, which is itself a claim).
+STATE_SKIP = "skip"
+TRIGGER_REQUESTED = "requested"
+TRIGGER_COMPLETED = "completed"
+# GitHub truncates a commit-status description past 140 characters.
+STATUS_DESCRIPTION_LIMIT = 140
+
+
+@dataclass
+class EvalOutcome:
+    """One short-lived evaluation's answer: the commit-status state to publish (or
+    STATE_SKIP for "publish nothing") and the one-line human description."""
+
+    state: str
+    description: str
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in (STATE_SUCCESS, STATE_FAILURE)
+
+
+def clip_description(text: str, limit: int = STATUS_DESCRIPTION_LIMIT) -> str:
+    """Whitespace-collapsed, hard-bounded status description (GitHub silently
+    rejects/truncates past the limit; we truncate deterministically instead)."""
+    collapsed = " ".join((text or "").split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1] + "…"
+
+
+def trigger_run_visible(runs: list[dict], trigger_run_id: int) -> bool:
+    """Startup-race parity (a): is the run whose event drove this evaluation actually
+    present in the fetched snapshot? `_workflow_run_id` is set by the resolver for
+    every check it attributes; the URL scan covers external/manually-posted checks and
+    the raw (unresolved) fixtures the tests use."""
+    if not trigger_run_id:
+        return True
+    for run in runs:
+        if _as_int(run.get("_workflow_run_id")) == trigger_run_id:
+            return True
+        if _workflow_run_id_of_check(run) == trigger_run_id:
+            return True
+    return False
+
+
+def evaluate_once(
+    raw_runs: list[dict],
+    *,
+    trigger: str = TRIGGER_COMPLETED,
+    self_run_id: str = "",
+    trigger_run_id: int = 0,
+    tier_ctx: TierContext | None = None,
+    summary_path: str = "",
+    pr_is_draft: bool | None = None,
+) -> EvalOutcome:
+    """ONE non-resident evaluation over an already-fetched check-run snapshot.
+
+    `raw_runs` is exactly what run_gate's `fetch_runs()` yields. The sibling set is
+    derived with the IDENTICAL filters run_gate uses (forgive_superseded, self
+    exclusion, draft-gate + status-evaluator artifacts), and a terminal answer is
+    rendered by the SHARED `render_verdict` — so the two transports cannot drift.
+
+    `pr_is_draft` is the PR's live draft state (None => unreadable / not a PR).
+    Every guard in here can only downgrade an answer toward `pending`; none can
+    manufacture a SUCCESS."""
+    kept, forgiven = forgive_superseded(raw_runs)
+    runs = [
+        r for r in kept
+        if not is_self(r, self_run_id)
+        and not is_draft_gate_artifact(r.get("name", ""))
+        and not is_status_evaluator_artifact(r.get("name", ""))
+    ]
+    total = len(runs)
+    pending = sum(1 for r in runs if r.get("status") != "completed")
+    awaiting_full = bool(
+        tier_ctx
+        and tier_ctx.run_tier == "full"
+        and tier_ctx.event_name == "pull_request"
+        and draft_selects_unsuperseded(runs)
+    )
+    awaiting_report = fm_report_status(runs) == "pending"
+    outstanding = bool(pending or awaiting_full or awaiting_report)
+    print(
+        f"evaluate[{trigger}]: {total} sibling check-run(s), {pending} running, "
+        f"{len(forgiven)} superseded-cancelled forgiven, "
+        f"awaiting_full={awaiting_full}, awaiting_report={awaiting_report}",
+        flush=True,
+    )
+
+    # DRAFT-TIER INTEGRITY (see §KNOWN DIVERGENCES). A draft PR runs a REDUCED leg
+    # set, so no terminal verdict over it may ever be publishable; an unreadable
+    # draft state fail-closes the same way (a draft cannot merge regardless, so a
+    # false `pending` is cheap and a false SUCCESS is the invariant violation).
+    if tier_ctx and tier_ctx.event_name == "pull_request" and pr_is_draft is not False:
+        return EvalOutcome(
+            STATE_PENDING,
+            "draft PR (or draft state unreadable) — the draft-tier leg set can never "
+            "produce a mergeable verdict; ready_for_review re-runs at full tier",
+        )
+
+    # Startup-race parity (a): the snapshot must postdate the event that drove it.
+    if trigger == TRIGGER_COMPLETED and not trigger_run_visible(runs, trigger_run_id):
+        return EvalOutcome(
+            STATE_PENDING,
+            f"snapshot predates the triggering run {trigger_run_id} (check-run API lag) "
+            f"— refusing to conclude over a set that cannot yet contain it",
+        )
+
+    if outstanding:
+        # FAIL-FAST parity: a concluded GATING failure already decides the verdict, so
+        # the status REDs now rather than at the last sibling's completion. Restricted
+        # to the `completed` transport for the same reason (c) exists.
+        ff = failfast_failures(runs) if trigger == TRIGGER_COMPLETED else []
+        if ff:
+            return EvalOutcome(
+                STATE_FAILURE,
+                f"{len(ff)} gating check(s) failed ({_name_list(ff, 3)}) while "
+                f"{pending} sibling(s) were still running — a newest-run failure is "
+                f"never forgiven",
+            )
+        return EvalOutcome(
+            STATE_PENDING,
+            f"{pending} of {total} sibling check-run(s) still running"
+            + (" (awaiting the full-tier re-run)" if awaiting_full else "")
+            + (" (awaiting the feature-matrix reporter)" if awaiting_report else ""),
+        )
+
+    # Startup-race parity (c): a just-CREATED sibling's check-runs have not registered
+    # yet, so an all-terminal set on the `requested` transport is evidence of nothing.
+    # Publishing NOTHING (rather than `pending`) is what stops a late `requested` event
+    # from downgrading a SUCCESS a `completed` evaluation already published.
+    if trigger != TRIGGER_COMPLETED:
+        return EvalOutcome(
+            STATE_SKIP,
+            "seed evaluation saw an all-terminal set — the newly-requested run's "
+            "check-runs have not registered; leaving the published status untouched",
+        )
+
+    code = render_verdict(runs, summary_path, tier_ctx)
+    if code == 0:
+        return EvalOutcome(
+            STATE_SUCCESS,
+            f"all {total} sibling check-run(s) are terminal and no gating check failed",
+        )
+    return EvalOutcome(
+        STATE_FAILURE,
+        f"a gating check-run failed or the set could not be determined over "
+        f"{total} sibling check-run(s) — see the ci-summary status evaluation log",
+    )
+
+
+def run_status_evaluation(
+    fetch_runs,
+    publish,
+    *,
+    trigger: str = TRIGGER_COMPLETED,
+    self_run_id: str = "",
+    trigger_run_id: int = 0,
+    tier_ctx: TierContext | None = None,
+    summary_path: str = "",
+    pr_is_draft: bool | None = None,
+    settle_seconds: int = 15,
+    sleep_fn=time.sleep,
+    fetch_retries: int = 3,
+) -> int:
+    """Drive ONE short-lived evaluation and publish its commit status.
+
+    Returns the process exit code. The evaluator exits 0 for EVERY published state
+    including `failure`: the STATUS carries the verdict, and a red evaluator job
+    would be a second, redundant (and — until the migration completes — confusing)
+    red on the commit. Exit 1 is reserved for "the evaluation could not run or could
+    not be published", which is an infrastructure fault worth an Actions annotation.
+
+    SETTLE CONFIRM (startup-race parity (b)): a would-be TERMINAL verdict is
+    re-derived from a FRESH fetch after `settle_seconds`; if the second answer is not
+    the identical state, `pending` is published instead. This is the non-resident
+    equivalent of SETTLE_POLLS and, like it, can only ever hold a verdict back."""
+
+    def fetch() -> list[dict]:
+        last: Exception | None = None
+        for _ in range(max(1, fetch_retries)):
+            try:
+                return fetch_runs()
+            except FetchError as exc:  # transient API blip: bounded retry
+                last = exc
+        raise FetchError(str(last))
+
+    def evaluate(runs: list[dict], summary: str) -> EvalOutcome:
+        return evaluate_once(
+            runs,
+            trigger=trigger,
+            self_run_id=self_run_id,
+            trigger_run_id=trigger_run_id,
+            tier_ctx=tier_ctx,
+            summary_path=summary,
+            pr_is_draft=pr_is_draft,
+        )
+
+    try:
+        outcome = evaluate(fetch(), summary_path)
+    except SupersededLegsError as exc:
+        # No `actions: write` here by design (§KNOWN DIVERGENCES) — the legacy gate
+        # owns the bounded once-only re-dispatch; this evaluation just holds.
+        outcome = EvalOutcome(
+            STATE_PENDING, f"superseded legs, re-run required — {exc}"
+        )
+    except FetchError as exc:
+        print(f"::error::ci-summary status: could not observe the sibling set ({exc}).")
+        return 1
+
+    if outcome.terminal and settle_seconds > 0:
+        sleep_fn(settle_seconds)
+        try:
+            # The confirming pass writes no step summary: a terminal verdict is
+            # rendered twice and only the first render's detail is worth keeping.
+            confirm = evaluate(fetch(), "")
+        except (FetchError, SupersededLegsError) as exc:
+            confirm = EvalOutcome(STATE_PENDING, f"settle-confirm fetch failed: {exc}")
+        if confirm.state != outcome.state:
+            print(
+                f"::notice::ci-summary status: settle-confirm re-derived "
+                f"{confirm.state!r} after an initial {outcome.state!r} — publishing "
+                f"`pending`; the next sibling event re-evaluates."
+            )
+            outcome = EvalOutcome(
+                STATE_PENDING,
+                f"the set changed during the settle window (initial {outcome.state}, "
+                f"re-derived {confirm.state}) — not yet settled",
+            )
+
+    if outcome.state == STATE_SKIP:
+        print(f"ci-summary status: publishing nothing — {outcome.description}")
+        return 0
+    description = clip_description(outcome.description)
+    print(f"ci-summary status: publishing {outcome.state} — {description}")
+    try:
+        publish(outcome.state, description)
+    except FetchError as exc:
+        print(f"::error::ci-summary status: could not publish the commit status ({exc}).")
+        return 1
+    _emit(
+        f"### ci-summary status: `{outcome.state}` — {description}",
+        summary_path,
+    )
+    return 0
+
+
 # ----------------------------- live (gh-backed) wiring -----------------------------
 
 
@@ -2277,6 +2646,67 @@ def make_fetch_pr_draft(repo: str, pr_number: str):
     return fetch
 
 
+def make_fetch_pr_draft_for_sha(repo: str, sha: str):
+    """[OPUS-5] sq-lfmvd: the live draft state of the OPEN PR whose head is `sha`.
+
+    The evaluator runs on `workflow_run`, whose payload's `pull_requests` array is
+    empty for fork PRs, so the PR is resolved from the commit instead. Returns True
+    (a draft PR heads this commit), False (a non-draft PR does), or None (no open PR
+    — a push/merge_group head). Raises FetchError on any API failure, which the
+    caller treats exactly like a draft (fail-closed to `pending`)."""
+
+    def fetch():
+        rows = _gh_json_lines(
+            [
+                f"repos/{repo}/commits/{sha}/pulls",
+                "--paginate",
+                "--jq",
+                ".[] | {number, draft, state, head_sha: .head.sha}",
+            ]
+        )
+        # Only PRs this commit actually HEADS: the endpoint also lists PRs that merely
+        # contain the commit, whose draft state says nothing about this evaluation.
+        heading = [
+            r for r in rows if r.get("head_sha") == sha and r.get("state") == "open"
+        ]
+        if not heading:
+            return None
+        return any(bool(r.get("draft")) for r in heading)
+
+    return fetch
+
+
+def make_publish_status(repo: str, sha: str, context: str, target_url: str = ""):
+    """[OPUS-5] sq-lfmvd: POST a commit status on `sha`. Needs `statuses: write`,
+    which is granted ONLY to the default-branch `workflow_run` evaluator — a PR head
+    can neither define that workflow nor forge the context (#3474's trust model)."""
+
+    def publish(state: str, description: str) -> None:
+        args = [
+            "--method",
+            "POST",
+            f"repos/{repo}/statuses/{sha}",
+            "-f",
+            f"state={state}",
+            "-f",
+            f"context={context}",
+            "-f",
+            f"description={description}",
+        ]
+        if target_url:
+            args += ["-f", f"target_url={target_url}"]
+        try:
+            proc = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            raise FetchError(f"status POST subprocess raised: {exc}") from exc
+        if proc.returncode != 0:
+            raise FetchError(
+                proc.stderr.strip()[:300] or f"status POST gh api exited {proc.returncode}"
+            )
+
+    return publish
+
+
 def make_fetch_queue_depth(repo: str):
     """Queued workflow-run count for the repo — the saturation signal. Returns None
     (unknown) on any failure so a permissions/API blip degrades to progress-only,
@@ -2402,23 +2832,11 @@ def _self_test() -> int:
     return 0
 
 
-def main() -> int:
-    if sys.argv[1:] == ["--self-test"]:
-        return _self_test()
-    if sys.argv[1:]:
-        print("usage: ci_summary_gate.py [--self-test]", file=sys.stderr)
-        return 2
-    repo = os.environ.get("REPO", "")
-    sha = os.environ.get("SHA", "")
-    self_run_id = os.environ.get("SELF_RUN_ID", "")
-    if not repo or not sha or not self_run_id:
-        print("::error::ci-summary: REPO, SHA and SELF_RUN_ID must all be set.")
-        return 1
-    # [OPUS-5] #3773 — establish the DECLARED-advisory set BEFORE polling, and fail
-    # LOUD + FAST if it cannot be read. Evaluating a merge-authorising gate without
-    # knowing which checks were deliberately declared non-gating is exactly the
-    # over-promise this issue is about, so an unreadable registry is exit 1 in
-    # seconds, never a 37-minute wait or a silent "everything gates".
+def _load_declared_or_fail(where: str) -> bool:
+    """[OPUS-5] #3773 — establish the DECLARED-advisory set BEFORE any verdict, and
+    fail LOUD + FAST if it cannot be read. Returns True on success. Shared by both
+    transports so neither can evaluate a merge-authorising verdict without knowing
+    which checks were deliberately declared non-gating."""
     registry_path = os.environ.get("ADVISORY_REGISTRY", ADVISORY_REGISTRY_PATH)
     try:
         declared = load_advisory_registry(registry_path)
@@ -2426,13 +2844,86 @@ def main() -> int:
         print(
             f"::error::ci-summary: the advisory registry is unreadable ({exc}). The gate "
             f"cannot decide which checks are DECLARED non-gating, so it fails closed. "
-            f"Ensure ci-summary.yml's sparse-checkout includes {ADVISORY_REGISTRY_PATH}."
+            f"Ensure {where}'s sparse-checkout includes {ADVISORY_REGISTRY_PATH}."
         )
-        return 1
+        return False
     print(
         f"ci-summary: {len(declared)} declared-advisory job name(s) loaded from "
         f"{registry_path}; every other check GATES (#3773)."
     )
+    return True
+
+
+def main_evaluate() -> int:
+    """[OPUS-5] sq-lfmvd — the `--evaluate` entry point: ONE short-lived, slotless
+    evaluation publishing a commit status (see §EVENT-DRIVEN above). Invoked by
+    .github/workflows/ci-summary-status.yml on every sibling workflow_run event."""
+    repo = os.environ.get("REPO", "")
+    sha = os.environ.get("SHA", "")
+    self_run_id = os.environ.get("SELF_RUN_ID", "")
+    if not repo or not sha:
+        print("::error::ci-summary status: REPO and SHA must both be set.")
+        return 1
+    trigger = os.environ.get("TRIGGER", TRIGGER_COMPLETED).strip().lower()
+    if trigger not in (TRIGGER_REQUESTED, TRIGGER_COMPLETED):
+        print(f"::error::ci-summary status: unknown TRIGGER {trigger!r}.")
+        return 1
+    if not _load_declared_or_fail("ci-summary-status.yml"):
+        return 1
+    trigger_run_id = _as_int(os.environ.get("TRIGGER_RUN_ID", ""))
+    trigger_event = os.environ.get("TRIGGER_EVENT", "")
+    context = os.environ.get("STATUS_CONTEXT", "") or STATUS_CONTEXT
+    # The PR's LIVE draft state — the ONE thing the evaluator re-reads from the API
+    # before it may conclude (§KNOWN DIVERGENCES). Unreadable => `pending`.
+    pr_is_draft: bool | None = None
+    if trigger_event == "pull_request":
+        try:
+            pr_is_draft = make_fetch_pr_draft_for_sha(repo, sha)()
+        except FetchError as exc:
+            print(
+                f"::notice::ci-summary status: the PR draft state for {sha} is "
+                f"unreadable ({exc}) — fail-closed to `pending`."
+            )
+            pr_is_draft = None
+    print(
+        f"ci-summary status: sha={sha} trigger={trigger} "
+        f"trigger_event={trigger_event or '<unset>'} trigger_run={trigger_run_id} "
+        f"draft={pr_is_draft} context={context}"
+    )
+    # run_tier is always "full": a draft head is refused above rather than evaluated
+    # at draft tier, so render_verdict's stale-draft-tier belt applies unchanged.
+    tier_ctx = TierContext(run_tier="full", event_name=trigger_event)
+    return run_status_evaluation(
+        make_fetch_runs(repo, sha, self_run_id),
+        make_publish_status(repo, sha, context, os.environ.get("TARGET_URL", "")),
+        trigger=trigger,
+        self_run_id=self_run_id,
+        trigger_run_id=trigger_run_id,
+        tier_ctx=tier_ctx,
+        summary_path=os.environ.get("GITHUB_STEP_SUMMARY", ""),
+        pr_is_draft=pr_is_draft,
+    )
+
+
+def main() -> int:
+    if sys.argv[1:] == ["--self-test"]:
+        return _self_test()
+    if sys.argv[1:] == ["--evaluate"]:
+        return main_evaluate()
+    if sys.argv[1:]:
+        print("usage: ci_summary_gate.py [--self-test | --evaluate]", file=sys.stderr)
+        return 2
+    repo = os.environ.get("REPO", "")
+    sha = os.environ.get("SHA", "")
+    self_run_id = os.environ.get("SELF_RUN_ID", "")
+    if not repo or not sha or not self_run_id:
+        print("::error::ci-summary: REPO, SHA and SELF_RUN_ID must all be set.")
+        return 1
+    # #3773 — the DECLARED-advisory set is established BEFORE polling, exit 1 in
+    # seconds if it cannot be read (never a 37-minute wait, never a silent
+    # "everything gates"). See _load_declared_or_fail.
+    if not _load_declared_or_fail("ci-summary.yml"):
+        return 1
     # [FABLE-5] Draft-tier CI: the tier THIS run evaluates is decided by its own
     # trigger payload — a pull_request event with draft == true is a DRAFT-tier
     # gate (ci-summary.yml exports the payload's draft flag + PR number). Every

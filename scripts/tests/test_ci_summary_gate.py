@@ -2403,14 +2403,34 @@ class TestUnsatisfiableHoldFastFail(unittest.TestCase):
             f"{fetch.state['calls']} polls")
 
     def test_the_fast_path_only_ever_reds(self):
-        """No new exit-0 path: the detector's only outcome is the refusal."""
+        """No new exit-0 path: the detector's only outcome is the refusal.
+
+        [OPUS-5] sq-lfmvd: the count is scoped to the source ABOVE the event-driven
+        evaluation banner — i.e. the WAITER transport, whose exit code IS the merge
+        verdict and whose exit-0 surface is what this guard fixes. The slotless
+        evaluator below the banner has a different contract (the STATUS carries the
+        verdict; the process exits 0 for every published state, 1 only on an
+        infrastructure fault), so its exit-0 paths are counted separately rather than
+        blanket-forbidden — a blanket count would have had to be relaxed, which would
+        have retired the guard on the half that still needs it."""
         source = (REPO_ROOT / "scripts" / "ci_summary_gate.py").read_text(
             encoding="utf-8")
+        banner = "# ------------------- EVENT-DRIVEN (SLOTLESS) EVALUATION"
+        end = "# ----------------------------- live (gh-backed) wiring"
+        self.assertIn(banner, source, "the event-driven section banner moved")
+        head, rest = source.split(banner, 1)
+        self.assertIn(end, rest, "the live-wiring banner closing the section moved")
+        evaluator, tail = rest.split(end, 1)
         self.assertEqual(
-            len(re.findall(r"^\s*return 0\b", source, re.M)), 5,
+            len(re.findall(r"^\s*return 0\b", head + tail, re.M)), 5,
             "the #3781 detector must add only `return 1` paths — the gate's exit-0 "
             "surface is FIXED and enumerated in the module header (_draft_recheck's "
             "two, render_verdict's empty-set + PASS, and _self_test's)")
+        self.assertEqual(
+            len(re.findall(r"^\s*return 0\b", evaluator, re.M)), 2,
+            "the slotless evaluator's exit-0 surface is FIXED at two: published a "
+            "status, and published nothing (STATE_SKIP). Any third one means a new "
+            "path exits green without the status having been written.")
 
     # ---- (d) the discrimination: a still-settling set is NOT unsatisfiable ---
     def test_a_still_settling_set_is_not_declared_unsatisfiable(self):
@@ -3032,6 +3052,370 @@ class TestLatestRunRelativePresence(unittest.TestCase):
         self.assertEqual(g.fm_report_status([FM_GROUP, _skel("222"), GREEN]), "pending")
         # With any legacy report present it degrades to any-report (never a false RED).
         self.assertEqual(g.fm_report_status([FM_GROUP, FM_REPORT_OK, GREEN]), "ok")
+
+
+# [OPUS-5] sq-lfmvd — EVENT-DRIVEN (SLOTLESS) EVALUATION. The waiter's verdict brain
+# invoked once per sibling workflow event, publishing a COMMIT STATUS instead of
+# holding a runner slot (research/ci-gate-slotless-aggregation.md §2). These tests pin
+# the properties that make the STAGED migration safe — every one of them is a
+# "can only downgrade toward `pending`" guard, because the one thing this transport
+# must never do is manufacture a mergeable SUCCESS the waiter would not have rendered.
+class TestEventDrivenStatusEvaluation(unittest.TestCase):
+    COMPLETED = "completed"
+    REQUESTED = "requested"
+
+    @staticmethod
+    def _ev(runs, **over):
+        kwargs = dict(trigger=TestEventDrivenStatusEvaluation.COMPLETED)
+        kwargs.update(over)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            outcome = g.evaluate_once(list(runs), **kwargs)
+        return outcome, out.getvalue()
+
+    # ---- (1) the verdict itself is the SHARED one, not a re-implementation ----
+    def test_all_terminal_green_publishes_success(self):
+        outcome, log = self._ev([GREEN, GREEN2])
+        self.assertEqual(outcome.state, g.STATE_SUCCESS, log)
+        self.assertTrue(outcome.terminal)
+
+    def test_a_gating_failure_publishes_failure(self):
+        outcome, log = self._ev([GREEN, RED])
+        self.assertEqual(outcome.state, g.STATE_FAILURE, log)
+
+    def test_a_declared_advisory_failure_does_not_red_the_status(self):
+        """Semantics parity: the status transport reuses is_advisory, so a DECLARED
+        advisory failure is non-gating here exactly as it is for the waiter."""
+        advisory_red = R(DECLARED_ADVISORY[0], conclusion="failure")
+        outcome, log = self._ev([GREEN, advisory_red])
+        self.assertEqual(outcome.state, g.STATE_SUCCESS, log)
+        # ...while an UNDECLARED advisory-NAMED failure still gates (#3773).
+        undeclared, log2 = self._ev(
+            [GREEN, R(UNDECLARED_ADVISORY_NAME, conclusion="failure")])
+        self.assertEqual(undeclared.state, g.STATE_FAILURE, log2)
+
+    def test_an_empty_stable_set_publishes_success(self):
+        """The quiet-PR case: a head whose only workflow was ci-summary itself. The
+        waiter passes a stable-empty set, so the status must agree."""
+        outcome, log = self._ev([])
+        self.assertEqual(outcome.state, g.STATE_SUCCESS, log)
+
+    # ---- (2) outstanding work is `pending`, and fail-fast still REDs early ----
+    def test_pending_siblings_publish_pending(self):
+        outcome, log = self._ev([GREEN, PENDING])
+        self.assertEqual(outcome.state, g.STATE_PENDING, log)
+        self.assertFalse(outcome.terminal)
+        self.assertIn("still running", outcome.description)
+
+    def test_fail_fast_reds_while_siblings_are_still_running(self):
+        outcome, log = self._ev([RED, PENDING])
+        self.assertEqual(outcome.state, g.STATE_FAILURE, log)
+        self.assertIn("never forgiven", outcome.description)
+
+    # ---- (3) startup-race parity (a): the snapshot must postdate the trigger ----
+    def test_a_snapshot_that_predates_the_triggering_run_cannot_conclude(self):
+        """The event says run 4242 completed; the check-run API has not caught up, so
+        'all terminal' is an artifact of lag, not of the tree. MUST hold at `pending`
+        — this is the event-driven counterpart of the MIN_POLLS startup floor."""
+        outcome, log = self._ev([GREEN, GREEN2], trigger_run_id=4242)
+        self.assertEqual(outcome.state, g.STATE_PENDING, log)
+        self.assertIn("predates", outcome.description)
+        # Once the triggering run IS visible (either enrichment key or the URL), the
+        # same set concludes — proving the guard is the only thing that held it.
+        visible_by_url = R("build + test",
+                           url="https://github.test/o/r/actions/runs/4242/job/7")
+        concluded, log2 = self._ev([visible_by_url, GREEN2], trigger_run_id=4242)
+        self.assertEqual(concluded.state, g.STATE_SUCCESS, log2)
+        enriched = dict(GREEN, _workflow_run_id=4242)
+        by_key, log3 = self._ev([enriched, GREEN2], trigger_run_id=4242)
+        self.assertEqual(by_key.state, g.STATE_SUCCESS, log3)
+
+    def test_trigger_visibility_helper_is_exact(self):
+        self.assertTrue(g.trigger_run_visible([], 0))  # no trigger id => no constraint
+        self.assertFalse(g.trigger_run_visible([GREEN], 4242))
+        # No prefix reach: run 42 must not satisfy a wait on run 4242 (or vice versa).
+        near = R("x", url="https://github.test/o/r/actions/runs/42/job/1")
+        self.assertFalse(g.trigger_run_visible([near], 4242))
+        self.assertTrue(g.trigger_run_visible([near], 42))
+
+    # ---- (4) startup-race parity (c): the SEED transport is pending-only ----
+    def test_the_requested_seed_never_publishes_a_terminal_verdict(self):
+        """A `requested` event fires when a sibling run is CREATED — its check-runs
+        have not registered. The seed may say `pending` and nothing else."""
+        outcome, log = self._ev([GREEN, PENDING], trigger=self.REQUESTED)
+        self.assertEqual(outcome.state, g.STATE_PENDING, log)
+        # Even over a set the `completed` transport would RED: the seed cannot fail
+        # fast either (the red is re-derived by the next completion event).
+        red_seed, log2 = self._ev([RED, PENDING], trigger=self.REQUESTED)
+        self.assertEqual(red_seed.state, g.STATE_PENDING, log2)
+
+    def test_the_requested_seed_publishes_nothing_over_an_all_terminal_set(self):
+        """The anti-downgrade property: a late `requested` event must not turn an
+        already-published SUCCESS back into `pending`. STATE_SKIP, not STATE_PENDING."""
+        outcome, log = self._ev([GREEN, GREEN2], trigger=self.REQUESTED)
+        self.assertEqual(outcome.state, g.STATE_SKIP, log)
+        self.assertFalse(outcome.terminal)
+
+    # ---- (5) draft-tier integrity: a draft head can never go terminal ----
+    def test_a_draft_pr_head_holds_at_pending(self):
+        ctx = g.TierContext(run_tier="full", event_name="pull_request")
+        for draft_state in (True, None):  # a draft, and an UNREADABLE draft state
+            outcome, log = self._ev([GREEN, GREEN2], tier_ctx=ctx,
+                                    pr_is_draft=draft_state)
+            self.assertEqual(outcome.state, g.STATE_PENDING,
+                             f"draft={draft_state}: {log}")
+            self.assertIn("draft", outcome.description)
+        # A confirmed NON-draft PR concludes normally.
+        ready, log2 = self._ev([GREEN, GREEN2], tier_ctx=ctx, pr_is_draft=False)
+        self.assertEqual(ready.state, g.STATE_SUCCESS, log2)
+
+    def test_a_non_pr_head_is_unaffected_by_the_draft_guard(self):
+        """push / merge_group heads have no PR, so pr_is_draft is None there — which
+        must NOT be read as 'unreadable draft' and hold the status at pending."""
+        for event in ("merge_group", "push", ""):
+            ctx = g.TierContext(run_tier="full", event_name=event)
+            outcome, log = self._ev([GREEN, GREEN2], tier_ctx=ctx, pr_is_draft=None)
+            self.assertEqual(outcome.state, g.STATE_SUCCESS, f"{event}: {log}")
+
+    # ---- (6) the evaluator's own check-run is an ARTIFACT, never a leg ----
+    def test_the_evaluators_own_check_run_is_excluded_from_both_transports(self):
+        name = sorted(g.STATUS_EVALUATOR_NAMES)[0]
+        self.assertTrue(g.is_status_evaluator_artifact(name))
+        self.assertTrue(g.is_status_evaluator_artifact("  CI-Summary Status "))
+        # FAIL-CLOSED: no prefix/substring reach — an unknown or renamed job GATES.
+        for gating in ("ci-summary status check", "status", "gate", "ci-summary"):
+            self.assertFalse(g.is_status_evaluator_artifact(gating), gating)
+        # A cancelled evaluator run with no successor would otherwise RED the waiter
+        # (cancelled is not in _PASSING and forgive_superseded cannot excuse it).
+        stray = R(name, conclusion="cancelled")
+        code, out = run(tiny_cfg(), [[GREEN, stray]])
+        self.assertEqual(code, 0, out)
+        # ...and an in-flight one must not hold the waiter's settle window open.
+        code2, out2 = run(tiny_cfg(), [[GREEN, R(name, status="in_progress",
+                                                 conclusion=None)]])
+        self.assertEqual(code2, 0, out2)
+        # Same exclusion on the status transport itself (no self-observation loop).
+        outcome, log = self._ev([GREEN, R(name, status="queued", conclusion=None)])
+        self.assertEqual(outcome.state, g.STATE_SUCCESS, log)
+
+    def test_the_exclusion_is_narrow_enough_to_still_gate_a_real_leg(self):
+        """Mutation guard: widening is_status_evaluator_artifact to a substring match
+        would silently drop real jobs. A failing leg whose name merely CONTAINS the
+        evaluator's name must still RED."""
+        outcome, _ = self._ev([R("ci-summary status probe", conclusion="failure")])
+        self.assertEqual(outcome.state, g.STATE_FAILURE)
+
+    # ---- (7) startup-race parity (b): the settle-confirm re-read ----
+    def _drive(self, snapshots, **over):
+        """Drive run_status_evaluation over a scripted sequence of fetch snapshots
+        (the last one repeats), capturing every published status."""
+        published = []
+        seq = list(snapshots)
+
+        def publish(state, description):
+            published.append((state, description))
+
+        def fetch_seq():
+            return list(seq.pop(0) if len(seq) > 1 else seq[0])
+
+        kwargs = dict(trigger=self.COMPLETED, sleep_fn=lambda s: None)
+        kwargs.update(over)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_status_evaluation(fetch_seq, publish, **kwargs)
+        return code, published, out.getvalue()
+
+    def test_a_terminal_verdict_must_survive_the_settle_reread(self):
+        """First sweep: all green. Settle re-read: a new sibling has registered and is
+        queued. That is NOT a settled tree — publish `pending`, not SUCCESS."""
+        code, published, log = self._drive([[GREEN, GREEN2], [GREEN, GREEN2, PENDING]])
+        self.assertEqual(code, 0, log)
+        self.assertEqual([s for s, _ in published], [g.STATE_PENDING], log)
+        self.assertIn("not yet settled", published[0][1])
+
+    def test_a_stable_terminal_verdict_is_published(self):
+        code, published, log = self._drive([[GREEN, GREEN2], [GREEN, GREEN2]])
+        self.assertEqual(code, 0, log)
+        self.assertEqual([s for s, _ in published], [g.STATE_SUCCESS], log)
+
+    def test_a_pending_verdict_skips_the_settle_pause_entirely(self):
+        """Non-terminal answers are cheap and re-derived by the next event, so they
+        must not pay the settle pause (this is a per-event cost paid dozens of times)."""
+        slept = []
+        code, published, log = self._drive(
+            [[GREEN, PENDING]], sleep_fn=slept.append)
+        self.assertEqual(code, 0, log)
+        self.assertEqual([s for s, _ in published], [g.STATE_PENDING], log)
+        self.assertEqual(slept, [], "a pending answer must not sleep")
+
+    def test_a_failure_status_still_exits_zero(self):
+        """The STATUS carries the verdict; the evaluator JOB is not a second red on
+        the commit (its check-run is excluded from every sibling set anyway, but a red
+        job would still be a misleading Actions annotation)."""
+        code, published, log = self._drive([[GREEN, RED], [GREEN, RED]])
+        self.assertEqual(code, 0, log)
+        self.assertEqual([s for s, _ in published], [g.STATE_FAILURE], log)
+
+    def test_a_skip_publishes_nothing_at_all(self):
+        code, published, log = self._drive([[GREEN, GREEN2]], trigger=self.REQUESTED)
+        self.assertEqual(code, 0, log)
+        self.assertEqual(published, [], log)
+
+    def test_an_unobservable_sibling_set_exits_one_and_publishes_nothing(self):
+        """A status is a CLAIM. If the set cannot be observed at all, the evaluator
+        makes no claim and fails loudly so the Actions run is visibly broken."""
+        def fetch():
+            raise g.FetchError("api down")
+
+        published = []
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_status_evaluation(
+                fetch, lambda s, d: published.append((s, d)),
+                trigger=self.COMPLETED, sleep_fn=lambda s: None)
+        self.assertEqual(code, 1, out.getvalue())
+        self.assertEqual(published, [])
+
+    def test_a_failed_publish_exits_one(self):
+        def publish(state, description):
+            raise g.FetchError("403")
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_status_evaluation(
+                lambda: [GREEN, GREEN2], publish, trigger=self.COMPLETED,
+                sleep_fn=lambda s: None)
+        self.assertEqual(code, 1, out.getvalue())
+
+    def test_a_cancelled_newest_run_holds_at_pending_not_red(self):
+        """The evaluator has no `actions: write` and cannot bound a re-dispatch across
+        processes, so it must NOT convert the waiter's recoverable re-dispatch case
+        into a merge-blocking FAILURE."""
+        def fetch():
+            raise g.SupersededLegsError("newest run cancelled")
+
+        published = []
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_status_evaluation(
+                fetch, lambda s, d: published.append((s, d)),
+                trigger=self.COMPLETED, sleep_fn=lambda s: None)
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual([s for s, _ in published], [g.STATE_PENDING])
+
+    # ---- (8) the status description is a bounded, single-line claim ----
+    def test_description_is_collapsed_and_bounded(self):
+        self.assertEqual(g.clip_description("  a\n b  c "), "a b c")
+        long = g.clip_description("x" * 500)
+        self.assertLessEqual(len(long), g.STATUS_DESCRIPTION_LIMIT)
+        self.assertTrue(long.endswith("…"))
+        self.assertEqual(g.clip_description(""), "")
+
+    def test_every_published_description_fits_the_github_limit(self):
+        for snapshots, kwargs in (
+            ([[GREEN, RED], [GREEN, RED]], {}),
+            ([[GREEN, PENDING]], {}),
+            ([[GREEN, GREEN2], [GREEN, GREEN2, PENDING]], {}),
+        ):
+            _, published, _ = self._drive(snapshots, **kwargs)
+            for _, description in published:
+                self.assertLessEqual(len(description), g.STATUS_DESCRIPTION_LIMIT,
+                                     description)
+
+
+class TestEventDrivenStatusWorkflowWiring(unittest.TestCase):
+    """[OPUS-5] sq-lfmvd — the workflow half of the contract. Each assertion here is a
+    property the script cannot enforce from inside: the trust model, the debounce, the
+    staged-migration promise, and the load-bearing job name."""
+
+    WORKFLOW = ".github/workflows/ci-summary-status.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = (REPO_ROOT / cls.WORKFLOW).read_text(encoding="utf-8")
+
+    def _body(self):
+        """The workflow WITHOUT comment lines — so a phrase in the doctrine header
+        can never satisfy an assertion about the live configuration."""
+        return "\n".join(
+            line for line in self.text.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+    def test_the_job_name_matches_the_scripts_exclusion_list(self):
+        """LOAD-BEARING: rename one without the other and the evaluator's own
+        check-run starts gating, deadlocking the legacy gate on itself."""
+        match = re.search(r"^\s{4}name: (.+)$", self._body(), re.M)
+        self.assertIsNotNone(match, "the evaluate job has no `name:`")
+        self.assertIn(match.group(1).strip().lower(), g.STATUS_EVALUATOR_NAMES)
+
+    def test_there_is_no_pull_request_trigger(self):
+        """THE TRUST MODEL (#3474). This workflow holds `statuses: write`. A
+        `pull_request` trigger takes the workflow DEFINITION FROM THE PR HEAD, and
+        same-repo agent branches receive repository credentials — so a PR could edit
+        the seed job to publish a forged SUCCESS on its own head. workflow_run always
+        runs the DEFAULT-BRANCH copy, which is the only reason the write is safe."""
+        body = self._body()
+        self.assertNotIn("pull_request:", body)
+        self.assertNotIn("pull_request_target:", body)
+        self.assertIn("workflow_run:", body)
+        self.assertIn("statuses: write", body)
+
+    def test_both_transports_are_wired(self):
+        """`requested` is the seed (quiet + fork PRs reach an evaluation at all);
+        `completed` carries the verdict. Dropping `requested` loses the seed;
+        dropping `completed` loses every verdict."""
+        self.assertRegex(self._body(), r"types:\s*\[requested,\s*completed\]")
+
+    def test_the_recursion_guard_excludes_workflow_run_originated_runs(self):
+        """The `if:` accepts only the three aggregation-subject events, so this
+        workflow's own runs (originating event `workflow_run`) never re-enter it."""
+        body = self._body()
+        for event in ("'pull_request'", "'merge_group'", "'push'"):
+            self.assertIn(f"github.event.workflow_run.event == {event}", body)
+        self.assertNotIn("workflow_run.event == 'workflow_run'", body)
+
+    def test_the_debounce_never_cancels_a_running_evaluation(self):
+        """cancel-in-progress MUST be false: a cancelled evaluation can be killed
+        mid-publish, and it leaves a `cancelled` check-run on the head SHA."""
+        body = self._body()
+        self.assertIn("group: ci-summary-status-${{ github.event.workflow_run.head_sha }}",
+                      body)
+        self.assertIn("cancel-in-progress: false", body)
+        self.assertNotIn("cancel-in-progress: true", body)
+
+    def test_it_sparse_checks_out_the_script_and_the_registry(self):
+        """#3773: a missing advisory registry makes the script exit 1 on every run."""
+        block = self._body().split("sparse-checkout:", 1)[1].split(
+            "sparse-checkout-cone-mode", 1)[0]
+        self.assertIn("scripts/ci_summary_gate.py", block)
+        self.assertIn(g.ADVISORY_REGISTRY_PATH, block)
+
+    def test_it_invokes_the_evaluate_mode_with_the_server_supplied_sha(self):
+        body = self._body()
+        self.assertIn("python3 scripts/ci_summary_gate.py --evaluate", body)
+        self.assertIn("SHA: ${{ github.event.workflow_run.head_sha }}", body)
+        self.assertIn("TRIGGER: ${{ github.event.action }}", body)
+        self.assertIn("TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}", body)
+
+    def test_it_holds_no_actions_write(self):
+        """Read-only on Actions: the once-only cancelled-run re-dispatch stays with
+        the waiter, which can bound it (see §KNOWN DIVERGENCES in the script)."""
+        body = self._body()
+        self.assertIn("actions: read", body)
+        self.assertNotIn("actions: write", body)
+
+    def test_the_required_check_is_not_touched_by_this_change(self):
+        """THE STAGED-MIGRATION PROMISE (design record §3.1). The single required
+        context is still the `gate` JOB in ci-summary.yml; this workflow adds a
+        second, observational publisher and removes nothing."""
+        ci_summary = (REPO_ROOT / ".github" / "workflows" / "ci-summary.yml").read_text(
+            encoding="utf-8")
+        self.assertRegex(ci_summary, r"(?m)^\s{4}name: gate\$\{\{")
+        self.assertRegex(
+            ci_summary, r"(?m)^\s*run: python3 scripts/ci_summary_gate\.py\s*$",
+            "the waiter must still run in POLL mode — the required `gate` job is not "
+            "switched to --evaluate by this change")
 
 
 if __name__ == "__main__":

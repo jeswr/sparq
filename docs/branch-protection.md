@@ -37,6 +37,78 @@ without a second concurrent author to race against). The required check is:
 > header of `ci-summary.yml` for the full semantics (newest-run resolution, bounded
 > cancelled-run re-dispatch, stability window, and self-exclusion).
 
+### Slotless status migration — STAGE 1 of 3, nothing required has changed yet
+
+<!-- [OPUS-5] sq-lfmvd. Design record: research/ci-gate-slotless-aggregation.md §2-3.
+     This section is the maintainer-facing half of the migration: the ruleset edits it
+     describes are the ONLY way it can advance, and no workflow can perform them. -->
+
+The `gate` job above is a **waiter**: it holds a hosted-runner job slot for the whole
+life of a PR's CI, and under pool saturation the waiters starve the very builds they
+wait on. [`ci-summary-status.yml`](../.github/workflows/ci-summary-status.yml) is the
+non-resident replacement — the **same verdict brain**
+(`scripts/ci_summary_gate.py --evaluate`) invoked as a short-lived evaluation on each
+sibling workflow event, publishing its answer as the commit status context
+**`ci-summary/status`** instead of occupying a slot.
+
+**The required set is unchanged by that workflow existing.** `ci-summary / gate` is
+still the single required context, and `ci-summary/status` is published *alongside* it
+purely so the two can be compared. A required check that is "expected" but never
+reported blocks **every** merge, so the required set must be widened before it is
+narrowed:
+
+| Stage | Action | Who | Status |
+|---|---|---|---|
+| 1 | Publish `ci-summary/status` alongside the `gate` job; compare verdicts on live PRs, drafts, fork PRs and merge-queue refs. | the workflow | **shipped — this is the current state; the observation itself is still to be done** |
+| 2 | Add `ci-summary/status` to the ruleset's required contexts **alongside** `gate`. | **maintainer** (ruleset edit) | not started |
+| 3 | Once both have agreed across all four paths: remove `gate` from the required contexts, then delete the `gate` job and its `timeout-minutes: 80`. | **maintainer**, then a follow-up PR | not started |
+
+**What stage-1 observation must confirm**, in order — none of it is verified yet, and
+the first item has a silent failure mode:
+
+1. **That the evaluator fires at all.** Its `workflow_run` trigger carries no
+   `workflows:` filter (deliberately — a hard-coded sibling list is the brittleness
+   the aggregator exists to avoid). That this subscribes to *all* workflows is the
+   documented reading but is unverified here; if it is wrong, the evaluator simply
+   never runs and no status ever appears. Check the Actions tab of the first PR after
+   this merges for `ci-summary-status` runs.
+2. That `ci-summary/status` and `ci-summary / gate` reach the **same verdict** on
+   green PRs, red PRs, drafts, fork PRs, and merge-queue refs.
+3. That the per-evaluation wall clock and the event volume are what the design
+   assumed — the slot-occupancy claim is structural (one API sweep plus one settle
+   re-read per event), **not** a measured figure, and stage 2 should not proceed on an
+   unmeasured one.
+
+Before stage 2, two **deliberate divergences** from the waiter must be accepted or
+closed — both are documented in `scripts/ci_summary_gate.py` §KNOWN DIVERGENCES, and
+both fail *closed* (they publish `pending`, which blocks a merge):
+
+- a PR that is **currently a draft** gets `pending` rather than a draft-tier
+  evaluation, so a draft's reduced leg set can never produce a mergeable verdict
+  (§Draft-tier CI below); `ready_for_review` re-runs every tiered workflow, whose
+  events re-drive the evaluator at full tier;
+- a **cancelled newest workflow run** gets `pending` rather than the waiter's bounded
+  once-only re-dispatch. The evaluator holds no `actions: write` — it fires per event
+  and so cannot bound a retry across processes — and relies on the `gate` job's retry.
+  This one **must** be resolved before stage 3, since dropping the job also drops that
+  retry.
+
+Two properties make the new workflow safe to have running today, and both are pinned by
+`scripts/tests/test_ci_summary_gate.py::TestEventDrivenStatusWorkflowWiring`:
+
+- it has **no `pull_request` trigger**. It holds `statuses: write`, and a
+  `pull_request` event takes the workflow *definition from the PR head*, where
+  same-repo agent branches receive repository credentials — the exact hole
+  [#3474](https://github.com/sparq-org/sparq/issues/3474) closed for
+  `fast-fix-ring.yml`. `workflow_run` always runs the default-branch copy.
+- its **own check-run is not a leg**. A `workflow_run` run inherits the triggering
+  run's head SHA, so the evaluator's job check-run lands on the commit being
+  aggregated; `is_status_evaluator_artifact()` excludes it from every sibling set (the
+  same class of exclusion as `gate, draft-tier`, *not* an advisory-registry waiver).
+  **The job name is load-bearing** — renaming it without updating
+  `STATUS_EVALUATOR_NAMES` makes it gate, and the legacy `gate` would then wait on a
+  job that is waiting on it.
+
 ### What `ci-summary` aggregates (informational — do NOT add these individually)
 
 The gate covers **every newest Actions workflow run** and every external check-run on the
