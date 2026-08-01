@@ -130,6 +130,7 @@ does not do it.
 | Label | Means | Who closes the certificate gap |
 |---|---|---|
 | IMPLEMENTED & VERIFIED | Technical control + re-runnable repo/CI evidence | already met (repo) |
+| PARTIAL | Materially but not fully met; the shortfall is named in-row with a gap id (currently A.8.7 + A.8.28 under **GX-14** — SAST is not running, `codeql.yml` is disabled and nothing compensates) | tracked cross-framework gap + posture decision #4620 |
 | AUDIT-READY | Doc-of-record / substrate in repo; cert needs an org act | adopting org's ISMS + accredited body |
 | GAP | Not met | tracked bead, see gap-register |
 | N/A (operator) | Property of the deployed environment | adopting operator |

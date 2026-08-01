@@ -8,6 +8,21 @@ implementation in this PR.
 
 ---
 
+> **CORRECTION (2026-07-31, issue #4615) — the CodeQL premise in this record is FALSIFIED.**
+> [OPUS-5] §2 lever 6, the §8 demotion table, and §10 item 2 all reason from a CodeQL lane
+> that runs and whose **"alerts-at-zero still gates every merge"** through the merge queue.
+> That is no longer true and must not be relied on: `codeql.yml` was **disabled at the
+> Actions level on 2026-07-18** by separate maintainer direction, so CodeQL runs on **no**
+> event — not per-push, not on `merge_group`, not nightly. The record's argument was that
+> per-push analysis could be demoted *because* the merge-queue run would still protect the
+> merge; with the lane off entirely, there is no such backstop, and sparq has **no
+> compensating SAST control**. The demotion question this record raised is therefore moot —
+> superseded by the strictly larger open question of whether CodeQL returns at all
+> (issue #4620). The text below is left unedited as the historical design record.
+> See [`ASSURANCE.md`](../ASSURANCE.md) §11 and `compliance/gap-register.md`.
+
+---
+
 ## 1. Scope — what this record deliberately does NOT cover
 
 Three tactical fixes are already in flight. This record designs around them, never

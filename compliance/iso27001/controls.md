@@ -11,8 +11,21 @@ paths are repo-relative. Re-runnable verification is in [`evidence.md`](./eviden
 open gaps are in [`gap-register.md`](./gap-register.md).
 
 **Status legend:** `IMPL` = Implemented & verified (technical control + re-runnable
-evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act ·
+evidence) · `PARTIAL` = materially but not fully met; the shortfall is named in-row and
+carries a gap id · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act ·
 `GAP` = not met (bead) · `N/A(op)` = property of the operator's deployed environment.
+
+> **SAST correction (GX-14).** `.github/workflows/codeql.yml` is **disabled at the Actions
+> level** (`disabled_manually`, since 2026-07-18, separate maintainer direction — merge
+> latency). The file and its triggers remain on `main`, but GitHub schedules **no run on any
+> event**: no `CodeQL analysis (rust)` check-run, no SARIF upload, no input to `ci-summary`,
+> and it gates nothing. Every row below that previously cited CodeQL has been corrected in
+> place — struck from the evidence where the control stands on its other named controls, and
+> **downgraded** (A.8.7, A.8.28) where the status materially rested on it. **No compensating
+> SAST control exists**: clippy `-D warnings`, the unsafe-count ratchet, `cargo-deny`/
+> `cargo-vet`, fuzz and Miri are all live and genuine, but none performs taint or
+> crypto-misuse analysis. Anchor: **GX-14** in [`../gap-register.md`](../gap-register.md);
+> `ASSURANCE.md` §11; durable-posture decision issue **#4620**. [OPUS-5]
 
 > **Honesty banner.** The clustering of `AUDIT-READY` in A.5/A.6 is **deliberate and
 > correct**: those are management-system controls that require an *organization* to act
@@ -31,9 +44,9 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 | A.5.3 | Segregation of duties | AUDIT-READY | PR review required + `CODEOWNERS` + branch protection (`docs/branch-protection.md`: no direct push, including admins). Author≠sole-approver is enforced by the ruleset (org-configured, out-of-repo). | Adopting org |
 | A.5.4 | Management responsibilities | AUDIT-READY | `CONTRIBUTING.md` + `AGENTS.md` define the obligations on every contributor; management *enforcement* is an org act. | Adopting org |
 | A.5.5 | Contact with authorities | N/A(op) | No org/authority relationship to maintain for an OSS project; operator owns this for their deployment. | Operator |
-| A.5.6 | Contact with special interest groups | IMPL | OpenSSF Scorecard published to the public OpenSSF dashboard (`.github/workflows/scorecard.yml`, `publish_results: true`); RustSec advisory-DB consumed daily (`dependency-monitoring.yml`); CodeQL/GHSA ecosystem participation. | sparq |
-| A.5.7 | Threat intelligence | IMPL | Daily advisory watchdog `.github/workflows/dependency-monitoring.yml` (RustSec); Dependabot 4 ecosystems (`.github/dependabot.yml`); CodeQL `security-and-quality` (`codeql.yml`). | sparq |
-| A.5.8 | Information security in project management | IMPL | Security gates are part of the dev process: `ci.yml` (clippy `-D warnings`, tests), `codeql.yml`, `supply-chain.yml`, `miri.yml`, `fuzz.yml`, `scorecard.yml`, aggregated by `ci-summary.yml` as a branch-protection gate. Threat model authored per surface (`research/threat-model.md`). | sparq |
+| A.5.6 | Contact with special interest groups | IMPL | OpenSSF Scorecard published to the public OpenSSF dashboard (`.github/workflows/scorecard.yml`, `publish_results: true`); RustSec advisory-DB consumed daily (`dependency-monitoring.yml`); GHSA ecosystem participation (advisories consumed + published through GitHub Security Advisories). *CodeQL struck from this row's evidence — the lane is disabled and runs on no event (**GX-14**); the control stands on the Scorecard/RustSec/GHSA evidence above.* | sparq |
+| A.5.7 | Threat intelligence | IMPL | Daily advisory watchdog `.github/workflows/dependency-monitoring.yml` (RustSec); Dependabot 4 ecosystems (`.github/dependabot.yml`); GHSA/`SECURITY.md` inbound reports. *CodeQL `security-and-quality` struck from this row — `codeql.yml` is disabled and produces no analysis (**GX-14**); the advisory feeds above are live and independently sufficient for the intelligence-collection control, but sparq now receives **no first-party code-analysis signal**.* | sparq |
+| A.5.8 | Information security in project management | IMPL | Security gates are part of the dev process: `ci.yml` (clippy `-D warnings`, tests), `supply-chain.yml`, `miri.yml`, `fuzz.yml`, `scorecard.yml`, aggregated by `ci-summary.yml` as a branch-protection gate. *`codeql.yml` struck from this gate list — the file is retained on `main` but the workflow is disabled at the Actions level, so it is not part of the running gate stack (**GX-14**); the listed lanes are live and gating.* Threat model authored per surface (`research/threat-model.md`). | sparq |
 | A.5.9 | Inventory of information & associated assets | AUDIT-READY | Asset inventory of the *software* exists: CycloneDX SBOM per build (`supply-chain.yml`), crate list, `research/threat-model.md` §Assets. Inventory of *operator data assets* is the operator's. | sparq / Operator |
 | A.5.10 | Acceptable use of information & assets | N/A(op) | Acceptable-use of a deployed instance + loaded data is the operator's policy. | Operator |
 | A.5.11 | Return of assets | N/A(op) | People/asset-return control; no employees. | Operator |
@@ -60,8 +73,8 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 | A.5.32 | Intellectual property rights | IMPL | `deny.toml` `[licenses]` allow-list gates dependency licenses in CI (`supply-chain.yml`); `LICENSE` (MIT) declared; contributor IP terms in `CONTRIBUTING.md`. | sparq |
 | A.5.33 | Protection of records | N/A(op) | Operator's records retention. | Operator |
 | A.5.34 | Privacy & protection of PII | AUDIT-READY | sparq processes no PII of its own; loaded-RDF PII is operator-controller. Scoped in `compliance/data-flow.md` + `compliance/dpia.md` (privacy worktree). | Operator |
-| A.5.35 | Independent review of information security | AUDIT-READY | Independent reviews exist in substance: OpenSSF Scorecard (external automated), CodeQL, the adversarial threat model + ZK soundness audit; this very engineer↔auditor loop. A *formal accredited internal-audit programme* is an org act — GAP-ISO-1. | sparq / Adopting org |
-| A.5.36 | Compliance with policies, rules & standards | IMPL | The `ci-summary.yml` aggregator is a required branch-protection gate that fails the merge if any policy lane (clippy, tests, conformance ratchets, supply-chain, CodeQL) is red. `docs/branch-protection.md`. | sparq |
+| A.5.35 | Independent review of information security | AUDIT-READY | Independent reviews exist in substance: OpenSSF Scorecard (external automated), the adversarial threat model + ZK soundness audit; this very engineer↔auditor loop. *CodeQL struck — the one automated independent code-review source is disabled and produces no findings (**GX-14**), so the automated half of this control is now Scorecard-only.* A *formal accredited internal-audit programme* is an org act — GAP-ISO-1. | sparq / Adopting org |
+| A.5.36 | Compliance with policies, rules & standards | IMPL | The `ci-summary.yml` aggregator is a required branch-protection gate that fails the merge if any policy lane (clippy, tests, conformance ratchets, supply-chain) is red. `docs/branch-protection.md`. **Correction (GX-14):** an earlier version of this row also listed **CodeQL** as one of those lanes — that was **false**. `codeql.yml` is disabled at the Actions level, emits no `CodeQL analysis (rust)` check-run on any event (push / pull_request / merge_group / schedule), and therefore **feeds the aggregator nothing and gates nothing**. The lanes named above are live and genuinely gating, so the control itself stands on them. | sparq |
 | A.5.37 | Documented operating procedures | IMPL | `AGENTS.md` (the operating procedure for working on the repo), `CONTRIBUTING.md`, `docs/branch-protection.md`, the workflows themselves are executable procedure. | sparq |
 
 ## A.6 — People controls (8)
@@ -93,8 +106,8 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 | A.8.4 | Access to source code | IMPL | Branch protection on `main` (no direct push, PR + review + required `ci-summary` gate; `docs/branch-protection.md`); `CODEOWNERS`; SHA-pinned actions; release artifacts SLSA-attested + SHA256SUMS (`release.yml`). | sparq |
 | A.8.5 | Secure authentication | N/A(op) → AUDIT-READY | Optional server bearer token (`SPARQ_AUTH_TOKEN`); full secure-auth (MFA, session) is the operator's gateway (boundary B3). Repo-side: GitHub auth + signed commits/attestations. | Operator |
 | A.8.6 | Capacity management | N/A(op) → IMPL(partial) | Engine has a `QueryBudget` DoS-limit primitive (`sparq-engine`, threat-model T-DoS); capacity of a *running deployment* is operator-owned. | sparq / Operator |
-| A.8.7 | Protection against malware | IMPL | CodeQL SAST (`codeql.yml`), supply-chain advisory gating (`supply-chain.yml` + daily watchdog), SHA-pinned actions, distroless non-root image (no shell/package-manager to subvert; `Dockerfile`). | sparq |
-| A.8.8 | Management of technical vulnerabilities | IMPL | `cargo deny check advisories` GATING (`supply-chain.yml` — GX-1 un-degraded), daily `dependency-monitoring.yml` watchdog, Dependabot 4 ecosystems, CodeQL, `SECURITY.md` disclosure + `.well-known/security.txt`. Remediation tracked as beads. | sparq |
+| A.8.7 | Protection against malware | **PARTIAL** (was IMPL — **GX-14**) | **Prevention/containment layers are live and verified:** supply-chain advisory gating (`supply-chain.yml#deny` + daily `dependency-monitoring.yml` watchdog), `cargo-deny` bans/sources + `cargo-vet` (`supply-chain.yml#vet`), SHA-pinned actions, distroless non-root image with no shell or package manager to subvert (`Dockerfile`). **The detection layer over first-party source is absent:** CodeQL SAST — the control previously cited first in this row — is disabled at the Actions level and analyses nothing, and **no other control substitutes** (clippy `-D warnings` is a lint, the unsafe-count ratchet is a count gate, fuzz/Miri find undefined behaviour, not malicious or vulnerable logic). Downgraded IMPL→PARTIAL rather than footnoted, because A.8.7 expects detection as well as prevention. Anchor **GX-14**; posture decision issue **#4620**. | sparq |
+| A.8.8 | Management of technical vulnerabilities | IMPL | `cargo deny check advisories` GATING (`supply-chain.yml` — GX-1 un-degraded), daily `dependency-monitoring.yml` watchdog, Dependabot 4 ecosystems, `SECURITY.md` disclosure + `.well-known/security.txt`. Remediation tracked as beads. *CodeQL struck from this row (**GX-14**): the **dependency** half of the control — obtain, evaluate, gate — remains fully live and merge-blocking, but sparq now has **no automated discovery channel for vulnerabilities in its own source**; that residual is carried by A.8.28 (PARTIAL), not papered over here.* | sparq |
 | A.8.9 | Configuration management | IMPL | Infrastructure-as-code: pinned toolchain (`rust-toolchain`/MSRV), SHA-pinned actions, pinned base image digest (`Dockerfile` `@sha256:…`), `Cargo.lock` committed, `deny.toml` policy-as-code. | sparq |
 | A.8.10 | Information deletion | N/A(op) | Deletion of operator data is operator-owned. | Operator |
 | A.8.11 | Data masking | N/A(op) → cross-ref | sparq does not mask loaded RDF; the ZK *privacy story* (what it would offer if sound) is in `compliance/cryptoreview/` + privacy worktree, flagged **not yet sound**. Not claimed here. | Operator / cryptoreview |
@@ -111,10 +124,10 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 | A.8.22 | Segregation of networks | N/A(op) | Operator deployment topology. | Operator |
 | A.8.23 | Web filtering | N/A(op) | Operator network control. | Operator |
 | A.8.24 | **Use of cryptography** | AUDIT-READY (scoped) | **Operationally relied-on crypto only:** release artifacts signed via Sigstore/SLSA attestations (`release.yml` `attest-build-provenance`); TLS is the operator's gateway. **EXPLICITLY EXCLUDED: the `sparq-zk`/`sparq-zk-compose`/`sparq-mpc` estate makes NO production cryptographic guarantee** — the v1 ZK verifier was **originally found NOT sound** (`research/zk-soundness-audit.md`, kept on record for the `sq-1gir` regression map), but `sq-1s2` landed the verifier-side binding layer and an **internal** post-remediation re-audit (`research/zk-verifier-reaudit.md`, `sq-gbp4`) found all prior findings closed → "sound as landed for the assumed threat model"; that re-audit is internal/single-model/read-only, **external accredited-cryptographer sign-off is STILL PENDING** (`sq-qhy4`, P0) and there is **NO production soundness/privacy/integrity guarantee** (still a research scaffold; `sparq-mpc` semi-honest-only) [OPUS-4.8] (`SECURITY.md`); soundness is assessed in `compliance/cryptoreview/`. A crypto-key-management *policy* is an org act (`compliance/policies/` template). <!-- [OPUS-4.8] reconciled with post-remediation re-audit (sq-gbp4); see ZK-verdict cross-ref sweep --> | sparq / cryptoreview |
-| A.8.25 | Secure development life cycle | IMPL | The gate stack *is* the SDLC: `CONTRIBUTING.md` §Secure coding + §Secure-SDLC touchpoints (maps to NIST SSDF), `ci.yml`, `codeql.yml`, `miri.yml`, `fuzz.yml`, `supply-chain.yml`, conformance ratchets, threat model. Cross-ref `compliance/ssdf/`. | sparq |
+| A.8.25 | Secure development life cycle | IMPL | The gate stack *is* the SDLC: `CONTRIBUTING.md` §Secure coding + §Secure-SDLC touchpoints (maps to NIST SSDF), `ci.yml`, `miri.yml`, `fuzz.yml`, `supply-chain.yml`, conformance ratchets, threat model. Cross-ref `compliance/ssdf/`. *`codeql.yml` struck from the gate stack (**GX-14**) — it is disabled and runs on no event. The SDLC's remaining phase-gates are live and gating; the **static-analysis touchpoint of the SDLC is missing**, and that shortfall is carried explicitly by A.8.28 (PARTIAL) rather than absorbed here.* | sparq |
 | A.8.26 | Application security requirements | IMPL | Security requirements documented: `research/threat-model.md` (assets, boundaries B1–B5, STRIDE), `SECURITY.md` (hardened-input expectations), ASVS re-scope (`compliance/asvs/`). | sparq |
 | A.8.27 | Secure system architecture & engineering principles | IMPL | `#![forbid(unsafe_code)]` in **26 of 31** crates (confined unsafe surface — the 5 with `unsafe` are sparq-core/-vectors/-cli/-zk-compose/-bench), boundary-based threat model (B1–B5), defense-in-depth gate stack. `compliance/memsafety/unsafe-register.md` attests every first-party unsafe site. | sparq |
-| A.8.28 | Secure coding | IMPL | `CONTRIBUTING.md` §Secure coding (the standard); `clippy --workspace --all-targets -- -D warnings` GATING (`ci.yml`); CodeQL `security-and-quality`; the unsafe-register count ratchet (`scripts/unsafe-gate.py`, gating CI lane). | sparq |
+| A.8.28 | Secure coding | **PARTIAL** (was IMPL — **GX-14**) | **Live:** `CONTRIBUTING.md` §Secure coding (the standard of record); `clippy --workspace --all-targets -- -D warnings` GATING (`ci.yml#lint`); the unsafe-register count ratchet (`scripts/unsafe-gate.py`, gating CI lane); `#![forbid(unsafe_code)]` on the majority of crates. **Missing: SAST.** ISO/IEC 27002 A.8.28 expects static application security testing as part of the secure-coding control; CodeQL `security-and-quality` — previously cited here — is disabled at the Actions level and runs on no event, and **nothing compensates**: clippy is a *linter*, not a taint or crypto-misuse analyser. 35 open critical `rust/hard-coded-cryptographic-value` alerts survive from the last runs; they are **triaged** as false positives of a single query-model defect (issue **#4615**) — triaged is **not** covered, and says nothing about what an enabled scanner would find on today's tree. Anchor **GX-14**; posture decision issue **#4620**. | sparq |
 | A.8.29 | Security testing in development & acceptance | IMPL | `cargo test --workspace` (`ci.yml`), W3C SPARQL/SHACL/inference conformance ratchets (never-lowered), `cargo-fuzz` (`fuzz.yml` PR smoke + nightly), Miri UB lane (`miri.yml`), the mmap corruption oracle (`crates/sparq-core/tests/mmap_corruption_oracle.rs`). | sparq |
 | A.8.30 | Outsourced development | N/A(op) | No outsourced development. | sparq |
 | A.8.31 | Separation of dev/test/production environments | AUDIT-READY | Branch model (`main` protected; feature branches) separates in-progress from released; release artifacts are built only on tags via `release.yml`. Operator owns their prod env separation. | sparq / Operator |
@@ -126,13 +139,13 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 
 ## Roll-up
 
-| Theme | Applicable & IMPL | AUDIT-READY | GAP | N/A(operator) |
-|---|---|---|---|---|
-| A.5 Organizational (37) | 9 | 17 | 0 (gaps tracked under GAP-ISO-1/2) | 11 |
-| A.6 People (8) | 1 | 4 | 0 | 3 |
-| A.7 Physical (14) | 0 | 0 | 0 | 14 (block) |
-| A.8 Technological (34) | 14 | 6 | 0 | 14 |
-| **Total (93)** | **24** | **27** | **0 open Annex-A control gaps; 2 readiness gaps** | **42** |
+| Theme | Applicable & IMPL | PARTIAL | AUDIT-READY | GAP | N/A(operator) |
+|---|---|---|---|---|---|
+| A.5 Organizational (37) | 9 | 0 | 17 | 0 (gaps tracked under GAP-ISO-1/2) | 11 |
+| A.6 People (8) | 1 | 0 | 4 | 0 | 3 |
+| A.7 Physical (14) | 0 | 0 | 0 | 0 | 14 (block) |
+| A.8 Technological (34) | 12 | 2 (A.8.7, A.8.28 — **GX-14**) | 6 | 0 | 14 |
+| **Total (93)** | **22** | **2** | **27** | **0 open Annex-A control gaps; 2 readiness gaps** | **42** |
 
 **Dual-status bucketing rule (so the roll-up cross-foots).** Several rows carry a dual
 status of the form `N/A(op) → X` or `X(repo) / N/A(op)`, because the control has a *sparq-side*
@@ -149,9 +162,12 @@ is described in the row text, not separately tallied. Applying the rule:
 - **Counted as N/A(op)**: A.8.11 (`N/A(op) → cross-ref`) — sparq does not mask loaded RDF; the
   ZK privacy story is cross-referenced to `compliance/cryptoreview/`, not claimed here.
 
-This yields the A.8 split **14 IMPL / 6 AUDIT-READY / 14 N/A(op) = 34**. (An earlier headline
-read 26/27/40; it bucketed the two `N/A(op) → AUDIT-READY` rows A.8.2/A.8.5 as IMPL, which the
-rule above does not — corrected here in the conservative direction to **24/27/42**.)
+This yields the A.8 split **12 IMPL / 2 PARTIAL / 6 AUDIT-READY / 14 N/A(op) = 34**. (An earlier
+headline read 26/27/40; it bucketed the two `N/A(op) → AUDIT-READY` rows A.8.2/A.8.5 as IMPL, which
+the rule above does not — corrected in the conservative direction to **24/27/42**. A later
+correction under **GX-14** moved **A.8.7** and **A.8.28** from IMPL to PARTIAL when CodeQL was
+found to be operationally disabled, giving the current **22 IMPL / 2 PARTIAL / 27 AUDIT-READY /
+42 N/A(op)**.)
 
 **Reading this honestly:** sparq's *technical* Annex A surface (the bulk of A.8 + the
 supplier/development/vuln-management parts of A.5) is **IMPLEMENTED & VERIFIED** with
@@ -160,7 +176,11 @@ management-system layer (A.5 policy/roles/incident/review, A.6 people) — they 
 **doc-of-record in the repo** but their *certificate* requires an organization to operate
 an ISMS, which **no repo artifact can substitute for**. The **42 N/A(operator)** controls
 are physical/operational properties of a *deployed* environment, correctly assigned to the
-adopting operator for a library/server. There are **zero open Annex-A control gaps**; of the
+adopting operator for a library/server. There are **zero Annex-A controls at status `GAP`**, but
+**two are `PARTIAL`** — A.8.7 (protection against malware) and A.8.28 (secure coding) — because
+**SAST is not running**: `codeql.yml` is disabled at the Actions level and **nothing compensates**
+(cross-cutting **GX-14**, P1; `ASSURANCE.md` §11; posture decision **#4620**). That is a real
+residual, not a bookkeeping artefact. Of the
 two readiness gaps, **GAP-ISO-2** (an explicit operator-deployment-security guidance doc) is
 now **ADDRESSED** by [`operator-deployment-security.md`](./operator-deployment-security.md),
 leaving **GAP-ISO-1** (the ISMS organizational artifacts) as the one open readiness gap in

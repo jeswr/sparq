@@ -34,12 +34,53 @@ grep -n 'cargo clippy' .github/workflows/ci.yml
 (the `lint` job, "clippy (deny warnings)"). The secure-coding *standard* of record is
 `CONTRIBUTING.md` §"Secure coding" (read lines under that heading).
 
-## SAST (A.8.7 / A.8.25 / A.8.28)
+## SAST — NOT RUNNING (A.8.7 PARTIAL / A.8.25 / A.8.28 PARTIAL) — GX-14
+
+> **This verification step was misleading and is corrected here.** It previously read:
+>
+> ```sh
+> grep -nE 'queries:|languages:' .github/workflows/codeql.yml
+> ```
+> → "CodeQL runs `security-and-quality`."
+>
+> **That grep still passes** — the workflow *file* and its trigger block are intact on `main` —
+> but it proves only that a YAML file exists, **not** that any analysis runs. A workflow can be
+> disabled at the **Actions level**, which leaves the file byte-identical while GitHub schedules
+> nothing. Grepping a workflow file is therefore **never** valid evidence that a lane executes;
+> only the workflow *state* and the presence of a *check-run* are. [OPUS-5]
+
+**Ground truth:** `.github/workflows/codeql.yml` has been **`disabled_manually`** since
+**2026-07-18**, by separate maintainer direction (merge latency). GitHub schedules **no run on
+any event** — push, `pull_request`, `merge_group`, or `schedule`. Consequently there is **no**
+`CodeQL analysis (rust)` check-run, **no** SARIF upload, **no** input to `ci-summary`, and it
+**gates nothing**.
+
+Authoritative re-verification (state + check-run, not file contents):
 
 ```sh
-grep -nE 'queries:|languages:' .github/workflows/codeql.yml
+# 1. the workflow's Actions-level state — the only thing that decides whether it runs
+gh api repos/sparq-org/sparq/actions/workflows/codeql.yml --jq '.state'
+#   → disabled_manually        (NOT "active")
+
+# 2. no run has been scheduled on any recent event
+gh run list --workflow codeql.yml --limit 5
+
+# 3. no CodeQL check-run appears on a recent PR's status set
+gh pr checks <recent-pr> | grep -i codeql        # → no match
 ```
-→ CodeQL runs `security-and-quality`. Workflow `.github/workflows/codeql.yml`.
+
+**No compensating SAST control exists.** `clippy --workspace --all-targets -- -D warnings`
+(`ci.yml#lint`), the unsafe-count ratchet (`scripts/unsafe-gate.py`), `cargo-deny`/`cargo-vet`
+(`supply-chain.yml`), `fuzz.yml` and `miri.yml` are **all live and genuine** — but **none of
+them performs taint analysis or crypto-misuse analysis**, so the residual is real, not
+bookkeeping. clippy is a *linter*, not a SAST engine. The 35 open critical
+`rust/hard-coded-cryptographic-value` alerts left behind by the last CodeQL runs were **triaged**
+under issue **#4615** and found to be false positives of one query-model defect; **triaged is not
+covered**, and it says nothing about what an enabled scanner would find on today's tree.
+
+Anchor: **GX-14** (P1) in [`../gap-register.md`](../gap-register.md); `ASSURANCE.md` §11;
+durable-posture decision (re-enable advisory-only / re-enable on schedule / adopt another SAST /
+accept and document no SAST) is open maintainer issue **#4620**.
 
 ## Vulnerability management — advisory gating (A.8.8 / A.8.22)
 

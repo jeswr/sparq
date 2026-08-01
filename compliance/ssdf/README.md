@@ -29,10 +29,17 @@ deploying organization can lift into its own attestation — not a pending exter
 ## Scope — what's in, what's the operator's job
 
 **In scope (the producer = sparq project):**
-- The secure-SDLC *gates* — clippy `-D warnings`, CodeQL SAST, `cargo test`/conformance
+- The secure-SDLC *gates* — clippy `-D warnings`, `cargo test`/conformance
   ratchets, Miri, fuzz, the unsafe-count ratchet, cargo-deny advisories/bans/sources/
   licenses (gating), cargo-vet, the CycloneDX SBOM + VEX, SLSA build provenance, and the
-  `ci-summary / gate` aggregator.
+  `ci-summary / gate` aggregator. **CodeQL SAST is deliberately absent from this list:**
+  `.github/workflows/codeql.yml` is retained on `main` but has been **disabled at the Actions
+  level (`disabled_manually`) since 2026-07-18** by separate maintainer direction (merge
+  latency), so it runs on **no** event, produces no check-run or SARIF, and gates nothing.
+  **Nothing compensates** — none of the live gates above performs taint or crypto-misuse
+  analysis. Anchor: cross-cutting gap **GX-14** (P1) in
+  [`../gap-register.md`](../gap-register.md); narrative in `ASSURANCE.md` §11; open posture
+  decision **#4620**.
 - The secure-coding standard (`CONTRIBUTING.md`), the threat model
   (`research/threat-model.md`), the dependency policy (`deny.toml`), and the coordinated
   vulnerability-disclosure programme (`SECURITY.md` + `.well-known/security.txt`).
@@ -51,12 +58,21 @@ deploying organization can lift into its own attestation — not a pending exter
 
 ## Honesty posture
 
-The coverage summary in `controls.md` reports **28 implemented & verified / 13 audit-ready
-/ 1 gap** across **42 rows = 41 standard SP 800-218 v1.1 tasks + 1 flagged sparq-local row**
+The coverage summary in `controls.md` reports **26 implemented & verified / 2 partial / 13
+audit-ready / 1 gap** across **42 rows = 41 standard SP 800-218 v1.1 tasks + 1 flagged
+sparq-local row**
 (`RV.1.4`, the daily advisory watchdog — evidence supporting standard task RV.1.3, **not** a
 separate framework task; see the footnote in `controls.md`). <!-- [OPUS-4.8] sq-ce97: 41
-standard (RV.1 has 3 tasks) + 1 local row = 42 rows; status tally 28/13/1 unchanged. -->
-The single technical gap is **PW.6.2 reproducible-build**
+standard (RV.1 has 3 tasks) + 1 local row = 42 rows. [OPUS-5] tally re-footed 28/13/1 →
+26/2/13/1 for the CodeQL/GX-14 reconciliation; no row added or removed. -->
+The two **partial** rows are **PW.7.1 / PW.7.2** (static analysis): they were scored on CodeQL,
+which has been `disabled_manually` since **2026-07-18**, so **no SAST runs** and **nothing
+compensates** — clippy, the unsafe ratchet, cargo-deny/cargo-vet, fuzz and Miri are all live and
+genuine but none performs taint or crypto-misuse analysis. The 35 open critical
+`rust/hard-coded-cryptographic-value` alerts were **triaged** (issue #4615) as false positives of
+one query-model defect — *triaged is not covered*. Anchor: **GX-14** (P1) in
+[`../gap-register.md`](../gap-register.md); `ASSURANCE.md` §11; open posture decision **#4620**.
+The single row scored as an outright gap is **PW.6.2 reproducible-build**
 (GX-8, bead **sq-toze.9**) — now *characterised*: the honest reproducibility statement is
 documented ([`../slsa/reproducible-build.md`](../slsa/reproducible-build.md)), with only the CI
 rebuild-and-diff enforcement outstanding. No row presents the `sparq-zk*` / `sparq-mpc`

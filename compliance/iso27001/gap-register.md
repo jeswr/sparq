@@ -13,9 +13,10 @@ first.
 
 ## Framing — why this register is short, and why that is honest
 
-ISO 27001 has **zero open Annex-A *control* gaps** for sparq, because the gaps that would
-otherwise appear are correctly classified one of two ways (and so are *not* gaps in the
-"sparq must fix code" sense):
+ISO 27001 has **zero Annex-A controls at status `GAP`** for sparq — though **two are now
+`PARTIAL`** (A.8.7, A.8.28) under the cross-cutting **GX-14** SAST gap recorded below, which is a
+real technical residual and not a classification artefact. The remaining potential gaps are
+correctly classified one of two ways (and so are *not* gaps in the "sparq must fix code" sense):
 
 1. **AUDIT-READY** — the control needs an *organization* to run an ISMS (a signed policy,
    a risk-treatment decision, a management review, an accredited internal audit). The repo
@@ -39,18 +40,25 @@ addressed**:
   [`operator-deployment-security.md`](./operator-deployment-security.md) — see the *ADDRESSED in
   this directory* section below.
 
-So there are **no remaining open readiness gaps in the in-repo / agent-scoped sense**; the only
-residual is the **external certificate act** under GAP-ISO-1 (labelled, never claimed as
-closed). One earlier suspected gap (CODEOWNERS) was verified **false** and is recorded as
+So there are **no remaining open readiness gaps owned by this slice**; the residuals are (a) the
+**external certificate act** under GAP-ISO-1 (labelled, never claimed as closed) and (b) the
+cross-cutting, **open and technical** SAST gap **GX-14** recorded in the OPEN-gaps section below.
+One earlier suspected gap (CODEOWNERS) was verified **false** and is recorded as
 resolved-on-inspection below.
 
 ## OPEN gaps
 
-_No open readiness gaps in the in-repo / agent-scoped sense._ Both readiness gaps have their
+_No open readiness gaps **owned by this slice**._ Both readiness gaps have their
 in-repo deliverable addressed — GAP-ISO-1 by the ISMS template set (below) and GAP-ISO-2 by the
 operator-deployment-security doc (below). The **only residual is the external certificate act**
 under GAP-ISO-1, which is labelled in the residual note and the external section, and **must
 never be claimed as closed**.
+
+**But one *cross-cutting* open gap now bears on this slice's control statuses:**
+
+| ID | Gap (anchor — not restated here) | Sev | Effect on this slice |
+|---|---|---|---|
+| **GX-14** | **SAST is not running** — CodeQL is operationally disabled and nothing compensates. Full statement, evidence and remediation options live in the top-level [`../gap-register.md`](../gap-register.md) (and `ASSURANCE.md` §11); the durable-posture decision is open maintainer issue **#4620**. Do **not** restate it here. | **P1** | **A.8.7** and **A.8.28** downgraded **IMPL → PARTIAL** in [`controls.md`](./controls.md) + [`soa-template.md`](./soa-template.md). CodeQL struck from the evidence of **A.5.6, A.5.7, A.5.8, A.5.35, A.8.8, A.8.25** (each stands on its other named controls). The **A.5.36** claim that `ci-summary` gates on a CodeQL lane was **false** and is corrected. The `evidence.md` SAST step — a `grep` over the intact workflow *file* — was **misleading verification** and is replaced with a workflow-*state* check. So the Annex-A roll-up is now **22 IMPL / 2 PARTIAL / 27 AUDIT-READY / 42 N/A(op)**. |
 
 ## ADDRESSED in this directory
 

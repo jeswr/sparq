@@ -9,8 +9,12 @@
 > discovered work as beads via the main checkout; orchestrator re-exports.)
 
 Severity — **P0** unblocks a CDMC key-control theme · **P1** raises a capability one level · **P2**
-polish. None of these are *security* gaps (sparq's security posture is 4 and covered by the other
-framework slices); they are **data-management-maturity** gaps specific to CDMC.
+polish. None of these are *security* gaps; they are **data-management-maturity** gaps specific to
+CDMC. **One security gap does bear on CDMC but is owned cross-cuttingly, not here:** **GX-14** — the
+CodeQL lane is disabled at the Actions level (`disabled_manually`, since 2026-07-18) and **no
+compensating SAST exists**, so CodeQL is struck from the 4.1 evidence (the maturity **4** was
+re-tested without it and kept — see [`controls.md`](./controls.md) 4.1). Anchor:
+[`../gap-register.md`](../gap-register.md) GX-14 (P1), issue **#4620**; `ASSURANCE.md` §11.
 
 | ID | Gap | Cap (cur→tgt) | Sev | Remediation (see `recommendations.md`) | Bead intent (epic sq-toze) |
 |---|---|---|---|---|---|

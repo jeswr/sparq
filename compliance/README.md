@@ -87,7 +87,12 @@ contract) — operator-owned governance *decisions* are capped at the maturity o
 **The two earned 4s** — sparq is strongest where it is an engine:
 
 - **4.1 Data is secured & controls are evidenced — 4.** The deep, CI-gated security estate:
-  `#![forbid(unsafe_code)]`, Miri/fuzz, CodeQL, supply-chain attestation, DoS limits, distroless image.
+  `#![forbid(unsafe_code)]` + unsafe ratchet, Miri/fuzz, clippy `-D warnings`, gating cargo-deny/
+  cargo-vet, supply-chain attestation, DoS limits, distroless image. **CodeQL is *not* part of this
+  claim** — the lane is disabled at the Actions level (`disabled_manually`, since 2026-07-18) and
+  gates nothing, and **no compensating SAST exists** (gap **GX-14**, `ASSURANCE.md` §11). The 4 was
+  re-tested without it and kept, since the remaining legs independently meet the "enforced, gated,
+  regression-covered" level-4 bar; the absence of SAST is carried as a named residual.
 - **6.1 Technical design supports the data platform — 4.** Sorted-permutation indexes, generation-ring
   MVCC snapshots, WAL durability, time-travel, zero-copy views, HDT/compressed ingest.
 

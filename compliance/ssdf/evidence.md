@@ -28,12 +28,12 @@ repo-relative. "Gating" means the artifact is a required CI check folded into
 
 | CI job (workflow#job) | What it gates | SSDF tasks |
 |---|---|---|
-| `ci.yml#clippy` | clippy `-D warnings` (gating) + fmt (non-blocking today) | PO.3.2, PW.5.1, PW.7.2 |
+| `ci.yml#clippy` | clippy `-D warnings` (gating) + fmt (non-blocking today). **A lint, not a SAST** — it performs no taint or crypto-misuse analysis, so it is *partial* evidence for PW.7.2, never a substitute for the disabled CodeQL lane (GX-14). | PO.3.2, PW.5.1, PW.7.2 (partial) |
 | `ci.yml#test` (sharded) | `cargo test --workspace` + doctests | PW.8.1, PW.8.2 |
 | `ci.yml#conformance` (SPARQL/SHACL/inference ratchets) | spec-conformance floors (never lowered) | PO.4.1, PW.8.2 |
 | `ci.yml#coverage` | per-crate coverage + test-presence ratchet | PO.4.1 |
 | `ci.yml#unsafe-register` | unsafe-count ratchet (`scripts/unsafe-gate.py`, `bench/unsafe-snapshot.json`) | PO.3.2, PO.4.1, RV.3.4 |
-| `codeql.yml` | CodeQL `security-and-quality` SAST | PO.3.2, PW.7.1, PW.7.2 |
+| ~~`codeql.yml`~~ **DISABLED — NOT valid evidence** | ~~CodeQL `security-and-quality` SAST~~ — the workflow is retained on `main` with its triggers intact, but it has been **disabled at the Actions level (`disabled_manually`) since 2026-07-18** by separate maintainer direction (merge latency). GitHub schedules **no** run on **any** event (push, pull_request, merge_group, schedule): no `CodeQL analysis (rust)` check-run, no SARIF upload to code scanning, nothing fed to `ci-summary`, nothing gated. **It gates nothing and must not be cited as a met control.** No compensating SAST exists. See **GX-14** in [`../gap-register.md`](../gap-register.md), `ASSURANCE.md` §11, posture decision **#4620**. | ~~PO.3.2, PW.7.1, PW.7.2~~ — struck from PO.3.2 (which stands on its other four gating tools); PW.7.1 + PW.7.2 downgraded to **Partial** |
 | `supply-chain.yml#audit` | `cargo deny check bans sources licenses` **and** `advisories` (all gating) | PO.3.2, PW.4.1, PW.4.4, RV.1.3 (sparq-local `RV.1.4`) |
 | `supply-chain.yml#vet` | `cargo vet --locked` (per-dependency audit attestations, gating) | PW.4.1 |
 | `supply-chain.yml#sbom` | CycloneDX SBOM artifact (`**/*.cdx.json`) | PO.3.3, PS.3.2 |
@@ -84,6 +84,25 @@ cargo audit bin <path-to-sparq-cli>
 
 ## 5. Honest gaps (do not read these as met)
 
+- **PW.7.1 / PW.7.2 — static analysis is NOT being performed (GX-14, P1; issue #4620).**
+  [OPUS-5] `.github/workflows/codeql.yml` has been **disabled at the Actions level
+  (`disabled_manually`) since 2026-07-18**, by separate maintainer direction (merge latency).
+  The file and its triggers are retained on `main`, but GitHub schedules **no** run on **any**
+  event (push, pull_request, merge_group, schedule) — so there is no `CodeQL analysis (rust)`
+  check-run, no SARIF upload to code scanning, nothing contributed to `ci-summary`, and nothing
+  gated. Two earlier claims in `controls.md` PW.7.2 were false as written and have been
+  corrected: CodeQL does **not** "run on push/PR/merge_group + schedule", and code-scanning
+  alerts are **not** "kept at zero" — **35 open `critical`
+  `rust/hard-coded-cryptographic-value` alerts** remain. Those 35 were **triaged** under issue
+  #4615 and found to be false positives of one query-model defect; **triaged is not covered**,
+  and it says nothing about what an enabled scanner would find now. **There is no compensating
+  SAST control.** clippy `-D warnings`, the unsafe-count ratchet, cargo-deny/cargo-vet, fuzz and
+  Miri are all live and genuine — but **none** performs taint or crypto-misuse analysis, so this
+  residual is real. PW.7.1 and PW.7.2 are consequently **Partial**, keeping only their
+  code-review evidence. The durable posture (re-enable advisory-only / on a schedule / adopt
+  another SAST / accept and document no SAST) is an **open maintainer decision (#4620)**. See
+  **GX-14** in [`../gap-register.md`](../gap-register.md), `ASSURANCE.md` §11, and
+  [`gap-register.md`](./gap-register.md) SSDF-G2.
 - **PW.6.2 — reproducible builds (GX-8, bead sq-toze.9).** The release is `--locked` +
   provenance-attested, and the honest PW.6.2 reproducibility statement is now **documented**
   ([`../slsa/reproducible-build.md`](../slsa/reproducible-build.md)): a measured double-build of

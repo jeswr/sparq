@@ -29,6 +29,13 @@ Safeguard honestly into one of:
   re-reads or re-runs the cited artifact.
 - **AUDIT-READY** — control + documentation in place, but the *certificate* needs an accredited
   external assessor / an organizational ISMS we cannot substitute for.
+- **PARTIAL** — materially but not fully met; the shortfall is named in-row and carries a gap id.
+  Currently **C-16.12** (SAST) and the source-code half of **C-7.5/7.6**, both under **GX-14**:
+  `.github/workflows/codeql.yml` is **disabled at the Actions level** (`disabled_manually`, since
+  2026-07-18), so no CodeQL run is scheduled on any event, it emits no check-run and gates nothing —
+  and **no compensating SAST control exists** (clippy `-D warnings` is a linter, not a taint or
+  crypto-misuse analyser). Anchor: [`../gap-register.md`](../gap-register.md) GX-14, `ASSURANCE.md`
+  §11, posture decision issue **#4620**. [OPUS-5]
 - **OPEN-gap** — not met (or only partially); recorded in [`gap-register.md`](./gap-register.md)
   with a `bd` bead. **Not** papered over.
 - **N/A (operator)** — the Safeguard governs the *deployment environment* (the org's network,
@@ -60,7 +67,12 @@ scoping the context). A `docker-smoke` job builds + runs the image and curls it 
 there is no automated container-image vulnerability scan (Trivy/Grype) and no Dockerfile linter
 (Dockle/Hadolint) lane in CI** — verified by `grep -rIl -E 'trivy|grype|dockle|hadolint' .github/`
 returning only false-positive comment matches. That is gap **GX-12** (bead **sq-toze.31**); see
-[`gap-register.md`](./gap-register.md). Everything else in this slice is PASS or honestly N/A.
+[`gap-register.md`](./gap-register.md).
+
+**A second, cross-cutting gap now applies: GX-14 — SAST is not running.** CodeQL is disabled at the
+Actions level and no compensating taint/crypto-misuse analysis exists, so **C-16.12 is PARTIAL, not
+PASS** (details in the status legend above and in [`controls.md`](./controls.md)). Everything else in
+this slice is PASS or honestly N/A.
 
 ## Files in this slice
 

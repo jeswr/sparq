@@ -11,8 +11,8 @@ codebase/CI evidence — controls that are met are in [`controls.md`](./controls
 gaps and are not listed here.
 
 SSDF coverage is high because it is largely a **mapping** of sparq's existing gate stack
-(see `controls.md` coverage summary: 28 implemented & verified / 13 audit-ready / **1
-gap**, across 42 task rows). The cross-cutting supply-chain/secure-coding gaps that other frameworks share
+(see `controls.md` coverage summary: 26 implemented & verified / **2 partial** / 13
+audit-ready / **1 gap**, across 42 task rows). The cross-cutting supply-chain/secure-coding gaps that other frameworks share
 (GX-1 advisories PR-gate, GX-5 unsafe register, GX-6 secure-coding section, GX-7
 cargo-auditable/vet) have **already landed** in the codebase and are cited as evidence in
 `controls.md` — they are *not* re-listed as SSDF gaps.
@@ -32,6 +32,23 @@ cargo-auditable/vet) have **already landed** in the codebase and are cited as ev
 | **Remediation plan** | (1) ✓ DONE — double-build + diff of `sparq-cli`, recorded in [`../slsa/reproducible-build.md`](../slsa/reproducible-build.md). (2) result was **not** byte-identical; (3) ✓ DONE — the specific non-determinism source (`mimalloc` build-time `__DATE__`/`__TIME__` banner; the build-id is downstream) is documented as the honest PW.6.2 statement and linked from `controls.md`. REMAINING (keeps the bead open): pin `SOURCE_DATE_EPOCH` (or drop the opt-in `mimalloc` default) for the reproducible artifact + add a CI rebuild-and-diff ratchet → a byte-for-byte claim. |
 | **Target** | Before a 1.0 release; not a pre-1.0 blocker (the project is explicitly pre-1.0, `SECURITY.md`). |
 | **Owner** | @jeswr |
+
+### SSDF-G2 — PW.7.1 / PW.7.2: SAST is not running (CodeQL disabled; nothing compensates)
+
+<!-- [OPUS-5] Slice entry for cross-cutting gap GX-14; do not duplicate the remediation
+     decision here — it is one maintainer decision, tracked in issue #4620. -->
+
+| Field | Value |
+|---|---|
+| **SSDF tasks** | PW.7.1 (determine + configure code review / analysis), PW.7.2 (perform the review / static analysis). Also struck as evidence from PO.1.3, PO.3.1, PO.3.2 and RV.3.4, which retain their status on other, live evidence. |
+| **Cross-cutting id** | **GX-14** (P1) — see [`../gap-register.md`](../gap-register.md) |
+| **Severity** | **P1** — a stated control that is switched off is worse than an acknowledged gap, because it stops anyone looking. |
+| **Tracking** | **issue #4620** (durable posture decision) · issue #4615 (alert triage + doc reconciliation). No `sq-toze` bead: the remediation is a maintainer *decision*, not an implementable task, until #4620 resolves. |
+| **Status** | **OPEN.** |
+| **What's missing** | `.github/workflows/codeql.yml` has been **disabled at the Actions level (`disabled_manually`) since 2026-07-18**, by separate maintainer direction (merge latency). The file and its triggers are retained on `main`, but GitHub schedules **no** run on **any** event (push, pull_request, merge_group, schedule): no `CodeQL analysis (rust)` check-run, no SARIF upload to code scanning, nothing fed to `ci-summary`, nothing gated. **No compensating SAST control exists** — clippy `-D warnings`, the unsafe-count ratchet, cargo-deny/cargo-vet, the fuzz lane and the Miri lane are all live and genuine, but **none** performs taint or crypto-misuse analysis. **35 open `critical` `rust/hard-coded-cryptographic-value` alerts** remain; they were **triaged** under issue #4615 and found to be false positives of a single query-model defect (the query matches its sink by parameter name while classifying test code by file path, and Rust colocates `#[cfg(test)]` code inside source files) — **triaged is not covered**, and it says nothing about what an enabled scanner would find now. |
+| **Remediation plan** | Not agent-decidable. The durable posture is an **open maintainer decision (#4620)** between: (1) re-enable advisory-only (non-gating, keeps the signal without the merge latency); (2) re-enable on a schedule only; (3) adopt a different SAST tool; (4) accept and document *no* SAST as a standing, disclosed residual. **No replacement control is claimed here** — until one of those lands, SSDF PW.7.1/PW.7.2 stay **Partial** and the static-analysis limb stays unmet. |
+| **Target** | Tied to #4620; not self-resolving. Before any 1.0 / external-attestation use of this SSDF mapping. |
+| **Owner** | @jeswr (maintainer decision) |
 
 ## Watch items (not gaps — evidence present, bead still open)
 

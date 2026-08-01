@@ -225,7 +225,12 @@ flat if the min-entries wait proves non-inert.
 > events**: `codeql.yml` was operationally disabled on 2026-07-18, so it produces no
 > check-run on any event and costs the queue nothing today. Its forward-looking meaning
 > is that queue latency is not a valid argument against re-enabling it on the blocking
-> path (PR #3427 owns the successor policy).
+> path (issue **#4620** owns the successor policy; PR #3427, cited here originally, was
+> closed as obsolete — its "advisory at merge" premise was overtaken by the full disable).
+> Note also that the §3.3 "alerts-at-zero posture … stay intact" line above is stale as a
+> description of today: with the lane off there is no such posture to preserve, and no
+> compensating SAST control exists. See `ASSURANCE.md` §11 and `compliance/gap-register.md`
+> GX-14.
 
 ### 3.4 Lever 4 — skip tests for unaffected crates in the merge group
 

@@ -97,9 +97,11 @@ CodeQL, which is operationally disabled via manual workflow-disable — see the 
 > check-run reflect the *ruleset's* intent, but the `codeql.yml` workflow is disabled
 > via `gh workflow disable` (Actions workflow state `disabled_manually`): the file is
 > retained on `main` with live triggers, but GitHub schedules no run, so no CodeQL
-> check-run is produced on any event and it neither runs nor gates today. Open PR
-> #3427 owns the successor policy (an advisory / retroactive posture) and the file's
-> triggers are left untouched here to avoid colliding with it. Read every "CodeQL …
+> check-run is produced on any event and it neither runs nor gates today. Issue
+> #4620 owns the successor policy (re-enable advisory-only / on a schedule / adopt
+> another SAST / accept and document no SAST). PR #3427, which previously owned it, was
+> **closed as obsolete** — its "advisory at merge" premise was overtaken by the full
+> disable — so do not follow it; the file's triggers are left untouched here. Read every "CodeQL …
 > gates" statement in this document against this note. (See *Merge-queue subset* below.)
 
 From the binding/packaging workflows (when those surfaces are exercised):
@@ -168,9 +170,9 @@ BYTE-IDENTICAL to before, with its full trigger set
 disabled via `gh workflow disable` (Actions workflow state `disabled_manually`), so
 GitHub does not schedule it on any event — no CodeQL check-run is produced on ANY
 trigger, so it neither runs nor gates. (This is an inert-file state, NOT an edit to the
-triggers — this PR does not modify codeql.yml at all; open PR #3427 owns the codeql.yml
-successor policy — an advisory / retroactive posture — so the file's triggers are left
-untouched here to avoid colliding with it.)
+triggers — this PR does not modify codeql.yml at all; issue #4620 owns the codeql.yml
+successor policy. PR #3427, which previously owned it, was closed as obsolete — its
+"advisory at merge" premise was overtaken by the full disable.)
 Heavy or independent lanes that already ran and gated on the PR head dropped their
 `merge_group` trigger because the queue re-run added wall-clock per enqueue with no new
 signal: currently `formal-verification.yml` (Kani proofs), `fuzz.yml` (corpus replay),
@@ -267,7 +269,7 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts. The `ready_for_review` run re-measures at full tier; since sq-6vshe.17 the `merge_group` run does **not** re-measure (only the fast floor gates run there — see *Coverage MEASUREMENT off the merge queue*), so the non-draft PR head and the post-merge `main` run are the measurement points |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
 | `cargo-fuzz` corpus replay (nightly toolchain + a libFuzzer build of every `fuzz/fuzz_targets/` target) | `fuzz.yml` `fuzz` | kept iff the PR carries `ci-full`/`fuzz-full` (`fuzz-full` also selects the randomized budget, so a bare draft skip would neuter it); otherwise the `ready_for_review` run re-replays at full tier. `differential-smoke` — the wrong-answer gate in the same workflow — is deliberately NOT draft-skipped: a wrong-answer regression is review-relevant |
-| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; codeql.yml is byte-identical to `main` — its triggers, including merge_group, are untouched by this PR — but the workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |
+| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; codeql.yml is byte-identical to `main` — its triggers, including merge_group, are untouched by this PR — but the workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; issue #4620 owns the successor policy; PR #3427 was closed as obsolete) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
@@ -561,7 +563,7 @@ all risk and no win: **REJECTED**, and the alerts-at-zero posture plus the rules
 disable** (*Merge-queue subset* above): the conclusion stands, but its premise no longer
 describes today's CI — `codeql.yml` is `disabled_manually`, so no CodeQL check-run is
 produced on any event and it costs the queue nothing at all right now. The standing
-meaning is forward-looking: when PR #3427 settles the successor policy and CodeQL runs
+meaning is forward-looking: when issue #4620 settles the successor policy and CodeQL runs
 again, **queue latency is not a valid argument for keeping it off the blocking path** —
 that premise was measured and falsified.
 

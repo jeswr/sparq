@@ -26,6 +26,7 @@ it does not re-own them:
 
 | Ref | Item | ASVS relevance | Status / owner |
 |---|---|---|---|
+| **GX-14** | **SAST is not running — CodeQL disabled at the Actions level (`disabled_manually`) since 2026-07-18; no compensating SAST.** | V1.1 (SDLC gate stack), V10.2 (evidence struck), **V10.1.1 (L3) NOT met** | **OPEN (P1)** — cross-cutting anchor in [`../gap-register.md`](../gap-register.md) GX-14; `ASSURANCE.md` §11; posture decision issue **#4620**, alert triage **#4615** (35 open critical alerts triaged as false positives of one query-model defect — triaged ≠ covered). ASVS L1/L2 sign-off is **not** blocked (L2 mandates no SAST); the V1.1/V10.2 rows keep **PASS** on their other, live evidence, but CodeQL is struck from both. Not re-owned here. |
 | GX-1 | cargo-deny advisories PR-gate | V10.2 (dependency integrity) | **Resolved** — `supply-chain.yml` job `cargo-deny check (advisories) — GATING` (no `continue-on-error`). Owned by `sbom`/`ssdf`. |
 | GX-3 | `.well-known/security.txt` (RFC 9116) | V14 (machine-discoverable disclosure) | **Resolved** — `.well-known/security.txt` present (bead `sq-toze.4` ✓). Cited as PASS. |
 | GX-6 | CONTRIBUTING secure-coding section | V1.1 (documented secure-coding standard) | **Resolved** — `CONTRIBUTING.md#secure-coding` (bead `sq-toze.7` ✓). Cited as PASS for V1. |
