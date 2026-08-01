@@ -1559,6 +1559,35 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — CACHE-BUDGET GROUPING. THIS IS THE CANONICAL NOTE; the
+          # other nine members of this group carry a one-line back-pointer here.
+          #
+          # `shared-key` REPLACES rust-cache's automatic job-name-derived key, so the
+          # ten conformance/oracle jobs land on ONE entry of the repository's shared
+          # 10 GB Actions-cache budget instead of ten. Before this, all ten were
+          # unkeyed and each held its own near-identical dependency entry — and budget
+          # pressure is exactly the LRU-eviction mechanism sq-3sbrr (#1395) identified
+          # as what makes a warm cache restore cold. sq-h2gz6 stopped these jobs'
+          # branch-scoped WRITES but left the keys alone, because collapsing them is
+          # only sound if their closures actually coincide.
+          #
+          # MEASURED, not assumed: `scripts/ci-cache-closure-overlap.py` computes each
+          # job's external dependency closure from the committed Cargo.lock and reports
+          # the pairwise overlap. The ten members sit above its floor and share a large
+          # common core; `geiger` (sparq-core only) and `lint` (whole workspace,
+          # --all-features) measure far below it and are deliberately left as
+          # singletons. `wasm` (a different target triple) and `msrv` (a different
+          # toolchain, which the key digest already separates) are left out on
+          # structural grounds the script records but cannot measure. Read that
+          # script's header before widening or narrowing this group.
+          #
+          # THE TRADE: rust-cache skips saving on an exact key hit, so one member wins
+          # the save race on main and its closure becomes the entry; the others restore
+          # the common core and compile their few extra packages cold. Smaller than ten
+          # warm caches, still far better than the cold rebuild an evicted key forces,
+          # and the same trade already taken on the `coverage-measure` step below.
+          # Pinned by scripts/tests/test_cache_shared_key_grouping.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -1695,6 +1724,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -1834,6 +1868,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -1982,6 +2021,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2094,6 +2138,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2202,6 +2251,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2313,6 +2367,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2429,6 +2488,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2573,6 +2637,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2736,6 +2805,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one of the ten measured-coincident conformance/oracle jobs
+          # sharing a single cache entry; rationale on the `conformance` job's cache
+          # step above (the canonical note), measurement in
+          # scripts/ci-cache-closure-overlap.py.
+          shared-key: conformance-suites
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical

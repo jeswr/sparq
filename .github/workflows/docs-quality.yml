@@ -900,6 +900,16 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] #5214: the sibling half of the property above. `save-if` stopped the
+      # branch-scoped cache WRITES; `shared-key` stops ten near-identical conformance
+      # /oracle jobs from each holding their own dependency entry against the shared
+      # 10 GB budget. Same invisible-regression shape — drop the key and rust-cache
+      # silently falls back to a job-name key while CI stays green. This pins the
+      # grouping over ci.yml AND re-runs the dependency-closure measurement that
+      # justifies it, so a dep change that pulls one member away from the rest reds
+      # here instead of quietly costing that job a cold build. Stdlib-only.
+      - name: rust-cache shared-key grouping + closure overlap (#5214)
+        run: python3 scripts/tests/test_cache_shared_key_grouping.py
       # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
       # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
       # outage there concluded `failure` with nothing measured and ejected an unrelated
