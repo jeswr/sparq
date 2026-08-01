@@ -130,6 +130,33 @@ reason — and an `odrl:prohibition` visibly flips a previously visible named gr
 that requester's pane. The browser build labels the tool **native-only** (the ODRL stack is not
 in the wasm bundle) instead of pretending.
 
+## ZK proofs + MPC tools (`sq-ixc3.17`)
+
+The **ZK proofs** and **MPC** tools are the site's `/showcase/zk-car-hire` and
+`/showcase/mpc-100k` demos re-pointed at the live workspace store, with the marketing chrome
+cut (the `sq-ixc3.11` translation rule). Both are lazily code-split, so an operator who never
+opens either tab pays nothing for them — which matters most for ZK, whose chunk pulls the
+~MB `@aztec/bb.js` + `@noir-lang/noir_js` WASM glue.
+
+**ZK proofs** (`live-bbjs`) runs a SPARQL SELECT over the live store, lists the
+`xsd:integer` literals in the result as candidate **private witnesses**, and proves a
+`FILTER` comparison over the one the operator picks — a genuine in-tab UltraHonk run over
+the compiled sparq circuit member `filter_int_d2` (the ACIR is synced from `site/public/zk/`
+by `app/scripts/sync-wasm.mjs`, optional at build time exactly like the tier-b wasm bundles).
+A second button asks the prover for the *opposite* verdict: the witness solve then fails and
+no proof exists, which is the refusal the tool demonstrates rather than asserts. The ceiling
+is shown, not hidden — binding an arbitrary store value to the circuit needs the **native**
+blake3 term encoder, which is not in the in-tab wasm bundle, so every row without a shipped
+term commitment is listed with that exact reason instead of being dropped.
+
+**MPC** (`live-sim`) takes each party's private contribution from a SELECT over the live
+store and reveals exactly one bit — `Σ contributions ≥ threshold` — through an additive
+secret-sharing run: the share matrix, each party's received view, the free zero-round local
+addition, then the verdict next to an explicit list of what stays withheld. Rows the store
+yielded that could not become parties (unbound, non-numeric, or outside the field's exact
+range) are surfaced with their reason, because a quietly-shortened party list would change
+the verdict without saying so.
+
 ## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
 
 The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 
@@ -176,8 +203,8 @@ loaders, and the result-shaping helpers — the **same package the site uses** �
 
 No performance number is baked in — the status bar shows the **measured** latency of the query you
 just ran, labelled as such (this work box / CI runner is non-canonical). The ZK/MPC tools are
-**research-grade and not externally audited** (the v1 ZK verifier is internally re-audited only,
+**research-track and not externally audited** (the v1 ZK verifier is internally re-audited only,
 external accredited-cryptographer sign-off is pending; `sparq-mpc` is honest-majority semi-honest
-only, and the site's MPC demo is an in-tab JS simulation, not live MPC) — the tool stubs carry
-those caveats verbatim and never present either as a settled cryptographic guarantee. A
-`walkthrough`/`soon` tool is never silently dressed up as `live`.
+only, and the MPC tool is an in-tab JS illustration, not live MPC) — each panel carries those
+caveats in its own honest-limits strip and never presents either as a settled cryptographic
+guarantee. A `walkthrough`/`soon` tool is never silently dressed up as `live`.

@@ -172,6 +172,32 @@ try {
   );
 }
 
+// [OPUS-5] sq-ixc3.17 — also sync the compiled Noir ACIR the ZK tool proves against
+// (`zk/compose/filter_int_d2`). The committed artifact lives at `site/public/zk/` — the ONE
+// in-repo copy, produced by `nargo` and already consumed by the site's flagship demo. The GUI
+// fetches it as a plain static asset from public/, so it is COPIED here (never re-committed)
+// exactly as the wasm bundles are, keeping the GUI a zero-new-copy consumer.
+//
+// OPTIONAL, like the tier-b bundles: a missing artifact WARNS and skips rather than failing the
+// build. The ZK tool then surfaces a clear prover-unavailable state at runtime (the circuit
+// fetch 404s and the prover pill goes to `error`) — it never falls back to fabricating a proof.
+const zkSrc = join(here, "..", "..", "..", "site", "public", "zk");
+const zkDest = join(here, "..", "public", "zk");
+const zkFiles = ["filter_int_d2.json"];
+
+try {
+  await access(join(zkSrc, zkFiles[0]));
+  await mkdir(zkDest, { recursive: true });
+  for (const f of zkFiles) {
+    await copyFile(join(zkSrc, f), join(zkDest, f));
+  }
+  console.log(`[sync-wasm] copied ${zkFiles.length} file(s) → public/zk/ (ZK circuit ACIR)`);
+} catch {
+  console.warn(
+    `[sync-wasm] ZK circuit ACIR not found at ${zkSrc}; the ZK tool will not prove in-tab.`,
+  );
+}
+
 // [SONNET-4.6] sq-b66fc — write the manifest. Same contract as the site sync: maps
 // each logical runtime filename (relative to public/wasm/) to its content-hashed copy.
 // The @sparq/client resolveWasmAsset() loader reads this once and caches it; falls back

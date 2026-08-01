@@ -7,3 +7,7 @@ next-env.d.ts
 
 # The wasm bundle is synced in from js/wasm at build time (a build artifact, not source).
 /public/wasm/
+
+# [OPUS-5] sq-ixc3.17 — the ZK tool's circuit ACIR is synced in from site/public/zk at build
+# time (the one committed copy lives there), so it is a build artifact here too.
+/public/zk/
