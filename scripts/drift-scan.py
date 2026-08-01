@@ -114,9 +114,12 @@ BENCH_EXEMPT_CRATES = frozenset(
 # (crates/sparq-conformance/src/scoreboard.rs `SUITES`). Their runners stay
 # crate-local (they depend on sparq-shacl / sparq-geo / sparq-solid, which the
 # dev-only conformance crate must not take on as deps), but the central scoreboard
-# now REPORTS them alongside SPARQL/inference with their ratchet floors, and a guard
-# test (crates/sparq-conformance/tests/scoreboard_floors.rs) keeps the floors in
-# lock-step. So these are no longer a `conformance-split` drift — the split the
+# now REPORTS them alongside SPARQL/inference with their ratchet floors. [SONNET-4.6]
+# sq-z1xv8: those floors are now ONE shared const per ratchet (the zero-dependency
+# `sparq-conformance-floors` crate, imported by both the runner and the registry row)
+# instead of a copy kept in lock-step by the guard test
+# (crates/sparq-conformance/tests/scoreboard_floors.rs) re-reading the runner's source.
+# So these are no longer a `conformance-split` drift — the split the
 # §5.E finding flagged is closed. The scanner derives the live set from the
 # registry source (so adding a crate to `SUITES` auto-exempts it), falling back to
 # this literal set if the registry can't be read.

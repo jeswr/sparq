@@ -1,0 +1,5 @@
+{
+  "pr": 3799,
+  "date": "2026-07-25",
+  "reason": "sparq-substrate numeric.rs (in the feature-OFF wasm graph via sparq-engine) now parses xsd:float lexicals str->f32 DIRECTLY instead of parsing at f64 and narrowing, which double-rounds (issue #3796). That links <f32 as FromStr> — core's dec2flt decimal->binary parser monomorphized for f32 — into the always-compiled bundle for the first time: at base the only parse::<f32> call sites in crates/ were in sparq-vectors and sparq-lws-core, neither of which is in the feature-OFF wasm dep graph. Measured delta +2739 bytes (1553502 -> 1556241, +0.176%), well under the +/-2% that would also require raising metrics.wasm_bundle_bytes.floor. Intentional always-compiled correctness change, no new dependency (core library only)."
+}

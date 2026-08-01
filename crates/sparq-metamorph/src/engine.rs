@@ -100,11 +100,19 @@ impl SparqlEngine for InProcessSparq {
 /// * **NoREC**: the optimizable form (`FILTER`) loses a row while the non-optimizable
 ///   rewrite (predicate in projection position, no `FILTER` keyword) is untouched, so
 ///   the cardinalities disagree.
-/// * **Differential**: the mutant disagrees with a pristine engine on any `FILTER`
-///   query with a non-empty result.
+/// * **Differential** (both modes): the mutant disagrees with a pristine engine on any
+///   `FILTER` query with a non-empty result.
+/// * **TLP/`DISTINCT`** ([`crate::distinct`]): the dropped row is removed from an
+///   already-deduplicated branch result, so it disappears from the branch *set* union
+///   while the (`FILTER`-free) base keeps it.
+/// * **TLP/aggregate** ([`crate::aggregate`]): each branch query returns exactly one
+///   solution, so dropping it breaks the single-group row count the oracle requires.
 ///
 /// A self-test suite whose oracles do NOT flag this mutant is vacuous; the integration
-/// tests assert all three flags.
+/// tests assert every one of those flags. This mutant perturbs **cardinality** only, so
+/// the `sq-gum8.12` variants carry their own mutants for the laws it cannot touch — an
+/// off-by-one aggregate value, a silently unbound aggregate, and a reversed result
+/// order (the last of which the *unordered* differential oracle provably cannot see).
 pub struct FilterDropsRow<E: SparqlEngine> {
     name: String,
     inner: E,

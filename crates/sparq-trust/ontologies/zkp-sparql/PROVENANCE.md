@@ -18,6 +18,13 @@ them. It is the companion ontology to the **ISWC 2025** ZKP-SPARQL paper.
 | `sec-req:` | `https://w3id.org/zkp-sparql/sec-req#` | Three regulatory frameworks (eIDAS 2.0, NIST PQC migration, UK DVS) that pull on `sec-prop:` properties, with dated obligations. |
 | `prov-ext:` | `https://w3id.org/zkp-sparql/prov-ext#` | Minimal `bibo:`/`dcterms:`/`prov:` provenance extension (one coined term, `prov-ext:bibtexKey`) backing the `prov:wasDerivedFrom` citation chains. |
 
+The sparq-authored extension graphs reuse those stable namespaces:
+
+| Extension file | Namespace extended | Authorising work |
+|----------------|--------------------|------------------|
+| `secprop-ext.ttl` | `https://w3id.org/zkp-sparql/sec-prop#` | bead `sq-5oru9`, issue #1001 |
+| `sigimpl-ext.ttl` | `https://w3id.org/zkp-sparql/sig-impl#` | issue #2832 |
+
 ## Origin
 
 - **Origin repository:** `github.com/jeswr/sparql-zkp-ontologies` (private at
@@ -106,7 +113,14 @@ the origin repo by a plain diff. That verifiability **is** the provenance
 guarantee, and it holds only while the files stay untouched — so a stale upstream
 comment is reconciled **in this record**, never by patching the vendored file.
 (`LICENSE` and this `PROVENANCE.md` are sparq-added files, not vendored ones;
-`secprop-ext.ttl` is the sparq *extension* and is ours to edit.)
+`secprop-ext.ttl` and `sigimpl-ext.ttl` are sparq *extensions* and are ours to
+edit.)
+
+The ML-DSA terms in `sigimpl-ext.ttl` were added by sparq on **2026-07-26**
+(issue #2832). They extend the existing `sig-impl:` namespace without changing
+the vendored ontology. Their sparq authorship and separation from the paper
+authors' graph are recorded both by the source-file boundary and by the
+`owl:Ontology` marker at `https://w3id.org/zkp-sparql/sig-impl-ext`.
 
 The consequence is that some upstream comments describe the **origin repository**
 rather than this copy. This record supersedes them; the known cases are:

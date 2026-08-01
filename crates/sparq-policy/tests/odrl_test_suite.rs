@@ -1,8 +1,8 @@
 //! [OPUS-4.8] sq-tmsd6 — the **SolidLab ODRL-Test-Suite** wired as a conformance
 //! RATCHET, mirroring the crate-local Solid WAC/ACP decision-parity ratchets in
 //! `sparq-solid` (a `cargo test` runner + a pinned pass-count FLOOR that may only
-//! RISE, registered in the central `sparq_conformance::scoreboard::SUITES` and
-//! guarded by `sparq-conformance`'s `tests/scoreboard_floors.rs`).
+//! RISE, registered in the central `sparq_conformance::scoreboard::SUITES`, which
+//! shares the floor const via `sparq-conformance-floors` — sq-z1xv8).
 //!
 //! ## The suite
 //!
@@ -61,11 +61,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 // ---- The RATCHET floor. The ACTUAL current pass count at the pinned suite
-// revision (scripts/fetch-odrl-suite.sh). MIRRORED in the central scoreboard
-// (sparq_conformance::scoreboard::SUITES) and read TEXTUALLY by the floor-sync
-// guard (crates/sparq-conformance/tests/scoreboard_floors.rs); it may only RISE.
-// Declared `pub const … : usize = N;` at TOP LEVEL so the guard's `const_floor_in`
-// helper (which matches `pub const NAME: usize = N;`) can read it. [OPUS-4.8]
+// revision (scripts/fetch-odrl-suite.sh); it may only RISE. [SONNET-4.6] sq-z1xv8:
+// the VALUE lives in the shared `sparq-conformance-floors` crate, which the central
+// scoreboard row (sparq_conformance::scoreboard::SUITES) imports too — one const on
+// both sides, so no mirroring and no textual re-read of this file. [OPUS-4.8]
 //
 /// Pass-count floor for the SolidLab ODRL Test Suite. RATCHET: may only RISE.
 /// At the pinned revision 67 of the 68 self-describing cases pass through the
@@ -79,7 +78,12 @@ use std::path::{Path, PathBuf};
 /// The single remaining NOT-IMPLEMENTED case is a duty whose discharge state is
 /// unknown/`report:NonSet` (sparq is fail-closed; SolidLab treats a not-violated
 /// duty as active — a documented semantic divergence). Raise this as that lands.
-pub const ODRL_SUITE_FLOOR: usize = 67;
+/// [SONNET-4.6] sq-z1xv8 — the VALUE now lives once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
+/// ONE `const` and cannot drift (replacing the old textual re-read of this file).
+/// Raise it THERE; the measurement narrative stays here.
+pub const ODRL_SUITE_FLOOR: usize = sparq_conformance_floors::policy::ODRL_SUITE_FLOOR;
 
 /// The size of the documented not-implemented bucket at the pinned revision. The
 /// runner pins it so the bucket cannot silently GROW (a new regression hidden as

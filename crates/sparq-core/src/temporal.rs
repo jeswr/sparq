@@ -3,8 +3,12 @@
 //! [`Timeline`] is the parsed value of an `xsd:date` / `xsd:dateTime` lexical —
 //! seconds-from-epoch plus timezone presence — with XPath comparison semantics
 //! (both-with-tz / both-without compare directly; MIXED presence is only
-//! decidable outside the ±14h window). It lives in core (rather than the engine,
-//! which consumes it for FILTER/ORDER BY/`=`) so the graph can precompute a
+//! decidable outside the ±14h window). That XPath order is PARTIAL, which is
+//! right for the relational operators (indeterminate = type error) but not for a
+//! sort: [`Timeline::cmp_tl_total`] / [`Temporal::cmp_t_total`] are the TOTAL-order
+//! extension the `ORDER BY` / `MIN`/`MAX` order uses instead. It lives in core
+//! (rather than the engine, which consumes it for FILTER/ORDER BY/`=`) so the
+//! graph can precompute a
 //! per-term [`Temporal`] cache at load time, exactly like the f64 `numerics`
 //! cache: dateTime evaluation then never round-trips the dictionary per row.
 //!
@@ -75,6 +79,42 @@ impl Timeline {
     pub fn cmp_tl(a: Timeline, b: Timeline) -> Option<Ordering> {
         cmp_instants(a.instant(), a.tz.is_some(), b.instant(), b.tz.is_some())
     }
+
+    /// The TOTAL-order EXTENSION of [`cmp_tl`](Self::cmp_tl) — for the `ORDER BY` /
+    /// `MIN`/`MAX` total order ONLY. Never for the relational operators: `<` / `>` / `=`
+    /// keep [`cmp_tl`](Self::cmp_tl)'s indeterminate window as a SPARQL type error.
+    ///
+    /// Orders by the INSTANT-ASSUMING-UTC ([`instant`](Self::instant)) first, then by
+    /// timezone PRESENCE (floating before zoned) as the tiebreak. Where
+    /// [`cmp_tl`](Self::cmp_tl) decides, this AGREES with it (it decides by exactly that
+    /// instant comparison); the tiebreak only positions the pairs it leaves indeterminate.
+    ///
+    /// # Why an extension is needed
+    ///
+    /// [`cmp_tl`](Self::cmp_tl) is a PARTIAL order: a tz-less dateTime against a tz-carrying
+    /// one inside the ±14h window is indeterminate. A comparator that falls back to the
+    /// LEXICAL form on those pairs mixes timeline-decided and lexical-decided pairs in one
+    /// kind, which is intransitive — the shape of the sq-wjl8i witnesses. Concretely, with
+    /// a lexical fallback: `"2024-03-15T12:00:00-01:00"` and `"2024-03-15T14:00:00+01:00"`
+    /// are the SAME instant (timeline-Equal), yet the floating `"2024-03-15T13:00:00"`
+    /// sits lexically BETWEEN them — so `x = y`, `x < z` and `z < y`, and `ORDER BY`'s
+    /// `sort_by` is fed an inconsistent comparator.
+    ///
+    /// # Why the tiebreak is timezone PRESENCE, not the lexical form
+    ///
+    /// The witness above is not repaired by ordering the indeterminate pairs lexically
+    /// *after* the instant — the equal-instant class still contains zoned lexicals on both
+    /// lexical sides of a floating one. Presence is a function of the TERM (like the
+    /// instant), so the whole within-kind order is the lexicographic key
+    /// `(instant, has_tz)`: a genuine total order, whose `Equal` is a real equivalence.
+    ///
+    /// This position for the indeterminate window is a documented sparq EXTENSION, not a
+    /// spec claim: SPARQL 1.1 §15.1 leaves it open, and the relational semantics are
+    /// unchanged. [SONNET-4.6] sq-2k5py
+    #[inline]
+    pub fn cmp_tl_total(a: Timeline, b: Timeline) -> Ordering {
+        cmp_instants_total(a.instant(), a.tz.is_some(), b.instant(), b.tz.is_some())
+    }
 }
 
 /// The XPath dateTime/date comparison on precomputed instants: direct when both
@@ -88,6 +128,23 @@ fn cmp_instants(ai: f64, a_tz: bool, bi: f64, b_tz: bool) -> Option<Ordering> {
         ai.partial_cmp(&bi)
     } else {
         None
+    }
+}
+
+/// The TOTAL-order extension of `cmp_instants`: the XPath partial order where it
+/// decides, else the instant order with timezone PRESENCE (floating < zoned) as the
+/// tiebreak. See [`Timeline::cmp_tl_total`] for the rationale and the intransitivity
+/// witness this closes. [SONNET-4.6] sq-2k5py
+#[inline]
+fn cmp_instants_total(ai: f64, a_tz: bool, bi: f64, b_tz: bool) -> Ordering {
+    match cmp_instants(ai, a_tz, bi, b_tz) {
+        Some(o) => o,
+        // The indeterminate mixed-presence window (and the NaN instant an ill-formed-but
+        // -parsing lexical can produce): order by instant, then by presence. `partial_cmp`
+        // first keeps `-0.0 == 0.0` — the verdict `cmp_instants` itself would give, so the
+        // extension can never contradict the partial order it extends — with `total_cmp`
+        // only for a NaN instant, which `partial_cmp` cannot place at all.
+        None => ai.partial_cmp(&bi).unwrap_or_else(|| ai.total_cmp(&bi)).then(a_tz.cmp(&b_tz)),
     }
 }
 
@@ -170,6 +227,25 @@ impl Temporal {
         }
         cmp_instants(a.instant, a.has_tz, b.instant, b.has_tz)
     }
+
+    /// The TOTAL order over cached temporals, for the `ORDER BY` / `MIN`/`MAX` total order
+    /// ONLY (relational `<` / `>` / `=` keep [`cmp_t`](Self::cmp_t)'s type errors): the
+    /// cross-family pair ranks KIND-FIRST — dateTime before date, the literal-kind rank the
+    /// engine and the shared comparator apply — and a same-family pair by
+    /// [`Timeline::cmp_tl_total`]'s instant-then-timezone-presence order.
+    ///
+    /// This is the ONE definition the three lock-step call sites (the ORDER BY sort-cell
+    /// comparator, the id-level MIN/MAX fold, and the `CompareTerm::strict_cmp` seam the
+    /// substrate's total order drives) share, so they cannot drift apart again.
+    /// [SONNET-4.6] sq-2k5py
+    #[inline]
+    pub fn cmp_t_total(a: Temporal, b: Temporal) -> Ordering {
+        match (a.kind, b.kind) {
+            (TemporalKind::DateTime, TemporalKind::Date) => Ordering::Less,
+            (TemporalKind::Date, TemporalKind::DateTime) => Ordering::Greater,
+            _ => cmp_instants_total(a.instant, a.has_tz, b.instant, b.has_tz),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +313,80 @@ mod tests {
         // xsd:time compares lexically in the engine — must NOT enter the cache.
         assert!(Temporal::of_lit("13:00:00", "http://www.w3.org/2001/XMLSchema#time").is_none());
         assert!(Temporal::of_lit("42", "http://www.w3.org/2001/XMLSchema#integer").is_none());
+    }
+
+    // [SONNET-4.6] sq-2k5py — the TOTAL-order extension over the indeterminate window: a
+    // direct test per new public fn (`Timeline::cmp_tl_total` / `Temporal::cmp_t_total`)
+    // plus the intransitivity WITNESS the extension exists to close.
+
+    /// `Timeline::cmp_tl_total` must AGREE with `cmp_tl` on every pair `cmp_tl` decides,
+    /// and place the indeterminate ones by instant-then-timezone-presence.
+    #[test]
+    fn cmp_tl_total_extends_cmp_tl_without_contradicting_it() {
+        let p = |s: &str| Timeline::parse_datetime(s).unwrap();
+        // Agreement: wherever the XPath partial order decides, the extension repeats it.
+        for (a, b) in [
+            ("2024-03-15T13:00:00Z", "2024-03-15T14:00:00+01:00"), // equal instants, both zoned
+            ("2024-03-15T12:00:00", "2024-03-15T13:00:00"),        // both floating
+            ("2024-03-15T13:00:00Z", "2024-03-17T13:00:00"),       // mixed, OUTSIDE the window
+            ("2024-03-15T13:00:00.250Z", "2024-03-15T13:00:00.500Z"), // sub-second
+        ] {
+            let decided = Timeline::cmp_tl(p(a), p(b)).expect("pair is XPath-decidable");
+            assert_eq!(Timeline::cmp_tl_total(p(a), p(b)), decided, "extension contradicts cmp_tl on {a} vs {b}");
+        }
+        // The indeterminate window is now DECIDED: same instant, so timezone presence
+        // breaks the tie — the floating value sorts before the zoned one.
+        let (zoned, floating) = (p("2024-03-15T13:00:00Z"), p("2024-03-15T13:00:00"));
+        assert_eq!(Timeline::cmp_tl(zoned, floating), None, "still a relational type error");
+        assert_eq!(Timeline::cmp_tl_total(floating, zoned), Less);
+        assert_eq!(Timeline::cmp_tl_total(zoned, floating), Greater);
+        // Inside the window but NOT the same instant: the instant still decides first.
+        assert_eq!(Timeline::cmp_tl_total(floating, p("2024-03-15T13:00:00.250Z")), Less);
+        // Reflexive, and equal-instant same-presence pairs stay Equal (no spurious order).
+        assert_eq!(Timeline::cmp_tl_total(zoned, zoned), Equal);
+        assert_eq!(Timeline::cmp_tl_total(zoned, p("2024-03-15T08:00:00-05:00")), Equal);
+    }
+
+    /// The WITNESS sq-2k5py closes: two zoned dateTimes are the same instant (so
+    /// timeline-Equal) while a floating one sits lexically BETWEEN them — under a lexical
+    /// fallback that is `x = y`, `x < z`, `z < y`, an inconsistent comparator. The
+    /// extension orders all three by (instant, presence), so `z` sits strictly below the
+    /// equal pair and transitivity holds.
+    #[test]
+    fn witness_indeterminate_window_lexical_fallback_was_intransitive() {
+        let p = |s: &str| Timeline::parse_datetime(s).unwrap();
+        let (x, y, z) = ("2024-03-15T12:00:00-01:00", "2024-03-15T14:00:00+01:00", "2024-03-15T13:00:00");
+        // x and y are the SAME instant; both are indeterminate against the floating z.
+        assert_eq!(Timeline::cmp_tl(p(x), p(y)), Some(Equal));
+        assert_eq!(Timeline::cmp_tl(p(x), p(z)), None);
+        assert_eq!(Timeline::cmp_tl(p(y), p(z)), None);
+        // The OLD lexical fallback put z strictly between the equal pair — intransitive.
+        assert_eq!(x.cmp(z), Less, "the lexical fallback's x < z leg");
+        assert_eq!(y.cmp(z), Greater, "the lexical fallback's y > z leg");
+        // The extension: z (floating) is below BOTH members of the equal instant class.
+        assert_eq!(Timeline::cmp_tl_total(p(x), p(y)), Equal);
+        assert_eq!(Timeline::cmp_tl_total(p(z), p(x)), Less);
+        assert_eq!(Timeline::cmp_tl_total(p(z), p(y)), Less);
+    }
+
+    /// `Temporal::cmp_t_total` — the cached twin: KIND-FIRST (dateTime before date) and
+    /// then the same instant-then-presence order, agreeing with `cmp_t` where it decides.
+    #[test]
+    fn cmp_t_total_is_kind_first_and_total() {
+        let d = |s: &str| Temporal::of_lit(s, XSD_DATE).expect("valid date");
+        // Cross-family: kind rank decides, never a value or lexical coercion.
+        assert_eq!(Temporal::cmp_t(dt("2024-03-15T00:00:00Z"), d("1999-01-01")), None);
+        assert_eq!(Temporal::cmp_t_total(dt("2024-03-15T00:00:00Z"), d("1999-01-01")), Less);
+        assert_eq!(Temporal::cmp_t_total(d("1999-01-01"), dt("2024-03-15T00:00:00Z")), Greater);
+        // Same family: agrees with `cmp_t` where it decides…
+        assert_eq!(Temporal::cmp_t_total(dt("2024-03-15T13:00:00Z"), dt("2024-03-15T14:00:00+01:00")), Equal);
+        assert_eq!(Temporal::cmp_t_total(dt("2024-03-15T13:00:00Z"), dt("2024-03-16T13:00:00Z")), Less);
+        // …and decides the indeterminate window by timezone presence.
+        assert_eq!(Temporal::cmp_t(dt("2024-03-15T13:00:00Z"), dt("2024-03-15T13:00:00")), None);
+        assert_eq!(Temporal::cmp_t_total(dt("2024-03-15T13:00:00"), dt("2024-03-15T13:00:00Z")), Less);
+        // The date family gets the same extension (a tz-less date vs a zoned one).
+        assert_eq!(Temporal::cmp_t(d("2024-03-15"), d("2024-03-15Z")), None);
+        assert_eq!(Temporal::cmp_t_total(d("2024-03-15"), d("2024-03-15Z")), Less);
     }
 
     // [OPUS-4.8] sq-bif — the tests below close real gaps in this module's default surface:

@@ -15,7 +15,12 @@
 //! (bounded existential-witness folding), `minimise` (UCQ-containment minimisation by
 //! homomorphism), and `consistency` (the violation-query satisfiability check).
 //!
-//! The rewriter is validated against a hand-checked DL-Lite_R oracle. On the FORMAL DL-Lite_R
+//! The rewriter is validated two independent ways: syntactically against a hand-checked DL-Lite_R
+//! oracle, and executably against an OWL 2 RL materialise-then-query baseline
+//! (`tests/rl_baseline_differential.rs`, sq-wxaas) — on fixtures inside the RL ∩ QL overlap the
+//! rewrite-the-query and close-the-data strategies must return identical answers, while an
+//! existential-generating axiom (which has no OWL 2 RL superclass form) pins the direction of the
+//! profiles' legitimate divergence: QL strictly richer, never poorer. On the FORMAL DL-Lite_R
 //! suite (the hand-derived certain-answer oracle from sq-g19x0) the rewrite is sound AND complete
 //! case by case — that has GRADUATED to a pinned floor (sq-qo1a9): `sparq-conformance`'s
 //! `ql_dllite_suite` runner rewrites each case and asserts its UCQ, evaluated over the unmodified

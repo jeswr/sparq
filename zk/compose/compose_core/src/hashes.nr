@@ -26,6 +26,15 @@ pub fn h3(s: Field, p: Field, o: Field) -> Field {
     Poseidon2::hash([s, p, o], 3)
 }
 
+/// Four-input hash -- the arity the sq-kndw fully-hidden revocation relation
+/// needs. Mirrors `sparq_zk::poseidon2::hash(&[a, b, c, d])`, which is what
+/// `sig::status_ref_commitment` and `sig::accepted_status_leaf` fold
+/// (`[DOMAIN, x, y, z]`). One permutation, same cost class as `h2`/`h3`.
+// [OPUS-5] sq-kndw: 4-input arity for the ref-commitment / accepted-set leaf.
+pub fn h4(a: Field, b: Field, c: Field, d: Field) -> Field {
+    Poseidon2::hash([a, b, c, d], 4)
+}
+
 /// Flat per-graph commitment fold over the first `count` leaves.
 pub fn commit_fold<let N: u32>(leaves: [Field; N], count: u32) -> Field {
     Poseidon2::hash(leaves, count)

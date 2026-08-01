@@ -92,6 +92,12 @@ const ok   = Validator.conforms(dataTurtle, shapesTurtle, "turtle", /* violation
   echo "pre-gzip: $(stat -c%s "$f") bytes   gzip -9: $(gzip -9 -c "$f" | wc -c) bytes"
   ```
 
+  For the *comparative* wire-byte picture — this artifact against an
+  esbuild-minified, tree-shaken `rdf-validate-shacl` browser bundle, plus the
+  size-trim levers (cargo profile, binaryen headroom) — run
+  `bash bench/shacl-wasm/run.sh --bundle-only`; the levers are inventoried in
+  [`research/gap-shacl-wasm-2026-07.md`](../../research/gap-shacl-wasm-2026-07.md#size-trim-levers-sq-c6c2s).
+
 - **Status** — this crate delivers the wasm portability, the `Validator` entry
   points, the `shacl-af` opt-in, and a headless `wasm-pack test --node` smoke suite.
   The npm wrapper packaging and Pages deploy wiring are tracked separately (the

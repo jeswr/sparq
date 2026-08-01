@@ -1,0 +1,62 @@
+[package]
+name = "sparq-e2ee-ng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in E2EE-NG profile primitives for sparq: deterministic capability encoding, read/publish/admin capability separation, recipient-wrapped secrets, randomized block/commit envelopes, a Merkle-linked object chunker, a domain-separated key schedule, signatures, and epoch transitions. RESEARCH-GRADE, NOT externally audited — production use gated by sq-qhy4."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Design/spec: research/e2ee-nextgraph-variant-gpt56-2026-07.md (program sq-tag1q),
+# bead sq-tag1q.9. Not published while the surface settles AND while the crypto suite
+# selection + soundness review (sq-qhy4) is pending. NONE of the claimed confidentiality/
+# integrity/authorization/revocation properties are proven; they are designed/intended.
+publish = false
+
+# docs.rs: build with all features so the whole primitive surface is documented.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# OPT-IN BY CONSTRUCTION. NOTHING in the workspace's default build depends on this
+# crate: it is a standalone, non-default member (like `sparq-vc` / `sparq-zk` /
+# `sparq-mpc`), so `sparq-core` / `sparq-engine` / `sparq-substrate` and the wasm
+# artifact are byte-identical with or without it. Encryption + key material live ONLY
+# behind this crate boundary (research doc §7): the core crates never link a cipher.
+# This bead is the PRIMITIVES layer only — capability / envelope / epoch + the key
+# schedule, signatures and deterministic codec underneath them. Sync / broker /
+# CRDT / materialize are separate later beads and are NOT implemented here.
+[dependencies]
+# Deterministic key schedule: HKDF-SHA256 (extract + expand) built on the RustCrypto
+# `hmac` + `sha2` already vetted-and-present in the tree (sparq-vc / sparq-zk). SHA-256
+# also computes CommitId / cap_id over canonical bytes.
+sha2 = "0.10"
+hmac = "0.12"
+# AEAD-256 (v0 suite): XChaCha20-Poly1305 — a 192-bit random nonce is safe to draw per
+# block/wrap without a stateful counter, which matches the randomized-envelope design.
+chacha20poly1305 = "0.10"
+# SIG-256 (v0 suite): Ed25519 (RFC 8032) — the SAME vetted dalek signature sparq-vc uses.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+# WRAP-256 (v0 suite): X25519 ECDH for recipient wrapping of capability secret fields /
+# DEKs (sealed-box shape). Same dalek family; reuses curve25519-dalek already in-tree.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+# OS CSPRNG (fresh key / nonce / id material). Mirrors sparq-vc's exact pin so the
+# `rand_core::OsRng` used for dalek keygen is the same one already in the lockfile.
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Secret-memory hygiene: zero read secrets / private keys on drop. Constant-time compare
+# for secret-vs-secret byte equality.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"
+
+[dev-dependencies]
+hex = "0.4"
+proptest = "1"
+
+[features]
+# Lean by default: the whole primitive surface is always available (there is no heavier
+# opt-in tier at the primitives layer). The feature exists so a downstream selecting
+# `sparq-e2ee-ng` stays explicit and future sync/broker tiers can gate additively.
+default = []

@@ -5,9 +5,8 @@
 # ORDER BY + LIMIT k (any engine is free to optimize it internally;
 # jena-geosparql's non-standard spatial:nearby needs a radius, so it is not a
 # faithful k-NN rendering — see research/gap-geo-2026-07.md). ?e tie-breaks
-# equal distances for a deterministic result SET; only the result-set SIZE is
-# cross-checked (== k on a corpus larger than k, the same invariant sparq's
-# expected.tsv pins), never coordinates or ordering.
+# equal distances for a deterministic result SET; the harness cross-checks the
+# exact entity-IRI set against GeoIndex::nearest (never coordinates or order).
 # SORT KEY (sq-a8anf): the original standard-form key
 #   geof:distance(?wkt, centre, uom:metre)
 # throws per row on jena 5.4.0 (planar degree-space Euclidean + degree->metre

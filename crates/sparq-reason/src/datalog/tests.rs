@@ -3,7 +3,7 @@
 //! them red), and the DIFFERENTIAL harness against the independent naive oracle
 //! (`super::oracle`) on fixed programs × seed-randomised graphs.
 
-use super::{eval, oracle, parse_program, stratify};
+use super::{eval, oracle, parse_program, souffle, stratify};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::{Dict, Id};
 
@@ -803,6 +803,259 @@ fn avg_of_integers_is_decimal() {
     );
     let one_half = d.intern_lit("1.5", "http://www.w3.org/2001/XMLSchema#decimal", None);
     assert_eq!(got, [[g, avg, one_half]].into_iter().collect());
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-r2nor — the DECIDED float/double semantics for the numeric
+// aggregates: the whole XSD numeric tower is in scope (no fail-closed reject),
+// SUM/AVG promote per XPath, and the fold order + NaN/-0.0 rule are pinned so the
+// closure stays a function of the completed lower strata.
+// ---------------------------------------------------------------------------
+
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
+
+fn dbl(d: &mut Dict, lex: &str) -> Id {
+    d.intern_lit(lex, XSD_DOUBLE, None)
+}
+
+/// A `(term id, numeric value)` group in the shape `fold_numeric_group` consumes.
+fn group(d: &mut Dict, ids: &[Id]) -> Vec<(Id, sparq_substrate::numeric::Num)> {
+    ids.iter()
+        .map(|&id| {
+            (
+                id,
+                super::numeric_value(d, id).expect("test fixture is numeric"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn sum_and_avg_promote_a_double_operand() {
+    let mut d = Dict::new();
+    let (g, value, total, avg) = (
+        iri(&mut d, "g"),
+        iri(&mut d, "value"),
+        iri(&mut d, "total"),
+        iri(&mut d, "avg"),
+    );
+    let (one, half) = (int(&mut d, 1), dbl(&mut d, "0.5"));
+    let facts = vec![[g, value, one], [g, value, half]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:total, ?s] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND SUM(?v) AS ?s) .\n\
+             [?g, ex:avg, ?a] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND AVG(?v) AS ?a) ."
+        ),
+    );
+    // XPath promotion: an xsd:double operand makes both results xsd:double, in the
+    // canonical mantissa-E-exponent lexical.
+    let (sum_out, avg_out) = (dbl(&mut d, "1.5E0"), dbl(&mut d, "7.5E-1"));
+    assert_eq!(
+        got,
+        [[g, total, sum_out], [g, avg, avg_out]]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn min_max_totalise_nan_below_negative_infinity() {
+    let mut d = Dict::new();
+    let (g, value, min_p, max_p) = (
+        iri(&mut d, "g"),
+        iri(&mut d, "value"),
+        iri(&mut d, "min"),
+        iri(&mut d, "max"),
+    );
+    let (nan, ninf, one) = (
+        dbl(&mut d, "NaN"),
+        dbl(&mut d, "-INF"),
+        dbl(&mut d, "1.0E0"),
+    );
+    let facts = vec![[g, value, one], [g, value, nan], [g, value, ninf]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:min, ?v] :- AGGREGATE([?g, ex:value, ?x] ON ?g BIND MIN(?x) AS ?v) .\n\
+             [?g, ex:max, ?v] :- AGGREGATE([?g, ex:value, ?x] ON ?g BIND MAX(?x) AS ?v) ."
+        ),
+    );
+    // NaN is NOT a row-level failure for MIN/MAX (unlike FILTER, which uses the
+    // relational comparison): the total order puts it below -INF.
+    assert_eq!(
+        got,
+        [[g, min_p, nan], [g, max_p, one]].into_iter().collect()
+    );
+}
+
+#[test]
+fn float_sum_fold_is_independent_of_group_order() {
+    let mut d = Dict::new();
+    // Classic non-associative catastrophic-cancellation set: an unsorted left-to-right
+    // fold gives 2, 3 or 4 depending on where the big pair lands, so a hash-order fold
+    // would make the derived SUM depend on the derivation order.
+    let ids = [
+        dbl(&mut d, "1.0E16"),
+        dbl(&mut d, "1.0E0"),
+        dbl(&mut d, "-1.0E16"),
+        dbl(&mut d, "2.0E0"),
+    ];
+    let mut base = group(&mut d, &ids);
+    let want = eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut base)
+        .expect("a non-empty group folds");
+    for rot in 1..ids.len() {
+        let mut rotated: Vec<Id> = ids[rot..].to_vec();
+        rotated.extend_from_slice(&ids[..rot]);
+        let mut values = group(&mut d, &rotated);
+        assert_eq!(
+            eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut values),
+            Some(want),
+            "rotation by {} changed the SUM",
+            rot
+        );
+    }
+    let mut reversed = group(&mut d, &[ids[3], ids[2], ids[1], ids[0]]);
+    assert_eq!(
+        eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut reversed),
+        Some(want)
+    );
+    // The pinned order is ascending value: -1e16, 1, 2, 1e16.
+    assert_eq!(want, dbl(&mut d, "2.0E0"));
+}
+
+/// Fold a two-term value tie in a FRESH dictionary that interns the pair in the given
+/// order, and return the emitted RDF TERM. Returning the term, not the id, is the point:
+/// ids are interning-order artefacts, so an assertion phrased in ids cannot see a
+/// tie-break that moved with the interning order.
+fn tie_term(first: (&str, &str), second: (&str, &str), func: super::AggFunc) -> oxrdf::Term {
+    let mut d = Dict::new();
+    let ids = [
+        d.intern_lit(first.0, first.1, None),
+        d.intern_lit(second.0, second.1, None),
+    ];
+    let mut values = group(&mut d, &ids);
+    let id = eval::fold_numeric_group(&mut d, func, &mut values).expect("a non-empty group folds");
+    d.term(id)
+}
+
+fn lit_term((lex, datatype): (&str, &str)) -> oxrdf::Term {
+    oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+        lex,
+        oxrdf::NamedNode::new_unchecked(datatype),
+    ))
+}
+
+#[test]
+fn min_max_break_a_signed_zero_tie_by_term_content() {
+    // +0.0 and -0.0 are EQUAL under the total order, so the emitted term is decided by
+    // the tie-break — the same one for MIN and for MAX. Interning the pair in OPPOSITE
+    // orders gives the two terms opposite dictionary ids, which is exactly the freedom a
+    // derivation-order change has; a content tie-break must ignore it.
+    let (pos, neg) = (("0.0E0", XSD_DOUBLE), ("-0.0E0", XSD_DOUBLE));
+    for func in [super::AggFunc::Min, super::AggFunc::Max] {
+        assert_eq!(
+            tie_term(pos, neg, func),
+            tie_term(neg, pos, func),
+            "{:?} moved with the interning order",
+            func
+        );
+        // "-0.0E0" sorts before "0.0E0" as a lexical form, for both functions.
+        assert_eq!(tie_term(pos, neg, func), lit_term(neg));
+    }
+}
+
+#[test]
+fn min_max_break_a_cross_tier_value_tie_by_term_content() {
+    // "1.0"^^xsd:decimal and "1.0E0"^^xsd:double are distinct TERMS of equal VALUE
+    // (neither is an inlined id, so their relative ids follow the interning order).
+    let (exact, inexact) = (("1.0", XSD_DECIMAL), ("1.0E0", XSD_DOUBLE));
+    for func in [super::AggFunc::Min, super::AggFunc::Max] {
+        assert_eq!(
+            tie_term(exact, inexact, func),
+            tie_term(inexact, exact, func),
+            "{:?} moved with the interning order",
+            func
+        );
+        // xsd:decimal orders before xsd:double as a datatype IRI.
+        assert_eq!(tie_term(exact, inexact, func), lit_term(exact));
+    }
+}
+
+#[test]
+fn sum_of_equal_valued_operands_is_id_order_independent() {
+    // A tie between EQUAL-valued operands of different tiers is not free for SUM: the
+    // fold promotes as it goes, so the tie order decides where the accumulator leaves
+    // the float tier. Here `(1 + 2^24) as f32` rounds the 1 away, while `1 + 2^24` in
+    // the double tier keeps it — so the two tie orders differ in the last unit.
+    let one = ("1.0E0", XSD_FLOAT);
+    let (as_float, as_double) = (("1.6777216E7", XSD_FLOAT), ("1.6777216E7", XSD_DOUBLE));
+    let fold = |order: [(&str, &str); 3]| {
+        let mut dict = Dict::new();
+        let ids: Vec<Id> = order
+            .iter()
+            .map(|&(lex, dt)| dict.intern_lit(lex, dt, None))
+            .collect();
+        let mut values = group(&mut dict, &ids);
+        let id = eval::fold_numeric_group(&mut dict, super::AggFunc::Sum, &mut values)
+            .expect("a non-empty group folds");
+        dict.term(id)
+    };
+    let want = fold([one, as_float, as_double]);
+    for order in [
+        [one, as_double, as_float],
+        [as_float, as_double, one],
+        [as_double, as_float, one],
+        [as_float, one, as_double],
+    ] {
+        assert_eq!(fold(order), want, "the SUM moved with the interning order");
+    }
+    // xsd:double orders before xsd:float, so the accumulator promotes at the tie and
+    // the 1 survives: 1 + 2^24 + 2^24 == 33554433, not 33554432.
+    assert_eq!(want, lit_term(("3.3554433E7", XSD_DOUBLE)));
+}
+
+/// Derived facts as RDF TERM triples, so two runs over different dictionaries can be
+/// compared (ids cannot be).
+fn derived_terms(d: &mut Dict, facts: &[[Id; 3]], src: &str) -> FxHashSet<[String; 3]> {
+    derived(d, facts, src)
+        .into_iter()
+        .map(|f| f.map(|id| d.term(id).to_string()))
+        .collect()
+}
+
+#[test]
+fn a_tie_over_minted_terms_is_independent_of_the_minting_order() {
+    // The tied operands are MINTED by an earlier stratum, so their ids come out of the
+    // aggregate's hash-map iteration order — the concrete way a derivation-order change
+    // reassigns ids. Here the same flip is forced by pre-interning one of the two: with
+    // `seed`, "0.0E0" is interned BEFORE the facts and holds the smaller id; without it,
+    // "0.0E0" is minted afterwards and holds the larger. The closure must not move.
+    let src = format!(
+        "{P}[?g, ex:total, ?s] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND SUM(?v) AS ?s) .\n\
+         [ex:world, ex:min, ?m] :- AGGREGATE([?g, ex:total, ?t] BIND MIN(?t) AS ?m) .\n\
+         [ex:world, ex:max, ?m] :- AGGREGATE([?g, ex:total, ?t] BIND MAX(?t) AS ?m) ."
+    );
+    let run = |seed: bool| {
+        let mut d = Dict::new();
+        if seed {
+            dbl(&mut d, "0.0E0");
+        }
+        let (g1, g2, value) = (iri(&mut d, "g1"), iri(&mut d, "g2"), iri(&mut d, "value"));
+        // g1 sums to +0.0 (a MINTED term); g2's one-element sum is -0.0. They are equal
+        // under the total order and distinct as terms.
+        let facts = vec![
+            [g1, value, dbl(&mut d, "1.0E0")],
+            [g1, value, dbl(&mut d, "-1.0E0")],
+            [g2, value, dbl(&mut d, "-0.0E0")],
+        ];
+        derived_terms(&mut d, &facts, &src)
+    };
+    assert_eq!(run(false), run(true));
 }
 
 #[test]
@@ -1768,4 +2021,250 @@ fn incr_accessors_direct() {
     assert!(m.contains(&[a, q, b]) && !m.contains(&[a, p, b]));
     assert_eq!(m.delete(&mut d, &[[a, q, b]]), 1);
     assert!(m.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-xzb9p — differential vs the EXTERNAL Soufflé engine
+// ---------------------------------------------------------------------------
+// `oracle` is an independent implementation, but it is still OUR reading of the
+// semantics. These fixtures put the same programs through Soufflé — which stratifies
+// them ITSELF, so this arm can catch a stratification bug the in-tree oracle cannot.
+// The translation is pinned by a golden test that runs with or without the binary;
+// the engine comparison skips (loudly, "not checked") when Soufflé is absent. See
+// `super::souffle` for the fragment this arm covers and why it stops where it does.
+
+/// The Soufflé closure and ours must agree on every triple the program's relations
+/// cover, over the same seed-randomised graphs the oracle arm uses.
+fn assert_souffle_agrees(src: &str, seeds: std::ops::Range<u64>) {
+    let Some(bin) = souffle::binary() else {
+        return;
+    };
+    for seed in seeds {
+        let mut d = Dict::new();
+        let program = parse_program(&mut d, src).expect("parse");
+        let facts = random_graph(&mut d, seed, 6, 9);
+        let translation = souffle::translate(&d, &program, &facts).expect("in fragment");
+        let external = translation.run(&bin).expect("souffle run");
+        let ours: FxHashSet<[Id; 3]> = eval(&mut d, &facts, &program)
+            .unwrap()
+            .into_iter()
+            .filter(|&t| translation.covers(t))
+            .collect();
+        assert_eq!(
+            ours, external,
+            "sparq/souffle divergence: seed {seed} program:\n{src}"
+        );
+    }
+}
+
+#[test]
+fn souffle_recursion_plus_naf() {
+    assert_souffle_agrees(
+        &format!(
+            "{P}[?x, ex:reach, \"y\"] :- [?x, ex:seed, \"y\"] .\n\
+             [?y, ex:reach, \"y\"] :- [?x, ex:reach, \"y\"], [?x, ex:edge, ?y] .\n\
+             [?x, ex:unreach, \"y\"] :- [?x, a, ex:Node], NOT [?x, ex:reach, \"y\"] ."
+        ),
+        0..15,
+    );
+}
+
+/// The grouped `NOT` is one existential conjunction; the aux-relation encoding has to
+/// preserve that, so an external engine disagreeing here would mean our join-inside-the-
+/// group semantics is wrong.
+#[test]
+fn souffle_naf_conjunction() {
+    assert_souffle_agrees(
+        &format!(
+            "{P}[?x, ex:noCycle, \"y\"] :- [?x, a, ex:Node], \
+             NOT {{ [?x, ex:edge, ?y], [?y, ex:edge, ?x] }} ."
+        ),
+        0..15,
+    );
+}
+
+/// Transitive closure, a multi-atom head, and an UNCORRELATED wildcard `NOT` with a
+/// repeated variable (`[?z, ex:edge, ?z]`) — which translates to a NULLARY auxiliary
+/// relation, the encoding's most easily-broken corner.
+///
+/// The guarded rule must actually be EXERCISED both ways or this fixture would pass
+/// with the negation dropped entirely (an earlier draft used a guard atom the random
+/// graph never produces, and survived exactly that mutation). So the seed range is
+/// required to contain a graph with a self-loop and one without, and the derivation is
+/// asserted to track it.
+#[test]
+fn souffle_multi_head_and_wildcard_naf() {
+    let src = format!(
+        "{P}[?x, ex:reach, ?y] :- [?x, ex:edge, ?y] .\n\
+         [?x, ex:reach, ?z] :- [?x, ex:reach, ?y], [?y, ex:edge, ?z] .\n\
+         [?x, ex:out, ?y], [?y, ex:in, ?x] :- [?x, ex:edge, ?y] .\n\
+         [?x, ex:loopFree, \"y\"] :- [?x, a, ex:Node], NOT [?z, ex:edge, ?z] ."
+    );
+    assert_souffle_agrees(&src, 0..15);
+    // Witness that the nullary NOT gates the rule in BOTH directions across the range.
+    let (mut fired, mut blocked) = (0, 0);
+    for seed in 0..15 {
+        let mut d = Dict::new();
+        let program = parse_program(&mut d, &src).unwrap();
+        let facts = random_graph(&mut d, seed, 6, 9);
+        let edge = iri(&mut d, "edge");
+        let loop_free = iri(&mut d, "loopFree");
+        let self_loop = facts.iter().any(|&[s, p, o]| p == edge && s == o);
+        let derived_any = eval(&mut d, &facts, &program)
+            .unwrap()
+            .iter()
+            .any(|&[_, p, _]| p == loop_free);
+        assert_eq!(
+            derived_any, !self_loop,
+            "seed {seed}: ex:loopFree must be derived exactly when no self-loop exists"
+        );
+        if derived_any {
+            fired += 1;
+        } else {
+            blocked += 1;
+        }
+    }
+    assert!(
+        fired > 0 && blocked > 0,
+        "the seed range must exercise the nullary NOT both ways (fired {fired}, blocked {blocked})"
+    );
+}
+
+/// The class-granularity decision, externally corroborated: `NOT [?x, a, ex:Hub]`
+/// feeding an `ex:Leaf` head is stratifiable ONLY if `rdf:type` nodes are per-CLASS.
+/// A predicate-granular encoding would make Soufflé reject this program outright, so
+/// Soufflé accepting it is independent evidence for the design record's §3 choice.
+#[test]
+fn souffle_accepts_class_granular_negation() {
+    assert_souffle_agrees(
+        &format!(
+            "{P}[?x, a, ex:Hub] :- [?x, ex:edge, ?y] .\n\
+             [?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] ."
+        ),
+        0..15,
+    );
+}
+
+/// Rejection parity: the textbook `win(X) :- move(X,Y), NOT win(Y)` has no stratified
+/// model, and BOTH engines must say so. Agreeing only on accepted programs would let a
+/// too-permissive checker pass unnoticed.
+#[test]
+fn souffle_rejects_what_our_checker_rejects() {
+    let src = format!(
+        "{P}[?x, ex:win, \"y\"] :- [?x, ex:move, ?y], NOT [?y, ex:win, \"y\"] ."
+    );
+    let mut d = Dict::new();
+    let program = parse_program(&mut d, &src).expect("parse");
+    assert!(
+        stratify(&d, &program).is_err(),
+        "our checker must reject the negation cycle"
+    );
+    let Some(bin) = souffle::binary() else {
+        return;
+    };
+    let facts = random_graph(&mut d, 0, 6, 9);
+    let translation = souffle::translate(&d, &program, &facts).expect("in fragment");
+    let err = translation
+        .run(&bin)
+        .expect_err("souffle must also refuse to stratify this program");
+    assert!(
+        err.contains("stratify"),
+        "souffle refused for an unexpected reason: {err}"
+    );
+}
+
+/// The fragment boundary is a LOUD error naming the construct, never a silent partial
+/// translation that would quietly compare fewer rules than the program has.
+#[test]
+fn souffle_translation_rejects_out_of_fragment_constructs() {
+    let cases = [
+        (
+            format!("{P}[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) ."),
+            "AGGREGATE",
+        ),
+        (
+            format!("{P}[?x, ex:big, \"y\"] :- [?x, ex:deg, ?c], FILTER(?c >= 2) ."),
+            "FILTER",
+        ),
+        (
+            format!("{P}[?p, ex:observed, ?y] :- [?x, ?p, ?y] ."),
+            "variable predicates",
+        ),
+        (
+            format!("{P}[?x, ex:typed, \"y\"] :- [?x, a, ?c] ."),
+            "variable-class",
+        ),
+    ];
+    for (src, needle) in cases {
+        let mut d = Dict::new();
+        let program = parse_program(&mut d, &src).expect("parse");
+        let err = souffle::translate(&d, &program, &[]).expect_err("out of fragment");
+        assert!(
+            err.contains(needle),
+            "expected the error to name {needle:?}, got: {err}"
+        );
+    }
+}
+
+/// The run path up to the process spawn — scratch directory, program file, and one
+/// `.facts` table per relation — is exercised even on a box with no Soufflé, so an
+/// ordinary CI run still covers it and a spawn failure is reported, never swallowed.
+#[test]
+fn souffle_run_reports_an_unrunnable_binary() {
+    let mut d = Dict::new();
+    let src = format!("{P}[?x, ex:q, ?y] :- [?x, ex:p, ?y] .");
+    let program = parse_program(&mut d, &src).unwrap();
+    let (a, p, b) = (iri(&mut d, "a"), iri(&mut d, "p"), iri(&mut d, "b"));
+    let t = souffle::translate(&d, &program, &[[a, p, b]]).unwrap();
+    let err = t
+        .run("sparq-no-such-souffle-binary")
+        .expect_err("an absent binary must be an error, not an empty closure");
+    assert!(
+        err.contains("failed to run"),
+        "expected a spawn-failure report, got: {err}"
+    );
+}
+
+/// Golden translation: the emitted Soufflé source is the artifact a reviewer reads and
+/// the CI lane runs, so it is pinned exactly. This runs whether or not Soufflé is
+/// installed, which is what keeps the translator covered on an ordinary CI box.
+#[test]
+fn souffle_translation_is_pinned() {
+    let mut d = Dict::new();
+    let src = format!(
+        "{P}[?y, ex:reach, \"y\"] :- [?x, ex:reach, \"y\"], [?x, ex:edge, ?y] .\n\
+         [?x, ex:lonely, \"y\"] :- [?x, a, ex:Node], NOT {{ [?x, ex:edge, ?w] }} ."
+    );
+    let program = parse_program(&mut d, &src).unwrap();
+    let (a, b) = (iri(&mut d, "a"), iri(&mut d, "b"));
+    let (edge, ty, node) = (
+        iri(&mut d, "edge"),
+        d.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+        iri(&mut d, "Node"),
+    );
+    let t = souffle::translate(&d, &program, &[[a, edge, b], [a, ty, node]]).unwrap();
+    assert_eq!(
+        t.source,
+        "// Generated by sparq-reason datalog::souffle (sq-xzb9p). Do not edit.\n\
+         // One relation per stratification node; Soufflé stratifies this itself.\n\
+         .decl p0_reach(s: symbol, o: symbol)\n\
+         .input p0_reach\n\
+         .decl p1_edge(s: symbol, o: symbol)\n\
+         .input p1_edge\n\
+         .decl c2_Node(s: symbol)\n\
+         .input c2_Node\n\
+         .decl p3_lonely(s: symbol, o: symbol)\n\
+         .input p3_lonely\n\
+         .decl neg1_0(v0: symbol)\n\
+         p0_reach(v0, \"\\\"y\\\"\") :- p0_reach(v1, \"\\\"y\\\"\"), p1_edge(v1, v0).\n\
+         neg1_0(v0) :- p1_edge(v0, v1).\n\
+         p3_lonely(v0, \"\\\"y\\\"\") :- c2_Node(v0), !neg1_0(v0).\n\
+         .output p0_reach\n\
+         .output p1_edge\n\
+         .output c2_Node\n\
+         .output p3_lonely\n"
+    );
+    // A triple under a predicate no atom reads is outside the comparison projection.
+    assert!(t.covers([a, edge, b]) && t.covers([a, ty, node]));
+    assert!(!t.covers([a, iri(&mut d, "weight"), b]));
 }

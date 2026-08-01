@@ -7,7 +7,11 @@ measured on the aarch64 work box. **All figures cited here are RELATIVE, NON-CAN
 shapes** — they steer prioritization only and must never be baked into docs, tests, or CI
 thresholds. Any adopted change proves itself on the canonical EC2 lane
 (`research/ci-ec2-design.md`, greenlit sq-vw3ax.12) and against the deterministic
-`scripts/perf-gate.py` ratchets, which must hold or improve.
+`scripts/perf-gate.py` ratchets, which must hold or improve. Mind the split those ratchets
+enforce: every `mode: auto` metric in `bench/perf-baseline.json` hard-fails, while the
+`mode: noise` timing metrics are advisory. `parse_ns_per_byte` is the sole `mode: noise`
+metric — wall-clock-derived, an **advisory timing signal (tracked/warned, non-blocking)** —
+and the measurement obligations below cite it in that sense, never as a hard ratchet.
 
 ## 0. Disjointness map — what this record must NOT restate
 
@@ -52,8 +56,9 @@ dominant cold-load / `query-mmap` cost, so this is a direct product win for load
 
 **Canonical measurement:** EC2 bench (tag `sparq-bench`, orphan-proof self-terminate):
 ingest wall on the synthetic social graph + WatDiv at two scales; `perf` self-time share of
-the sort family before/after; `parse_ns_per_byte` and `bytes/triple` ratchets hold or
-improve. Correctness gate: byte-identical index content vs the comparison sort (exact
+the sort family before/after; the `bytes/triple` ratchet holds or improves, and
+`parse_ns_per_byte` (advisory timing signal — tracked/warned, non-blocking) shows no
+regression. Correctness gate: byte-identical index content vs the comparison sort (exact
 output-equivalence test), and dict-id-order determinism per
 `research/dict-id-order-determinism-audit.md`.
 
@@ -85,8 +90,9 @@ replays deterministically per PR. No adoption without that lane green.
 uniformity (real dumps are highly prefix-uniform; WatDiv/BSBM/Wikidata all are).
 
 **Canonical measurement:** EC2 ingest wall + `perf` share of the oxiri symbol family;
-`parse_ns_per_byte` ratchet. A prefix-diverse adversarial input must show no regression
-(memo miss cost ≈ one short memcmp).
+`parse_ns_per_byte` as an advisory timing signal (tracked/warned, non-blocking). A
+prefix-diverse adversarial input must show no regression (memo miss cost ≈ one short
+memcmp).
 
 **M4 composition:** orthogonal (ingest).
 
@@ -152,7 +158,8 @@ lane coverage. (b) In `Dict` dedup, compare the stored 64-bit hash before fallin
 cost — which is why it ranks below the three items above despite being trivial.
 
 **Canonical measurement:** EC2 ingest wall delta; Miri lane green; cargo-geiger ratchet
-accounted; `parse_ns_per_byte` holds or improves.
+accounted; `parse_ns_per_byte` (advisory timing signal — tracked/warned, non-blocking)
+shows no regression.
 
 ---
 
@@ -263,6 +270,32 @@ a documented local `--no-default-features` check loop instead.
 
 **Expected impact:** small constant CPU off the test-profile critical path; near-zero risk.
 
+**Audit outcome (sq-6vshe.13).** Mechanism (a) as stated above is **refuted**, and (b) found
+nothing trimmable. Recorded so the item is not re-opened on the same premise:
+
+- **(a) `serde_derive` does not enter via `serde_json`.** `serde_json` depends on the `serde`
+  facade with the `derive` feature *off*; the proc-macro is activated instead by ten crates'
+  **non-dev** `serde = { features = ["derive"] }` edges (`sparq-nlq`, `-forms`, `-lws-core`,
+  `-mcp`, `-zk-compose`, `-metamorph`, `-introspect`, `-shacl`, plus optional edges in
+  `-fedclient`/`-kb`). Because features unify across a workspace resolution, `serde_derive`
+  compiles in *any* workspace build regardless of how `serde_json` dev-deps are scoped — so
+  scoping them buys no proc-macro time, only `serde_json`+`itoa`+`zmij` codegen units.
+- **Scoping is already tight.** All thirteen crates carrying a `serde_json` dev-dep genuinely
+  use it from a dev target, so there is nothing to delete on usage grounds. The one real
+  finding was a *redundant* declaration: `sparq-lws-core` listed `serde_json` in both
+  `[dependencies]` (unconditional, non-optional) and `[dev-dependencies]`; the dev entry was
+  removed. `sparq-engine` and `sparq-vectors` also carry both, but there the non-dev edge is
+  `optional = true`, so their dev entries are load-bearing and stay.
+- **(b) `zerocopy` is not in the lean default graph and is not trimmable from our manifests.**
+  No sparq crate depends on it directly. It enters only transitively via `ppv-lite86`
+  (← `rand_chacha` ← `proptest`/`rand`), `ahash` (← `hashbrown 0.14` inside `hdt`/`parquet`,
+  and the arkworks stack under `sparq-zk`), and `half` (← `ciborium` ← `criterion`, and
+  `arrow`/`parquet`/`naga`). `sparq-core`'s own `hashbrown 0.17` hashes with `foldhash`, not
+  `ahash`, so the lean core/engine build never reaches `zerocopy`. `zerocopy-derive` is turned
+  on by those third-party manifests' own feature selections, which we cannot override without
+  dropping `proptest`/`criterion` — not on the table. **No action.**
+- **(c)** Position on `regex`/`digest` defaults is unchanged: do not flip.
+
 ---
 
 ## 3. Coverage-lane speed (beyond sq-p0hcd's shard, sq-piapk's engine shard, fmx4u.6's empty-set skip)
@@ -316,6 +349,72 @@ generics-heavy engine shard benefits most (composes with sq-piapk).
 
 **Risk:** medium — nightly flag stability + the re-baseline governance step.
 
+#### 3.2 OUTCOME (sq-6vshe.11) — instrumentation A/B PARKED, trio audit found a real gap
+
+This section's two halves resolved differently, so both verdicts are recorded here rather
+than left to be re-derived.
+
+**Half 1 — `except-unused-generics`: PARKED, and not "until stable".** The premise above is
+stale. The value is not merely nightly-gated; `rustc` no longer accepts it *at all*.
+Measured directly against `rustc`:
+
+- `-C instrument-coverage=except-unused-generics` is rejected with
+  *"incorrect value … one of: `y`, `yes`, `on`, `true`, `n`, `no`, `off` or `false` was
+  expected"* — i.e. `-C instrument-coverage` now takes only booleans (plus the deprecated
+  `all` alias, which still parses).
+- The same value is **also** rejected under `-Z unstable-options`, so escaping the coverage
+  lane to a pinned nightly would buy nothing. There is no channel on which this works.
+- The surviving nightly knob is `-Z coverage-options`, whose accepted values are
+  `block | branch | condition | mcdc | no-mir-spans`. None of these is an unused-generics
+  diet; they add finer-grained coverage, they do not remove monomorphization counters.
+
+Consequence for governance: **there is no floor re-baseline to do.** The re-baseline was
+required only because a changed instrumentation mode would change per-crate coverage
+denominators. The mode cannot change, so the denominators do not move, and no
+measurement-definition PR is owed. The "loud standalone PR with before/after floor tables"
+obligation is discharged as *not applicable*, not skipped.
+
+Caveat on the measurement: it was taken on the `rustc` available to the implementing agent
+(1.88.0), not on the repo's pinned toolchain — that pin could not be materialised in the
+sandbox (read-only `rustup` directory). Option removals are not reverted, and the `-Z
+coverage-options` enumeration observed there is already the modern surface, so the verdict is
+not expected to differ on the pin. Anyone re-opening this should re-run those two commands on
+the pinned toolchain before spending further effort.
+
+**Half 2 — the sq-6vshe.1 trio audit: one leg was NOT reaching the coverage lane.** Verified
+per leg rather than assumed:
+
+| Leg | Reaches the coverage jobs? | How verified |
+|---|---|---|
+| `CARGO_INCREMENTAL=0` | yes | plain cargo env var, no competing source |
+| `CARGO_PROFILE_DEV_DEBUG=line-tables-only` | yes | ran `cargo test --no-run -v` with it set; `rustc` is invoked with `-C debuginfo=line-tables-only` (the `test` profile inherits `dev`, and a config/env profile key overrides the manifest) |
+| `CARGO_TARGET_<triple>_RUSTFLAGS="-C link-arg=-fuse-ld=lld"` | **no** | see below |
+
+Cargo resolves rustflags from `CARGO_ENCODED_RUSTFLAGS` > `RUSTFLAGS` >
+`target.<triple>.rustflags` > `build.rustflags` and uses **only the first source that is
+set** — it never merges them. Confirmed directly: with only the per-target variable set,
+`rustc` receives its flags; with `RUSTFLAGS` also set, the per-target variable is dropped
+entirely. `cargo-llvm-cov` sets the top two variables to inject `-C instrument-coverage`
+(that is what `cargo llvm-cov show-env` exports, and what `coverage-engine-shard.sh
+build-objects` sources), so **every coverage job was linking with the default linker** while
+every sibling native job used lld — silently, since nothing fails when a flag stops applying.
+
+Fix landed with this bead: the four `cargo-llvm-cov` jobs (`coverage-measure`,
+`coverage-engine-run`, `coverage-engine-merge`, `coverage-nightly`) set `RUSTFLAGS` at job
+level, on the source `cargo-llvm-cov` reads and extends rather than one it shadows. That
+"extends rather than replaces" step is `cargo-llvm-cov`'s documented behaviour and was **not**
+measured here — the tool is not installed on the authoring box, so it should be confirmed on
+the first CI run from a coverage job's compile line. The failure mode is benign either way: if
+it replaced `RUSTFLAGS`, this change is a no-op (status quo) rather than a regression. All
+four use one identical value
+— required independently by the engine coverage split, whose cross-runner `.profraw` merge is
+only valid while every compile sees identical inputs. `scripts/check-coverage-rustflags.py`
+gates both the presence and the sameness so the shadowing cannot silently return.
+
+Not claimed: any specific speed-up. This bead makes the flag *apply*; whether lld is faster
+on instrumented links is the same bet sq-6vshe.1 already made and merged for every other
+native lane, and the coverage-lane wall-clock trend is the measurement that settles it.
+
 ### 3.3 Cross-benefit accounting (no new bead)
 
 §2.1's test-crate consolidation is itself a first-order coverage lever (fewer
@@ -345,7 +444,9 @@ structural program (source-level + coverage levers its record scoped out or defe
 | 11 | sq-6vshe.13 | build | scope `serde_json` dev-dep, audit zerocopy; do NOT flip regex/digest defaults | small constant test-profile CPU | near-zero | haiku |
 
 Maintainer-decision flags: the engine **crate split** stays gated at sq-6vshe.3/.4
-(endorsed, not re-beaded; #9 feeds it). #7's floor **re-baseline** is a
-measurement-definition change requiring a loud standalone PR. #5's lane assignment
+(endorsed, not re-beaded; #9 feeds it). #7's floor **re-baseline** was flagged as a
+measurement-definition change requiring a loud standalone PR — **resolved as not applicable**:
+§3.2 OUTCOME measured that the instrumentation mode cannot change, so no denominator moves
+and no re-baseline is owed. #7 shipped only its trio-audit half. #5's lane assignment
 (what stays on the fat ship profile) is listed for steer in its PR body
 (proceed-and-document).

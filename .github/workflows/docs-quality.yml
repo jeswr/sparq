@@ -81,11 +81,35 @@
 #                       not-yet-clean dirs (bench/, .claude/) so any backlog stays visible.
 #     • vale          — prose hygiene: weasel words, wordy phrases, adjective puffery.
 #     • external-links — lychee online: dead http(s) links (network-flaky → advisory).
+#     • docs-duplication — jscpd copy/paste detection over the doc surface, configured by the
+#                       repo-root `.jscpd.json`. ADVISORY, and the reason is a MEASURED tool
+#                       limitation, not a backlog — see the step body for the evidence: jscpd's
+#                       `markdown` block class reports clones between text that is not
+#                       duplicated at all, so its headline percentage is not trustworthy on a
+#                       prose corpus. The per-fence sub-format classes (the ```rust / ```bash /
+#                       ```sparql blocks inside those docs) ARE exact, and are the half worth
+#                       gating on. The step therefore splits the two classes in its summary
+#                       rather than reporting one blended number.
+#                       `.jscpd.json` notes (it is JSON, so it cannot carry its own comments —
+#                       jscpd warns on an unknown key, including a `_doc` one):
+#                         · `path` is the scope: README.md + skills/ + docs/ + research/ +
+#                           book/src. The mdBook RENDERED output is excluded STRUCTURALLY by
+#                           naming the sources (`book/src`) rather than `book` — an ignore glob
+#                           for `book/book/**` was measured to be unreachable dead config and
+#                           was dropped. `**/target/**` IS reachable and is verified to bite
+#                           (root `.gitignore` only anchors `/target`, so a nested cargo target
+#                           dir under research/ does show up without it).
+#                         · `format: ["markdown"]` selects FILES by extension; the per-fence
+#                           sub-format blocks inside those files are analysed regardless, which
+#                           is what makes the exact half of this lane possible.
+#                         · it sits at the tool's conventional discovery path, so a local bare
+#                           `npx jscpd` reproduces the lane with no flags.
 #
 # WHY this split: markdownlint/typos/internal-links/no-perf-numbers/readme-template are
 # deterministic and now pass on the scoped doc surface, so they gate. Vale/external-links
-# carry a network dependency or a pre-existing prose-style backlog, so they advise until
-# their scope is clean, then flip to HARD.
+# carry a network dependency or a pre-existing prose-style backlog, and docs-duplication
+# carries a per-class precision problem, so they advise until their scope is clean, then
+# flip to HARD.
 #
 # ci-summary aggregation: it polls every check-run on the head commit and fails iff one
 # concluded failure. So every ADVISORY job must CONCLUDE SUCCESS or it would block the
@@ -154,11 +178,11 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: lychee@0.23.0
 
@@ -177,7 +201,9 @@ jobs:
           set -euo pipefail
           # HARD scope = root *.md + skills/ + docs/ + crates/ (markdown only).
           # `git ls-files '*.md'` matches at any depth, so EXCLUDE the out-of-scope
-          # dirs to land exactly on the same set markdownlint's config globs (49 files).
+          # dirs to land exactly on the same set markdownlint's config globs. (A file
+          # COUNT was pinned here and rotted — it read 49 while the real scope had grown
+          # to 280; the step prints the live count below, so do not re-pin one. [OPUS-5])
           git ls-files '*.md' \
             ':!:research/**' ':!:zk/**' ':!:bench/**' ':!:js/**' \
             ':!:.beads/**' ':!:.claude/**' ':!:.github/**' \
@@ -266,9 +292,24 @@ jobs:
       # should-FAIL banned spellings must fire AND should-PASS proper-noun / paper-title /
       # third-party-doc / URL / allow-marker lines (+ the GeoSPARQL / italic-closer / bold
       # false-positive families) must not regress. Hermetic (no git/network).
+      #
+      # [OPUS-5] issue #3811 — the gate is now DATA-DRIVEN (scripts/banned-terminology.json)
+      # and each banned term declares its OWN file surface. The trigger: ~98 occurrences of a
+      # maintainer-banned trust term reached PR #3451 as a `pub` Rust type AND a PUBLISHED
+      # .ttl rdfs:comment with a green `ci-summary / gate`, because this gate hard-coded its
+      # list and scanned only *.md — neither extension was reachable. Adding a future banned
+      # term is now one object in the JSON, not a code change.
+      #
+      # These three steps are the whole enforcement path; deleting any one of them silently
+      # disarms the gate, so scripts/tests/test_banned_terminology.py asserts all three call
+      # sites exist, that neither the steps nor the job carry a skip `if:`, that the job name
+      # does not read as advisory (ci_summary_gate.py would stop gating on it), and that the
+      # workflow still triggers on merge_group (the queue must evaluate it).
       - name: Self-test the terminology gate (both directions)
         run: python3 scripts/check-terminology.py --self-test
-      - name: terminology (RDF 1.2 / SPARQL 1.2 wording) — GATING
+      - name: Self-test the banned-terminology gate (fixtures + workflow wiring)
+        run: python3 scripts/tests/test_banned_terminology.py
+      - name: terminology (RDF 1.2 / SPARQL 1.2 + banned wording) — GATING
         run: python3 scripts/check-terminology.py
 
       # ---- former job: no-perf-numbers (docs) ----
@@ -318,6 +359,34 @@ jobs:
         run: python3 scripts/check-readme-template.py --self-test
       - name: readme-template (template) — crate-README cap + sections (sq-9jw5) — GATING
         run: python3 scripts/check-readme-template.py --enforce
+
+      # [OPUS-5] Pre-submit runner (scripts/preflight.py) — the checker that shifts
+      # G1/G2/G6 + no-perf-numbers + readme-template + privacy-claims LEFT into the
+      # worker's worktree, plus the `guard-untested` check. Two HARD legs, both in
+      # this already-GATING job so a regression reds ci-summary:
+      #   * --self-test pins the checker's own logic (mirrors readme-template /
+      #     coverage-gate / perf-gate above);
+      #   * the unittest suite additionally pins that EVERY worker brief still
+      #     carries the shared pre-submit block, byte-identical. A brief silently
+      #     losing a clause is a repeated failure mode here — a worker reads only
+      #     its own brief, so an obligation present in five of six is absent for
+      #     the sixth. Deleting the block from one brief reds this leg.
+      #
+      # Both `run:` values must stay BARE COMMANDS on their own line. Appending
+      # `|| true` (or `; true`, or piping) leaves every substring-matching seam
+      # test green while the leg can no longer fail — the commonest swallow shape
+      # in this repo's verdict corpus. `test_preflight.py::
+      # test_neither_leg_is_invoked_with_its_exit_code_discarded` anchors the call
+      # with `^\s*<cmd>\s*$` and reds on exactly that edit.
+      - name: Self-test the pre-submit runner (pure logic)
+        run: python3 scripts/preflight.py --self-test
+      - name: preflight — checker tests + worker-brief block consistency — GATING
+        run: python3 scripts/tests/test_preflight.py
+
+      - name: Demo deployment manifests
+        run: |
+          bash deploy/demo/check.sh
+          bash deploy/demo/check-self-test.sh
 
       # ---- former job: ci-scripts (CI-helper self-tests + workflow lints) ----
       # [OPUS-4.8] sq-6uc7: HARD self-tests for the shared CI disk-reclaim script
@@ -385,6 +454,26 @@ jobs:
         run: bash scripts/tests/test_beir_gather_sentinel.sh
       - name: Self-test console envelope extractor (exact names + CRLF + allowlist)
         run: bash scripts/tests/test_extract_console_envelopes.sh
+      # [OPUS-5] sq-ffaa9: the serial console is AMI-dependent — on the AL2023/Nitro x86_64
+      # image `get-console-output` returned nothing usable, so a whole canonical gather was
+      # unrecoverable. scripts/bench/bench-result-egress.sh adds the durable S3 channel; this
+      # hermetic harness (PATH-shadowed `aws`, no account, no network) pins the two properties
+      # that make it safe to leave in every launcher: it is INERT unless both knobs are set,
+      # and a HALF-configured pair (destination, no instance profile) fails fast instead of
+      # running for hours and losing the results. It also pins the bootstrap policy as
+      # write-only + prefix-scoped, and that the launchers stay wired to the library.
+      - name: Self-test durable S3 result egress (inert by default, half-config fails fast)
+        run: bash scripts/tests/test_bench_result_egress.sh
+      # [SONNET-4.6] PR #3990 review: bench/geo/gsb.sh advertises a HARD sha256 pin on the
+      # GeoSPARQL Compliance Benchmark, but a CACHED extraction was accepted on file COUNTS
+      # alone — a stale or locally edited corpus would have been scored silently, making the
+      # recorded compliance number irreproducible. The cache is now gated on a recorded proof
+      # (pinned tarball digest + a content digest of the extracted tree); this hermetic
+      # self-test pins that a count-preserving edit, an absent proof, and a proof naming a
+      # different tarball digest are all rejected. No network, no corpus: it fabricates a
+      # correctly-shaped tree in a scratch dir and drives the real script with GSB_FETCH=0.
+      - name: Self-test gsb.sh cache pin (count-preserving edit never scored)
+        run: bash bench/geo/gsb.sh --self-test
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.
@@ -400,6 +489,25 @@ jobs:
       # self-test in differential.yml).
       - name: Self-test demoted-lane failure filer (id/dedupe/append/log-tail logic)
         run: python3 scripts/ci-file-demoted-lane-failure.py --self-test
+      # [OPUS-5] sq-jxeqz / #4559: the bench HARD-ZONE gate's pure logic
+      # (scripts/bench_hardzone.py). Its --self-test previously ran ONLY inside bench.yml's
+      # "Hard zone" step, which is guarded `github.event_name != 'schedule' && github.ref ==
+      # 'refs/heads/main'` — so the gate's own logic was NEVER exercised on a PR, and a change
+      # to it could only be discovered by reddening main AFTER merge. That is exactly how the
+      # zero-boundary defect in #4559 reached main and then persisted (15 of the last 60
+      # Benchmarks runs failed on that one step). Running it HERE, on every PR, means a
+      # regression in the regression gate reds the PR that causes it. Hermetic: no network,
+      # no git, no repo writes (same stdlib-only pattern as the lints above).
+      - name: Self-test bench hard-zone gate (zero boundary + noise floor + resolution bounds)
+        run: python3 scripts/bench_hardzone.py --self-test
+      # ...and the WIRING of that gate: the step above must exist and stay unconditional, the
+      # bench.yml lane must keep `set -euo pipefail` with no `|| true` / continue-on-error, and
+      # the hard-zone step must keep running BEFORE the Store step (the anti-laundering
+      # invariant — Store auto-pushes this run's point, so gating afterwards would publish a
+      # rejected regression into the very median that judges it). This test also asserts its
+      # OWN step is present, so the seam cannot be un-wired one level up.
+      - name: Self-test bench hard-zone WIRING (PR coverage + publish order + no swallow)
+        run: python3 scripts/tests/test_bench_hardzone_wiring.py
       # [FABLE-5] formal-lanes fix: the nightly miri.yml UB lane's verdict CLASSIFIER
       # (scripts/miri_classify_verdict.py) decides whether a shard's non-passes are known
       # per-test-cap TIMEOUTS (cost debt, sq-0s15k — non-fatal) or a GENUINE Miri UB/assertion
@@ -418,6 +526,22 @@ jobs:
         run: |
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
+      # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
+      # family — it CLEARS the `needs:area` park triage.py sets. As of #3816 it also
+      # runs unattended every half hour (.github/workflows/triage-area.yml), which
+      # makes this PR-time gate load-bearing rather than merely prudent: without it a
+      # rule-table edit would first be observed by mislabeling LIVE issues on the next
+      # cron fire, and a wrong `area:` routes a worker at the wrong crate. The cron
+      # re-runs both suites itself before it writes, so this gate and that one fail on
+      # the same regression — here on the PR, there before any label is touched.
+      # Both suites are hermetic (stdlib only, no gh/network):
+      # the script's own rule self-test, plus the independent safety tests
+      # (fail-closed / no unpark-without-an-area / no invented label / the three
+      # rule orderings that were measured wrong on the live backlog).
+      - name: Self-test triage-area.py (needs:area classifier — fail-closed + no-drift)
+        run: |
+          python3 scripts/triage-area.py --self-test
+          python3 scripts/tests/test_triage_area.py
       # [FABLE-5] #3759 / registry#563 item 4: the transient-tolerant gh READ retry
       # helper (scripts/gh_retry.py — bounded, transient-5xx-only, fail-closed
       # read-allow-list so mutations/arm calls can never be wrapped) and the two arm
@@ -430,6 +554,29 @@ jobs:
           python3 scripts/gh_retry.py --self-test
           python3 scripts/auto-arm.py --self-test
           python3 scripts/rearm-sweeper.py --self-test
+      # [OPUS-5] issue #1135 — the crates.io PUBLISHING protections, gated here because
+      # the release path itself (release-plz.yml) runs ONLY on push:main and therefore
+      # never registers on this PR's `gate`: a defect in it would otherwise surface for
+      # the first time at release time, when the mistake is irreversible.
+      #   * release_pr_guard.py    — the branch/author/title Release-PR exclusion that
+      #                              auto-arm.py, rearm-sweeper.py, check-pr-arm-base.py,
+      #                              batch-merge.py and pr-backlog.py all consult.
+      #   * release-interval-guard — the fail-closed minimum-release-interval belt.
+      #   * test_release_publish_guard.py — parses .github/workflows/release-plz.yml
+      #     STRUCTURALLY (not by substring) so `if: false`, a deleted step, a reordered
+      #     step or a re-pointed `--dry-run` input each red this gate. Measured in this
+      #     repo: every uncaught mutant has lived at the YAML seam, not in the Python.
+      #     [OPUS-5] PR #4192 review: it now pins the guard step's `run:` by EQUALITY and
+      #     asserts `continue-on-error` is ABSENT — a `|| true` suffix, an `exit 0;`
+      #     prefix, `continue-on-error: 'true'` and `continue-on-error: ${{ true }}` all
+      #     survived the looser containment/identity readings. It also drives `run()`'s
+      #     crates.io CALL SITE (not just `decide()`), and executes .claude/settings.json's
+      #     hook wrapper to prove an unrunnable arm guard denies rather than allows.
+      - name: Self-test crates.io publishing protections (#1135)
+        run: |
+          python3 scripts/release_pr_guard.py --self-test
+          python3 scripts/release-interval-guard.py --self-test
+          python3 scripts/tests/test_release_publish_guard.py
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
@@ -441,6 +588,19 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [SONNET-4.6] sq-6vshe.11: every cargo-llvm-cov job MUST set a job-level RUSTFLAGS,
+      # and they must all set the SAME value. cargo picks ONE rustflags source (first match
+      # wins, never merged) and cargo-llvm-cov sets RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS to
+      # inject `-C instrument-coverage` — which silently DROPS ci.yml's workflow-level
+      # CARGO_TARGET_<triple>_RUSTFLAGS lld flag in exactly those jobs. Nothing fails when
+      # that happens; the flag just stops applying, which is how it went unnoticed from
+      # sq-6vshe.1 until it was measured. The sameness half additionally protects the engine
+      # coverage split, whose cross-runner .profraw merge is only valid while the run and
+      # merge jobs compile with identical inputs. Stdlib-only, no compile, no deps.
+      - name: Self-test coverage RUSTFLAGS gate (pure logic)
+        run: python3 scripts/check-coverage-rustflags.py --self-test
+      - name: "Enforce job-level RUSTFLAGS on every cargo-llvm-cov job — GATING"
+        run: python3 scripts/check-coverage-rustflags.py
       # [OPUS-4.8] sq-u59rq: the stacked-PR arm guard. A deterministic PreToolUse command-hook
       # (.claude/settings.json, sibling to the perf-reviewer) that DENIES `gh pr merge … --auto`
       # when the PR's baseRefName ≠ main — so we never squash-merge a stacked PR into its base
@@ -450,8 +610,14 @@ jobs:
       # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
       # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
       # [GPT-5.6] #3605: it also runs the real settings command from an unrelated cwd and
-      # proves a missing guard script returns an explicit allow instead of bricking every Bash.
-      - name: Self-test stacked-PR arm guard (cwd-independent + fail-open)
+      # proves an unrunnable guard script returns an explicit decision with exit 0 instead
+      # of bricking every Bash.
+      # [OPUS-5] PR #4192 review, finding 3: that explicit decision used to be `allow` for
+      # EVERY command, which inverted the script's deliberately fail-CLOSED release axis
+      # exactly when there is no guard. The wrapper now DENIES `gh pr merge` and allows
+      # everything else; both halves are pinned in the self-test (an all-deny would
+      # re-create the #3605 all-Bash deadlock, so the allow row is load-bearing too).
+      - name: Self-test stacked-PR arm guard (cwd-independent; fail-closed on arms)
         run: python3 scripts/check-pr-arm-base.py --self-test
       # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
       # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
@@ -471,6 +637,26 @@ jobs:
         run: python3 scripts/check-dashboard-publish-wiring.py --self-test
       - name: "Enforce every served bench/dashboard asset is wired into the Pages publisher — GATING"
         run: python3 scripts/check-dashboard-publish-wiring.py
+      # [OPUS-5] sq-t099c: the drift class tests/scoreboard_floors.rs does NOT cover. That
+      # guard binds crate-test floor `const`s to the central registry; the two BINARY-runner
+      # suites' floors are hand-typed `RATCHET=<n>` shell literals in ci.yml, and the number
+      # compared against the inference one is grepped out of a report by heading text. So the
+      # emitter (inference/report.rs), ci.yml's grep, scoreboard.rs + its generated mirror, and
+      # the INTENTIONALLY-tracked inference-conformance-report.md all have to agree — and
+      # nothing checked that they did. Observed live on main: the emitter writes
+      # "## Overall (all inference suites)" while the committed report said "## Overall (all
+      # suites)" with a hand-added paragraph wedged between heading and totals, so ci.yml's own
+      # `grep -A2 <heading>` could not parse the artefact readers cite. It stayed silent because
+      # CI REGENERATES the report before parsing it — the tracked file is read by nothing. This
+      # gate binds heading, bucket spelling, grep-window parseability, both `RATCHET=` literals
+      # and the doc-comment floor list to the registry. It never regenerates the report (that
+      # needs the pinned suites + a release build), so a legitimately-lagging artefact is fine;
+      # only a heading/count contradiction is red. GATING: deterministic, in-repo, no network,
+      # stdlib-only. Mutation table in --self-test proves each check has teeth.
+      - name: Self-test inference report/scoreboard drift gate (mutation table)
+        run: python3 scripts/check-inference-report-drift.py --self-test
+      - name: "Enforce inference report ↔ ci.yml ratchet ↔ central scoreboard floor agree — GATING"
+        run: python3 scripts/check-inference-report-drift.py
       # [OPUS-4.8] sq-d8or: the built-docs-site link gate (scripts/check-site-links.sh) is
       # invoked on the publish path in pages.yml (after `next build`), where the static export
       # exists. Its remap of the /sparq GitHub-Pages base path + its TEETH (a broken internal
@@ -483,6 +669,31 @@ jobs:
         run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
       - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
         run: bash scripts/tests/test_check_site_links.sh
+      # [SONNET-4.6] sq-vw3ax.11.3: the fail-closed release alias contract check
+      # (scripts/check-release-aliases.sh) runs on the RELEASE path (release.yml), where a
+      # silently shrunken extraction would only surface after a bad release shipped. Its
+      # hermetic self-test therefore runs HERE on every PR: it pins the golden alias contract
+      # extracted from the real /download component (so an intentional alias change must
+      # update the golden in the same PR), the release-blocking teeth, and — PR #3528 review —
+      # that every partial-extraction mutation (reformat / key rename / pattern-key drift)
+      # exits 2 instead of approving a reduced contract.
+      - name: shellcheck check-release-aliases.sh + its self-test
+        run: shellcheck scripts/check-release-aliases.sh scripts/tests/test_check_release_aliases.sh
+      - name: Self-test check-release-aliases.sh (golden contract + partial-extraction teeth)
+        run: bash scripts/tests/test_check_release_aliases.sh
+      # [OPUS-5] issue #4571 (GX-11 residual / SL-B3-b): verify-release-provenance.sh is the
+      # EVIDENCE ENGINE for the AR->IV flip — release.yml's `verify-provenance` job runs it right
+      # after cutting the Release, so like every other release-time script its first real execution
+      # is the worst moment to discover a bug in it. Worse, its dangerous failure is the VACUOUS
+      # pass (empty asset set, a bundle covering nothing, an asset silently exempted), which would
+      # manufacture "provenance verified" out of nothing. The self-test drives every fail-closed
+      # branch here, on every PR, against a stub verifier; its non-vacuity is mutation-proved. It
+      # also pins the WIRING — that release.yml itself drives the verifier — because a
+      # `release: published` trigger alone never fires for a GITHUB_TOKEN-created Release.
+      - name: shellcheck verify-release-provenance.sh + its self-test
+        run: shellcheck scripts/verify-release-provenance.sh scripts/tests/test_verify_release_provenance.sh
+      - name: Self-test verify-release-provenance.sh (fail-closed branches + vacuity guard)
+        run: bash scripts/tests/test_verify_release_provenance.sh
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified
@@ -504,6 +715,19 @@ jobs:
       # so a silent rename back to the taken name fails CI here. Stdlib-only, no network.
       - name: Self-test check-pypi-name.py (decision table + dist-name reader)
         run: python3 scripts/check-pypi-name.py --self-test
+      # [OPUS-5] sq-98w7z.8: the upstream-release watch for the vendored spargebra
+      # (scripts/check-spargebra-release.py) answers the one question gating retirement of
+      # vendor/spargebra + the root [patch.crates-io] entry — "has oxigraph released a
+      # spargebra above 0.4.6 yet?". Its LIVE mode queries the crates.io sparse index
+      # (network), so it is a developer/bead-pickup tool and deliberately NOT a required
+      # check — a crates.io outage must never red a gate. Its version-comparison logic IS
+      # hermetic, and it is the part that can silently rot into a WRONG answer: mis-ranking
+      # a yanked or pre-release entry would report "released" and trigger a retirement that
+      # the conformance ratchet would then fail. The self-test is NON-VACUOUS — dropping
+      # either the yanked filter or the prerelease filter makes it exit 1. Stdlib-only, no
+      # network — mirrors the other scripts/check-*.py --self-test lints here.
+      - name: Self-test check-spargebra-release.py (yanked + prerelease version ranking)
+        run: python3 scripts/check-spargebra-release.py --self-test
       # [OPUS-4.8] sq-mraf: the build-BOUNDARY honesty assertion in
       # site/scripts/build-papers.mjs re-runs BOTH shared gates over the exact paper
       # sources + paper-evidence.json before any artifact is written, so the factory can
@@ -528,6 +752,22 @@ jobs:
       # scripts/check-*.py --self-test lints above.
       - name: Self-test the paper-evidence binding verifier (drift + missing-anchor FAIL; real evidence PASS — sq-gum8.13)
         run: python3 scripts/verify-paper-evidence.py --self-test
+      # [SONNET-4.6] sq-gum8.5 (epic sq-gum8): the constraint-count evaluation pack
+      # (bench/zk-compose/constraint_counts.json + CONSTRAINT_COUNTS.md) is GENERATED — every
+      # integer is joined from the regression-gated snapshot
+      # crates/sparq-zk-compose/tests/gate_count_snapshot.json, nothing is hand-typed. Without a
+      # gate the pack's guarantees rested on a contributor remembering to re-run the generator:
+      # a re-baselined snapshot, a hand-edited artefact, or a NEW snapshot member belonging to no
+      # described family could all merge with the committed pack silently stale. `--check` is that
+      # gate — it re-generates in-memory and fails unless BOTH artefacts are byte-identical, then
+      # re-verifies the COMMITTED JSON against the snapshot (every member size, scaling delta,
+      # invariance, both lanes) and the honesty guards (no related-work figure transcribed; the
+      # metric never flipped to wall-clock/canonical). classify() fails on an unclassified member,
+      # so a new circuit family cannot silently drop out. Stdlib-only, needs NO nargo/bb, no
+      # network — and this lane carries no paths filter, so it runs whenever the snapshot, the
+      # generator, or either artefact changes.
+      - name: "constraint-pack reproducibility (bench/zk-compose, sq-gum8.5) — GATING"
+        run: python3 bench/zk-compose/scripts/constraint_pack.py --check
       # [OPUS-4.8] sq-dhss (epic sq-lhwo): the agent-efficiency Phase-1 telemetry
       # harness (scripts/agent-telemetry/) is the BLOCKING measurement baseline —
       # it parses Claude Code transcript JSONL and aggregates token/cache/$ usage
@@ -628,24 +868,102 @@ jobs:
         run: python3 scripts/tests/test_path_ownership.py
       - name: Selection wiring inspection (fail-closed guards + real crate needles — sq-fmx4u.3)
         run: python3 scripts/tests/test_ci_select_wiring.py
+      # [SONNET-4.6] sq-6vshe.15: the merge-queue cache/artifact posture is two
+      # single-line YAML properties that are INVISIBLE when absent — a dropped
+      # `save-if` just makes the queue slower and churns the shared 10 GB cache
+      # budget again, and a dropped `compression-level: 0` just re-compresses the
+      # already-zstd nextest archive on the critical path. Neither reds anything on
+      # its own, so both are pinned structurally over every workflow that still
+      # triggers on `merge_group`, together with the archive's producer/consumer
+      # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
+      - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
+        run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
+      # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
+      # outage there concluded `failure` with nothing measured and ejected an unrelated
+      # PR from the merge queue. It is now restored from an Actions cache. Same
+      # invisible-regression shape as the posture test above — drop the restore step and
+      # CI stays green while silently re-coupling to a third party's uptime. This runs
+      # the REAL bash `fetch_pinned_file` against a stub curl to prove the offline-on-hit
+      # property, pins the ci.yml wiring, and pins that the ratchet was NOT weakened.
+      - name: Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)
+        run: python3 scripts/tests/test_inference_corpus_cache.py
+      # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
+      # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
+      # versioned binary; reverting to `cargo install wasm-pack` would keep the lane
+      # green on a good day while re-exposing it to a transient crates.io blip
+      # (which red-gated PR #1131). Hermetic + stdlib-only (no PyYAML needed).
+      - name: js lane wasm-pack install posture (prebuilt + pinned — sq-khm3f)
+        run: python3 scripts/tests/test_js_wasm_pack_install.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
-      # design §6.1). Hermetic stdlib-unittest suite (NO gh, NO git, NO cargo,
-      # NO network): the pure correlation core (precise per-crate hit, fail-safe
-      # triage for narrowed shards, the non-spam empty-skip-set property), the
-      # TRIAGE_LANE_RE pin against the real ci.yml shard job name, and the
-      # fail-loud exits (replay error / total blocker => non-zero).
+      # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;
+      # stdlib + PyYAML, installed once in the shared setup above): the pure
+      # correlation core (precise per-crate hit, fail-safe triage for narrowed
+      # shards, the non-spam empty-skip-set property), the TRIAGE_LANE_RE pin
+      # against the real ci.yml shard job name, the fail-loud exits (replay error /
+      # total blocker => non-zero), and — since #4965 — the ADMISSION SEAM: the live
+      # workflow `if:` evaluated against the real known-positive event payload, with
+      # the evaluator validated against the pre-fix expression as a known answer.
       - name: Self-test the nightly selection-bug alarm (correlation + fail-loud — sq-va7at)
         run: python3 scripts/tests/test_ci_selection_alarm.py
+      # [OPUS-5] The review-lane BLIND-SPOT alarm (scripts/review_lane_alarm.py,
+      # .github/workflows/review-alarm.yml). Hermetic (no gh, no network). Two halves:
+      # the four verdict obligations — no-verdict is not armable, a superseded head does
+      # not count, an author cannot verdict their own PR, and the review brief's own
+      # quoted `VERDICT: pass` instruction text is not a pass — plus the YAML SEAM
+      # inspection (schedule present, self-test ordered before the live step, the call
+      # site intact, and the job's permissions carrying `issues: write` with NO
+      # `pull-requests: write`, so the detector can never acquire arming authority).
+      # The suite also pins its OWN call site here, so it cannot silently leave CI.
+      - name: Self-test the review-lane blind-spot alarm (verdict obligations + YAML seam)
+        run: python3 scripts/tests/test_review_lane_alarm.py
+      # [OPUS-5] sq-huwr8: the three DETECTOR lanes (review-alarm / formal-alarm /
+      # selection-alarm) RED by design, and each one's header used to assert it "can
+      # never enter the `ci-summary / gate` poll set" because it creates no check-run on
+      # a PR head or merge-group ref. True premise, false conclusion: ci-summary.yml also
+      # runs on `push: branches: [main]`, so a scheduled alarm's check-run lands on the
+      # very head SHA that gate polls. MEASURED on main head cb0c6739c, render_verdict()
+      # listed `review-lane blind-spot alarm: failure` as a GATING failure. What makes
+      # these lanes safe to RED is their advisory-registry declaration, nothing else.
+      # This suite drives the REAL render_verdict() so deleting a declaration REDs on the
+      # gate's own exit code, carries an UNDECLARED-lane control so the assertions cannot
+      # go vacuous, and DISCOVERS *alarm*.yml from disk so a fourth detector added with
+      # the same false header reds on arrival.
+      - name: Self-test the alarm/detector lanes are DECLARED non-gating (sq-huwr8)
+        run: python3 scripts/tests/test_alarm_lanes_non_gating.py
+      # [OPUS-5] sq-1lc4i: the CI EXECUTION-LATENCY alarm
+      # (scripts/ci_execution_latency_alarm.py, .github/workflows/ci-latency-alarm.yml).
+      # Hermetic (no gh, no network). Three halves: the classifiers for all three choke
+      # modes — including the two guards that fail SILENTLY if broken, namely the
+      # missing-baseline fallback (a lane whose runs never complete must still be
+      # watchable, or the detector goes quiet exactly when a lane is 100% hung) and the
+      # empty-scan-set fail-loud (reporting health over an empty population); the
+      # DISJOINTNESS with #4368's cron_lane_liveness.py, asserted over the REAL workflow
+      # tree in both directions so neither a duplicate nor a hole can open; and the YAML
+      # SEAM (self-test ordered before the detector, both invocations matched EXACTLY
+      # rather than by containment, no step `if:`/`continue-on-error`, SHA-pinned actions,
+      # the sparse-checkout that M1 reads its expectation from, and permissions carrying
+      # `issues: write` with NO `pull-requests: write` so the detector can never acquire
+      # arming authority). The suite pins its OWN call site here, so it cannot silently
+      # leave CI.
+      - name: Self-test the CI execution-latency alarm (3 choke modes + YAML seam)
+        run: python3 scripts/tests/test_ci_execution_latency_alarm.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
-      # test_cone_coverage.py (27 tests) — the cone-based coverage selector
+      # test_cone_coverage.py (49 tests) — the cone-based coverage selector
       # (scripts/cone_coverage.py): compute_cone() closure math, §4.1 full-run
-      # triggers, dev-dep propagation, shadow/enforce mode flags, shadow_report()
+      # triggers, dev-dep propagation, shadow/enforce mode flags, report()
       # label semantics, shard-filtering intersection, and the empty-all_members
-      # fallback. Stdlib-only, no cargo/network.
-      - name: Self-test cone_coverage.py (cone selector + shadow_report — sq-1cb6l)
+      # fallback. [SONNET-4.6] sq-3dr4t adds the ENFORCE-flip guards: cone_from_selection()
+      # (the path CI uses — narrows for an explicit select mode=selected and NOTHING
+      # else), which cases write a NARROWING --crates-output (cone+enforce ONLY — shadow,
+      # mode=full and every fail-safe write EMPTY), the enforce-mode report's inherited
+      # rows and divergence-detection-unavailable honesty, and coverage.sh's COVERAGE_CONE
+      # intersection driven through `coverage.sh --print-crates` (including the
+      # whitespace-only-cone no-op). Stdlib-only, no cargo/network.
+      - name: Self-test cone_coverage.py (cone selector + cone report — sq-1cb6l)
         run: python3 scripts/tests/test_cone_coverage.py
       # test_drift_scan.py (37 tests) — the periodic drift scanner
       # (scripts/drift-scan.py): all 5 scanner classes (bench-missing,
@@ -680,6 +998,31 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [SONNET-4.6] test_coverage_rustflags.py (17 tests) — supplements the
+      # check-coverage-rustflags.py --self-test + enforce run above: the pure
+      # fixtures (job-level vs step-level env, CSV `tool:` list, bare `run: cargo
+      # llvm-cov`, no-compile coverage job out of scope, value divergence), the
+      # scalar parser (a mis-parsed value would fake a divergence), the live
+      # workflows invariant, and TWO vacuity guards — the scan must find at least
+      # one cargo-llvm-cov job, and it must specifically cover the
+      # coverage-engine-{run,merge} pair whose RUSTFLAGS must match for the
+      # cross-runner .profraw merge to be valid. Stdlib-only, no git/network.
+      - name: Self-test check-coverage-rustflags.py (fixtures + live invariant — sq-6vshe.11)
+        run: python3 scripts/tests/test_coverage_rustflags.py
+      # [OPUS-5] sparq-org/sparq#4652: the zero-dispatch merge-group watchdog
+      # (scripts/merge-group-watchdog.py, .github/workflows/merge-group-watchdog.yml)
+      # plus the CI_TIMEOUT routing split it feeds in merge-queue-feedback.yml. Both
+      # are queue-critical and neither can be exercised by a PR run, so their whole
+      # contract is pinned here: the hermetic decision tables (script --self-test), and
+      # the three-layer suite — policy, sweep BEHAVIOUR against a scripted gh (assert on
+      # the mutations issued, not the log text), and cross-file YAML-seam inspection of
+      # every `if:`, step and call site. The fail-closed direction matters most: the
+      # demote guard is `route != 'preserve'`, so a classifier failure keeps the
+      # pre-#4652 behaviour; inverting it to `== 'demote'` fails here.
+      - name: Self-test merge-group-watchdog.py (decision tables — #4652)
+        run: python3 scripts/merge-group-watchdog.py --self-test
+      - name: Zero-dispatch watchdog suite (policy + behaviour + YAML seam — #4652)
+        run: python3 scripts/tests/test_merge_group_watchdog.py
       # [SONNET-4.6] sq-qcnn.32 / [OPUS-5] #3773: the advisory-job registry + gate-intent
       # placement check. Since #3773 the registry is LOAD-BEARING (it is the ONLY thing
       # that makes a check-run non-gating), so this is its integrity gate. THREE
@@ -728,6 +1071,36 @@ jobs:
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
         run: python3 scripts/check-fast-fix-ring-guard.py
+      # [OPUS-5] #4966: the SAME two doorbells, from the opposite direction — a MISSING
+      # REGISTRY_RING_TOKEN must fail LOUD instead of suppressing ~130 rings into green
+      # runs. Extracts each ring job's real `run:` script from the live YAML and
+      # EXECUTES it under bash with a stubbed `gh`, asserting the exit code and the
+      # emitted annotations in BOTH credential states (empty => non-zero + `::error::`
+      # + no dispatch; present => exit 0 + the dispatch actually attempted, so the fix
+      # cannot be "always fail"). Also drives the REAL ci_summary_gate.render_verdict()
+      # to prove the new hard failure cannot red `ci-summary / gate` — both check-runs
+      # land on the main head SHA that the push-triggered gate polls (sq-huwr8), so the
+      # advisory-registry declaration is what keeps them non-gating. Needs PyYAML,
+      # installed once in the shared setup above.
+      - name: Self-test the ring doorbells fail LOUD on a missing credential (#4966)
+        run: python3 scripts/tests/test_ring_credential_loud.py
+      # [OPUS-5] The VERDICT-comment -> review:pass bridge (scripts/verdict-bridge.py,
+      # .github/workflows/verdict-bridge.yml). It is the ONLY automated writer of the
+      # label the whole arming chain admits on, so a regression in it either strands
+      # green PRs outside the merge queue again or — far worse — attests a PR whose
+      # verdict is stale. The suite pins BOTH: the pure fail-closed predicate
+      # (line-anchored trailing verdict, FULL 40-hex head binding, trusted
+      # author_association, latest-by-immutable-created_at retraction, hold labels,
+      # never-retract-on-absence) AND the YAML seam, parsed STRUCTURALLY with PyYAML so
+      # an `if: false`, a deleted step, a wrong sparse-checkout/ref/cron input, or a
+      # privilege escalation reds here — substring assertions catch none of those.
+      # A cross-file check imports the LIVE auto-arm.py / rearm-sweeper.py so the
+      # bridge can never attest a PR those policies would refuse. Stdlib + PyYAML
+      # (installed in the shared setup above); no gh, no git, no network.
+      - name: Self-test verdict-bridge.py (fail-closed predicate — head binding + retraction)
+        run: python3 scripts/verdict-bridge.py --self-test
+      - name: Verdict-bridge policy + workflow-seam inspection (structural YAML)
+        run: python3 scripts/tests/test_verdict_bridge.py
       # [OPUS-5] sparq-org/sparq#3760 — THE ARM PATH. The re-arm sweeper spent days unable
       # to enable auto-merge at all ("Resource not accessible by integration
       # (enablePullRequestAutoMerge)") because its job declared `contents: read` while the
@@ -755,6 +1128,27 @@ jobs:
         run: python3 scripts/auto-arm.py --self-test
       - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
         run: python3 scripts/tests/test_arm_capability_wiring.py
+      # [OPUS-5] sq-w1dxx: release.yml's container contract was pinned by a test that NOTHING
+      # ran, so every assertion in it was decorative. Wire it in beside its sibling tests.
+      # sq-fvzi6 pins the multi-arch push; sq-n6rv + sq-p9xq pin sparq-server's trigger-gated
+      # GHCR tags so a workflow_dispatch dev build never pushes `:latest`, which deploy/paas
+      # and deploy/aws follow.
+      # [GPT-5] sq-fqrv4: also pin multi-arch push + smoke/Trivy pre-push gates for both native
+      # deployment servers, including the sparq-lws-core release contract.
+      # Needs PyYAML, installed once in the shared setup above.
+      - name: Release container contracts (both multi-arch images + safe ghcr tags)
+        run: python3 scripts/tests/test_release_container_multiarch.py
+      # [OPUS-5] sq-toze.25 + #4570 + #4635 (GX-11): the SLSA Build L3 isolation contract for all
+      # FOUR isolated-builder lanes — release.yml#provenance (archives),
+      # release.yml#provenance-artifacts (GUI bundles + SBOM/VEX + conformance report),
+      # dist.yml#provenance (tiered binaries) and release.yml#provenance-container (the ghcr
+      # image, via the generator's container builder). Neither workflow runs on a PR, so a
+      # "simplification" that folds a trusted builder back into an in-band attest step — or
+      # SHA-pins it, which erases the verifiable builder identity — would land unnoticed and
+      # quietly downgrade the level the compliance estate publishes. Pure stdlib (no PyYAML
+      # needed); non-vacuity proved by its own mutation table.
+      - name: SLSA Build L3 isolation contract (release + dist artifacts + container)
+        run: python3 scripts/tests/test_release_slsa_l3_provenance.py
       # [GPT-5] #3770 — structural backstop for the recurring failure-swallow shape:
       # once a sweep records a hard failure, a later transient exception must never
       # short-circuit to exit 0. The hermetic fixture reproduces exactly that
@@ -809,6 +1203,97 @@ jobs:
             grep -oE ' (MD[0-9]+/[a-z0-9-]+)' md-advisory.txt | sort | uniq -c | sort -rn || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- docs-duplication (jscpd copy/paste detection over the doc surface) ----
+      # [OPUS-5] sq-lrju — a STEP, not a job: sq-6vshe.20 consolidated this workflow to two
+      # runners precisely to stop sub-minute lints each claiming their own, and the registry
+      # entry for `docs-quality quick-advisory (advisory)` already owns per-step promotion.
+      #
+      # WHY ADVISORY. Not a backlog — a measured precision problem in the tool, recorded here
+      # because the next person will otherwise read the headline percentage as a defect count:
+      #   * jscpd's per-fence sub-format classes are EXACT. Verified on a fixture: two ```rust
+      #     blocks with identical bodies in two .md files report one `rust` clone with the
+      #     matching span, and the same pair wrapped in `<!-- jscpd:ignore-start -->` /
+      #     `<!-- jscpd:ignore-end -->` reports none.
+      #   * the `markdown` block class is NOT exact. Verified by hand on this repo's
+      #     research/ corpus with `--reporters console-full`: reported `markdown` pairs
+      #     include ones whose own printed snippets are entirely different text (a prose
+      #     paragraph plus a ```text fence, reported as a clone of unrelated prose plus a
+      #     ```js fence — both spans inside research/autonomous-scheduler-design.md). The
+      #     mechanism is NOT established here; what IS measured is that the whole class
+      #     disappears under `--mode weak`, which the tool documents as dropping comment
+      #     tokens, and that `mild` behaves like `strict`. So there is no middle setting:
+      #     either the class is reported and cannot be trusted, or nothing is reported.
+      # So the summary reports the two classes SEPARATELY instead of one blended number, and
+      # the lane may only be promoted on the exact half. `threshold: 0` in the config is real
+      # (the threshold reporter exits 1) and is swallowed here by `|| true` while advisory.
+      #
+      # jscpd 5.x is the Rust engine: the npm package is a launcher plus per-platform
+      # optionalDependencies carrying a prebuilt binary — same shape as the prebuilt tools
+      # taiki-e/install-action fetches for the gating steps above. Version pinned exactly.
+      - name: docs-duplication (jscpd; copy/paste clones over README + skills + docs + research + book)
+        run: |
+          set -uo pipefail
+          # Console reporter goes straight to the job log (where the full clone list lives —
+          # the summary caps its own list); the json reporter writes the report the summary is
+          # computed from, at target/jscpd/jscpd-report.json (under the gitignored /target), whose
+          # directory jscpd creates itself. `|| true` swallows the threshold reporter exit 1.
+          npx --yes jscpd@5.0.12 --config .jscpd.json --no-colors || true
+          node -e '
+            const fs = require("fs");
+            const P = "target/jscpd/jscpd-report.json";
+            let r = null;
+            try { r = JSON.parse(fs.readFileSync(P, "utf8")); } catch (e) { r = null; }
+            if (!r) {
+              console.log("### docs-duplication (jscpd): NO REPORT PRODUCED");
+              console.log("");
+              console.log("jscpd wrote no `" + P + "`, so nothing was measured. This is a BROKEN");
+              console.log("lane, not a clean one — the reason is in the step log.");
+              process.exit(0);
+            }
+            const total = (r.statistics || {}).total || {};
+            const dups = r.duplicates || [];
+            const prose = dups.filter(function (d) { return d.format === "markdown"; });
+            const code = dups.filter(function (d) { return d.format !== "markdown"; });
+            console.log("### docs-duplication (jscpd): " + code.length + " fenced-code clone(s), " +
+                        prose.length + " prose-class finding(s)");
+            console.log("");
+            if (!total.sources) {
+              console.log("**Nothing was analysed** — 0 eligible blocks. The `path` scope in");
+              console.log("`.jscpd.json` matched no markdown, so these zeros mean the lane is");
+              console.log("vacuous, NOT that the docs are clone-free.");
+              console.log("");
+            }
+            console.log("| class | findings | precision |");
+            console.log("|---|---|---|");
+            console.log("| fenced code blocks (`rust` / `bash` / `sparql` / …) | " + code.length +
+                        " | exact — real copy/paste, fix these |");
+            console.log("| `markdown` prose blocks | " + prose.length +
+                        " | LOW — matches non-identical prose (see the step comment) |");
+            console.log("");
+            if (code.length) {
+              console.log("Fenced-code clones:");
+              console.log("");
+              code.slice(0, 25).forEach(function (d) {
+                console.log("- `" + d.format + "`, " + d.lines + " lines — `" + d.firstFile.name + ":" +
+                            d.firstFile.start + "` ↔ `" + d.secondFile.name + ":" + d.secondFile.start + "`");
+              });
+              if (code.length > 25) { console.log("- … " + (code.length - 25) + " more, full list in the step log"); }
+              console.log("");
+            }
+            console.log("Analysed " + (total.sources || 0) + " eligible block(s) — a block below");
+            console.log("`minTokens` is not analysed at all, so that count moves when the knob does.");
+            console.log("");
+            console.log("Intentional repeats are allowlisted IN THE SOURCE with");
+            console.log("`<!-- jscpd:ignore-start -->` / `<!-- jscpd:ignore-end -->` (verified working for");
+            console.log("markdown). Reserve them for genuinely intentional duplication: wrapping a");
+            console.log("prose-class finding hides a tool defect rather than a repeat.");
+            console.log("");
+            console.log("Reproduce locally: `npx jscpd@5.0.12` — the repo-root `.jscpd.json` is picked");
+            console.log("up automatically. Add `--reporters console-full` to print the matched snippets");
+            console.log("and judge a finding for yourself.");
+          ' >> "$GITHUB_STEP_SUMMARY" \
+            || echo "⚠️ docs-duplication: summary generation failed — see the step log." >> "$GITHUB_STEP_SUMMARY"
 
       # ---- former job: vale (prose, advisory) ----
       - name: vale (prose, advisory) — vendored styles, no network

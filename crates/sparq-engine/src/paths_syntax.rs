@@ -16,16 +16,16 @@ use spargebra::term::NamedNodePattern;
 use spargebra::{Query, SparqlParser};
 use sparq_core::Graph;
 
-use crate::{enumerate_paths, PathMode, PathSpec, QueryResult, Via};
+use crate::{enumerate_paths, Endpoint, PathMode, PathSpec, QueryResult, Via};
 
 #[derive(Debug)]
 struct ParsedPaths {
     mode: PathMode,
     cyclic: bool,
     start_var: Variable,
-    start: Option<Term>,
+    start: Option<Endpoint>,
     end_var: Variable,
-    end: Option<Term>,
+    end: Option<Endpoint>,
     via: Via,
     max_length: Option<usize>,
 }
@@ -119,14 +119,19 @@ fn parse_paths(src: &str) -> Result<ParsedPaths, String> {
     let cyclic = parser.consume_keyword("CYCLIC");
     parser.keyword("START")?;
     let start_var = parser.variable()?;
-    let start = parser.optional_bound_iri(&prologue)?;
+    let start = parser.optional_endpoint(&prologue, &start_var)?;
     parser.keyword("END")?;
     let end_var = parser.variable()?;
-    let end = parser.optional_bound_iri(&prologue)?;
+    let end = parser.optional_endpoint(&prologue, &end_var)?;
     parser.keyword("VIA")?;
     let via_token = parser.next("IRI or graph pattern after VIA")?;
     let via = if via_token.starts_with('{') {
-        Via::Pattern(canonical_pattern(&prologue, via_token)?)
+        Via::Pattern(canonical_pattern(
+            &prologue,
+            via_token,
+            &[Variable::new_unchecked("from"), Variable::new_unchecked("to")],
+            "VIA",
+        )?)
     } else {
         Via::Predicate(resolve_iri(&prologue, via_token)?)
     };
@@ -169,20 +174,35 @@ fn display_via(via: &Via) -> String {
     }
 }
 
-fn canonical_pattern(prologue: &str, token: &str) -> Result<String, String> {
+/// Resolves a braced graph-pattern token against the prologue and re-serializes it
+/// as a prefix-free canonical form, so downstream evaluation needs no prologue.
+fn canonical_pattern(
+    prologue: &str,
+    token: &str,
+    project: &[Variable],
+    clause: &str,
+) -> Result<String, String> {
     let source = token
         .strip_prefix('{')
         .and_then(|value| value.strip_suffix('}'))
-        .ok_or_else(|| "unterminated graph pattern after VIA".to_owned())?
+        .ok_or_else(|| format!("unterminated graph pattern after {}", clause))?
         .trim();
+    let projection = project
+        .iter()
+        .map(Variable::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
     let query = SparqlParser::new()
-        .parse_query(&format!("{prologue} SELECT ?from ?to WHERE {{ {source} }}"))
-        .map_err(|error| format!("invalid graph pattern after VIA: {error}"))?;
+        .parse_query(&format!(
+            "{} SELECT {} WHERE {{ {} }}",
+            prologue, projection, source
+        ))
+        .map_err(|error| format!("invalid graph pattern after {}: {}", clause, error))?;
     let Query::Select { pattern, .. } = query else {
         unreachable!()
     };
     let GraphPattern::Project { inner, .. } = pattern else {
-        return Err("invalid SELECT projection for PATHS VIA pattern".to_owned());
+        return Err(format!("invalid SELECT projection for PATHS {} pattern", clause));
     };
     Ok(inner.to_string())
 }
@@ -363,15 +383,33 @@ impl<'a> Tokens<'a> {
             .ok_or_else(|| format!("expected variable, found `{token}`"))?;
         Variable::new(name).map_err(|error| error.to_string())
     }
-    fn optional_bound_iri(&mut self, prologue: &str) -> Result<Option<Term>, String> {
+    /// Parses the optional `= <iri>` or `= { pattern }` restriction on an endpoint.
+    /// A pattern must bind the endpoint variable declared just before it.
+    fn optional_endpoint(
+        &mut self,
+        prologue: &str,
+        variable: &Variable,
+    ) -> Result<Option<Endpoint>, String> {
         if self.peek() != Some("=") {
             return Ok(None);
         }
         self.position += 1;
-        Ok(Some(Term::NamedNode(resolve_iri(
-            prologue,
-            self.next("IRI after =")?,
-        )?)))
+        let token = self.next("IRI or graph pattern after =")?;
+        if token.starts_with('{') {
+            Ok(Some(Endpoint::Pattern {
+                source: canonical_pattern(
+                    prologue,
+                    token,
+                    std::slice::from_ref(variable),
+                    "endpoint",
+                )?,
+                variable: variable.clone(),
+            }))
+        } else {
+            Ok(Some(Endpoint::Node(Term::NamedNode(resolve_iri(
+                prologue, token,
+            )?))))
+        }
     }
     fn remaining(&self) -> bool {
         self.position < self.tokens.len()

@@ -559,13 +559,17 @@ composition is the contribution AND the principal research risk.**
   public; PFE/universal-circuit is the would-be capability, explicitly forgone by
   convention #4). The one genuine residual is the join MATCH STRUCTURE leak (L2/§4.1).
   Surface a `LeakageProfile` so a federation can reason about residual leakage.
-- **Composability / UC.** No standalone/UC statement exists, yet the whole architecture
-  is a COMPOSITION (holder → join → aggregate → proof). `secure_equal` OPENS a value
-  mid-computation — exactly what naive sequential composition does not justify. Honest
-  majority enjoys UC WITHOUT setup (Canetti) — an argument FOR the default. The
-  collaborative-proof layer inherits the coZK 2025/1026 pitfall (proving on an inconsistent
-  extended witness leaks honest inputs) — a composition-security failure a UC treatment
-  would catch. Write the composition/UC posture as a design record.
+- **Composability / UC.** The whole architecture is a COMPOSITION (holder → join → aggregate
+  → proof). `secure_equal` OPENS a value mid-computation — exactly what naive sequential
+  composition does not justify. Honest-majority protocols can achieve UC without a CRS/PKI trust
+  root — but only GIVEN the theorems' communication-model resources (ideal authenticated/private
+  channels, broadcast where required, the UC session/scheduling model; Canetti FOCS'01) — an
+  argument FOR the default as a design target; applying this to today's in-process code is
+  aspirational. The collaborative-proof layer inherits the coZK 2025/1026 pitfall (proving on
+  an inconsistent extended witness leaks honest inputs) — a composition-security failure a UC
+  treatment would catch. The composition/UC posture (which results apply + the per-stage
+  obligations + the `secure_equal`-open justification) is now recorded in
+  [`mpc-composition-uc-posture.md`](./mpc-composition-uc-posture.md) (sq-wj4k).
 - **Offline/online (preprocessing) split.** Honest-majority Shamir needs NONE for its
   current ops (linear = zero-round, single mult = local product + open). A SPDZ/MASCOT/
   Overdrive backend adds an input-independent offline phase (Beaver triples + MACs); the

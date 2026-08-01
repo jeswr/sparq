@@ -35,7 +35,7 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
   ratchets), plus the *non-standard* `MULTIPLICITY()` aggregate extension — see the SKILL.
 - **Named graphs** — query across an active dataset with `GRAPH` and `FROM` / `FROM NAMED`.
 - **RDF 1.2 triple terms** — match [triple terms](https://www.w3.org/TR/rdf12-concepts/), including variables inside them.
-- **Materialized full paths** *(opt-in `paths` feature, OFF by default)* — `enumerate_paths` returns intermediate nodes and edges for tied shortest paths, bounded simple paths, or cycles back to their start.
+- **Materialized full paths** *(opt-in `paths` feature, OFF by default)* — `enumerate_paths` returns intermediate nodes and edges for tied shortest paths, bounded simple paths, or cycles back to their start. Each endpoint is unrestricted, one fixed node, or a graph pattern selecting a candidate set.
 - **Query plan introspection** — `EXPLAIN` and `EXPLAIN ANALYZE`.
 - **Custom functions** — register Rust closures under function IRIs (the
   [SPARQL extension mechanism](https://www.w3.org/TR/sparql11-query/#extensionFunctions));

@@ -203,6 +203,13 @@ Notes on a few that need care:
   every emitted row** (the caveat travels in the envelope, not just prose). Windows
   that cannot be count-matched are **excluded and the exclusion reported**. Implemented
   by `sq-hmd7l.20`; RSP4J/YASPER registered in `bench/competitors.json` (id: `rsp4j-yasper`).
+  The **sustained-throughput axis is still NOT-MEASURED**: `sq-hmd7l.20` count-matched only the
+  19-event oracle replay, too small for a rate claim. `sq-3f5ay` added the matched-workload
+  harness — a sparq-side replay-FILE runner (the `replay_runner` example), a sha-pinned SCALED
+  replay generated from `bench/rsp/replay/scaled.manifest.json`, and
+  `SCALED=1 bench/rsp/gather-rsp4j.sh` driving BOTH engines from that one file — but the gather
+  run that would publish the side-by-side has not been performed. No sustained `triples_per_s`
+  comparison row is on the dashboard until it is; see `research/gap-rsp-2026-07.md`.
   Competitor honesty: **Solr/ES are NOT SPARQL competitors and stay off the dashboard**; the
   surface peer is Fuseki + `jena-text` (`http-sparql`), the kernel ref is Lucene/Anserini (labelled
   *sub-component, not an RDF benchmark*).

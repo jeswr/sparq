@@ -3,17 +3,34 @@
 """bd-to-issues.py — one-time, idempotent migration of open bd beads into GitHub issues.
 
 DEFAULT is --dry-run: it parses `bd export`, computes the issue payloads + label mapping + the
-dependency edges, and prints a summary WITHOUT creating anything. `--apply` does the real two-pass
-(create issues, then link blocked-by dependencies) and writes the `sq-… ↔ #NN` map — held for the
-maintainer's go-ahead because it bulk-creates hundreds of issues.
+dependency edges, and prints a summary WITHOUT creating anything. `--apply` does the real
+three-pass run (create issues, then stamp the `Blocked-by:`/`Parent:` body markers, then reconcile
+labels — see apply_migration) and writes the `sq-… ↔ #NN` map — held for the maintainer's go-ahead
+because it bulk-creates hundreds of issues.
 
 Label mapping (bd -> issue):
   priority 0..4            -> priority:P{n}
   existing labels          -> passed through verbatim (area:<crate>=package, needs:*, kind:*, from:*)
   issue_type / kind:       -> role:<r> (feature/bug->impl, docs->docs, spike->research, chore->ci, ...)
   every migrated issue     -> MIGRATION_LABEL (authenticates the `<!-- bd-id:… -->` body marker)
-  dependency edges         -> `Blocked-by: #NN` body markers (resolved to native deps in --apply)
+  dependency edges         -> `Blocked-by: #NN` body markers ONLY (see NATIVE DEPENDENCIES below)
 The bead id (`sq-…`) is preserved in the issue title so existing PR-title tokens still resolve.
+
+NATIVE DEPENDENCIES — this script does NOT write them, in any mode. Every edge it emits is a
+`Blocked-by:` / `Parent:` body marker (pass 2); nothing here calls GitHub's issue-dependency or
+sub-issue API, so a migrated bd blocker edge does not appear in the native dependency UI. Dispatch
+is unaffected: `ready-issues.py::open_blocker_count` holds an issue iff EITHER channel reports an
+open blocker, so a marker-only edge still blocks. The gap is one-directional and is a VISIBILITY
+one: a maintainer reading the native graph cannot see the bd-derived edges. Mirroring the markers
+into native edges is a separate, still-undecided change (issue #4616); the only native reader
+in this file is `--verify`, which uses the count-only summary as context and never as evidence that
+a specific marker landed (see fetch_native_blockers / verify_migration).
+
+`--verify` is the read-only post-migration reconcile (see verify_migration): counts, duplicate
+bd-id mappings, and whether pass 2's dependency markers actually landed. It creates and edits
+nothing, so it is safe to run at any time against a live board. It counts a bead as migrated only
+on the same authentication `--apply` demands — MIGRATION_LABEL on the issue — so a board of
+forgeable marker-only decoys fails closed instead of verifying as a finished migration.
 """
 import argparse
 import json
@@ -150,6 +167,19 @@ def externally_gated(bead):
 # package from the bead's own text, and when nothing is derivable make the parked state EXPLICIT
 # with `needs:area` (a gate ready-issues.py already respects + maintainer-visible) instead of
 # silently reserving the global partition.
+#
+# [OPUS-5] SCOPE OF THAT CLAIM, corrected in review round 2. It holds for the ZERO-area case only.
+# `limit=2` below means a bead CAN emit two areas, and the two consumers then disagree about what
+# that means: ready-issues.py `packages_of` treats it as the SET {a, b}, while dispatch-plan.py
+# collapses any non-singleton package set to `_ready.GLOBAL` — so a two-area issue lands in the
+# serializing __global__ partition at PLAN time after all, which is precisely the outcome the
+# needs:area park exists to avoid. MEASURED on the live board 2026-07-26: 55 of the 895 migrated
+# issues carry >=2 `area:` labels. Re-running derive_areas over their reconstructed bead text
+# reproduces >=2 for only 13 of those 55 (the reconstruction from the issue title/body is
+# approximate, so treat 13 as +/-1); the other 42 inherited both labels from their bd record or
+# from hand-labelling. So lowering this limit would NOT retro-fix the bulk of them, which is why
+# the fix is a decision about which consumer is authoritative rather than a change here.
+# Tracked separately (#3838); deliberately not reworded away.
 _SURFACE_AREAS = {"site": "site", "gui": "gui", "bench": "bench", "ci": "ci", "docs": "docs",
                   "js": "js", "wasm": "sparq-wasm", "workflows": "ci", "release": "release",
                   "orchestration": "orchestration", "deps": "deps", "workspace": "workspace"}
@@ -210,7 +240,10 @@ def derive_areas(bead, crates=None, limit=2):
 
     Returns [] when nothing is derivable; the caller then parks the issue `needs:area` rather than
     guessing. A wrong partition is worse than an explicit park: the park is maintainer-visible and
-    retriage re-promotes it the moment an area lands, whereas a wrong area silently routes the work."""
+    the retriage cron re-promotes it once an area lands, whereas a wrong area silently routes the
+    work. That readmission holds only for a park the sweep can SEE and whose author it trusts —
+    the fetch is paginated for exactly this reason (retriage.py `_fetch_label`); its predecessor
+    truncated at 500 and 219 of 719 parks were unreachable on every tick (issue #3831)."""
     crates = crate_names() if crates is None else crates
     title = bead.get("title") or ""
     low = title.lower()
@@ -280,7 +313,7 @@ def plan(issues, edges, include_closed=False):
     return open_ids, blockers, parents
 
 
-# --- idempotent two-pass --apply (review C2) -----------------------------------------------------
+# --- idempotent multi-pass --apply (review C2) ---------------------------------------------------
 def _run(args, check=True):
     return subprocess.run(args, capture_output=True, text=True, check=check)
 
@@ -294,9 +327,12 @@ MARKER_RE = re.compile(r"<!--\s*bd-id:(sq-[0-9a-z]+(?:\.\d+)*)\s*-->")
 
 def fetch_issues(repo):
     """Every issue (any state) with the fields the resume + reconcile passes need. ONE LIST call —
-    the search index lags badly on this repo, so current state must come from the list API."""
+    the search index lags badly on this repo, so current state must come from the list API.
+
+    `state` is carried for `--verify` only: a dependency edge whose endpoint issue is already
+    CLOSED cannot hold anything, so the reconcile must not report it as a live gap."""
     out = _run(["gh", "issue", "list", "-R", repo, "--state", "all", "--limit", "10000",
-                "--json", "number,id,body,labels,author,title"]).stdout
+                "--json", "number,id,body,labels,author,title,state"]).stdout
     return json.loads(out or "[]")
 
 
@@ -531,6 +567,28 @@ def _label_node_ids(repo, names):
     return ids
 
 
+def _split_chunk(chunk, half=None):
+    """Split an over-limit chunk STRICTLY downward, or fail loud.
+
+    [OPUS-5] The split must SHRINK. GitHub executes the leading aliases before refusing an
+    oversize mutation, and these mutations are ADD-only, so a chunk re-queued at its original
+    size loops forever while re-applying its prefix on every pass — the process never exits and
+    never errors, it just spins. Review round 2 measured exactly that: mutating the halving
+    HUNG the self-test instead of failing it, which is a weak kill (a hang reads as a stuck
+    runner, not a caught defect). The invariant below turns that into a loud SystemExit.
+
+    `half` is injectable ONLY so the guard is reachable from the self-test. A post-condition no
+    input can violate is a tripwire nobody can prove still works — deleting it would red nothing
+    (measured: it survived mutation until this seam existed). Production always uses the default.
+    """
+    half = max(1, len(chunk) // 2) if half is None else half
+    halves = [chunk[:half], chunk[half:]]
+    if sum(len(h) for h in halves) != len(chunk) or any(len(h) >= len(chunk) for h in halves):
+        raise SystemExit(f"label reconcile: non-progressing split of {len(chunk)} -> "
+                         f"{[len(h) for h in halves]} — would loop while partially applying")
+    return halves
+
+
 def apply_reconcile(repo, plan, node_ids, batch=8, pause=2.0, log=print):
     """Apply `plan` ({issue_number: [labels]}) with ONE GraphQL request per `batch` issues.
 
@@ -569,9 +627,10 @@ def apply_reconcile(repo, plan, node_ids, batch=8, pause=2.0, log=print):
                 if len(chunk) == 1:
                     raise SystemExit(f"label reconcile: issue #{chunk[0]} is irreducibly over the "
                                      f"GraphQL resource limit: {err[:300]}")
-                half = max(1, len(chunk) // 2)
-                log(f"  request over the GraphQL resource limit — splitting {len(chunk)} -> {half}")
-                queue[:0] = [chunk[:half], chunk[half:]]
+                halves = _split_chunk(chunk)          # strictly downward, or a loud SystemExit
+                log(f"  request over the GraphQL resource limit — splitting {len(chunk)} -> "
+                    f"{len(halves[0])}")
+                queue[:0] = halves
                 break
             if "secondary rate" in err or "abuse" in err or "was submitted too quickly" in err:
                 wait = 30 * (2 ** attempt)
@@ -658,6 +717,228 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
     return id_map, created, reconciled, edged
 
 
+# --- post-migration verification, READ-ONLY (sq-gj35r / issue #3812) -----------------------------
+# The bulk `--apply` was still inside pass 1 when the 2026-07-17 audit sampled the board, and pass 2
+# — the `Blocked-by:` / `Parent:` body markers — runs ONLY after pass 1 finishes. A run that died
+# mid pass-1 therefore leaves a board that looks migrated (the issues exist, labelled and mapped)
+# and carries NO dependency edges at all. Nothing about that state is loud.
+#
+# `--apply` cannot answer "did it finish", because it is idempotent by design: a re-run repairs
+# whatever it finds and then prints 0/0/0 — the same output it prints when nothing was ever wrong.
+# So the completion question needs its own read-only pass, which is this one. It creates nothing,
+# edits nothing, and reports the three things the audit asked for: counts reconcile, no bd-id maps
+# to two issues, and every planned edge is actually present on the issue that carries it.
+#
+# The regexes below are the READ side of exactly what pass 2 writes. `_MARKER_BLOCKED_BY` in
+# scripts/ready-issues.py is the OTHER reader of that same channel, and the self-test pins the two
+# patterns equal: an edge the readiness engine cannot parse is not an edge, however well-formed it
+# looks to the writer.
+VERIFY_BLOCKED_BY_RE = re.compile(r"[Bb]locked-by:\s*#(\d+)")
+VERIFY_PARENT_RE = re.compile(r"[Pp]arent:\s*#(\d+)")
+_EDGE_RE = {"blocked-by": VERIFY_BLOCKED_BY_RE, "parent": VERIFY_PARENT_RE}
+# The NATIVE dependency channel, as carried by GitHub's REST issue-list payload. ready-issues.py
+# unions it with the marker channel, so it is what decides whether a marker gap is also a DISPATCH
+# problem. It reports a COUNT, not blocker numbers — see verify_migration on why that can only ever
+# downgrade the description of a gap, never erase one.
+NATIVE_SUMMARY_FIELD = "issue_dependencies_summary"
+
+
+def marker_index(issues):
+    """(authenticated, marker_only): two {bd-id: [issue, ...]} maps over every issue carrying a
+    shape-valid bd-id marker, split on MIGRATION_LABEL, duplicates KEPT in both.
+
+    The split is the SAME trust boundary fetch_bd_map draws, and it is load-bearing here for the
+    same reason: a body marker is FORGEABLE. An unprivileged user can pre-create one decoy issue
+    per planned bead carrying the expected marker — and correctly-edged decoys are no harder to
+    forge than bare ones. `--apply` already fails closed on exactly that shape (the `unverifiable`
+    check in apply_migration refuses to map to a marker-only issue with no migration provenance),
+    so `--verify` must not accept as migrated what `--apply` refuses to resume from; otherwise a
+    board of decoys reports PASSED although the migration never created or authenticated anything.
+    MIGRATION_LABEL is the stable POST-migration invariant to check against: pass 3 stamps it on
+    every mapped bead, including the ~750 pre-label issues of the 2026-07-17 run (see `backfill`).
+    A marker-only issue is therefore an unfinished migration or a decoy — never a pass.
+
+    Duplicates are kept because "one bd-id, two issues" is a defect this reconcile looks for.
+    fetch_bd_map collapses a repeated bd-id by dict assignment (last write wins). That is right for
+    resume — resolve_resume_map re-derives provenance afterwards — but it is precisely the wrong
+    shape for a count reconcile."""
+    authenticated, marker_only = {}, {}
+    for it in issues:
+        mm = MARKER_RE.search(it.get("body") or "")
+        if not mm:
+            continue
+        labels = {lb["name"] if isinstance(lb, dict) else lb for lb in it.get("labels") or []}
+        (authenticated if MIGRATION_LABEL in labels else marker_only).setdefault(
+            mm.group(1), []).append(it)
+    return authenticated, marker_only
+
+
+def _is_closed(issue):
+    """True only on an explicit closed state. `gh issue list --json state` yields OPEN/CLOSED and
+    REST yields open/closed; an ABSENT state reads as open, which is the fail-loud direction — an
+    unknown-state endpoint is reported as a live gap rather than quietly excused as moot."""
+    return str(issue.get("state") or "").lower() == "closed"
+
+
+def verify_migration(open_ids, blockers, parents, issues, native_blockers=None):
+    """Reconcile the migration PLAN against a board snapshot. PURE — the caller does the fetching.
+
+    `open_ids`/`blockers`/`parents` are `plan()`'s output (both endpoints of every edge are already
+    scoped to the migrated set). `issues` is a `fetch_issues` snapshot. `native_blockers` is the
+    optional {issue_number: open native blocker count} map; None means the native channel was not
+    consulted, which the report states rather than silently reading as "zero everywhere".
+
+    Verdict rules, and why each is drawn where it is:
+
+    * ONLY a MIGRATION_LABEL-carrying issue counts as a mapping (marker_index). A marker-only
+      issue is a forgeable claim, not evidence the migration ran; `--apply` refuses to resume from
+      one, so `--verify` must not pass on one. Such bd-ids are reported under `unauthenticated`
+      and their beads stay `unmigrated`, i.e. the verdict fails closed. The remedy is the same
+      re-run of `--apply`, whose pass 3 stamps the label (or stops for review if it is a decoy).
+    * A bd-id found on TWO authenticated issues is NOT a mapping. It is reported as a duplicate and
+      the bead counts as unmigrated, because choosing one of the two here would be guessing — the
+      same fail-closed rule migration_owned already applies. A marker-only copy SHADOWING an
+      authenticated issue is inert (resolve_resume_map already treats it so): the authenticated
+      issue is canonical, and the copy is reported under `shadowed` for information only.
+    * A missing marker is a missing marker even when the issue carries native edges. Pass 2 either
+      wrote it or it did not, and the count-only native summary cannot confirm that one SPECIFIC
+      edge exists. The native count is attached to the record so the operator can tell a
+      cosmetic backfill from a real dispatch hole; it never launders the gap away.
+    * An edge whose source or target issue is already CLOSED is recorded but does not fail the
+      verdict: a closed issue is never dispatched and never holds anything, so no marker written
+      there could change an outcome.
+    """
+    authenticated, marker_only = marker_index(issues)
+    duplicates = {bid: sorted(it["number"] for it in cands)
+                  for bid, cands in authenticated.items() if len(cands) > 1}
+    by_bid = {bid: cands[0] for bid, cands in authenticated.items() if len(cands) == 1}
+    unauthenticated = {bid: sorted(it["number"] for it in cands)
+                       for bid, cands in marker_only.items() if bid not in authenticated}
+    shadowed = {bid: sorted(it["number"] for it in cands)
+                for bid, cands in marker_only.items() if bid in authenticated}
+    unmigrated = sorted(b for b in open_ids if b not in by_bid)
+    stray = sorted(b for b in by_bid if b not in open_ids)
+
+    landed, missing, unresolvable = 0, [], []
+    for kind, table in (("blocked-by", blockers), ("parent", parents)):
+        for bid in sorted(table):
+            for dep in sorted(set(table[bid])):
+                if bid not in by_bid or dep not in by_bid:
+                    unresolvable.append({"kind": kind, "from": bid, "to": dep})
+                    continue
+                src, dst = by_bid[bid], by_bid[dep]
+                seen = {int(n) for n in _EDGE_RE[kind].findall(src.get("body") or "")}
+                if dst["number"] in seen:
+                    landed += 1
+                    continue
+                missing.append({
+                    "kind": kind, "from": bid, "from_issue": src["number"],
+                    "to": dep, "to_issue": dst["number"],
+                    "moot": _is_closed(src) or _is_closed(dst),
+                    "native_blockers": (None if native_blockers is None
+                                        else native_blockers.get(src["number"], 0)),
+                })
+    live_missing = [m for m in missing if not m["moot"]]
+    return {
+        "planned": len(open_ids), "mapped": len(by_bid),
+        "duplicates": duplicates, "unmigrated": unmigrated, "stray": stray,
+        "unauthenticated": unauthenticated, "shadowed": shadowed,
+        "edges_planned": landed + len(missing) + len(unresolvable),
+        "edges_landed": landed, "edges_missing": missing, "edges_live_missing": live_missing,
+        "edges_unresolvable": unresolvable,
+        "native_consulted": native_blockers is not None,
+        "ok": not duplicates and not unmigrated and not live_missing,
+    }
+
+
+def print_verify_report(rep, log=print, sample=8):
+    """Human-readable rendering of a verify_migration report. Samples the long lists — the counts
+    are the verdict, the samples are the starting point for the operator's own look."""
+    log(f"[verify] planned (open/in_progress beads): {rep['planned']}  |  "
+        f"mapped to exactly one '{MIGRATION_LABEL}'-labelled issue: {rep['mapped']}")
+    log(f"[verify] planned edges: {rep['edges_planned']}  |  markers present: "
+        f"{rep['edges_landed']}  |  absent: {len(rep['edges_missing'])} "
+        f"({len(rep['edges_live_missing'])} on issue pairs that are both still open)")
+    if rep["stray"]:
+        log(f"[verify] {len(rep['stray'])} mapped bd-id(s) are not in the current plan "
+            f"(bead closed or dropped since the run) — informational: {rep['stray'][:sample]}")
+    if rep["duplicates"]:
+        log(f"[verify] FAIL {len(rep['duplicates'])} bd-id(s) map to MORE THAN ONE issue "
+            f"(never resolved by guessing — close or re-marker the extras):")
+        for bid, nums in sorted(rep["duplicates"].items())[:sample]:
+            log(f"          {bid} -> {['#' + str(n) for n in nums]}")
+    if rep["unmigrated"]:
+        log(f"[verify] FAIL {len(rep['unmigrated'])} planned bead(s) have NO unambiguous "
+            f"authenticated issue — pass 1 did not finish: {rep['unmigrated'][:sample]}")
+    if rep["unauthenticated"]:
+        # These are NOT mappings, and saying so is the whole point: a marker without the label is
+        # either an unfinished migration or a pre-created decoy, and this report cannot tell which.
+        log(f"[verify] {len(rep['unauthenticated'])} bd-id(s) appear ONLY on issue(s) with no "
+            f"'{MIGRATION_LABEL}' label — an unauthenticated body marker is not evidence of "
+            f"migration (--apply refuses to resume from one). Any that are in the plan are counted "
+            f"unmigrated above; re-run --apply to label the genuine ones or close the decoys:")
+        for bid, nums in sorted(rep["unauthenticated"].items())[:sample]:
+            log(f"          {bid} -> {['#' + str(n) for n in nums]}")
+    if rep["shadowed"]:
+        log(f"[verify] {len(rep['shadowed'])} bd-id(s) also appear on an unlabelled COPY of an "
+            f"authenticated issue — inert (the labelled issue is canonical), informational: "
+            f"{sorted(rep['shadowed'])[:sample]}")
+    if rep["edges_unresolvable"]:
+        log(f"[verify] {len(rep['edges_unresolvable'])} edge(s) have an unmigrated endpoint "
+            f"(a consequence of the unmigrated beads above, not a separate defect)")
+    if rep["edges_missing"]:
+        log(f"[verify] {len(rep['edges_live_missing'])} live edge(s) missing their marker — "
+            f"pass 2 did not run for them; re-run --apply to backfill idempotently:")
+        for m in rep["edges_live_missing"][:sample]:
+            nat = ("" if m["native_blockers"] is None else
+                   f", issue carries {m['native_blockers']} native blocker(s)")
+            log(f"          {m['kind']}: {m['from']} (#{m['from_issue']}) -> "
+                f"{m['to']} (#{m['to_issue']}){nat}")
+        moot = len(rep["edges_missing"]) - len(rep["edges_live_missing"])
+        if moot:
+            log(f"          (+{moot} on an already-closed issue — a marker there holds nothing)")
+    # Both caveats are about how to read a GAP, so neither belongs on a report that has none.
+    if rep["edges_missing"] and not rep["native_consulted"]:
+        log("[verify] native dependency channel NOT consulted — the marker gaps above are reported "
+            "as-is and may overstate the DISPATCH impact (ready-issues.py unions both channels).")
+    elif any(m["native_blockers"] for m in rep["edges_live_missing"]):
+        log("[verify] note: the native summary reports a COUNT, not blocker numbers, so a native "
+            "edge can never confirm one SPECIFIC missing marker — only suggest the issue is held.")
+    log(f"[verify] {'PASSED' if rep['ok'] else 'FAILED'}")
+    return 0 if rep["ok"] else 1
+
+
+def fetch_native_blockers(repo, ceiling=20000, log=print):
+    """{issue_number: open native blocker count} for OPEN issues, or None when unavailable.
+
+    Cursor-paginated (`gh api --paginate` follows Link headers) for the same reason
+    ready-issues.py `_fetch` is: a single-page fetch fails closed at the page limit, and this
+    backlog is past it. OPEN issues only — a closed issue is never dispatched.
+
+    Returns None, not an all-zero map, when the fetch fails or no issue in the whole snapshot
+    carries `issue_dependencies_summary`. Flattened to zeros, either state is indistinguishable
+    from "nothing is blocked", and the report has to be able to say which one it is."""
+    r = _run(["gh", "api", "--paginate", "--slurp",
+              f"repos/{repo}/issues?state=open&per_page=100"], check=False)
+    if r.returncode != 0:
+        log(f"[verify] native dependency fetch failed ({(r.stderr or '').strip()[:200]})")
+        return None
+    rows = [it for page in json.loads(r.stdout or "[]") if isinstance(page, list)
+            for it in page if isinstance(it, dict)]
+    if len(rows) >= ceiling:
+        raise SystemExit(f"refusing --verify: fetched {len(rows)} >= ceiling {ceiling} — the "
+                         "snapshot looks runaway (fail-closed).")
+    summaries = {it["number"]: it[NATIVE_SUMMARY_FIELD] for it in rows
+                 if isinstance(it.get(NATIVE_SUMMARY_FIELD), dict)}
+    if not summaries:
+        log(f"[verify] no issue in the snapshot carries `{NATIVE_SUMMARY_FIELD}` — treating the "
+            "native channel as unavailable rather than as zero blockers everywhere.")
+        return None
+    return {n: s.get("blocked_by") if isinstance(s.get("blocked_by"), int)
+            and not isinstance(s.get("blocked_by"), bool) else 0
+            for n, s in summaries.items()}
+
+
 def _self_test():
     ok = True
 
@@ -734,6 +1015,16 @@ def _self_test():
     chk("non-bead marker payload does not scan", MARKER_RE.search("<!-- bd-id:not-a-bead -->"), None)
     chk("dotted subtask ids still scan",
         MARKER_RE.search("<!-- bd-id:sq-7d3dj.32.2.3 -->").group(1), "sq-7d3dj.32.2.3")
+    # [OPUS-5] _body was UNTESTED: reading a wrong/absent key (e.g. bead["body"] instead of
+    # bead["description"]) silently ships every migrated issue with an EMPTY description —
+    # content loss across a ~900-issue bulk run, with no error and a still-valid marker. The
+    # fixture carries ONLY `description`, so a wrong-key read cannot pass by coincidence.
+    body_out = _body({"description": "  the real bead prose  "}, "sq-body")
+    chk("migrated body carries the bead description", "the real bead prose" in body_out, True)
+    chk("migrated body is marker-addressable and self-identified",
+        (MARKER_RE.search(body_out).group(1), body_out.startswith(SELF_ID)), ("sq-body", True))
+    chk("a description-less bead still yields a valid marker body",
+        MARKER_RE.search(_body({}, "sq-empty")).group(1), "sq-empty")
 
     # --- migration-owned provenance (audit 2026-07-25) -------------------------------------------
     # The 2026-07-17 bulk run predates MIGRATION_LABEL: ~750 marker-only issues. Without a third
@@ -742,7 +1033,14 @@ def _self_test():
     # the decoy threat model's attacker is unprivileged, so the author check is what closes the hole.
     legit = {"number": 42, "title": "sq-legit: do the thing",
              "body": "x\n<!-- bd-id:sq-legit -->\n", "author": {"login": "maintainer"}}
-    decoy = {"number": 43, "title": "please look at this",
+    # [OPUS-5] The decoy MUST satisfy the title contract. Review round 2 measured that the old
+    # title ("please look at this") also violated the title check, so `chk("unprivileged decoy
+    # author is NOT owned")` short-circuited there and NEVER reached `login in writers` — deleting
+    # the author check outright left the whole self-test green. A decoy that copies a marker to
+    # capture a bead id would obviously copy the title format too; the author check is the ONLY
+    # thing standing between an unprivileged forger and a hijacked migration mapping, so it is
+    # the one that has to be isolated here.
+    decoy = {"number": 43, "title": "sq-victim: do the thing",
              "body": "<!-- bd-id:sq-victim -->", "author": {"login": "randomuser"}}
     wrongtitle = {"number": 44, "title": "unrelated title",
                   "body": "<!-- bd-id:sq-titleless -->", "author": {"login": "maintainer"}}
@@ -750,8 +1048,101 @@ def _self_test():
                  "body": "matches `<!-- bd-id:… -->`", "author": {"login": "maintainer"}}
     owned = migration_owned([legit, decoy, wrongtitle, prose_iss], {"maintainer"})
     chk("write-author + title contract is migration-owned", owned, {"sq-legit"})
-    chk("unprivileged decoy author is NOT owned", "sq-victim" in owned, False)
+    # ISOLATES the author check: the decoy now satisfies title + unique-marker, so the ONLY
+    # remaining reason it is not owned is that its author lacks write permission.
+    chk("title-contract-satisfying decoy from an unprivileged author is NOT owned",
+        "sq-victim" in owned, False)
     chk("write author WITHOUT the title contract is NOT owned", "sq-titleless" in owned, False)
+
+    # --- _writer_logins: the LOAD-BEARING half of the trust boundary (review round 2) ------------
+    # migration_owned only consumes the `writers` set; the code that BUILDS it was untested, so
+    # "every login is a writer" and "any [bot] is trusted" were both free mutations. Stub the
+    # subprocess boundary (`_run`) so the permission contract is asserted without network.
+    class _Resp:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    perms = {"maintainer": "admin", "triager": "write", "curator": "maintain",
+             "randomuser": "read", "watcher": ""}
+    api_calls = []
+
+    def _stub_run(args, check=True):
+        api_calls.append(args)
+        assert args[0:2] == ["gh", "api"], args
+        login = args[2].split("/")[-2]
+        return _Resp(perms.get(login, "") + "\n")
+
+    real_run = globals()["_run"]
+    globals()["_run"] = _stub_run
+    try:
+        got = _writer_logins("o/r", ["maintainer", "triager", "curator", "randomuser", "watcher"])
+        chk("only admin/maintain/write logins are writers", got,
+            {"maintainer", "triager", "curator"})
+        chk("a read-only collaborator is NOT a writer", "randomuser" in got, False)
+        chk("an empty/absent permission is NOT a writer (fail closed)", "watcher" in got, False)
+        # `[bot]` logins never hit the collaborators API — an App is not a collaborator — so the
+        # allowlist is the ONLY gate. Trusting the suffix would let anyone who can create a
+        # `*[bot]`-suffixed account author a decoy the migration then treats as its own.
+        n_before = len(api_calls)
+        bots = _writer_logins("o/r", ["sparq-orchestrator[bot]", "attacker[bot]"])
+        chk("only the migration's own App bot is trusted", bots, {"sparq-orchestrator[bot]"})
+        chk("an unlisted [bot] login is NOT a writer", "attacker[bot]" in bots, False)
+        chk("bot logins are decided by the allowlist, not by the permissions API",
+            len(api_calls) - n_before, 0)
+        # the cache must not launder an untrusted login into a trusted one
+        shared = {}
+        _writer_logins("o/r", ["randomuser"], cache=shared)
+        chk("a cached negative stays negative", _writer_logins("o/r", ["randomuser"],
+                                                              cache=shared), set())
+        chk("the cache records the verdict, not the raw permission", shared, {"randomuser": False})
+    finally:
+        globals()["_run"] = real_run
+
+    # --- THE YAML SEAM: a self-test no workflow INVOKES is not a gate (review round 2) ----------
+    # Measured on the merged tree: `bd-to-issues.py --self-test` was invoked by NO workflow, and
+    # `ci-close-merged-beads.py --self-test` ran only POST-merge in bead-autoclose.yml
+    # (pull_request_target: [closed], ref: main) — after the change it would have caught was
+    # already on main. Every assertion above was therefore ungated on the PR that could break it.
+    #
+    # SCOPED ON PURPOSE. A whole-file substring search passes for the WRONG reason here, because
+    # each filename appears in BOTH the `paths:` filter and the `run:` block — that exact vacuity
+    # has already been measured twice on this repo's routing gate. So: count the filename inside
+    # the `paths:` region only (exactly 2 — the pull_request filter AND the push filter), and
+    # assert the `--self-test` invocation inside the steps region only.
+    wf = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "..", ".github", "workflows", "routing-self-tests.yml")
+    wf_src = open(wf, encoding="utf-8").read()
+    paths_region = wf_src[:wf_src.index("permissions:")]
+    steps_region = wf_src[wf_src.index("    steps:"):]
+    for script in ("scripts/bd-to-issues.py", "scripts/ci-close-merged-beads.py"):
+        chk(f"{script} is a path trigger on BOTH pull_request and push",
+            paths_region.count(f'"{script}"'), 2)
+        chk(f"{script} --self-test is actually INVOKED, not merely path-filtered",
+            f"python3 {script} --self-test" in steps_region, True)
+    # [OPUS-5] GATING STATUS, guarded against the rule that is ACTUALLY live. ci-summary's
+    # discovery changed on 2026-07-25 (#3773): a check is non-gating iff it is EXPLICITLY
+    # DECLARED in .github/advisory-registry.json, keyed on workflow file + job id. The old
+    # `\b(advisory|informational)\b` NAME rule is gone — it had silently neutralised four real
+    # gates — so a rename can no longer demote anything, and asserting on the job NAME would
+    # guard a rule that no longer exists. The real demotion path is a registry entry, so that
+    # is what is asserted: this job must not be declared advisory.
+    registry = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "..", ".github", "advisory-registry.json"),
+                              encoding="utf-8"))
+    declared = {(e.get("workflow"), e.get("job_id")) for e in registry.get("jobs", {}).values()}
+    chk("the routing gate is NOT declared advisory (a declaration is what demotes it now)",
+        ("routing-self-tests.yml", "validate") in declared, False)
+    # merge_group cannot carry a paths filter; without the trigger the queue ref never exposes
+    # this gating check and the merge queue would merge past it.
+    chk("merge_group trigger present (the queue ref must expose the gate)",
+        bool(re.search(r"(?m)^  merge_group:", wf_src)), True)
+    # The two scripts share a marker regex that must not drift. Pin that they are gated
+    # TOGETHER, so a change to either re-runs both.
+    chk("MARKER_RE stays in sync with ci-close-merged-beads _MARKER_RE",
+        MARKER_RE.pattern,
+        re.search(r"_MARKER_RE = re\.compile\(r\"(.+?)\"\)",
+                  open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "ci-close-merged-beads.py"), encoding="utf-8").read()).group(1))
     dup = [dict(legit), dict(legit, number=46)]
     chk("two issues sharing a bd-id are never owned (fail closed)",
         migration_owned(dup, {"maintainer"}), set())
@@ -842,11 +1233,42 @@ def _self_test():
          if lb.startswith("priority:")], [])
     chk("a missing single-valued family IS still filled in",
         "role:impl" in plan_reconcile(beads, {"sq-a": 15}, {15: ["area:x"]}, cr).get(15, []), True)
+    # [OPUS-5] `area:` was in _SINGLE_VALUED but UNGUARDED — dropping it from the tuple redded
+    # nothing, unlike its two siblings. The "human-curated area is preserved" case above passes
+    # for a DIFFERENT reason (its bead derives no area at all, so the `needs:area` discard does
+    # the work). This is the case that isolates the family suppression: the bead derives
+    # area:sparq-solid while the issue already carries a different area, so a second area label
+    # would put one issue in two package partitions — which dispatch-plan.py then collapses to
+    # the serializing __global__ partition, i.e. strictly worse than leaving it alone.
+    chk("never adds a SECOND area: label when the issue already has a different one",
+        [lb for lb in plan_reconcile(beads, {"sq-a": 16}, {16: ["area:sparq-core"]},
+                                     cr).get(16, []) if lb.startswith("area:")], [])
     chk("batching chunks evenly", [len(c) for c in _chunks(range(45), 20)], [20, 20, 5])
     chk("empty reconcile does zero API calls", apply_reconcile("o/r", {}, {}), 0)
     # Adaptive split on the server's `Resource limits for this query exceeded` refusal (a real
     # 20-mutation batch hit it on the first chunk). Every issue must still be applied EXACTLY
     # once overall, and a single irreducible issue must fail loud rather than loop.
+    # [OPUS-5] Split-invariant assertions run BEFORE the apply_reconcile block on purpose: a
+    # broken split makes apply_reconcile raise, which would abort _self_test mid-way and turn
+    # every later assertion into an unnamed traceback instead of a named FAIL line.
+    def _shrinks(n):
+        try:
+            return all(0 < len(h) < n for h in _split_chunk(list(range(n))))
+        except SystemExit:
+            return "SystemExit"
+    chk("every split strictly shrinks (a non-progressing split loops forever)",
+        [n for n in range(2, 65) if _shrinks(n) is not True], [])
+    chk("a split preserves every element exactly once",
+        _split_chunk([1, 2, 3, 4, 5]), [[1, 2], [3, 4, 5]])
+    # The guard itself, exercised through the injectable seam — otherwise it is an unreachable
+    # post-condition that could be deleted with nothing going red.
+    for bad, why in ((5, "no shrink"), (0, "empty head, full tail"), (9, "tail dropped")):
+        try:
+            _split_chunk([1, 2, 3, 4, 5], half=bad)
+            chk(f"non-progressing split is rejected ({why})", "returned", "SystemExit")
+        except SystemExit:
+            chk(f"non-progressing split is rejected ({why})", "SystemExit", "SystemExit")
+
     calls = []
 
     def fake_run(args, check=True):
@@ -869,6 +1291,24 @@ def _self_test():
         # is NEVER re-issued at the same size (that would loop while partially applying).
         chk("oversize batch splits strictly downward, never retried at the same size",
             calls, [5, 2, 3, 1, 2])
+        # CALL-SITE PIN: apply_reconcile must route its split through the guarded helper. An
+        # inlined halving at the call site is correct TODAY and therefore invisible to every
+        # assertion above — measured as a surviving mutant. Stub the helper with a sentinel and
+        # require it to reach the caller: if the call site stops using it, nothing raises.
+        sentinel = RuntimeError("split helper reached")
+
+        def _boom(chunk, half=None):
+            raise sentinel
+        real_split = globals()["_split_chunk"]
+        globals()["_split_chunk"] = _boom
+        try:
+            apply_reconcile("o/r", plan5, {n: f"I_{n}" for n in plan5}, batch=5, pause=0)
+            chk("apply_reconcile splits via the guarded _split_chunk", "not called", "called")
+        except RuntimeError as exc:
+            chk("apply_reconcile splits via the guarded _split_chunk",
+                "called" if exc is sentinel else repr(exc), "called")
+        finally:
+            globals()["_split_chunk"] = real_split
         calls.clear()
         globals()["_run"] = lambda a, check=True: type("R", (), {
             "returncode": 1, "stdout": "", "stderr": "Resource limits for this query exceeded"})()
@@ -879,6 +1319,146 @@ def _self_test():
             chk("irreducible oversize issue fails loud", "SystemExit", "SystemExit")
     finally:
         globals()["_run"], globals()["_label_node_ids"] = real_run, real_ids
+
+    # --- post-migration verification (sq-gj35r / #3812) ------------------------------------------
+    # The defect being pinned is an --apply that died inside pass 1: issues exist, dependency
+    # markers silently do not. Every assertion below therefore separates "the board matches the
+    # plan" from "the board merely has issues on it".
+    # `labeled` is EXPLICIT because the label is what authenticates the marker: an issue built with
+    # labeled=False is exactly the forgeable decoy shape --apply refuses to resume from, and the
+    # verifier must refuse it too. Default True = the post-migration board pass 3 leaves behind.
+    def _iss(num, bid, body_extra="", state="OPEN", labeled=True):
+        return {"number": num, "title": f"{bid}: t", "state": state,
+                "labels": [{"name": MIGRATION_LABEL}] if labeled else [],
+                "body": f"prose\n<!-- bd-id:{bid} -->\n{body_extra}"}
+
+    beads3 = {"sq-a": {"id": "sq-a"}, "sq-b": {"id": "sq-b"}, "sq-c": {"id": "sq-c"}}
+    blk, par = {"sq-a": ["sq-b"]}, {"sq-a": ["sq-c"]}
+    complete = [_iss(1, "sq-a", "Blocked-by: #2\nParent: #3"), _iss(2, "sq-b"), _iss(3, "sq-c")]
+    rep = verify_migration(beads3, blk, par, complete)
+    chk("a complete migration verifies clean",
+        (rep["ok"], rep["mapped"], rep["edges_landed"], rep["edges_planned"]), (True, 3, 2, 2))
+    chk("a clean verify consults nothing it was not given", rep["native_consulted"], False)
+    # THE FORGED-BOARD SHAPE (review round 2). A body marker is forgeable, so an unprivileged user
+    # can pre-create one issue per planned bead — WITH the right markers and the right edges, which
+    # cost nothing extra to forge — and a marker-trusting verifier would report PASSED for a
+    # migration that never ran. --apply already refuses to resume from these (the `unverifiable`
+    # fail-closed check), so --verify must refuse them too. The ONLY difference from `complete`
+    # above, which passes, is MIGRATION_LABEL: every bd-id here is unique and every edge lands.
+    decoys = [_iss(1, "sq-a", "Blocked-by: #2\nParent: #3", labeled=False),
+              _iss(2, "sq-b", labeled=False), _iss(3, "sq-c", labeled=False)]
+    rep = verify_migration(beads3, blk, par, decoys)
+    chk("unique, correctly-edged marker-only issues never verify as migrated",
+        (rep["ok"], rep["mapped"], rep["unmigrated"]), (False, 0, ["sq-a", "sq-b", "sq-c"]))
+    chk("the unauthenticated bd-ids are named, not silently dropped",
+        rep["unauthenticated"], {"sq-a": [1], "sq-b": [2], "sq-c": [3]})
+    chk("an unauthenticated marker is not a duplicate either (it is simply not a mapping)",
+        (rep["duplicates"], rep["edges_landed"], len(rep["edges_unresolvable"])), ({}, 0, 2))
+    lines = []
+    chk("the forged board renders a FAILED verdict",
+        print_verify_report(rep, log=lines.append), 1)
+    chk("the report says the markers are unauthenticated",
+        any(MIGRATION_LABEL in l and "not evidence of migration" in l for l in lines), True)
+    # A marker-only COPY shadowing an authenticated issue is inert, exactly as resolve_resume_map
+    # already treats it: the labelled issue is canonical, so the verdict is unchanged.
+    rep = verify_migration(beads3, blk, par, complete + [_iss(9, "sq-b", labeled=False)])
+    chk("a marker-only copy shadowing an authenticated issue is inert, not a failure",
+        (rep["ok"], rep["mapped"], rep["shadowed"], rep["unauthenticated"]),
+        (True, 3, {"sq-b": [9]}, {}))
+    # THE DIED-MID-PASS-1 SHAPE: every issue present, not one marker written. The count reconcile
+    # alone reports a perfectly healthy board here, which is exactly why the edge check exists.
+    no_edges = [_iss(1, "sq-a"), _iss(2, "sq-b"), _iss(3, "sq-c")]
+    rep = verify_migration(beads3, blk, par, no_edges)
+    chk("issues present but NO markers is caught (the died-mid-pass-1 shape)",
+        (rep["ok"], rep["mapped"], rep["edges_landed"], len(rep["edges_live_missing"])),
+        (False, 3, 0, 2))
+    chk("both edge kinds are reported, not just blocked-by",
+        sorted(m["kind"] for m in rep["edges_live_missing"]), ["blocked-by", "parent"])
+    # A marker pointing at the WRONG issue is not the planned edge. Substring-matching the marker
+    # PREFIX would pass here, so the check resolves the target NUMBER.
+    rep = verify_migration(beads3, blk, par,
+                           [_iss(1, "sq-a", "Blocked-by: #99\nParent: #98"), _iss(2, "sq-b"),
+                            _iss(3, "sq-c")])
+    chk("a marker naming a different issue does not satisfy the edge",
+        (rep["ok"], rep["edges_landed"]), (False, 0))
+    # …and the two kinds do not satisfy each other: a Parent link is not a readiness blocker.
+    rep = verify_migration(beads3, blk, par,
+                           [_iss(1, "sq-a", "Parent: #2\nBlocked-by: #3"), _iss(2, "sq-b"),
+                            _iss(3, "sq-c")])
+    chk("a Parent marker never satisfies a blocked-by edge (or vice versa)",
+        (rep["ok"], rep["edges_landed"]), (False, 0))
+    # Case tolerance: ready-issues.py reads `[Bb]locked-by`, so the verifier must accept exactly
+    # what that reader accepts — no more (nothing is gained by calling an unreadable edge present)
+    # and no less (an edge the engine honours must not be reported as a gap).
+    rep = verify_migration({"sq-a": {}, "sq-b": {}}, {"sq-a": ["sq-b"]}, {},
+                           [_iss(1, "sq-a", "blocked-by:#2"), _iss(2, "sq-b")])
+    chk("the verifier accepts every marker spelling the readiness engine accepts",
+        (rep["ok"], rep["edges_landed"]), (True, 1))
+    # Duplicates: one bd-id on two issues is never resolved by picking one.
+    dup_board = [_iss(1, "sq-a", "Blocked-by: #2\nParent: #3"), _iss(2, "sq-b"), _iss(3, "sq-c"),
+                 _iss(4, "sq-b")]
+    rep = verify_migration(beads3, blk, par, dup_board)
+    chk("a bd-id mapped to two issues fails and is named",
+        (rep["ok"], rep["duplicates"]), (False, {"sq-b": [2, 4]}))
+    chk("an ambiguous bd-id is NOT counted as mapped", ("sq-b" in rep["unmigrated"],
+                                                        rep["mapped"]), (True, 2))
+    chk("an edge through an ambiguous bd-id is unresolvable, not silently landed",
+        (rep["edges_landed"], [e["to"] for e in rep["edges_unresolvable"]]), (1, ["sq-b"]))
+    # Pass 1 incomplete: a planned bead with no issue at all.
+    rep = verify_migration(beads3, blk, par, [_iss(1, "sq-a", "Blocked-by: #2"), _iss(2, "sq-b")])
+    chk("a planned bead with no issue is reported unmigrated", rep["unmigrated"], ["sq-c"])
+    chk("its edge is unresolvable rather than missing",
+        (len(rep["edges_unresolvable"]), len(rep["edges_missing"])), (1, 0))
+    # A mapped bd-id absent from the plan (bead closed since the run) is informational only.
+    rep = verify_migration({"sq-a": {}}, {}, {}, [_iss(1, "sq-a"), _iss(2, "sq-zzz")])
+    chk("a mapped bd-id outside the plan is informational, not a failure",
+        (rep["ok"], rep["stray"]), (True, ["sq-zzz"]))
+    # Moot edges: neither endpoint can act, so a marker there could not change any outcome.
+    rep = verify_migration(beads3, blk, par,
+                           [_iss(1, "sq-a"), _iss(2, "sq-b", state="CLOSED"),
+                            _iss(3, "sq-c", state="CLOSED")])
+    chk("a missing marker to a CLOSED issue is recorded but does not fail the verdict",
+        (rep["ok"], len(rep["edges_missing"]), rep["edges_live_missing"]), (True, 2, []))
+    chk("REST-cased and gh-cased closed states are both recognised",
+        (_is_closed({"state": "closed"}), _is_closed({"state": "CLOSED"})), (True, True))
+    # An ABSENT state is read as open — the fail-loud direction. Reading it as closed would let a
+    # snapshot missing the field excuse every gap on the board at once.
+    chk("an absent state is read as open (fail loud, never excuse the gap)",
+        _is_closed({"number": 1}), False)
+    # The native channel: a count-only summary annotates a gap, it never erases one.
+    rep = verify_migration({"sq-a": {}, "sq-b": {}}, {"sq-a": ["sq-b"]}, {},
+                           [_iss(1, "sq-a"), _iss(2, "sq-b")], native_blockers={1: 3})
+    # Indexed defensively: a regression that empties this list must render as a named FAIL, not as
+    # an IndexError that aborts _self_test and turns every later assertion into an unnamed
+    # traceback — the same reason the split invariants run ahead of the apply_reconcile block.
+    live = rep["edges_live_missing"]
+    chk("a native edge annotates a missing marker but never launders it away",
+        (rep["ok"], live[0]["native_blockers"] if live else "no missing edge reported",
+         rep["native_consulted"]), (False, 3, True))
+    # The printer is the only thing an operator actually sees; keep it out of the dead-code set.
+    lines = []
+    chk("the report renders and returns the verdict as an exit code",
+        print_verify_report(verify_migration(beads3, blk, par, dup_board), log=lines.append), 1)
+    chk("the rendered report names the duplicate bd-id",
+        any("sq-b" in l and "#2" in l and "#4" in l for l in lines), True)
+    lines = []
+    chk("a clean report renders a zero exit code",
+        print_verify_report(verify_migration(beads3, blk, par, complete), log=lines.append), 0)
+    chk("a clean report says so", any("PASSED" in l for l in lines), True)
+    chk("a clean report carries no how-to-read-a-gap caveat",
+        any("NOT consulted" in l for l in lines), False)
+    lines = []
+    print_verify_report(verify_migration(beads3, blk, par, no_edges), log=lines.append)
+    chk("a report WITH gaps says the native channel was not consulted",
+        any("NOT consulted" in l for l in lines), True)
+    # SYNC PIN, same reasoning as the MARKER_RE pin above: ready-issues.py is the other reader of
+    # the marker channel, and routing-self-tests.yml triggers on BOTH files, so a drift on either
+    # side reds this assertion on its own PR.
+    chk("VERIFY_BLOCKED_BY_RE stays in sync with ready-issues.py _MARKER_BLOCKED_BY",
+        VERIFY_BLOCKED_BY_RE.pattern,
+        re.search(r'_MARKER_BLOCKED_BY = re\.compile\(r"(.+?)"\)',
+                  open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "ready-issues.py"), encoding="utf-8").read()).group(1))
 
     print("bd-to-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
@@ -893,11 +1473,24 @@ def main():
     ap.add_argument("--export-file", help="read bd export from a file instead of running bd")
     ap.add_argument("--no-reconcile", action="store_true",
                     help="skip the ADD-only label reconcile over already-migrated issues")
+    ap.add_argument("--verify", action="store_true",
+                    help="read-only post-migration reconcile: counts, duplicate bd-id mappings "
+                         "and whether pass 2's dependency markers landed (exit 1 on any gap)")
+    ap.add_argument("--no-native-check", action="store_true",
+                    help="--verify: skip the native-dependency fetch (the report then says the "
+                         "channel was not consulted instead of implying zero blockers)")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
     if args.self_test:
         return _self_test()
+
+    # Refuse rather than pick. --verify short-circuits before the apply block, so accepting both
+    # would silently drop a requested bulk write — and "it printed a report" is not a signal an
+    # operator would read as "your --apply did not run".
+    if args.verify and args.apply:
+        raise SystemExit("--verify (read-only) and --apply (bulk write) are mutually exclusive: "
+                         "run --apply, then --verify to confirm it finished.")
 
     if args.export_file:
         lines = open(args.export_file, encoding="utf-8").read().splitlines()
@@ -941,6 +1534,14 @@ def main():
     print(f"  title : {sample['id']}: {sample['title'][:70]}")
     print(f"  labels: {issue_labels(sample)}")
     print(f"  blockers: {[f'{b}' for b in blockers.get(sample['id'], [])] or 'none'}")
+
+    # --verify before --apply: it is read-only, and its verdict is what tells the operator whether
+    # an --apply is needed at all. Reported over the SAME plan the summary above printed.
+    if args.verify:
+        native = None if args.no_native_check else fetch_native_blockers(args.repo)
+        print()
+        return print_verify_report(
+            verify_migration(open_ids, blockers, parents, fetch_issues(args.repo), native))
 
     if not args.apply:
         print("\n[dry-run] nothing created. Re-run with --apply (after go-ahead) to bulk-create.")

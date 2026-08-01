@@ -1,0 +1,221 @@
+{
+  "$comment": [
+    "[OPUS-5] issue #3811 — the SINGLE data-driven source of truth for sparq's banned-terminology",
+    "gate (scripts/check-terminology.py). Adding a future banned term is ONE object in `terms`,",
+    "not a code change.",
+    "",
+    "WHY THIS FILE EXISTS: the terminology gate previously hard-coded its banned list in Python AND",
+    "scanned only `*.md`. A banned term therefore reached PR #3451 as a `pub` Rust type name and as",
+    "an rdfs:comment inside a PUBLISHED vocabulary (.ttl) with a green `ci-summary / gate` — neither",
+    "file extension was in the gate's surface. Terms now declare their OWN surface, so a term that",
+    "must not appear in code/vocabulary is checked in code/vocabulary.",
+    "",
+    "SCHEMA (validated by scripts/tests/test_banned_terminology.py):",
+    "  allowMarker  — the inline per-line opt-out token; the text after `<marker>:` is the required",
+    "                 human justification. This is the ONLY narrow escape, and it is reviewed in the",
+    "                 diff like any other line.",
+    "  surfaces     — named file surfaces. `include` = git-ls-files globs; `exclude` = git pathspec",
+    "                 exclusions. A term references one by name.",
+    "  terms[]      — id, label (the operator-facing 'say this instead' message), patterns (Python",
+    "                 `re` sources), ignoreCase, surface, allowPatterns (regexes whose match on a",
+    "                 line exempts it — proper nouns, citations, third-party doc names, URLs),",
+    "                 exemptPaths (EXPLICIT paths/globs, each with a `why`).",
+    "",
+    "EXEMPTION DISCIPLINE: `exemptPaths` entries are enumerated and individually justified. Adding a",
+    "broad path exclusion to make a violation pass defeats the gate; fix the wording, or mark the one",
+    "line with the inline marker + a reason."
+  ],
+  "allowMarker": "terminology-allow",
+  "surfaces": {
+    "docs-markdown": {
+      "why": "The user-facing + governance markdown surface the other docs-quality HARD gates use (root *.md + skills/ + docs/ + crates/ + book/).",
+      "include": [
+        "*.md"
+      ],
+      "exclude": [
+        ":!:research/**",
+        ":!:bench/**",
+        ":!:js/**",
+        ":!:.beads/**",
+        ":!:.claude/**",
+        ":!:.github/**",
+        ":!:vendor/**",
+        ":!:**/vendor/**"
+      ]
+    },
+    "authored-source-and-docs": {
+      "why": "Everything a human AUTHORS that ships or is published: Rust/TS/Python/shell source, RDF vocabularies (.ttl/.jsonld/.yaml.ld), Noir circuits, Typst papers + specs, manifests, CI workflows, and all markdown INCLUDING research/. This is the surface a term banned from PUBLIC API + PUBLISHED VOCABULARY must be checked over — the #3811 gap was exactly that `.rs` and `.ttl` were unreachable.",
+      "include": [
+        "*.md",
+        "*.mdx",
+        "*.rs",
+        "*.ttl",
+        "*.jsonld",
+        "*.yaml.ld",
+        "*.nr",
+        "*.typ",
+        "*.ts",
+        "*.tsx",
+        "*.js",
+        "*.mjs",
+        "*.py",
+        "*.sh",
+        "*.toml",
+        "*.yml",
+        "*.yaml",
+        "*.json"
+      ],
+      "exclude": [
+        ":!:.beads/**",
+        ":!:vendor/**",
+        ":!:**/vendor/**",
+        ":!:target/**",
+        ":!:**/target/**",
+        ":!:**/node_modules/**",
+        ":!:Cargo.lock",
+        ":!:**/package-lock.json"
+      ],
+      "excludeWhy": {
+        ".beads/**": "A machine-synced MIRROR of the GitHub issue tracker, not authored product text. Issue titles legitimately name a banned term in order to ban it (e.g. issue #3811 itself), and the mirror is rewritten by tooling, so a hit there is neither authored nor fixable in the diff that trips it.",
+        "vendor/**, target/**, node_modules/**, lockfiles": "Not authored by this repo — vendored upstream sources, build output, and resolver-generated lockfiles."
+      }
+    }
+  },
+  "terms": [
+    {
+      "id": "rdf-star",
+      "label": "RDF-star (say: RDF 1.2)",
+      "patterns": [
+        "\\bRDF[- ]star\\b"
+      ],
+      "ignoreCase": true,
+      "surface": "docs-markdown",
+      "exemptPaths": [
+        {
+          "path": "skills/terminology/SKILL.md",
+          "why": "The terminology GUIDE itself — it must print each banned spelling in its 'say this, not that' table in order to ban it. Same class as the gate's own definition files."
+        }
+      ]
+    },
+    {
+      "id": "sparql-star",
+      "label": "SPARQL-star (say: SPARQL 1.2)",
+      "patterns": [
+        "\\bSPARQL[- ]star\\b"
+      ],
+      "ignoreCase": true,
+      "surface": "docs-markdown",
+      "exemptPaths": [
+        {
+          "path": "skills/terminology/SKILL.md",
+          "why": "The terminology GUIDE itself — it must print each banned spelling in its 'say this, not that' table in order to ban it. Same class as the gate's own definition files."
+        }
+      ]
+    },
+    {
+      "id": "rdf-star-glyph",
+      "label": "RDF*/SPARQL* (say: RDF 1.2 / SPARQL 1.2)",
+      "patterns": [
+        "\\bRDF\\*/SPARQL\\*?",
+        "\\bSPARQL\\*/RDF\\*?"
+      ],
+      "ignoreCase": false,
+      "surface": "docs-markdown",
+      "exemptPaths": [
+        {
+          "path": "skills/terminology/SKILL.md",
+          "why": "The terminology GUIDE itself — it must print each banned spelling in its 'say this, not that' table in order to ban it. Same class as the gate's own definition files."
+        }
+      ]
+    },
+    {
+      "id": "quoted-triple",
+      "label": "quoted triple (say: triple term)",
+      "patterns": [
+        "\\bquoted triples?\\b"
+      ],
+      "ignoreCase": true,
+      "surface": "docs-markdown",
+      "exemptPaths": [
+        {
+          "path": "skills/terminology/SKILL.md",
+          "why": "The terminology GUIDE itself — it must print each banned spelling in its 'say this, not that' table in order to ban it. Same class as the gate's own definition files."
+        }
+      ]
+    },
+    {
+      "id": "embedded-triple",
+      "label": "embedded triple (say: triple term)",
+      "patterns": [
+        "\\bembedded triples?\\b"
+      ],
+      "ignoreCase": true,
+      "surface": "docs-markdown",
+      "exemptPaths": [
+        {
+          "path": "skills/terminology/SKILL.md",
+          "why": "The terminology GUIDE itself — it must print each banned spelling in its 'say this, not that' table in order to ban it. Same class as the gate's own definition files."
+        }
+      ]
+    },
+    {
+      "id": "trust-envelope",
+      "label": "the banned trust-container term (say: \"trust requirements\" for the TR document, or a request/contract-carrier name such as ContractRequest for the (query, requirements, nonce) triple)",
+      "why": "Maintainer directive (2026-07-06, MEMORY feedback-no-trust-envelope-term): the term is banned in trust-program artifacts. It reached PR #3451 as `pub struct` + a PUBLISHED rdfs:comment before any mechanical check existed (issue #3811). Note the approved phrasing 'trust requirements' names the TR graph, which is ALREADY a distinct type — so the container needs a different non-banned name, not a blind substitution.",
+      "patterns": [
+        "trust[\\s_\\-]*envelope"
+      ],
+      "ignoreCase": true,
+      "surface": "authored-source-and-docs",
+      "exemptPaths": [
+        {
+          "path": "scripts/banned-terminology.json",
+          "why": "This file DEFINES the term; the `why`/`label` prose necessarily discusses it."
+        },
+        {
+          "path": "scripts/check-terminology.py",
+          "why": "The gate implementation documents, in prose, which term it bans and why."
+        },
+        {
+          "path": "scripts/tests/test_banned_terminology.py",
+          "why": "The both-direction self-test asserts on literal should-FAIL strings containing the term."
+        },
+        {
+          "path": "scripts/tests/fixtures/banned-terminology/**",
+          "why": "Deliberate violation fixtures — the mutation evidence that the gate is non-vacuous. They exist to be caught when scanned EXPLICITLY by the test; they must not red the repo-wide scan."
+        }
+      ]
+    }
+  ],
+  "allowPatterns": {
+    "$comment": "Line-level exemptions, keyed by term id. A line matching any regex here is a legitimate proper-noun / citation / third-party-doc-name / URL usage and passes.",
+    "rdf-star": [
+      "rdf[- ]star\\s+(?:working|community)\\s+group",
+      "rdf[- ]star[- ](?:wg|cg)\\b",
+      "foundations of rdf",
+      "reification done right",
+      "rdf-?sparql-?star",
+      "/rdfstar\\b",
+      "documentation/rdf-star",
+      "rdf-star-wg",
+      "https?://\\S*rdf-?star",
+      "https?://\\S*sparql-?star"
+    ],
+    "sparql-star": [
+      "rdf[- ]star\\s+(?:working|community)\\s+group",
+      "rdf[- ]star[- ](?:wg|cg)\\b",
+      "foundations of rdf",
+      "reification done right",
+      "rdf-?sparql-?star",
+      "https?://\\S*rdf-?star",
+      "https?://\\S*sparql-?star"
+    ],
+    "rdf-star-glyph": [
+      "foundations of rdf",
+      "reification done right"
+    ],
+    "quoted-triple": [],
+    "embedded-triple": [],
+    "trust-envelope": []
+  }
+}

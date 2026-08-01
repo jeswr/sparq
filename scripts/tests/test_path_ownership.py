@@ -272,6 +272,20 @@ class AuditUnitTests(unittest.TestCase):
         self.assertTrue(r.ok, r.findings)
         self.assertEqual(r.acknowledged, [("crate-a", "crates/c/data/x")])
 
+    def test_shipped_residual_list_is_empty(self):
+        # [SONNET-4.6] sq-z1xv8 — residual 3 (sparq-conformance's scoreboard_floors.rs
+        # reading sibling test sources at a runtime-built workspace path) was the last
+        # acknowledged residual; the shared sparq-conformance-floors crate relocated the
+        # input so the read is gone. Nothing is acknowledged any more, and this pins that
+        # posture: a NEW out-of-crate read must be fixed or attributed in
+        # ci/path-ownership.toml, not parked on the nightly full-run backstop. Removing
+        # this assertion is the deliberate act of re-opening that door.
+        self.assertEqual(
+            audit.KNOWN_RESIDUALS, (),
+            "every out-of-crate input is covered; prefer relocation/attribution over a "
+            "new acknowledged residual (sq-z1xv8 closed the last one)",
+        )
+
     def test_stale_acknowledgement_is_a_finding(self):
         acks = (audit.Residual("crate-a", "crates/nope/data", "matches nothing"),)
         r = self._audit([_ref("crate-a", "data/x")], [{"pattern": "data/**", "crates": ["crate-a"]}], acks=acks)

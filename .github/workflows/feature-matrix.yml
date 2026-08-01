@@ -72,6 +72,52 @@
 # A suite with no leg and no default coverage is the silent gap this whole lane exists to
 # close; do NOT let one back in. (ci.yml carries the mirror-image of this guard.)
 #
+# [OPUS-5] sq-p1ccp — THE GUARD ABOVE IS NOW ENFORCED, NOT MERELY REVIEW DISCIPLINE. The
+# gating `setup` job runs `python3 scripts/feature-matrix-tiers.py --enforce`, which REDs
+# that job (and so withholds the ENTIRE opt-in matrix — see AGENTS.md's MISSING-LEG-
+# ATTRIBUTION rule before triaging a phantom leg failure) on either violation:
+#   (1) a leg carries `tier: check` while the detector still classifies one of its features
+#       SENSITIVE — a `cfg(feature = "F")` hit under `tests/`/`benches/`, a `#[cfg(test)]`/
+#       `#[test]`-adjacent hit under `src/`, or ANY `cfg(not(feature = "F"))` in the crate —
+#       and the fragment carries no reviewed `tier-reason:` override. This is the RATCHET:
+#       feature-gating a test under a demoted feature reds the NEXT PR until the leg is
+#       promoted back to `tier: test`.
+#   (2) a SENSITIVE (crate, feature) appears in no `test: true` leg FOR THAT CRATE — the
+#       sq-vya1 guard itself, mechanized. The silent gap now fails the gate instead of
+#       awaiting a reviewer. BOTH invariants key on the (crate, feature) PAIR, never the
+#       bare feature name: cargo feature names are crate-LOCAL and 15 are shared across
+#       crates today (`arrow`, `service`, `templates`, …), so a `test: true` leg for `F`
+#       in crate A never stands in for a sensitive `F` in crate B. The ONLY exit from (2)
+#       is a written `test-reason:` on the leg, for coverage that genuinely cannot be a
+#       `cargo test` leg — today exactly one: sparq-py's `arrow`, reachable only through
+#       the pymodule (`[lib] test = false`), whose executor is the gating maturin `arrow`
+#       pytest job in python.yml. Prefer adding the leg to writing a reason.
+# The detector is FAIL-CLOSED: any parse/IO error classifies the leg SENSITIVE (keep the
+# full leg), never a silent demotion. Options (a)/(b) above are still exactly what you DO —
+# what changed is that skipping them is now caught mechanically.
+#
+# TIERS — the optional `tier:` field on a fragment leg (design: research/feature-matrix-
+# pyramid.md §3/§4):
+#   • `tier: test` — the DEFAULT, and what a MISSING `tier:` means: the full
+#     build+test+clippy leg in the `opt-in-features` matrix. Unchanged behaviour. A
+#     present-but-unrecognised value (typo, null, non-string) is a HARD assembler ERROR,
+#     not a silent fallback — a demotion is only ever a reviewed `tier: check` edit.
+#   • `tier: check` — DEMOTED. On pull_request/merge_group the assembler's `--tier check`
+#     mode routes the leg OUT of that matrix and into the `check-tier` job below, which runs
+#     `cargo clippy -p <crate> --features <F> -- -D warnings` and NOTHING else — no test
+#     execution, and deliberately no `--all-targets` (by the demotion criterion the feature
+#     has no gated test code). On push-to-main (and workflow_dispatch/schedule) the check
+#     tier assembles EMPTY and the leg runs as a FULL build+test leg in the matrix above:
+#     the per-merge backstop, so a demoted leg's residual risk surfaces within minutes of
+#     the merge that broke it rather than never.
+# Nothing is demoted by default, by omission, or by a detector run — only by a reviewed
+# fragment edit that `--enforce` then holds to the evidence. As of 2026-07-26 NO fragment
+# carries `tier:`, so both `check-tier` shards assemble a zero-leg set and are green-empty.
+# They are REQUIRED checks regardless — post-#3773 a check GATES unless it is DECLARED in
+# .github/advisory-registry.json, and neither `check-tier` shard is declared there — so the
+# first demotion is gated on arrival: its compile/clippy break blocks the merge in the
+# check tier instead of via its former `opt-in <name>` leg.
+#
 # SCOPE — what this lane deliberately does NOT cover, and why (each is a separate gate
 # or a documented exclusion, NOT an oversight):
 #   • `zlib-ng` (sparq-cli / sparq-server / sparq-parse / sparq-hdt): swaps flate2's
@@ -491,8 +537,13 @@ jobs:
     # regardless of any check-run posting (sq-fmx4u.4).
     #
     # [OPUS-4.8] sq-ibrze (unchanged): legs are ASSEMBLED from the per-crate fragment
-    # files (`.github/feature-matrix.d/<crate>.yml`). To add a leg, edit ONLY the
-    # relevant crate fragment — do NOT reintroduce a static `include:` list here.
+    # files (`.github/feature-matrix.d/<crate>.yml`). To add a leg, edit the relevant
+    # crate fragment — do NOT reintroduce a static `include:` list here.
+    # [SONNET-4.6] issue #2384: that is a TWO-FILE change, not a one-file change. A
+    # leg's `name:` is pinned byte-for-byte by the gate-name golden, so adding /
+    # renaming / removing a leg ALSO requires regenerating
+    # `scripts/tests/feature-matrix-legnames.golden.txt`. Scope both files (never one)
+    # — see `.github/feature-matrix.d/README.md`.
     name: opt-in group (${{ matrix.group }})
     runs-on: ubuntu-latest
     permissions:
@@ -816,6 +867,18 @@ jobs:
         run: cargo build -p sparq-server --no-default-features
       - name: Test (-p sparq-server --no-default-features) — the still-compiled pure-serialiser suites
         run: cargo test -p sparq-server --no-default-features
+      - name: Rustdoc (-p sparq-server --no-default-features, -D warnings)
+        # [OPUS-5] sq-d661l: the repo-wide rustdoc gate (ci.yml) runs --all-features, where
+        # an intra-doc link from an ALWAYS-compiled doc-comment to a `server`-gated item
+        # RESOLVES — the break only surfaces in the async-stack-less doc build, and this lane
+        # ran build/test/clippy but NOT rustdoc, so that state was unchecked and had rotted
+        # (lib.rs -> health_probe::run_probe / http::harden / ServerConfig::*, redact.rs ->
+        # ServerConfig::redact_logs; fixed under sq-d661l by demoting each to a code span, the
+        # standing rule for cfg-gated link targets). This step locks that state, mirroring the
+        # sparq-geo lane below.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p sparq-server --no-deps --no-default-features
       - name: Clippy (--no-default-features --all-targets -D warnings)
         run: cargo clippy -p sparq-server --no-default-features --all-targets -- -D warnings
 

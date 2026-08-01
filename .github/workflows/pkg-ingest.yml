@@ -56,12 +56,12 @@ jobs:
 
       - name: Build validate-pkg
         run: |
-          cargo build --bin validate-pkg --features validate -p sparq-kb --release
+          cargo build --bin validate-pkg --features validate -p sparq-kb --profile release-fast
         shell: bash
 
       - name: Validate ingest against SHACL shapes
         run: |
-          ./target/release/validate-pkg crates/sparq-kb/ingest/pkg-instances.ttl
+          ./target/release-fast/validate-pkg crates/sparq-kb/ingest/pkg-instances.ttl
         shell: bash
 
       - name: Upload quarantine sidecar

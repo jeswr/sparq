@@ -11,9 +11,9 @@ without re-deriving it. All paths are repo-relative; all CI job names match
 
 | Artifact | Path | What it is |
 |---|---|---|
-| VEX (source of truth) | `supply-chain/vex.cdx.json` | CycloneDX 1.5 VEX; 1 vulnerability (`RUSTSEC-2025-0134`), `not_affected`. (`RUSTSEC-2024-0436` paste was dropped once the GPU stack stopped pulling `paste`.) |
+| VEX (source of truth) | `supply-chain/vex.cdx.json` | CycloneDX 1.5 VEX; 4 vulnerabilities — `RUSTSEC-2024-0436` (paste) / `RUSTSEC-2025-0141` (bincode) `not_affected`, `RUSTSEC-2026-0194` + `RUSTSEC-2026-0195` (quick-xml) honestly `exploitable`. ([OPUS-5] sq-5ah3p dropped `RUSTSEC-2025-0134` `rustls-pemfile` from both sides: the mTLS PEM parse moved to `rustls-pki-types`' `PemObject`, so the archived crate left the tree.) |
 | SBOM+VEX generator | `scripts/gen-sbom-vex.sh` | Produces per-binary SBOM + version-stamped VEX into `./sbom/` for the release. |
-| Dependency policy | `deny.toml` | cargo-deny advisories/bans/sources/licenses; `[advisories].ignore` = the 2 RUSTSEC IDs the VEX mirrors. |
+| Dependency policy | `deny.toml` | cargo-deny advisories/bans/sources/licenses; `[advisories].ignore` = the 4 RUSTSEC IDs the VEX mirrors 1:1. |
 | cargo-vet config | `supply-chain/config.toml`, `supply-chain/audits.toml`, `supply-chain/imports.lock` | Trusted import sets + exemptions; gates new unaudited deps. |
 
 ## 2. The CI / release wiring (cite these job + step names)
@@ -199,15 +199,16 @@ advisory. The check asserts set equality and fails (exit 1) on any unjustified o
 
 ```sh
 # the gate (parses deny.toml via tomllib + the VEX via json; robust to the {id,reason} ignore form)
-python3 scripts/check-vex-deny-drift.py        # -> "VEX ↔ deny.toml in sync: 2 advisory id(s) match 1:1."
+python3 scripts/check-vex-deny-drift.py        # -> "VEX ↔ deny.toml in sync: 4 advisory id(s) match 1:1."
 python3 scripts/tests/test_vex_deny_drift.py   # hermetic self-test (11 cases incl. the drift-fail paths)
 ```
 
 Wired as `.github/workflows/supply-chain.yml#vex-deny-sync` (job name
 `VEX ↔ deny.toml sync (GS-5) — GATING`; no `advisory`/`informational` whole word, so ci-summary gates
-it). Recorded this branch: both = `{RUSTSEC-2025-0134}` — **in sync** (no drift to
-resolve). (`RUSTSEC-2024-0436` paste/sq-l8bv was removed from both sides once the GPU stack stopped
-pulling `paste`.) Negative test: temporarily dropping either deny.toml ignore makes the check exit 1 and name
+it). Recorded this branch: both = `{RUSTSEC-2024-0436, RUSTSEC-2025-0141, RUSTSEC-2026-0194,
+RUSTSEC-2026-0195}` — **in sync** (no drift to resolve). ([OPUS-5] sq-5ah3p removed
+`RUSTSEC-2025-0134` from both sides in one change, which is exactly the edit shape this gate exists to
+police.) Negative test: temporarily dropping any one of the four deny.toml ignores makes the check exit 1 and name
 the offending id. A genuinely-intended one-sided entry is recorded with a reason in the script's
 `JUSTIFIED_DRIFT` allow-list (empty today).
 

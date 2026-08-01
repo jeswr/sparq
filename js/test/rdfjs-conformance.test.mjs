@@ -51,7 +51,8 @@ test('@jeswr/sparq Source/Sink round-trips quads through the engine', async () =
     DataFactory.namedNode('http://ex/c'),
   );
 
-  // import via a quad Stream (the adapter buffers + applies one delta on `end`)
+  // import via a quad Stream (the adapter applies O(batch) deltas of `chunkSize` quads, so a
+  // one-quad stream lands as a single delta on `end` — see test/source-hardening.test.mjs)
   const inStream = new SparqSource(await SparqStore.fromQuads([q])).match();
   await new Promise((resolve, reject) => {
     src.import(inStream).on('end', resolve).on('error', reject);

@@ -164,6 +164,17 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+    # [OPUS-5] PINNED-TOOLCHAIN ESCAPE. The repo root carries a `rust-toolchain.toml`
+    # pinning STABLE. rustup resolves that file (precedence 4) ABOVE the `rustup default
+    # <toolchain>` that `dtolnay/rust-toolchain` performs (precedence 5), so with the pin
+    # in place a plain `cargo`/`rustc` in this job resolves to pinned stable, NOT the
+    # nightly this lane declares. The `cargo +nightly-2026-06-11 miri …` calls below are
+    # precedence 1 and were already immune; this env var (precedence 2) restores the
+    # pre-pin behaviour for everything else in the job — notably the `rustc -vV` that
+    # Swatinem/rust-cache derives its cache key from, which would otherwise silently
+    # re-key the Miri cache onto stable. Keep in sync with the `toolchain:` input below.
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-06-11
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -180,7 +191,7 @@ jobs:
       # nextest = the process-per-test runner (see THE FIX above). Same pinned installer
       # action + tool the ci.yml test shards use.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: nextest
       - name: Cache cargo + target
@@ -244,6 +255,9 @@ jobs:
     name: miri doctests (sparq-core)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # [OPUS-5] PINNED-TOOLCHAIN ESCAPE — see the identical note on the `miri` job above.
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-06-11
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

@@ -1328,9 +1328,11 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// `sum + r < p` (no wrap), which — with `p = 2^61−1` and a `2^{−40}` gap — left only
 /// [`DECOMP_VALUE_BITS`] = 20 bits for the value. The Rabbit path RECOVERS the wrap
 /// instead of avoiding it, so it carries no slack and supports the **full**
-/// [`RABBIT_VALUE_BITS`] = 60 magnitude (`2^60`) — a 40-bit lift. The malicious twin
-/// [`crate::auth_disclose`] still uses the lower-magnitude masked-open path; its
-/// Rabbit upgrade is tracked separately.
+/// [`RABBIT_VALUE_BITS`] = 60 magnitude (`2^60`) — a 40-bit lift. [OPUS-4.8] sq-km34.6:
+/// the IT-MAC twin [`crate::auth_disclose`] has since been lifted to the SAME Rabbit
+/// construction (with every gate an authenticated multiplication), so both support
+/// `2^60`. [SONNET-4.6] That is MAGNITUDE parity only — the twin's integrity tier is
+/// tamper-evident, not malicious-secure (see its module docs' integrity residual).
 ///
 /// ## Security tier — honest-majority, semi-honest (NOT malicious)
 ///

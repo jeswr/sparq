@@ -21,6 +21,15 @@
 //! so the regression gate runs in the normal suite when the toolchain is
 //! present.
 //!
+//! [FABLE-5] sq-7pifo: because it is non-`#[ignore]`d it is SKIPPED by the
+//! zk-toolchain lane's `cargo test -- --ignored` step, and the default ci.yml
+//! lanes have no `nargo`/`bb` so it self-skips there — i.e. it ran in NO CI lane
+//! and its baselines went silently stale (the sq-25mgo fix grew filter_f64 well
+//! past the checked-in regression tolerance untripped). The zk-toolchain lane now runs the
+//! non-ignored `gate_count` + `sparql_catalog` binaries in a dedicated step (WITH
+//! the toolchain present) so an intentional circuit change must re-baseline in
+//! the same PR — see `.github/workflows/zk-toolchain.yml`.
+//!
 //! Re-baseline after an INTENTIONAL circuit change: run
 //! `bench/zk-compose/scripts/gate_counts.sh` and copy the new `circuit_size`
 //! values into `tests/gate_count_snapshot.json` (and the bench JSON).

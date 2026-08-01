@@ -70,6 +70,52 @@ if [ "$seen" != "$exp_rows" ]; then
   echo "[rsp] ERROR: emitted $seen *_rows metrics, expected $exp_rows (a window/scenario vanished)" >&2; fail=1
 fi
 
+# ---- 4. replay-FILE runner equivalence (sq-3f5ay) ----------------------------------------
+# The matched-workload throughput leg drives sparq from a pinned replay FILE
+# (examples/replay_runner.rs) instead of the in-code script, and the two examples carry
+# duplicate scenario definitions by design. Re-derive every scenario's per-window counts
+# THROUGH the file path and assert them against the same expected.tsv: this pins
+# replay_runner == rsp_oracle == expected.tsv == replay/*.ts.tsv, so a drift in either
+# example — or in a replay export — fails here rather than silently skewing a published
+# side-by-side. Skipped (with a note) when the example is not built; it emits NO stdout
+# metrics, so the hook contract above is unchanged.
+REPLAY_BIN="${RSP_REPLAY_BIN:-$ROOT/target/release/examples/replay_runner}"
+if [ -x "$REPLAY_BIN" ]; then
+  replay_checked=0
+  while IFS=: read -r rfile scenario prefix; do
+    if ! "$REPLAY_BIN" --replay "$ROOT/bench/rsp/replay/$rfile.ts.tsv" --scenario "$scenario" \
+         > "$TMP/replay.tsv" 2>"$TMP/replay.err"; then
+      echo "[rsp] ERROR: replay_runner failed for $scenario" >&2; cat "$TMP/replay.err" >&2; fail=1; continue
+    fi
+    got=0
+    while IFS=$'\t' read -r wk rows _; do
+      case "$wk" in w[0-9]*) ;; *) continue ;; esac
+      exp="$(awk -F'\t' -v m="$prefix${wk#w}_rows" '$1==m{print $2}' "$EXP")"
+      if [ -z "$exp" ]; then
+        echo "[rsp] ERROR: replay_runner $scenario $wk has no expected.tsv entry" >&2; fail=1; continue
+      fi
+      if [ "$rows" != "$exp" ]; then
+        echo "[rsp] ERROR: replay_runner $scenario $wk rows=$rows expected=$exp (file-driven path diverged from the in-code oracle)" >&2; fail=1
+      fi
+      got=$((got+1))
+    done < "$TMP/replay.tsv"
+    want="$(awk -F'\t' -v p="$prefix" 'index($1,p)==1 && $1 ~ /_rows$/{n++} END{print n+0}' "$EXP")"
+    if [ "$got" != "$want" ]; then
+      echo "[rsp] ERROR: replay_runner $scenario emitted $got windows, expected $want" >&2; fail=1
+    fi
+    replay_checked=$((replay_checked+got))
+  done <<'SCENARIOS'
+single_window:tumbling_avg:rsp_tumbling_avg_pdict_w
+single_window:sliding_sum:rsp_sliding_sum_pdict_w
+single_window:tumbling_groupby_join:rsp_tumbling_groupby_join_pdict_w
+srbench:srbench_join:rsp_srbench_join_w
+srbench:srbench_groupby_state:rsp_srbench_groupby_state_w
+SCENARIOS
+  [ "$fail" = 0 ] && echo "[rsp] OK: replay-FILE runner reproduced $replay_checked per-window counts (file path == in-code oracle)" >&2
+else
+  echo "[rsp] note: replay_runner equivalence check skipped (build: cargo build --release -p sparq-rsp --example replay_runner)" >&2
+fi
+
 if [ "$fail" = 0 ]; then
   echo "[rsp] OK: all $seen per-window row counts match expected.tsv (single-window x 3 EvalModes + SRBench oracle)" >&2
 else

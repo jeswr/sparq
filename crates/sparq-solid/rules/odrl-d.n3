@@ -1,0 +1,63 @@
+# [SONNET-4.6] sq-zgbso.2 — ODRL stateless core: stratum D.
+# Input: the serialized closure of stratum C (includes A + B + C derived facts).
+#
+# NAF in this stratum is over the COMPLETE prohibMatches (unconstrained from B,
+# constrained from C) and anyRuleConstrUnsat (from B):
+#   - auth:* grant triples — emitted when no prohibition matches the request
+# Grants live in their own final stratum so that a CONSTRAINED prohibition
+# (matched in C) suppresses them exactly like an unconstrained one — deny-overrides.
+#
+# Three grant rules cover all permission shapes in scope:
+#   1. Unconstrained permission (no odrl:constraint)
+#   2. Permission with ONLY atomic constraints (checked via anyRuleConstrUnsat from B)
+#   3. Permission with a satisfied logical constraint (lcSat from A or C)
+
+@prefix odrl:  <http://www.w3.org/ns/odrl/2/> .
+@prefix auth:  <https://sparq.dev/ns/auth#> .
+@prefix odrlx: <https://sparq.dev/ns/odrlx#> .
+@prefix log:   <http://www.w3.org/2000/10/swap/log#> .
+
+# ── grant rule 1: UNCONSTRAINED permission ────────────────────────────────────
+# Fires when the permission has no odrl:constraint at all. NAF is over:
+#   - INPUT  predicate odrl:constraint (input-complete, safe in any stratum)
+#   - prohibMatches (complete after stratum C)
+{ ?pol odrl:permission ?perm .
+  ?perm odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?act odrlx:mode ?mode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?S1 log:notIncludes { ?perm odrl:constraint ?anyc } .
+  ?S2 log:notIncludes { ?proh odrlx:prohibMatches ?req } . }
+=> { ?party ?mode ?tgt } .
+
+# ── grant rule 2: permission with ONLY atomic constraints (all satisfied) ─────
+# Fires when the permission has at least one atomic constraint (?c odrl:leftOperand ?lo)
+# and no logical constraint (S2-S4 check odrl:or/and/xone). NAF is over:
+#   - stratum B's anyRuleConstrUnsat (all atomic constraints satisfied)
+#   - INPUT  predicates odrl:or/and/xone (no LC present)
+#   - prohibMatches (complete after stratum C)
+{ ?pol odrl:permission ?perm .
+  ?perm odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?perm odrl:constraint ?c . ?c odrl:leftOperand ?lo .
+  ?act odrlx:mode ?mode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?S1 log:notIncludes { ?perm odrlx:anyRuleConstrUnsat ?req } .
+  ?S2 log:notIncludes { ?perm odrl:constraint ?lc . ?lc odrl:or ?x } .
+  ?S3 log:notIncludes { ?perm odrl:constraint ?lc . ?lc odrl:and ?x } .
+  ?S4 log:notIncludes { ?perm odrl:constraint ?lc . ?lc odrl:xone ?x } .
+  ?S5 log:notIncludes { ?proh odrlx:prohibMatches ?req } . }
+=> { ?party ?mode ?tgt } .
+
+# ── grant rule 3: permission with a satisfied logical constraint ───────────────
+# Fires when the permission has a logical constraint ?lc that is satisfied (lcSat from
+# stratum A for odrl:or, or stratum C for odrl:and). NAF is over:
+#   - stratum B's anyRuleConstrUnsat (all atomic constraints on the permission satisfied)
+#   - prohibMatches (complete after stratum C)
+{ ?pol odrl:permission ?perm .
+  ?perm odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?perm odrl:constraint ?lc .
+  ?lc odrlx:lcSat ?req .
+  ?act odrlx:mode ?mode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?S1 log:notIncludes { ?perm odrlx:anyRuleConstrUnsat ?req } .
+  ?S2 log:notIncludes { ?proh odrlx:prohibMatches ?req } . }
+=> { ?party ?mode ?tgt } .

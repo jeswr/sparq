@@ -121,24 +121,23 @@ pub struct Suite {
 /// crate-test ones against source):
 /// * SPARQL  1229  — `ci.yml` job `conformance` (`RATCHET=1229`).
 /// * inference 1967 — `ci.yml` job `inference-conformance` (`RATCHET=1967`).
-/// * SHACL core 98 — `sparq-shacl` `w3c_core.rs` `BASELINE_PASS = 98`.
-/// * SHACL-SPARQL 5 — `sparq-shacl` `w3c_sparql.rs` `SHACL_SPARQL_FLOOR = 5`.
-/// * OGC GeoSPARQL 197 — `sparq-geo` `ogc_compliance_ratchet.rs`
-///   `OGC_RATCHET_FLOOR = 197` (sq-cbe4t raised it 119 -> 158;
-///   sq-lk3aw.1 raised it 158 -> 197: 39 net-new assertions covering
-///   edge-adjacent polygons / disjoint line+polygon / parallel lines /
-///   point-on-line / and multi-pair rcc8/eh disjoint cells).
-/// * OGC GeoSPARQL query-rewrite 48 — `sparq-geo` `ogc_query_rewrite_ratchet.rs`
-///   `OGC_QUERY_REWRITE_FLOOR = 48` (sq-wf9qg raised to 38; sq-lk3aw.2 raised 38→48:
-///   [SONNET-4.6] strengthened semantics-preserving comparison + extended coverage;
-///   opt-in `geosparql_rewrite` feature; topology PROPERTY forms answered via the
-///   rewrite, MEASURED pass count).
-/// * Solid WAC 13 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 13`
-///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6;
-///   [GPT-5.6] sq-61uvs added the control-document authorization vector).
-/// * Solid ACP 13 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 13`
-///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6;
-///   [GPT-5.6] sq-61uvs added the control-document authorization vector).
+///
+/// [SONNET-4.6] sq-z1xv8 — every floor whose ENFORCING runner lives in another crate
+/// (SHACL core/SPARQL, both OGC GeoSPARQL lanes, Solid WAC/ACP parity + the two
+/// differential oracles, the SolidLab ODRL suite, the sparq-text BM25 oracle and the
+/// sparq-rsp expressivity oracle) now lives in the zero-dependency
+/// `sparq-conformance-floors` crate and is IMPORTED into both the runner's
+/// `assert!(count >= FLOOR)` and the `Suite` row here
+/// (`ratchet_floor: sparq_conformance_floors::<module>::<FLOOR>`) — the same
+/// cannot-drift shape the six JSON-LD lanes get from `crate::floors`. This RETIRED
+/// their textual floor-sync rows in `tests/scoreboard_floors.rs`, which used to read
+/// those crates' test SOURCES at a runtime-built workspace path: an out-of-crate read
+/// that no dependency closure or `ci/path-ownership.toml` `readers` entry could
+/// attribute, i.e. CI test-selection "residual 3"
+/// (`scripts/ci_audit_inputs.py`; design `research/change-based-test-selection.md`
+/// §4.2). Raise such a floor in `sparq-conformance-floors`; the measurement narrative
+/// stays with the runner, and `tests/scoreboard_floors.rs`'s `SHARED_CRATE_EXPECTED`
+/// pins the value so a silent LOWERING still fails.
 ///
 /// [FABLE-5] sq-oy1f.40 — the SIX JSON-LD floors below now live LIB-SIDE in
 /// `src/floors/<lane>.rs` (`floors::<lane>::FLOOR`) and are IMPORTED directly into
@@ -153,17 +152,21 @@ pub struct Suite {
 ///   `FLOOR = 52` (sq-oy1f.2; RAISED 51→52 by sq-oy1f.28 flipping the lane to the
 ///   native document-level `sparq_jsonld::from_rdf` oracle; opt-in `jsonld-suite`
 ///   feature).
-/// * JSON-LD compact 228 — `sparq-conformance` `src/floors/compact.rs`
-///   `FLOOR = 228` (sq-3uos5 163; RAISED →186 by sq-oy1f.16; RE-PINNED →228 by
+/// * JSON-LD compact 243 — `sparq-conformance` `src/floors/compact.rs`
+///   `FLOOR = 243` (sq-3uos5 163; RAISED →186 by sq-oy1f.16; RE-PINNED →228 by
 ///   sq-oy1f.27's oracle correction to the native document-level Compaction
-///   Algorithm vs the W3C EXPECTED document; opt-in `jsonld-suite` feature).
+///   Algorithm vs the W3C EXPECTED document; RAISED →243 by sq-gzsky RUNNING the
+///   17 NegativeEvaluationTests against `expectErrorCode`; opt-in `jsonld-suite`
+///   feature).
 /// * JSON-LD frame 92 — `sparq-conformance` `src/floors/frame.rs`
 ///   `FLOOR = 92` (sq-oy1f.19; RE-PINNED 61→92 by sq-oy1f.29 flipping the lane from
 ///   the RDF-first framer to the NATIVE document-level Framing Algorithm compared to
 ///   the W3C EXPECTED document with `json_ld_equal` (negatives RUN, not skipped);
 ///   opt-in `jsonld-suite` feature; over the SEPARATE w3c/json-ld-framing suite).
-/// * JSON-LD expand 259 — `sparq-conformance` `src/floors/expand.rs`
-///   `FLOOR = 259` (sq-oy1f.37 expand() correctness raise from 240; opt-in
+/// * JSON-LD expand 381 — `sparq-conformance` `src/floors/expand.rs`
+///   `FLOOR = 381` (sq-oy1f.37 expand() correctness raise from 240; →276 by
+///   sq-oy1f.45; →381 by sq-gzsky RUNNING the 109 NegativeEvaluationTests against
+///   `expectErrorCode` plus seven spec-faithful `sparq-jsonld` fixes; opt-in
 ///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
 ///   directly and compares the result to the expected document via `json_ld_equal`
 ///   — a document-level JSON comparator measuring JSON-LD data-model (semantic)
@@ -290,7 +293,7 @@ pub const SUITES: &[Suite] = &[
         family: "W3C SHACL",
         runner: Runner::CrateTest { krate: "sparq-shacl", target: "w3c_core" },
         ci_job: "shacl-conformance",
-        ratchet_floor: 98,
+        ratchet_floor: sparq_conformance_floors::shacl::CORE_FLOOR,
         floor_basis: "pass",
         note: "data-shapes sht:Validate core suite (w3c/data-shapes)",
     },
@@ -299,7 +302,7 @@ pub const SUITES: &[Suite] = &[
         family: "W3C SHACL",
         runner: Runner::CrateTest { krate: "sparq-shacl", target: "w3c_sparql" },
         ci_job: "shacl-conformance",
-        ratchet_floor: 5,
+        ratchet_floor: sparq_conformance_floors::shacl::SPARQL_FLOOR,
         floor_basis: "pass",
         note: "sh:sparql node + property constraint sub-suites",
     },
@@ -315,7 +318,7 @@ pub const SUITES: &[Suite] = &[
         // [SONNET-4.6] sq-lk3aw.1 — raised 158 -> 197: 39 more net-new assertions
         // (edge-adjacent polygons / disjoint line+polygon / parallel lines /
         // point-on-line / multi-pair rcc8/eh disjoint cells).
-        ratchet_floor: 197,
+        ratchet_floor: sparq_conformance_floors::geo::OGC_TOPOLOGY_FLOOR,
         floor_basis: "pass",
         // [OPUS-4.8] sq-cbe4t — DISTANCE-APPROXIMATION HONESTY NOTE. This topology
         // ratchet is exact DE-9IM (no approximation). The `geof:distance` METRIC
@@ -350,7 +353,7 @@ pub const SUITES: &[Suite] = &[
             feature: "geosparql_rewrite",
         },
         ci_job: "geo-conformance",
-        ratchet_floor: 48,
+        ratchet_floor: sparq_conformance_floors::geo::OGC_QUERY_REWRITE_FLOOR,
         floor_basis: "pass",
         note: "topology PROPERTY forms (geo:sf*/eh*/rcc8*) answered end-to-end via the \
                opt-in query-rewrite extension, result-equivalent to the geof: oracle",
@@ -367,7 +370,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid WAC",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_wac" },
         ci_job: "solid-conformance",
-        ratchet_floor: 13,
+        ratchet_floor: sparq_conformance_floors::solid::WAC_SCENARIO_FLOOR,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over minimal per-construct WAC .acl scenarios",
     },
@@ -376,7 +379,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid ACP",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_acp" },
         ci_job: "solid-conformance",
-        ratchet_floor: 13,
+        ratchet_floor: sparq_conformance_floors::solid::ACP_SCENARIO_FLOOR,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over minimal per-construct ACP ACR scenarios",
     },
@@ -398,7 +401,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid WAC",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "differential_oracle" },
         ci_job: "solid-conformance",
-        ratchet_floor: 0,
+        ratchet_floor: sparq_conformance_floors::solid::DIVERGENCE_FLOOR,
         floor_basis: "0 divergences",
         note: "engine vs an independent reference evaluator vs the hand Expect table, \
                over the WAC parity corpus (zero divergence)",
@@ -408,7 +411,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid ACP",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "differential_oracle" },
         ci_job: "solid-conformance",
-        ratchet_floor: 0,
+        ratchet_floor: sparq_conformance_floors::solid::DIVERGENCE_FLOOR,
         floor_basis: "0 divergences",
         note: "engine vs an independent reference evaluator vs the hand Expect table, \
                over the ACP parity corpus (zero divergence)",
@@ -494,7 +497,8 @@ pub const SUITES: &[Suite] = &[
         floor_basis: "pass",
         note: "native document-level Compaction Algorithm (sparq-jsonld), compared \
                against the W3C EXPECTED compacted document (json_ld_equal — the \
-               normative document oracle)",
+               normative document oracle); NegativeEvaluationTests RUN against the \
+               manifest expectErrorCode since sq-gzsky (a wrong code is a FAIL)",
     },
     // [OPUS-4.8] sq-oy1f.19 — the W3C JSON-LD 1.1 `frame` ratchet (epic sq-oy1f),
     // over the SEPARATE w3c/json-ld-framing suite (fetch-jsonld-framing-tests.sh).
@@ -541,7 +545,11 @@ pub const SUITES: &[Suite] = &[
     // pass count with the corrected oracle at the pinned suite revision, sq-kk1mq), then
     // RAISED to 259 by sq-oy1f.37 (three expand() correctness fixes: value-object
     // @type collapse, empty-array-property retention, free-floating value/list drop —
-    // rise-only ratchet).
+    // rise-only ratchet), then to 276 by sq-oy1f.45 (FsLoader wiring + six more fixes).
+    // [OPUS-5] sq-gzsky — RAISED 276 → 381: the 109-case NegativeEvaluationTest SKIP
+    // bucket (the whole expand gap) is closed — the lane now RUNS the negatives against
+    // the manifest's `expectErrorCode` — plus seven spec-faithful sparq-jsonld fixes.
+    // See src/floors/expand.rs for the itemised fix list and the 4 remaining fails.
     // [FABLE-5] sq-oy1f.26 — the flatten lane ALSO moved to the native document oracle
     // (sparq_jsonld::flatten() = expand ∘ node-map ∘ fold, compared via json_ld_equal),
     // re-pinned off the old RDF-writer oracle.  It composes over expand(), so it inherits
@@ -563,7 +571,9 @@ pub const SUITES: &[Suite] = &[
         note: "native sparq_jsonld::expand() + json_ld_equal semantic-equivalence comparator \
                (sq-kk1mq; NOT structural identity — ~18/240 passes are reordered, \
                strict-ordered count 222; re-baseline from 247 under RDF-equivalence \
-               oracle sq-oy1f); options forwarded (base, expandContext, processingMode)",
+               oracle sq-oy1f); options forwarded (base, expandContext, processingMode); \
+               NegativeEvaluationTests RUN against the manifest expectErrorCode since \
+               sq-gzsky (a wrong code is a FAIL, never a pass)",
     },
     Suite {
         label: "W3C JSON-LD 1.1 flatten",
@@ -599,7 +609,7 @@ pub const SUITES: &[Suite] = &[
         family: "SolidLab ODRL",
         runner: Runner::CrateTest { krate: "sparq-policy", target: "odrl_test_suite" },
         ci_job: "odrl-conformance",
-        ratchet_floor: 67,
+        ratchet_floor: sparq_conformance_floors::policy::ODRL_SUITE_FLOOR,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over the SolidLab self-describing ODRL \
                cases through sparq-policy's real evaluate() path",
@@ -844,7 +854,7 @@ pub const SUITES: &[Suite] = &[
         family: "sparq extension",
         runner: Runner::CrateTest { krate: "sparq-text", target: "bm25_oracle" },
         ci_job: "text-oracle",
-        ratchet_floor: 18750,
+        ratchet_floor: sparq_conformance_floors::text::BM25_ORACLE_FLOOR,
         floor_basis: "score-exact assertions (sparq EXTENSION, NOT standards conformance)",
         note: "EXTENSION ratchet — no normative full-text-over-RDF / BM25 standard \
                exists: sparq-text's BM25 search/ranking vs a from-scratch independent \
@@ -884,7 +894,8 @@ pub const SUITES: &[Suite] = &[
         family: "sparq extension",
         runner: Runner::CrateTest { krate: "sparq-rsp", target: "srbench_oracle" },
         ci_job: "rsp-oracle",
-        ratchet_floor: 317, // [SONNET-4.6] sq-2n1q3.3 raised from 303 (from 149 sq-mcb3q baseline)
+        // [SONNET-4.6] sq-2n1q3.3 raised from 303 (from 149 sq-mcb3q baseline).
+        ratchet_floor: sparq_conformance_floors::rsp::EXPRESSIVITY_FLOOR,
         floor_basis: "per-window correctness assertions (sparq EXTENSION, NOT standards conformance)",
         note: "EXTENSION ratchet — no normative RDF-Stream-Processing standard / RSP \
                conformance suite exists (RSP-QL is a W3C-community spec; SRBench a \
@@ -934,8 +945,13 @@ pub const SUITES: &[Suite] = &[
         // [OPUS-4.8] sq-26vwp — raised to 73: +10 assertions for variable/mixed body
         // Equal resolved by compile-time substitution/unification (V1/V2, ?x=<t>
         // substitution, head-var bind, chained collapse, distinct-ground fail-closed).
+        // [SONNET-4.6] sq-anyad — raised to 76: the distinct-ground Equal item of
+        // equal_atom_audit grew from 1 fail-closed assertion to 4 (numeric value-equal
+        // validates + fires, numeric value-unequal is vacuous, non-numeric still fails
+        // closed) when the NUMERIC half of the value-space deferral landed on the
+        // sq-v5evr comparator.
         // Mirrors RIF_CORE_FLOOR in rif_core_suite.rs (scoreboard_floors guard checks sync).
-        ratchet_floor: 73,
+        ratchet_floor: 76,
         floor_basis: "expressivity assertions (sparq EXTENSION over the RIF-Core subset, \
                       NOT the normative W3C SPARQL-RIF conformance suite)",
         note: "EXTENSION ratchet — sparq's own faithful expressivity battery over the \
@@ -1124,7 +1140,7 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 94,
+        ratchet_floor: 93,
         floor_basis: "positive-tag membership passes, EXACT-pinned (sparq EXTENSION over the \
                       L1/L2 ALCH-fragment checker — scoped fragment, NOT full OWL 2 DL and NOT \
                       a W3C ProfileIdentificationTest conformance claim); re-pinned by \
@@ -1132,7 +1148,10 @@ pub const SUITES: &[Suite] = &[
                       re-pinned by sq-pbz04.4.9 (L1 datatype-map-IRI refusal: -1, 95 -> 94 — the \
                       WebOnt-I5.3-015 EL profile row whose premise carries xsd:integer/xsd:string \
                       ranges now refuses extraction and honestly abstains, was a pass under the \
-                      old opaque-datatype reading)",
+                      old opaque-datatype reading); re-pinned by sq-pbz04.4.8 (L1 built-in \
+                      fixed-extension property refusal: -1, 94 -> 93 — the \
+                      New-Feature-BottomObjectProperty-001 EL profile row, whose premise uses \
+                      owl:bottomObjectProperty, now refuses extraction and honestly abstains)",
         note: "EXTENSION ratchet — the DIRECT-arm ProfileIdentificationTest cases whose \
                POSITIVE test:profile tags the L2 syntactic checker reproduces through the \
                REAL fail-closed L1 extraction + grammar walk; abstentions are never passes. \
@@ -1140,9 +1159,9 @@ pub const SUITES: &[Suite] = &[
                normalizes a 1-ary owl:intersectionOf to its member) and now pass; the \
                positive PROFILE_DIVERGENCES pin is empty. The EXPLICIT-NEGATIVE direction is \
                a SEPARATE lane (sq-pbz04.4.16): the export's owl:NegativePropertyAssertion \
-               profile negations refuted where L2 can (138 after sq-zfwzq graduated three \
-               transitive-property inputs from extraction abstention: +1 refuted and +2 \
-               measured In-gap), with an honest measured In-gap (182 of 320 checkable) where axiom-grammar membership \
+               profile negations refuted where L2 can (134 after sq-pbz04.4.8 moved four \
+               built-in-property rows out of the checkable set into honest extraction \
+               abstention), with an honest measured In-gap (181 of 315 checkable) where axiom-grammar membership \
                over the ALCH shadow cannot refute full-profile membership (deferred \
                restrictions); species assertions remain unchecked (documented)",
     },
@@ -1155,7 +1174,7 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 186,
+        ratchet_floor: 227,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
                       (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
                       re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); \
@@ -1169,7 +1188,14 @@ pub const SUITES: &[Suite] = &[
                       + L1 datatype-map-IRI refusal net to zero on the pass total, composition \
                       97+69 -> 96+70; fail set still 5, M3/M5/M6); re-pinned by sq-zfwzq \
                       (ALCHS transitive roles: +2 consistency and +2 positive-entailment \
-                      passes, 182 -> 186; composition 98+14+72+2, fail set unchanged)",
+                      passes, 182 -> 186; composition 98+14+72+2, fail set unchanged); \
+                      re-pinned by sq-pbz04.4.8 (guard-abstention tableau fall-through: +41, \
+                      186 -> 227; composition 136+17+72+2 — an abstaining RL/EL/QL branch now \
+                      re-asks the ALCH tableau, which is complete for every L1-extracted \
+                      ontology, so the 43 guard-abstained rows are decided instead of dropped; \
+                      paired with an L1 refusal of owl:top/bottomObjectProperty, whose fixed \
+                      extensions L1 had been reading away — without it the fall-through exposed \
+                      2 wrong verdicts; fail set unchanged at 5)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \

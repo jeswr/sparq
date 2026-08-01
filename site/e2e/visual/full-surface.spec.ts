@@ -26,13 +26,18 @@
 // digest-pinned official Playwright container (SPARQ_VR=1, scripts/vr.sh). The visual-*
 // projects are container-only by design; see e2e/visual/README.md.
 //
-// BASELINE GENERATION. Baselines for this spec do NOT exist in the initial commit of this
-// PR — they CANNOT be generated in the authoring environment (not inside the pinned
-// container). On the first nightly `visual-sweep` run, Playwright will create them
-// automatically (first-run baseline mint). If the nightly visual-sweep fails with
-// "missing snapshot" errors before the first successful run, regenerate with:
-//   npm run vr:update  (from site/, inside the container via scripts/vr.sh)
-// See e2e/visual/README.md for the full baseline-update workflow.
+// BASELINE GENERATION. The baselines for this spec ARE committed under baselines/<project>/.
+// They can only be minted inside the pinned container: `npm run vr:update` (from site/, via
+// scripts/vr.sh), or — with no local docker — the nightly's `refresh_visual_baselines` +
+// `mode: full` dispatch, which re-mints in CI and uploads them as an artifact to review and
+// commit. See e2e/visual/README.md § "No docker?" for the full baseline-update workflow.
+//
+// [SONNET-4.6] sq-hfd82 — DRIFT NOTE. This spec runs ONLY in the nightly (playwright.config.ts
+// gates it behind SPARQ_NIGHTLY_VR), so a PR that restyles the app shell, adds a /capabilities
+// tile, or edits a /surface page does not see its own pixel drift. The baselines therefore go
+// stale between nightlies as a matter of course, and a red sweep here is far more often
+// accumulated intentional change than a regression — read the uploaded diffs before assuming
+// either. Data-driven regions must carry data-vr-mask instead ("mask, don't chase").
 //
 // Design of record: research/web-gui-test-program.md §4 + §6.2.
 import type { Page } from "@playwright/test";

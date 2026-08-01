@@ -85,6 +85,34 @@ class TestFeatureMatrixAssemble(unittest.TestCase):
             "did NOT intend to change the gating set, this is a real regression.",
         )
 
+    def test_golden_is_exact_names_output(self):
+        """The golden is REGENERATED, never hand-edited: it == `--names` stdout, byte-for-byte.
+
+        [SONNET-4.6] issue #2384. The sibling test above compares the SORTED SETS, so a
+        hand-written golden line still passes it while sitting in the wrong sort position
+        (or carrying a comment, or a stray blank line). This pins the documented
+        regeneration command instead — `python3 scripts/assemble-feature-matrix.py --names
+        > scripts/tests/feature-matrix-legnames.golden.txt` — so the only way to update the
+        golden is to run it. That matters because the decomposition rule says a leg-NAME-SET
+        change scopes BOTH the fragment and this golden, with the golden regenerated.
+        """
+        buf = io.StringIO()
+        argv = sys.argv
+        sys.argv = ["assemble-feature-matrix.py", "--names"]
+        try:
+            with redirect_stdout(buf):
+                self.mod.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual(
+            buf.getvalue(),
+            GOLDEN.read_text(encoding="utf-8"),
+            "scripts/tests/feature-matrix-legnames.golden.txt is not the verbatim output "
+            "of `python3 scripts/assemble-feature-matrix.py --names`. Do not hand-edit it "
+            "— regenerate: python3 scripts/assemble-feature-matrix.py --names > "
+            "scripts/tests/feature-matrix-legnames.golden.txt",
+        )
+
     def test_no_duplicate_leg_names(self):
         names = [leg["name"] for leg in self.legs]
         dupes = sorted({n for n in names if names.count(n) > 1})
@@ -1443,6 +1471,60 @@ class TestGroupReporter(unittest.TestCase):
         self.assertEqual({c["name"] for c in leg_calls},
                          {f"opt-in {leg['name']}" for leg in legs})
         self.assertEqual(len(self._summary_calls(gh_calls)), 1)
+
+
+class TestTwoFileScopeRuleIsDocumented(unittest.TestCase):
+    """[SONNET-4.6] issue #2384 — the leg/golden pairing must be stated where it is read.
+
+    A task that adds/removes/RENAMES a leg but is decomposed with
+    `.github/feature-matrix.d/<crate>.yml` as its ONLY permitted file is
+    self-contradicting: the leg-name change it asks for also requires the golden update it
+    forbids, and a worker that obeys the scope has to decline. (That is exactly what
+    happened on sq-19f1i / sq-kf56o.) Edits that cannot move the name set stay single-file.
+    The contract therefore lives in the fragment directory itself, and these tests keep it
+    from being deleted or drifting.
+
+    Pure file reads — no PyYAML, no assembler import.
+    """
+
+    README = FRAGMENT_DIR / "README.md"
+    GOLDEN_REL = "scripts/tests/feature-matrix-legnames.golden.txt"
+    REGEN_CMD = "python3 scripts/assemble-feature-matrix.py --names"
+
+    def test_fragment_dir_readme_states_both_in_scope_paths(self):
+        self.assertTrue(self.README.is_file(), f"missing {self.README}")
+        text = self.README.read_text(encoding="utf-8")
+        for needle in (".github/feature-matrix.d/<crate>.yml", self.GOLDEN_REL):
+            self.assertIn(
+                needle, text,
+                f"{self.README} must name {needle} as an in-scope file for a "
+                "leg-name-set change",
+            )
+
+    def test_fragment_dir_readme_gives_the_regeneration_command(self):
+        text = self.README.read_text(encoding="utf-8")
+        self.assertIn(
+            f"{self.REGEN_CMD} > {self.GOLDEN_REL}", text,
+            "the README must give the exact regeneration command, since the golden is "
+            "regenerated and never hand-edited",
+        )
+
+    def test_every_fragment_points_at_the_golden(self):
+        """A fragment author/decomposer reading ONLY their crate's file still sees the rule
+        — including its name-set qualification, so a non-name edit is not over-scoped."""
+        frags = sorted(FRAGMENT_DIR.glob("*.yml"))
+        self.assertTrue(frags, "no fragment files found")
+        missing = [
+            f.name for f in frags
+            if "feature-matrix-legnames.golden.txt" not in f.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(
+            missing, [],
+            "these fragments never mention the gate-name golden, so a leg-name-set task "
+            "scoped from them alone would forbid the golden update it requires. Add the "
+            "SCOPE comment "
+            f"(see any sibling fragment or {self.README}): {missing}",
+        )
 
 
 if __name__ == "__main__":

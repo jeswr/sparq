@@ -21,6 +21,14 @@ the `research/zk-*-audit.md` records and are unchanged by this ledger.
 Columns: `Issue` = the steering issue that captured it · `Evidence` = the merged PR (and,
 where relevant, the design record) · GitHub auto-links `#NNNN`.
 
+**Separate estate — the imported LWS server.** `crates/sparq-lws-core` was imported from
+another repository and brought its own, independently-numbered `decisions/` tree with it.
+Those are **not** proceed-and-document calls made here, so they are not rows in this table;
+their durable in-repo home is
+[`research/lws-design-records.md`](../../research/lws-design-records.md). Read that record
+before interpreting any bare `decisions/NNNN` citation inside `crates/sparq-lws-core/**` —
+its §2 documents a genuine number collision between two upstream ADR trees.
+
 ## Reasoner (OWL RL / EL / QL / DL, RIF, N3)
 
 | Issue | Date | Decision | Rationale | Evidence | Status |
@@ -85,6 +93,7 @@ where relevant, the design record) · GitHub auto-links `#NNNN`.
 | #1168 | 2026-06-22 | disk-guard's completed-worktree reclaim is opt-in in the library script but ON-by-default in the per-tick `disk-guard.sh` delegation | the per-tick sweep must reclaim or disk starves; an in-use probe plus the harness LOCK keep it off live agents | #1167 | adopted |
 | #1104 | 2026-06-21 | `proceed-and-document` lives in the internal `.claude/skills/` tree (not the public `skills/`); AGENTS.md reconciled to current truth (scheduler landed), not the bead's stale framing | it is an agent-process skill, not a usage surface; fix stale claims to the verified reality | #1103 | adopted |
 | #1199 | 2026-06-22 | the docs guide single-sources its capability list by `{{#include}}`-ing the README plus a build-time link-rewriting mdBook preprocessor (option a) | keeps the single source in README with lychee-friendly relative links; avoids weakening the internal-links gate or adding a manifest | #1196 | adopted |
+| #2759 | 2026-07-29 | merge-queue throughput (sq-6vshe.16): `max_entries_to_build` 3→5 approved in principle but NOT requested; `min_entries_to_merge_wait_minutes: 5` audit closes **inert** (no edit); CodeQL stays eligible for the queue-blocking path | the 3→5 precondition (`sq-6vshe.14` push-skip) has not landed, and raising parallelism first worsens the measured 43–225 s per-job queue delays; the wait field is a ceiling while `min_entries_to_merge` is unmet, not a floor, so it never binds at 1; CodeQL measured 3.8 m median on `merge_group` — a non-pole, so latency never justified demoting a security gate | `docs/branch-protection.md` §Merge-queue throughput settings · `research/ci-mergequeue-speedup-2026-07.md` §3.3 | adopted |
 
 ## E2E gating governance
 

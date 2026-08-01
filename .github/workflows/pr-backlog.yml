@@ -71,9 +71,14 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          sparse-checkout: |
-            scripts/pr-backlog.py
-          sparse-checkout-cone-mode: false
+          # [OPUS-5] #1135: check out the whole `scripts` directory (cone mode) rather
+          # than a hand-maintained file list. pr-backlog.py imports the sibling
+          # scripts/release_pr_guard.py (the Release-PR exclusion), and a manifest that
+          # enumerates only the entry point silently drops sibling imports — the exact
+          # class of drift scripts/tests/test_arm_capability_wiring.py::
+          # TestSparseCheckoutManifest exists to red, and which it caught on this change.
+          # Matches auto-arm.yml / rearm-sweeper.yml, which already do this.
+          sparse-checkout: scripts
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

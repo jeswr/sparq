@@ -15,6 +15,17 @@
 // forge-test overclaim. Bibliographic entries were verified against public sources
 // (zksparql.org, CEUR-WS Vol-4085, Springer/ACM indexes) on 2026-07-01.
 //
+// REVISION 3 (sq-gum8.5, submission support): hardened the related-work section into
+// subsections (3.1-3.5) covering PoneglyphDB, ZKGraph, VeriDKG, zk-creds/Crescent and ZKLP,
+// with (a) an EXPLICIT disclaimer of any priority/compliance claim about in-circuit IEEE 754
+// (ZKLP exists and claims that ground), (b) an explicit statement that the fragment of
+// section 7.1 is NARROWER than the relational systems' - OPTIONAL/MINUS/NOT EXISTS/aggregation
+// are OUT, so no coverage advantage is claimed, and (c) an explicit self-delta vs the
+// Braun-Kaefer / Braun-Wright-Kaefer line (dataset soundness vs evaluation correctness).
+// Added a reproducibility pointer (section 16) to the deterministic constraint-count pack in
+// bench/zk-compose/. New bibliographic entries carry the provenance caveat noted at the head
+// of the References section. NO number of any kind was added to this document.
+//
 // HONESTY: the entire zkSPARQL estate is research-grade and NOT externally audited (open
 // external-audit gate sq-qhy4). This draft states that plainly and repeatedly; it must never be
 // edited into claiming a settled production guarantee while that gate is open.
@@ -159,39 +170,118 @@ candidate-normative successor to this draft.
 
 This section is informative.
 
-*Verifiable query evaluation over databases.* IntegriDB #cite("INTEGRIDB") and vSQL
-#cite("VSQL") prove SQL query answers correct against a committed, outsourced database, and
-ZKSQL #cite("ZKSQL") extends the guarantee to zero knowledge: the answer is proven correct
-while the database's records stay hidden. zkSPARQL targets the same class of guarantee for
-RDF and SPARQL, with three structural differences: the data model is graph-shaped, with blank
-nodes and per-graph canonicalisation (section 6); trust is rooted in *issuer attestation
-signatures* over per-graph commitments rather than in a single data owner's commitment, so
-proofs compose across many small signed graphs (credentials); and the admissibility of a
-proof *method* is itself policy-controlled (section 13). The zkSPARQL manifest is a
-non-interactive object designed to be checked offline against externally supplied trust
-anchors (section 11).
+Every comparison below states *what* a system proves and *about what*. None of it is a
+performance comparison: this document reports no measured comparison against another system
+and reproduces no other system's reported figures. The only quantitative artefact it points
+at is the deterministic constraint-count pack of section 16.2, which counts gates in this
+document's own circuit family and in nothing else.
 
-*Anonymous credentials and selective disclosure.* CL signatures #cite("CL02"), the BBS line
-of multi-message signatures #cite("BBS04"), and the `bbs-2023` / `ecdsa-sd-2023`
-Data-Integrity cryptosuites #cite("VC-DI") let a holder reveal a subset of signed attributes,
-sometimes with simple predicates. zkSPARQL generalises the *statement language*: instead of
-disclosing attribute subsets, the holder proves that a SPARQL query — joins, typed value
-filters, revocation state — evaluates as claimed over the signed data (section 7), without
-disclosing the data. It does not replace credential-level selective disclosure: ingest of
-`bbs-2023` credentials is an explicitly deferred seam (section 15).
+== Verifiable and zero-knowledge query evaluation over databases
 
-*Zero-knowledge proofs over RDF and SPARQL.* The annotation and admissibility layer of this
-document (sections 12–13) directly extends the `sec-prop` security-properties vocabulary of
-Wright, Shadbolt, Zhao, Zhao and Braun #cite("SEC-PROP") — prior work of this document's
-editor — and the query-proof pipeline shares that work's goal of proving correct SPARQL
-evaluation over verifiable credentials, realised here with a different commitment scheme,
-circuit family, and manifest format. The research agenda is stated in #cite("WRIGHT-DC25").
-Braun, Wright and Käfer #cite("BWK26") prove soundness of SPARQL query results via
-*selectively disclosed views* of the queried dataset — a disclosure-based mechanism, where
-zkSPARQL keeps the source graphs hidden and proves algebra evaluation in-circuit. The sparq
-estate described here is an engine-integrated implementation with its own manifest format,
-verifier obligation set, and admissibility layer; it is not a wire-compatible implementation
-of any of the above.
+IntegriDB #cite("INTEGRIDB") and vSQL #cite("VSQL") prove SQL query answers correct against a
+committed, outsourced database: integrity against a cheating server, with no hiding of the
+data. ZKSQL #cite("ZKSQL") extends the guarantee to zero knowledge — the answer is proven
+correct while the database's records stay hidden — with an interactive, VOLE-based argument
+run between prover and verifier. PoneglyphDB #cite("PONEGLYPHDB") addresses the same SQL
+setting with a *non-interactive* PLONKish argument, so its proof object, like the manifest of
+section 8, can be checked offline and after the fact.
+
+zkSPARQL targets the same class of guarantee for RDF and SPARQL, with four structural
+differences: the data model is graph-shaped, with blank nodes and per-graph canonicalisation
+(section 6); trust is rooted in *issuer attestation signatures* over per-graph commitments
+rather than in a single data owner's commitment, so proofs compose across many small signed
+graphs (credentials); credential-layer statements — holder possession, revocation
+non-membership, hidden-issuer attestation — are carried by the *same* manifest and the same
+verifier obligation set as the query-layer statements (sections 8 and 10), rather than by a
+separate credential protocol; and the admissibility of a proof *method* is itself
+policy-controlled (section 13). The zkSPARQL manifest is a non-interactive object designed to
+be checked offline against externally supplied trust anchors (section 11).
+
+The fragment comparison cuts the other way and is stated plainly here so it is not mistaken:
+the relational systems above accept far more of their query language than section 7.1 accepts
+of SPARQL. `OPTIONAL`, `MINUS`, `FILTER NOT EXISTS` and aggregation are #strong[OUT] of this
+fragment by design, because each asserts a closed-world or completeness property that
+composed membership proofs do not establish. This document therefore claims no coverage
+advantage over relational zero-knowledge query systems; its fragment is monotone and
+deliberately narrow.
+
+== Verifiable and zero-knowledge queries over graphs and RDF
+
+ZKGraph #cite("ZKGRAPH") evaluates graph queries in zero knowledge under a PLONKish argument
+and is the closest graph-shaped analogue. It does not target RDF or SPARQL: there is no RDF
+dataset canonicalisation, no blank-node discipline, and no notion of many independently
+signed source graphs — the three things sections 6 and 7 are built around.
+
+VeriDKG #cite("VERIDKG") verifies SPARQL query results over decentralised knowledge graphs
+using an authenticated data structure. Its guarantee is *integrity against a cheating server*
+and it is deliberately not hiding: the verifier sees the results and the authenticated
+structure they were drawn from. That is a different point in the design space from the model
+of section 5, where the verifier is not trusted with the source graphs at all. The two
+guarantees are complementary rather than competing — and VeriDKG's is a settled published
+result, whereas this document's is not, pending the audit gate of section 17.1.
+
+== Anonymous credentials and selective disclosure
+
+CL signatures #cite("CL02"), the BBS line of multi-message signatures #cite("BBS04"), and the
+`bbs-2023` / `ecdsa-sd-2023` Data-Integrity cryptosuites #cite("VC-DI") let a holder reveal a
+subset of signed attributes, sometimes with simple predicates. zk-creds #cite("ZKCREDS")
+generalises the mechanism by putting the credential check inside a zkSNARK, so statements
+about attributes of *existing* identity documents can be proven; Crescent #cite("CRESCENT")
+follows the same route for existing JWT and mDL credentials with a prepare-once /
+show-fast split.
+
+What all of these prove is a statement about a *credential and its attributes*. zkSPARQL
+generalises the *statement language* instead: the holder proves that a SPARQL query — joins,
+typed value filters, revocation state — evaluates as claimed over the signed data
+(section 7), without disclosing the data. It does not replace credential-level
+selective disclosure, and it is not a competing credential format: ingest of `bbs-2023`
+credentials is an explicitly deferred seam (section 15).
+
+== In-circuit numerics
+
+The `xsd:double` FILTER lane of section 7.1 needs IEEE 754 semantics inside a circuit. ZKLP
+#cite("ZKLP") gives zero-knowledge circuits for IEEE 754 arithmetic and states that they are
+the first set fully compliant with that standard; it also surveys the earlier in-circuit
+floating-point line. This document accordingly makes #strong[no] priority, completeness, or
+standard-compliance claim about floating point in zero knowledge. The reference
+implementation's double lane rests on the editor's `noir_IEEE754` Noir library, consumed by
+the circuit family as a pinned external dependency (`sparq_ieee754`); it is an engineering
+dependency of the value-comparison lane, not a contribution of this document. Its own
+evidence is a differential harness against the hardware floating-point oracle — a testing
+artefact, not a proof of anything.
+
+== Delta to this document's own line
+
+Parts of the work cited in this section are prior work of this document's editor and
+co-authors, so the boundary is stated explicitly rather than left to the reader.
+
+The annotation and admissibility layer of this document (sections 12–13) directly extends the
+`sec-prop` security-properties vocabulary of Wright, Shadbolt, Zhao, Zhao and Braun
+#cite("SEC-PROP"), and the query-proof pipeline shares that work's goal of proving correct
+SPARQL evaluation over verifiable credentials, realised here with a different commitment
+scheme, circuit family, and manifest format. The research agenda is stated in
+#cite("WRIGHT-DC25").
+
+Braun and Käfer #cite("BK25"), and then Braun, Wright and Käfer #cite("BWK26"), establish
+what is best called #dfn[dataset soundness]: the verifier is shown a *selectively disclosed
+view* of the queried dataset together with a proof that the view is a faithful part of the
+signed source, and the query is then checked against that disclosed view. The hidden object
+is the undisclosed remainder of the dataset; the evaluated portion is revealed.
+
+zkSPARQL targets #dfn[evaluation correctness] instead: no view of the source graphs is
+disclosed, the algebra of section 7.2 is evaluated *inside* the circuit family over
+commitments (section 7.3), and the verifier checks a manifest (section 8) whose sub-proofs
+bind to those commitments and to the verifier nonce (section 9). The two mechanisms are
+complementary, and this document does not claim its direction is generally preferable: for
+many predicates a disclosed view is cheaper, simpler, and easier to audit, and a
+disclosed-base entailment re-check is explicitly #strong[not] representable as a
+zero-knowledge sub-proof here (section 7.4). What is claimed is only that the two hide
+different things and therefore suit different threat models (section 5).
+
+The sparq estate described here is an engine-integrated implementation with its own manifest
+format, verifier obligation set, and admissibility layer; it is not a wire-compatible
+implementation of any of the work cited above. No positive security property of it is
+asserted as achieved while the external audit gate remains open (sections 1 and 17.1).
 
 = Terminology and conformance
 
@@ -1041,6 +1131,8 @@ This section is informative.
 
 = Conformance testing and toolchain pinning
 
+== Open conformance gaps
+
 Two conformance gaps are open:
 
 + *No portable test vectors.* An adversarial forge-test suite exists covering the manifest
@@ -1055,6 +1147,33 @@ Two conformance gaps are open:
   descriptive, not normative. Until the layout is specified toolchain-independently
   (section 2.3), cross-version interoperability is out of reach and even reference-level
   compatibility can only be claimed against the pinned toolchain.
+
+== Reproducible constraint counts
+
+The one reproducible quantitative artefact of the reference implementation is a
+#dfn[constraint-count pack]: the per-member gate count of every compiled circuit-family
+member, grouped by family and reported alongside the family parameters it varies over. It
+lives in the sparq repository #cite("SPARQ") under `bench/zk-compose/`, is regenerated by a
+script that reads a regression-gated snapshot rather than invoking the prover, and is
+therefore byte-identical on re-run and independent of the machine that runs it. This document
+states no figure from it; it points at it so a reader can obtain the figures without trusting
+prose.
+
+Three honesty constraints govern what that artefact may be read to mean, and they are
+repeated here because they are easy to lose in a table:
+
++ A gate count is a *size* of a compiled circuit under the toolchain pinned in section 16.1.
+  It is not a running time, and no wall-clock figure — prove, verify, or end-to-end — is
+  reported by this document or by the pack. Timings gathered on a development machine are not
+  comparable across machines and are excluded deliberately.
++ A gate count says nothing about whether the circuit proves the right statement. The
+  coverage status of each SPARQL construct is section 7.1's table, not a circuit size; in
+  particular the bounded property-path members prove a strictly weaker, bounded-existence
+  statement (section 7.1), and a large or small number next to them does not change that.
++ The pack reproduces no other system's reported figures. Constraint counts are not
+  comparable across proof systems, arithmetizations, or circuit granularities, so a ratio
+  between this family and a differently-arithmetized published system would not be a
+  measurement of anything. The related work of section 3 is cited, never re-measured.
 
 = Security and Privacy Considerations
 
@@ -1118,6 +1237,16 @@ policy — it is not, and must not be presented as, an independent cryptographic
 
 = References
 
+#note[
+  Editor's note (revision 3). The entries `PONEGLYPHDB`, `ZKGRAPH`, `VERIDKG`, `ZKLP`,
+  `ZKCREDS`, `CRESCENT` and `BK25` were added in revision 3 from the project's own
+  search-verified related-work records. Venue, year, and the DOI / arXiv identifier are
+  reproduced from those records; author initials and exact titles have #strong[not] been
+  independently re-verified against the publishers' pages in this revision, and two entries
+  (`ZKGRAPH`, `BK25`) deliberately carry an identifier and a description rather than a title
+  that could not be confirmed. They must be checked before any camera-ready use.
+]
+
 #references((
   ("RFC2119", [Bradner, S. #emph[Key words for use in RFCs to Indicate Requirement Levels].
     RFC 2119, IETF, March 1997.]),
@@ -1167,6 +1296,9 @@ policy — it is not, and must not be presented as, an independent cryptographic
     in Decentralised Data Architectures]. ISWC 2025 Companion Volume (Doctoral Consortium),
     CEUR-WS Vol-4085, paper 19, Nara, Japan, November 2025.
     https://ceur-ws.org/Vol-4085/paper19.pdf.]),
+  ("BK25", [Braun, C.; Käfer, T. In: The Semantic Web (ESWC 2025), Springer, 2025.
+    DOI 10.1007/978-3-031-94575-5_21 — RDF-level selective disclosure combined with
+    zero-knowledge proofs; the immediate predecessor of the entry below.]),
   ("BWK26", [Braun, C.; Wright, J.; Käfer, T. #emph[Proving Soundness of SPARQL Query Results
     Using Selective Disclosure of RDF Datasets and Zero-Knowledge Proofs]. In: The Semantic
     Web, Springer, 2026. DOI 10.1007/978-3-032-25156-5_16.]),
@@ -1178,6 +1310,25 @@ policy — it is not, and must not be presented as, an independent cryptographic
   ("ZKSQL", [Li, X.; Weng, C.; Xu, Y.; Wang, X.; Rogers, J. #emph[ZKSQL: Verifiable and
     Efficient Query Evaluation with Zero-Knowledge Proofs]. Proceedings of the VLDB Endowment
     16(8), 1804–1816, 2023.]),
+  ("PONEGLYPHDB", [Gu; Fang; Nawab. #emph[PoneglyphDB: Efficient Non-Interactive
+    Zero-Knowledge Proofs for Private Database Queries]. ACM SIGMOD / Proceedings of the ACM
+    on Management of Data, 2025. arXiv:2411.15031.]),
+  ("ZKGRAPH", [ZKGraph — zero-knowledge evaluation of graph queries under a PLONKish
+    argument; property-graph model, no RDF or SPARQL surface. arXiv:2507.00427, July 2025.]),
+  ("VERIDKG", [Zhou; et al. #emph[VeriDKG: A Verifiable SPARQL Query Engine for Decentralized
+    Knowledge Graphs]. Proceedings of the VLDB Endowment 17(5), 2024.
+    https://www.vldb.org/pvldb/vol17/p912-zhou.pdf. (Authenticated data structure; integrity
+    against a cheating server, not hiding.)]),
+  ("ZKLP", [Ernstberger, J.; et al. #emph[Zero-Knowledge Location Privacy via Accurate
+    Floating-Point SNARKs]. IEEE Symposium on Security and Privacy, 2025. (States the first
+    set of zero-knowledge circuits fully compliant with IEEE 754; cited here to disclaim any
+    priority or compliance claim of this document's own double lane — section 3.4.)]),
+  ("ZKCREDS", [Rosenberg, M.; White, J.; Garman, C.; Miers, I. #emph[zk-creds: Flexible
+    Anonymous Credentials from zkSNARKs and Existing Identity Infrastructure]. IEEE Symposium
+    on Security and Privacy, 2023.]),
+  ("CRESCENT", [Microsoft Research. #emph[Crescent] — unlinkable presentation of existing JWT
+    and mDL credentials with zkSNARKs, split into a prepare-once and a show-fast phase.
+    Project, no figure from it is reproduced here.]),
   ("CL02", [Camenisch, J.; Lysyanskaya, A. #emph[A Signature Scheme with Efficient
     Protocols]. SCN 2002, LNCS 2576, Springer, 2003.]),
   ("BBS04", [Boneh, D.; Boyen, X.; Shacham, H. #emph[Short Group Signatures]. CRYPTO 2004,

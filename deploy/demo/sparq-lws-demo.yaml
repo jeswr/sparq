@@ -1,0 +1,58 @@
+# [SONNET-4.6] sq-80afk — ephemeral public LWS demo, deliberately not production posture.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sparq-lws-demo
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/invoker-iam-disabled: "true"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "1"
+        # Request-based billing: CPU is allocated only while requests are handled.
+        run.googleapis.com/cpu-throttling: "true"
+    spec:
+      serviceAccountName: sparq-demo-sa@PROJECT_ID.iam.gserviceaccount.com
+      containerConcurrency: 40
+      timeoutSeconds: 30
+      containers:
+        - name: sparq-lws-demo
+          image: ghcr.io/sparq-org/sparq-lws-core@sha256:SPARQ_LWS_DIGEST
+          ports:
+            - name: http1
+              containerPort: 3000
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: SOLID_SERVER_BASE_URL
+              value: "https://sparq-lws-demo-PROJECT_NUMBER.REGION.run.app"
+            - name: SOLID_SERVER_TRUSTED_ISSUER
+              value: "https://css-idp-PROJECT_NUMBER.REGION.run.app"
+            - name: SOLID_SERVER_AUDIENCE
+              value: "solid"
+            - name: SOLID_SERVER_TRUSTED_PROXY
+              value: "1"
+            - name: SOLID_SERVER_SEED_DEMO
+              value: "1"
+            - name: PSS_SPARQ_BACKEND
+              value: "memory"
+            - name: SOLID_SERVER_RATE_LIMIT_PER_IP
+              value: "20"
+            - name: SOLID_SERVER_RATE_LIMIT_BURST
+              value: "40"
+            - name: SOLID_SERVER_MAX_BODY_BYTES
+              value: "2097152"
+            - name: SOLID_SERVER_REQUEST_TIMEOUT_SECS
+              value: "30"
+          # Cloud Run's default TCP-style startup check; no production HTTP/liveness probes.
+          startupProbe:
+            tcpSocket:
+              port: 3000
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 1

@@ -57,6 +57,30 @@ export const SECURE_DEFAULTS = [
   },
 ] as const;
 
+// [OPUS-5] sq-cepjb — the ephemeral Cloud Run demo posture (deploy/demo/), kept here so
+// site/test/deploy.test.mjs can pin the links and the caveats a visitor must read first.
+export const DEMO_ENVIRONMENT = {
+  manifestsHref: `${REPO}/blob/main/deploy/demo/README.md`,
+  designHref: `${REPO}/blob/main/research/lws-demo-architecture.md`,
+  caveats: [
+    {
+      rule: "Throwaway identities",
+      detail:
+        "The bundled identity provider accepts unverified registrations and holds accounts, signing keys, and tokens in memory. Nothing in the demo attests that an identity flow is production-ready.",
+    },
+    {
+      rule: "No isolation between visitors",
+      detail:
+        "Every signed-in visitor shares one playground container and can read, change, or delete what another visitor wrote. Only anonymous writes are refused.",
+    },
+    {
+      rule: "Wiped when idle",
+      detail:
+        "Cloud Run reclaims idle instances on its own schedule and the two services scale down independently, so there is no guaranteed wipe deadline. If a request starts returning 401 or data disappears, register again.",
+    },
+  ],
+} as const;
+
 export const DEPLOY_OPTIONS: readonly DeployOption[] = [
   {
     id: "aws",

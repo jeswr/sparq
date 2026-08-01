@@ -162,9 +162,10 @@ fn fixture_snapshot() -> StatusListSnapshot {
 }
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
-        status_list: STATUS_LIST.to_string(),
+        ref_commitment: None,
+        status_list: Some(STATUS_LIST.to_string()),
         index: Some(STATUS_INDEX),
-        version: STATUS_VERSION,
+        version: Some(STATUS_VERSION),
         index_commitment: None,
     }
 }
@@ -193,8 +194,9 @@ fn attest_bearer(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestat
             .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
+            ref_commitment: None,
             index: Some(STATUS_INDEX),
-            version: STATUS_VERSION,
+            version: Some(STATUS_VERSION),
             index_commitment: None,
         }),
         holder: None,
@@ -218,12 +220,14 @@ fn toolchain_available() -> bool {
 /// gate runs — this isolates `bind_holder_set`.
 fn manifest_with_set_proof(proof: HolderSetProof) -> ProofManifest {
     ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT * WHERE {}".into(),
         issuers: vec![],
         key_set: vec![],
         commitment_attestations: vec![],
         attributions: vec![],
+        pattern_scans: vec![],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],

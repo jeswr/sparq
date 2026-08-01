@@ -4,9 +4,50 @@
 //! The profile single-sources its canonical token rules — the `<<( … )>>`
 //! triple-term form, the `"…"@lang--dir` directional-language form, and the
 //! literal escaping — from oxrdf 0.3's `Display` (and re-parses them with
-//! oxttl 0.2). W3C **rdf12-n-quads** was NOT yet verified final when this
-//! suite was written, so the token rules must be RE-VERIFIED against the
-//! final Recommendation, and against any canonical-escaping change upstream.
+//! oxttl 0.2). W3C **rdf12-n-quads** is NOT a Recommendation, so the token
+//! rules must still be RE-VERIFIED against the final REC when one is
+//! published, and against any canonical-escaping change upstream.
+//!
+//! ## Spec-status check — 2026-08-01 (sq-g6b6 residue, issue #3455)
+//!
+//! Checked against the live documents on 2026-08-01:
+//!
+//! - **`https://www.w3.org/TR/rdf12-n-quads/` — W3C Working Draft, 23 July 2026**
+//!   (`WD-rdf12-n-quads-20260723`). Its publication history lists 40 entries,
+//!   **all Working Drafts** — no Candidate, Proposed, or final Recommendation
+//!   has ever been published. `https://www.w3.org/TR/rdf12-n-triples/`, which
+//!   Canonical N-Quads is defined as an extension of, is at the same status
+//!   and date.
+//! - So the "once final" hedge above **stays**. It is not stale prose; it
+//!   states the document's actual status. Do not drop it until a REC exists.
+//!
+//! The byte-exact expectations below were nevertheless compared against that
+//! draft's grammar, and **all of them match it**:
+//!
+//! | Expectation here | Draft rule |
+//! |---|---|
+//! | `<<( s p o )>>`, single spaces | N-Quads `[12] tripleTerm ::= '<<(' subject predicate object ')>>'`; Canonical N-Triples §3 permits white space "after subject, predicate, object, and the terminal `<<(`", each a single space |
+//! | nesting only via the object slot | N-Quads `[9] object ::= IRIREF \| BLANK_NODE_LABEL \| literal \| tripleTerm` |
+//! | `@he--rtl` / `@en--ltr`, lowercase | `[16] LANG_DIR ::= '@' [a-zA-Z]+ ('-' [a-zA-Z0-9]+)* ('--' [a-zA-Z]+)?`; canonical form case-maps LANG_DIR alphabetics to lowercase |
+//! | no `^^<…#string>` on plain literals | canonical form: `xsd:string` literals MUST NOT carry the datatype IRI |
+//! | `\"` `\\` `\n` `\r` `\t` `\b` `\f` | canonical form: BS, HT, LF, FF, CR, `"`, `\` MUST use ECHAR (`[19] ECHAR ::= '\' [tbnrf\"']`) |
+//! | `\u0001` and `\u007F` (lowercase `u`, uppercase hex) | canonical form: U+0000–U+0007, VT, U+000E–U+001F, DEL, and non-XML11-`Char` MUST use UCHAR — lowercase `\u` plus 4 HEX, with HEX restricted to `[0-9A-F]` |
+//!
+//! Two things found in the draft that are worth carrying forward to the REC
+//! re-check, neither of which changes an expectation today:
+//!
+//! 1. **An editorial inconsistency between the two documents.** N-Quads §3
+//!    restates the white-space list as "after subject, predicate, object, and
+//!    graphLabel" — it omits the "and the terminal `<<(`" clause that
+//!    N-Triples §3 carries. Read on its own that would forbid the space after
+//!    `<<(` and make every triple-term line here non-canonical. It is read as
+//!    an inheritance, not a contradiction: N-Quads §3 says Canonical N-Quads
+//!    "extends Canonical N-Triples … to include graphLabel", and the draft's
+//!    own Example 5 prints `<<( … )>>` with those spaces. If the REC resolves
+//!    it the other way, every expectation in this file moves.
+//! 2. **Draft rules this file does not exercise:** the UCHAR mandate for VT
+//!    (U+000B) and for U+000E–U+001F, and the `graphLabel` position. The
+//!    expectations present are correct; these are simply untested.
 //!
 //! This suite makes that re-verification impossible to miss:
 //!
