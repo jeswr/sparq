@@ -120,9 +120,17 @@ first deploy is allowed to publish. This runbook *specifies* them; it does not
 build them.
 
 1. **Publish the mdBook docs site.** The unified producer builds the mdBook guide
-   (plus `cargo doc` API output, per `sq-h0tr`) into the Pages artifact, so the
-   site root (`https://jeswr.github.io/sparq/`) stops `404`-ing and serves the
-   guide.
+   into the Pages artifact. **The mount is decided
+   ([#5022](https://github.com/jeswr/sparq/issues/5022) — superseding this item's
+   original "guide at the site root" wording):** the guide is published at
+   the **`/guide/` sub-path**, not the root — `pages.yml` builds it via
+   `scripts/build-guide.sh` and overlays the render at `out/guide/`, exactly as it
+   already overlays `dev/bench*` and `/app`. The root is the Next.js showcase and
+   does not move. See
+   [`research/docs-site-single-sourcing-anti-drift.md`](../research/docs-site-single-sourcing-anti-drift.md)
+   §7 option (a) for why guide-at-root and a second deploy workflow were rejected.
+   Self-hosting `cargo doc` output was also dropped there in favour of linking
+   docs.rs, so it is not a producer prerequisite.
 2. **Publish BOTH benchmark series.** The artifact must contain **both**
    `dev/bench` **and** `dev/bench-ec2` (glob `dev/bench*`). Folding only
    `dev/bench` would make the EC2 dashboard `404` after cutover — exactly the
