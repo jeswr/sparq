@@ -15,10 +15,13 @@
 //!    does not stream at all: it GRACEFULLY DEGRADES to the buffered serialiser (identical
 //!    bytes, `Content-Length`, never a pin held past serialize) with a `Warning` header. The
 //!    design prefers this to a `503` shed: a correct answer beats a refusal when the correct
-//!    answer is affordable — and the buffered answer is only AFFORDABLE when a memory ceiling
-//!    (`--max-query-bytes` / `--max-query-rows` / `--max-results`) bounds it, since the buffered
-//!    serialiser materialises the whole response. With no ceiling configured the stream is
-//!    admitted under any pressure, and both halves of that are asserted here.
+//!    answer is affordable — and affordability is ENFORCED by the degraded path's own byte
+//!    budget (`DEGRADED_BUFFER_MAX_BYTES`), not inferred from a configured ceiling. No engine
+//!    ceiling bounds serialised response bytes: `--max-query-rows` / `--max-results` bound ROWS,
+//!    and `--max-query-bytes` prices the id-level working set plus query-COMPUTED terms, so a
+//!    single row projecting a huge literal already stored in the graph is cheap under all three
+//!    and enormous once serialised. That exact shape is asserted here to be refused rather than
+//!    materialised.
 //! 2. **The per-stream pin cap** — a reader that stops draining past `--stream-pin-timeout` has
 //!    its stream ABANDONED so the pin is released, and the body is truncated under the
 //!    sq-7d3dj.26 contract: the document-closing `]}}` is never written and the reason is
@@ -43,11 +46,15 @@ const TRIPLES: usize = 20_000;
 
 const QUERY: &str = "SELECT * WHERE { ?s ?p ?o }";
 
-/// A configured memory ceiling, far above anything [`TRIPLES`] can produce, so it never refuses
-/// these queries. Its presence is what makes the buffered fallback a BOUNDED allocation, and
-/// therefore what lets admission degrade a stream at all: without one the server would be
-/// trading a bounded transport for an unbounded buffer precisely when it is under pressure.
+/// A configured memory ceiling far above anything [`TRIPLES`] can produce, so the engine never
+/// refuses these queries and the admission verdict is the only thing under test. It is NOT what
+/// bounds the buffered fallback — see `over_cap_a_few_huge_stored_literals_are_refused_not_buffered`.
 const ROOMY_ROW_CEILING: usize = 1_000_000;
+
+/// The degraded path's own allocation budget, mirroring `http::DEGRADED_BUFFER_MAX_BYTES` (a
+/// private constant — this integration test sees only the behaviour and the `Warning` text, so
+/// it re-states the value and pins it against the header the server emits).
+const DEGRADED_BUFFER_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 fn big_graph() -> Graph {
     let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
@@ -56,6 +63,26 @@ fn big_graph() -> Graph {
             "ex:s{} ex:p \"value-{}-padding-padding-padding\" .\n",
             i, i
         ));
+    }
+    Graph::load_str(&ttl, "turtle").unwrap()
+}
+
+/// Bytes in each pre-existing stored literal of [`huge_literal_graph`], and how many rows carry
+/// one. The product (12 MiB) is comfortably over [`DEGRADED_BUFFER_MAX_BYTES`] while the ROW
+/// count and the id-level working set are trivial — the asymmetry the affordability test needs.
+const HUGE_LITERAL_BYTES: usize = 3 * 1024 * 1024;
+const HUGE_LITERAL_ROWS: usize = 4;
+
+/// A graph whose whole size lives in a handful of literals that are ALREADY INTERNED before the
+/// query runs. `SELECT * WHERE { ?s ?p ?o }` over it binds [`HUGE_LITERAL_ROWS`] rows of three
+/// ids — nothing a row cap or a working-set byte cap can object to — and serialises to over
+/// 12 MiB, because the serialiser must write out the dictionary-resident lexical forms those ids
+/// point at. No `x` needs JSON escaping, so the serialised size is the literal size.
+fn huge_literal_graph() -> Graph {
+    let padding = "x".repeat(HUGE_LITERAL_BYTES);
+    let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+    for i in 0..HUGE_LITERAL_ROWS {
+        ttl.push_str(&format!("ex:s{} ex:p \"{}-{}\" .\n", i, padding, i));
     }
     Graph::load_str(&ttl, "turtle").unwrap()
 }
@@ -169,10 +196,10 @@ async fn under_ring_pressure_a_stream_degrades_to_the_buffered_path() {
         "warning: {}",
         warning
     );
-    // …and names the ceiling that made buffering the whole answer affordable, so an operator
-    // can see WHICH of their limits the fallback is leaning on.
+    // …and names the byte budget the degraded body is held to, so an operator reading the
+    // header knows what bounds the allocation the server just chose to make.
     assert!(
-        warning.contains("bounded by --max-query-rows"),
+        warning.contains(&format!("capped at {} bytes", DEGRADED_BUFFER_MAX_BYTES)),
         "warning: {}",
         warning
     );
@@ -323,23 +350,70 @@ async fn below_the_cap_a_stream_is_admitted() {
 }
 
 /// THE AFFORDABILITY TEST. Degrading swaps a bounded transport (four channel slots, whatever the
-/// result size) for an allocation the size of the whole serialised answer. On a server with NO
-/// memory ceiling configured — which is `ServerConfig::default()` — nothing bounds that answer, so
-/// the same over-cap pressure must NOT degrade: a client could otherwise pair a large SELECT with
-/// ring pressure to force the server to materialise an unbounded response exactly when it is
-/// already under load. Streaming is the memory-safer of the two, and the pin it holds is bounded
-/// by `--stream-pin-timeout` instead.
+/// result size) for an allocation the size of the whole serialised answer — and NO configured
+/// engine ceiling bounds that number of BYTES. This is the shape that proves it: FOUR rows, each
+/// projecting a multi-megabyte literal that was already in the graph before the query ran. Every
+/// engine ceiling is set and comfortably satisfied — the row caps see four rows, and
+/// `--max-query-bytes` prices the id-level working set (a handful of `Id`s) plus the terms the
+/// query COMPUTES, of which there are none — yet the serialised answer is
+/// [`HUGE_LITERAL_ROWS`] × [`HUGE_LITERAL_BYTES`], well over the degraded path's budget.
+///
+/// So an attacker who pairs ring pressure with a low-cardinality, high-byte result must get a
+/// BOUNDED REFUSAL, not a materialised body. Transient (`503`), because the same query streams
+/// fine once pressure drops — the refusal is about capacity, not about the request.
 #[tokio::test]
-async fn over_the_cap_with_no_memory_ceiling_the_stream_is_still_admitted() {
+async fn over_cap_a_few_huge_stored_literals_are_refused_not_buffered() {
     let app = router(AppState::with_config(
-        big_graph(),
+        huge_literal_graph(),
         ServerConfig {
-            // The SAME cap the degradation test uses, under the SAME pressure — the only
-            // difference is that no ceiling bounds the buffered answer.
             stream_max_live_generations: Some(2),
-            max_query_rows: None,
-            max_query_bytes: None,
-            max_results: None,
+            // Every ceiling configured, and every one of them SATISFIED by this result — which
+            // is exactly the point: a row cap is not a response-byte bound, and the byte cap
+            // prices the working set, not the stored literals the working set points AT.
+            max_query_rows: Some(ROOMY_ROW_CEILING),
+            max_results: Some(ROOMY_ROW_CEILING),
+            max_query_bytes: Some(1024 * 1024),
+            ..ServerConfig::default()
+        },
+    ));
+    publish_generations(&app, 3).await;
+
+    let response = app.clone().oneshot(select_request()).await.unwrap();
+    let (parts, body) = response.into_parts();
+    assert_eq!(
+        parts.status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "FORBIDDEN: a few huge stored literals must not be materialised whole just because \
+         every ROW cap was satisfied"
+    );
+    let out = drain(body).await;
+    assert!(
+        out.bytes.len() < HUGE_LITERAL_BYTES,
+        "a refusal must be a short error body, not the answer: {} bytes",
+        out.bytes.len()
+    );
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&out.bytes)
+            .ok()
+            .and_then(|v| v["results"]["bindings"].as_array().map(Vec::len))
+            .is_none(),
+        "a refusal must not carry a result set"
+    );
+}
+
+/// CONTROL (anti-vacuity) for the test above: the SAME graph and the SAME ceilings BELOW the
+/// pressure cap are admitted and stream the whole answer. Without this, "refused" could just
+/// mean "this server cannot serve big literals at all" — the refusal has to be the degradation
+/// budget, not the query.
+#[tokio::test]
+async fn below_the_cap_the_same_huge_literals_stream_in_full() {
+    let app = router(AppState::with_config(
+        huge_literal_graph(),
+        ServerConfig {
+            stream_max_live_generations: Some(64),
+            max_query_rows: Some(ROOMY_ROW_CEILING),
+            max_results: Some(ROOMY_ROW_CEILING),
+            max_query_bytes: Some(1024 * 1024),
             ..ServerConfig::default()
         },
     ));
@@ -348,22 +422,21 @@ async fn over_the_cap_with_no_memory_ceiling_the_stream_is_still_admitted() {
     let response = app.clone().oneshot(select_request()).await.unwrap();
     let (parts, body) = response.into_parts();
     assert_eq!(parts.status, axum::http::StatusCode::OK);
-    assert!(
-        parts.headers.get(axum::http::header::CONTENT_LENGTH).is_none(),
-        "FORBIDDEN: an unbounded result must not be buffered whole just because the ring is busy"
-    );
-    assert!(
-        parts.headers.get(axum::http::header::WARNING).is_none(),
-        "nothing was degraded, so nothing should claim it was"
-    );
+    assert!(parts.headers.get(axum::http::header::WARNING).is_none());
     let out = drain(body).await;
+    assert!(!out.failed);
+    assert!(
+        out.bytes.len() > DEGRADED_BUFFER_MAX_BYTES,
+        "the control must exceed the degraded budget, or it proves nothing: {} bytes",
+        out.bytes.len()
+    );
     assert!(out.bytes.ends_with(b"]}}"));
 }
 
-/// …and the corollary: when a ceiling IS configured, it really does bound the degraded response.
-/// Over-cap pressure plus a result that EXCEEDS the ceiling is an honest pre-first-byte `413`,
-/// not a materialised body — the buffered fallback is bounded by refusal, which is the property
-/// that makes degrading affordable in the first place.
+/// …and the engine ceilings still apply ON TOP of the degradation budget: over-cap pressure plus
+/// a result that exceeds a configured ceiling is the usual honest pre-first-byte `413`, not a
+/// materialised body. (A ceiling bounds the engine's working set, which is a real and separate
+/// guard — it is only the claim that it bounds RESPONSE BYTES that would be wrong.)
 #[tokio::test]
 async fn a_degraded_response_that_exceeds_the_ceiling_is_refused_not_materialised() {
     let app = router(AppState::with_config(

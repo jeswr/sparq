@@ -319,13 +319,15 @@ pub struct ServerConfig {
     /// the buffered serialiser (same bytes, `Content-Length`, plus a `Warning` header) rather
     /// than being shed.
     ///
-    /// **Requires a memory ceiling to take effect.** The buffered fallback materialises the
-    /// whole response, so degrading is only the safer choice when one of
+    /// **The degraded body is capped by its OWN byte budget, not by a configured ceiling.** The
+    /// buffered fallback materialises the whole serialised response, and NONE of
     /// [`max_query_bytes`](Self::max_query_bytes) / [`max_query_rows`](Self::max_query_rows) /
-    /// [`max_results`](Self::max_results) bounds how large that can be. With none configured —
-    /// which is the default — this cap is inert and every SELECT-JSON response streams whatever
-    /// the pressure, since a bounded stream beats an unbounded buffer; the pin such a stream
-    /// holds is bounded instead by [`stream_pin_timeout`](Self::stream_pin_timeout).
+    /// [`max_results`](Self::max_results) bounds that — the first two bound ROWS, and
+    /// `--max-query-bytes` prices the id-level working set plus query-COMPUTED terms, never the
+    /// bytes of a literal already interned in the graph dictionary (one row projecting one huge
+    /// stored literal is cheap under all three and enormous once serialised). So affordability
+    /// is enforced rather than inferred: the degraded path accumulates under a fixed 8 MiB
+    /// budget (`DEGRADED_BUFFER_MAX_BYTES`) and refuses with a `503` past it.
     ///
     /// **What it bounds, and why the ring's own `K` does not.** A streamed body keeps its
     /// `spawn_blocking` worker — and therefore its `Arc<Generation>` pin — alive for as long as
@@ -895,10 +897,10 @@ impl Default for ServerConfig {
             body_read_timeout: Some(Duration::from_secs(30)),
             // [SONNET-4.6] sq-7d3dj.28: streaming admission ON by default, at a reading that a
             // healthy server never reaches (the ring retains 4 + the current generation, and a
-            // reader only ADDS to the count once it outlives retention). It only ENGAGES on a
-            // server that also set a memory ceiling, since degrading to the buffered path is
-            // only safe when something bounds the buffered answer — on this default config
-            // (no ceilings) the pin bound is stream_pin_timeout alone. 0 /
+            // reader only ADDS to the count once it outlives retention). Degrading is bounded
+            // whatever else is configured, because the buffered answer is accumulated under
+            // DEGRADED_BUFFER_MAX_BYTES and refused past it — no engine ceiling bounds
+            // serialised response bytes, so none is required (or trusted) here. 0 /
             // SPARQ_STREAM_MAX_LIVE_GENERATIONS=0 disables admission outright. See
             // ServerConfig::stream_max_live_generations.
             stream_max_live_generations: Some(32),
@@ -6973,17 +6975,22 @@ async fn await_update_worker(
     }
 }
 
-/// Runs a SELECT on the engine and serialises it in the negotiated format. JSON uses the
-/// engine's direct id→JSON fast path and is **streamed**: the engine returns the body as
-/// an ordered chunk sequence (concatenation byte-identical to the single-string form) and
-/// the response body hands those chunks to hyper one by one — the peak never holds a
-/// second whole-result copy (T16). `Content-Length` is known up front (the chunks are
-/// fully evaluated before the response starts), so the response framing is identical to
-/// the buffered path. The other formats go through the materialised `QueryResult`.
+/// Runs a SELECT on the engine and serialises it in the negotiated format, fully materialised:
+/// the engine produces the body as an ordered chunk sequence (concatenation byte-identical to
+/// the single-string form) and the response hands those chunks to hyper one by one, so the peak
+/// never holds a second whole-result copy (T16), but the whole answer IS in memory before the
+/// response starts. `Content-Length` is therefore known up front. The other formats go through
+/// the materialised `QueryResult`.
 ///
-/// Takes the request's pinned generation (not a bare `&Graph`) so the streamed JSON body
-/// can keep the generation pinned until the last chunk is written — the stream stays
-/// snapshot-consistent with query START even if the writer publishes past it mid-response.
+/// [OPUS-5] (sq-7d3dj.28) **The JSON arm here is the DEGRADED path.** An admitted SELECT-JSON
+/// request never reaches it — it streams via [`stream_select_json`] — so this arm runs only for
+/// a response [`stream_admission`] declined, and it is the allocation that decision must not be
+/// allowed to make unbounded. It accumulates under [`DEGRADED_BUFFER_MAX_BYTES`] and answers
+/// [`degraded_over_budget_response`] rather than materialising past it.
+///
+/// Takes the request's pinned generation (not a bare `&Graph`) because the engine reads the
+/// snapshot for the whole call; [`chunked_response`] releases the pin as it builds the response,
+/// since every chunk by then is an owned `String` that borrows nothing.
 fn render_select(
     gen: &PinnedGen,
     select: &str,
@@ -6996,12 +7003,15 @@ fn render_select(
     let ct = fmt.select_content_type();
     let body = match fmt {
         // SELECT projections fold in --max-results (`make_budget(_, true)`) → name it.
-        Format::Json => match sparq_engine::query_json_chunks_with_budget(graph, select, budget) {
-            Ok(chunks) => {
-                return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone())
+        Format::Json => {
+            match collect_json_chunks_capped(graph, select, budget, DEGRADED_BUFFER_MAX_BYTES) {
+                Ok(chunks) => {
+                    return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone())
+                }
+                Err(None) => return degraded_over_budget_response(),
+                Err(Some(e)) => return engine_error_response(&e, config, true),
             }
-            Err(e) => return engine_error_response(&e, config, true),
-        },
+        }
         // CSV/TSV: row-oriented chunked streaming — mirrors the JSON T16 path; the peak
         // never holds a second full-result copy. Byte-identical to the buffered form per
         // the chunked invariant. XML stays buffered (prefix compaction). [SONNET-4.6]
@@ -7049,15 +7059,16 @@ const STREAM_CHANNEL_CAP: usize = 4;
 /// **…but only when the correct answer IS affordable.** The buffered serialiser MATERIALISES
 /// the whole response, so degrading trades a bounded transport (four channel slots, whatever
 /// the result size) for an allocation the size of the answer. That is a bound only if something
-/// bounds the answer, and [`ServerConfig::default`] configures none of the memory ceilings. So
-/// admission first requires a configured ceiling ([`buffered_response_bound`]); with none the
-/// stream is ADMITTED under pressure, because streaming is then the memory-safer of the two and
-/// the pin it holds is separately bounded by [`ServerConfig::stream_pin_timeout`]. Preferring an
-/// unbounded buffer to a bounded stream *because the server is under pressure* would be exactly
-/// the wrong trade.
+/// bounds the answer — and no *configured* ceiling does: `--max-query-rows` / `--max-results`
+/// bound ROWS, and `--max-query-bytes` prices the id-level working set, so all three are blind
+/// to the bytes of a dictionary-resident literal a single row can project. Affordability is
+/// therefore ENFORCED, not inferred: the degraded path accumulates its body under
+/// [`DEGRADED_BUFFER_MAX_BYTES`] and refuses past it ([`degraded_over_budget_response`]), which
+/// makes degrading a bounded choice at every configuration including the default one.
 ///
 /// Returns `None` to admit the stream, or `Some(warning)` — the `Warning` header value naming
-/// the reading, the cap, and the ceiling that made buffering affordable — when it was declined.
+/// the reading, the cap, and the byte budget the degraded body is held to — when it was
+/// declined.
 ///
 /// **Cost, stated plainly.** [`GenerationRing::live_generations`] takes the ring's writer-side
 /// mutex and prunes its weak registry, so this adds one short lock — over a registry whose
@@ -7065,14 +7076,10 @@ const STREAM_CHANNEL_CAP: usize = 4;
 /// request. That is not free, and the ring's own `at` docs warn against the writer-side mutex on
 /// the hot path. The exact reading is taken deliberately: it is the signal the design specifies,
 /// its critical section is orders of magnitude shorter than the query it guards, and the check
-/// is skipped entirely when the cap is unset — or when no memory ceiling is configured, since
-/// then no reading can decline the stream. A lock-free pressure gauge is the obvious follow-up
-/// if a benchmark ever attributes anything measurable to it.
+/// is skipped entirely when the cap is unset. A lock-free pressure gauge is the obvious
+/// follow-up if a benchmark ever attributes anything measurable to it.
 fn stream_admission(state: &AppState, config: &ServerConfig) -> Option<header::HeaderValue> {
     let cap = config.stream_max_live_generations?;
-    // Checked BEFORE the reading: with nothing bounding the buffered answer there is no
-    // pressure at which degrading to it is the safer choice, so the ring lock is never taken.
-    let bound = buffered_response_bound(config)?;
     let live = state.live_generations();
     if live < cap {
         return None;
@@ -7080,36 +7087,82 @@ fn stream_admission(state: &AppState, config: &ServerConfig) -> Option<header::H
     // RFC 9111 §5.5 warn-code 199 "Miscellaneous warning" with the agent and a quoted text.
     // Positional `format!` args (CodeQL rust/unused-variable false positive on inline captures).
     header::HeaderValue::from_str(&format!(
-        "199 sparq \"streamed response declined: {} live generations at/over the --stream-max-live-generations cap of {}; served buffered (bounded by {})\"",
-        live, cap, bound
+        "199 sparq \"streamed response declined: {} live generations at/over the --stream-max-live-generations cap of {}; served buffered (capped at {} bytes)\"",
+        live, cap, DEGRADED_BUFFER_MAX_BYTES
     ))
     .ok()
 }
 
-/// [SONNET-4.6] (sq-7d3dj.28) The configured ceiling that makes the buffered fallback
-/// affordable, or `None` when nothing bounds it.
+/// [OPUS-5] (sq-7d3dj.28) The degraded (non-streamed) SELECT-JSON body's OWN allocation budget,
+/// in bytes of serialised response.
 ///
-/// Every one of these caps aborts evaluation with an honest `413` before the working set — and
-/// therefore the serialised response the buffered path materialises — can exceed it, so any one
-/// of them turns "buffer the whole answer" from an unbounded allocation into a bounded one.
-/// `--max-query-bytes` prices the working set in bytes and is the closest thing to a direct
-/// bound on the response, so it is named first when several are set. The decision itself is just
-/// "some ceiling exists"; the name is carried into the degradation `Warning` so an operator
-/// reading it can see which of their ceilings is the one making the fallback affordable.
+/// Degrading materialises the whole serialised answer, and **no configured ceiling bounds
+/// that**. [`ServerConfig::max_query_rows`] and [`ServerConfig::max_results`] bound ROW COUNT;
+/// [`ServerConfig::max_query_bytes`] prices the id-level working set (`rows × width ×
+/// size_of::<Id>()`) plus the terms a query COMPUTES, so it never charges for the bytes of a
+/// literal already interned in the graph dictionary. A `SELECT` returning one row whose object
+/// is a multi-megabyte stored literal is therefore cheap under all three and huge once
+/// serialised — which is exactly the shape an attacker pairs with ring pressure to force a
+/// large allocation. Treating a row cap as a response-byte bound would be the bug; this budget
+/// is the actual bound, enforced cooperatively by [`collect_json_chunks_capped`] as the body
+/// accumulates, so the allocation is refused BEFORE it is made rather than measured after.
 ///
-/// Note this is the ceiling on the ENGINE's working set, not a byte-exact bound on the response;
-/// it makes the buffered allocation a function of operator-chosen limits rather than of
-/// client-chosen result size, which is the property admission needs.
-fn buffered_response_bound(config: &ServerConfig) -> Option<&'static str> {
-    if config.max_query_bytes.is_some() {
-        Some("--max-query-bytes")
-    } else if config.max_query_rows.is_some() {
-        Some("--max-query-rows")
-    } else if config.max_results.is_some() {
-        Some("--max-results")
-    } else {
-        None
+/// 8 MiB: comfortably above any answer worth buffering on a server that is already declining to
+/// stream, far below anything that threatens the process. Peak is this plus at most one
+/// in-flight engine chunk (the chunk that crosses the budget is dropped, never pushed).
+const DEGRADED_BUFFER_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// [OPUS-5] (sq-7d3dj.28) Serialises a SELECT to SPARQL-JSON chunks under a HARD cap on the
+/// accumulated body, for the degraded (buffered) path — see [`DEGRADED_BUFFER_MAX_BYTES`].
+///
+/// Uses the engine's incremental sink entry point rather than
+/// [`sparq_engine::query_json_chunks_with_budget`] precisely because the latter builds the whole
+/// `Vec<String>` inside the engine, where a post-hoc size check would arrive after the
+/// allocation it is meant to prevent. Here the cap is checked per chunk and the offending chunk
+/// is dropped, so the accumulated body never exceeds the budget.
+///
+/// `Err(None)` = the budget was crossed (the caller answers [`degraded_over_budget_response`]);
+/// `Err(Some(e))` = an engine error, mapped as on any other path.
+fn collect_json_chunks_capped(
+    graph: &sparq_core::Graph,
+    select: &str,
+    budget: &QueryBudget,
+    cap: usize,
+) -> Result<Vec<String>, Option<String>> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut total: usize = 0;
+    let mut over_budget = false;
+    let outcome = sparq_engine::query_json_stream_with_budget(graph, select, budget, |chunk| {
+        if total.saturating_add(chunk.len()) > cap {
+            over_budget = true;
+            return std::ops::ControlFlow::Break(());
+        }
+        total += chunk.len();
+        chunks.push(chunk);
+        std::ops::ControlFlow::Continue(())
+    });
+    if over_budget {
+        return Err(None);
     }
+    outcome.map(|()| chunks).map_err(Some)
+}
+
+/// [OPUS-5] (sq-7d3dj.28) The refusal a degraded response gets when its serialised body would
+/// exceed [`DEGRADED_BUFFER_MAX_BYTES`].
+///
+/// `503`, not `413`: the request is not intrinsically too large — the very same query streams
+/// fine once the ring pressure that declined the stream has passed — so this is a transient
+/// server-capacity refusal, and a client that retries later gets the whole answer. Nothing has
+/// been written to the socket when this is chosen, so the status is honest and complete.
+fn degraded_over_budget_response() -> Response {
+    // Positional `format!` args (CodeQL rust/unused-variable false positive on inline captures).
+    json_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &format!(
+            "server under generation pressure: the streamed response was declined (--stream-max-live-generations) and the buffered alternative exceeds the {}-byte degraded-response budget; retry when pressure drops, or narrow the query (e.g. add LIMIT)",
+            DEGRADED_BUFFER_MAX_BYTES
+        ),
+    )
 }
 
 /// [SONNET-4.6] (sq-7d3dj.28) Attaches the [`stream_admission`] `Warning` to a response the

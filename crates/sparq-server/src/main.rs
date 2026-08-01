@@ -100,10 +100,11 @@
 //!                             [SONNET-4.6 sq-7d3dj.28] streaming ADMISSION: at/over N live generations
 //!                             (ring-retained OR reader-pinned) a SELECT-JSON response is served BUFFERED
 //!                             instead of streamed (a Warning header says so), so a chunked body cannot pin
-//!                             an unbounded number of stale generations. Engages ONLY when a memory ceiling
-//!                             (--max-query-bytes / --max-query-rows / --max-results) bounds the buffered
-//!                             answer; with none it is inert, since a bounded stream beats an unbounded
-//!                             buffer. 0 disables admission
+//!                             an unbounded number of stale generations. The buffered answer is accumulated
+//!                             under a fixed 8 MiB degraded-response budget and refused with a 503 past it
+//!                             (no engine ceiling bounds serialised response BYTES: --max-query-rows /
+//!                             --max-results bound rows, --max-query-bytes prices the id-level working set).
+//!                             0 disables admission
 //!                             [32, env SPARQ_STREAM_MAX_LIVE_GENERATIONS]
 //!   --stream-pin-timeout S    [SONNET-4.6 sq-7d3dj.28] per-stream PIN CAP: max SECONDS the server waits
 //!                             for a streaming client to accept the NEXT chunk (idle deadline, reset after
