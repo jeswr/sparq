@@ -82,7 +82,8 @@ assert!(sparq_fedplan_mpc::bind_plan_to_proof(&claimed, &statement).is_err()); /
   domain-separated `PlanCommitment` whose `plan_digest()` is one `sparq_mpc::FieldWord` — shaped to become a public input once a proof exists to carry it.
   It binds plan **content**, not the planner's enumeration order, and excludes `estimated_cardinality` (a cost estimate, not plan semantics).
   `revalidate_plan` compares a *claimed* commitment against an *independently recomputed* one and **fails closed**, naming the **dropped source** /
-  **re-routed operator** via `PlanDivergence`; a digest mismatch is never `Bound`, and a routing/envelope disagreement is refused at commit time
+  **re-routed operator** via `PlanDivergence`; a digest mismatch is never `Bound`, and a routing/envelope disagreement — including a hidden operator
+  carrying disclosed operands, or a participation set that is not exactly the distinct sources the selection assigns — is refused at commit time
   (`DescriptorMismatch`/`PlanBinding`).
   - **A canonicality + transcript-integrity check, NOT a soundness mechanism.** A malicious planner computes the plan *and* its commitment, so one that
     drops a source simply commits to the plan it actually ran and passes. It catches *accidental* divergence (a plan mutated after ratification, a

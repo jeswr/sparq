@@ -337,7 +337,15 @@ fn digest_parts(tag: &[u8], parts: &[Vec<u8>]) -> FieldWord {
 /// * `routing` and `envelope` disagree — different operator counts, a label mismatch at some
 ///   index, a disclose/hide disagreement, or a hidden operator whose routed class differs from the
 ///   class the envelope declares. Committing to either side of a disagreement would bind a plan
-///   that no phase actually produced.
+///   that no phase actually produced;
+/// * the envelope declares a **hidden** operator with a non-empty `disclosed_operands` list. A
+///   hidden operator runs under MPC and discloses nothing, so such an envelope contradicts its own
+///   leakage statement;
+/// * the envelope's declared participation set is not **exactly** the distinct set of source ids
+///   the selection assigns across its patterns (either an omitted or an extra participant). The
+///   participation set is the plan's declared leakage/accounting artefact; committing to a
+///   selection and a participation claim that contradict each other would bind a plan that no
+///   phase produced.
 pub fn commit_plan(
     selected: &SelectedPrivateSources,
     routing: &PrivateRouting,
@@ -348,13 +356,30 @@ pub fn commit_plan(
 
     // Ascending + duplicate-free via the BTreeSet: the commitment binds the participation SET,
     // never the order the envelope happened to list it in.
-    let participating_sources: Vec<String> = envelope
-        .participating_sources
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<String>>()
-        .into_iter()
-        .collect();
+    let declared_participants: BTreeSet<&String> = envelope.participating_sources.iter().collect();
+
+    // The selection and the envelope are committed as independent components, so they must first
+    // be cross-checked against each other — exactly as `commit_operators` cross-checks routing
+    // against the envelope. The distinct sources the selection ASSIGNS are precisely the sources
+    // that participate (this is how `assemble_leakage_envelope` derives the set), so any omission
+    // or addition means the commitment would bind a selection and a participation claim that
+    // contradict one another. Fail closed rather than commit to that.
+    let assigned_participants: BTreeSet<&String> =
+        patterns.iter().flat_map(|p| p.sources.iter()).collect();
+    if assigned_participants != declared_participants {
+        return Err(SeamError::DescriptorMismatch {
+            phase: SeamPhase::PlanBinding,
+            source_id: assigned_participants
+                .symmetric_difference(&declared_participants)
+                .next()
+                .copied()
+                .cloned()
+                .unwrap_or_default(),
+            detail: "the envelope's participation set is not the distinct source set the selection assigns",
+        });
+    }
+
+    let participating_sources: Vec<String> = declared_participants.into_iter().cloned().collect();
 
     // ── Component digests ──────────────────────────────────────────────────────────────
     let mut selection_parts = vec![arity(patterns.len())];
@@ -479,6 +504,18 @@ fn commit_operators(
                     detail: "routing and leakage envelope disagree on a hidden operator's class",
                 });
             }
+        }
+        // A hidden operator runs under MPC and discloses NO operand — that is what the envelope's
+        // own leakage statement says, and what `CommittedOperator::disclosed_operands` documents.
+        // An envelope that hides an operator while listing operands for it contradicts itself, so
+        // refuse rather than commit to a non-canonical `disclosed = false` + non-empty pair whose
+        // digest would assert operands are revealed on a route that reveals nothing.
+        if !declared.disclosed && !declared.disclosed_operands.is_empty() {
+            return Err(SeamError::DescriptorMismatch {
+                phase: SeamPhase::PlanBinding,
+                source_id: String::new(),
+                detail: "the leakage envelope lists disclosed operands for a HIDDEN operator",
+            });
         }
         let disclosed_operands: Vec<String> = declared
             .disclosed_operands
@@ -952,6 +989,96 @@ mod tests {
         envelope.operators.truncate(1);
 
         assert!(commit_plan(&selected, &routing, &envelope).is_err());
+    }
+
+    /// The REAL pipeline over two flatmates, returned unassembled so a test can MUTATE the
+    /// envelope the way a lying planner would before committing.
+    fn two_flatmate_plan_parts() -> (SelectedPrivateSources, PrivateRouting, LeakageEnvelope) {
+        let ids = ["http://a/", "http://b/"];
+        let sources: Vec<SourceDescriptor> = ids.iter().map(|id| source(id)).collect();
+        let privacy: Vec<SourcePrivacyDescriptor> =
+            ids.iter().map(|id| flatmate_privacy(id)).collect();
+        let selected = select_private_sources(&bgp(), &sources, &privacy).unwrap();
+        let ops = four_flatmates_operators();
+        let routing = route_operators(&selected, &privacy, &ops, RoutingPolicy::Default).unwrap();
+        let envelope = assemble_leakage_envelope(&routing, &ops, &selected).unwrap();
+        (selected, routing, envelope)
+    }
+
+    /// The participation set is the plan's declared leakage/accounting artefact, so DROPPING a
+    /// participant the selection still assigns must be refused — not committed as a
+    /// selection/participation pair that contradicts itself.
+    #[test]
+    fn a_participant_dropped_from_the_envelope_is_refused() {
+        let (selected, routing, mut envelope) = two_flatmate_plan_parts();
+        assert_eq!(envelope.participating_sources.len(), 2, "fixture");
+
+        // The envelope now under-declares: source B still answers the pattern in the selection.
+        envelope
+            .participating_sources
+            .retain(|id| id != "http://b/");
+
+        let err = commit_plan(&selected, &routing, &envelope)
+            .expect_err("an omitted participant must be refused");
+        match err {
+            SeamError::DescriptorMismatch {
+                phase, source_id, ..
+            } => {
+                assert_eq!(phase, SeamPhase::PlanBinding);
+                assert_eq!(source_id, "http://b/", "the divergent source must be named");
+            }
+            other => panic!("expected DescriptorMismatch, got {:?}", other),
+        }
+    }
+
+    /// …and ADDING a participant the selection assigns to no pattern is refused too, so the
+    /// cross-check is an equality, not a containment that an over-declaring envelope could pass.
+    #[test]
+    fn an_extra_envelope_participant_is_refused() {
+        let (selected, routing, mut envelope) = two_flatmate_plan_parts();
+
+        envelope
+            .participating_sources
+            .push("http://unrelated/".to_string());
+
+        let err = commit_plan(&selected, &routing, &envelope)
+            .expect_err("an extra participant must be refused");
+        match err {
+            SeamError::DescriptorMismatch {
+                phase, source_id, ..
+            } => {
+                assert_eq!(phase, SeamPhase::PlanBinding);
+                assert_eq!(source_id, "http://unrelated/");
+            }
+            other => panic!("expected DescriptorMismatch, got {:?}", other),
+        }
+    }
+
+    /// A HIDDEN operator discloses nothing, so an envelope that lists an operand for one
+    /// contradicts its own leakage statement and must be refused — otherwise the commitment would
+    /// carry `disclosed = false` alongside a non-empty operand list, exactly the non-canonical
+    /// pair `CommittedOperator::disclosed_operands` documents as impossible.
+    #[test]
+    fn a_hidden_operator_with_disclosed_operands_is_refused() {
+        let (selected, routing, mut envelope) = two_flatmate_plan_parts();
+        assert!(
+            !envelope.operators[1].disclosed && envelope.operators[1].disclosed_operands.is_empty(),
+            "fixture: the salary aggregate must be hidden and disclose nothing"
+        );
+
+        // The envelope now claims the hidden salary aggregate reveals the salary predicate.
+        envelope.operators[1].disclosed_operands = vec![SALARY.to_string()];
+
+        let err = commit_plan(&selected, &routing, &envelope)
+            .expect_err("a hidden operator carrying disclosed operands must be refused");
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::PlanBinding,
+                ..
+            }
+        ));
+        assert!(format!("{}", err).contains("HIDDEN"));
     }
 
     // ── The gated half stays gated ──────────────────────────────────────────────────────
