@@ -174,8 +174,22 @@ untouched here to avoid colliding with it.)
 Heavy or independent lanes that already ran and gated on the PR head dropped their
 `merge_group` trigger because the queue re-run added wall-clock per enqueue with no new
 signal: currently `formal-verification.yml` (Kani proofs), `fuzz.yml` (corpus replay),
-and `bench.yml` (noisy timing suites; the deterministic ratchet is guarded separately).
-This is a **decision, not a defect**.
+`zk-toolchain.yml` (Noir forge suite), `container-scan.yml` (trivy image build + scan),
+`supply-chain.yml` (cargo-deny/vet/SBOM), and `bench.yml` (noisy timing suites; the
+deterministic ratchet is guarded separately — `bench.yml`'s removal predates this
+directive, under sq-6vshe.6). This is a **decision, not a defect**.
+
+<!-- [OPUS-5] issue #5165: the three zk/container/supply-chain lanes carry the same
+     "(2026-07-18 maintainer directive, merge-queue subset) merge_group REMOVED" header
+     comment as the other two but were missing from this list, which is the doc-of-record
+     for the subset. Verified against the `on:` blocks in .github/workflows/ on
+     2026-08-01; the same pass corrected research/ci-mergequeue-speedup-2026-07.md §2.1. -->
+
+The lanes that DO trigger on `merge_group` today are: `ci-summary.yml` (the gate itself),
+`ci.yml`, `feature-matrix.yml`, `vectorized-feature-off.yml`, `docs-quality.yml`,
+`flow-on-gates.yml`, `routing-self-tests.yml` and `pr-area-label.yml` — plus
+`codeql.yml`, whose trigger set lists `merge_group` but which is operationally disabled
+per the note above and so produces no check-run there.
 
 Why it stays sound:
 

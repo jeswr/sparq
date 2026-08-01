@@ -889,6 +889,18 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] issue #5165 — the LANE INVENTORY half of the same problem. The
+      # `merge_group` trigger set and the prose in docs/branch-protection.md
+      # §Merge-queue subset that describes it are unrelated files, so the list drifted
+      # silently: SIX workflows have left the queue (five under the 2026-07-18
+      # directive, bench.yml earlier under sq-6vshe.6) but the doc-of-record's list
+      # named only three, while research/ci-mergequeue-speedup-2026-07.md §2.1 still
+      # listed all six as gate legs — and three lanes that gate there today appeared in
+      # neither. That list is what the sq-6vshe speedup levers are sized off. Hermetic +
+      # stdlib-only; reuses the cache-posture suite's on:-block parser so the two can
+      # never disagree about what "triggers on merge_group" means.
+      - name: Merge-queue lane inventory (docs match the workflow triggers — issue 5165)
+        run: python3 scripts/tests/test_mergequeue_lane_inventory.py
       # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
       # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
       # outage there concluded `failure` with nothing measured and ejected an unrelated
