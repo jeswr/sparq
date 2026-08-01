@@ -596,13 +596,26 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          # START THE TEST MERGE AT THE PR HEAD ITSELF (PR #5253 review round 2). A
+          # default pull_request checkout lands on `refs/pull/N/merge` — the SYNTHETIC
+          # merge GitHub froze when this run was triggered, i.e. the head already merged
+          # with the base AS OF THE EVENT. Merging the current base tip into THAT grades
+          # ((stale base ⊕ head) ⊕ current base), which is not the tree this job claims
+          # to grade, and the difference is not purely cosmetic: merge base resolution
+          # and rename detection depend on the history, so the two can disagree even
+          # where the ordinary clean-merge cases agree. Pinning `ref` to the head SHA
+          # makes the test merge's first parent the PR head, so the graded tree really is
+          # "PR head ⊕ current base tip". The merge step re-verifies HEAD against this
+          # same SHA rather than assuming the checkout honoured it.
+          ref: ${{ github.event.pull_request.head.sha }}
           # The test merge below needs the base BRANCH and a shared ancestor with it. A
           # default pull_request checkout fetches only `refs/pull/N/merge` at depth 1, so
           # `origin/<base branch>` is not present there at all, and a shallow graft has no
           # merge base to work from either (the same class of shallow-checkout breakage
           # the `changes` job's three-dot diff documents). fetch-depth: 0 fetches the
           # branches with full history — ~76 MB of .git here, cheaper than hand-rolling a
-          # deepening fetch.
+          # deepening fetch — and full history is also what gives the pinned head SHA
+          # above a merge base with the base branch to three-way merge from.
           fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -626,6 +639,17 @@ jobs:
             echo "::error title=pre-merge C1 could not run::origin/${BASE_REF} is missing from the checkout — the fetch-depth: 0 checkout in this job is a precondition of the test merge."
             exit 1
           }
+          # FAIL CLOSED ON THE OTHER HALF OF THE ASSUMPTION (PR #5253 review round 2).
+          # The merge must START at the PR head, not at the event-time
+          # `refs/pull/N/merge` a default pull_request checkout would leave here; the
+          # checkout above pins `ref` to HEAD_SHA precisely so that holds. Verify it
+          # instead of trusting it — if HEAD is anything else, the merge's first parent
+          # is not the PR head and the tree graded below is not the one this job reports.
+          ACTUAL_HEAD="$(git rev-parse HEAD)"
+          if [ "${ACTUAL_HEAD}" != "${HEAD_SHA}" ]; then
+            echo "::error title=pre-merge C1 could not run::HEAD is ${ACTUAL_HEAD}, not the PR head ${HEAD_SHA} — the test merge would start from the wrong commit (most likely the event-time refs/pull/N/merge), so its result would not be the PR head merged with the current base."
+            exit 1
+          fi
           # RECORD THE BASE THIS VERDICT IS ABOUT (PR #5253 review round 1). The check-run
           # this job produces goes stale the moment the base advances — GitHub re-runs
           # nothing for an open PR when its base moves — so publish the exact SHA graded

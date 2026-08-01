@@ -1012,6 +1012,27 @@ class TestPreMergeC1Job(unittest.TestCase):
         self.assertIn("fetch-depth: 0", self.block)
         self.assertIn("persist-credentials: false", self.block)
 
+    def test_test_merge_starts_at_the_pr_head(self):
+        """PR #5253 review round 2. On `pull_request`, actions/checkout WITHOUT an explicit
+        `ref` lands on `refs/pull/N/merge` — the synthetic merge GitHub froze at event time,
+        i.e. the head already merged with the THEN-current base. Merging the current base
+        tip into that grades ((stale base ⊕ head) ⊕ current base), not the "PR head ⊕
+        current base tip" this job's comments and summary claim; history shape feeds merge
+        base resolution and rename detection, so the two are not interchangeable. Pin both
+        halves of the fix — the checkout starts at the head SHA, and the merge step
+        re-verifies HEAD against it rather than trusting the checkout. Note this asserts
+        the merge's STARTING COMMIT, which `test_publishes_the_base_sha_it_graded` does not:
+        that one only proves HEAD_SHA reaches the summary, which was true while the bug
+        was live."""
+        self.assertIn("ref: ${{ github.event.pull_request.head.sha }}", self.block,
+                      "the checkout must pin `ref` to the PR head SHA — otherwise the "
+                      "test merge starts from the event-time refs/pull/N/merge commit")
+        self.assertIn('ACTUAL_HEAD="$(git rev-parse HEAD)"', self.block,
+                      "the merge step must resolve the commit it is about to merge from")
+        self.assertIn('if [ "${ACTUAL_HEAD}" != "${HEAD_SHA}" ]; then', self.block,
+                      "the merge step must FAIL CLOSED when HEAD is not the PR head — a "
+                      "merge from any other commit produces a tree the job misreports")
+
     def test_guard_step_is_gated_on_a_clean_test_merge(self):
         """A conflicted working tree is not the merge result; grading it would be a
         verdict about a tree that will never exist."""
@@ -1069,7 +1090,8 @@ class TestPreMergeC1Job(unittest.TestCase):
                          "cannot go stale")
 
     def test_job_is_unprivileged(self):
-        """It checks out the PR merge ref; it needs nothing but the source."""
+        """It checks out the PR head and merges the base locally; it needs nothing but
+        the source."""
         self.assertIn("permissions:\n      contents: read\n", self.block)
         self.assertNotIn("checks: write", self.block)
 
