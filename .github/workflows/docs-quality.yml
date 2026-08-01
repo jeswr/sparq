@@ -711,6 +711,33 @@ jobs:
         run: python3 scripts/check-dashboard-publish-wiring.py --self-test
       - name: "Enforce every served bench/dashboard asset is wired into the Pages publisher — GATING"
         run: python3 scripts/check-dashboard-publish-wiring.py
+      # [OPUS-5] issue #5022: the SAME silent-drop class for the mdBook guide. GitHub Pages has
+      # one deploy slot, so the guide has no workflow of its own — docs.yml VALIDATES it on PRs
+      # and pages.yml BUILDS + OVERLAYS it into the single Pages artifact at out/guide/. Three
+      # things must hold for that to work and each fails silently: both lanes must build through
+      # the shared scripts/build-guide.sh (where the mdBook#1094 "[ERROR]" teeth live) with the
+      # SAME pinned mdbook (otherwise the validated guide is not the published one), and
+      # book.toml's `site-url` must equal the overlay sub-path (mdBook bakes it into the guide's
+      # 404.html as `<base href=…>`, which GitHub Pages serves for /guide/<typo>). pages.yml
+      # asserts its own artifact, but its build job is gated to the publish refs (main /
+      # benchmark-data), so it only speaks after the change has landed; this runs on every PR.
+      # GATING: deterministic, in-repo, no network, no mdbook, no build.
+      # The self-test's mutation table proves each check has teeth.
+      - name: Self-test guide publish-wiring gate (mutation table)
+        run: python3 scripts/check-guide-publish-wiring.py --self-test
+      - name: "Enforce the mdBook guide is wired to publish at /guide/ — GATING"
+        run: python3 scripts/check-guide-publish-wiring.py
+      # [OPUS-5] issue #5022: scripts/build-guide.sh is the shared mdBook builder for BOTH the
+      # validate lane (docs.yml) and the publish lane (pages.yml). Its only non-obvious job is
+      # the teeth — mdBook exits 0 on a broken {{#include}}/anchor (rust-lang/mdBook#1094) and
+      # only says so as an "[ERROR]" log line — and the guide is entirely {{#include}} wrappers
+      # around canonical README/SKILL.md anchors, now PUBLISHED. So the self-test drives the
+      # script against a stub mdbook and pins both directions (clean build passes; exit-0-with-
+      # [ERROR] fails), plus the non-zero-exit-through-`tee` and empty-render cases.
+      - name: shellcheck build-guide.sh + its self-test
+        run: shellcheck scripts/build-guide.sh scripts/tests/test_build_guide.sh
+      - name: Self-test build-guide.sh (broken-include teeth; stub mdbook)
+        run: bash scripts/tests/test_build_guide.sh
       # [OPUS-5] sq-t099c's inference report/scoreboard drift gate was wired in here and
       # sq-1d528's (#3171) a few steps above; the two scripts are now ONE gate, invoked
       # once at the earlier site (search "inference-conformance report drift"). Running
