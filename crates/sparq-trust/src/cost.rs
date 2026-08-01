@@ -468,12 +468,9 @@ fn analyse_rule(rule_index: usize, body: &[[String; 3]], head: &[[String; 3]]) -
     // Repeatedly take the LOWEST-index remaining atom whose subject or object is a
     // constant or an already-bound variable. Lowest-index keeps the answer independent
     // of iteration order, so the report is reproducible.
-    loop {
-        let Some(pick) = (0..body.len()).find(|&k| {
-            !taken[k] && (term_bound(&body[k][0], &bound) || term_bound(&body[k][2], &bound))
-        }) else {
-            break;
-        };
+    while let Some(pick) = (0..body.len()).find(|&k| {
+        !taken[k] && (term_bound(&body[k][0], &bound) || term_bound(&body[k][2], &bound))
+    }) {
         taken[pick] = true;
         seeding_order.push(pick);
         for t in &body[pick] {
