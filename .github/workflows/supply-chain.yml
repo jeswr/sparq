@@ -173,6 +173,23 @@ jobs:
       - name: self-cert evidence check — GATING
         run: python3 scripts/check-bestpractices-evidence.py
 
+      # ---- Dependabot ecosystem coverage (sq-bqjv) — GATING ----
+      # [SONNET-4.6] A Dependabot entry aimed at a directory with no resolvable
+      # manifest/lock does NOT error — it just yields no PRs, which looks exactly like
+      # "no updates available". That silence hid a real hole: the npm entry pointed at
+      # the workspace MEMBER `/js` (whose lock is gitignored; only the repo-root lock is
+      # tracked), so `site` / `gui/*` / `packages/*` were uncovered, and the two
+      # digest-pinned Dockerfiles had no docker entry, so their base images were never
+      # refreshed for Debian/distroless security rebuilds. This asserts coverage
+      # structurally against the LIVE repo — every tracked npm lock root and Dockerfile
+      # directory is covered or carries a written, non-stale exclusion — so a newly
+      # added ecosystem cannot land uncovered. Pure-stdlib Python (re/subprocess/pathlib
+      # on the runner's 3.12), consistent with this job's other checks; runs
+      # unconditionally because its inputs are checked-in config, not the Rust
+      # dependency graph.
+      - name: Dependabot ecosystem-coverage check — GATING
+        run: python3 scripts/tests/test_dependabot_coverage.py
+
       # ---- JS/npm CycloneDX SBOMs (published WASM + shared browser clients) ----
       # [OPUS-4.8] sq-toze.27 / [GPT-5.6] sq-epbw4: SBOM both `@jeswr/sparq` and the
       # `@sparq/client` code bundled into the site/GUI artifacts. Each gets a strict runtime
@@ -230,7 +247,7 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - name: Install cargo-deny + cargo-vet + cargo-cyclonedx
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-deny,cargo-vet@0.10.2,cargo-cyclonedx
 

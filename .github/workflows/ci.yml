@@ -473,7 +473,7 @@ jobs:
       # item 2) lets a residual transient binary race self-heal. SHA-pinned install
       # action (a pin already vetted elsewhere in this workflow).
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: nextest
       # [OPUS-4.8] Build + ARCHIVE the whole workspace test set once. `--all-targets`
@@ -663,7 +663,7 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: nextest
       - name: Download nextest archive
@@ -2741,8 +2741,48 @@ jobs:
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # [OPUS-5] #4935 — AVAILABILITY DECOUPLING for the only two corpora in this
+      # GATING lane that come from a non-GitHub third party: the OWL 2 test-case
+      # export (an Internet Archive snapshot, fetched over plain http://) and the
+      # W3C RIF WG Core_v1.22 archive. Both are FIXED, sha256-pinned exports, yet
+      # they were re-downloaded live on every run — so a bad few minutes at
+      # web.archive.org concluded this leg `failure` with nothing measured, which
+      # ci-summary correctly fail-fasts on, ejecting unrelated PRs from the merge
+      # queue (merge group e5c2e01c, 2026-07-28: six 30s connect timeouts, no
+      # assertion failed, PR #4925 ejected). Restoring them from the Actions cache
+      # makes the network a CACHE-MISS-ONLY path: fetch-inference-suites.sh
+      # short-circuits on the pinned digest (`fetch_pinned_file` / the RIF stamp),
+      # so a hit performs zero network I/O. The ratchet is untouched — a genuine
+      # regression still reds, because the corpus arriving from cache vs. network
+      # is invisible to the runner. Key hashes the fetch script, so ANY pin change
+      # busts it (over-busting on an unrelated comment edit only costs one cold
+      # fetch). Pinned by scripts/tests/test_inference_corpus_cache.py.
+      - name: Restore the pinned OWL 2 / RIF corpora
+        id: inference-corpus-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            tests/w3c/owl2
+            tests/w3c/rif-core
+          key: inference-corpus-v1-${{ runner.os }}-${{ hashFiles('scripts/fetch-inference-suites.sh') }}
       - name: Fetch inference test suites (pinned)
+        # On a cache hit this fetches only the two github.com clones (rdf-tests,
+        # N3); the OWL/RIF steps report "already present (sha256 ok)".
         run: ./scripts/fetch-inference-suites.sh
+      # Save from main-scoped runs only — repo cache-save doctrine (sq-3sbrr /
+      # sq-6vshe.15): an entry written from a PR or `gh-readonly-queue/` ref is
+      # scoped to that ref, which is deleted on merge/ejection, so it is pure
+      # unreachable churn against the shared 10 GB budget. PRs and merge groups
+      # RESTORE main's entry — which is exactly where the hit that protects the
+      # queue comes from. Skipped on a hit: cache entries are immutable.
+      - name: Save the pinned OWL 2 / RIF corpora (main-scoped runs)
+        if: github.ref == 'refs/heads/main' && steps.inference-corpus-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            tests/w3c/owl2
+            tests/w3c/rif-core
+          key: inference-corpus-v1-${{ runner.os }}-${{ hashFiles('scripts/fetch-inference-suites.sh') }}
       - name: Run inference suites
         # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
         # self-heal. This `cargo run` WRITES inference-conformance-report.md as a side
@@ -3255,7 +3295,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
         # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
         # is MANDATORY — without it install-action installs NOTHING and `cargo llvm-cov` ENOENTs.
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-llvm-cov
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - name: Compute coverage cone (ENFORCE mode, sq-3dr4t) [SONNET-4.6]
@@ -3463,7 +3503,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action (the @<tool> ref is dropped by the pin). Both tools are needed:
         # llvm-cov for instrumentation, nextest for the partitioning.
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-llvm-cov
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov,nextest
       - name: Fetch W3C fixtures (engine tests need them)
@@ -3531,7 +3571,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: coverage-engine-run-1
       - name: Install cargo-llvm-cov + nextest
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-llvm-cov
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov,nextest
       - name: Build instrumented engine objects (for `report`, no test run)
@@ -3882,7 +3922,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action — the @<tool> ref is dropped by the SHA pin, so without this the
         # tool is silently NOT installed and `cargo llvm-cov` ENOENTs (see per-commit job).
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-llvm-cov
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - name: Test-presence gate
@@ -4097,7 +4137,43 @@ jobs:
             timeout_minutes: 360
           - crate: sparq-vectors
             timeout_minutes: 360
+          # [SONNET-4.6] sq-qcnn.41: sparq-server QUIRK — measure it FEATURE-ON, so the ceiling
+          # it is about to be seeded with is honest. cargo-mutants generates mutants from the
+          # SOURCE (it walks `mod` items regardless of the `#[cfg]` on them), but a
+          # default-feature build never COMPILES the gated modules, so every mutant inside one
+          # is trivially "missed" — non-compiled code, NOT a test gap. Same class as the
+          # sparq-canon / sparq-prov quirks above, and the same artifact that forced this
+          # baseline to re-measure sparq-fedplan (committed 0-caught/534-survived) and
+          # sparq-fedclient (0/553). It matters MORE here than for either of those: ceilings
+          # only ever FALL (`--seed` will not raise one without `--allow-higher` + review), so
+          # an inflated FIRST seed is sticky — hence this lands BEFORE the crate is baselined.
+          # SCALE (structural counts from the tree, reproduce with grep + wc): the
+          # `#[cfg(feature = …)] mod` items the DEFAULT build leaves out are solid_authz 2647,
+          # tpf 1333, descriptors 1145, access_audit 614, streams 592, n3_patch 497,
+          # templates 373, audit 294 = 7495 of 25702 src lines (~29%), and src/http.rs carries
+          # a further 301 `cfg(feature = …)` sites naming a default-OFF feature.
+          # THE SET = the LEG-PROVEN subset: every feature named below already has a
+          # `test: true` leg in .github/feature-matrix.d/sparq-server.yml, so its suite is
+          # known-green on this runner image. That matters because cargo-mutants runs an
+          # UNMUTATED baseline first and aborts the whole sweep if it fails — a feature set
+          # nobody has ever executed could cost the crate its run.
+          # DELIBERATELY OUT, each with a reason. The ceiling therefore still carries
+          # trivially-surviving mutants from these, and must be re-tightened as they gain legs:
+          #   • shacl / backup / n3-patch — NO CI executor runs their suites (shacl + backup
+          #     are explicit entries in scripts/check-feature-test-execution.allowlist.json).
+          #     They COMPILE (the gating workspace `--all-features` clippy proves that much),
+          #     but "compiles" is not "passes", and this lane cannot risk the baseline run.
+          #   • http2 / http3 — transport plumbing (TLS / a second UDP listener) with few
+          #     mutable lines, whose socket + TLS test cost every mutant would then pay.
+          #   • zlib-ng — a flate2 backend swap; no leg, and no sparq-server code of its own.
+          #   • test-seams — a TEST seam, not product surface.
+          # COST, stated plainly: a feature-ON sweep compiles and runs strictly more per mutant
+          # than today's feature-OFF one, and this crate has no seedable run on record (the last
+          # one noted above was killed by runner shutdown). No timing is guessed here — RE-TUNE
+          # this entry from the first run that completes (raise timeout_minutes, or move it to the
+          # SUB-SHARDS idiom below), using that run's own timings as the evidence of record.
           - crate: sparq-server
+            features: audit-log,access-audit,change-stream,federation-descriptors,solid-authz,odrl-authz,solid-authz-trust,templates,tpf,brtpf,query-registry,facets,complete,service,time-travel,geo,terse,response-compression
             timeout_minutes: 360
           - crate: sparq-mpc
             timeout_minutes: 360
@@ -4265,16 +4341,18 @@ jobs:
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-mutants
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # cargo-mutants
         with:
           tool: cargo-mutants@25.3.1
       - name: Run cargo-mutants for this crate + ratchet against the baseline
         # [OPUS-4.8] sq-qcnn.11: measure exactly THIS shard's crate (--package). The static
         # exclusions (presence-gated / non-host crates) live in .cargo/mutants.toml.
-        # matrix.features carries the whole-surface features for the two DEFAULT-OFF crates
-        # (sparq-core mmap,dict-spill / sparq-substrate numeric,join,compare,rows) — passed via
-        # env (not inline ${{ }}) to keep it out of the shell-injection surface. A per-crate
-        # failure is tolerated (continue-on-error) while seeding — the gate verdict is --check.
+        # matrix.features carries the per-crate whole-surface feature set for every crate whose
+        # measured surface is DEFAULT-OFF (sparq-core, sparq-substrate, sparq-sim, sparq-canon,
+        # sparq-prov, sparq-fedplan, sparq-fedclient, sparq-server — see the QUIRK comments on
+        # each include entry) — passed via env (not inline ${{ }}) to keep it out of the
+        # shell-injection surface. A per-crate failure is tolerated (continue-on-error) while
+        # seeding — the gate verdict is --check.
         # [SONNET-4.6] sq-qcnn.28: continue-on-error:true at STEP level (in addition to job
         # level) so that a runner shutdown mid-cargo-mutants does not mark the job as failure:
         # the artifact upload (if: always()) still runs, and the job exits success even when the
@@ -4416,7 +4494,7 @@ jobs:
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-geiger
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-geiger
         continue-on-error: true

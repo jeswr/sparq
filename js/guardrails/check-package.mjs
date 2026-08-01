@@ -42,6 +42,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { parsePackJson } from './pack-json.mjs';
+
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_NAME = '@jeswr/sparq';
 
@@ -90,7 +92,9 @@ if (!wasmNodeExport) {
 
 // (3) the tree `npm pack` would ship actually contains the entrypoints + wasm.
 // `npm pack --dry-run --json` runs `prepack` and reports the resulting file
-// list WITHOUT writing a tarball or touching the network.
+// list WITHOUT writing a tarball or touching the network. Those lifecycle scripts
+// share this stdout, so read only the TRAILING JSON value (see pack-json.mjs): a
+// stray progress line must not be reported here as "not packable".
 let packed;
 try {
   const out = execFileSync('npm', ['pack', '--dry-run', '--json'], {
@@ -98,7 +102,7 @@ try {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'inherit'],
   });
-  packed = JSON.parse(out);
+  packed = parsePackJson(out);
 } catch (err) {
   fail(`\`npm pack --dry-run\` failed (the package is not packable): ${err.message}`);
 }

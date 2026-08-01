@@ -178,11 +178,11 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: lychee@0.23.0
 
@@ -637,6 +637,26 @@ jobs:
         run: python3 scripts/check-dashboard-publish-wiring.py --self-test
       - name: "Enforce every served bench/dashboard asset is wired into the Pages publisher — GATING"
         run: python3 scripts/check-dashboard-publish-wiring.py
+      # [OPUS-5] sq-t099c: the drift class tests/scoreboard_floors.rs does NOT cover. That
+      # guard binds crate-test floor `const`s to the central registry; the two BINARY-runner
+      # suites' floors are hand-typed `RATCHET=<n>` shell literals in ci.yml, and the number
+      # compared against the inference one is grepped out of a report by heading text. So the
+      # emitter (inference/report.rs), ci.yml's grep, scoreboard.rs + its generated mirror, and
+      # the INTENTIONALLY-tracked inference-conformance-report.md all have to agree — and
+      # nothing checked that they did. Observed live on main: the emitter writes
+      # "## Overall (all inference suites)" while the committed report said "## Overall (all
+      # suites)" with a hand-added paragraph wedged between heading and totals, so ci.yml's own
+      # `grep -A2 <heading>` could not parse the artefact readers cite. It stayed silent because
+      # CI REGENERATES the report before parsing it — the tracked file is read by nothing. This
+      # gate binds heading, bucket spelling, grep-window parseability, both `RATCHET=` literals
+      # and the doc-comment floor list to the registry. It never regenerates the report (that
+      # needs the pinned suites + a release build), so a legitimately-lagging artefact is fine;
+      # only a heading/count contradiction is red. GATING: deterministic, in-repo, no network,
+      # stdlib-only. Mutation table in --self-test proves each check has teeth.
+      - name: Self-test inference report/scoreboard drift gate (mutation table)
+        run: python3 scripts/check-inference-report-drift.py --self-test
+      - name: "Enforce inference report ↔ ci.yml ratchet ↔ central scoreboard floor agree — GATING"
+        run: python3 scripts/check-inference-report-drift.py
       # [OPUS-4.8] sq-d8or: the built-docs-site link gate (scripts/check-site-links.sh) is
       # invoked on the publish path in pages.yml (after `next build`), where the static export
       # exists. Its remap of the /sparq GitHub-Pages base path + its TEETH (a broken internal
@@ -858,6 +878,16 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
+      # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
+      # outage there concluded `failure` with nothing measured and ejected an unrelated
+      # PR from the merge queue. It is now restored from an Actions cache. Same
+      # invisible-regression shape as the posture test above — drop the restore step and
+      # CI stays green while silently re-coupling to a third party's uptime. This runs
+      # the REAL bash `fetch_pinned_file` against a stub curl to prove the offline-on-hit
+      # property, pins the ci.yml wiring, and pins that the ratchet was NOT weakened.
+      - name: Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)
+        run: python3 scripts/tests/test_inference_corpus_cache.py
       # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
       # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
       # versioned binary; reverting to `cargo install wasm-pack` would keep the lane
