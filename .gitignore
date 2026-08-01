@@ -96,6 +96,15 @@ node_modules/
 # columns only — no session tokens), which is regenerable via capture_baseline.py.
 metrics/runtime/
 
+# [OPUS-5] flow-on-gates.yml RUNTIME scratch: the gate job writes the PR's label list to
+# the repo-root pr-labels.txt (`: > pr-labels.txt`, then `gh pr view ... > pr-labels.txt`)
+# and gate-api-skill.py / check-config-documented.py read it back via --labels-file. It is
+# per-run CI output, so reproducing a gate locally leaves it in the tree where it can be
+# staged by accident — which is how the empty file landed on PR #5520 and reded the
+# `area:` totality gate (test_pr_area_labels.py: an unattributed root path sends its PR to
+# the serializing __global__ partition). Ignored so it can never re-enter the index.
+/pr-labels.txt
+
 # KB dump output (scripts/export-kb-dump.py, sq-tzars.8) — assembled locally then pushed
 # to sparq-org/research-kb; never committed to this repo.  A leak-abort leaves partial
 # content in this directory, so git-ignoring it prevents accidental staging.
