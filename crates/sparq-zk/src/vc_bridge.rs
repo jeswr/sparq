@@ -40,10 +40,13 @@
 //!   published profiles — P-256/SHA-256 and P-384/SHA-384), then re-commit +
 //!   record provenance.
 //! - **NOT in scope:** `bbs-2023` / `ecdsa-sd-2023` selective disclosure (the
-//!   natural per-leaf match, but a real BBS verifier is not in-repo — deferred
-//!   seam, design §5.3); **in-circuit** VC-proof verification (explicitly
-//!   excluded — would be an overclaim). The host **does not fetch** the issuer key
-//!   from a `did:`/URL — the caller supplies the resolved key bytes.
+//!   natural per-leaf match, but a real BBS verifier is not in-repo). Those suites
+//!   are still rejected by every function in THIS module; they are handled by the
+//!   DELEGATING seam [`crate::vc_bridge_sd`] (sq-u5y1f, design §5.3), which asserts
+//!   no selective-disclosure soundness of its own. Also NOT in scope: **in-circuit**
+//!   VC-proof verification (explicitly excluded — would be an overclaim). The host
+//!   **does not fetch** the issuer key from a `did:`/URL — the caller supplies the
+//!   resolved key bytes.
 //! - **This module is RDF-native**: it operates over the credential's RDF graph —
 //!   its canonical N-Quads, the form the DI suites hash. Turning a JSON-LD VC
 //!   document into that RDF is the ADDITIVE, layered-on-top job of
@@ -81,9 +84,12 @@ use crate::registry::RegistryEntry;
 use oxrdf::{NamedNode, Triple};
 use sha2::{Digest, Sha256, Sha384};
 
-/// The W3C Data-Integrity cryptosuites this bridge verifies off-circuit. Only the
-/// whole-credential `rdfc` suites are in scope (design §5.4); the
-/// selective-disclosure suites (`bbs-2023`, `ecdsa-sd-2023`) are a deferred seam.
+/// The W3C Data-Integrity cryptosuites this bridge verifies off-circuit **itself**.
+/// Only the whole-credential `rdfc` suites are in scope (design §5.4); the
+/// selective-disclosure suites (`bbs-2023`, `ecdsa-sd-2023`) are delegated to a
+/// host verifier through [`crate::vc_bridge_sd::SdCryptosuite`] — a deliberately
+/// separate type, so "sparq verified this" and "a host verifier verified this"
+/// cannot be confused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VcCryptosuite {
     /// `eddsa-rdfc-2022` — Ed25519 over the RDFC10 canonical credential, SHA-256
@@ -153,7 +159,10 @@ impl VcCryptosuite {
     }
 
     /// Parse a W3C cryptosuite token. Fail-closed: an unknown / out-of-scope suite
-    /// (incl. `bbs-2023`, `ecdsa-sd-2023`) returns `None`, never a default.
+    /// returns `None`, never a default. The selective-disclosure tokens
+    /// (`bbs-2023`, `ecdsa-sd-2023`) are out of scope HERE and stay so — they
+    /// resolve only through [`crate::vc_bridge_sd::SdCryptosuite::from_token`], so
+    /// an SD credential can never reach this module's Ed25519/ECDSA paths.
     pub fn from_token(token: &str) -> Option<Self> {
         match token {
             "eddsa-rdfc-2022" => Some(VcCryptosuite::EddsaRdfc2022),
@@ -200,6 +209,18 @@ pub enum VcBridgeError {
     /// the bridge performs NO network access, so an unlisted context URL is
     /// refused (by name, in this message) rather than fetched.
     JsonLdExpansion(String),
+    /// [OPUS-5] sq-u5y1f — a **selective-disclosure** suite (`bbs-2023` /
+    /// `ecdsa-sd-2023`) was presented to [`crate::vc_bridge_sd`] but no host
+    /// verifier able to check it was supplied (none at all, or one whose
+    /// [`crate::vc_bridge_sd::SelectiveDisclosureVerifier::supports`] said no).
+    /// sparq implements NO selective-disclosure verifier, so this is the DEFAULT
+    /// outcome for those suites. Carries the offending token.
+    SelectiveDisclosureUnavailable(String),
+    /// [OPUS-5] sq-u5y1f — the host-supplied selective-disclosure verifier
+    /// REJECTED the derived proof. Carries that verifier's verbatim reason; the
+    /// decision is the host's, not sparq's (which is why it is a distinct variant
+    /// from [`VcBridgeError::VerificationFailed`], the in-repo `rdfc` outcome).
+    SelectiveDisclosureRejected(String),
     /// [OPUS-5] sq-txg1y — the JSON-LD expansion produced quads outside the
     /// default graph. Refused rather than flattened, because flattening would
     /// change the canonical N-Quads the Data-Integrity hash covers.
@@ -232,6 +253,17 @@ impl std::fmt::Display for VcBridgeError {
             VcBridgeError::JsonLdExpansion(why) => {
                 write!(f, "JSON-LD expansion to RDF failed: {}", why)
             }
+            VcBridgeError::SelectiveDisclosureUnavailable(t) => write!(
+                f,
+                "no selective-disclosure verifier available for cryptosuite {}; sparq implements \
+                 none and delegates it (supply one via SelectiveDisclosureVerifier)",
+                t
+            ),
+            VcBridgeError::SelectiveDisclosureRejected(why) => write!(
+                f,
+                "the host selective-disclosure verifier rejected the derived proof: {}",
+                why
+            ),
             VcBridgeError::NamedGraphUnsupported => write!(
                 f,
                 "the VC expanded to quads outside the default graph; the bridge hashes a \
@@ -278,7 +310,12 @@ fn hash_data_384(proof_config_canonical: &[u8], credential_canonical: &[u8]) -> 
 /// hashing step digests, in the order it concatenates them. Shared by both the
 /// SHA-256 and SHA-384 `hashData` derivations so the canonicalization step (and
 /// its fail-closed error mapping) exists exactly once.
-fn canonical_nquads(
+///
+/// `pub(crate)` so the selective-disclosure seam ([`crate::vc_bridge_sd`]) can
+/// offer the SAME canonicalization to a host verifier — the SD suites canonicalise
+/// identically, and two RDFC10 implementations disagreeing would silently change
+/// the bytes a proof covers.
+pub(crate) fn canonical_nquads(
     credential: &[Triple],
     proof_config: &[Triple],
 ) -> Result<(String, String), VcBridgeError> {

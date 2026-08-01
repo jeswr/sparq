@@ -80,6 +80,16 @@ secprop-annotations = ["dep:oxttl"]
 # raw key/signature bytes, so a caller that already has the credential's RDF never
 # touches the JSON-LD path. `oxjsonld` is driven with a caller-supplied context
 # allowlist and NO network (see `vc_bridge_json`'s module docs).
+#
+# [OPUS-5] sq-u5y1f (issue #3235) adds the SELECTIVE-DISCLOSURE ingest SEAM
+# (`vc_bridge_sd`) under this same gate, and adds NO dependency: a real BBS /
+# `ecdsa-sd-2023` verifier is not in-repo, so `bbs-2023` / `ecdsa-sd-2023` are
+# DELEGATED to a host-supplied `SelectiveDisclosureVerifier` trait impl (the BBS/SD
+# crypto stays outside sparq entirely). sparq's part is the RDFC10 canonicalization,
+# the re-commitment of the DISCLOSED subset, and the `zk:sourceCryptosuite`
+# provenance; with no verifier supplied the ingest FAILS CLOSED
+# (`SelectiveDisclosureUnavailable`). Asserts NO selective-disclosure soundness or
+# unlinkability — that claim belongs to the host verifier (sq-qhy4).
 vc-bridge = [
     "dep:ed25519-dalek",
     "dep:p256",

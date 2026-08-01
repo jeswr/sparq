@@ -34,7 +34,11 @@
 //! - `vc_bridge` — the OFF-circuit W3C VC ingest bridge (OPT-IN, behind the
 //!   `vc-bridge` feature): verify a source VC's Data-Integrity proof
 //!   (`eddsa-rdfc-2022` / `ecdsa-rdfc-2019`) at the host, then re-commit + record
-//!   the `zk:sourceCryptosuite` provenance (sq-9c5e, design §5).
+//!   the `zk:sourceCryptosuite` provenance (sq-9c5e, design §5). Its
+//!   selective-disclosure counterpart `vc_bridge_sd` (`bbs-2023` /
+//!   `ecdsa-sd-2023`, sq-u5y1f) DELEGATES the derived-proof check to a
+//!   host-supplied verifier and fails closed without one — sparq implements no
+//!   selective-disclosure verifier and asserts no SD soundness.
 //!
 //! NOTHING in the sparq workspace depends on this crate; default builds and
 //! the wasm artifact are byte-identical with or without it.
@@ -102,6 +106,16 @@ pub mod vc_bridge;
 // OFF-by-default `vc-bridge` gate; the RDF-native API is unchanged.
 #[cfg(feature = "vc-bridge")]
 pub mod vc_bridge_json;
+// [OPUS-5] sq-u5y1f (issue #3235): the SELECTIVE-DISCLOSURE ingest SEAM for
+// `bbs-2023` / `ecdsa-sd-2023` (design §5.3). A real BBS / `ecdsa-sd-2023` verifier
+// is NOT in this repo, so the module is a DELEGATION boundary: the host plugs its
+// own audited verifier into `SelectiveDisclosureVerifier`, sparq does the RDFC10
+// canonicalization + re-commitment + provenance, and with no verifier supplied the
+// ingest FAILS CLOSED. Asserts NO selective-disclosure soundness or unlinkability
+// of its own; research-grade, NOT externally audited (sq-qhy4). Same OFF-by-default
+// `vc-bridge` gate; adds NO dependency.
+#[cfg(feature = "vc-bridge")]
+pub mod vc_bridge_sd;
 pub mod verify;
 
 pub use field::Fr;
