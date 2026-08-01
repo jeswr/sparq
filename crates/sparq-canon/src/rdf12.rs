@@ -2,15 +2,14 @@
 //!
 //! **⚠️ NON-STANDARD. This is NOT W3C RDFC-1.0.** [RDFC-1.0] is defined for the
 //! RDF-1.1 data model only; it has **no** notion of RDF-1.2 triple terms
-//! (`<<( s p o )>>` as an object), and the consequences of triple terms for
-//! canonicalization are **unsettled upstream** (see [w3c/rdf-star-wg#114]). The
-//! profile here is sparq's own opt-in extension. The standard
-//! [`crate::canonicalize`] / [`crate::canonicalize_triples`] paths, and the W3C
-//! `rdf-canon` test suite, keep meaning **exactly** what they mean today: they
-//! still fail closed with [`CanonError::TripleTerm`] on any triple-term input.
+//! (`<<( s p o )>>` as an object), and no W3C RDF-1.2 dataset-canonicalization
+//! specification exists. The profile here is sparq's own opt-in extension. The
+//! standard [`crate::canonicalize`] / [`crate::canonicalize_triples`] paths,
+//! and the W3C `rdf-canon` test suite, keep meaning **exactly** what they mean
+//! today: they still fail closed with [`CanonError::TripleTerm`] on any
+//! triple-term input.
 //!
 //! [RDFC-1.0]: https://www.w3.org/TR/rdf-canon/
-//! [w3c/rdf-star-wg#114]: https://github.com/w3c/rdf-star-wg/issues/114
 //!
 //! ## What it does
 //!
@@ -177,8 +176,8 @@ fn subject_nesting_depth(subject: &NamedOrBlankNode) -> usize {
 /// [`crate::canonicalize`]. With triple terms it additionally relabels blank
 /// nodes nested inside triple-term objects via the HNDQ descent.
 ///
-/// This is **not** W3C RDFC-1.0 (RDF-1.2 canonicalization is unsettled
-/// upstream); see the [module docs](self).
+/// This is **not** W3C RDFC-1.0; no W3C RDF-1.2 dataset-canonicalization
+/// specification exists. See the [module docs](self).
 pub fn canonicalize_rdf12(dataset: &[Quad]) -> Result<String, CanonError> {
     canonicalize_rdf12_with::<Sha256>(dataset)
 }

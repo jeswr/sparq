@@ -72,9 +72,9 @@ bridge-lowcopy = []
 # NON-STANDARD, OFF BY DEFAULT. RDF-1.2 triple-term canonicalization: a native
 # RDFC-1.0 re-implementation over oxrdf-0.3 whose Hash-N-Degree-Quads descent
 # reaches blank nodes nested inside `Term::Triple` objects. This is NOT W3C
-# RDFC-1.0 (RDF-1.2 canonicalization is unsettled upstream). With this OFF the
-# crate is byte-identical to before and the standard paths still reject triple
-# terms with `CanonError::TripleTerm`.
+# RDFC-1.0; no W3C RDF-1.2 dataset-canonicalization specification exists. With
+# this OFF the crate is byte-identical to before and the standard paths still
+# reject triple terms with `CanonError::TripleTerm`.
 rdf12-triple-terms = ["dep:sha2"]
 # OFF BY DEFAULT. `urn:concept:` record verification (GitHub #1746): the
 # multibase/multihash envelope plus the recompute-and-byte-compare guard over
