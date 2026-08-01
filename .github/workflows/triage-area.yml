@@ -126,3 +126,35 @@ jobs:
             sed -n 's/^   LEFT /- /p' "$log"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=area-less residue::${summary}"
+
+      # #5004 — THE HALF THE STEP ABOVE CANNOT SEE. That report is built on the
+      # `--label needs:area` query, so it counts only issues that already carry the park.
+      # The registry's `curate-frontier.py` skips on a WIDER predicate — any issue whose area
+      # it cannot derive — and re-skips those every 30 minutes with no label and no count. A
+      # no-area issue that was never parked is invisible to BOTH ends: `triage.py` withholds
+      # the park from epics, gated issues and role/priority-incomplete ones, and `retriage.py`
+      # computes that park delta and then discards it (PROMOTING deltas only), so nothing
+      # ever applies it. This step is the sparq side of the cross-repo gap: the curator's own
+      # predicate, evaluated against the board it reads.
+      #
+      # READ-ONLY, and a SEPARATE step on purpose — its own failure domain, so a census fault
+      # can never abort or half-apply the label sweep above, and a reader can see at a glance
+      # that nothing here writes. `--census` runs no rule and edits no issue.
+      #
+      # No `if:`, for the same reason as the step above: a count printed only when something
+      # happened is exactly the silence this closes.
+      - name: Report the unattributed class the registry curator skips
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/triage-area-census.log"
+          python3 scripts/triage-area.py --census | tee "$log"
+          # The script's own tally line:
+          # "== N open issue(s) carry no area: label (P parked needs:area, U with no board state ...)".
+          tally=$(sed -n 's/^== //p' "$log" | tail -1)
+          tally=${tally:-'no census line — the census produced no report'}
+          {
+            printf '### unattributed class (registry curator skip predicate)\n\n%s\n\n' "$tally"
+            printf 'The registry curator cannot stage an issue whose area it cannot derive: it logs `skip #N: no confident area` and re-skips it on every tick, in a repository this one cannot change. The count above is that class measured on the board it reads. The issues listed below are the half that carries no `needs:area` park either, so no report on either side of the fence and no board query surfaces them — attributing one, or parking it, is what removes it from this list.\n\n'
+            sed -n 's/^   UNPARKED /- /p' "$log"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=unattributed class::${tally}"

@@ -61,6 +61,7 @@
 #   python3 scripts/triage-area.py                # dry run: full proposed mapping
 #   python3 scripts/triage-area.py --apply        # apply (add area:*; drop needs:area
 #                                                 #  only where it was actually set)
+#   python3 scripts/triage-area.py --census       # read-only: count the unattributed class
 #
 # Maintainer authorisation for the automated pass: sparq-org/sparq#1135 (2026-07-26).
 #
@@ -72,6 +73,14 @@
 # scripts/tests/test_triage_area.py before it writes anything, and always reports the
 # left-parked residue to the run summary — the issues no rule can attribute are a visible
 # count for a human, not silence.
+#
+# THE PARK IS NOT THE WHOLE CLASS (#5004). That residue report is built on the
+# `--label needs:area` query, so it describes only issues that already carry the park. Per
+# #5004 — a claim about the private registry, not checkable from here — its
+# `curate-frontier.py` skips on a WIDER predicate, any issue whose area it cannot derive,
+# and a no-area issue that was never parked belongs to neither report.
+# `--census` computes that wider predicate here and the cron always prints it; see the
+# block above `open_issues()` for why the two sets diverge and why the census only counts.
 import argparse
 import json
 import os
@@ -502,6 +511,92 @@ def candidate_issues():
             if not any((n or "").startswith("area:") for n in label_names(it))]
 
 
+# --- the unattributed census (#5004) --------------------------------------------
+# [OPUS-5] THE CLASS THE PARK QUERY CANNOT SEE.
+#
+# The classifier's own residue report (#3816) is assembled from the rows the sweep LEFT
+# unattributed and is written up in `triage-area.yml` against the `--label needs:area`
+# population, so every report built that way — including that run-summary one — describes
+# only the issues that ALREADY carry the park. (Since #5003 the sweep's own QUEUE is wider
+# than the park; the census below is about what gets COUNTED and reported, not fetched.)
+#
+# PER sparq#5004 — a statement about the PRIVATE `jeswr/agent-account-registry`, not
+# something this repository can check — its `curate-frontier.py` skips on a WIDER
+# predicate: any issue whose area it cannot derive, logged `skip #N: no confident area`,
+# whether or not that issue is parked. Only the sparq half is verifiable from here, and
+# that half is enough on its own: the two label sets genuinely differ, and the gap between
+# them is structural rather than incidental:
+#
+#   * `triage.py` applies the park only to an issue that is otherwise triage-complete —
+#     it deliberately withholds it from an epic, from an externally-gated issue, and from
+#     anything still missing a role or a priority;
+#   * `retriage.py` COMPUTES that park delta and then discards it, because it emits
+#     PROMOTING deltas only. Its own docstring records the leftover population and hands
+#     it on: "clearing that population is `needs:area` work, not this layer's."
+#
+# Nothing then picks it up. `triage-area.py` is that layer, and it was querying the park —
+# so a no-area issue that was never parked is invisible to BOTH ends: sparq reports on the
+# park it is not in, and the registry re-skips it every half hour with no label, no count
+# and no route back to a human. That is #5004, and it is the half of it that sparq owns:
+# the curator lives in another repository, but the board it reads is this one.
+#
+# This census is READ-ONLY and deliberately so. It computes the curator's predicate on
+# sparq's side of the fence and hands the count to `triage-area.yml`, which always prints
+# it — the always-printed-count shape #5004 asks for. It does NOT write `needs:area` onto
+# the unparked half: that would be a mass relabel of the live board under park rules
+# `triage.py` deliberately withholds from epics and gated issues, and it is a separate
+# decision from making the number visible.
+#
+# This asks for the WHOLE board, not just the park, and the open-issue count is already the
+# larger figure (`retriage.py`'s docstring carries the live measurement; no number is
+# restated here, because one pinned in a comment did not survive the week last time). A
+# silently short fetch would UNDERCOUNT the very residue the census exists to surface — the
+# exact failure mode #5004 is about, reintroduced by the fix. Detected, never assumed.
+#
+# So the census does NOT carry a fetch of its own: it reuses `open_issues()` above, the one
+# cursor-paginated snapshot #5003 introduced. That is the same requirement arrived at from
+# the other end — #5003 needed the classifier to stop truncating its queue, #5004 needs the
+# census to stop undercounting its class, and a `--limit` fetch fails both the same way.
+# One fetch means the two reports cannot drift into disagreeing about the same board, and
+# `FETCH_CEILING` gives the census its fail-closed guarantee: pagination runs to exhaustion,
+# so a short count is impossible, and an implausible snapshot raises instead of half-
+# reporting. `open_issues()` also drops PRs, which the census must not count either.
+def census(issues):
+    """Split the OPEN issues into (parked, unparked) halves of the unattributed class.
+
+    `unattributed` = carries no `area:` label = the registry curator's skip predicate.
+    `parked` are the ones the existing residue report already describes; `unparked` are
+    the ones no report on either side of the fence has ever counted.
+    """
+    parked, unparked = [], []
+    for it in sorted(issues, key=lambda i: i["number"]):
+        # `label_names()` is the shared tolerant reader: since the census took over the
+        # classifier's REST fetch (#5003) both callers see the same payload shape, so both
+        # must read it the same way — and it is the predicate that decides the count.
+        names = label_names(it)
+        if any((n or "").startswith("area:") for n in names):
+            continue
+        (parked if PARK_LABEL in names else unparked).append(it)
+    return parked, unparked
+
+
+def print_census(issues):
+    """The always-printed count, in the shape `triage-area.yml` reads back out.
+
+    `== ` is the tally line and `   UNPARKED ` the per-issue lines, deliberately distinct
+    from the classifier's own `-- `/`   LEFT `. The two report steps read SEPARATE logs
+    today, so that distinctness is defence in depth rather than the thing keeping them
+    apart: it is what stops a later merge of the two reports — or a `--census` run teed
+    into the classifier's log — from having one step silently absorb the other's lines.
+    """
+    parked, unparked = census(issues)
+    print(f"== {len(parked) + len(unparked)} open issue(s) carry no area: label "
+          f"({len(parked)} parked {PARK_LABEL}, {len(unparked)} with no board state at all), "
+          f"{len(issues)} open")
+    for it in unparked:
+        print(f"   UNPARKED #{it['number']} {it['title'][:120]}")
+
+
 def plan(issues, crates):
     """The proposed mapping. Deterministic, and a no-op for an issue that already
     carries an area (idempotence: re-running never re-decides settled work).
@@ -650,9 +745,16 @@ def main():
     ap.add_argument("--apply", action="store_true", help="write labels (default: dry run)")
     ap.add_argument("--self-test", action="store_true", help="offline rule unit tests")
     ap.add_argument("--json", action="store_true", help="emit the plan as JSON")
+    ap.add_argument("--census", action="store_true",
+                    help="READ-ONLY: count every open issue with no area: label (#5004)")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
+    if a.census:
+        # Read-only and independent of the rule table: it neither classifies nor writes, so
+        # it reports the same number whether or not the sweep above ran or wrote anything.
+        print_census(open_issues())
+        return 0
 
     crates = crate_names()
     known = live_area_labels()

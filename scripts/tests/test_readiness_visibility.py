@@ -1324,6 +1324,38 @@ class TestAreaClassifierCronSeam(unittest.TestCase):
         self.assertIn("LEFT", run,
                       "the residue report must extract the classifier's LEFT lines")
 
+    def test_the_wider_unattributed_class_is_always_reported(self):
+        # [OPUS-5] #5004. The step pinned above extracts `LEFT` lines from the
+        # `--label needs:area` sweep, so it counts only issues that already carry the park.
+        # The registry curator skips a WIDER class — any issue whose area it cannot derive —
+        # and a no-area issue that was never parked (triage.py withholds the park from epics,
+        # gated and role/priority-incomplete issues; retriage.py computes that delta and
+        # discards it) is in NEITHER report. Deleting the census step restores that blind
+        # spot, and a lane that has stopped counting looks exactly like a lane with nothing
+        # to count — which is why this is pinned here rather than left to review.
+        run = self._run_blocks()
+        self.assertIn("triage-area.py --census", run,
+                      "triage-area.yml must run the --census pass, or the unattributed "
+                      "class the registry curator skips is counted nowhere")
+        # The census prints `== <tally>` and `   UNPARKED #N ...`; the report step must
+        # extract BOTH or the count reaches no human. Pinned against the script's own
+        # prefixes so renaming one without the other reds here rather than at the next cron.
+        self.assertIn("s/^== //p", run, "the census tally is never extracted")
+        self.assertIn("s/^   UNPARKED /- /p", run,
+                      "the previously-invisible issues never reach the run summary")
+
+    def test_the_census_step_cannot_write_to_the_board(self):
+        # It runs in a job holding `issues: write`. `--census` is read-only by construction
+        # (scripts/tests/test_triage_area.py asserts its argv reaches only `issue list`);
+        # this pins that the WORKFLOW does not pair it with a mutating flag in the same step.
+        for step in self._steps():
+            run = step.get("run") or ""
+            if "--census" not in run:
+                continue
+            self.assertNotIn("--apply", run,
+                             "the census step must not also apply labels — it is a "
+                             "separate failure domain from the sweep on purpose")
+
     def test_this_lane_never_runs_on_a_pull_request(self):
         # It holds `issues: write` and executes the checked-out tree. A `pull_request`
         # trigger would run PR-authored code with a write token; `pull_request_target`

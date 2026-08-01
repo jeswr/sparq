@@ -104,6 +104,11 @@ on:
       # TestAreaClassifierCronSeam asserts the same seam (scheduled, unconditional,
       # --apply, self-tested first, issues:write) and is vacuous without this trigger.
       - ".github/workflows/triage-area.yml"
+      # [OPUS-5] #5004 — the SCRIPT side of that seam. The census report is a cross-FILE
+      # contract: triage-area.py prints `== `/`   UNPARKED ` and triage-area.yml seds for
+      # exactly those prefixes, so renaming one alone leaves a lane that runs, exits 0 and
+      # reports nothing. Without this trigger a script-only PR never runs the assertion.
+      - "scripts/triage-area.py"
       # ...and the workflow that self-tests triage.py + retriage.py on every PR.
       - ".github/workflows/docs-quality.yml"
       # [OPUS-5] the maintainer front door (#1135 / #4145) — the curated TOML, the renderer
@@ -219,6 +224,11 @@ on:
       # TestAreaClassifierCronSeam asserts the same seam (scheduled, unconditional,
       # --apply, self-tested first, issues:write) and is vacuous without this trigger.
       - ".github/workflows/triage-area.yml"
+      # [OPUS-5] #5004 — the SCRIPT side of that seam. The census report is a cross-FILE
+      # contract: triage-area.py prints `== `/`   UNPARKED ` and triage-area.yml seds for
+      # exactly those prefixes, so renaming one alone leaves a lane that runs, exits 0 and
+      # reports nothing. Without this trigger a script-only PR never runs the assertion.
+      - "scripts/triage-area.py"
       # ...and the workflow that self-tests triage.py + retriage.py on every PR.
       - ".github/workflows/docs-quality.yml"
       # [OPUS-5] the maintainer front door (#1135 / #4145) — the curated TOML, the renderer
