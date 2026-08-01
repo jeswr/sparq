@@ -658,13 +658,23 @@ impl FederatedStatement {
     /// Digest over every holder's commitments in canonical order — the subject of
     /// the out-of-circuit issuer signatures, and an input to the freshness tag.
     ///
-    /// Each commitment is prefixed by its holder's tag, so moving a commitment
-    /// between holders changes the digest (the same re-attribution concern the
-    /// layout's arity words address).
+    /// The pre-image carries the same **arity words** as
+    /// [`FederatedStatement::reconstruct_public_inputs`]: `holder_count`, then per
+    /// holder `holder_tag ‖ k_i ‖ commitments[k_i]`. A holder tag prefix ALONE
+    /// would not bind the partition, because [`FieldWord`] is opaque and accepts
+    /// arbitrary bytes: a prover may set a commitment equal to the (publicly
+    /// computable) `holder_tag` of another holder, so one holder `A` committing
+    /// `[x, holder_tag(B), y]` flattens to exactly the part sequence of the two
+    /// holders `A:[x]`, `B:[y]`. With `holder_count` and each `k_i` present the
+    /// segmentation is length-determined and that re-partition is a different
+    /// pre-image — no SHA-512 property is being leaned on to separate them.
+    /// `commitment_digest_binds_holder_arities` pins the exact collision.
     pub fn commitment_digest(&self) -> FieldWord {
         let mut parts: Vec<[u8; WORD_BYTES]> = Vec::new();
+        parts.push(*uint_word(self.holders.len() as u64).as_be_bytes());
         for seg in &self.holders {
             parts.push(*seg.holder_tag().as_be_bytes());
+            parts.push(*uint_word(seg.commitments.len() as u64).as_be_bytes());
             for c in &seg.commitments {
                 parts.push(*c.as_be_bytes());
             }
@@ -985,6 +995,78 @@ mod tests {
             err,
             BindingError::PublicInputMismatch { .. } | BindingError::PublicInputLength { .. }
         ));
+    }
+
+    /// The commitment digest binds the holder/commitment ARITIES, not just the
+    /// holder tags — pinned by the exact collision the arity words remove.
+    ///
+    /// [`FieldWord`] is opaque and accepts arbitrary bytes, and a holder tag is
+    /// publicly computable from the [`HolderId`], so a prover can plant
+    /// `holder_tag("bob")` as one of alice's commitments. Under a pre-image of
+    /// bare `holder_tag ‖ commitments…` parts, alice committing `[x, tag(bob), y]`
+    /// is then byte-identical to the two holders `alice:[x]`, `bob:[y]` — no
+    /// SHA-512 collision required. That would falsify the digest's re-attribution
+    /// claim and leave [`FreshnessBinding::tag`] (which digests this word, and is
+    /// the subject of the out-of-circuit issuer signatures) blind to the claimed
+    /// holder partition.
+    ///
+    /// The first assertion reconstructs the OLD flattened pre-image and shows it
+    /// really did collide, so the assertions after it are not vacuous. Delete
+    /// either arity word from [`FederatedStatement::commitment_digest`] and this
+    /// test goes red.
+    #[test]
+    fn commitment_digest_binds_holder_arities() {
+        let x = word(0x11);
+        let y = word(0x22);
+        // Publicly computable: exactly what HolderSegment::holder_tag derives.
+        let bob_tag = FieldWord::digest(HOLDER_DOMAIN_TAG, &[b"bob"]);
+        assert_eq!(
+            bob_tag,
+            segment("bob", 1, 0, 0).holder_tag(),
+            "the planted commitment must be a real holder tag"
+        );
+
+        let merged = statement(vec![HolderSegment::new(
+            HolderId::new("alice"),
+            vec![x, bob_tag, y],
+            vec![],
+            0,
+            vec![true; 3],
+        )
+        .unwrap()]);
+        let split = statement(vec![
+            HolderSegment::new(HolderId::new("alice"), vec![x], vec![], 0, vec![true]).unwrap(),
+            HolderSegment::new(HolderId::new("bob"), vec![y], vec![], 0, vec![true]).unwrap(),
+        ]);
+
+        // NON-VACUITY: the pre-image WITHOUT the arity words is identical.
+        let flattened = |s: &FederatedStatement| {
+            let mut parts: Vec<[u8; WORD_BYTES]> = Vec::new();
+            for seg in s.holders() {
+                parts.push(*seg.holder_tag().as_be_bytes());
+                for c in seg.commitments() {
+                    parts.push(*c.as_be_bytes());
+                }
+            }
+            parts
+        };
+        assert_eq!(
+            flattened(&merged),
+            flattened(&split),
+            "the flattened pre-images MUST actually collide, or this test proves nothing"
+        );
+
+        // With holder_count and each k_i in the pre-image, they separate.
+        assert_ne!(
+            merged.commitment_digest(),
+            split.commitment_digest(),
+            "holder_count / k_i must make the holder partition part of the digest"
+        );
+        // And so does the freshness tag that digests it.
+        assert_ne!(
+            merged.freshness_binding().tag(),
+            split.freshness_binding().tag()
+        );
     }
 
     /// Merging two holders into one segment carrying both their commitments is a
