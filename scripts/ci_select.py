@@ -105,10 +105,14 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 # `OrchestrationSafeInertnessTests`): every entry here must be a path that NO
 # `.github/workflows/*.yml` step feeding a Rust build/test/gate ever reads, and that
 # no crate `include_str!`/`include_bytes!`/`../`-escapes to. The test greps the
-# Rust-CI workflows for a reference to each allowlisted script/dir and FAILS if one
-# is referenced (i.e. is actually Rust-CI-affecting) — so an entry can never silently
-# become unsound when a script is later wired into a gate. A pattern ending in "/" is
-# a directory prefix; otherwise an exact repo-relative path.
+# Rust-CI workflows for a reference to each allowlisted script/dir/WORKFLOW and FAILS
+# if one is referenced (i.e. is actually Rust-CI-affecting) — so an entry can never
+# silently become unsound when a script is later wired into a gate, or when a listed
+# workflow is later `uses:`-called from (or named as a `paths:` input of) a skippable
+# lane. That grep only means something if the corpus covers every workflow the
+# selector can actually skip, so the same test asserts that EVERY consumer of
+# ci-select.yml is in the corpus. A pattern ending in "/" is a directory prefix;
+# otherwise an exact repo-relative path.
 #
 # NOT here (deliberately — these ARE read by the Rust matrix, so they must keep
 # triggering full): every Rust-CI script (ci_select.py, ci_summary_gate.py,
@@ -137,6 +141,33 @@ _ORCHESTRATION_SAFE: list[str] = [
     ".github/workflows/differential-update.yml",
     ".github/workflows/kb-dump.yml",
     ".github/workflows/pkg-ingest.yml",
+    # [OPUS-5] #2536 — RELEASE-LANE workflow files. The reported shape: a PR that
+    # changes ONLY a COMMENT in a release workflow (#2533) hit the broad `.github/`
+    # trigger and forced the whole Rust matrix. Same soundness argument as the block
+    # above, in two parts:
+    #   (1) NOT SELECTOR-GATED. The only workflows that consume ci-select.yml are
+    #       ci.yml / bench.yml / fuzz.yml / feature-matrix.yml. Each file below is
+    #       an independent workflow on its own release triggers (tag push / release /
+    #       workflow_dispatch / push-to-main) — none is `uses:`-called by, or named
+    #       as a path input of, a selector-gated lane, so editing one cannot change
+    #       what any skippable leg computes. (Pinned by the inertness grep, which
+    #       #2536 EXTENDED to cover workflow-file entries, not just scripts.)
+    #   (2) THEIR OWN GUARDS STILL RUN. The gates that read these files as DATA
+    #       (scripts/tests/test_release_publish_guard.py, test_release_slsa_l3_provenance.py,
+    #       test_release_container_multiarch.py, test_verify_release_provenance.sh)
+    #       are invoked by docs-quality.yml, which is NOT selector-gated and runs on
+    #       every PR — so a release-workflow edit is still validated by the lane that
+    #       actually validates release workflows, just not by the Rust engine matrix.
+    ".github/workflows/release.yml",
+    ".github/workflows/release-plz.yml",
+    ".github/workflows/release-verify.yml",
+    ".github/workflows/dist.yml",
+    ".github/workflows/publish.yml",
+    # NOTE deliberately NOT here: build-matrix.yml — it is the shared cargo BUILD
+    # matrix that release.yml/dist.yml call, i.e. a real Rust build definition. It is
+    # inert by the same argument, but "a Rust build definition changed" is exactly the
+    # case where the cheap posture is to keep running the matrix (fail-closed; the
+    # saving is one workflow, the audit is cleaner).
     # NOTE deliberately NOT here: selection-alarm.yml / formal-alarm.yml — they are
     # monitors for the Rust/formal lanes (borderline), so they keep triggering full
     # (fail-closed; the value of skipping them is negligible and the audit is cleaner).

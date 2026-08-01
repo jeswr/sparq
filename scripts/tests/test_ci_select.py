@@ -576,6 +576,31 @@ class ChangeClassTests(unittest.TestCase):
         self.assertEqual(sel.affected, [])
         self.assertEqual(sel.change_class, "orchestration-only")
 
+    def test_release_workflow_edit_is_safe(self):
+        # [OPUS-5] #2536, the reported shape: PR #2533 changed only a COMMENT in a
+        # release workflow and got the whole Rust matrix. A release-lane workflow file
+        # is proven inert (see the _ORCHESTRATION_SAFE comment), so the closure is
+        # empty and every Rust lane skips.
+        for wf in (".github/workflows/release.yml", ".github/workflows/dist.yml",
+                   ".github/workflows/publish.yml", ".github/workflows/release-plz.yml",
+                   ".github/workflows/release-verify.yml"):
+            sel = self._select([wf])
+            self.assertEqual(sel.mode, "selected", wf)
+            self.assertEqual(sel.affected, [], wf)
+            self.assertEqual(sel.change_class, "orchestration-only", wf)
+
+    def test_release_workflow_edit_beside_a_rust_ci_workflow_still_forces_full(self):
+        # Fail-closed pairing: the carve-out only ever REMOVES a proven-inert path from
+        # the full set. A Rust-CI workflow in the same diff still forces full.
+        sel = self._select([".github/workflows/release.yml", ".github/workflows/ci.yml"])
+        self.assertEqual(sel.mode, "full")
+
+    def test_release_build_matrix_still_forces_full(self):
+        # build-matrix.yml is deliberately NOT carved out (it is a real cargo BUILD
+        # definition) — pin that so the allowlist cannot quietly grow into it.
+        sel = self._select([".github/workflows/build-matrix.yml"])
+        self.assertEqual(sel.mode, "full")
+
     def test_rename_crossing_classes_forces_full(self):
         # git diff --no-renames reports a move as delete+add of BOTH paths. Moving an
         # orchestration script INTO a crate dir surfaces both paths: the crate path is
@@ -752,18 +777,44 @@ class OrchestrationSafeInertnessTests(unittest.TestCase):
             if entry.endswith("/"):
                 continue  # directory prefixes: never cargo-compiled (audited by convention)
             if entry.startswith(".github/workflows/"):
-                # An orchestration WORKFLOW file: it must not itself be a Rust-CI wf.
+                # An orchestration/release-lane WORKFLOW file: it must not itself be a
+                # Rust-CI wf...
                 self.assertNotIn(
                     Path(entry).name, self._RUST_CI_WORKFLOWS,
                     f"{entry} is listed as orchestration-safe but is a Rust-CI workflow",
                 )
-                continue
-            # A script: it must not be referenced anywhere in a Rust-CI workflow.
+                # ...and (#2536) it must not be REFERENCED by one either. The pre-#2536
+                # test stopped at the name check, which left the release-lane entries'
+                # soundness resting on a hand audit: a later `uses: ./.github/workflows/
+                # release-verify.yml` from ci.yml, or naming one in a Rust-CI `paths:`
+                # filter, would make the entry Rust-CI-affecting with nothing going red.
+                # Fall through to the same grep the scripts get.
+            # A script or workflow: it must not be referenced anywhere in a Rust-CI workflow.
             self.assertNotIn(
                 entry, blob,
                 f"orchestration-safe {entry} IS referenced by a Rust-CI workflow — it is "
                 f"NOT inert; remove it from _ORCHESTRATION_SAFE (fail-closed: a referenced "
                 f"script must keep triggering the full matrix).",
+            )
+
+    def test_every_selector_consumer_is_in_the_rust_ci_corpus(self):
+        """[OPUS-5] #2536: the inertness grep above is only as good as its corpus.
+        The workflows the selector can actually SKIP legs in are exactly those that
+        `uses:` ci-select.yml — so every one of them must be in _RUST_CI_WORKFLOWS,
+        else a future 5th consumer could reference an allowlisted path and the grep
+        would never see it. Non-vacuous: the discovered consumer set must be
+        non-empty."""
+        wf_dir = REPO_ROOT / ".github" / "workflows"
+        consumers = sorted(
+            p.name for p in wf_dir.glob("*.yml")
+            if "uses: ./.github/workflows/ci-select.yml" in p.read_text(encoding="utf-8")
+        )
+        self.assertTrue(consumers, "no ci-select.yml consumers found — the audit is vacuous")
+        for name in consumers:
+            self.assertIn(
+                name, self._RUST_CI_WORKFLOWS,
+                f"{name} consumes ci-select.yml (so the selector can skip its legs) but is "
+                f"NOT in the inertness-grep corpus — add it to _RUST_CI_WORKFLOWS.",
             )
 
     def test_orch_safe_scripts_exist_on_disk(self):
@@ -775,6 +826,72 @@ class OrchestrationSafeInertnessTests(unittest.TestCase):
                 path.exists(),
                 f"orchestration-safe entry {entry} does not exist on disk (stale allowlist)",
             )
+
+
+class ReleaseLaneSafeTests(unittest.TestCase):
+    """[OPUS-5] #2536: the SECOND half of the release-lane carve-out's soundness
+    argument. Part (1) — "no selector-gated lane reads these files" — is pinned by
+    OrchestrationSafeInertnessTests. Part (2) is that the gates which DO read them as
+    data still run: they live in workflows the selector cannot skip. If a future guard
+    that parses a release workflow were wired ONLY into a selector-gated lane, a
+    release-workflow PR could skip its own guard — exactly the unsound skip §2 forbids,
+    and exactly what this test turns red."""
+
+    RELEASE_LANE = [
+        ".github/workflows/release.yml",
+        ".github/workflows/release-plz.yml",
+        ".github/workflows/release-verify.yml",
+        ".github/workflows/dist.yml",
+        ".github/workflows/publish.yml",
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wf_dir = REPO_ROOT / ".github" / "workflows"
+        cls.wf_text = {p.name: p.read_text(encoding="utf-8") for p in cls.wf_dir.glob("*.yml")}
+        cls.selector_gated = {
+            name for name, text in cls.wf_text.items()
+            if "uses: ./.github/workflows/ci-select.yml" in text
+        }
+
+    def test_release_lane_entries_are_allowlisted(self):
+        # The mirror above must describe the real allowlist, else this suite audits
+        # nothing (vacuity guard).
+        for entry in self.RELEASE_LANE:
+            self.assertIn(entry, cs._ORCHESTRATION_SAFE, f"{entry} is not allowlisted")
+
+    def test_release_lane_workflows_are_not_selector_gated(self):
+        # A carved-out workflow must not itself consume the selector — otherwise
+        # editing it would change what its own (skippable) legs compute.
+        for entry in self.RELEASE_LANE:
+            self.assertNotIn(Path(entry).name, self.selector_gated, entry)
+
+    def test_guards_reading_a_release_workflow_run_outside_the_selector(self):
+        # Scope: `scripts/tests/**` — the files that ASSERT on a release workflow's
+        # contents. Deliberately not all of `scripts/`, where a mention is usually a
+        # prose cross-reference rather than a gate reading the file.
+        tests_dir = REPO_ROOT / "scripts" / "tests"
+        checked = 0
+        for entry in self.RELEASE_LANE:
+            name = Path(entry).name
+            for guard in sorted(p for p in tests_dir.iterdir() if p.is_file()):
+                if name not in guard.read_text(encoding="utf-8", errors="ignore"):
+                    continue
+                runners = {
+                    wf for wf, text in self.wf_text.items()
+                    if f"scripts/tests/{guard.name}" in text
+                }
+                if not runners:
+                    continue  # invoked by no workflow at all: a different problem
+                self.assertTrue(
+                    runners - self.selector_gated,
+                    f"{guard.name} reads {entry} but every workflow that runs it "
+                    f"({sorted(runners)}) is selector-gated — a release-workflow PR "
+                    f"would skip this guard; either run it from a non-gated workflow "
+                    f"or drop {entry} from _ORCHESTRATION_SAFE.",
+                )
+                checked += 1
+        self.assertGreater(checked, 0, "no release-workflow guard found — the audit is vacuous")
 
 
 class RealMetadataShapeTests(unittest.TestCase):

@@ -138,6 +138,28 @@ Any changed path matching the following forces `mode=full`, no closure math:
 Changes to the selector script or its tests are subsumed by `scripts/**`; a
 selection-logic PR therefore always validates against the full matrix.
 
+**The proven-inert carve-out.** `.github/**` and `scripts/**` above are
+correct-by-default but over-broad: a PR touching only orchestration tooling, or only
+a release-lane workflow (issue #2536 — a comment change in a release workflow forced
+the whole matrix), is not read by any leg the selector can skip. `ci_select.py`'s
+`_ORCHESTRATION_SAFE` is therefore an explicit, audited **allowlist** — never a
+denylist — consulted before the trigger table; a `.github/`/`scripts/` path that does
+not match still forces full (absence of proof ⇒ run, §2). Two obligations, both
+enforced by `scripts/tests/test_ci_select.py`:
+
+1. **Not read by a skippable lane.** No workflow that consumes `ci-select.yml`
+   (today: `ci.yml`, `bench.yml`, `fuzz.yml`, `feature-matrix.yml`) may reference an
+   allowlisted script or workflow — and every consumer of `ci-select.yml` must be in
+   the grep corpus, so a future fifth consumer cannot escape the audit.
+2. **Its own guards still run.** For the release-lane entries, the gates that parse
+   those workflows as data (the release-publish / SLSA-provenance / multiarch /
+   provenance-verify checks) are invoked from `docs-quality.yml`, which is not
+   selector-gated — so a release-workflow PR is still validated by the lane that
+   validates release workflows, just not by the Rust engine matrix.
+
+`build-matrix.yml` is deliberately excluded: it is a real cargo build definition, and
+the fail-closed posture there is worth more than the one skipped workflow.
+
 ### 4.2 The ownership map — `ci/path-ownership.toml`
 
 A small, checked-in, audited policy file. Three ownership-verdict forms plus the
