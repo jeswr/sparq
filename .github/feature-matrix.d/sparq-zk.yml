@@ -31,10 +31,18 @@
 # (`#![cfg(feature = "secprop-annotations")]`) are ALL behind the default-OFF
 # `secprop-annotations` feature, so ci.yml's default-feature lane compiles
 # them EMPTY and runs ZERO of them — the silent-skip gap (#1171) this leg
-# closes. The feature pulls only `oxttl` (already a workspace dep). Verified
-# locally: `cargo test -p sparq-zk --features secprop-annotations` runs the
-# 11 `secprop::tests` + the `secprop_annotations.rs` integration tests, and
-# `clippy --all-targets -D warnings` is clean in every state.
+# closes. The feature pulls `oxttl` (already a workspace dep) and, since
+# [OPUS-5] sq-3705, `sparq-secprop-vocab` — a ZERO-dependency leaf carrying
+# the shared `secx:` IRI constants, so it adds a `const &str` table and no
+# transitive dependency. That edge REPLACED the local IRI copies and the
+# cross-package `include_str!` of sparq-trust's vocabulary; the guards that
+# keep them from coming back (`module_declares_no_local_sec_prop_iri_literal`,
+# `keyed_terms_come_from_the_canonical_vocabulary`) and the relocated
+# annotation-graph dimension guard `methods_ttl_dims_are_canonical_vocabulary`
+# are all in this leg. Verified locally: `cargo test -p sparq-zk --features
+# secprop-annotations` runs 15 `secprop::tests` + the 2
+# `secprop_annotations.rs` integration tests, and `clippy --all-targets -D
+# warnings` is clean in every state.
 - name: "sparq-zk (secprop-annotations — per-method annotation graph + over-claim guards)"
   crate: "sparq-zk"
   features: "secprop-annotations"
