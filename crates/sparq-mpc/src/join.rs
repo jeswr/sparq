@@ -308,7 +308,11 @@ fn compatible(lrow: &[Option<Term>], rrow: &[Option<Term>], shared: &[(usize, us
 /// Sort rows into a canonical order (by their `{:?}` term tuple) so the
 /// disclosed result multiset is independent of holder/row ordering — the
 /// verifier recomputes ORDER BY over the disclosed multiset (convention #4).
-fn canonicalize_rows(rows: &mut [Vec<Option<Term>>]) {
+///
+/// `pub(crate)` so the malicious-secure twin ([`crate::auth_join`], sq-km34)
+/// canonicalises with the SAME body — a second implementation would let the two
+/// joins' outputs differ in order and silently break their differential parity.
+pub(crate) fn canonicalize_rows(rows: &mut [Vec<Option<Term>>]) {
     rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
 }
 

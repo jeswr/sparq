@@ -303,7 +303,7 @@ leaks the boolean) or needs P5 to keep the sum itself secret (OPEN — see §4.2
 |---|---|---|---|
 | SH, HM, any N | **BUILT** | equality-to-zero: `d=a−b`, mask `m=d·r`, open `m`; `m==0 ⇔ equal`. 1 mult + 1 open. Leaks only the match bit. | `secure_equal` (`join.rs:411`) |
 | Mal, HM, over-provisioned N | KNOWN→partial | same with checked open; full malicious needs IT-MAC | `reconstruct_degree` checks the 2t open where redundancy exists |
-| Mal, HM, **minimal N=2t+1** | **OPEN (the one real hole)** | **IT-MAC** on the degree-2t product (NOT RS redundancy — there is none at degree 2t when n=2t+1) | documented gap; seam **sq-6d6g**. Per coZK eprint 2025/1026 this is also a *confidentiality* hole, not just correctness |
+| Mal, HM, **minimal N=2t+1** | **BUILT (with-abort)** — [OPUS-5] **sq-km34** | **IT-MAC** on the equality product (NOT RS redundancy — there is none at degree 2t when n=2t+1): authenticate `[[m]] = [[d]]·[[r]]`, then MAC-check before any match bit is acted on | `auth_join::malicious_secure_equal` / `malicious_hidden_join`; tier reported by `auth_join::equality_join_security` (Malicious + Abort(Unanimous)). The semi-honest `secure_equal` is unchanged and still reports `SemiHonestOnly` — the promotion is per-PATH, not a relabel of the backend. **Residual:** the MAC authenticates `m = d·r`, NOT `r ≠ 0`, so mask integrity still rests on the trusted-dealer draw (`randomness.rs` "the `r = 0` threat", exhibited by a witness test) — a dealer-less source needs an authenticated nonzero test first. Per coZK eprint 2025/1026 this cell is also a *confidentiality* hole, not just correctness; the mitigation is the check-then-act discipline at the open boundary. `sq-qhy4` external sign-off pending |
 | any, DM | KNOWN | SPDZ equality (MAC-checked) | no backend |
 
 #### Inner JOIN (hidden key) / cross-credential hidden join
@@ -312,7 +312,7 @@ leaks the boolean) or needs P5 to keep the sum itself secret (OPEN — see §4.2
 |---|---|---|---|
 | SH, HM, any N | **BUILT (naive)** | sparq runs **all-pairs** `O(\|L\|·\|R\|)` `secure_equal`. **SOTA is O(n log n)** ORQ sort-merge join-aggregation OR ~linear **circuit-PSI** (cuckoo+simple hashing; VOLE-PSI eprint 2021/266) | `HiddenValueJoin` all-pairs (`join.rs:443`); SOTA = bead **sq-ujz8 OPEN** |
 | SH, HM, **disclosed global-IRI key** | **BUILT, crypto-free** | hash-join `O(\|L\|+\|R\|)` in cleartext — sparq's genuine lead (global IRIs as cross-holder join keys) | `DisclosedKeyJoin` (`join.rs:119`) |
-| Mal, HM, N=3 | KNOWN | **ORQ 4-party Fantastic Four** sort-merge; relational SOTA | not built |
+| Mal, HM, N=3 | **BUILT (all-pairs, with-abort)** — [OPUS-5] **sq-km34**; SOTA still KNOWN-not-built | **ORQ 4-party Fantastic Four** sort-merge is the relational SOTA | `auth_join::malicious_hidden_join` — the same all-pairs shape as the semi-honest join, with every pair's equality product IT-MAC'd and the WHOLE `\|L\|·\|R\|` batch verified in ONE `σ` open, so the malicious lift costs `O(1)` rounds per join rather than per pair. Integrity only: the per-pair match bit is still opened (L2 unchanged). The SOTA sort-merge shape remains **sq-ujz8 OPEN** |
 | Mal, DM | KNOWN | malicious circuit-PSI (VOLE-PSI, malicious, single equi-join only — does NOT compose into multi-pattern BGP) | no backend |
 | any, multi-pattern BGP | **primitives BUILT; awaits sort-merge join** | sort-merge composed per pattern (P6) needs the secure comparator + mult-chaining | **[RECONCILED 2026-06-16]** the secure comparator (`sq-rrz4`) + mult-chaining (`sq-dvuc`) are CLOSED; the remaining dependency is the SOTA sort-merge join (`sq-ujz8`, OPEN) |
 
@@ -452,7 +452,7 @@ The directive asks the cost of hardening each operator. Per primitive:
 | Primitive | SH→Mal cost (HM) | SH→Mal cost (DM) |
 |---|---|---|
 | P0 linear / SUM | ~free — RS-checked open is the same Lagrange on clean input; cost only on tamper (BUILT) | SPDZ MAC-check before open (adds the preprocessing tax) |
-| P2 equality | **IT-MAC** at minimal N (the one real hole, sq-6d6g); otherwise RS-checked (BUILT) | SPDZ MAC |
+| P2 equality | **IT-MAC** at minimal N — **BUILT** ([OPUS-5] `sq-km34`, `auth_join`): ~2× the multiplication work (two `mul_shares_raw` + two `degree_reduce` vs one product + one degree-`2t` open) + ~2× share volume for the MAC halves, and ONE batched `σ` open amortised over the whole batch; otherwise RS-checked (BUILT) | SPDZ MAC |
 | P3 shuffle | malicious shuffle needs a proof-of-permutation (verifiable shuffle) — KNOWN | heavier |
 | P4 mult / P5 comparison | Goyal–Song "malicious comes free in honest majority" (eprint 2020/134) — **~no online overhead at HM** | Beaver triples + MAC-check — preprocessing dominates |
 | P6 sort | inherits comparator + checked opens | inherits |
@@ -463,7 +463,10 @@ Goyal–Song–Liu) for the arithmetic operators *once the primitives exist* —
 this lift is now realisable rather than hypothetical; the IT-MAC machinery that delivers it is
 in flight (`authenticated.rs`, `sq-km34.1` CLOSED + `sq-km34.2–.9` OPEN). The cost is in the
 checked-open machinery (BUILT for degree-`t`/`2t`-with-redundancy) plus an IT-MAC for the one
-no-redundancy cell. At **dishonest majority** there is NO free lunch: every malicious cell
+no-redundancy cell — **[OPUS-5] that IT-MAC has now landed for the equality/join cell**
+(`auth_join`, `sq-km34`), so P2's minimal-`N` lift is measured rather than projected; the
+registry-wide `new_malicious(n)` wiring (`sq-km34.7`) and the comparison cell's promotion
+remain OPEN. At **dishonest majority** there is NO free lunch: every malicious cell
 pays the SPDZ preprocessing tax (Beaver triples + MACs), and — critically — **no published
 system delivers dishonest-majority-malicious correctness for SPARQL/graph query eval at all**
 (parent §6.3). The registry correctly **refuses** that request rather than downgrading.

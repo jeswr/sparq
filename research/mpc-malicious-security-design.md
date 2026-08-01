@@ -559,6 +559,25 @@ sq-pwr — ids recorded in the report:
    / `HiddenValueJoin` (`join.rs:411`,`:443`): authenticate `m = d·r`, MAC-check before open.
    Acceptance: `secure_equal` promotes `EqualityJoin` from `SemiHonestOnly → Abort` at
    `n=2t+1`; differential parity with plaintext join preserved. Depends on (1)–(4).
+
+   > **[OPUS-5] LANDED — with two deviations from this text, both deliberate.** The
+   > implementation is `crates/sparq-mpc/src/auth_join.rs`
+   > (`malicious_secure_equal` / `malicious_hidden_join` / `equality_join_security`),
+   > not an edit to `join.rs`: it is an opt-in TWIN, mirroring how `auth_compare` twins
+   > `compare`, so the semi-honest `HiddenValueJoin` is byte-for-byte unchanged and keeps
+   > its honest `SemiHonestOnly` reporting. Consequently **(a)** the promotion is reported
+   > per-PATH via `equality_join_security` (→ `SecurityDescriptor::authenticated_abort`),
+   > NOT by promoting `ShamirBackend::operator_descriptor(EqualityJoin)` — that arm
+   > describes the unauthenticated path, which no MAC covers, so promoting it would
+   > relabel code that did not change. The registry-wide `new_malicious(n)` wiring stays
+   > step (7)/sq-km34.7. **(b)** Two boundaries this record did not call out, found during
+   > implementation and now witness-tested rather than merely documented:
+   > **operand order is load-bearing** — `auth_mul` ADOPTS a value deviation on its SECOND
+   > operand, so the construction must be `[[d]]·[[r]]` (difference first, mask second);
+   > reversed, a *matching* pair can be flipped to a non-match for free with `σ = 0` — and
+   > **the MAC does not authenticate `r ≠ 0`**, so the `randomness.rs` `r = 0` threat is
+   > untouched and mask integrity still rests on the trusted-dealer draw. Both are pinned
+   > by tests in that module. External sign-off remains pending (`sq-qhy4`).
 6. **Malicious-secure comparison (depends on sq-rrz4 + this stack).** When the secure
    greater-than lands (sq-rrz4), build it on authenticated mul/reduce so the boolean verdict is
    MAC-checked. Acceptance: secure verdict == plaintext `(sum > threshold)`, tamper in any gate

@@ -260,6 +260,15 @@ impl ShamirBackend {
             // Equality / hidden-value join: degree-`2t` open. No redundancy at
             // `n = 2t+1` (odd-`n` honest majority) → semi-honest-only; otherwise
             // the RS budget at degree `2t` decides detect-and-abort vs robust.
+            //
+            // [OPUS-5] sq-km34: this arm describes the SEMI-HONEST
+            // `join::HiddenValueJoin` path, and it stays SemiHonestOnly at `n = 2t+1`
+            // because that path really is. The IT-MAC twin
+            // (`auth_join::malicious_hidden_join`) reaches Malicious + Abort(Unanimous)
+            // at the SAME `(n, t)` — soundness from the secret `α`, not from RS — and
+            // reports it via `auth_join::equality_join_security`. Keep the two
+            // reportings distinct: promoting this arm would relabel the unauthenticated
+            // path, which no MAC covers.
             OperatorClass::EqualityJoin => match self.rs_correction_budget(2 * self.t) {
                 None => SecurityDescriptor::semi_honest_only(self.n, self.t),
                 Some(e) => SecurityDescriptor::shamir_degree_recon(self.n, self.t, e),

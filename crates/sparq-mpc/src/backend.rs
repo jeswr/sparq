@@ -434,6 +434,40 @@ impl SecurityDescriptor {
         }
     }
 
+    /// [OPUS-5] sq-km34 — the **IT-MAC authenticated** descriptor: honest-majority,
+    /// AXIS-1 `Malicious`, AXIS-2 `Abort(Unanimous)` (design §3). This is the tier an
+    /// operator reaches when every value on its path carries an information-theoretic
+    /// MAC under a secret-shared `[α]` and the batch is MAC-checked before any value
+    /// is acted on ([`crate::shamir::MacSession::mac_check_and_open`]) — soundness
+    /// then comes from the secrecy of `α`, NOT from Reed–Solomon redundancy, which is
+    /// why it holds at the minimal `n = 2t+1` where [`Self::shamir_degree_recon`]'s
+    /// redundancy argument has nothing to work with.
+    ///
+    /// Deliberately NOT [`AbortKind::Identifiable`]: detect-and-abort with no sound
+    /// cheater attribution (true IA needs authenticated per-party transcripts +
+    /// broadcast that the in-process simulation lacks — see [`AbortKind`]). And
+    /// deliberately never a [`OutputGuarantee::GuaranteedOutput`]: a cheater can
+    /// always force the abort.
+    ///
+    /// **FAIL-CLOSED under a dishonest majority** (`n <= 2t`), for the same reason
+    /// [`Self::shamir_degree_recon`] is: honest-majority authenticated Shamir relies
+    /// on `<= t` corruptions both for the privacy of `[α]`/`[x]` and for the
+    /// degree-reduce/recombine, so an `Abort` claim there would over-claim. A genuine
+    /// dishonest-majority authenticated backend (SPDZ/MASCOT) is a different
+    /// construction and would build its descriptor directly. `[OPUS-5]`
+    pub fn authenticated_abort(n: usize, t: usize) -> Self {
+        let threshold = CorruptionThreshold::from_n_t(n, t);
+        if !threshold.is_honest_majority() {
+            return SecurityDescriptor::semi_honest_only(n, t);
+        }
+        SecurityDescriptor {
+            adversary: AdversaryModel::Malicious,
+            output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
+            threshold,
+            public_verifiability: PublicVerifiability(false),
+        }
+    }
+
     /// A no-redundancy descriptor: semi-honest-only, with no detection. Used for
     /// the degree-`2t` equality open at `n = 2t+1` (zero RS redundancy at degree
     /// `2t`) and for honest stub backends. `[OPUS-4.8]`
