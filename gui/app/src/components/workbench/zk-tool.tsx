@@ -23,8 +23,13 @@
 // research-track: external accredited-cryptographer sign-off is pending (bead sq-qhy4), so
 // nothing in this panel presents a proof as a settled cryptographic guarantee.
 //
-// Stable hooks: [data-result-kind="zk"] (the candidates + proof pane),
-// [data-result-kind="error"] (the error <pre>), [data-zk-proof-verified] on a finished proof.
+// Stable hooks (driven by gui/e2e-playwright/specs/zk-tool.spec.ts, the browser lane that
+// exercises this panel's REAL prove path end to end): [data-result-kind="zk"] (the candidates
+// + proof pane), [data-result-kind="error"] (the error <pre>), [data-zk-prover] (the
+// cold-start pill), [data-zk-candidate]/[data-zk-provable] (a candidate row + whether it can
+// be proven), [data-zk-proof-verified] on a finished proof, [data-zk-public-inputs] (the
+// public-input list the verifier sees), [data-zk-refused] (the circuit's refusal of a false
+// claim).
 
 import * as React from "react";
 import {
@@ -319,6 +324,8 @@ function CandidateTable({
           {scan.candidates.map((c) => (
             <tr
               key={c.row}
+              data-zk-candidate={c.value}
+              data-zk-provable={c.provable ? "true" : "false"}
               className={cn(
                 "border-t align-top",
                 c.row === selectedRow && "bg-primary/5 ring-1 ring-inset ring-primary/30",
@@ -451,7 +458,10 @@ function ProvePanel({
       </div>
 
       {state.kind === "refused" ? (
-        <p className="rounded-md border border-[var(--warning)]/30 bg-[var(--warning)]/5 p-2 text-xs text-muted-foreground">
+        <p
+          className="rounded-md border border-[var(--warning)]/30 bg-[var(--warning)]/5 p-2 text-xs text-muted-foreground"
+          data-zk-refused={state.claim ? "true" : "false"}
+        >
           <CircleAlert className="mr-1 inline size-3.5 text-[var(--warning)]" aria-hidden />
           The witness solve failed, so <strong>no proof exists</strong> for that claim: the
           constraint system will not certify a verdict the hidden value does not satisfy. That
@@ -512,9 +522,12 @@ function ProofSummary({ result, value }: { result: ProofResult; value: number })
         <p className="mb-1 flex items-center gap-1.5 text-[11px] font-medium">
           <Eye className="size-3.5" aria-hidden /> Public inputs the verifier sees
         </p>
-        <ul className="space-y-0.5 font-mono text-[11px] text-muted-foreground">
+        <ul
+          className="space-y-0.5 font-mono text-[11px] text-muted-foreground"
+          data-zk-public-inputs={result.publicInputs.length}
+        >
           {result.publicInputs.map((p, i) => (
-            <li key={i} className="break-all">
+            <li key={i} className="break-all" data-zk-public-input={p}>
               · {p}
             </li>
           ))}

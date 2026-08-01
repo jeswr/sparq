@@ -147,7 +147,12 @@ A second button asks the prover for the *opposite* verdict: the witness solve th
 no proof exists, which is the refusal the tool demonstrates rather than asserts. The ceiling
 is shown, not hidden — binding an arbitrary store value to the circuit needs the **native**
 blake3 term encoder, which is not in the in-tab wasm bundle, so every row without a shipped
-term commitment is listed with that exact reason instead of being dropped.
+term commitment is listed with that exact reason instead of being dropped. Those claims are
+gated rather than asserted: `e2e-playwright/specs/zk-tool.spec.ts` (the `gui-mock-ipc` job)
+drives the panel's real prove path in headless Chromium — proof generated **and verified**
+in-tab, the store value absent from the proof's public inputs, and the opposite claim refused
+by the circuit. A green run there is evidence the machinery runs; it is **not** a soundness
+result (no external cryptographer review — `sq-qhy4`).
 
 **MPC** (`live-sim`) takes each party's private contribution from a SELECT over the live
 store and reveals exactly one bit — `Σ contributions ≥ threshold` — through an additive

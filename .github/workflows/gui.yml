@@ -330,7 +330,10 @@ jobs:
   gui-mock-ipc:
     name: "GUI Playwright mocked-IPC lane"
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # [OPUS-5] sq-ixc3.17 — 25 → 35. specs/zk-tool.spec.ts drives a REAL in-tab UltraHonk
+    # prove + verify, and this runner is not cross-origin-isolated (no SharedArrayBuffer), so
+    # bb.js runs SINGLE-THREADED. The spec's own 300 s ceiling has to fit inside the job's.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

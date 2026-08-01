@@ -7,6 +7,13 @@
 // witness-selection unit tests, and re-proving it here is not possible: bb.js proving needs
 // the WASM prover and belongs in a browser lane, not in `node --test`.
 //
+// That browser lane now EXISTS and is where those claims are actually earned:
+// `gui/e2e-playwright/specs/zk-tool.spec.ts` (the gating `gui-mock-ipc` job) drives THIS
+// panel's own prove path end to end — lazy import → ACIR fetch → Barretenberg →
+// `noir.execute` → generateProof/verifyProof → the rendered public inputs → the refusal
+// button. This file is the cheap CONFIGURATION guard that runs on every unit-test run and
+// fails first, in seconds, when the two provers drift apart; the spec is the proof run.
+//
 // WHAT IS ACTUALLY GATED. The GUI's prover is not an independent implementation — it is the
 // SAME configuration as the site's car-hire prover, which IS proven and verified end to end
 // in a real headless-Chromium lane (`site/e2e/zk-prewarm.spec.ts`, run by the `site-e2e`
@@ -23,11 +30,11 @@
 // `#[test(should_fail_with = "filter verdict mismatch")]` — which is also the exact assertion
 // label `lib/zk-witness.ts::isUnsatisfiable` keys on.
 //
-// WHAT IS NOT GATED — say it plainly. This is an EQUIVALENCE argument, not a proof run. No
-// GUI-native browser test yet drives the tool's own Prove button through bb.js, so the
-// wiring BETWEEN the panel and the prover (the two prove buttons, the refusal branch, the
-// public-inputs rendering) rests on code review, not on a gate. A Playwright spec in the
-// `gui-mock-ipc` lane is the missing piece; it is tracked as follow-up work.
+// WHAT IS NOT GATED — say it plainly. Everything here is a STATIC source comparison: it
+// reads the two modules as text. It can tell you the configurations agree; it cannot tell
+// you either one runs. Only `zk-tool.spec.ts` can, and only for the GUI. And neither gate
+// says anything about SOUNDNESS: sparq's ZK estate is research-track with no external
+// accredited-cryptographer review (bead sq-qhy4).
 //
 // Run via:   npm run test:unit   (gui/app)
 import { test } from "node:test";
