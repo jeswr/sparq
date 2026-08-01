@@ -222,6 +222,18 @@ secx:PerPresentation a skos:Concept ; rdfs:label "Per-presentation"@en-GB .
 secx:Linkable a skos:Concept ; rdfs:label "Linkable"@en-GB .
 
 # ─── [his] PostQuantumForgery: keep IRI, add the nistLevel parameter ──────────
+# The DIMENSION IRI is VENDORED (vocab/sec-prop.yaml.ld, paper §7.7 #3). The subject
+# below re-asserts the ORIGINAL IRI and label verbatim and the vendored
+# `sec-prop:SecurityProperty` type, adding only the `owl:ObjectProperty` typing every
+# other dimension in this file carries — it mints nothing and refines nothing (design
+# §4.1, extend-do-not-fork). It is stated here so this file is self-contained for the
+# `secx:property` range, and so the cross-crate dimension-IRI drift guards (sq-mgxz8)
+# CAN check subject presence for these three directly; retiring their exemption entries
+# in `sparq-policy`'s guards is separate follow-up work in that crate.
+secx:PostQuantumForgery a owl:ObjectProperty, sec-prop:SecurityProperty ;
+  rdfs:label "Post-quantum forgery resistance"@en-GB ;
+  rdfs:isDefinedBy <https://w3id.org/zkp-sparql/sec-prop> ;
+  rdfs:comment "Vendored dimension re-asserted from vocab/sec-prop.yaml.ld (§7.7 #3); levels PQForgeryResistant ⊐ PQForgeable, parameterised by secx:nistLevel."@en-GB .
 secx:PQForgeryResistant a skos:Concept ; rdfs:label "PQ forgery-resistant"@en-GB .
 secx:PQForgeable a skos:Concept ; rdfs:label "PQ forgeable"@en-GB .
 secx:nistLevel a owl:DatatypeProperty ;
@@ -230,6 +242,11 @@ secx:nistLevel a owl:DatatypeProperty ;
   rdfs:range xsd:integer .
 
 # ─── [his] PostQuantumSnooping ────────────────────────────────────────────────
+# Vendored dimension IRI — same re-assertion rationale as PostQuantumForgery above.
+secx:PostQuantumSnooping a owl:ObjectProperty, sec-prop:SecurityProperty ;
+  rdfs:label "Post-quantum snooping resistance (harvest-now-decrypt-later)"@en-GB ;
+  rdfs:isDefinedBy <https://w3id.org/zkp-sparql/sec-prop> ;
+  rdfs:comment "Vendored dimension re-asserted from vocab/sec-prop.yaml.ld (§7.7 #4); levels PQHiding ⊐ PQRevealable. The PQ-time slice of the general secx:Hiding axis."@en-GB .
 secx:PQHiding a skos:Concept ; rdfs:label "PQ hiding"@en-GB .
 secx:PQRevealable a skos:Concept ; rdfs:label "PQ revealable"@en-GB .
 
@@ -239,6 +256,11 @@ secx:IssuerSetDisclosure a skos:Concept ; rdfs:label "Issuer-set disclosure"@en-
 secx:FullSourceDisclosure a skos:Concept ; rdfs:label "Full source disclosure"@en-GB .
 
 # ─── [his] SignatureTypeLeakage ───────────────────────────────────────────────
+# Vendored dimension IRI — same re-assertion rationale as PostQuantumForgery above.
+secx:SignatureTypeLeakage a owl:ObjectProperty, sec-prop:SecurityProperty ;
+  rdfs:label "Signature-type leakage (PoKoS reveals signature type)"@en-GB ;
+  rdfs:isDefinedBy <https://w3id.org/zkp-sparql/sec-prop> ;
+  rdfs:comment "Vendored dimension re-asserted from vocab/sec-prop.yaml.ld (§7.7 #5); levels SchemeHidden ⊐ SchemeRevealed."@en-GB .
 secx:SchemeHidden a skos:Concept ; rdfs:label "Scheme hidden"@en-GB .
 secx:SchemeRevealed a skos:Concept ; rdfs:label "Scheme revealed"@en-GB .
 
