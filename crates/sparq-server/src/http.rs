@@ -411,6 +411,23 @@ pub struct ServerConfig {
     /// log otherwise). It is also NOT the ZK/MPC privacy story. Inert unless `verbose` is also on
     /// (no request log => nothing to redact). See [`crate::redact`].
     pub redact_logs: bool,
+    /// [SONNET-4.6] (sq-3bz2w) **Slow-query log** arming threshold. `Some(d)` records every
+    /// query request whose measured wall time is `>= d` into the bounded slow-query ring served
+    /// by `GET /admin/slow-queries`; `None` (the default) leaves the log disarmed and the route
+    /// answering `404`, so a compiled-in feature still costs one `Option` check per request.
+    /// Set by `--slow-query-log <MS>` / `SPARQ_SLOW_QUERY_LOG` (a zero threshold records every
+    /// query — legitimate for debugging, but every query then pays the plan replay). Present
+    /// only with the `slow-query-log` cargo feature; without it the field, the flag, the route
+    /// and the recording seam are compiled out (byte-identical to before). PRIVACY: the ring
+    /// retains RAW query text — see [`crate::slow_query`] for that boundary.
+    #[cfg(feature = "slow-query-log")]
+    pub slow_query_threshold: Option<Duration>,
+    /// [SONNET-4.6] (sq-3bz2w) How many slow queries the ring retains (the "N worst"). Clamped
+    /// to at least 1. Set by `--slow-query-capacity <N>` / `SPARQ_SLOW_QUERY_CAPACITY`; inert
+    /// unless [`slow_query_threshold`](Self::slow_query_threshold) arms the log. Each retained
+    /// entry holds one query's text and its plan tree, so this bounds the log's memory.
+    #[cfg(feature = "slow-query-log")]
+    pub slow_query_capacity: usize,
     /// [OPUS-4.8] (sq-0bxp) **Per-query access audit log** runtime switch (CDMC CD-2 / ISO
     /// 27001 A.8.15 / EU CRA logging). When `true`, every query / update / Graph-Store request
     /// emits a structured `tracing` record under the dedicated `target: "sparq_server::audit"`
@@ -864,6 +881,14 @@ impl Default for ServerConfig {
             // start writing query text (possibly PII) into operator logs. Opt out with
             // --log-full-requests / SPARQ_LOG_FULL_REQUESTS=1. Inert unless `verbose` is also set.
             redact_logs: true,
+            // [SONNET-4.6] sq-3bz2w: the slow-query log is DISARMED by default even when the
+            // feature is compiled in (the operator arms it via --slow-query-log <MS> /
+            // SPARQ_SLOW_QUERY_LOG). 16 retained entries is a small, bounded default the
+            // operator widens with --slow-query-capacity.
+            #[cfg(feature = "slow-query-log")]
+            slow_query_threshold: None,
+            #[cfg(feature = "slow-query-log")]
+            slow_query_capacity: 16,
             // [OPUS-4.8] sq-0bxp: audit log OFF by default even when the feature is compiled in
             // (the operator opts in deliberately via --audit-log / SPARQ_AUDIT_LOG=1).
             #[cfg(feature = "audit-log")]
@@ -1105,6 +1130,19 @@ impl ServerConfig {
         #[cfg(feature = "audit-log")]
         if let Ok(v) = std::env::var("SPARQ_AUDIT_LOG") {
             cfg.audit_log = env_truthy(&v);
+        }
+        // [SONNET-4.6] sq-3bz2w: SPARQ_SLOW_QUERY_LOG=<MS> arms the slow-query log at that
+        // threshold in milliseconds (only when the `slow-query-log` feature is compiled in); an
+        // unset / unparseable value leaves it disarmed. SPARQ_SLOW_QUERY_CAPACITY=<N> sizes the
+        // ring; 0 is clamped to 1 by the ring itself.
+        #[cfg(feature = "slow-query-log")]
+        {
+            if let Some(ms) = env_parse::<u64>("SPARQ_SLOW_QUERY_LOG") {
+                cfg.slow_query_threshold = Some(Duration::from_millis(ms));
+            }
+            if let Some(n) = env_parse::<usize>("SPARQ_SLOW_QUERY_CAPACITY") {
+                cfg.slow_query_capacity = n.max(1);
+            }
         }
         // [OPUS-4.8] sq-toze.34: SPARQ_LOG_FULL_REQUESTS truthy ("1"/"true"/"yes"/"on") OPTS OUT of
         // request-log redaction (logs full URIs/query text verbatim). Default (unset / falsey) keeps
@@ -2524,6 +2562,13 @@ pub struct AppState {
     /// values share one registry (the `Arc`).
     #[cfg(feature = "query-registry")]
     running_queries: Arc<QueryRegistry>,
+    /// [SONNET-4.6] (sq-3bz2w) The opt-in slow-query log backing `GET /admin/slow-queries`.
+    /// `None` unless the operator armed it (`--slow-query-log <MS>` / `SPARQ_SLOW_QUERY_LOG`),
+    /// so a compiled-but-disarmed build pays one `Option` check per query. Cloned `AppState`
+    /// values share one log (the `Arc`). Unlike `running_queries` this retains RAW query text —
+    /// see `crate::slow_query`.
+    #[cfg(feature = "slow-query-log")]
+    slow_queries: Option<Arc<crate::slow_query::SlowQueryLog>>,
     /// [SONNET-4.6] (sq-snopa.8) `solid-authz`-only: the STATEFUL Solid authorization view over
     /// the server's OWN loaded store, cached per generation. `None` until the first
     /// `"source":"server"` `/authz/*` request builds it.
@@ -2922,6 +2967,15 @@ impl AppState {
         let templates = Arc::new(std::sync::RwLock::new(crate::templates::load_store(
             config.templates_file.as_deref(),
         )?));
+        // [SONNET-4.6] sq-3bz2w: build the slow-query log only when the operator armed it. A
+        // disarmed (or feature-off) server never allocates the ring.
+        #[cfg(feature = "slow-query-log")]
+        let slow_queries = config.slow_query_threshold.map(|threshold| {
+            Arc::new(crate::slow_query::SlowQueryLog::new(
+                config.slow_query_capacity,
+                threshold,
+            ))
+        });
         Ok(Self {
             #[cfg(feature = "templates")]
             templates,
@@ -2949,6 +3003,8 @@ impl AppState {
             restore_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "query-registry")]
             running_queries,
+            #[cfg(feature = "slow-query-log")]
+            slow_queries,
             // [SONNET-4.6] sq-snopa.8: cold at boot — the stateful auth view is built lazily on
             // the first `"source":"server"` request and re-built whenever the generation moves.
             #[cfg(feature = "solid-authz")]
@@ -2959,6 +3015,14 @@ impl AppState {
     /// The server's Prometheus metrics (T22).
     pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
         &self.metrics
+    }
+
+    /// [SONNET-4.6] (sq-3bz2w) The armed slow-query log, or `None` when the operator did not
+    /// set a threshold. The `GET /admin/slow-queries` route maps `None` to a `404`; the
+    /// recording seam maps it to "do nothing".
+    #[cfg(feature = "slow-query-log")]
+    pub(crate) fn slow_queries(&self) -> Option<&Arc<crate::slow_query::SlowQueryLog>> {
+        self.slow_queries.as_ref()
     }
 
     /// [SONNET-4.6] (sq-t1isr) Test-only: returns the current count of registered queries.
@@ -3591,6 +3655,16 @@ pub fn router(state: AppState) -> Router {
     let routes = routes
         .route("/queries", get(list_queries_handler))
         .route("/queries/{id}", axum::routing::delete(cancel_query_handler));
+    // [SONNET-4.6] sq-3bz2w: OPT-IN slow-query view. Compiled only with the `slow-query-log`
+    // feature; even then the handler refuses (404) unless a threshold is configured — the same
+    // double-opt-in as `/tpf` / `/templates`. GET, but WRITE/admin-gated: the body is other
+    // callers' RAW query text, so the read token is deliberately not sufficient. See
+    // [`crate::slow_query`].
+    #[cfg(feature = "slow-query-log")]
+    let routes = routes.route(
+        "/admin/slow-queries",
+        get(crate::slow_query::slow_queries_endpoint),
+    );
     // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization surface.
     // Compiled only with the `solid-authz` feature; even then each handler refuses (404) unless the
     // config flag is set. POST only — a thin HTTP shell over the `sparq-solid` library authoriser
@@ -6441,7 +6515,34 @@ async fn run_query(
     dataset: &DatasetOverride,
 ) -> Response {
     let number = gen.number();
+    // [SONNET-4.6] sq-3bz2w: THE slow-query recording seam — one place covering every query
+    // form (SELECT / ASK / CONSTRUCT / DESCRIBE / EXPLAIN, GET and POST). `PinnedGen` is an
+    // `Arc`, so keeping a handle for the post-hoc plan replay costs a refcount bump and pins
+    // the SAME snapshot the query ran against.
+    // A DISARMED (or feature-off) server never even reads the clock: everything below hangs off
+    // this one `Option`, so the whole seam costs one check per query.
+    #[cfg(feature = "slow-query-log")]
+    let recorder = state
+        .slow_queries()
+        .map(|log| (Arc::clone(log), gen.clone(), std::time::Instant::now()));
     let resp = run_query_pinned(state, sparql, headers, head_only, explain, gen, dataset).await;
+    // Measured HERE: the request's own wall time, handed to `SlowQueryRing::push` as-is. The
+    // query is never re-run to time it. For a STREAMED SELECT body this stops at the response
+    // head, so the recorded time is a LOWER BOUND on the query's full cost — documented in
+    // `crate::slow_query` and in skills/http-server/SKILL.md, never left for a reader to infer.
+    #[cfg(feature = "slow-query-log")]
+    if let Some((log, pin, started)) = recorder {
+        let elapsed = started.elapsed();
+        if elapsed >= log.threshold() {
+            // The plan replay is CPU-bound (a planning dry run — it executes nothing), so it
+            // goes to the blocking pool like every other engine call. Awaited rather than
+            // fire-and-forget so the log is observable the moment the response is: only a
+            // query already over the threshold pays this.
+            let q = sparql.to_string();
+            let _ = tokio::task::spawn_blocking(move || log.record(pin.snapshot(), &q, elapsed))
+                .await;
+        }
+    }
     with_generation_header(resp, number)
 }
 

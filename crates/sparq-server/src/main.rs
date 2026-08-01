@@ -162,6 +162,17 @@
 //!                             status/rows, duration). Route it with RUST_LOG. Off by default.
 //!                             [env SPARQ_AUDIT_LOG=1]
 //!
+//! Slow-query log (opt-in `slow-query-log` cargo feature — see skills/http-server/SKILL.md
+//! "Slow-query log"; PRIVACY: retains RAW query text, so the route is admin/WRITE-gated):
+//!   --slow-query-log MS       arm the log: record every query whose ALREADY-MEASURED wall time
+//!                             is >= MS into a bounded worst-first ring, served by
+//!                             `GET /admin/slow-queries`. The query is never re-executed; the
+//!                             retained plan is the planning-only tree (estimates, no actuals).
+//!                             0 records every query. Off by default.
+//!                                                                   [env SPARQ_SLOW_QUERY_LOG]
+//!   --slow-query-capacity N   how many slow queries the ring retains [16,
+//!                             env SPARQ_SLOW_QUERY_CAPACITY]
+//!
 //! Subscription limits (T23, the /subscriptions WebSocket — see SUBSCRIPTIONS.md):
 //!   --max-subscriptions N           server-wide active subscriptions [256, env SPARQ_MAX_SUBSCRIPTIONS]
 //!   --max-subscriptions-per-conn N  active subscriptions per socket  [16, env SPARQ_MAX_SUBSCRIPTIONS_PER_CONN]
@@ -356,6 +367,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // This flag logs the raw URI verbatim — the deliberate debug escape hatch. Overrides
             // SPARQ_LOG_FULL_REQUESTS. Inert without --verbose.
             "--log-full-requests" => config.redact_logs = false,
+            // [SONNET-4.6] sq-3bz2w: ARM the slow-query log at a threshold in MILLISECONDS.
+            // Every query at or over it is recorded — with the wall time the server already
+            // measured, never a re-execution — into a bounded worst-first ring served by the
+            // admin-gated GET /admin/slow-queries. 0 records every query (each then pays a
+            // planning replay). Overrides SPARQ_SLOW_QUERY_LOG. Only present with the
+            // `slow-query-log` cargo feature. PRIVACY: the ring retains RAW query text, which is
+            // why the route is WRITE/admin-gated — see skills/http-server/SKILL.md.
+            #[cfg(feature = "slow-query-log")]
+            "--slow-query-log" => {
+                let ms: u64 = parse_flag(&mut args, "--slow-query-log")?;
+                config.slow_query_threshold = Some(std::time::Duration::from_millis(ms));
+            }
+            // [SONNET-4.6] sq-3bz2w: how many slow queries the ring retains (the "N worst").
+            // Clamped to at least 1; inert without --slow-query-log.
+            #[cfg(feature = "slow-query-log")]
+            "--slow-query-capacity" => {
+                let n: usize = parse_flag(&mut args, "--slow-query-capacity")?;
+                config.slow_query_capacity = n.max(1);
+            }
             // [OPUS-4.8] sq-0bxp: opt in to the per-query access audit log (CDMC CD-2). Emits a
             // structured `tracing` record per request under target `sparq_server::audit` (route
             // it with RUST_LOG). Only present with the `audit-log` cargo feature.

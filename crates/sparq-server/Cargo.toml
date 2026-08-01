@@ -122,6 +122,21 @@ test-seams = []
 # byte-identical to before.
 # Pulls no new dependencies beyond those already present via `server`.
 query-registry = ["server"]
+# [SONNET-4.6] (sq-3bz2w, follow-up to sq-u4lgr/#902) `slow-query-log` (default OFF): the
+# server-side policy layer over sparq-engine's `explain_json::SlowQueryRing` — a bounded ring
+# of the N slowest recent queries with their plans, served on the WRITE/admin-gated
+# `GET /admin/slow-queries`. The engine provides the data structure; the server decides which
+# requests enter it. Recording uses the ALREADY-MEASURED request wall time (`SlowQueryRing::push`,
+# never `record`, which would re-execute the query) plus a planning-only `explain_plan` replay,
+# so a recorded query is never run twice; only queries over the threshold pay the replay.
+# STILL OFF AT RUNTIME by default even when compiled in: the operator must additionally set
+# `--slow-query-log <MS>` / `SPARQ_SLOW_QUERY_LOG` (`ServerConfig::slow_query_threshold`), the
+# same double-opt-in as `tpf` / `shacl` / `templates`. PRIVACY: the ring retains RAW SPARQL text
+# (unlike the `query-registry` fingerprints) — that is why the route is admin/WRITE-gated; see
+# `crate::slow_query`. Pulls `sparq-engine/explain-json` (which itself has zero dependencies) and
+# no new external dependency. With the feature off the module, the config fields, the route and
+# the recording seam are all `#[cfg]`-stripped — byte-identical to before.
+slow-query-log = ["server", "explain-json"]
 # [OPUS-4.8] (sq-0bxp) `audit-log` (default OFF): compiles the OPT-IN per-query access
 # audit log (CDMC CD-2 / ISO 27001 A.8.15 / EU CRA logging). With the feature on, the
 # server can emit a structured `tracing` record under target `sparq_server::audit` for

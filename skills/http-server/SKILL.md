@@ -1633,6 +1633,45 @@ correlate repeated identical queries / a recurring caller across requests and re
 callers set `ServerConfig { audit_log: true, .. }` (field present only with the feature). See
 `crates/sparq-server/src/audit.rs`.
 
+### Slow-query log — opt-in worst-N view with plans (`sq-3bz2w`, follow-up to `sq-u4lgr`/#902)
+
+The ops answer to "which queries are hurting us, and what did the planner do with them" — where
+`/metrics` only gives you an aggregate latency histogram. sparq-engine supplies the data
+structure (`explain_json::SlowQueryRing`, a bounded ring keeping the N worst by wall time);
+sparq-server supplies the policy. **Doubly opt-in:** compile with the `slow-query-log` cargo
+feature, then arm it with `--slow-query-log <MS>` (env `SPARQ_SLOW_QUERY_LOG`). Size the ring
+with `--slow-query-capacity <N>` (env `SPARQ_SLOW_QUERY_CAPACITY`, default 16). Unarmed, the
+route answers `404` and a query pays one `Option` check; without the feature, the module, the
+config fields, the route and the recording seam are all `#[cfg]`-stripped.
+
+```bash
+sparq-server --slow-query-log 250 --slow-query-capacity 32 --auth-token "$ADMIN_TOKEN" &
+curl -H "Authorization: Bearer $ADMIN_TOKEN" localhost:3030/admin/slow-queries
+# response SHAPE (the numbers below are placeholders, not measurements):
+# {"thresholdMs":250,"capacity":32,"retained":1,"planKind":"estimated","rowsObserved":false,
+#  "queries":[{"sparql":"SELECT …","totalNanos":…,"totalRows":0,"plan":{…}}]}
+```
+
+**`GET /admin/slow-queries` is WRITE/admin-gated**, not read-gated — deliberately stricter than
+every other read route. The body contains **raw SPARQL text** from other callers, so holding the
+read token is not sufficient authority to see it.
+
+**What the numbers mean — read this before acting on them.** The whole point of this seam is
+that it is nearly free, and the honest boundaries follow from that:
+
+| field | meaning |
+| --- | --- |
+| `totalNanos` | the request's **already-measured** server-side wall time. The query is never re-executed to time it (`SlowQueryRing::push`, not `record`). For a **streamed** SELECT this stops at the response head, so it is a **lower bound** on the full cost |
+| `plan` | the **planning-only** tree: `estimated` cardinalities are real, `actual` / `nanos` / `qError` are always `null`. Filling them in would mean a second execution under the operator trace — exactly what this avoids. Use `Accept: application/x-sparq-explain+json` with `explain=analyze` when you want per-operator actuals |
+| `totalRows` | **always 0, carries no information** — the row count is not observed at the recording seam. The envelope's `rowsObserved: false` is what says so |
+| `thresholdMs` / `capacity` / `retained` | the armed policy and how many entries are currently held |
+
+Only queries at or over the threshold pay anything (a planning replay, which executes nothing).
+`--slow-query-log 0` records every query — a legitimate debugging choice, at the cost of that
+replay per request. **Privacy:** unlike `GET /queries` (which fingerprints), this retains raw
+query text in server memory and serves it; leave the feature off if that is unacceptable. See
+`crates/sparq-server/src/slow_query.rs`.
+
 ### Request-log redaction — keep query text out of the `--verbose` log (`sq-toze.34`, ON by default)
 
 `--verbose` installs `tower_http::trace`, whose default span records the request **URI** — and

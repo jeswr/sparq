@@ -147,6 +147,18 @@ pub mod solid_authz;
 #[cfg(feature = "templates")]
 pub mod templates;
 
+/// [SONNET-4.6] (sq-3bz2w, follow-up to sq-u4lgr/#902) OPT-IN slow-query log — the server-side
+/// policy over sparq-engine's `explain_json::SlowQueryRing`: the N slowest recent queries with
+/// their (planning-only) plans, served on the WRITE/admin-gated `GET /admin/slow-queries`.
+/// Compiled ONLY behind the `slow-query-log` feature, and armed only when
+/// [`ServerConfig::slow_query_threshold`](http::ServerConfig) is also set (`--slow-query-log
+/// <MS>` / `SPARQ_SLOW_QUERY_LOG`) — the same double-opt-in as `tpf` / `templates`. Recording
+/// uses the already-measured request wall time (never a re-execution). PRIVACY: the ring
+/// retains RAW query text, unlike the `query-registry` fingerprints — see the module docs for
+/// that boundary and for what the recorded plan does and does not tell you.
+#[cfg(feature = "slow-query-log")]
+pub mod slow_query;
+
 /// Prometheus metrics — hand-rolled text exposition at `GET /metrics` (T22).
 #[cfg(feature = "server")]
 pub mod metrics;

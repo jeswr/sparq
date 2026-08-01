@@ -250,6 +250,25 @@
   features: "query-registry"
   test: true
 
+# [SONNET-4.6] sq-3bz2w (follow-up to sq-u4lgr/#902): the OPT-IN slow-query log — the server
+# policy layer over sparq-engine's `explain_json::SlowQueryRing`. The `slow_query` module (the
+# `SlowQueryLog` policy type + the `slow_queries_endpoint` handler), the two `ServerConfig`
+# fields, the `AppState::slow_queries` field + accessor, the `/admin/slow-queries` route mount,
+# the recording seam in `run_query`, the two `main.rs` flags, the in-module unit tests and
+# `tests/slow_query_log.rs` are ALL `#[cfg(feature = "slow-query-log")]`, so the DEFAULT build
+# never compiles, clippies or tests any of it. This leg builds it, runs `clippy --all-targets
+# -D warnings` with the feature ON (the real gate), and runs both suites — 8 unit tests
+# (threshold below/at/zero, unplannable query skipped, ring bound keeps the slowest, the
+# envelope's honesty constants, the handed-in measurement, capacity clamp) and 5 HTTP
+# integration tests (disarmed => 404, WRITE-gated even when reads are open, a real /sparql
+# query recorded with a real measurement, an unreachable threshold records nothing, the
+# envelope declares its boundaries). `slow-query-log` pulls `server` + `sparq-engine/explain-json`
+# (in-workspace, itself dependency-free); no new external dependency.
+- name: "sparq-server (slow-query-log — GET /admin/slow-queries worst-N view)"
+  crate: "sparq-server"
+  features: "slow-query-log"
+  test: true
+
 # [FABLE-5] sq-37f1a (issue #2718): the COMBINED `odrl-authz,solid-authz-trust` state — the
 # feature INTERACTION the two single-feature legs above never exercise. Cargo feature
 # unification makes `odrl-authz` turn on `sparq-solid/odrl-bridge`, which changes the
