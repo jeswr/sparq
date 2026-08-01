@@ -132,6 +132,7 @@ class NewPublicCrateFollowOnTest(unittest.TestCase):
     a publishable one and a `publish = false` stub."""
 
     PUBLIC_CRATE = "sparq-core"
+    OTHER_PUBLIC_CRATE = "sparq-engine"
     STUB_CRATE = "sparq-canon"
     RULE_IDS = {"new-crate-site-advert", "new-crate-guide-docs", "new-crate-test-methods"}
 
@@ -139,18 +140,25 @@ class NewPublicCrateFollowOnTest(unittest.TestCase):
         self.rules = flow_on.load_rules(RULES)
         # Guard the fixtures: if either crate's publish status ever flips, fail
         # HERE with a clear message instead of silently voiding the assertions.
-        self.assertTrue(
-            flow_on.crate_is_public(self.PUBLIC_CRATE),
-            f"fixture crate {self.PUBLIC_CRATE} is no longer publishable",
-        )
+        for crate in (self.PUBLIC_CRATE, self.OTHER_PUBLIC_CRATE):
+            self.assertTrue(
+                flow_on.crate_is_public(crate),
+                f"fixture crate {crate} is no longer publishable",
+            )
         self.assertFalse(
             flow_on.crate_is_public(self.STUB_CRATE),
             f"fixture crate {self.STUB_CRATE} is no longer a publish=false stub",
         )
 
     def _eval(self, changed, added, title="feat: new crate"):
+        fos = self._eval_list(changed, added, title)
+        return {fo.rule_id: fo for fo in fos}
+
+    def _eval_list(self, changed, added, title="feat: new crate"):
+        """Every new-crate follow-on, un-collapsed — a multi-crate PR produces
+        more than one follow-on per rule, which the dict view above would lose."""
         fos = flow_on.evaluate(self.rules, 900, title, changed, added, [])
-        return {fo.rule_id: fo for fo in fos if fo.rule_id in self.RULE_IDS}
+        return [fo for fo in fos if fo.rule_id in self.RULE_IDS]
 
     def test_new_public_crate_mints_site_guide_and_test_method_follow_ons(self):
         added = [
@@ -224,6 +232,123 @@ class NewPublicCrateFollowOnTest(unittest.TestCase):
         for fo in by_rule.values():
             self.assertIn(self.PUBLIC_CRATE, fo.dedup_key)
             self.assertNotIn("sparq-engine", fo.dedup_key)
+
+
+class MultipleNewPublicCratesTest(unittest.TestCase):
+    """[OPUS-5] (#2547) A PR may add MORE THAN ONE public crate.
+
+    Each of them owes its own website card, guide chapter and test-method plan, so
+    the `when_new_crate_public` rules are evaluated once per added public crate
+    (matching gate G1's `added_crates`, which likewise returns every new crate).
+    Evaluating them once with a single global `{crate}` dropped everything the
+    second crate needed."""
+
+    PUBLIC_CRATE = NewPublicCrateFollowOnTest.PUBLIC_CRATE
+    OTHER_PUBLIC_CRATE = NewPublicCrateFollowOnTest.OTHER_PUBLIC_CRATE
+    STUB_CRATE = NewPublicCrateFollowOnTest.STUB_CRATE
+    RULE_IDS = NewPublicCrateFollowOnTest.RULE_IDS
+
+    def setUp(self):
+        self.rules = flow_on.load_rules(RULES)
+
+    def _eval_list(self, changed, added, title="feat: new crates"):
+        fos = flow_on.evaluate(self.rules, 900, title, changed, added, [])
+        return [fo for fo in fos if fo.rule_id in self.RULE_IDS]
+
+    def _both(self, artifact=()):
+        added = [
+            f"crates/{self.PUBLIC_CRATE}/Cargo.toml",
+            f"crates/{self.OTHER_PUBLIC_CRATE}/Cargo.toml",
+        ]
+        return added, added + list(artifact)
+
+    def test_each_new_public_crate_gets_its_own_full_follow_on_set(self):
+        added, changed = self._both()
+        fos = self._eval_list(changed=changed, added=added)
+        self.assertEqual(
+            {(fo.rule_id, fo.dedup_key) for fo in fos},
+            {
+                ("new-crate-site-advert", f"site-advert-{self.PUBLIC_CRATE}"),
+                ("new-crate-guide-docs", f"guide-doc-{self.PUBLIC_CRATE}"),
+                ("new-crate-test-methods", f"test-methods-{self.PUBLIC_CRATE}"),
+                ("new-crate-site-advert", f"site-advert-{self.OTHER_PUBLIC_CRATE}"),
+                ("new-crate-guide-docs", f"guide-doc-{self.OTHER_PUBLIC_CRATE}"),
+                ("new-crate-test-methods", f"test-methods-{self.OTHER_PUBLIC_CRATE}"),
+            },
+        )
+        # Distinct dedup keys — a collision would make the run-level de-dup drop
+        # the second crate's issue exactly as the single-{crate} bug did.
+        self.assertEqual(len({fo.dedup_key for fo in fos}), 6)
+        # And each follow-on names ITS crate in the title/body and routes there.
+        for fo in fos:
+            crate = (
+                self.PUBLIC_CRATE
+                if self.PUBLIC_CRATE in fo.dedup_key
+                else self.OTHER_PUBLIC_CRATE
+            )
+            self.assertIn(crate, fo.title)
+            self.assertIn(f"crates/{crate}", fo.body)
+            if fo.rule_id == "new-crate-test-methods":
+                self.assertIn(f"area:{crate}", fo.labels)
+
+    def test_a_stub_alongside_a_public_crate_mints_only_the_public_set(self):
+        added = [
+            f"crates/{self.STUB_CRATE}/Cargo.toml",
+            f"crates/{self.PUBLIC_CRATE}/Cargo.toml",
+        ]
+        fos = self._eval_list(changed=added, added=added)
+        self.assertEqual(len(fos), 3)
+        for fo in fos:
+            self.assertIn(self.PUBLIC_CRATE, fo.dedup_key)
+
+    def test_a_shared_artifact_suppresses_that_rule_for_the_whole_pr(self):
+        # `site/src/data/surfaces.ts` and `book/src/**` are SHARED files: a diff
+        # touching them cannot say WHICH new crate it covers, so their
+        # suppression is PR-wide by construction (documented in the rules file).
+        # The rules with no artifact in the diff must still mint for BOTH crates.
+        added, changed = self._both(["site/src/data/surfaces.ts"])
+        fos = self._eval_list(changed=changed, added=added)
+        self.assertEqual([fo for fo in fos if fo.rule_id == "new-crate-site-advert"], [])
+        for rule_id in ("new-crate-guide-docs", "new-crate-test-methods"):
+            self.assertEqual(
+                {fo.dedup_key for fo in fos if fo.rule_id == rule_id},
+                {
+                    f"{'guide-doc' if rule_id.endswith('docs') else 'test-methods'}-{c}"
+                    for c in (self.PUBLIC_CRATE, self.OTHER_PUBLIC_CRATE)
+                },
+            )
+
+    def test_a_crate_named_artifact_suppresses_only_that_crate(self):
+        # When a rule's `unless_paths` glob carries `{crate}` the artifact CAN be
+        # attributed, so suppression is per crate. No shipped rule has a
+        # crate-named artifact path today; this pins the mechanism that lets one
+        # be written (and that the shipped placeholder-free globs opt out of).
+        rules_toml = """
+[[rule]]
+id = "per-crate-artifact"
+when_new_paths = ["crates/*/Cargo.toml"]
+when_new_crate_public = true
+unless_paths = ["crates/{crate}/GUIDE.md"]
+
+[[rule.create]]
+dedup_key = "per-crate-{crate}"
+title = "guide for {crate}"
+body = "guide for crates/{crate}"
+labels = ["area:{crate}"]
+"""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rules.toml"
+            path.write_text(rules_toml)
+            rules = flow_on.load_rules(path)
+        added = [
+            f"crates/{self.PUBLIC_CRATE}/Cargo.toml",
+            f"crates/{self.OTHER_PUBLIC_CRATE}/Cargo.toml",
+        ]
+        changed = added + [f"crates/{self.PUBLIC_CRATE}/GUIDE.md"]
+        fos = flow_on.evaluate(rules, 900, "feat: two crates", changed, added, [])
+        self.assertEqual(
+            [fo.dedup_key for fo in fos], [f"per-crate-{self.OTHER_PUBLIC_CRATE}"]
+        )
 
 
 class ChangedSurfaceTest(unittest.TestCase):

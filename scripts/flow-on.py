@@ -215,18 +215,23 @@ def _first_segment_after(prefix: str, paths: list[str]) -> str | None:
     return None
 
 
-# [OPUS-5] (#2547) A brand-new crate is identified by an ADDED `crates/<x>/Cargo.toml`
-# — the same signal merge gate G1 keys on (scripts/gate-new-crate.py::added_crates).
-_NEW_CRATE_MANIFEST_RE = re.compile(r"^crates/([^/]+)/Cargo\.toml$")
+# [OPUS-5] (#2547) A brand-new crate is identified by an ADDED `crates/<x>/Cargo.toml`.
+# We call merge gate G1's OWN detector rather than re-implementing the pattern, so
+# the reactive engine and the proactive gate cannot drift — including on the
+# multi-crate case, where G1 deliberately returns EVERY added crate.
+def new_crates(added: list[str]) -> list[str]:
+    """Every crate whose Cargo.toml was ADDED, in diff order, de-duplicated."""
+    return _gnc.added_crates(added)
 
 
 def new_crate(added: list[str]) -> str | None:
-    """The name of the first crate whose Cargo.toml was ADDED, else None."""
-    for p in added:
-        m = _NEW_CRATE_MANIFEST_RE.match(p)
-        if m:
-            return m.group(1)
-    return None
+    """The name of the FIRST crate whose Cargo.toml was ADDED, else None.
+
+    This is only the default `{crate}` placeholder for rules that are NOT
+    new-crate rules; the new-crate rules themselves fan out over
+    new_public_crates() so a PR adding two crates does not lose the second."""
+    crates = new_crates(added)
+    return crates[0] if crates else None
 
 
 def crate_is_public(crate: str) -> bool:
@@ -238,6 +243,14 @@ def crate_is_public(crate: str) -> bool:
     not readable is treated as public — G1's strict default, so an anomaly
     surfaces as a follow-on rather than being silently swallowed."""
     return not _gnc.crate_is_stub(crate, [])
+
+
+def new_public_crates(added: list[str]) -> list[str]:
+    """Every ADDED crate that is a PUBLIC surface (not a `publish = false` stub).
+
+    The new-crate rules are evaluated once per entry, so a PR that adds two
+    public crates mints a full follow-on set for BOTH."""
+    return [c for c in new_crates(added) if crate_is_public(c)]
 
 
 def build_context(
@@ -253,7 +266,9 @@ def build_context(
     pool_for_dir = added + changed  # added first so "new crate" wins
     # [OPUS-5] (#2547) Prefer the crate whose MANIFEST was added: on a PR that adds
     # `crates/foo/` while also touching `crates/bar/src/lib.rs`, path order alone
-    # could name `bar` in a new-crate follow-on's title and dedup key.
+    # could name `bar` in a new-crate follow-on's title and dedup key. This is the
+    # DEFAULT only — evaluate() overrides `{crate}` per added public crate for the
+    # `when_new_crate_public` rules, so a two-new-crate PR resolves both.
     crate = new_crate(added) or _first_segment_after("crates/", pool_for_dir)
     suite = _first_segment_after("bench/", pool_for_dir) or _first_segment_after("zk/", pool_for_dir)
     surface = _first_segment_after("skills/", pool_for_dir)
@@ -331,8 +346,12 @@ def rule_matches(
     labels: list[str],
     title: str,
     pub_changed: set[str] | None = None,
+    crate: str | None = None,
 ) -> bool:
     # ALL present predicates must pass; absent predicates are ignored.
+    # `crate` is the added public crate this evaluation is FOR (evaluate() fans a
+    # `when_new_crate_public` rule out over every one of them); None means the
+    # rule is evaluated once for the PR as a whole.
     if rule.when_paths and not _any_glob_match(rule.when_paths, changed):
         return False
     if rule.when_new_paths:
@@ -345,14 +364,25 @@ def rule_matches(
         if not _any_glob_match(rule.when_new_paths, new_pool):
             return False
     # [OPUS-5] (#2547) Declarative suppression: the same PR already did the work.
-    if rule.unless_paths and _any_glob_match(rule.unless_paths, changed):
-        return False
+    # A glob may carry `{crate}`, which resolves to the crate this evaluation is
+    # for — so a rule whose artifact path names the crate suppresses PER CRATE.
+    # A placeholder-free glob stays PR-global, which is the honest reading for a
+    # SHARED artifact file (`site/src/data/surfaces.ts`, `book/src/SUMMARY.md`):
+    # the path cannot say WHICH of two new crates it covers.
+    if rule.unless_paths:
+        globs = rule.unless_paths
+        if crate is not None:
+            globs = [expand(g, {"crate": crate}) for g in globs]
+        if _any_glob_match(globs, changed):
+            return False
     # [OPUS-5] (#2547) Public-crate refinement for the new-crate rules: an internal
     # `publish = false` stub gets no website / guide / test-method follow-on, the
     # same escape hatch G1 gives it for bench + SKILL.
     if rule.when_new_crate_public:
-        crate = new_crate(added)
-        if not crate or not crate_is_public(crate):
+        if crate is not None:
+            if not crate_is_public(crate):
+                return False
+        elif not new_public_crates(added):
             return False
     if rule.when_label is not None and rule.when_label not in labels:
         return False
@@ -402,44 +432,64 @@ def evaluate(
     labels: list[str],
     pub_changed: set[str] | None = None,
 ) -> list[FollowOn]:
-    ctx = build_context(pr, pr_title, changed, added)
+    base_ctx = build_context(pr, pr_title, changed, added)
     out: list[FollowOn] = []
     seen_keys: set[str] = set()
     for rule in rules:
-        if not rule_matches(rule, changed, added, labels, pr_title, pub_changed):
-            continue
-        for tmpl in rule.creates:
-            dedup_key = expand(tmpl.dedup_key, ctx)
-            if dedup_key in seen_keys:
-                continue  # de-dup within a single run
-            seen_keys.add(dedup_key)
-            body = expand(tmpl.body, ctx).rstrip() + "\n\n" + key_marker(dedup_key)
-            body += (
-                f"\n\n> 🤖 SPARQ agent — auto-generated by the flow-on engine "
-                f"(rule `{rule.id}`) from merged PR #{pr}. Reconcile into a bead."
-            )
-            # [OPUS-5] (#2547) Labels are placeholder-expanded like the title and
-            # body, so a per-crate routing label (`area:{crate}`) resolves to the
-            # crate the follow-on's work actually lands in. A rule that uses a
-            # placeholder here must guarantee it is non-empty when the rule fires
-            # (`when_new_crate_public` does, for `{crate}`).
-            labels_full = list(
-                dict.fromkeys(BASE_LABELS + [expand(lb, ctx) for lb in tmpl.labels])
-            )
-            # [FABLE-5] (#2474) dispatch-visibility: append role/priority/status
-            # routing labels at creation (see routing_labels for why the event
-            # path can never label these issues).
-            labels_full += routing_labels(labels_full)
-            out.append(
-                FollowOn(
-                    rule_id=rule.id,
-                    dedup_key=dedup_key,
-                    title=expand(tmpl.title, ctx),
-                    body=body,
-                    labels=labels_full,
-                )
-            )
+        # [OPUS-5] (#2547) A `when_new_crate_public` rule is evaluated ONCE PER
+        # ADDED PUBLIC CRATE. A PR that adds two public crates owes a website
+        # card, a guide chapter and a test-method plan for EACH of them; with a
+        # single global `{crate}` resolved from the FIRST added manifest, every
+        # later crate's follow-ons were silently never minted. Every other rule
+        # is evaluated once for the PR as a whole, as before.
+        crates: list[str | None] = (
+            list(new_public_crates(added)) if rule.when_new_crate_public else [None]
+        )
+        for crate in crates:
+            if not rule_matches(rule, changed, added, labels, pr_title, pub_changed, crate):
+                continue
+            ctx = base_ctx if crate is None else {**base_ctx, "crate": crate}
+            for tmpl in rule.creates:
+                dedup_key = expand(tmpl.dedup_key, ctx)
+                if dedup_key in seen_keys:
+                    continue  # de-dup within a single run
+                seen_keys.add(dedup_key)
+                out.append(_expand_follow_on(rule, tmpl, dedup_key, ctx, pr))
     return out
+
+
+def _expand_follow_on(
+    rule: Rule,
+    tmpl: CreateTemplate,
+    dedup_key: str,
+    ctx: dict[str, str],
+    pr: int,
+) -> FollowOn:
+    """Expand one create template against `ctx` into a ready-to-file follow-on."""
+    body = expand(tmpl.body, ctx).rstrip() + "\n\n" + key_marker(dedup_key)
+    body += (
+        f"\n\n> 🤖 SPARQ agent — auto-generated by the flow-on engine "
+        f"(rule `{rule.id}`) from merged PR #{pr}. Reconcile into a bead."
+    )
+    # [OPUS-5] (#2547) Labels are placeholder-expanded like the title and
+    # body, so a per-crate routing label (`area:{crate}`) resolves to the
+    # crate the follow-on's work actually lands in. A rule that uses a
+    # placeholder here must guarantee it is non-empty when the rule fires
+    # (`when_new_crate_public` does, for `{crate}`).
+    labels_full = list(
+        dict.fromkeys(BASE_LABELS + [expand(lb, ctx) for lb in tmpl.labels])
+    )
+    # [FABLE-5] (#2474) dispatch-visibility: append role/priority/status
+    # routing labels at creation (see routing_labels for why the event
+    # path can never label these issues).
+    labels_full += routing_labels(labels_full)
+    return FollowOn(
+        rule_id=rule.id,
+        dedup_key=dedup_key,
+        title=expand(tmpl.title, ctx),
+        body=body,
+        labels=labels_full,
+    )
 
 
 # --------------------------------------------------------------------------- #
