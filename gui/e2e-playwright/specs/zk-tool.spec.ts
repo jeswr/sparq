@@ -45,8 +45,27 @@
 //
 // Determinism rules: NO waitForTimeout; web-first assertions only. No wall-clock threshold is
 // asserted — only outcomes (the timeouts below are generous CEILINGS, not measurements).
+//
+// WHY THIS SPEC OPTS OUT OF THE HERMETIC NETWORK BLOCK (support/fixtures.ts). Every other spec
+// in this lane runs under a blanket `context.route("**/*")` that aborts anything off
+// 127.0.0.1. The in-tab bb.js prover is the ONE runtime in this repo already known to be
+// incompatible with that interception: the site's own bb.js spec has carried
+// `test.use({ hermeticNetwork: false })` since the e2e foundation landed, on the finding that
+// the prover does not come up under a blanket block (site/e2e/zk-prewarm.spec.ts,
+// site/e2e/support/fixtures.ts, PR #1405). The GUI panel drives the SAME prover, and this lane
+// is the first place in the repo where it runs under an interception — so it inherits the same
+// exemption rather than re-deriving the finding.
+//
+// What that costs, stated plainly: this spec is NOT network-hermetic. Everything the GUI itself
+// fetches is same-origin (the static export off `serve`, the synced ACIR at /zk/, the wasm
+// bundles), but bb.js's own load/prove path is third-party code and this spec no longer proves
+// it stays off the network. Nothing else in the lane changes: the option defaults to `true`, and
+// the browser-persona specs block unconditionally in support/web-fixtures.ts.
 
 import { test, expect } from "../support/index.ts";
+
+// See the note above: scoped to this file only.
+test.use({ hermeticNetwork: false });
 
 /** The seeded store value we prove over: two digits, `>= FILTER_BOUND` (25), and one of the
  *  values with a committed `operand_enc` fixture in `lib/zk-prover.ts`. */

@@ -18,6 +18,15 @@
 //                    control to the test body. Tests start with a warm engine + loaded sample.
 //
 // All four steps happen before `await use()`, so the test body never races the engine.
+//
+// [OPUS-5] Step 2 is now an OPTION (`hermeticNetwork`, default `true`) rather than an
+// unconditional install, mirroring the reviewed site harness (site/e2e/support/fixtures.ts).
+// Every existing spec keeps the block and behaves exactly as before; the opt-out exists for the
+// one runtime this repo has already found to be incompatible with blanket `context.route`
+// interception — the in-tab bb.js UltraHonk prover, whose spec on the site side
+// (site/e2e/zk-prewarm.spec.ts) has carried `test.use({ hermeticNetwork: false })` since the
+// e2e foundation landed (PR #1405). The GUI's ZK tool is the same prover, so
+// specs/zk-tool.spec.ts needs the same seam.
 
 import { test as base, expect, type Page } from "@playwright/test";
 import { tauriMockScript } from "./tauri-mock.ts";
@@ -29,29 +38,45 @@ export interface IpcLogEntry {
   args: unknown;
 }
 
-/** Fixtures added by this extension. */
+/** Options + fixtures added by this extension. */
 type GuiMockFixtures = {
+  /**
+   * Install the blanket hermetic-network `context.route` block at all. Default: `true` — every
+   * spec is hermetic unless it says otherwise, and only specs/zk-tool.spec.ts does.
+   *
+   * Set `false` ONLY for a spec whose runtime is incompatible with blanket `context.route`
+   * interception. Today that is exactly one thing: the in-tab `@aztec/bb.js` UltraHonk prover,
+   * which the site harness already has to exempt for the same reason
+   * (site/e2e/support/fixtures.ts + site/e2e/zk-prewarm.spec.ts, PR #1405). Turning it off is a
+   * REAL reduction in that spec's hermeticity, so the spec must say why in its header — it is
+   * not a knob to reach for when a locator is flaky.
+   */
+  hermeticNetwork: boolean;
   /** Auto-fixture: injects the Tauri mock, blocks external network, navigates + waits for engine. */
   tauriMock: void;
 };
 
 export const test = base.extend<GuiMockFixtures>({
+  hermeticNetwork: [true, { option: true }],
+
   tauriMock: [
-    async ({ page, context }, use) => {
+    async ({ page, context, hermeticNetwork }, use) => {
       // ── 1. Hermetic network block (context-level, covers all pages) ──────────────────────────
       // Allow only localhost / 127.0.0.1 (the static file server + blob: URLs the export uses).
-      await context.route("**/*", (route) => {
-        const url = route.request().url();
-        if (
-          url.startsWith("http://127.0.0.1") ||
-          url.startsWith("http://localhost") ||
-          url.startsWith("blob:") ||
-          url.startsWith("data:")
-        ) {
-          return route.continue();
-        }
-        return route.abort();
-      });
+      if (hermeticNetwork) {
+        await context.route("**/*", (route) => {
+          const url = route.request().url();
+          if (
+            url.startsWith("http://127.0.0.1") ||
+            url.startsWith("http://localhost") ||
+            url.startsWith("blob:") ||
+            url.startsWith("data:")
+          ) {
+            return route.continue();
+          }
+          return route.abort();
+        });
+      }
 
       // ── 2. Inject Tauri IPC mock before any page script runs ─────────────────────────────────
       await page.addInitScript(tauriMockScript);
