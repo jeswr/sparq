@@ -8,6 +8,8 @@
 # CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
 # discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
 # `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# A new leg also needs its `opt-in <name>` line added to
+# scripts/tests/feature-matrix-legnames.golden.txt (the assembler self-test).
 # Fields: name (required -> check-run name), crate (required), features (required,
 # non-empty comma list), test (bool — run `cargo test` for the leg).
 
