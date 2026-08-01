@@ -310,6 +310,29 @@ impl Request {
         self
     }
 
+    /// The parties this request's evidence proves are **members** of the party
+    /// collection `collection` (`party odrl:partOf collection`) — the public READ side
+    /// of [`Request::with_party_membership`]. Returned in the deterministic sorted
+    /// order of the underlying set; empty when `collection` is not a collection the
+    /// request supplied evidence for (including when it is a plain party IRI).
+    /// [SONNET-4.6] sq-rf9uv.
+    ///
+    /// A consumer that PERSISTS an ODRL rule as a re-checked head (the sparq-solid ODRL
+    /// bridge) cannot call the crate-internal `party_matches` per session — a
+    /// session carries no membership evidence — so it needs the member set itself to
+    /// expand a collection-valued `odrl:assignee` into one head per member. Because the
+    /// evidence is caller-supplied and possibly PARTIAL, the expansion is exact only
+    /// with respect to the edges supplied here: sound to widen an ALLOW head to (never
+    /// beyond) them, but NOT sound to narrow a DENY to them — an unlisted member would
+    /// escape the deny. Callers must keep that asymmetry.
+    pub fn party_collection_members(&self, collection: &str) -> Vec<&str> {
+        self.party_memberships
+            .iter()
+            .filter(|(_, c)| c == collection)
+            .map(|(p, _)| p.as_str())
+            .collect()
+    }
+
     /// Declare one **asset-collection membership** edge `asset odrl:partOf collection`
     /// (chainable) — the asset twin of [`Request::with_party_membership`]. A rule whose
     /// `odrl:target` names an `odrl:AssetCollection` is then matched by a request whose

@@ -1035,3 +1035,41 @@ rdf:nil odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
     let wrong = base.for_purpose(Value::Iri("urn:purpose/y".into()));
     assert!(!evaluate(&p, &wrong).allow);
 }
+
+// ===========================================================================
+// sq-rf9uv — `Request::party_collection_members`: the public READ side of the
+// membership evidence, added so a consumer that PERSISTS a rule as a re-checked head
+// (the sparq-solid ODRL bridge) can expand a collection-valued `odrl:assignee` into one
+// head per member — `party_matches` is unusable there because a session carries no
+// membership evidence. [SONNET-4.6]
+// ===========================================================================
+
+#[test]
+fn party_collection_members_reports_exactly_the_supplied_evidence() {
+    let req = Request::new(left("read")).on("http://example.org/x").with_party_memberships([
+        ("http://example.org/alice", "http://example.org/team"),
+        ("http://example.org/bob", "http://example.org/team"),
+        ("http://example.org/eve", "http://example.org/other"),
+    ]);
+
+    // Members of a collection — deterministic sorted order, only that collection.
+    assert_eq!(
+        req.party_collection_members("http://example.org/team"),
+        vec!["http://example.org/alice", "http://example.org/bob"],
+        "both team members, and NOT the member of the other collection"
+    );
+    assert_eq!(req.party_collection_members("http://example.org/other"), vec!["http://example.org/eve"]);
+
+    // A collection with no supplied evidence, and a plain party IRI, are both empty —
+    // membership is never inferred from IRI structure or from the reverse edge.
+    assert!(req.party_collection_members("http://example.org/unknown").is_empty());
+    assert!(
+        req.party_collection_members("http://example.org/alice").is_empty(),
+        "the edge is directional: alice is a member, not a collection"
+    );
+
+    // A request that supplied NO evidence reports no members for anything (the base
+    // case a consumer must fall back to — never widened on absent evidence).
+    let bare = Request::new(left("read")).on("http://example.org/x");
+    assert!(bare.party_collection_members("http://example.org/team").is_empty());
+}

@@ -982,6 +982,14 @@ fn recipient_principal_allowed(p: &str) -> bool {
 /// `auth:Public` (any session) — legitimately public because the action/target/duties
 /// were already satisfied at materialization.
 ///
+/// A head naming an `odrl:PartyCollection` the request supplied `odrl:partOf` evidence
+/// for ([`sparq_policy::Request::with_party_membership`]) is expanded to one grant per
+/// KNOWN member, keeping the collection IRI itself as a head ([SONNET-4.6] sq-rf9uv). An
+/// ACP `auth:agent` head matches by identity and a session carries no membership
+/// evidence, so the unexpanded collection head matched no member and the grant was dead
+/// — an over-restriction. The expanded head is exactly the party set the evaluator would
+/// admit under the supplied evidence, never wider.
+///
 /// # Fail-closed
 ///
 /// - A Deny (prohibition override, unmet *unmappable* constraint, undischarged duty)
@@ -994,6 +1002,9 @@ fn recipient_principal_allowed(p: &str) -> bool {
 ///   maps faithfully.
 /// - A recipient IRI inside the reserved pair encoding is dropped from the grant head
 ///   (it could otherwise impersonate a minted pair principal).
+/// - A `neq`/`isNoneOf` carve-out naming a party COLLECTION falls back to one-shot
+///   ([SONNET-4.6] sq-rf9uv): a frozen `noneOf` cannot re-check membership, so a member
+///   the request did not evidence would escape the exception and keep access (fail-open).
 ///
 /// Returns a [`BridgeOutcome`]; on a conditional grant `grant_triple` reports the
 /// `(agent, auth:effect, graph)` of the FIRST emitted grant (audit anchor) and
@@ -1068,6 +1079,22 @@ pub fn materialize_permission_conditional(
                     ));
                     continue;
                 }
+                // [SONNET-4.6] sq-rf9uv: a carve-out naming a party COLLECTION cannot be
+                // frozen into `noneOf` heads — a member the request did not evidence would
+                // escape the exception and keep access (fail-OPEN). One-shot instead, where
+                // the evaluator does the real identity-or-membership check.
+                if heads_name_party_collection(request, &excepts) {
+                    fallback_reasons.push(format!(
+                        "permission {} carves out a party collection (unlisted members would \
+                         escape a frozen noneOf); one-shot path",
+                        rule.id
+                    ));
+                    continue;
+                }
+                // [SONNET-4.6] sq-rf9uv: a collection-valued assignee/recipient head is
+                // matched by the evaluator via membership, but by ACP via identity — expand
+                // it to the members the request evidenced, else the grant is dead.
+                let agents = expand_party_collection_heads(request, &agents);
                 let (first, emitted) = append_conditional_grants(
                     graph, &agents, &excepts, &window, mode, target, GrantEffect::Allow,
                 );
@@ -1136,6 +1163,11 @@ pub fn materialize_permission_conditional(
 /// - A reserved-encoded recipient/exclusion cannot become an enforceable matcher; the
 ///   rule falls back to one-shot rather than emit a deny condition that cannot bite
 ///   (which would FAIL OPEN — a deny silently dropped widens access).
+/// - A deny head naming a party COLLECTION falls back to one-shot ([SONNET-4.6]
+///   sq-rf9uv) — the DENY dual of the allow path's member expansion. A concrete deny head
+///   cannot re-check membership, so every member the request did not evidence would
+///   escape the deny; the collection-member expansion is sound in the ALLOW direction
+///   only.
 ///
 /// Returns a [`BridgeOutcome`]; on a conditional deny `prohibited == true`,
 /// `deny_triple` reports the `(agent, auth:effect, graph)` anchor of the first emitted
@@ -1190,6 +1222,20 @@ pub fn materialize_prohibition_conditional(
                 if agents.is_empty() {
                     fallback_reasons.push(format!(
                         "prohibition {} recipients are all reserved-encoded; no deny",
+                        rule.id
+                    ));
+                    continue;
+                }
+                // [SONNET-4.6] sq-rf9uv: the DENY dual of the collection-head expansion is
+                // fail-OPEN and must stay one-shot. A concrete deny head cannot re-check
+                // membership, so freezing it to the members the request evidenced lets every
+                // unlisted member of the prohibited collection escape the deny (as does the
+                // bare collection IRI, which matches no member session at all). The one-shot
+                // path's evaluator does the real identity-or-membership check.
+                if heads_name_party_collection(request, &agents) {
+                    fallback_reasons.push(format!(
+                        "prohibition {} denies a party collection (unlisted members would \
+                         escape a frozen deny head); one-shot path",
                         rule.id
                     ));
                     continue;
@@ -1252,6 +1298,11 @@ pub fn materialize_prohibition_conditional(
 /// Only when there is NO recipient constraint AND NO assignee does the head fall back to
 /// a single `auth:Public` head (any session matches) — a legitimately public rule whose
 /// action/target/duties were already satisfied at materialization.
+///
+/// The heads returned here are identity-space and request-independent. A head naming an
+/// `odrl:PartyCollection` is resolved against the request's membership evidence
+/// afterwards by [`expand_party_collection_heads`] (ALLOW only) — see [SONNET-4.6]
+/// sq-rf9uv for why the DENY dual must not do the same.
 fn condition_agents(rule: &Rule, recipients: &[String]) -> Vec<String> {
     if recipients.is_empty() {
         // [OPUS-4.8] sq-9n1q4: a bare `odrl:assignee` PROPERTY scopes the head to that
@@ -1283,6 +1334,61 @@ fn condition_excepts(except: &[String]) -> Vec<String> {
         .filter(|r| recipient_principal_allowed(r))
         .map(|r| normalise_recipient_principal(r))
         .collect()
+}
+
+/// Expand every head that names an `odrl:PartyCollection` into one head per KNOWN
+/// member, keeping the collection IRI itself as a head. [SONNET-4.6] sq-rf9uv.
+///
+/// The evaluator matches a collection-valued `odrl:assignee`/`odrl:recipient` by
+/// identity-OR-membership (`Request::party_matches` / its recipient twin), but an ACP
+/// `auth:agent` head is matched against the session agent by identity ALONE — a session
+/// carries no membership evidence, so a lone collection-IRI head matches NO member and
+/// the persisted grant is dead (the over-restriction sq-rf9uv reports). Emitting
+/// `{collection} ∪ members(collection)` makes the head the EXACT set of parties the
+/// evaluator would admit under the membership evidence this request supplied.
+///
+/// **Soundness.** The expansion draws only on that caller-supplied evidence, so it can
+/// never grant a party the evaluator would not; a member the request did not evidence is
+/// simply absent (fail-closed under-grant, never a widening). With no evidence the result
+/// is byte-for-byte the input heads. A member inside the reserved pair encoding is
+/// dropped, exactly as [`condition_agents`] drops a reserved-encoded recipient.
+///
+/// This is sound for a positive ALLOW head only. The DENY dual and an ALLOW's `noneOf`
+/// carve-out must NOT be expanded this way — see [`heads_name_party_collection`].
+fn expand_party_collection_heads(request: &Request, heads: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for head in heads {
+        if !out.contains(head) {
+            out.push(head.clone());
+        }
+        for member in request.party_collection_members(head) {
+            if !recipient_principal_allowed(member) {
+                continue;
+            }
+            let m = normalise_recipient_principal(member);
+            if !out.contains(&m) {
+                out.push(m);
+            }
+        }
+    }
+    out
+}
+
+/// Does any of `heads` name a party collection the request supplied membership evidence
+/// for? The fail-closed trigger for the two directions where
+/// [`expand_party_collection_heads`] would FAIL OPEN. [SONNET-4.6] sq-rf9uv.
+///
+/// The membership evidence is caller-supplied and possibly PARTIAL, and the head is
+/// frozen at materialization. For a positive ALLOW head a missing member only under-grants
+/// (fail-closed), so expansion is safe. But for a **DENY** head, or an ALLOW's `noneOf`
+/// **carve-out**, a missing member ESCAPES the restriction — a member of a prohibited
+/// collection would keep access, which is the widening the bridge exists to prevent. There
+/// is no faithful frozen head for those, so the whole rule falls back to the one-shot path,
+/// whose evaluator does the real identity-or-membership check (frozen but sound).
+fn heads_name_party_collection(request: &Request, heads: &[String]) -> bool {
+    heads
+        .iter()
+        .any(|h| !request.party_collection_members(h).is_empty())
 }
 
 /// Map an ODRL recipient value to a principal-space `auth:agent` IRI. The two ODRL
