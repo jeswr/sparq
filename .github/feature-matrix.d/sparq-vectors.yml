@@ -114,3 +114,25 @@
   crate: "sparq-vectors"
   features: "metadata-sidecar,spqv-provenance"
   test: true
+
+# [SONNET-4.6] sq-lhcot.2 (issue #2789, KERN boundary #1746): the DRAFT external-key `.spqv`
+# interoperability profile. `src/external_key.rs` (23 unit tests) is `#[cfg(feature =
+# "external-key")]` and the cross-implementation conformance runner
+# `tests/external_key_profile.rs` is `#![cfg(feature = "external-key")]` +
+# `required-features = ["external-key"]` behind `default = []`, so ci.yml's `--workspace
+# --all-targets` archive (which passes NO `--features`) compiles both EMPTY and runs ZERO of
+# them — the C1 structural guard (scripts/check-feature-test-execution.py) reds without this
+# leg. The conformance runner replays the byte-level fixture corpus in
+# `tests/fixtures/external-key/` written by an INDEPENDENT stdlib-Python encoder, so it is a
+# two-implementation comparison, not a self-consistency check; the negative fixtures pin the
+# fail-closed parser rejections (bad magic, frozen profile version, unsorted/duplicate keys,
+# oversized/zero key length, trailing bytes, truncation). `external-key` implies NO other
+# feature and adds NO new dependency (a hand-rolled fixed-width LE codec reusing the
+# always-compiled provenance block codec; no serde, no multihash crate, no engine). This leg
+# builds the module, runs `cargo test` (both suites run only with the feature ON), and
+# `clippy --all-targets -D warnings` with it ON (the real gate). Appended at the END to
+# minimise the recurring feature-matrix merge conflict.
+- name: "sparq-vectors (external-key — DRAFT .spqv interoperability profile)"
+  crate: "sparq-vectors"
+  features: "external-key"
+  test: true
