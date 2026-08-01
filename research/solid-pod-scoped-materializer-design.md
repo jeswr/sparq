@@ -147,9 +147,35 @@ acl:accessTo <o.ex/n1>` and some foreign `.acl` declares `<o.ex/.acl#a1> acl:age
 <mallory> ; acl:mode acl:Write`, the grant fires on `o.ex/n1` from a foreign document.
 
 Unlike (B), this one is a *defect*, not a spec feature: WAC has no notion of an
-Authorization whose subject line is split across documents. §5 recommends closing it by
-adding the `inDoc` guard to `:47-64` — which is spec-correct hardening on its own merits and
-collapses case (C) out of the closure entirely.
+Authorization whose subject line is split across documents.
+
+**But the obvious fix does not work.** Adding an existential `?auth solidx:inDoc ?doc` guard to `:47-64` closes nothing, because
+`inDoc` is **subject**-scoped, not triple-scoped: the loader collects the subject of every
+triple in a control graph into one set and emits one `inDoc` fact per subject per document
+(`loader.rs:240-254`; `wac.n3:8` states this — "for every subject S of ACL graph D"). If the
+owning `<o.ex/.acl>` supplies `<#a1> a acl:Authorization ; acl:accessTo <o.ex/n1>` and a
+foreign `.acl` supplies `<#a1> acl:agent <mallory> ; acl:mode acl:Write`, then `<#a1>` has
+`inDoc` facts for **both** documents, so an existential guard is satisfied and the foreign
+`acl:agent`/`acl:mode` triples still combine with the local `appliesTo`.
+
+Nor is a *document-qualified* join over the current facts enough — deriving
+`grantsAgentIn(?auth, ?doc, ?a)` from `?auth solidx:inDoc ?doc . ?auth acl:agent ?a` and
+joining it to `appliesTo` on the same `?doc` still fires, because the foreign `acl:agent`
+triple carries no document tag of its own and joins happily against the *local* `inDoc`
+fact. Excluding the foreign contribution requires binding **each contributing triple** to
+the document that supplied it — i.e. real per-triple provenance, which the loader does not
+currently keep (`assemble_facts` pushes each control-document triple into one flat, untagged
+`Vec<[Term; 3]>`, `loader.rs:248-250`). Possible shapes, none free, and the choice belongs
+to P3 (§8):
+
+- retain per-triple graph provenance in the fact set and join `acl:agent`/`acl:mode`
+  against it, so applicability and the contributing properties share one document; or
+- have the loader mint document-qualified copies of each control document's triples and
+  derive document-qualified intermediate facts, emitting a grant only after applicability
+  and the properties agree on the document identity.
+
+Until one of those lands, case (C) stays open and **stays in the dependency closure** —
+§5.2 keeps the shared-subject edge, and §8 P3 is respecified accordingly.
 
 ### 2.3 The inert-closure lemma (a genuine negative result about a *non*-problem)
 
@@ -267,8 +293,11 @@ assembly:
 - ACP: `<o.acr> → {document containing each acp:accessControl / apply / allOf / anyOf /
   noneOf / matcher-attribute subject reachable from it}`, computed as a fixpoint over the
   subject→document inverted index;
-- WAC case (C): empty **once the `inDoc` hardening lands** (§8 P3); until then,
-  `<o.acl> → {every other .acl sharing a subject IRI}`.
+- WAC case (C): `<o.acl> → {every other .acl sharing a subject IRI}`. This edge is **not**
+  removable by an existential `inDoc` guard (§2.2 C shows why that guard is a no-op); it may
+  be dropped only once P3 lands per-triple/document-qualified provenance **and** the
+  split-node regression (§7 (7)) is green. Treat the edge as load-bearing until then — P4
+  must not assume case (C) is eliminated.
 
 `closure(O)` = documents at `O` (control graphs and, for the resource/container facts, `O`'s
 graph names) ∪ reachable set. Also needed: the **reverse** map, so a write to a group
@@ -378,7 +407,15 @@ The operation alphabet must include, at minimum:
 4. blank-node `acp:noneOf` matchers, with writes at non-final vector positions, so the
    skolem-stability fix (§3.1) is non-vacuously exercised;
 5. an exception matcher shared by policies at two origins (§3.2 residue);
-6. a `delete_acl` that revokes — no stale grant may survive (the fail-open-critical case).
+6. a `delete_acl` that revokes — no stale grant may survive (the fail-open-critical case);
+7. **split authorization nodes** (§2.2 C): `<o.ex/.acl>` declaring
+   `<#a1> a acl:Authorization ; acl:accessTo <o.ex/n1>` and a *foreign* `.acl` declaring the
+   same subject `<#a1> acl:agent <mallory> ; acl:mode acl:Write`. Assert the foreign `agent`
+   and `mode` cannot contribute — no grant to `<mallory>` on `<o.ex/n1>` — and that editing
+   the foreign `.acl` therefore leaves `O`'s slice fixed. This case does not exist in the
+   suite today; on `main` it is *expected* RED (§2.2 (C)'s rule-text argument — derived from
+   the rules, **not yet observed**), so P3 must show it red before fixing it, and it doubles
+   as P3's acceptance test. While it is red the §5.2 shared-subject closure edge must remain.
 
 Mutation obligation: each new assertion must be shown red when the scoped path is
 deliberately wrong (e.g. splice `O`'s slice without dropping the stale one), not merely green.
@@ -386,21 +423,25 @@ deliberately wrong (e.g. splice `O`'s slice without dropping the stale one), not
 ## 8. Phased plan — proposed child beads
 
 `bd` is not available in this checkout, so these are **specified, not created**. Each is
-single-crate and disjoint by file.
+single-crate; all are file-disjoint except P1 and P3, which both touch `loader.rs` (see the
+sequencing note below).
 
 | # | Bead | Crate | Tier | Invariant | Acceptance test |
 | --- | --- | --- | --- | --- | --- |
 | P0 | Write-path profile + `put_acl` benchmark; attribute cost across assembly / reason / install / index | `sparq-solid`, `sparq-bench` | sonnet | Measurement only; no behaviour change | A committed harness that reports the four-term split; no numbers in markdown |
 | P1 | Skolemize on graph IRI, not vector index | `sparq-solid` (`loader.rs`) | sonnet | Auth view is invariant under `graph.named` permutation | Permute `named`, assert identical view; blank-node-matcher ACR fixture |
 | P2 | `origin → graph names` index on `PodStore`, maintained on write | `sparq-solid` | sonnet | Index equals a full scan at every step | Differential vs `graph.named.iter().filter(...)` |
-| P3 | WAC `inDoc` guard on `grantsAgent` / `acl:mode` (§2.2 C) | `sparq-solid` (`rules/wac.n3`) | opus | A split authorization node grants nothing | New test: foreign `.acl` supplying `acl:agent` for `O`'s node ⇒ no grant; WAC conformance suite unchanged |
+| P3 | Document-qualified WAC authorizations (§2.2 C): per-triple provenance in the fact set, or loader-minted document-qualified triples, so `acl:agent`/`acl:mode` join applicability on the **same** document. NOT a bare existential `inDoc` guard — §2.2 (C) shows that is a no-op | `sparq-solid` (`rules/wac.n3` + `loader.rs`) | opus | A split authorization node grants nothing: a foreign document's `acl:agent`/`acl:mode` cannot combine with a local `appliesTo` | §7 (7), shown RED first; WAC conformance suite unchanged |
 | P4 | Document dependency graph + reverse map, built during assembly | `sparq-solid` | opus | `closure(O)` ⊇ true dependency set | Property: perturbing any document outside `closure(O)` leaves `O`'s slice fixed |
 | P5 | `assemble_facts_scoped` + scoped reasoner run + carried candidate seeds | `sparq-solid` | opus | Scoped closure ≡ full closure restricted to `O` | §7 (1)–(4), triple-level |
 | P6 | Splice + per-origin auth-view slices; `MaterializeStats` fallback counters | `sparq-solid` | opus | Atomicity: `Err` leaves prior view byte-identical | §7 all, plus the existing failed-rematerialization test |
 | P7 | `AuthIndex` per-origin patch replacing `from_graph` on the scoped path | `sparq-solid` | opus | Patched index ≡ `from_graph` of the spliced view | §7 (5)–(6); lands **last** |
 
-P0 gates everything. P1–P3 are independently valuable and can run in parallel. P4 gates P5;
-P5 gates P6; P6 gates P7.
+P0 gates everything. P1, P2 and P3 are independently valuable, but P3 touches `loader.rs`
+as well as `rules/wac.n3`, so it is **not** file-disjoint from P1 — sequence it after P1
+rather than in parallel. P4 gates P5; P5 gates P6; P6 gates P7. P3 does not gate
+P4, but it determines whether P4 may drop the case-(C) shared-subject edge (§5.2): if P3
+slips or is declined, P4 ships with that edge retained.
 
 ## 9. Open questions for the maintainer
 
