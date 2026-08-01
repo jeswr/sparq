@@ -1225,6 +1225,14 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
       * they still RUN on a non-draft PR head (the PRIMARY gate) and on push-to-main —
         the push leg is the sq-6vshe.14 EXEMPTION: if a future push-run skip lands and
         does not exempt coverage, this test REDs;
+      * [OPUS-5] issue #5149 — that exemption covers the whole post-merge CHAIN, not
+        just the measure legs: `coverage-engine-merge` (where the sparq-engine floor is
+        enforced), the `coverage` aggregate, and `coverage-demoted-filer` (which files
+        the alarm the ratchet-ADVANCE pause reads back). Pinned along all three routes by
+        which a leg can leave the push run: behaviourally on a real push-to-main payload,
+        by the chain's `needs.*` GUARD REFERENCES (an unmodelled `needs` path evaluates
+        null-truthy and would otherwise slip past the payload assertions), and by its
+        `needs:` EDGES (a new edge skips a leg by propagation, without touching its `if:`);
       * the fast no-compile FLOOR gates (`coverage-floors`) STILL RUN on merge_group, so a
         batch can never LOWER a committed floor (the "floor is never silently lowered"
         half of the invariant);
@@ -1304,6 +1312,131 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
             eval_job_if(cond, {"needs": {"coverage-engine-run": {"result": "success"}}}),
             "coverage-engine-merge must still run when its partitions succeeded",
         )
+
+    def _push_to_main(self, needs=None):
+        """A push-to-main `github` context — including `github.ref`, which `pr_event`
+        omits — plus synthetic upstream job results."""
+        ctx = pr_event(event="push")
+        ctx["github"]["ref"] = "refs/heads/main"
+        ctx["needs"] = {job: {"result": r} for job, r in (needs or {}).items()}
+        return ctx
+
+    def test_post_merge_enforcement_chain_survives_on_push_to_main(self):
+        """[OPUS-5] issue #5149 — the sq-6vshe.14 coordination pin, SECOND half.
+
+        `test_measure_legs_still_run_on_a_pr_head_and_on_push_to_main` pins only the
+        FIRST hop. Post-merge enforcement is a CHAIN, and the demotion's soundness needs
+        all of it:
+
+            measure legs -> `coverage-engine-merge` (this is where `coverage-gate.py
+            --check` actually enforces the sparq-engine floor; the run partitions only
+            emit .profraw) -> the `coverage` aggregate (the verdict the filer reads) ->
+            `coverage-demoted-filer` (files the `[demoted-lane]
+            lane=coverage-ratchet-main` alarm, which beads the finding AND is what the
+            ratchet-ADVANCE pause reads back).
+
+        A push-run skip that exempted the two measure legs but not the rest would leave a
+        post-merge regression measured, RED and UNFILED — no bead, no alarm, no ratchet
+        pause — which is silent rot, not the "detectable and recoverable" the demotion
+        argues for. Each hop is evaluated against a REAL push-to-main payload, so an
+        event-conditioned conjunct added by that lever is genuinely exercised here
+        instead of resolving against an absent `github` context."""
+        self.assertTrue(
+            eval_job_if(self.ci["jobs"]["coverage-engine-merge"].get("if", ""),
+                        self._push_to_main({"coverage-engine-run": "success"})),
+            "coverage-engine-merge must still run on push-to-main — it is where the "
+            "sparq-engine floor is ENFORCED (coverage-gate.py --check) over the merged "
+            "partitions, so exempting only the run partitions from the sq-6vshe.14 "
+            "push-run skip would measure the engine and never check it",
+        )
+        self.assertTrue(
+            eval_job_if(str(self.ci["jobs"]["coverage"].get("if", "")),
+                        self._push_to_main()),
+            "the coverage aggregate must still conclude on push-to-main — it is the "
+            "verdict coverage-demoted-filer gates on",
+        )
+        filer = str(self.ci["jobs"]["coverage-demoted-filer"].get("if", ""))
+        self.assertTrue(
+            eval_job_if(filer, self._push_to_main({"coverage": "failure"})),
+            "coverage-demoted-filer must FIRE on a red push-to-main coverage aggregate "
+            "— it is EXEMPT from the sq-6vshe.14 push-run skip, because a demoted lane "
+            "whose failures are never filed is exactly the silent rot the demotion "
+            "protocol forbids",
+        )
+        self.assertFalse(
+            eval_job_if(filer, self._push_to_main({"coverage": "success"})),
+            "coverage-demoted-filer must NOT file when the coverage aggregate is green",
+        )
+
+    # The ONLY `needs.<job>` references each push-side chain guard may carry.
+    #
+    # This closes a hole in the behavioural assertions above and in
+    # `test_measure_legs_still_run_on_a_pr_head_and_on_push_to_main`: a sq-6vshe.14
+    # push-skip is most naturally written as a new `needs.<pre-job>.outputs.… != 'true'`
+    # conjunct, and an unmodelled `needs` path resolves to NULL — so `null != 'true'` is
+    # truthy and every payload-driven assertion would still pass while the leg was in
+    # fact skipped in CI. Pinning the reference SET makes adding such a conjunct RED
+    # here, which is the point of contact where the exemption gets designed rather than
+    # discovered (issue #5149).
+    _CHAIN_NEEDS_REFS = {
+        "coverage-measure": {"changes", "select"},
+        "coverage-engine-run": {"changes", "select"},
+        "coverage-engine-merge": {"coverage-engine-run"},
+        "coverage": set(),
+        "coverage-demoted-filer": {"coverage"},
+    }
+    _NEEDS_REF_RE = re.compile(r"needs\.([A-Za-z0-9_-]+)\.")
+
+    # The `needs:` EDGES of the chain jobs that inherit skip-propagation (i.e. every one
+    # whose `if:` lacks `always()`). GitHub skips a job when a needed job is skipped, so
+    # adding a `queue-validated`-style pre-job to one of these lists is a second, `if:`-free
+    # way to take the leg off the push run — invisible to the guard-reference pin above.
+    # `coverage` and `coverage-demoted-filer` are deliberately absent: both carry
+    # `always()`, so they do not inherit a skipped upstream and their guards are already
+    # pinned behaviourally.
+    _CHAIN_NEEDS_EDGES = {
+        "coverage-measure": ["changes", "coverage-floors", "select"],
+        "coverage-engine-run": ["changes", "coverage-floors", "select"],
+        "coverage-engine-merge": ["coverage-engine-run"],
+    }
+
+    def test_push_chain_inherits_no_new_skip_propagating_edge(self):
+        """[OPUS-5] issue #5149, companion to the guard-reference pin: the second way to
+        skip a chain leg is a new `needs:` edge onto a job that itself skips. Pin the
+        edge sets of the propagation-susceptible legs so that route REDs too."""
+        for job_id, expected in self._CHAIN_NEEDS_EDGES.items():
+            needs = self.ci["jobs"][job_id].get("needs", [])
+            needs = [needs] if isinstance(needs, str) else list(needs)
+            self.assertEqual(
+                sorted(needs), sorted(expected),
+                f"ci.yml:{job_id}: a new `needs:` edge would let a skipped upstream skip "
+                f"this leg by propagation. If this is the sq-6vshe.14 push-run skip, the "
+                f"post-merge coverage chain must be EXEMPT from it (sq-6vshe.17)",
+            )
+
+    def test_push_chain_guards_gain_no_undeclared_needs_gate(self):
+        """[OPUS-5] issue #5149 — the structural half of the sq-6vshe.14 pin.
+
+        Every job on the post-merge coverage enforcement chain must keep referencing
+        exactly the upstream jobs it references today. A new `needs.*` reference in one
+        of these guards is, in practice, a new gate on the chain; the payload assertions
+        cannot catch it (see the note on `_CHAIN_NEEDS_REFS`), so it is caught here.
+
+        If you are landing sq-6vshe.14 and this RED is your first contact with the
+        constraint: the coverage chain must be EXEMPT from the push-run skip — see
+        docs/branch-protection.md §*Coverage MEASUREMENT off the merge queue*. Updating
+        this set is only correct once that exemption is real."""
+        for job_id, expected in self._CHAIN_NEEDS_REFS.items():
+            cond = str(self.ci["jobs"][job_id].get("if", ""))
+            got = set(self._NEEDS_REF_RE.findall(cond))
+            self.assertEqual(
+                got, expected,
+                f"ci.yml:{job_id}: the post-merge coverage chain's guard changed its "
+                f"`needs.*` references ({sorted(expected)} -> {sorted(got)}). If this is "
+                f"the sq-6vshe.14 push-run skip, the coverage chain must be EXEMPT from "
+                f"it — that is the whole enforcement point the merge_group demotion "
+                f"(sq-6vshe.17) depends on",
+            )
 
     # ---- what the queue KEEPS ------------------------------------------------
     def test_floor_gates_still_run_on_merge_group(self):

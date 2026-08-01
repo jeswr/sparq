@@ -3740,6 +3740,17 @@ jobs:
   # red main build (those gates never left the queue), not a demoted-lane finding.
   # SEPARATE job so the write scope stays off the coverage matrix — least privilege,
   # matching the heavy-recall / fuzz / differential filer precedent.
+  #
+  # [OPUS-5] issue #5149 — this job is part of the sq-6vshe.14 EXEMPTION, not just the
+  # measure legs. Post-merge enforcement is a CHAIN: measure legs -> coverage-engine-merge
+  # (where `coverage-gate.py --check` enforces the sparq-engine floor) -> the `coverage`
+  # aggregate -> THIS filer. A push-run skip that exempted the measure legs but not this
+  # job would leave a post-merge regression measured, RED and UNFILED — no bead, no alarm,
+  # so no ratchet-ADVANCE pause either — which is the silent rot the demotion's
+  # "detectable and recoverable" argument rules out. Every hop of the chain is pinned by
+  # scripts/tests/test_ci_select_wiring.py::TestCoverageMergeGroupDemotion — behaviourally
+  # (each guard evaluated on a push-to-main payload), by its `needs.*` guard references,
+  # and by its `needs:` edges — so all three ways to skip a leg RED there.
   coverage-demoted-filer:
     name: coverage demoted-lane safety-net (push-to-main)
     # Only the aggregate verdict is needed — it already folds in every measure leg, and an

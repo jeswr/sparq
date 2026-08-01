@@ -133,6 +133,33 @@ keep until the association is verified, it costs ~4 m on one runner), and ONE
 warm — note today's cache freshness already depends on whichever push wave survives
 cancellation, so a small always-completing primer is a strict improvement.
 
+> **KEEP-list ADDENDUM — the coverage CHAIN (issue #5149). [OPUS-5]** This list predates
+> sq-6vshe.17 (§3.4a), which demoted the instrumented coverage MEASUREMENT off
+> `merge_group`. That made the push-to-main run coverage's *last* enforcement point for
+> the batch-stacking case (two PRs each ≥ floor merging to a tree < floor), so lever 1
+> must exempt it — and the unit of exemption is the whole CHAIN, not just its first hop:
+> `coverage-measure`, `coverage-engine-run`, **`coverage-engine-merge`** (this is where
+> `coverage-gate.py --check` enforces the sparq-engine floor; the run partitions only
+> emit `.profraw`), the `coverage` aggregate, and **`coverage-demoted-filer`** (which
+> files the `[demoted-lane] lane=coverage-ratchet-main` alarm that beads the finding and
+> is what the ratchet-ADVANCE pause reads back). Exempting the measure legs but not the
+> filer leaves a post-merge regression measured, red and UNFILED — silent rot, which is
+> precisely what the demotion's "detectable and recoverable" argument rules out.
+>
+> This is mechanical, not advisory: every hop is pinned by
+> `scripts/tests/test_ci_select_wiring.py::TestCoverageMergeGroupDemotion` along all three
+> routes by which a leg can leave the push run — (a) **behaviourally**, each guard
+> evaluated against a real push-to-main payload; (b) the chain's **`needs.*` guard
+> references**, because a skip conjunct naming a pre-job the test does not model resolves
+> to null and would evaluate truthy, slipping past (a); and (c) the **`needs:` edges** of
+> the legs that inherit skip-propagation, because a new edge onto a skipping pre-job takes
+> a leg off the run without touching its `if:` at all. A `.14` skip over any hop REDs.
+>
+> Consequence for the estimate below: those legs are among the heaviest jobs on a push
+> run, so the runner-minute figure — written before sq-6vshe.17 made them load-bearing —
+> must be **re-derived with the chain kept**, not inherited. No revised number is claimed
+> here; none has been measured.
+
 **Safety: SAFE** (fail-open guard + explicit keep-list + the nightly full-matrix
 backstop and sq-va7at selection alarm are untouched).
 **Est. saved:** ~200–400 runner-min per merged PR of pool load; −0.5–2 m median entry
