@@ -564,6 +564,11 @@ def _self_test():
     assert attribute("crates/sparq-core/README.md", policy) == "sparq-core"
     # The shared-lane rows the frontier depends on.
     assert attribute("Cargo.lock", policy) == "deps"
+    # sparq#5128: the root manifest's lane is load-bearing for a DECISION, not just for routing —
+    # `ready-issues.py::partition_path` declines to narrow a not-yet-landed crate's key precisely
+    # because every new crate must add its `[workspace] members` entry here, so two new-crate PRs
+    # co-hold this reserving partition anyway. Re-point this row and that reasoning is void.
+    assert attribute("Cargo.toml", policy) == "workspace"
     assert attribute(".github/workflows/ci.yml", policy) == "ci"
     assert attribute("scripts/pr-area-labels.py", policy) == "ci"
     # Additive only: derivation never proposes removing a human label.
