@@ -56,6 +56,14 @@
 
 pub mod canon;
 pub mod commit;
+// [OPUS-5] sq-j3b9 (follow-up to sq-8jv7, gap CR-G5): the scalar-independent
+// Baby-JubJub ladder used by the SECRET-scalar paths of `sig` (key derivation +
+// Schnorr signing). Crate-internal — no public API, no new dependency, and the
+// public-data `verify` path deliberately keeps the faster arkworks
+// multiplication. Removes the square-and-multiply control-flow shape; does NOT
+// claim signing is constant-time (arkworks field ops remain unasserted — see the
+// module docs and `compliance/cryptoreview/side-channel-analysis.md`).
+mod ct;
 // [OPUS-4.8] sq-xojl: DUAL-LEAF value-lane host encoding (VALUE_HOOK + lexical
 // leaf). OPT-IN behind the `dual-leaf` cargo feature (OFF by default): the
 // default string-canonical pipeline is byte-unchanged. Carries the documented
