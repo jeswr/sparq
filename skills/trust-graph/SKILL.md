@@ -154,7 +154,7 @@ DIATF-register entry IS one such edge. The vocabulary (namespace `trustx:` — t
 <urn:example:cert-1> a trustx:Certification ;
   trustx:certifies      <https://issuer.example/dvs> ;      # the vouched-for issuer
   trustx:underFramework <https://gov.example/framework> ;   # the trustx:Framework
-  trustx:scope          trustx:AnyServiceScope ;            # or a SHACL shape / rulebook IRI
+  trustx:certificationScope trustx:AnyServiceScope ;        # or a SHACL shape / rulebook IRI
   trustx:validFrom      "2026-01-01T00:00:00Z"^^xsd:dateTime ;
   trustx:validUntil     "2027-01-01T00:00:00Z"^^xsd:dateTime .
 ```
@@ -260,7 +260,7 @@ Behind the default-OFF **`framework-vocab`** feature. The `trustx:` namespace (s
   (framework-certified issuers), `trustx:requiresScopeConformance` (issuer certification
   scope check), `trustx:requiresValidStatusAt` (positive status window instant),
   `trustx:methodPolicy` (OPTIONAL ODRL reference).
-- **Certification and scope** (`trustx:Certification`, `trustx:scope`) — an issuer being
+- **Certification and scope** (`trustx:Certification`, `trustx:certificationScope`) — an issuer being
   *certified under* a framework (`trustx:underFramework`), for a *scope* ranging from
   service-level (`trustx:AnyServiceScope`, the honest DIATF granularity) down to a
   predicate set / SHACL shape (reusing `trust:forShape`). Validity window via

@@ -85,7 +85,7 @@ vocabulary and merged gates — not a new model. That is what this record decomp
 A trust edge is a `trustx:Certification`: a **signed, time-windowed, status-checked,
 scope-attenuating** attestation by an *anchor authority* that an issuer may act as a
 source for statements **within the intersection** of the anchor's own authority and the
-certification's `trustx:scope`. An edge is **never blanket trust**, and it confers
+certification's `trustx:certificationScope`. An edge is **never blanket trust**, and it confers
 nothing by itself — authority flows only from a **local, Control-gated anchor rule**:
 
 ```turtle
@@ -101,7 +101,7 @@ nothing by itself — authority flows only from a **local, Control-gated anchor 
 [] a trustx:Certification ;
    trustx:certifies      <https://gov.example/issuer> ;
    trustx:underFramework <https://eidas.example/trusted-list> ;
-   trustx:scope          [ ... shape/attribute-list the issuer is certified for ... ] ;
+   trustx:certificationScope [ ... shape/attribute-list the issuer is certified for ... ] ;
    trustx:validFrom "..." ; trustx:validUntil "..." .
 ```
 

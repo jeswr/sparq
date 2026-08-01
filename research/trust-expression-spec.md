@@ -120,7 +120,7 @@ mechanics rather than a caricature.
 1. **Certification scope granularity differs by framework.** eIDAS gives
    schema-level scoping hooks (Attestation Rulebooks, the attribute
    catalogue); DIATF certifies a *service*, not an attribute list. So
-   `trustx:scope` must range from "everything this certified service issues"
+   `trustx:certificationScope` must range from "everything this certified service issues"
    (service-level, the DIATF reality) down to a specific attestation type or
    attribute-predicate set (the eIDAS Rulebook reality). A spec that hardwires
    attribute-level scope would misdescribe DIATF; one that omits scope cannot
@@ -219,14 +219,27 @@ constants like `trust.ttl`/`vocab.rs` and `secprop-ext.ttl`/`secprop.rs`):
   mechanics it lacks.
 - `trustx:Certification` — a time-windowed, authority-signed attestation
   that an issuer is certified under a framework: `trustx:certifies` (issuer),
-  `trustx:underFramework`, `trustx:scope`, `trustx:validFrom`/`validUntil`,
+  `trustx:underFramework`, `trustx:certificationScope`, `trustx:validFrom`/`validUntil`,
   plus the signature/attestation binding. A Trusted-List or DIATF-register
   entry *is* a `trustx:Certification` in this model.
-- `trustx:scope` — what the issuer is certified to issue. Ranges over (i)
+- `trustx:certificationScope` — what the issuer is certified to issue. Ranges over (i)
   `trustx:AnyServiceScope` (service-level — the honest DIATF granularity),
   (ii) an attestation type / Rulebook IRI, (iii) a predicate set or SHACL
   shape (reusing `trust:`'s existing `forPredicate` → `forShape` desugaring
-  pattern rather than inventing a second scoping idiom).
+  pattern rather than inventing a second scoping idiom). Named
+  `certificationScope`, **not** `scope`: `trustx:` is a prose-only sub-prefix
+  over `trust:`'s *own* base IRI, so a `trustx:scope` term would literally be
+  `trust:scope` (rule applicability, `rdfs:domain trust:TrustRule`) — one
+  property carrying two conflicting domains rather than two homonyms
+  (issue #3801). Every `trustx:` local name must stay disjoint from
+  `trust.ttl`'s for the shared-base choice to remain sound.
+- `trustx:validFrom` / `trustx:validUntil` carry the validity window of a
+  `trustx:Certification` **and** of a `trustx:StatusAttestation`, so their
+  `rdfs:domain` is the *union* of those two classes. A bare
+  `rdfs:domain trustx:Certification` would, under RDFS entailment, type every
+  status attestation as a certification and oblige it to satisfy the
+  certification's `certifies` / `underFramework` / `certificationScope`
+  structure (issue #3801).
 - "**Issuers only issued what they are certified to issue**" is then a
   *scope-conformance check*: every contributing attested statement's
   type/predicate falls under its issuer's `trustx:Certification.scope` valid
@@ -323,7 +336,7 @@ classes, all derived from §3's semantics, every negative case fail-closed:
 4. Untrusted issuer: signature valid, issuer not in `TR` → reject.
 5. Mode 2 pass: issuer certified under the framework, scope-conformant.
 6. Scope violation: certified issuer, contributing statement outside
-   `trustx:scope` → reject (the "only issued what certified to issue" case).
+   `trustx:certificationScope` → reject (the "only issued what certified to issue" case).
 7. Certification expired/revoked at *t* → reject (certifications are status-
    checked exactly like credentials — same positive-attestation machinery).
 8. Encoding: response provenance round-trips (a) ↔ (b) losslessly.
