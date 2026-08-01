@@ -35,6 +35,13 @@
 #      shards download — so the shards keep receiving the same byte-identical
 #      archive, and the nextest test set is unchanged.
 #
+#   3. [OPUS-5] #5213 — COVERAGE-ENGINE CACHE NAMESPACE. `coverage-engine-run` and
+#      `coverage-engine-merge` must reach the same rust-cache entry via one identical
+#      `shared-key`, and neither may use the `key:` input. Same "invisible when absent"
+#      argument: at the pinned revision the `key:` input does NOT replace the job
+#      component, so a `key:`-based attempt to share across those two jobs restores
+#      cold forever while looking correct in the YAML. Details in the class docstring.
+#
 # Deliberately NOT asserted: sccache. Bead item 3 (an sccache/GHA-backend A/B on
 # build-archive) is measure-first with a >=60 s median-win adoption bar, and no such
 # measurement has been taken — so nothing about sccache is wired, claimed, or pinned
@@ -142,6 +149,20 @@ def with_value(body: list[str], key: str) -> str | None:
     return None
 
 
+def job_body(lines: list[str], job_id: str) -> list[str]:
+    """The lines of the top-level `jobs:` entry `job_id` (a 2-space-indented key)."""
+    start = next(
+        (i for i, l in enumerate(lines) if re.match(rf"^  {re.escape(job_id)}:\s*$", l)),
+        None,
+    )
+    if start is None:
+        return []
+    for i in range(start + 1, len(lines)):
+        if re.match(r"^  \S", lines[i]) and not _is_comment(lines[i]):
+            return lines[start:i]
+    return lines[start:]
+
+
 def merge_group_workflows_with_rust_cache() -> list[Path]:
     return sorted(
         p
@@ -223,6 +244,78 @@ class TestCacheSaveDiscipline(unittest.TestCase):
                     with_value(body, "lookup-only:"),
                     f"{wf.name}:{idx + 1}: rust-cache `lookup-only` would disable RESTORE; "
                     "sq-6vshe.15 restricts SAVING only.",
+                )
+
+
+class TestCoverageEngineCacheNamespace(unittest.TestCase):
+    """[OPUS-5] #5213 — the two engine-coverage jobs must land on ONE cache entry.
+
+    `coverage-engine-merge` runs on a fresh runner and recompiles the instrumented
+    objects the run partitions' downloaded .profraw are merged against, so its whole
+    cache-step rationale is "restore what a run partition warmed".
+
+    rust-cache grants that through `shared-key` ONLY. Verified against the pinned
+    revision e18b497 (`src/config.ts`, and the shipped `dist/restore/index.js` it
+    builds to — identical logic): the key prefix is `prefix-key` plus EITHER
+    `-<shared-key>` OR `-<key>-$GITHUB_JOB`. `shared-key` REPLACES the job component;
+    `key` is only an ADDITIONAL discriminator that still gets $GITHUB_JOB appended
+    (`add-job-id-key` defaults to "true"). So the former `key: coverage-engine-run-1`
+    on the merge job produced a prefix ending `-coverage-engine-merge-…`, which can
+    never match a run partition's `-coverage-engine-run-…`.
+
+    Precisely: that was NOT a permanent cold restore — `save-if` lets the merge job
+    seed and restore its OWN entry on main — but it was a 4th cache entry instead of
+    the sharing the comment claimed, and the extra entries are the budget pressure
+    that evicts warm caches (sq-3sbrr / #1395). It reads as correct in the YAML and
+    nothing else in this repo would catch it, which is why it is pinned here.
+
+    Two properties, both one YAML line: the keys are shared AND equal, and neither
+    step reintroduces `key:` (which would re-split the entry per matrix leg and put
+    the job component back).
+    """
+
+    JOBS = ("coverage-engine-run", "coverage-engine-merge")
+
+    def _cache_steps(self, job_id: str) -> list[list[str]]:
+        body = job_body(_lines(CI_YML), job_id)
+        self.assertTrue(body, f"ci.yml has no `{job_id}:` job — renamed? re-point this test.")
+        steps = [b for _, b in steps_using(body, RUST_CACHE)]
+        self.assertTrue(
+            steps,
+            f"`{job_id}` no longer has a rust-cache step — the cross-job dep-cache "
+            "contract this class pins is gone; re-point the test rather than deleting it.",
+        )
+        return steps
+
+    def test_run_and_merge_share_one_shared_key(self) -> None:
+        seen: dict[str, str] = {}
+        for job_id in self.JOBS:
+            for body in self._cache_steps(job_id):
+                got = with_value(body, "shared-key:")
+                self.assertIsNotNone(
+                    got,
+                    f"`{job_id}`'s rust-cache step has no `shared-key`. Without it the key "
+                    "prefix carries $GITHUB_JOB, so coverage-engine-merge addresses its own "
+                    "entry and can never restore what coverage-engine-run saved — the "
+                    "sharing its cache step exists for (#5213).",
+                )
+                seen[job_id] = got
+        self.assertEqual(
+            len(set(seen.values())),
+            1,
+            "coverage-engine-run and coverage-engine-merge must use the SAME rust-cache "
+            f"`shared-key` or they address different cache entries: {seen}",
+        )
+
+    def test_neither_job_uses_the_job_scoped_key_input(self) -> None:
+        for job_id in self.JOBS:
+            for body in self._cache_steps(job_id):
+                self.assertIsNone(
+                    with_value(body, "key:"),
+                    f"`{job_id}`'s rust-cache step sets `key:`. At the pinned revision `key` "
+                    "is an ADDITIONAL discriminator that still has $GITHUB_JOB appended — it "
+                    "does NOT make a key shareable across jobs, and on the matrix job it "
+                    "re-splits the one entry per partition. Use `shared-key` (#5213).",
                 )
 
 
