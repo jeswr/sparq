@@ -2408,6 +2408,55 @@ def _deploy_reference_hits(label: str, text: str) -> list[str]:
     return hits
 
 
+# The WORKFLOW half of the same proof, derived rather than listed.
+#
+# Every `.github/workflows/*.yml` is audited unless it is EXEMPT below, so a NEW or
+# RENAMED workflow that reads deploy/ is caught BY DEFAULT — the previous
+# hand-maintained "these are the Rust-CI lanes" filename list silently covered
+# nothing it had not been told about, and skipped entries that were missing from disk.
+#
+# An exemption is sound only for a workflow the SELECTOR CANNOT SKIP. _ORCHESTRATION_SAFE
+# acts solely through the ci-select outputs, so a workflow consuming none of them runs on a
+# deploy-only PR exactly as on any other, and reading deploy/ there can produce no unsound
+# skip. That property is RE-DERIVED per exemption (test_every_deploy_audit_exemption_…),
+# never asserted in prose: wiring one of these to the selector turns this suite RED.
+_DEPLOY_AUDIT_EXEMPT: dict[str, str] = {
+    "deploy-lint.yml": "the deploy/** yaml+shell lane that owns the tree",
+    "deploy-terraform-lint.yml": "the deploy/** terraform lane that owns the tree",
+    "docs-quality.yml": "runs deploy/demo/check.sh — the demo-manifest lane",
+}
+
+# A workflow is SELECTION-GATED iff it calls the reusable selector or reads its outputs.
+_SELECTION_GATED_RE = re.compile(
+    r"needs\.select\.outputs|\./\.github/workflows/ci-select\.yml")
+
+
+def _workflow_texts() -> dict[str, str]:
+    """Every workflow definition on disk, keyed by file name."""
+    wf_dir = REPO_ROOT / ".github" / "workflows"
+    return {
+        p.name: p.read_text(encoding="utf-8")
+        for p in sorted(wf_dir.glob("*.yml")) + sorted(wf_dir.glob("*.yaml"))
+    }
+
+
+def _is_selection_gated(text: str) -> bool:
+    """Does this workflow consume the ci-select outputs (i.e. can selection skip it)?
+    Whole-line comments are ignored — several workflows DISCUSS the selector."""
+    return any(_SELECTION_GATED_RE.search(line) for line in text.splitlines()
+               if not line.lstrip().startswith("#"))
+
+
+def _workflow_deploy_hits(texts: dict[str, str], exempt) -> list[str]:
+    """deploy/-reference lines across the audited (non-exempt) workflows."""
+    hits: list[str] = []
+    for name in sorted(texts):
+        if name in exempt:
+            continue
+        hits += _deploy_reference_hits(name, texts[name])
+    return hits
+
+
 def _rust_build_inputs() -> list[Path]:
     """Every source/manifest the Rust matrix compiles: the workspace crates, the
     fuzz crate and the vendored path deps (all `*.rs`, incl. build.rs, plus every
@@ -2428,9 +2477,10 @@ class TestDeployPathsAreRustInert(unittest.TestCase):
     orchestration-only and skips the Rust matrix instead of paying the full suite.
 
     THE SOUNDNESS OBLIGATION (§2 — a skip is a PROOF of non-interference): this test
-    re-derives that proof every run — over the Rust-CI workflows AND over the crate
-    build inputs — so the entry cannot silently rot the day a crate, a build script,
-    a manifest or a Rust-CI workflow starts reading deploy/."""
+    re-derives that proof every run — over EVERY workflow on disk (minus a small set of
+    exemptions that must themselves prove the selector cannot skip them) AND over the
+    crate build inputs — so the entry cannot silently rot the day a crate, a build
+    script, a manifest or a workflow starts reading deploy/."""
 
     @classmethod
     def setUpClass(cls):
@@ -2460,26 +2510,75 @@ class TestDeployPathsAreRustInert(unittest.TestCase):
                 cls_, (self.select_mod._CLASS_ORCHESTRATION, self.select_mod._CLASS_DOCS),
                 f"{engine_path} in the batch must defeat the fast lane, got {cls_!r}")
 
-    def test_deploy_tree_is_not_read_by_any_rust_ci_workflow(self):
+    def test_no_audited_workflow_references_the_deploy_tree(self):
         # The inertness proof for the directory entry. OrchestrationSafeInertnessTests
         # exempts directory prefixes from its grep ("audited by convention"); deploy/
-        # is a large, externally-authored tree, so audit it explicitly here instead.
-        wf_dir = REPO_ROOT / ".github" / "workflows"
-        rust_ci = [
-            "ci.yml", "feature-matrix.yml", "codeql.yml", "supply-chain.yml",
-            "bench.yml", "fuzz.yml", "miri.yml", "asan.yml", "kani.yml",
-            "metamorph.yml", "vectorized-feature-off.yml", "ci-select.yml",
-            "ci-summary.yml", "formal-verification.yml", "differential.yml",
-            "shacl-diff-fuzz.yml", "nightly-full-sweep.yml", "datalog-souffle.yml",
-        ]
-        for name in rust_ci:
-            path = wf_dir / name
-            if not path.exists():
-                continue
-            self.assertNotIn(
-                "deploy/", path.read_text(encoding="utf-8"),
-                f"{name} references deploy/ — the tree is NOT inert for the Rust "
-                "matrix; remove 'deploy/' from _ORCHESTRATION_SAFE (fail-closed)")
+        # is a large, externally-authored tree, so audit it explicitly here instead —
+        # over EVERY workflow on disk minus the justified exemptions, so a Rust lane
+        # that is added or renamed tomorrow is audited without anyone updating a list.
+        texts = _workflow_texts()
+        # Non-vacuity: a broken glob must not make this pass by scanning nothing, and
+        # the lanes the whole design is about must actually be inside the audited set.
+        self.assertGreater(len(texts), 50,
+                           "the workflow corpus collapsed — the audit would be vacuous")
+        for name in ("ci.yml", "feature-matrix.yml", "bench.yml", "fuzz.yml",
+                     "codeql.yml", "supply-chain.yml", "miri.yml"):
+            self.assertIn(name, texts, f"{name} vanished from .github/workflows/")
+            self.assertNotIn(name, _DEPLOY_AUDIT_EXEMPT,
+                             f"{name} is a selection-gated Rust lane and must never "
+                             "be exempted from the deploy/ audit")
+        hits = _workflow_deploy_hits(texts, _DEPLOY_AUDIT_EXEMPT)
+        self.assertEqual(
+            hits, [],
+            "an audited workflow references deploy/ — the tree is NOT inert for the "
+            "Rust matrix; remove 'deploy/' from _ORCHESTRATION_SAFE (fail-closed)")
+
+    def test_every_deploy_audit_exemption_is_real_and_unskippable(self):
+        # An exemption is only sound while the selector cannot skip that workflow: it
+        # then runs on a deploy-only PR like any other, so its deploy/ read is never
+        # elided. Re-derive that, and fail on a stale (deleted/renamed) exemption
+        # rather than silently continuing past it.
+        texts = _workflow_texts()
+        for name, why in _DEPLOY_AUDIT_EXEMPT.items():
+            self.assertIn(name, texts,
+                          f"stale deploy-audit exemption {name!r} ({why}) — the file is "
+                          "gone, so the exemption now hides nothing and must be removed")
+            self.assertFalse(
+                _is_selection_gated(texts[name]),
+                f"{name} is exempt from the deploy/ audit because selection cannot skip "
+                "it, but it now consumes the ci-select outputs — a deploy-only PR could "
+                "skip it while it is the lane that reads deploy/. Drop the exemption (and "
+                "'deploy/' from _ORCHESTRATION_SAFE) or un-wire the selector.")
+        # Non-vacuity of the gated-ness detector itself: ci.yml IS selection-gated, so a
+        # detector that always returned False could not pass this.
+        self.assertTrue(_is_selection_gated(texts["ci.yml"]),
+                        "the selection-gated detector no longer recognises ci.yml")
+
+    def test_the_workflow_audit_catches_an_unlisted_rust_workflow(self):
+        # WITNESS (mutation): the derived scan is only worth its green if a Rust lane
+        # that appears on NO filename list — a brand-new or renamed workflow — is
+        # detected the moment it reads deploy/.
+        self.assertTrue(
+            _workflow_deploy_hits(
+                {"brand-new-rust-lane.yml":
+                 "jobs:\n  test:\n    steps:\n      - run: |\n"
+                 "          cp deploy/helm/sparq/values.yaml fixtures/chart.yaml\n"
+                 "          cargo test -p sparq-core\n"},
+                _DEPLOY_AUDIT_EXEMPT),
+            "an unlisted Rust workflow reading deploy/ went undetected — the audit is "
+            "fail-open again")
+        # …and a prose mention in a comment stays green, or the audit would be
+        # abandoned for noise rather than kept fail-closed.
+        self.assertEqual(
+            _workflow_deploy_hits(
+                {"brand-new-rust-lane.yml": "      # see deploy/helm for the chart\n"},
+                _DEPLOY_AUDIT_EXEMPT), [])
+        # HONEST LIMIT: an EXEMPT name is not scanned at all, which is why each
+        # exemption has to re-derive its own soundness above.
+        self.assertEqual(
+            _workflow_deploy_hits(
+                {"deploy-lint.yml": "      - run: cat deploy/helm/sparq/values.yaml\n"},
+                _DEPLOY_AUDIT_EXEMPT), [])
 
     def test_no_rust_build_input_references_the_deploy_tree(self):
         # The other half of the inertness proof: the workflow scan above says nothing

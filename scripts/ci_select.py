@@ -134,13 +134,13 @@ _ORCHESTRATION_SAFE: list[str] = [
     # the FULL required suite), re-derived every run by TestDeployPathsAreRustInert
     # in scripts/tests/test_ci_select_wiring.py: no Rust build input references
     # deploy/ — no crate source, build script, `#[path]` attribute or Cargo manifest
-    # (no include_str!/include_bytes!/path read/path dep) — and no Rust-CI workflow
-    # reads it either; the only
-    # workflows that do are the deploy lanes themselves (deploy-lint.yml,
-    # deploy-terraform-lint.yml — zero cargo invocations), pages.yml, docs-quality.yml
-    # and one release.yml COMMENT, none of which are gated by this selector. Those
-    # deploy/docs lanes still run on these PRs, so nothing that actually validates
-    # deploy/ is skipped — only the Rust matrix that never looked at it.
+    # (no include_str!/include_bytes!/path read/path dep) — and, across EVERY workflow
+    # on disk (not a hand-kept list of Rust lanes), the only ones that read it are the
+    # deploy lanes themselves (deploy-lint.yml, deploy-terraform-lint.yml — zero cargo
+    # invocations) and docs-quality.yml's demo-manifest step; pages.yml + release.yml
+    # merely name it in a COMMENT. None of those consume this selector's outputs, which
+    # the test re-derives, so they still run on these PRs: nothing that actually
+    # validates deploy/ is skipped — only the Rust matrix that never looked at it.
     "deploy/",
     # Orchestration-only workflow files (PR/issue/bead/merge automation — none run
     # cargo build/test/clippy/coverage/bench/fuzz/CodeQL).
