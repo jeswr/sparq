@@ -342,13 +342,22 @@ class TestRuleTableHygiene(unittest.TestCase):
         is unclassifiable — these bodies may still be labelled by T1/T2 on their own
         honest evidence, and should be.
 
-        Note `\\b` alone does NOT close the first hole: `-` is already a word
-        boundary, so `\\btool-surface:` matches. The guard is a lookbehind that
-        excludes `-` and `/` as well as word characters."""
+        No LEFT-CHARACTER guard can close this: `\\b` admits `tool-surface:` because
+        `-` is already a word boundary, and any lookbehind permissive enough to let a
+        space through admits every mid-sentence `... the surface: ...` as well. The
+        guard is therefore STRUCTURAL — the field name must open a field slot (line
+        start, `|`, or sentence break), which prose mid-sentence never does."""
         for why, body in (
             # A field name embedded in a longer hyphenated word.
             ("sub-word field name",
              "we exercise the tool-surface: sparq-core is one of them"),
+            # The same field name STANDING ALONE, but mid-sentence: whitespace on the
+            # left is not a field boundary (PR #5370 review round 1).
+            ("field name mid-sentence",
+             "we changed the surface: sparq-core is one of them"),
+            # A namespace/path prefix — `:` is not a boundary either, so this must not
+            # slip past on the left the way `crate::` does on the right.
+            ("namespaced field name", "foo::surface: sparq-core"),
             # A Rust path. MEASURED on the live backlog: `crate::verbalize` made
             # sq-rd6g parse as a four-area author declaration.
             ("rust `crate::` path",
@@ -360,10 +369,27 @@ class TestRuleTableHygiene(unittest.TestCase):
              "computed from the witnessed sparq-py handle"),
         ):
             self.assertEqual(TA.declared_areas(body, CRATES), [], why)
-        # Anti-vacuity: the same field, standing alone, still declares — so the three
+        # Anti-vacuity: EVERY supported declaration layout still declares — so the
         # cases above fail because of the GUARDS, not because T0 stopped working.
-        self.assertEqual(TA.declared_areas("surface: sparq-core", CRATES),
-                         ["sparq-core"])
+        for why, body, want in (
+            ("start of body", "surface: sparq-core", ["sparq-core"]),
+            # MEASURED, sq-pyn7: the field opens a line of its own mid-body.
+            ("own line", "green static export + lint.\nSurface: site/ (sparq-site)",
+             ["site"]),
+            ("indented list item", "  - crates: sparq-core", ["sparq-core"]),
+            # The `|` the value span ENDS at is equally a boundary it may START at.
+            ("after the field separator", "effort:XL | crates: sparq-core",
+             ["sparq-core"]),
+            # MEASURED, sq-f7bu: a declaration opening a sentence, mid-line.
+            ("after a sentence break",
+             "From sq-pwr research (M-C). Crate: sparq-mpc (pipeline.rs/proof.rs)",
+             ["sparq-mpc"]),
+            # Two adjacent declarations: the first must not consume the newline that
+            # is the second's left boundary.
+            ("two adjacent declarations", "crates: sparq-core\nsurface: docs",
+             ["sparq-core", "docs"]),
+        ):
+            self.assertEqual(TA.declared_areas(body, CRATES), want, why)
 
     def test_scope_is_declared_and_only_ever_title_or_text(self):
         """`scope` is a two-valued dispatch in classify(); a typo'd third value

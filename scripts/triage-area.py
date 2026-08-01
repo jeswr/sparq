@@ -320,16 +320,35 @@ RULES = [
 
 
 # --- T0: an explicit author declaration in the body -----------------------------
-# The field name must stand ALONE, the separator must not be a Rust `::`, and the
-# value must start on the SAME LINE. Without those three guards ordinary prose
+# The field name must START A FIELD SLOT, the separator must not be a Rust `::`, and
+# the value must start on the SAME LINE. Without those three guards ordinary prose
 # impersonates an author declaration and takes the highest-trust path — measured on
 # the live backlog, `... (crate::verbalize ambiguous fn-vs-module); sparq-geo gml.rs
 # ...` parsed as a four-area declaration, and `NEW in-circuit soundness surface:\n(a)
-# nf = Poseidon2(...)` parsed as a one-area one. `[a-z0-9_/-]` (not `\b`) is the left
-# guard because `\b` still admits `tool-surface:` — `-` is already a word boundary.
+# nf = Poseidon2(...)` parsed as a one-area one.
+#
+# A LEFT-CHARACTER guard is not enough for the first of those: any negative lookbehind
+# that admits a space admits `we changed the surface: sparq-core is one of them` too,
+# which is prose. So the boundary is STRUCTURAL — the field name may begin only at
+#   * the start of a line (leading indentation and one list marker allowed), or
+#   * a `|`, the same field separator the value span ENDS at, or
+#   * a sentence break — `. `, symmetric with the `\.\s` span terminator.
+# The first and third are the two layouts the 1262-bead corpus actually uses (e.g.
+# `Surface: site/ (sparq-site agent)` on its own line; `... M-C). Crate: sparq-mpc
+# (pipeline.rs/proof.rs) + ...` mid-line). The other two are admitted because they are
+# field boundaries a template may emit, and none of them can occur mid-sentence.
+# The span terminator is a LOOKAHEAD so that a match never eats the `|`/newline that
+# is the NEXT declaration's left boundary.
+#
+# COST, measured over the same corpus: exactly one bead (sq-qg0w, `... marginals.
+# Target surface: sparq-engine planner ...`) loses its T0 declaration and, matching no
+# other tier, stays parked. A mid-sentence `Target surface:` is not structurally
+# distinguishable from `we changed the surface:`, and the park is the FAIL-CLOSED
+# outcome this tool prefers over a guessed partition.
 _DECL = re.compile(
-    r"(?<![a-z0-9_/-])(?:crate_or_surface|crates?|surface)"
-    r"[^\S\n]*[:=](?!:)[^\S\n]*(.+?)(?:\||\n|\.\s|$)", re.I)
+    r"(?:^[^\S\n]*(?:[-*+>]|\d+[.)])?[^\S\n]*|\|[^\S\n]*|(?<=\.)[^\S\n]+)"
+    r"(?:crate_or_surface|crates?|surface)"
+    r"[^\S\n]*[:=](?!:)[^\S\n]*(.+?)(?=\||\n|\.\s|$)", re.I | re.M)
 _SURFACE_TOKENS = {"site": "site", "gui": "gui", "docs": "docs", "bench": "bench",
                    "ci": "ci", "js": "js"}
 # Path fragments a declaration may use instead of a bare token —
@@ -351,10 +370,12 @@ def declared_areas(body, crates):
     and running to end-of-line would derive a spurious `area:docs` from the prose
     that follows the declaration.
 
-    Symmetrically, the field NAME must stand alone and the value must start on the
-    same line — see the guards on `_DECL`. A declaration-shaped fragment buried in a
-    sentence is prose, not a declaration, and must fall through to T1/T2 rather than
-    claim the tier that beats every rule below it."""
+    Symmetrically, the field NAME must open a field slot — a line start, a `|`, or a
+    sentence break — and the value must start on the same line; see the guards on
+    `_DECL`. A declaration-shaped fragment buried in a sentence (`we changed the
+    surface: sparq-core`, `foo::surface: sparq-core`) is prose, not a declaration, and
+    must fall through to T1/T2 rather than claim the tier that beats every rule below
+    it."""
     out = []
     for m in _DECL.finditer(body or ""):
         span = m.group(1).lower()
@@ -517,15 +538,24 @@ def self_test():
     d = lambda b: declared_areas(b, crates)
     f += _chk("sub-word field name is not a declaration",
               d("we exercise the tool-surface: sparq-core is one of them"), [])
+    f += _chk("a field name mid-sentence is not a declaration",
+              d("we changed the surface: sparq-core is one of them"), [])
+    f += _chk("a namespaced field name is not a declaration",
+              d("foo::surface: sparq-core"), [])
     f += _chk("rust `crate::` path is not a declaration",
               d("already served by (crate::verbalize); sparq-server too"), [])
     f += _chk("a value on the next line is not a declaration",
               d("the nullifier is NEW in-circuit soundness surface:\n"
                 "computed from sparq-py witnesses"), [])
-    # ...while the real field, alone on its line, still declares (anti-vacuity: the
-    # three checks above must fail because of the GUARDS, not because the tier died).
+    # ...while each SUPPORTED layout still declares (anti-vacuity: the checks above
+    # must fail because of the GUARDS, not because the tier died).
     f += _chk("a real declaration still declares", d("surface: sparq-core"),
               ["sparq-core"])
+    f += _chk("a declaration after the `|` field separator still declares",
+              d("effort:XL | crates: sparq-mpc"), ["sparq-mpc"])
+    f += _chk("a declaration after a sentence break still declares",
+              d("From sq-pwr research (M-C). Crate: sparq-mpc (pipeline.rs)"),
+              ["sparq-mpc"])
 
     # FAIL CLOSED is the headline behaviour: no evidence => no label.
     f += _chk("no evidence -> parked", c("do the thing", "it would be nice"), [])
