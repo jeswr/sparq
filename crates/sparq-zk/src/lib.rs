@@ -94,6 +94,14 @@ pub mod trace;
 // externally audited (sq-qhy4).
 #[cfg(feature = "vc-bridge")]
 pub mod vc_bridge;
+// [OPUS-5] sq-txg1y (issue #3234): the ADDITIVE JSON-LD VC *envelope* entry point
+// layered on top of `vc_bridge` — split a DI-secured VC JSON document into its
+// unsecured document + proof configuration, multibase-decode `proofValue`, expand
+// both halves to RDF (`oxjsonld`, caller-supplied `@context` allowlist, NO
+// network), then run the SAME off-circuit `verify_source_proof` check. Same
+// OFF-by-default `vc-bridge` gate; the RDF-native API is unchanged.
+#[cfg(feature = "vc-bridge")]
+pub mod vc_bridge_json;
 pub mod verify;
 
 pub use field::Fr;
