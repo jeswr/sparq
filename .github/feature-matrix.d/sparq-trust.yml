@@ -247,3 +247,31 @@
   crate: "sparq-trust"
   features: "expression"
   test: true
+
+# [SONNET-4.6] sq-pfae.9 (epic sq-pfae P8, issue #3281): the admission-gate cost /
+# decidability spike. The `cost` module (`admission_cost_bound` / `admit_measured` /
+# `analyse_seeding` / `require_one_side_bound`) and the whole
+# `tests/admission_cost_bound.rs` suite (`#![cfg(feature = "cost-bound")]`) are behind
+# the default-OFF `cost-bound` feature, so ci.yml's default-feature `nextest archive
+# --workspace --all-targets` (which passes NO `--features`) compiles them EMPTY and runs
+# ZERO of the 14 integration tests — the silent-skip gap (#1171) this leg closes. Without
+# it the structural C1 guard (scripts/check-feature-test-execution.py) fails the assemble
+# job outright, since no other leg's activated feature set contains `cost-bound`.
+# `cost-bound = []` is dependency-free (pure `std` arithmetic over the operation meter
+# `admit` already threads, plus `&str` analysis of N3 rule text — NO new dep, strictly
+# additive), so this is a fast leg. It runs `clippy --all-targets -D warnings` with the
+# feature ON (the real gate) + `cargo test`, which drives the REAL `admit` path through
+# `admit_measured` (no `cfg` fork — the counted path IS the shipped path) and pins the
+# bound from BOTH sides: measured cost never exceeds the closed form over a
+# (rules x triples) grid, AND a saturated fixture attains it exactly, so the closed form
+# can be neither inflated nor deflated unnoticed. The seeding half asserts the design
+# §3.1 ABAC rule is one-side-bound, that the transitive-closure rule is REPORTED as a
+# two-unbound-atom seed rather than silently passed, and that unmodelled N3 fails closed.
+# The suite is deterministic by construction — it samples no clock, duration, allocator or
+# host metadata, because work-box / EC2 wall-clock is non-canonical here and is never
+# gated. Verified locally: `cargo test -p sparq-trust --features cost-bound --test
+# admission_cost_bound` runs all 14 tests green.
+- name: "sparq-trust (cost-bound — admission-gate cost/decidability bound)"
+  crate: "sparq-trust"
+  features: "cost-bound"
+  test: true
