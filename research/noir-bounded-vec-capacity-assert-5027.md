@@ -4,9 +4,12 @@
 **Status:** **the implementation ALREADY EXISTS upstream as draft PR [noir#13314](https://github.com/noir-lang/noir/pull/13314)** (authored 2026-07-10, still `DRAFT`, unmerged). No new implementation was written for this bead, and none should be — the remaining work is the human author-review gate ([sparq#1840](https://github.com/sparq-org/sparq/issues/1840)), plus the two pre-flip findings in §3 ·
 **Author:** SPARQ agent 🤖 [OPUS-5] · **Date:** 2026-07-29 ·
 **Amended 2026-08-01** (SPARQ agent 🤖 [OPUS-5], issue #5062): §5 added — the
-§3.1 finding named a missing test but not what it is, so §5 now specifies the
-constraint-level guard command-by-command. §5 is a SPECIFICATION; it has not been
-run, and no line of it is a measurement.
+§3.1 finding named a missing test but not what it is, so §5 specifies, command-by-command,
+one *prerequisite* of it: the ACIR memory-bound **mechanism** test (L1) plus the
+positive control that keeps it non-vacuous. §5 does **not** specify the
+`BoundedVec::push` regression guard itself — the `BoundedVec` form (§5.6 item 2)
+is still unresolved and returns no verdict as shaped, so §4 item 2 stays open.
+§5 is a SPECIFICATION; it has not been run, and no line of it is a measurement.
 
 ## 0. What this record is, and what it is not
 
@@ -105,8 +108,11 @@ supply a witness whose out-of-range `self.storage[self.len]` write is *not* caug
 the prover-side hint — and show that the constraint system / verifier rejects it.
 **No test available today establishes that**, neither in the PR nor at `master`, and
 this record does not claim one exists; the flip stays blocked pending one (§4 item 2).
-§5 specifies that test — the fixture, the forge, the oracle and the positive control
-that keeps it from passing vacuously.
+§5 specifies a *prerequisite* of that test — the fixture, the forge, the oracle and the
+positive control for the ACIR memory-op bound the elision leans on (L1). The guard that
+exercises the **patched `push` write itself** is not specified: §5.6 item 2 records why
+the `BoundedVec` form returns no verdict as currently shaped, and leaves the reshaping
+open.
 
 **3.2 The measured table is not reproducible in-repo.**
 The commit message carries a before/after table (ACIR opcodes and UltraHonk gates on
@@ -145,18 +151,26 @@ actions, in order:
    verifier/constraint-system rejection of an out-of-range index, **not** an
    execution-path differential. Until such a test exists the PR carries no regression
    guard for the property the elision relies on, and stays blocked on it.
-   **Specified in §5** (fixture, forge, oracle, positive control); still unimplemented
-   and unrun, and still blocked on a box with `nargo` + `bb` (`sq-i50o4`).
+   §5 specifies only its **prerequisite** — the L1 mechanism test (fixture, forge,
+   oracle, positive control), which goes red if the compiler stops emitting the ACIR
+   memory-op bound, but **not** if a later change to `BoundedVec::push` moves or drops
+   the write that bound is supposed to dominate. The `push`-path guard itself stays
+   unspecified (§5.6 item 2); both are unimplemented and unrun, and blocked on a box
+   with `nargo` + `bb` (`sq-i50o4`).
 3. Upgrade the commit/PR safety justification from the ACVM execution-time error to
    the `array_index_needs_explicit_oob_check` contract (§2), which is the citable
    in-tree reason and is the argument a noir maintainer will want to see.
 4. Then flip draft → ready per §6. No agent arms anything; upstream merge is the only "arm".
 
-## 5. The constraint-level guard, specified (2026-08-01, issue #5062)
+## 5. The ACIR memory-bound mechanism test, specified — a prerequisite of the guard, not the guard itself (2026-08-01, issue #5062)
 
 > 🤖 **SPARQ agent** [OPUS-5]. §3.1/§4 item 2 established that the guard is missing
 > and that the §10.2 step-2 differential is not it. They did not say what it *is*.
-> This section does. **Nothing here has been executed** — this session had no noir
+> This section specifies as much of it as is settled: the **L1 mechanism test** that
+> pins the ACIR memory-op bound the elision leans on, together with its forge, its
+> oracle and its positive control. It does **not** cover the patched `BoundedVec::push`
+> write — see §5.6 item 2 for what has to be resolved before an L2 fixture returns any
+> verdict at all. **Nothing here has been executed** — this session had no noir
 > checkout, no `nargo` and no `bb` (`command -v nargo bb` empty), so §5 contains no
 > measurement and predicts no outcome. What it does contain is verified: every
 > upstream fact below carries the file it was read from, re-fetched at `master` on
@@ -167,6 +181,11 @@ actions, in order:
 > **G.** For the patched `push`, there exists no assignment to the circuit's witnesses
 > that (a) is accepted by the constraint system, and (b) writes at index `len` with
 > `len >= MaxLen`.
+
+`G` is what the guard must eventually pin. What §5.3 onward actually specifies is one
+step short of it: L1 tests `G`'s **premise** — that the ACIR memory op binds an index
+at all — on a stand-in fixture, not `G` on `push`. Closing the remaining step is §5.6
+item 2, which is unresolved.
 
 `G` is a property of the *constraint system*, quantified over *all* witnesses. Every
 instrument currently on the table quantifies over the ACVM's *one honest* witness
@@ -308,10 +327,12 @@ and fail** rather than reporting a pass on the strength of run 3.
 What each outcome licenses, stated narrowly:
 
 - **Runs 1,2 accept and 3 rejects** — the constraint system rejects *this* witness
-  class on *this* fixture. That is a regression guard: it goes red if a future
-  compiler change stops emitting the bound. It is **not** a soundness proof of `G`
-  (one witness is not a quantifier) and per `sq-qhy4` this repo does not label it
-  sound.
+  class on *this* fixture. That is a regression guard for the **compiler mechanism**:
+  it goes red if a future compiler change stops emitting the bound. It does **not** go
+  red if `BoundedVec::push` itself later drops, moves or reshapes the write that bound
+  is supposed to dominate — pinning that is L2's job (§5.6 item 2), still unspecified.
+  Nor is it a soundness proof of `G` (one witness is not a quantifier); per `sq-qhy4`
+  this repo does not label it sound.
 - **Run 3 accepts** — a witness violating the capacity bound is accepted by the
   constraint system. That is the under-constraining outcome §10.2 calls a soundness
   bug, and it blocks the flip outright.
@@ -337,7 +358,10 @@ Two extensions, in priority order:
    returns *no verdict* unless the fixture is first reshaped so `len` reaches nothing
    but the write. **Do not ship L2 before its run 2 is green** — an L2 that reports
    run 3's rejection while run 2 also rejects is precisely the false guard §3.1
-   warns about, one layer up.
+   warns about, one layer up. That reshaping is **not designed here**, so this record
+   specifies no test that reaches the patched `push` write; whatever shape it takes, it
+   owes §5.5's full honest / in-range-forged / out-of-range-forged matrix on that real
+   path. Until it exists, §4 item 2 stays open and §5 covers the mechanism only.
 
 ### 5.7 Placement, cost, blockers
 
