@@ -322,7 +322,7 @@ missing from an earlier draft of this record and the omission was not benign:
 
 | Dropped | Effect |
 |---|---|
-| (3) on conclusions only | still terminates and still PTIME, but `P ⊆ A`, so the Herbrand-base bound becomes `|A|³` and `|C| ≤ |F| + |A|³` |
+| (3) on conclusions only | still terminates and still PTIME, but `P ⊆ A`, so the Herbrand-base bound becomes `\|A\|³` and `\|C\| ≤ \|F\| + \|A\|³` |
 | (6) | **the claim fails outright** — the Herbrand base is infinite and the fixpoint need not exist (`{ ?x :seen ?l } => { ?x :seen (?l) }`) |
 | (2) or (4) | as (6): unbounded domain growth, no fixpoint (§6, U-1/U-2) |
 
