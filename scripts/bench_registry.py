@@ -248,11 +248,16 @@ def assemble_competitors(trunk_obj: dict, frags: list[tuple[str, str]]) -> dict:
                 f"{where}: `competitors` must be a non-empty array of entries"
             )
         for entry in entries:
-            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            # A blank id is as unaddressable as a missing one — gather-competitors.sh
+            # resolves engines BY id, so an entry keyed on "" (or "  ") can never be
+            # selected. Mirror the registry side, where `_ID_RE`'s `[^"]+` already
+            # makes an empty `id = ""` read as "no id at all".
+            cid = entry.get("id") if isinstance(entry, dict) else None
+            if not isinstance(cid, str) or not cid.strip():
                 raise RegistryError(
-                    f"{where}: every competitor entry must be an object with a string `id`"
+                    f"{where}: every competitor entry must be an object with a "
+                    f"non-empty string `id`"
                 )
-            cid = entry["id"]
             if cid in seen:
                 raise RegistryError(
                     f"{where}: duplicate competitor id {cid!r} (first declared in "

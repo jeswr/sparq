@@ -255,6 +255,20 @@ class CompetitorAssembly(unittest.TestCase):
         with self.assertRaises(br.RegistryError):
             br.competitors_obj(root)
 
+    def test_entry_with_a_blank_id_is_rejected(self):
+        # An id that is empty or whitespace-only is unaddressable by the id-based
+        # gather path, so it is rejected exactly like a missing one.
+        for blank in ("", "   ", "\t\n"):
+            with self.subTest(blank=blank):
+                root = _tree(
+                    competitor_frags={
+                        "bad.json": json.dumps({"competitors": [{"id": blank}]})
+                    }
+                )
+                with self.assertRaises(br.RegistryError) as cm:
+                    br.competitors_obj(root)
+                self.assertIn("non-empty string `id`", str(cm.exception))
+
 
 class CatalogAssembly(unittest.TestCase):
     def test_fragments_append_in_filename_order(self):
