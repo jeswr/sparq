@@ -142,8 +142,26 @@ and asserting three-way parity with the resident loop (**same verdict, same numb
 observations, same narration**) across the load-bearing scenarios. Verdict-only parity
 was measurably too weak: a carrier that forgets `stable` still reaches the same exit
 code via the #997 graceful-timeout path, having burned the whole budget. Each of the
-eight persisted fields was mutation-checked individually — deleting any one from
+eight decision-INPUT fields was mutation-checked individually — deleting any one from
 `PERSISTED` REDs the suite.
+
+The ninth persisted field, `terminal_exit`, is the one decision **output**, and it is
+what makes the carrier a durable DECISION record rather than merely a progress record.
+`run_gate_once` stamps every verdict it renders — clean convergence, fail-fast, the
+consecutive-fetch-failure cap, a genuine hang, the unsatisfiable draft-tier hold, the
+absolute-budget render — and re-returns a stamped verdict verbatim, without fetching,
+re-rendering or advancing the budget. Without it only the *budget-exhaustion* verdict
+was protected (by the `attempt >= max_total_polls` refusal), and every verdict reached
+below the budget — which is most of them — persisted a record indistinguishable from a
+still-settling one, so a duplicate delivery, a delayed event or a retry after an
+ambiguous transport failure could re-evaluate over a changed sibling set and render a
+DIFFERENT verdict, including green after an earlier red. The parity scenarios cannot
+pin this (they stop at the first verdict); `test_early_red_cannot_be_reopened_green_by_a_duplicate_delivery`
+does, with the symmetric early-green case and a per-path stamping test beside it. Two
+honest bounds: the marker is only as durable as the carrier (a lost or whole-rejected
+record restarts the window and re-observes from scratch — a re-run, not a re-decision),
+and it serialises SEQUENTIAL duplicates only, not the concurrent read-modify-write of
+§6.3(3).
 
 The carrier is also validated as **one atomic, versioned record** — every persisted
 field present, typed, in range, and consistent with the others (`stable`/`unsat_polls`
@@ -185,7 +203,9 @@ the *transport*, not of the verdict, and so could not be settled in the script:
    can overlap and read-modify-write one state. Needs a per-head-SHA concurrency group
    (cheap, `cancel-in-progress: false`) or a compare-and-set carrier — and note this
    interacts with (1): serialising evaluations behind a concurrency group re-introduces
-   queueing latency between them.
+   queueing latency between them. The `terminal_exit` marker (§6.2) closes the
+   *sequential* duplicate/retried delivery independently of this, but two evaluations
+   that both load a pre-verdict record before either saves can still both evaluate.
 
 Also unresolved from §3.3: a `pull_request` seed evaluation is still required for the
 stable-empty-set pass (a docs-only PR whose sibling set is empty produces no completion

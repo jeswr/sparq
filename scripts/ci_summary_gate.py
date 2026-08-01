@@ -1807,6 +1807,17 @@ def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _is_terminal_exit(value: object) -> bool:
+    """The RENDERED-VERDICT marker: `None` while the gate is still undecided, else
+    one of the gate's own exit codes. `bool` is excluded for the same reason as in
+    `_is_count` — a flag stringified into the exit-code slot is corrupt, and the
+    difference between `True` and `1` here is the difference between a red and a
+    green being replayed."""
+    return value is None or (
+        isinstance(value, int) and not isinstance(value, bool) and value in (0, 1)
+    )
+
+
 def _is_ff_key(value: object) -> bool:
     """The fail-fast suspicion key: `sorted([name, id] for r in failures)`."""
     return value is None or (
@@ -1832,6 +1843,7 @@ _STATE_FIELD_VALIDATORS = {
     "extension_started": lambda v: isinstance(v, bool),
     "ff_suspect": _is_ff_key,
     "unsat_polls": _is_count,
+    "terminal_exit": _is_terminal_exit,
 }
 
 
@@ -1846,10 +1858,15 @@ class GateState:
     deliberately absent from `PERSISTED` — persisting an observation is exactly how
     a STALE sibling set would end up rendered as a verdict.
 
-    Everything in `PERSISTED` is a DECISION input: drop any one and a slotless
-    transport either reaches a different verdict or reaches the same verdict after a
-    different number of observations. That is pinned field-by-field by
-    scripts/tests/test_ci_summary_gate.py::TestSlotlessTransportSeam."""
+    Every `PERSISTED` field except `terminal_exit` is a DECISION INPUT: drop any one
+    and a slotless transport either reaches a different verdict or reaches the same
+    verdict after a different number of observations. That is pinned field-by-field
+    by scripts/tests/test_ci_summary_gate.py::TestSlotlessTransportSeam.
+
+    `terminal_exit` is the one DECISION OUTPUT, and it is what makes this a durable
+    DECISION record rather than merely a progress record — see `record_verdict` and
+    the short-circuit at the top of `run_gate_once`. The parity scenarios cannot pin
+    it (they stop at the first verdict); the duplicate-delivery tests do."""
 
     attempt: int = 0
     prev_names: list[str] | None = None
@@ -1860,24 +1877,38 @@ class GateState:
     extension_started: bool = False
     ff_suspect: list | None = None
     unsat_polls: int = 0
+    terminal_exit: int | None = None
     runs: list[dict] = field(default_factory=list)
 
     #: the fields a non-resident transport MUST carry across invocations.
     PERSISTED = (
         "attempt", "prev_names", "stable", "completed_hist",
         "consec_fetch_failures", "extension_started", "ff_suspect", "unsat_polls",
+        "terminal_exit",
     )
 
     #: bumped whenever PERSISTED or a field's meaning changes. A record stamped with
     #: any other version is REJECTED WHOLE (see `rejection_reason`) rather than
     #: field-merged: a field that means something different in another revision is
     #: exactly as dangerous as a missing one.
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def to_dict(self) -> dict:
         payload = {k: getattr(self, k) for k in self.PERSISTED}
         payload["version"] = self.SCHEMA_VERSION
         return payload
+
+    def record_verdict(self, exit_code: int) -> int:
+        """Stamp a RENDERED verdict onto the carrier and return it unchanged.
+
+        [OPUS-5] #5259 review 2: called on EVERY path `run_gate_once` returns a
+        verdict on, not just budget exhaustion — most verdicts are reached well
+        below the absolute budget (clean convergence, fail-fast, the fetch-failure
+        cap, a genuine hang, the unsatisfiable draft-tier hold), and before this
+        marker existed the record persisted at that moment was indistinguishable
+        from an ordinary still-settling one."""
+        self.terminal_exit = exit_code
+        return exit_code
 
     @classmethod
     def rejection_reason(cls, payload: object) -> str | None:
@@ -1925,6 +1956,11 @@ class GateState:
                 return f"{counter}={payload[counter]} exceeds {hist} observation(s)"
         if payload["prev_names"] is not None and hist == 0:
             return "prev_names carries an observation completed_hist does not"
+        # A verdict is only ever rendered by (or after) an evaluation, so a record
+        # claiming a decided gate on zero evaluations was not produced here either.
+        if payload["terminal_exit"] is not None and payload["attempt"] < 1:
+            return (f"terminal_exit={payload['terminal_exit']!r} records a rendered "
+                    "verdict on a record with no evaluation (attempt 0)")
         return None
 
     @classmethod
@@ -2338,6 +2374,16 @@ def run_gate_once(cfg: Config, state: GateState, fetch_runs, fetch_queue_depth,
     sequence of invocations equivalent to the resident loop's sequence of polls
     (pinned by TestSlotlessTransportSeam.test_oneshot_sequence_matches_resident_loop).
 
+    [OPUS-5] #5259 review 2: the carrier is a durable DECISION record, not merely a
+    progress record. Any rendered verdict is stamped into `state.terminal_exit`, and
+    a carrier that already holds one is re-returned VERBATIM — no fetch, no re-render,
+    no budget advance. The honest bound on that: it is only as durable as the carrier
+    itself. A carrier that is lost, or rejected whole by `rejection_reason`, restarts
+    the window from scratch and can render a fresh verdict over a fresh observation
+    — that is a re-run, not a re-decision, and it is the safe degradation direction
+    (it re-observes rather than replaying a stale set). It also does NOT serialise
+    CONCURRENT evaluations, which remain a transport obligation (delta 3 below).
+
     PHASE-2 SEMANTICS DELTAS — this entry point is NOT yet wired to any required
     check, and must not be until these are resolved (they are transport properties,
     not verdict properties, which is why they cannot be settled in this module):
@@ -2352,24 +2398,45 @@ def run_gate_once(cfg: Config, state: GateState, fetch_runs, fetch_queue_depth,
         does. A non-resident transport can therefore re-POST during API lag.
       * CONCURRENT INVOCATIONS. Sibling completions arrive in bursts; two
         overlapping evaluations would read-modify-write one state. The transport
-        needs a per-head-SHA concurrency group (or a compare-and-set carrier)."""
+        needs a per-head-SHA concurrency group (or a compare-and-set carrier). The
+        `terminal_exit` marker closes SEQUENTIAL duplicate/retried delivery only:
+        two evaluations that both load a pre-verdict record before either saves can
+        still both evaluate, and the loser's write wins."""
+    if state.terminal_exit is not None:
+        # [OPUS-5] #5259 review 2: this gate is ALREADY DECIDED. Most verdicts are
+        # rendered well below the absolute budget, so the budget belt below cannot
+        # be the guard: a duplicate delivery, a delayed event or a retry after an
+        # ambiguous transport failure would otherwise reload an ordinary-looking
+        # record and evaluate again over a FRESHLY FETCHED sibling set — and a set
+        # that has changed since can render a DIFFERENT verdict, including green
+        # after an earlier red. Replay the recorded decision instead.
+        level = "notice" if state.terminal_exit == 0 else "error"
+        print(
+            f"::{level}::ci-summary --oneshot: this gate ALREADY RENDERED its verdict "
+            f"(exit {state.terminal_exit}) at evaluation {state.attempt}; the carried "
+            f"state records it as TERMINAL. Re-returning that verdict without "
+            f"re-observing the sibling set — a duplicate or retried delivery must not "
+            f"be able to re-decide a decided gate."
+        )
+        return state.terminal_exit
     if state.attempt >= cfg.max_total_polls:
-        # Reachable only if a transport re-invokes after a verdict was already
-        # rendered. `runs` is deliberately not persisted, so there is no fresh
-        # observation to render over — and rendering over an EMPTY set would read as
-        # the stable-empty-set PASS. Fail closed instead.
+        # Belt for a budget-exhausted record carrying no marker (a pre-marker
+        # carrier, or one hand-built by a transport). `runs` is deliberately not
+        # persisted, so there is no fresh observation to render over — and rendering
+        # over an EMPTY set would read as the stable-empty-set PASS. Fail closed,
+        # and stamp the refusal so the next invocation short-circuits above.
         print(
             f"::error::ci-summary --oneshot: the carried state is already at the "
             f"absolute budget (attempt {state.attempt}/{cfg.max_total_polls}) — its "
             f"verdict was already rendered. Refusing to re-render without a fresh "
             f"observation of the sibling set."
         )
-        return 1
+        return state.record_verdict(1)
     outcome = evaluate_once(cfg, state, fetch_runs, fetch_queue_depth, tier_ctx)
     if outcome.exit_code is not None:
-        return outcome.exit_code
+        return state.record_verdict(outcome.exit_code)
     if state.attempt >= cfg.max_total_polls:
-        return render_budget_exhausted(cfg, state, tier_ctx)
+        return state.record_verdict(render_budget_exhausted(cfg, state, tier_ctx))
     return STILL_SETTLING_EXIT
 
 

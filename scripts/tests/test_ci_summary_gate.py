@@ -3203,7 +3203,7 @@ class TestSlotlessTransportSeam(unittest.TestCase):
             attempt=7, prev_names=["a", "b"], stable=2, pending=3,
             completed_hist=[1, 2, 3], consec_fetch_failures=1,
             extension_started=True, ff_suspect=[["clippy", 42]], unsat_polls=2,
-            runs=[GREEN],
+            terminal_exit=1, runs=[GREEN],
         )
         restored = g.GateState.from_dict(json.loads(json.dumps(state.to_dict())))
         for field_name in g.GateState.PERSISTED:
@@ -3246,6 +3246,17 @@ class TestSlotlessTransportSeam(unittest.TestCase):
                                            stable=3)),
             ("attempt < observations", dict(g.GateState(
                 attempt=1, completed_hist=[1, 1, 1], prev_names=["a"]).to_dict())),
+            # The rendered-verdict marker is validated with the rest of the record:
+            # a value outside the gate's own exit space, or a decided gate that
+            # never evaluated, is not something `run_gate_once` could have written.
+            ("terminal_exit outside the verdict space",
+                dict(g.GateState(attempt=4, completed_hist=[1],
+                                 prev_names=["a"]).to_dict(), terminal_exit=2)),
+            ("terminal_exit is a bool",
+                dict(g.GateState(attempt=4, completed_hist=[1],
+                                 prev_names=["a"]).to_dict(), terminal_exit=True)),
+            ("terminal_exit with no evaluation",
+                dict(g.GateState().to_dict(), terminal_exit=0)),
         ]:
             with self.subTest(carrier=label):
                 out = io.StringIO()
@@ -3349,6 +3360,142 @@ class TestSlotlessTransportSeam(unittest.TestCase):
             code = g.run_gate_once(cfg, state, lambda: [], lambda: 0)
         self.assertEqual(code, 1)
         self.assertIn("Refusing to re-render", out.getvalue())
+        # ...and the refusal is itself recorded, so the invocation after it
+        # short-circuits on the marker instead of re-deriving the refusal.
+        self.assertEqual(state.terminal_exit, 1)
+
+    # --- the carrier as a durable DECISION record (#5259 review 2) ----------------
+    def _drive_to_verdict(self, cfg, path, fetch, depth=0, tier_ctx=None, limit=40):
+        """Load → evaluate → save, once per invocation, until a verdict exists.
+        Returns (exit_code, final_state, captured_stdout)."""
+        out = io.StringIO()
+        code, state, invocations = g.STILL_SETTLING_EXIT, None, 0
+        with redirect_stdout(out):
+            while code == g.STILL_SETTLING_EXIT and invocations < limit:
+                invocations += 1
+                state = g.load_state_file(path)
+                code = g.run_gate_once(cfg, state, fetch, lambda: depth,
+                                       tier_ctx=tier_ctx)
+                g.save_state_file(path, state)
+        return code, state, out.getvalue()
+
+    def _replay(self, cfg, path, fetch, times=3):
+        """Deliver the same event again `times` times against the saved carrier.
+        Returns (exit_codes, final_state, captured_stdout)."""
+        out, codes, state = io.StringIO(), [], None
+        with redirect_stdout(out):
+            for _ in range(times):
+                state = g.load_state_file(path)
+                codes.append(g.run_gate_once(cfg, state, fetch, lambda: 0))
+                g.save_state_file(path, state)
+        return codes, state, out.getvalue()
+
+    def test_early_red_cannot_be_reopened_green_by_a_duplicate_delivery(self):
+        """REAL PATH, the #5259 review-2 finding: a verdict rendered BELOW the
+        absolute budget must be as durable as one rendered at it.
+
+        `run_gate_once`'s budget belt only refuses re-invocation once `attempt >=
+        max_total_polls`. Most verdicts are reached long before that — this one is
+        the fail-fast red at attempt 2 of 8 — and the record persisted at that
+        moment used to look like any other still-settling record. A duplicate or
+        retried delivery reloaded it and evaluated again; here the sibling set has
+        since gone ALL GREEN, so a re-evaluation would walk straight to a PASS on a
+        gate that already REDded."""
+        import tempfile
+
+        cfg = tiny_cfg()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "gate-state.json")
+            red, _, _ = self._drive_to_verdict(cfg, path, scripted([[RED, PENDING]]))
+            self.assertEqual(red, 1, "the fail-fast scenario did not RED")
+            decided = g.load_state_file(path)
+            self.assertLess(
+                decided.attempt, cfg.max_total_polls,
+                "this scenario must render BELOW the absolute budget — otherwise it "
+                "only re-tests the pre-existing budget belt")
+            self.assertEqual(decided.terminal_exit, 1)
+
+            # The duplicate delivery: same carrier, but the sibling set is now green.
+            green = scripted([[GREEN, GREEN2]])
+            codes, after, out = self._replay(cfg, path, green)
+            self.assertEqual(
+                codes, [1, 1, 1],
+                "a duplicate delivery re-decided a gate that had already RENDERED a "
+                "red verdict")
+            self.assertEqual(
+                green.state["calls"], 0,
+                "a decided gate re-observed the sibling set — the verdict must be "
+                "replayed, not re-derived")
+            self.assertEqual(after.attempt, decided.attempt,
+                             "a decided gate advanced its budget on a replay")
+            self.assertIn("ALREADY RENDERED", out)
+
+            # MUTATION CONTROL — the marker is what does the work, not some other
+            # belt. Clear it and the SAME duplicate delivery converges GREEN, which
+            # is precisely the reopened-verdict defect this test pins.
+            control = g.load_state_file(path)
+            control.terminal_exit = None
+            control_fetch = scripted([[GREEN, GREEN2]])
+            with redirect_stdout(io.StringIO()):
+                reopened = [g.run_gate_once(cfg, control, control_fetch, lambda: 0)
+                            for _ in range(3)]
+            self.assertIn(
+                0, reopened,
+                "the control arm did not reopen green, so the assertions above are "
+                "not pinning the marker — re-derive this test")
+
+    def test_early_green_cannot_be_reopened_red_by_a_duplicate_delivery(self):
+        """The symmetric half: durability is not a fail-closed bias, it is
+        determinism. An early GREEN verdict (clean convergence at attempt 2 of 8) is
+        replayed just as verbatim when a later delivery would have observed a red
+        set — the transport gets the decision the gate actually rendered, and any
+        genuine later failure belongs to a NEW head SHA with a fresh carrier."""
+        import tempfile
+
+        cfg = tiny_cfg()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "gate-state.json")
+            code, _, _ = self._drive_to_verdict(cfg, path, scripted([[GREEN, GREEN2]]))
+            self.assertEqual(code, 0)
+            decided = g.load_state_file(path)
+            self.assertLess(decided.attempt, cfg.max_total_polls)
+            self.assertEqual(decided.terminal_exit, 0)
+
+            red = scripted([[GREEN, RED]])
+            codes, after, out = self._replay(cfg, path, red)
+            self.assertEqual(codes, [0, 0, 0],
+                             "a duplicate delivery re-decided an already-green gate")
+            self.assertEqual(red.state["calls"], 0,
+                             "a decided gate re-observed the sibling set")
+            self.assertEqual(after.attempt, decided.attempt)
+            self.assertIn("ALREADY RENDERED", out)
+
+    def test_every_verdict_path_records_its_exit_code(self):
+        """The marker is only a decision carrier if EVERY verdict path stamps it.
+        These are the paths `run_gate_once` can return 0/1 on below the budget —
+        clean convergence, fail-fast, the consecutive-fetch-failure cap, a genuine
+        hang — plus the absolute-budget render. A path that forgets to stamp is a
+        path a duplicate delivery can still re-decide."""
+        import tempfile
+
+        paths = [
+            ("clean convergence", tiny_cfg(), [[GREEN, GREEN2]], 0, 0),
+            ("fail-fast red", tiny_cfg(), [[RED, PENDING]], 0, 1),
+            ("fetch-failure cap", tiny_cfg(), [g.FetchError("api down")], 0, 1),
+            ("genuine hang", tiny_cfg(), [[GREEN, PENDING]], 0, 1),
+            ("absolute-budget expiry", tiny_cfg(), [[GREEN, PENDING]], 20, 1),
+        ]
+        for label, cfg, polls, depth, expected in paths:
+            with self.subTest(path=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    p = str(Path(tmp) / "gate-state.json")
+                    code, _, _ = self._drive_to_verdict(cfg, p, scripted(polls),
+                                                        depth=depth)
+                    self.assertEqual(code, expected, f"{label}: unexpected verdict")
+                    self.assertEqual(
+                        g.load_state_file(p).terminal_exit, expected,
+                        f"{label}: the rendered verdict was not recorded in the "
+                        f"carrier, so a duplicate delivery can re-decide it")
 
     def test_resident_transport_is_still_the_one_wired_to_the_required_check(self):
         """HONESTY GUARD: this increment adds the seam, it does NOT switch the
