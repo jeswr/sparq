@@ -321,6 +321,22 @@ safe = true
 pattern = ".beads/**"
 safe = true
 
+# [OPUS-5] sq-g25hr: deployment manifests (k8s / helm / terraform / bicep / PaaS
+# + their READMEs and smoke scripts). AUDIT-PROVEN inert for the RUST matrix: no
+# workspace crate include_str!/include_bytes!/reads deploy/, and this safe entry
+# makes that an ENFORCED claim — scripts/ci_audit_inputs.py fails the moment a
+# crate starts reading a safe-listed path. deploy/ is NOT unowned in CI overall:
+# deploy-lint.yml (yamllint/kubeconform), deploy-terraform-lint.yml,
+# container-scan.yml, and the pure-python test_release_container_multiarch.py /
+# test_dependabot_coverage.py checks all read it, and every one of those lives in a
+# workflow this selector does not gate — so they still run on a deploy-only PR.
+# Mirrored in ci_select.py `_DEPLOY_ONLY` (which also covers the two
+# `.github/workflows/deploy-*.yml` files, unreachable from this map because
+# `.github/` is a §4.1 full-run trigger that wins before the map is consulted).
+[[map]]
+pattern = "deploy/**"
+safe = true
+
 # [FABLE-5] sq-63ups: the formal-verification manifest (proof suites -> verified
 # paths + the alarmed lanes). Consumed ONLY by the formal-verification.yml /
 # formal-alarm.yml workflows via scripts/fv_select.py / check-fv-manifest.py /
