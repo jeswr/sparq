@@ -4,7 +4,7 @@
 use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
 use sparq_engine::update;
-use sparq_forms::{derive_form, to_sparql_update, FormOptions, DASH};
+use sparq_forms::{derive_form, to_sparql_update, FormDescription, FormOptions, TermRef, DASH};
 
 const PREFIXES: &str = r#"
   @prefix sh: <http://www.w3.org/ns/shacl#> .
@@ -128,6 +128,67 @@ fn the_update_path_preserves_the_base_direction() {
     let updated = update(&data, &text).unwrap();
     let derived = derive_form(&updated, &shapes, &alice(), &FormOptions::default());
     assert_eq!(derived, after, "the edit round-trips as a directional literal");
+}
+
+/// `TermRef` is public and `Deserialize`, so a renderer can hand back a term
+/// whose language tag / base direction never came from the parser. Neither has
+/// an escape form in N-Triples, so an unconstrained value would be spliced into
+/// the update as executable syntax. The write path fails CLOSED instead: an
+/// invalid tag or direction yields NO update at all.
+#[test]
+fn deserialized_term_metadata_cannot_inject_update_syntax() {
+    let data = g(r#"ex:alice a ex:Person ; ex:label "مرحبا"@ar--rtl ."#);
+    let shapes = g(SHAPES);
+    let before = derive_form(&data, &shapes, &alice(), &FormOptions::default());
+
+    // Positive control: the SAME edit with well-formed metadata does produce an
+    // update, so an empty result below is the validation and not an inert form.
+    assert!(
+        to_sparql_update(&before, &edited(&before, r#"{
+          "kind": "literal", "value": "أهلا", "language": "ar", "direction": "rtl"
+        }"#))
+        .contains("@ar--rtl"),
+        "a well-formed directional literal still writes back"
+    );
+
+    let payloads = [
+        // Punctuation smuggled through the base direction …
+        r#"{
+          "kind": "literal", "value": "pwned", "language": "en",
+          "direction": "ltr . } ; DROP ALL ; INSERT { <http://example.org/x> <http://example.org/y> \"z\""
+        }"#,
+        // … and through the language tag.
+        r#"{
+          "kind": "literal", "value": "pwned",
+          "language": "en . } ; DROP ALL ; INSERT { <http://example.org/x> <http://example.org/y> \"z\""
+        }"#,
+        // A direction that is neither `ltr` nor `rtl` is refused outright.
+        r#"{"kind": "literal", "value": "pwned", "language": "en", "direction": "auto"}"#,
+        // A base direction with no language tag names no RDF 1.2 term.
+        r#"{"kind": "literal", "value": "pwned", "direction": "ltr"}"#,
+    ];
+    for payload in payloads {
+        let text = to_sparql_update(&before, &edited(&before, payload));
+        assert_eq!(
+            text, "",
+            "no update may be emitted for term metadata {payload}: got {text}"
+        );
+    }
+}
+
+/// `before` with the label field's single value replaced by a `TermRef`
+/// deserialized from `json` — i.e. exactly what an untrusted renderer round-trip
+/// can hand back.
+fn edited(before: &FormDescription, json: &str) -> FormDescription {
+    let mut after = before.clone();
+    let label = after
+        .groups
+        .iter_mut()
+        .flat_map(|group| &mut group.fields)
+        .find(|f| f.path == "<http://example.org/label>")
+        .unwrap();
+    label.values[0].term = serde_json::from_str::<TermRef>(json).unwrap();
+    after
 }
 
 /// An identical form is a byte-level no-op: a directional literal must not

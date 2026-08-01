@@ -396,10 +396,28 @@ fn computed_fields_are_flagged_read_only_and_never_diff() {
         "computed values are derived, so there is nothing to write back"
     );
     assert!(!field(&form, "age").computed);
-    assert_ne!(
-        computed.values.iter().map(|v| v.term.value.as_str()).collect::<Vec<_>>(),
-        vec!["stale"],
-        "a computed field never shows the asserted triple at its path"
+
+    // The two feature states have DISTINCT contracts, so each is asserted
+    // exactly. [SONNET-4.6]
+    let values: Vec<&str> = computed
+        .values
+        .iter()
+        .map(|v| v.term.value.as_str())
+        .collect();
+    #[cfg(not(feature = "computed"))]
+    assert!(
+        values.is_empty(),
+        "a default build carries no sh:values evaluator, so the field derives EMPTY: {values:?}"
+    );
+    #[cfg(feature = "computed")]
+    assert_eq!(
+        values,
+        vec!["Bob"],
+        "with `computed` on, the field holds the evaluated ( ex:knows ex:name ) value set"
+    );
+    assert!(
+        !values.contains(&"stale"),
+        "a computed field never shows the asserted triple at its path: {values:?}"
     );
 
     // Even if a renderer echoes edited values back, nothing is written.

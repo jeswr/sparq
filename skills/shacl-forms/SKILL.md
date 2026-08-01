@@ -46,6 +46,13 @@ forward-predicate paths (`<p>`) participate; read-only/off-shape, inverse,
 computed, and complex property-path fields are excluded. A no-change or
 mismatched-focus input returns an empty update string.
 
+`TermRef` is `Deserialize`, so a renderer can hand back a term whose language
+tag or base direction never came from the parser — and neither has an escape
+form in N-Triples. `to_sparql_update` therefore builds ALL-or-NOTHING: a tag
+outside the `LANGTAG` grammar, or a direction other than `ltr`/`rtl`, yields an
+empty string rather than syntax. Treat an empty result as "nothing to apply",
+never as "apply the rest".
+
 What the description carries (all serde `Serialize + Deserialize`):
 
 - **`shapes`** — the applicable-shape switcher: `sh:targetNode`,

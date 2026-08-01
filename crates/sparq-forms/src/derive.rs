@@ -257,7 +257,11 @@ fn normalize_ref(r: &mut TermRef, names: &mut std::collections::HashMap<String, 
             normalize_ref(&mut t.subject, names);
             normalize_ref(&mut t.object, names);
         }
-        r.value = crate::diff::term_to_ntriples(r);
+        // A component whose metadata cannot be serialized keeps the text the
+        // parser produced rather than being blanked. [SONNET-4.6]
+        if let Some(text) = crate::diff::term_to_ntriples(r) {
+            r.value = text;
+        }
     }
 }
 

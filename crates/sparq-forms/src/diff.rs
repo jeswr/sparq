@@ -88,37 +88,46 @@ impl FormDiff {
 ///
 /// Returns an empty string when there is no writable change (including when
 /// the descriptions name different focus nodes). Callers may treat that as a no-op.
+///
+/// [SONNET-4.6] It also returns an empty string — rather than partial or
+/// malformed syntax — when any term in the diff carries metadata that cannot be
+/// serialized safely: a language tag outside the N-Triples `LANGTAG` grammar,
+/// or a base direction that is neither `ltr` nor `rtl`. A [`TermRef`] is public and
+/// `Deserialize`, so a renderer can hand back a term that never came from the
+/// parser; the update is built ALL-or-NOTHING so such a term can never
+/// contribute executable syntax.
 pub fn to_sparql_update(before: &FormDescription, after: &FormDescription) -> String {
     let diff = FormDiff::between(before, after);
     if diff.added.is_empty() && diff.removed.is_empty() {
         return String::new();
     }
 
-    let focus = term_to_ntriples(&after.focus);
-    let triples = |changes: &[FieldValueDiff]| {
+    let Some(focus) = term_to_ntriples(&after.focus) else {
+        return String::new();
+    };
+    let triples = |changes: &[FieldValueDiff]| -> Option<String> {
         changes
             .iter()
             .map(|change| {
                 // An annotation change is written against its IRI reifier, not
                 // the focus node. [OPUS-5] sq-lsp7k.1.5
                 let subject = match &change.subject {
-                    Some(reifier) => term_to_ntriples(reifier),
+                    Some(reifier) => term_to_ntriples(reifier)?,
                     None => focus.clone(),
                 };
-                format!(
+                Some(format!(
                     "  {subject} {} {} .\n",
                     change.path,
-                    term_to_ntriples(&change.value)
-                )
+                    term_to_ntriples(&change.value)?
+                ))
             })
-            .collect::<String>()
+            .collect()
     };
 
-    format!(
-        "DELETE {{\n{}}}\nINSERT {{\n{}}}\nWHERE {{}}",
-        triples(&diff.removed),
-        triples(&diff.added)
-    )
+    let (Some(removed), Some(added)) = (triples(&diff.removed), triples(&diff.added)) else {
+        return String::new();
+    };
+    format!("DELETE {{\n{}}}\nINSERT {{\n{}}}\nWHERE {{}}", removed, added)
 }
 
 /// Every writable field paired with the subject it belongs to: `None` for the
@@ -155,24 +164,45 @@ fn bare_predicate(path: &str) -> Option<&str> {
     (!iri.is_empty() && !iri.contains(['<', '>', ' ', '\t', '\r', '\n'])).then_some(iri)
 }
 
-pub(crate) fn term_to_ntriples(term: &TermRef) -> String {
-    match term.kind.as_str() {
+/// Renders a term as N-Triples, or `None` when its metadata cannot be
+/// serialized safely.
+///
+/// [SONNET-4.6] A language tag and a base direction have NO escape form in
+/// N-Triples — they are written literally after `@` — so, unlike a lexical form
+/// or an IRI, they cannot be neutralised by escaping. [`TermRef`] is public and
+/// `Deserialize`, so those two components can carry anything a caller supplies;
+/// validating them here (and refusing to render otherwise) is what stops
+/// punctuation in them reaching [`to_sparql_update`] as executable syntax.
+pub(crate) fn term_to_ntriples(term: &TermRef) -> Option<String> {
+    Some(match term.kind.as_str() {
         "iri" => format!("<{}>", escape_iri(&term.value)),
         "bnode" => format!("_:{}", term.value),
         "literal" => {
             let literal = format!("\"{}\"", escape_literal(&term.value));
-            if let Some(language) = &term.language {
+            match (&term.language, &term.direction) {
                 // RDF 1.2: a directional language-tagged string is written
                 // `"…"@lang--dir`. Dropping the direction would silently
                 // rewrite the term. [OPUS-5] sq-lsp7k.1.5
-                match &term.direction {
-                    Some(direction) => format!("{literal}@{language}--{direction}"),
-                    None => format!("{literal}@{language}"),
+                (Some(language), Some(direction)) => {
+                    if !valid_language(language) || !valid_direction(direction) {
+                        return None;
+                    }
+                    format!("{literal}@{language}--{direction}")
                 }
-            } else if let Some(datatype) = &term.datatype {
-                format!("{literal}^^<{}>", escape_iri(datatype))
-            } else {
-                literal
+                (Some(language), None) => {
+                    if !valid_language(language) {
+                        return None;
+                    }
+                    format!("{literal}@{language}")
+                }
+                // A base direction with no language tag is not a term RDF 1.2
+                // can express; rendering the plain literal would silently drop
+                // it, so decline instead. [SONNET-4.6]
+                (None, Some(_)) => return None,
+                (None, None) => match &term.datatype {
+                    Some(datatype) => format!("{literal}^^<{}>", escape_iri(datatype)),
+                    None => literal,
+                },
             }
         }
         // RDF 1.2 triple terms: re-render from the structured components when
@@ -181,13 +211,29 @@ pub(crate) fn term_to_ntriples(term: &TermRef) -> String {
         _ => match &term.triple {
             Some(t) => format!(
                 "<<( {} {} {} )>>",
-                term_to_ntriples(&t.subject),
-                term_to_ntriples(&t.predicate),
-                term_to_ntriples(&t.object)
+                term_to_ntriples(&t.subject)?,
+                term_to_ntriples(&t.predicate)?,
+                term_to_ntriples(&t.object)?
             ),
             None => term.value.clone(),
         },
-    }
+    })
+}
+
+/// RDF 1.2 admits exactly two base directions; anything else is not a direction
+/// this crate will write. [SONNET-4.6]
+fn valid_direction(direction: &str) -> bool {
+    matches!(direction, "ltr" | "rtl")
+}
+
+/// The N-Triples `LANGTAG` production: `[a-zA-Z]+ ('-' [a-zA-Z0-9]+)*`.
+/// [SONNET-4.6]
+fn valid_language(language: &str) -> bool {
+    let mut parts = language.split('-');
+    parts
+        .next()
+        .is_some_and(|primary| !primary.is_empty() && primary.bytes().all(|b| b.is_ascii_alphabetic()))
+        && parts.all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 fn escape_iri(value: &str) -> String {
