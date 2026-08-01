@@ -178,23 +178,76 @@ pub fn admit(
     session: &Session,
     target: &NamedNode,
 ) -> Vec<AdmittedFact> {
+    admit_metered(cred, rules, session, target, &mut AdmissionMeter::default())
+}
+
+/// The deterministic **operation meter** the admission gate increments as it runs — the
+/// evidence half of the P8 cost/decidability spike (`sq-pfae.9`). Each field counts one
+/// class of gate operation; there are **no clock samples, no elapsed durations, and no
+/// host metadata** in it, so it is a *deterministic* metric that can be gated in CI
+/// (work-box / EC2 wall-clock timings are explicitly non-canonical and are not measured
+/// here at all).
+///
+/// The meter is threaded through [`admit_metered`], which [`admit`] itself calls — there
+/// is **no `cfg` fork**, so the counted path IS the shipped path and the two can never
+/// drift. The public, feature-gated view of it is `cost::AdmissionCost` (a plain code
+/// span: that item is behind the default-OFF `cost-bound` feature).
+#[cfg_attr(not(feature = "cost-bound"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AdmissionMeter {
+    /// RDFC-1.0 canonicalise + commit of the credential graph `G` (at most one).
+    pub(crate) graph_commitments: usize,
+    /// Issuer-signature hex parses (at most one — parsed once, before the rule loop).
+    pub(crate) signature_parses: usize,
+    /// `trust:scope` containment checks (one per rule).
+    pub(crate) scope_checks: usize,
+    /// Schnorr verifications of the issuer signature over `C(G)` (one per in-scope rule).
+    pub(crate) signature_verifications: usize,
+    /// Per-request freshness comparisons (one per signature-verified rule).
+    pub(crate) freshness_checks: usize,
+    /// Input-stratified revocation-guard reads (one per fresh rule — `sq-tu4e`).
+    pub(crate) revocation_checks: usize,
+    /// Reserved-predicate guard evaluations (one per (surviving rule, triple) pair).
+    pub(crate) reserved_predicate_checks: usize,
+    /// `sparq-shacl` statement-type validations (one per non-reserved (rule, triple) pair).
+    pub(crate) shape_validations: usize,
+    /// Holder-binding comparisons (one per shape-admitted (rule, triple) pair).
+    pub(crate) holder_checks: usize,
+}
+
+/// [`admit`], instrumented. The metered core both entry points share so the counted
+/// path and the shipped path are the *same* code (see [`AdmissionMeter`]).
+///
+/// The control flow is a **single pass**: an admitted fact never re-enters `rules`, so
+/// there is no fixpoint and no recursion — the loop nest below is the whole cost, which
+/// is why the bound is exactly `|rules|` outer steps and `|rules| × |G|` inner steps.
+pub(crate) fn admit_metered(
+    cred: &PresentedCredential,
+    rules: &[TrustRule],
+    session: &Session,
+    target: &NamedNode,
+    meter: &mut AdmissionMeter,
+) -> Vec<AdmittedFact> {
     let mut admitted: Vec<AdmittedFact> = Vec::new();
 
     // Step 1: canonicalise + commit G (sparq-canon RDFC-1.0, the same canonical unit
     // the ZK estate commits over). A graph that cannot be committed admits nothing.
     let salt = salt_from_bytes(&cred.salt);
+    meter.graph_commitments += 1;
     let Ok(commitment) = commit_triples(&cred.graph, salt) else {
         return admitted; // fail closed
     };
     let commitment_fr: Fr = commitment.commitment;
 
     // Parse the issuer signature once (fail closed on malformed hex).
+    meter.signature_parses += 1;
     let Some(signature) = signature_from_hex(&cred.issuer_signature_hex) else {
         return admitted;
     };
 
     for r in rules {
         // §3.2 scope: the rule must cover the target resource.
+        meter.scope_checks += 1;
         if !scope_covers(&r.scope, target) {
             continue;
         }
@@ -202,6 +255,7 @@ pub fn admit(
         // self-asserted "I am signed" triple proves nothing; this verifies the
         // signature against the key the rule names.
         let msg = commitment_message(&commitment_fr);
+        meter.signature_verifications += 1;
         if !verify(&r.issuer_key, &msg, &signature) {
             continue;
         }
@@ -209,11 +263,13 @@ pub fn admit(
         let age = session
             .now_unix_secs
             .saturating_sub(cred.issued_at_unix_secs);
+        meter.freshness_checks += 1;
         if age < 0 || age > r.fresh_within_secs {
             continue;
         }
         // §3.3 input-stratified revocation guard (input-only; never NAF over a
         // derived predicate — sq-tu4e).
+        meter.revocation_checks += 1;
         if cred.revoked {
             continue;
         }
@@ -223,18 +279,21 @@ pub fn admit(
             // a source trusted for schema:age cannot launder a solidx:/urn:sparq:/acl
             // internal triple in (§3.3 item 2). This mirrors sparq-solid's
             // `is_reserved_derivation_predicate` / `validate_principal_iri` guards.
+            meter.reserved_predicate_checks += 1;
             if is_reserved_predicate(&t.predicate) {
                 continue;
             }
             // §2.3.2 statement-type scoping via the SHACL shape (forShape /
             // forPredicate-sugar). A triple whose subject the shape does not target,
             // or that violates the shape, is NOT of the trusted statement-type.
+            meter.shape_validations += 1;
             if !shape_admits(&r.shape, t, &cred.graph) {
                 continue;
             }
             // §3.4 holder binding: the credential subject must equal the authenticated
             // requester (the clear-WebID, non-anonymous v1 path — sq-wvne). Presenting
             // a third party's credential without holder binding must NOT admit.
+            meter.holder_checks += 1;
             if !subject_is(t, &session.agent) {
                 continue;
             }

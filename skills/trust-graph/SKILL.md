@@ -80,6 +80,10 @@ pre-processing: it produces the `Vec<TrustRule>` that the **UNCHANGED** admissio
 # Certification, CertScope, EdgeRejection. Implies the trustx: framework-vocab module.
 sparq-trust = { path = "crates/sparq-trust", features = ["cert-graph"] }
 
+# The P8 cost/decidability surface (sparq_trust::cost): admission_cost_bound,
+# admit_measured, analyse_seeding, require_one_side_bound.
+sparq-trust = { path = "crates/sparq-trust", features = ["cost-bound"] }
+
 # Pod-side wiring: PodStore admission-install methods over <urn:sparq:auth>.
 sparq-solid = { path = "crates/sparq-solid", features = ["trust-graph"] }
 # + DID-resolved issuer keys (trust:issuerDid) instead of operator-asserted hex:
@@ -367,6 +371,52 @@ variables in the reserved `?__tx_*` namespace the rewrite mints.
   is a separate bead (`sq-6syab.5`), the sparq ZK estate is internally re-audited with
   external accredited-cryptographer sign-off PENDING (`sq-qhy4`), and `sparq-mpc` is
   honest-majority semi-honest only.
+
+## Cost + decidability — what is bounded, and what is not (`cost-bound`, sq-pfae.9)
+
+The design record deferred a complexity bound to P8; the `cost` module is where it now
+lives. Two surfaces, both **deterministic** — no clock, elapsed duration, allocator or
+host metadata is sampled anywhere, because work-box / EC2 wall-clock numbers are
+non-canonical in this repo and only operation counts may be gated.
+
+```rust
+use sparq_trust::cost::{admission_cost_bound, admit_measured, AdmissionShape, require_one_side_bound};
+
+// 1. The gate is a SINGLE PASS, not a fixpoint: an admitted fact never re-enters the
+//    rule set, so the whole cost is the literal `rules × triples` loop nest.
+let bound = admission_cost_bound(AdmissionShape { rules: 4, graph_triples: 3 });
+assert_eq!(bound.total(), 2 + 4 * 4 + 3 * 4 * 3);        // 2 + 4R + 3R·T  ⇒  Θ(R·T)
+
+// 2. Measured against the REAL gate — the meter is threaded through the shipped code
+//    path, so there is no `cfg` fork and the counted path IS the admitted path.
+# fn demo(cred: &sparq_trust::admit::PresentedCredential, rules: &[sparq_trust::policy::TrustRule],
+#         session: &sparq_trust::admit::Session, target: &oxrdf::NamedNode) {
+let (admitted, measured) = admit_measured(cred, rules, session, target);
+assert!(bound.dominates(&measured));                      // componentwise, not just totals
+# let _ = admitted;
+# }
+
+// 3. Fail-closed guard for controller-authored `.acr` N3 before `wire::derive_grants`.
+require_one_side_bound("{ ?x <http://schema.org/age> ?y . ?y <http://www.w3.org/2000/10/swap/math#greaterThan> 18 } => { ?x <https://sparq.dev/ns/auth#read> <https://pod.ex/r> } .").unwrap();
+```
+
+An atom is **one-side-bound** when its *subject or object* is a constant or an
+already-bound variable — a constant predicate alone is not enough, since that is exactly
+the *two-unbound-atom* shape whose whole-extent seeding blew up before.
+`analyse_seeding` greedily picks a deterministic join order, reports every atom no order
+can bind (`PredicateAnchored` vs `Unanchored`), and reports head variables the body never
+binds (range-restriction failures). Anything it cannot parse — blank-node property lists,
+collections, nested formulae, `<=` — is a **refusal**, never a silent pass.
+
+The honest finding, recorded rather than assumed: design § 3.1's `.acr` ABAC rule and the
+`admissibility` **discharge** rule ARE one-side-bound; the `admissibility`
+**transitive-closure** rule is NOT — it is a genuine two-unbound-atom seed, safe only
+because its extent is the closed, bundled, constant `LEVEL_ORDERS` fact base rather than
+an attacker-supplied graph.
+
+Out of scope, and not claimed: `admit_static`, `admit_with_status`, the certification
+closure (`graph`), and the `expression` evaluator are not metered; nothing here bounds
+`sparq-reason`'s own evaluation, and none of it is a soundness or privacy property.
 
 ## Cross-references
 

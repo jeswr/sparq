@@ -134,6 +134,19 @@ pub mod delegation_prov;
 #[cfg(feature = "did")]
 #[cfg_attr(docsrs, doc(cfg(feature = "did")))]
 pub mod did;
+/// The P8 **cost / decidability** spike (`sq-pfae.9`): the closed-form worst-case bound on
+/// admission-gate evaluation (`2 + 4R + 3R·T` gate operations for `R` rules over a `T`-triple
+/// credential graph), measured against the REAL gate via the deterministic operation meter
+/// [`mod@admit`] already threads — no `cfg` fork, so the counted path IS the shipped path —
+/// plus the **one-side-bound seeding** analysis over Notation3 rule text and a fail-closed
+/// guard for controller-authored `.acr` rules. Deterministic **counts and static analysis
+/// only**: nothing here samples a clock, an allocator, or the host, because work-box / EC2
+/// wall-clock timings are non-canonical and must never be gated. Behind the default-OFF
+/// `cost-bound` feature: pure `std`, no new dependency, nothing in the lean default build
+/// depends on it.
+#[cfg(feature = "cost-bound")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cost-bound")))]
+pub mod cost;
 pub mod policy;
 /// The N3 proof-admissibility ruleset over `sparq-reason` — the §4.3 ODRL →
 /// admissible-proof-set reduction (`strongerThan`-closure / `atLeast` /
@@ -220,6 +233,12 @@ pub use admit::admit_with_status;
 #[cfg(feature = "secprop-precheck")]
 pub use admit::{
     admit_with_precheck, AdmissibilityConstraint, AdmissibilityPreference, PrecheckOutcome,
+};
+#[cfg(feature = "cost-bound")]
+pub use cost::{
+    admission_cost_bound, admit_measured, analyse_seeding, require_one_side_bound, AdmissionCost,
+    AdmissionShape, RuleSeeding, SeedingDenial, SeedingError, SeedingReport, UnseededAtom,
+    UnseededKind,
 };
 pub use delegation::{
     effective_against_current, hop_message, invoke, Capability, DelegationChain, DelegationHop,

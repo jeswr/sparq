@@ -125,6 +125,14 @@ secprop-precheck = ["secprop-admissibility", "sparq-zk/secprop-annotations"]
 # graph; the audit is a small fixed triple set emitted directly). Strictly additive: the
 # lean default build is byte-identical with it OFF.
 delegation-prov = []
+# [SONNET-4.6] sq-pfae.9 — the P8 cost/decidability spike (`cost` module): the closed-form
+# `2 + 4R + 3R·T` bound on admission-gate evaluation, checked against the REAL gate via the
+# operation meter `admit` already threads (no `cfg` fork, so the counted path is the shipped
+# path), plus the one-side-bound seeding analysis + fail-closed guard over `.acr` N3 rule
+# text. Pure `std` arithmetic + string analysis — NO new dependency, and DELIBERATELY no
+# clock/allocator/host sampling (work-box + EC2 timings are non-canonical; only deterministic
+# counts may be gated). Strictly additive: the lean default build is byte-identical with it OFF.
+cost-bound = []
 # [OPUS-4.8] sq-pfae.7 — live credential status / revocation over a W3C Bitstring Status
 # List + a minimal PROV-O denial justification (the P6 status stratum). Fetch (pluggable
 # `StatusListResolver`) + decode (hand-rolled multibase base64url/base58btc over a pluggable

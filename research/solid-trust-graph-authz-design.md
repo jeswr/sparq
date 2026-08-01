@@ -1171,7 +1171,22 @@ core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-
    P3 + `sq-qhy4`. Open problem: `sq-wvne`.*
 8. **P8 — Cost/decidability spike (prototype).** Bound admission-rule evaluation cost and
    confirm one-side-bound seeding everywhere; work-box timings are non-canonical. *Blocked-on:
-   P1–P4.*
+   P1–P4.* **PROTOTYPED** (`sq-pfae.9`, opt-in `cost-bound` feature,
+   `crates/sparq-trust/src/cost.rs`): the gate is a **single pass, not a fixpoint** — an
+   admitted fact never re-enters the rule set — so its cost is exactly the `rules × triples`
+   loop nest, `2 + 4R + 3R·T` gate operations, and `admission_cost_bound` states that closed
+   form while `admit_measured` checks it against the *real* gate through an operation meter
+   threaded into the shipped code path (no `cfg` fork). The acceptance suite pins the bound
+   **tight from both sides** — measured never exceeds it componentwise, and a saturated
+   credential attains it exactly — so it can be neither inflated nor deflated unnoticed.
+   `analyse_seeding` / `require_one_side_bound` decide one-side-bound seeding + head
+   range-restriction over N3 rule text, failing closed on anything unparsed. **Honest
+   residue:** this bounds *gate operations*, not elementary steps or latency; only
+   `admit` is metered (`admit_static`, `admit_with_status`, the `graph` closure and the
+   `expression` evaluator are not); and the `admissibility` transitive-closure rule is
+   confirmed **not** one-side-bound — it is a genuine two-unbound-atom seed, safe only
+   because its extent is a bundled constant fact base. Nothing here samples a clock:
+   work-box / EC2 timings remain non-canonical and ungated.
 
 ### 6.2 LWS/Solid-WG proposal framing
 
@@ -1295,6 +1310,15 @@ prior draft phrased as settled are open problems.
   *unanalysed* termination risk is **recursive / unbound-join admission rules over external-graph
   extents in the full evaluator** — P8 (`sq-pfae` P8) must bound *that* path (`sq-tu4e`). No
   formal complexity bound is proven here.
+  **P8 update (`sq-pfae.9`, opt-in `cost-bound`).** A bound now exists for the **gate**, not
+  for the reasoner: `admit` is a single pass, never a fixpoint, so its cost is exactly
+  `2 + 4R + 3R·T` gate operations — stated as a closed form and checked *tight from both
+  sides* against the real code path (`crates/sparq-trust/src/cost.rs`). Rule **shape** is
+  decided separately by `analyse_seeding`, which confirms §3.1's `.acr` ABAC rule is
+  one-side-bound and **fails closed** on any rule text it cannot decide. Still NOT proven:
+  any bound on `sparq-reason`'s own evaluation of a controller-authored rule set — an
+  operator who authors an unbounded-join `.acr` rule remains the open risk, and the guard
+  *refuses* such a rule rather than making it cheap.
 - **F — Conflicting-fact deny-on-disagreement is reachable.** A positive join over two
   disagreeing issuer-tagged facts derives a conflict/prohibition witness, and existing
   deny-overrides defeats the competing grant without NAF. Only the alternative “grant iff no
