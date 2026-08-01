@@ -326,15 +326,24 @@ def partition_path(key, roots=None):
     The residual — two not-yet-landed crates sharing the bucket — is KEPT, and the proposal to
     promote such a key to its own root when its PR adds `crates/<name>/Cargo.toml` is DECLINED,
     for two independent reasons:
-      * It buys no concurrency. `[workspace] members` is an explicit list with no globs,
-        `assert_workspace_tree` refuses a tree whose manifest and directories disagree, and
-        `gate-new-crate.py` (G1) triggers on the added `crates/<x>/Cargo.toml` — so a new crate
-        MUST also edit the root `Cargo.toml`, which `ci/area-labels.toml` maps to the reserving
-        `workspace` partition (or to `__global__`, wider still, when derivation fails closed).
-        Two new-crate PRs therefore CO-HOLD `workspace` and serialise there whatever their
-        `sparq-*` keys resolve to. Freeing the `sparq-*` key changes no outcome for the pair the
-        issue names, and for the cases it does free it dispatches two workers onto a manifest
-        they must both edit — the corrupting direction, for nothing.
+      * The bucket is the ONLY thing serialising such a pair, so freeing the key is the
+        corrupting direction. NOT the reason first recorded here, which was wrong and is left
+        stated so it is not re-derived: nothing ENFORCES that a PR adding
+        `crates/<x>/Cargo.toml` also registers `<x>` in the root `[workspace] members`.
+        `gate-new-crate.py` (G1) requires a README, plus a benchmark and a `SKILL.md` where
+        applicable, and never membership; `assert_workspace_tree` checks only the DECLARED ->
+        disk direction (a declared member with no directory, plus an empty tree under a glob),
+        so an unregistered `crates/<x>/` directory passes both. Registering it is convention.
+        What IS enforced runs AGAINST the promotion. `pr-area-labels.py::derive_areas` is
+        all-or-nothing: `crates/<x>/...` attributes to an `area:<x>` label that does not exist
+        while the crate is unlanded unless one was hand-created, a single unattributable path
+        makes the whole PR `unresolved`, and an unresolved PR derives NO labels — not even the
+        `area:workspace` its root-manifest edit would otherwise map to. Nor does failing closed
+        widen it instead: `_reserving_packages` gives an unattributable OCCUPANT nothing to
+        reserve (only a no-area CANDIDATE goes to `__global__`). Promoting the keys would
+        therefore dispatch two workers onto a root manifest
+        they both intend to edit, with nothing left to hold them apart; the shared bucket
+        over-reserves instead, which is the safe direction.
       * It is not expressible in the published contract. `--dump-partitions` exports a pure
         key -> path mapping for the registry's second occupancy leg; a rule whose answer depends
         on WHICH PR carries the key would resolve one way for an issue and another for a PR, and
@@ -1272,27 +1281,25 @@ def _self_test():
           (("sparq",), False, False))
     check("...but two not-yet-landed crate keys DO share rule 3's bucket",
           keys_conflict("sparq-foo", "sparq-bar"), True)
-    # ...and that residual is left in place on purpose: the manifest edit every new crate must make
-    # puts BOTH such PRs in the `workspace` partition, which RESERVES, so they serialise there
-    # whatever their `sparq-*` keys resolve to. If `workspace` were ever exempted the decision
-    # recorded in `partition_path` would lose its basis, so it is a row and not a sentence.
-    # (`ci/area-labels.toml` mapping `Cargo.toml` -> `workspace` is the other half of the basis,
-    # asserted in `pr-area-labels.py::_self_test`.) The pair below carries DISJOINT crate keys —
-    # exactly the world the declined narrowing would create for two not-yet-landed crates — so
-    # `workspace` is the only thing left that can hold them apart, and it does...
-    check("the manifest partition alone serialises a pair whose crate keys are disjoint",
-          (reserves_partition("workspace"),
-           keys_conflict("sparq-core", "sparq-engine"),
-           [i["number"] for i in compute_ready(
-               [pr(84, ["area:workspace", "area:sparq-core"]),
-                iss(85, R + ["priority:P1", "area:workspace", "area:sparq-engine"])],
-               conflict_log=quiet)]),
-          (True, False, []))
-    # ...and it is `workspace` doing that, not the crate keys: drop it and the same pair dispatches.
-    check("...and dropping it is what frees them (so the row above is not vacuous)",
+    # ...and that residual is KEPT because the bucket is the only thing serialising such a pair.
+    # Their PRs cannot be relied on to co-hold a narrower reserving partition instead: a
+    # `crates/<x>/...` path attributes to an `area:<x>` label that does not exist while the crate
+    # is unlanded, `derive_areas` is all-or-nothing, so such a PR derives NOTHING — not even the
+    # `area:workspace` its root-manifest edit would map to — and an unattributable occupant
+    # reserves nothing. Promote the keys and the pair below dispatches together onto a manifest
+    # both would edit; leave them in the bucket and only one goes.
+    check("two not-yet-landed crate keys serialise on rule 3's bucket",
           [i["number"] for i in compute_ready(
-              [pr(84, ["area:sparq-core"]),
-               iss(85, R + ["priority:P1", "area:sparq-engine"])], conflict_log=quiet)], [85])
+              [iss(84, R + ["priority:P0", "area:sparq-foo"]),
+               iss(85, R + ["priority:P1", "area:sparq-bar"])], conflict_log=quiet)],
+          [84])
+    # ...and it is the SHARED bucket doing that, not the priority ordering: give the same pair
+    # keys the tree DOES recognise and both dispatch, so the row above is not vacuous.
+    check("...disjoint landed-crate keys in the same pair dispatch together",
+          [i["number"] for i in compute_ready(
+              [iss(84, R + ["priority:P0", "area:sparq-core"]),
+               iss(85, R + ["priority:P1", "area:sparq-engine"])], conflict_log=quiet)],
+          [84, 85])
     # ---------------------------------------------------------------------------------------
     # NATIVE dependency edges (the maintainer's own triage action). Every row below is written to
     # go RED if the native read is deleted, if the union is turned into a replacement, or if the
