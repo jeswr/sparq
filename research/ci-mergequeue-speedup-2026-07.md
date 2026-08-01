@@ -187,6 +187,54 @@ rebuild. The honest remaining deltas, in measured order:
 > - **(3) NOT done — no verdict either way.** No sccache A/B was run, so there is neither
 >   an adoption nor an honest negative result to record; the ≥60 s bar is untested. Nothing
 >   about sccache is wired. Tracked as a follow-up issue.
+>   **SUPERSEDED IN PART by the 2026-08-01 note below** — the "nothing is wired" half is no
+>   longer true (a dispatch-only harness exists); the "no verdict, bar untested" half STILL
+>   HOLDS.
+
+> **Status 2026-08-01 [OPUS-5] — item 3: the HARNESS is wired; the MEASUREMENT is still
+> not taken (issue #5164).** Read this as "the experiment is now runnable", NOT as a
+> result. The ≥60 s bar remains untested and sccache remains UNADOPTED.
+>
+> - **What landed.** `ci.yml` gained a `workflow_dispatch` input `sccache_ab`
+>   (choice, default `"off"`). With `on`, the `build-archive` job installs sccache via the
+>   already-SHA-pinned `taiki-e/install-action`, re-exports the Actions cache credentials
+>   (`ACTIONS_RESULTS_URL` / `ACTIONS_CACHE_URL` / `ACTIONS_RUNTIME_TOKEN`, which the
+>   runner hands to JS actions only and never to `run:` steps) through the already-pinned
+>   `actions/github-script`, sets `RUSTC_WRAPPER=sccache`, and prints `sccache --show-stats`
+>   to the job summary. `CARGO_INCREMENTAL=0` is already workflow-global (sq-6vshe.1), so
+>   nothing had to change for sccache to be able to cache at all.
+> - **Nothing reaches the queue path.** `push` / `pull_request` / `merge_group` cannot carry
+>   an input, so the guard `github.event.inputs.sccache_ab == 'on'` is false on every
+>   automatic run and all four arm steps skip. That guard and the `"off"` default are the
+>   whole safety property and are pinned by
+>   `scripts/tests/test_mergequeue_cache_posture.py::TestSccacheArmIsDispatchOnly` —
+>   removing the `if:`, weakening it, or flipping the default each turns that suite red.
+> - **Key hygiene (sq-6vshe.5).** `SCCACHE_GHA_VERSION` prefixes every key sccache writes
+>   and is bound to the resolved toolchain string + the `Cargo.lock` hash + the exact
+>   feature set the job compiles, so no entry can alias across toolchain, dependency graph
+>   or feature-set, and the namespace is disjoint from every `Swatinem/rust-cache` key.
+>   Cost noted, not hidden: sccache entries share the repo's Actions-cache budget and can
+>   LRU-evict rust-cache entries — a second reason the arm is dispatch-only.
+> - **How to take the measurement.** Dispatch `CI` on `main` with `sccache_ab: off` k times
+>   for the control, then with `on` k+1 times; **discard the first `on` run** (it only
+>   populates the cache). Compare the medians of the `nextest archive compile seconds` row
+>   the job summary now prints. Read `sccache --show-stats` first: if the compile-request
+>   hit rate is ≈0 the bar is unreachable by construction and the negative result can be
+>   recorded without any median at all.
+> - **The measured number will be an UPPER BOUND, and the bar must be applied knowing it.**
+>   A dispatch on unchanged `main` leaves every workspace crate identical, which is
+>   sccache's best case; a real PR always dirties its changed crates and the feature-matrix
+>   legs key differently per cfg. So a **sub-60 s result here FALSIFIES adoption outright**
+>   (the realistic win is strictly smaller), whereas a ≥60 s result only justifies a second,
+>   realistic measurement on the queue path — it does not itself clear the bar. This
+>   asymmetry is why the cheap upper-bound experiment is the right first move.
+> - **Also landed, for item (1)'s two unattempted halves.** The archive step now records its
+>   own wall-clock and the resulting `nextest.tar.zst` byte size to the job summary on
+>   EVERY run (labelled with the arm), because a control median collected only during an
+>   experiment is worthless. That byte figure is the before/after baseline the
+>   `--zstd-level` retune and the non-test-content pruning both needed and did not have.
+>   The cargo invocation itself is unchanged, so the archive's bytes — and therefore the
+>   nextest test set — are untouched by this record's changes.
 
 ### 3.3 Lever 3 — prioritize/parallelize the thing about to merge → **bead sq-6vshe.16**
 

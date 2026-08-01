@@ -35,10 +35,16 @@
 #      shards download — so the shards keep receiving the same byte-identical
 #      archive, and the nextest test set is unchanged.
 #
-# Deliberately NOT asserted: sccache. Bead item 3 (an sccache/GHA-backend A/B on
-# build-archive) is measure-first with a >=60 s median-win adoption bar, and no such
-# measurement has been taken — so nothing about sccache is wired, claimed, or pinned
-# here, and no verdict on it should be inferred from this file's silence.
+#   3. SCCACHE STAYS OFF THE QUEUE PATH. Bead item 3 (an sccache/GHA-backend A/B on
+#      build-archive, issue #5164) is measure-first with a >=60 s median-win adoption
+#      bar, and THAT MEASUREMENT HAS STILL NOT BEEN TAKEN — there is no verdict here,
+#      neither adoption nor rejection. What ci.yml now carries is only the HARNESS that
+#      makes the measurement possible: sccache is installed and wired as `RUSTC_WRAPPER`
+#      ONLY when a maintainer dispatches the workflow with `sccache_ab: on`. That `if:`
+#      guard, and the input's `off` default, are the entire safety property — drop either
+#      and an unmeasured, unadopted compiler wrapper goes live on the merge-queue critical
+#      path, which is precisely what the adoption bar exists to prevent. Both are pinned
+#      by TestSccacheArmIsDispatchOnly below.
 #
 # Hermetic: stdlib only (no PyYAML, no network, no gh) so it runs anywhere.
 # Run:  python3 scripts/tests/test_mergequeue_cache_posture.py
@@ -66,6 +72,19 @@ DOWNLOAD_ARTIFACT = "actions/download-artifact@"
 
 _NEW_LIST_ITEM = re.compile(r"^ {0,6}- ")
 _ARCHIVE_FILE_ARG = re.compile(r"--archive-file\s+(\S+)")
+
+# A `steps:` list item, at the 6-space indent every job in these workflows uses.
+_STEP_START = re.compile(r"^ {6}- (name|uses|run|if|with|env):")
+# What it means to ENABLE sccache, as opposed to merely NAMING it. The always-on
+# profile step carries `SCCACHE_ARM: ${{ ... sccache_ab ... }}` purely to LABEL its
+# sample, and must not be caught: it sets no wrapper and runs no sccache binary.
+_SCCACHE_ENABLER = re.compile(
+    r"RUSTC_WRAPPER|SCCACHE_GHA_ENABLED|tool:\s*sccache|\bsccache\s+--"
+)
+# The one condition under which an sccache enabler may run. `workflow_dispatch` is the
+# only trigger that can carry an input, so this expression is null — and the step skips
+# — on every push / pull_request / merge_group run.
+SCCACHE_ARM_GUARD = "github.event.inputs.sccache_ab == 'on'"
 
 
 # --------------------------------------------------------------------------- #
@@ -140,6 +159,23 @@ def with_value(body: list[str], key: str) -> str | None:
         if stripped.startswith(key):
             return stripped[len(key) :].strip()
     return None
+
+
+def all_steps(lines: list[str]) -> list[tuple[int, list[str]]]:
+    """Every `steps:` list item, as (0-based line index, body)."""
+    return [
+        (i, step_body(lines, i)) for i, l in enumerate(lines) if _STEP_START.match(l)
+    ]
+
+
+def sccache_enabler_steps(path: Path) -> list[tuple[int, list[str]]]:
+    """Steps that actually turn sccache on (install it, wrap rustc, or invoke it)."""
+    lines = _lines(path)
+    return [
+        (idx, body)
+        for idx, body in all_steps(lines)
+        if any(_SCCACHE_ENABLER.search(l) for l in body if not _is_comment(l))
+    ]
 
 
 def merge_group_workflows_with_rust_cache() -> list[Path]:
@@ -275,6 +311,64 @@ class TestNextestArchiveDiet(unittest.TestCase):
             consumers,
             f"nothing in ci.yml downloads `{NEXTEST_ARCHIVE_ARTIFACT}` — the build-once "
             "archive would be uploaded and never consumed.",
+        )
+
+
+class TestSccacheArmIsDispatchOnly(unittest.TestCase):
+    """sq-6vshe.15 item 3 (#5164). The A/B harness may exist; the VERDICT does not.
+    Until a >=60 s median win is measured, sccache must be unreachable from any
+    automatic trigger — so every enabler step carries the dispatch-input guard and the
+    input defaults to `off`."""
+
+    def test_the_enabler_walker_is_not_vacuous(self) -> None:
+        found = sccache_enabler_steps(CI_YML)
+        self.assertTrue(
+            found,
+            "no sccache enabler step found in ci.yml. Either the A/B harness was removed "
+            "(then delete this class and the item-3 note in the header) or the step walker "
+            "no longer understands its shape — in which case the guard below is unchecked.",
+        )
+
+    def test_every_sccache_enabler_is_guarded_by_the_dispatch_input(self) -> None:
+        for wf in sorted(WORKFLOWS.glob("*.yml")):
+            if not triggers_on_merge_group(wf):
+                continue
+            for idx, body in sccache_enabler_steps(wf):
+                got = with_value(body, "if:")
+                self.assertEqual(
+                    got,
+                    SCCACHE_ARM_GUARD,
+                    f"{wf.name}:{idx + 1}: this step enables sccache but its `if:` is "
+                    f"{got!r}, not `{SCCACHE_ARM_GUARD}`. The workflow triggers on "
+                    "merge_group, so an unguarded enabler puts an UNMEASURED compiler "
+                    "wrapper on the merge-queue critical path — sq-6vshe.15 item 3 adopts "
+                    "sccache only on a measured >=60 s median win, and no such measurement "
+                    "exists (research/ci-mergequeue-speedup-2026-07.md §3.2).",
+                )
+
+    def test_the_ab_input_defaults_to_off(self) -> None:
+        lines = _lines(CI_YML)
+        start = next(
+            (i for i, l in enumerate(lines) if re.match(r"^ {6}sccache_ab:", l)), None
+        )
+        self.assertIsNotNone(
+            start,
+            "ci.yml declares no `sccache_ab` workflow_dispatch input, but a step is "
+            "guarded on it — that guard would then be permanently unsatisfiable, or "
+            "(worse) the guard was dropped with the input.",
+        )
+        block = lines[start + 1 : start + 12]
+        defaults = [
+            l.split(":", 1)[1].strip()
+            for l in block
+            if l.strip().startswith("default:") and not _is_comment(l)
+        ]
+        self.assertEqual(
+            defaults,
+            ['"off"'],
+            "the `sccache_ab` input must default to the QUOTED string \"off\". Unquoted "
+            "`off` is YAML 1.1 boolean false and would render as `false` in the dispatch "
+            "UI; any other default arms the un-adopted experiment by default.",
         )
 
 

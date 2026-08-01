@@ -47,7 +47,24 @@ on:
   # on a PR. The per-commit `coverage` job (if: event_name != 'schedule') runs here;
   # the nightly tier (if: event_name == 'schedule' || 'workflow_dispatch') stays off.
   merge_group:
+  # [OPUS-5] sq-6vshe.15 item 3 (#5164) — the sccache A/B lives on THIS trigger and
+  # nowhere else. `push` / `pull_request` / `merge_group` cannot supply an input, so
+  # `github.event.inputs.sccache_ab` is null on every automatic run and all four arm
+  # steps in `build-archive` skip: the merge-queue critical path keeps running the
+  # identical compile command it ran before this harness existed. See
+  # research/ci-mergequeue-speedup-2026-07.md §3.2 item 3 for the adoption bar.
   workflow_dispatch: # [OPUS-4.8] manual trigger forces the nightly tier regardless of the freshness gate
+    inputs:
+      sccache_ab:
+        description: >-
+          sccache (GitHub-Actions cache backend) A/B arm for the build-archive compile
+          step. `off` = control (production posture, no wrapper). `on` = sccache arm.
+          Dispatch on `main`, where rust-cache restores the same deps-only entry the
+          queue path restores. The FIRST `on` dispatch only POPULATES the sccache
+          cache and must be discarded; take the median of the later ones.
+        type: choice
+        default: "off"
+        options: ["off", "on"]
   # [OPUS-4.8] Nightly schedule drives the heavy coverage tier (sq-hbg7): the
   # `coverage-nightly` job runs the sparq-vectors 50k recall/diskann accuracy
   # tests under llvm-cov instrumentation, which a per-commit job cannot afford
@@ -476,6 +493,49 @@ jobs:
         uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: nextest
+      # ───────── sq-6vshe.15 item 3 (#5164): sccache A/B arm — DISPATCH-ONLY, DEFAULT OFF ─────────
+      # [OPUS-5] MEASURE-FIRST, and the `if:` guard IS the safety property. On push /
+      # pull_request / merge_group `github.event.inputs.sccache_ab` is null, so all four
+      # arm steps skip and no `RUSTC_WRAPPER` is ever set on the merge-queue critical path.
+      # Nothing here adopts sccache — adoption needs a >=60 s median win on the compile
+      # step below, and that number does not exist yet. The guard is pinned structurally
+      # by scripts/tests/test_mergequeue_cache_posture.py.
+      #
+      # WHY THE BACKEND ENV MUST BE RE-EXPORTED: the Actions cache service credentials
+      # (`ACTIONS_RESULTS_URL` / `ACTIONS_CACHE_URL` / `ACTIONS_RUNTIME_TOKEN`) are handed
+      # to JS actions only, never to `run:` steps, so a plain `sccache` binary cannot
+      # reach the GHA backend. Re-exporting them from the already-vetted, SHA-pinned
+      # `actions/github-script` keeps mozilla/sccache-action off our pin surface.
+      - name: Install sccache (A/B arm only)
+        if: github.event.inputs.sccache_ab == 'on'
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: sccache
+      - name: Export Actions cache credentials for sccache (A/B arm only)
+        if: github.event.inputs.sccache_ab == 'on'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            for (const k of ['ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL', 'ACTIONS_RUNTIME_TOKEN']) {
+              if (process.env[k]) { core.exportVariable(k, process.env[k]); }
+            }
+      # CACHE-POISONING DISCIPLINE (sq-6vshe.5): `SCCACHE_GHA_VERSION` prefixes every key
+      # sccache writes, and it is bound here to the resolved toolchain string + the
+      # Cargo.lock hash + the exact feature set this job compiles with — so an A/B entry
+      # can never alias across toolchain, dependency graph, or feature-set. It is also a
+      # namespace disjoint from every `Swatinem/rust-cache` key, so an arm cannot corrupt
+      # the dep cache the production path restores. QUOTA NOTE: these entries share the
+      # repo's 10 GB Actions-cache budget with the rust-cache entries and can LRU-evict
+      # them, which is a second reason this stays dispatch-only rather than always-on.
+      - name: Enable sccache wrapper (A/B arm only)
+        if: github.event.inputs.sccache_ab == 'on'
+        env:
+          LOCK_HASH: ${{ hashFiles('**/Cargo.lock') }}
+        run: |
+          toolchain="$(rustc -V | tr -c '[:alnum:].' '-')"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_VERSION=sq-6vshe15-${toolchain}-lock${LOCK_HASH}-feat-approx-ann.filtered-ann.vec-predicate" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       # [OPUS-4.8] Build + ARCHIVE the whole workspace test set once. `--all-targets`
       # mirrors the old `cargo build --workspace --all-targets` (unit + integration +
       # bin test targets), so the archived set == what the un-sharded run built. The
@@ -496,8 +556,51 @@ jobs:
       # rides these archive features; ANYTHING ELSE must be wired into a feature-matrix.yml leg
       # (read that file's GUARD block). Prove a suite is reached: `cargo nextest list -p <crate>
       # --features <set>` must SHOW its test names.
+      #
+      # [OPUS-5] sq-6vshe.15 (#5164) — the cargo invocation is UNCHANGED; the wrapper only
+      # RECORDS the two samples this bead could never take: this step's own wall-clock
+      # (the A/B's dependent variable, item 3) and the resulting archive size in bytes
+      # (the baseline the two UNATTEMPTED halves of lever 1 — a `--zstd-level` retune and
+      # pruning non-test content — need a before/after for). `sccache_arm` labels every
+      # sample so control and arm runs can never be pooled by mistake. Always-on because
+      # `SECONDS` arithmetic and one `stat` cost nothing on a ~162 s step, and because a
+      # control median is worthless if it is only collected during an experiment.
       - name: Build + archive test binaries (nextest archive)
-        run: cargo nextest archive --workspace --all-targets --features approx-ann,filtered-ann,vec-predicate --archive-file nextest.tar.zst
+        env:
+          SCCACHE_ARM: ${{ github.event.inputs.sccache_ab || 'off' }}
+        run: |
+          start=$SECONDS
+          cargo nextest archive --workspace --all-targets --features approx-ann,filtered-ann,vec-predicate --archive-file nextest.tar.zst
+          elapsed=$(( SECONDS - start ))
+          bytes=$(stat -c %s nextest.tar.zst)
+          {
+            echo "### build-archive profile (sq-6vshe.15)"
+            echo ""
+            echo "| sample | value |"
+            echo "| --- | --- |"
+            echo "| sccache_arm | ${SCCACHE_ARM} |"
+            echo "| event | ${GITHUB_EVENT_NAME} |"
+            echo "| nextest archive compile seconds | ${elapsed} |"
+            echo "| nextest.tar.zst bytes | ${bytes} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      # [OPUS-5] The DECISIVE datum for item 3, and it is cheaper to read than the timings:
+      # if the compile-request hit rate here is ~0 the >=60 s bar is unreachable by
+      # construction and the negative result can be recorded without a median at all.
+      # Read it knowing a dispatch on unchanged `main` gives sccache its BEST case (every
+      # workspace crate is unmodified), whereas a real PR always dirties its changed
+      # crates — so any win measured this way is an UPPER BOUND, not the queue-path win.
+      - name: sccache stats (A/B arm only)
+        if: github.event.inputs.sccache_ab == 'on'
+        run: |
+          # Read BEFORE the doctest step below, so the counters cover the archive
+          # compile alone. Scratch file goes to RUNNER_TEMP, never the checkout.
+          sccache --show-stats | tee "$RUNNER_TEMP/sccache-stats.txt"
+          {
+            echo "### sccache stats (upper bound — dispatch on unchanged main)"
+            echo '```'
+            cat "$RUNNER_TEMP/sccache-stats.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       # [OPUS-4.8] Upload the archive immediately after the build, BEFORE doctests, so
       # the shards' input artifact is produced even if the doctest step later fails.
       - name: Upload nextest archive
