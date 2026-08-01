@@ -1171,7 +1171,14 @@ core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-
    P3 + `sq-qhy4`. Open problem: `sq-wvne`.*
 8. **P8 — Cost/decidability spike (prototype).** Bound admission-rule evaluation cost and
    confirm one-side-bound seeding everywhere; work-box timings are non-canonical. *Blocked-on:
-   P1–P4.*
+   P1–P4.* **ANALYSED** (`sq-pfae.9`, [`research/trust-admission-cost-decidability.md`](trust-admission-cost-decidability.md)):
+   the bound is proven for a stated fragment (safety + no head existentials + ground
+   predicates + no term-minting builtin on a recursive cycle + no scope re-entry), under
+   which data complexity is PTIME; outside it the path is **undecidable** — `reason_n3`
+   carries no budget and `wire::derive_grants` validates nothing. One-side-bound seeding is
+   **confirmed for the v1 admission path and refuted as a blanket claim** (two shipped rules
+   violate it, both bounded and polynomial). **Enforcement is NOT shipped**: the fragment is
+   one the path happens to stay inside, not one it is held inside.
 
 ### 6.2 LWS/Solid-WG proposal framing
 
@@ -1295,6 +1302,14 @@ prior draft phrased as settled are open problems.
   *unanalysed* termination risk is **recursive / unbound-join admission rules over external-graph
   extents in the full evaluator** — P8 (`sq-pfae` P8) must bound *that* path (`sq-tu4e`). No
   formal complexity bound is proven here.
+  **Superseded in two places by the P8 analysis** (`sq-pfae.9`,
+  [`research/trust-admission-cost-decidability.md`](trust-admission-cost-decidability.md) §0):
+  (a) the seeding blow-up is **not** confined to the incremental path — its canonical recorded
+  instance is a *full-evaluator* rule in `crates/sparq-solid/rules/common.n3`, hand-split for
+  exactly this reason; (b) since `sq-zgbso.4` the production materialiser runs the **compiled**
+  id-level evaluator, not the text engine, which now survives there only as the differential
+  test oracle. The formal bound is in that record; termination and seeding cost are shown there
+  to be **independent** properties, which this paragraph conflates.
 - **F — Conflicting-fact deny-on-disagreement is reachable.** A positive join over two
   disagreeing issuer-tagged facts derives a conflict/prohibition witness, and existing
   deny-overrides defeats the competing grant without NAF. Only the alternative “grant iff no
