@@ -708,3 +708,35 @@ simple-element array index, via `array_index_needs_explicit_oob_check`
 (`ssa_gen/context.rs:131-136`) — is the one a maintainer will want. On that reading
 the elision is *plausibly* dominated by the array write's own bound; it is **not
 certified sound** by this bead, per `sq-qhy4`.
+
+### 10.12 `sq-fwcuo` (row 3, single-limb `to_bits`/`to_radix`) — already shipped upstream as a draft, verified (2026-07-31)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-single-limb-decomposition-13265.md` (verified against noir `master`,
+> `d89d99a9`).
+
+**Tracking correction, same shape as §10.11.** The bead was re-dispatched as an
+implementation task; it is not one. Row 3 was written and shipped in steps 1–2 as
+draft **noir#13265**, which §10.1 already lists — the bead is open because the §6
+author-review gate has not been passed, not because code is missing. **Do not
+re-implement.** Verified this session: the two TODOs at
+`ssa/ir/dfg/simplify/call.rs:59,79` are still present at `master` (so the PR is
+unmerged), and all five of its `call.rs` hunks still apply there cleanly — only
+that file was checked, not the two snapshot files it also touches.
+
+Nothing was measured — no noir checkout, no `nargo`, no `bb` in this environment,
+so no ACIR-opcode delta and no gate count. The record is a source-level
+verification of the PR's diff against `master`:
+
+| finding | consequence |
+|---|---|
+| the rewrite's equivalence holds on every path read: `radix_le_decompose` at one limb is exactly `RANGE(w, log2 radix)` + `w == input`; `Instruction::Cast` is a constraint-free alias in ACIR-gen; and the reused failure string is character-identical to the one **both** runtimes emit (ACIR `generated_acir/mod.rs:422-424`, ACVM Brillig `black_box.rs:345-349`) | the PR is well-constructed; this bead's review is confirmatory, and per `sq-qhy4` still **not** a soundness certification |
+| predication is preserved: `flatten_cfg`'s `RangeCheck` arm rewrites the operand to `value * condition` **and** `map_value`s the original id (issue #8617), so the following `Cast` resolves to the predicated value — while the un-rewritten call was predicated by zeroing its argument | the predicated single-limb case, the one shape a reviewer will probe, is sound by the same mechanism on both sides |
+| the power-of-two guard costs nothing in ACIR — `radix_decompose` itself `assert!`s `is_power_of_two` — so the declined cases are Brillig-only, exactly as the PR's two decline tests are written | row 3's stated risk ("non-power-of-two radix cannot be a pure range check") is fully retired |
+| **the failure path has no live test**: the fixture's out-of-range input is only decomposed under a `false` predicate, so deleting the emitted `RangeCheck` leaves every shipped test green | the red-on-wrong-answer guard is missing — the one actionable precondition before the draft → ready flip, and cheap (an `execution_failure` fixture) |
+| the fixture lands in `execution_success`, not `test_programs/benchmarks/`, so no committed number moves if the rule regresses; and the removed recomposition `AssertZero` is the two-term shape the ACVM `MergeExpressionsOptimizer` refunds (§10.6) | any opcode delta counted from SSA/ACIR-gen is an **upper bound** on the post-ACVM one — measure after ACVM, with `bb` as arbiter (§5.1) |
+| frequency: `remove_bit_shifts` itself generates `to_le_bits(v) -> [u1; 1]` when the shift exponent's max bit width is 1 (`remove_bit_shifts.rs:347-363`, its committed snapshot at `:698`), and at that site the emitted range check is itself removed as already-implied (`simplify.rs:281-284`) — the decomposition goes away with nothing emitted in its place | the rule fires on **compiler-generated** IR, not only hand-written single-limb calls — the same evidence shape §10.10 found for #13263. Corpus frequency is still unmeasured |
+
+The bead stays **open**, blocked on the §6 author review and on `sq-i50o4` (a `bb`
+binary) like the rest of the program. Nothing was posted upstream, and the PR's
+body and review thread were not read — only its diff.
