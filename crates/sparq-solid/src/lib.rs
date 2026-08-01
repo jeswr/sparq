@@ -243,6 +243,18 @@ pub struct PodStore {
     // more stale than `auth` itself, so it introduces no fail-open window. (sq-b7k7u's
     // incremental reindex + sq-cnuqd's shared `&self` session cache compose on this seam.)
     acl_index: OnceLock<decide::AclIndex>,
+    // [SONNET-4.6] issue #55: the set of graphs the current access-control documents
+    // reference via `acl:agentGroup` — the WAC group-membership INPUTS of the auth view.
+    // The write path consults it to decide whether a permitted update touched an auth-view
+    // input and must re-materialize; unlike `.acl`/`.acr` a group document has no naming
+    // convention, so reference is the only sound recognizer.
+    //
+    // Same `OnceLock` discipline (and the same invalidation argument) as `acl_index`: it is
+    // a pure function of the current graph, built lazily on the first update of a
+    // generation and dropped in `reindex` — the ONE seam that also rebuilds `auth`. So it
+    // can never be more stale than the auth view it guards, and a read-only workload never
+    // pays for it.
+    group_docs: OnceLock<FxHashSet<String>>,
     // [OPUS-4.8] sq-3jtd.6: the cache key ([`SessionKey`]) spans all three session
     // dimensions — agent, client, AND issuer — so two sessions differing only by issuer
     // (e.g. the same WebID vouched for by a trusted vs an untrusted IdP) never collide on
@@ -422,6 +434,7 @@ impl PodStore {
             auth: Arc::new(AuthIndex::default()),
             epoch: 0,
             acl_index: OnceLock::new(), // [OPUS-4.8] sq-j8qtt: built lazily on first decide
+            group_docs: OnceLock::new(), // [SONNET-4.6] #55: built lazily on first update
             cache: session_cache::SessionCache::new(), // [FABLE-5] sq-cnuqd: bounded + sharded
             #[cfg(feature = "odrl-bridge")]
             bridge_ledger: odrl_bridge::BridgeLedger::new(),
@@ -676,6 +689,19 @@ impl PodStore {
         // the auth rebuild. `take` empties the cell; the next `decide`/`resolve_acl` rebuilds
         // from the just-re-materialized graph.
         self.acl_index.take();
+        // [SONNET-4.6] issue #55: same lock-step for the referenced-group-document set — an
+        // `.acl` write that starts (or stops) referencing a group document is reflected on
+        // the next update's re-materialization decision.
+        self.group_docs.take();
+    }
+
+    /// The graphs the current access-control documents reference via `acl:agentGroup`,
+    /// built lazily on the first update of a generation and reused across it
+    /// ([SONNET-4.6] issue #55). `reindex` empties the cell, so this can never outlive an
+    /// ACL change. See [`loader::referenced_group_docs`] for why it is an
+    /// over-approximation and why that is the safe direction.
+    fn group_docs(&self) -> &FxHashSet<String> {
+        self.group_docs.get_or_init(|| loader::referenced_group_docs(&self.graph))
     }
 
     /// The persistent structural ACL index for the current generation, built lazily on the
@@ -1179,10 +1205,12 @@ impl PodStore {
     ///   (never permissive), at the cost of denying some updates a per-solution check
     ///   might allow.
     ///
-    /// On a permitted update that touched an `.acl`/`.acr`/group document — any static
-    /// control-doc write, any precisely-resolved variable-graph update (its targets could
-    /// include a group document, which has no naming convention), or any graph-wildcard
-    /// update — the auth view is **re-materialized** automatically (WAC by default; pass
+    /// On a permitted update that touched an `.acl`/`.acr`/group document — a static
+    /// control-doc write, a static write to a graph the current access-control documents
+    /// reference via `acl:agentGroup` (a **group document**, which has no naming
+    /// convention and so is recognized by that reference), any precisely-resolved
+    /// variable-graph update, or any graph-wildcard update — the auth view is
+    /// **re-materialized** automatically (WAC by default; pass
     /// [`PodStore::update_as_acp`] for ACP pods), so a changed rule takes effect on the
     /// next call.
     ///
@@ -1231,7 +1259,7 @@ impl PodStore {
     fn update_inner(&mut self, s: &Session, sparql: &str, acp: bool) -> Result<(), String> {
         // Authorize against the CURRENT auth view before mutating anything (fail-closed).
         let auth = Arc::clone(&self.auth);
-        let permit = update::check(&self.graph, &auth, s, sparql)?;
+        let permit = update::check(&self.graph, &auth, s, sparql, self.group_docs())?;
         // Authorized: apply through the engine's in-place delta path.
         sparq_engine::update_in_place(&mut self.graph, sparql)?;
         // A change to the access-control rules invalidates the auth view.

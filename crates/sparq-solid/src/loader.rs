@@ -369,6 +369,57 @@ pub(crate) fn assemble_input(
     Ok(out)
 }
 
+/// The group DOCUMENT an `acl:agentGroup` value names: the group IRI without its
+/// fragment (`https://pod.ex/groups#team` → `https://pod.ex/groups`). Single source of
+/// truth for the mapping — [`collect_agents`] uses it to decide which named graphs the
+/// materializer merges in, and [`referenced_group_docs`] uses it to tell the write path
+/// which graphs are auth-view inputs.
+fn group_doc_of(group_iri: &str) -> &str {
+    group_iri.split('#').next().unwrap_or(group_iri)
+}
+
+/// Every graph IRI referenced as an `acl:agentGroup` group document by an access-control
+/// document currently in `graph` — the WAC group-membership INPUTS of the auth view.
+///
+/// The write path ([`crate::update`]) needs this because a group document, unlike an
+/// `.acl`/`.acr`, has no naming convention: nothing about the IRI `https://pod.ex/groups`
+/// says a write to it changes who may read what. Without the referenced set, a write that
+/// adds or removes a `vcard:hasMember` triple leaves the materialized auth view stale
+/// (design record research/solid-pod-scoped-materializer-design.md §2.2 case A).
+///
+/// Deliberately an OVER-approximation, never an under-one:
+/// - it is the set of REFERENCED documents, not of present graphs, so a write that
+///   CREATES a not-yet-existing group document still triggers re-materialization;
+/// - it scans `.acl` **and** `.acr` control documents. `acl:agentGroup` is WAC-only
+///   vocabulary (the ACP materializer ignores it), so an occurrence inside an `.acr` can
+///   at worst cost one redundant re-materialization — it can never miss one.
+///
+/// Reserved-space (`urn:sparq:`) values are excluded on both sides, mirroring the
+/// assembly pass: the materializer never reads a reserved-space graph as a group
+/// document, so a write to one cannot change the auth view either.
+pub(crate) fn referenced_group_docs(graph: &Graph) -> FxHashSet<String> {
+    let mut docs: FxHashSet<String> = FxHashSet::default();
+    for (name, sub) in graph.named.iter() {
+        let Some(iri) = graph_iri(name) else { continue };
+        if iri.starts_with(RESERVED_PREFIX)
+            || !(iri.ends_with(ACL_SUFFIX) || iri.ends_with(ACR_SUFFIX))
+        {
+            continue;
+        }
+        for t in graph_triples(sub) {
+            let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) else { continue };
+            if p.as_str() != ACL_AGENT_GROUP {
+                continue;
+            }
+            let doc = group_doc_of(o.as_str());
+            if !doc.starts_with(RESERVED_PREFIX) {
+                docs.insert(doc.to_owned());
+            }
+        }
+    }
+    docs
+}
+
 /// Concrete agents + group documents mentioned by an access-control triple; every
 /// pair/triple-principal ingredient (agents, group members, origins, clients, issuers)
 /// is recorded for reserved-encoding validation.
@@ -390,9 +441,7 @@ fn collect_agents(
             principal_iris.insert(o.as_str().to_owned());
         }
         ACL_AGENT_GROUP => {
-            // the group document = the group IRI without its fragment
-            let doc = o.as_str().split('#').next().unwrap_or(o.as_str());
-            groups.insert(doc.to_owned());
+            groups.insert(group_doc_of(o.as_str()).to_owned());
         }
         _ => {}
     }
