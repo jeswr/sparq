@@ -746,6 +746,12 @@ DELEGATES = [
     Delegate("readme-template", ["python3", "scripts/check-readme-template.py", "--enforce"],
              path_filter=re.compile(r"^crates/[^/]+/README\.md$"), pass_changed_paths=True),
     Delegate("privacy-claims", ["bash", "scripts/check-privacy-claims.sh"]),
+    # [OPUS-5] #5133 — a label-writing step must carry a bot identity, never a
+    # human/alias PAT. Diff-scoped by PATH rather than by file list (the guard reads
+    # the whole workflow tree by design): a `scripts/` edit can change which scripts
+    # count as label writers, so both prefixes trigger it.
+    Delegate("label-write-identity", ["python3", "scripts/check-label-write-token.py"],
+             path_filter=re.compile(r"^(\.github/workflows/|scripts/)")),
 ]
 
 

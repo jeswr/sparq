@@ -712,6 +712,7 @@ class TheDelegateRegistryIsPinned(unittest.TestCase):
         ("no-perf-numbers", "scripts/check-no-perf-numbers.py"),
         ("readme-template", "scripts/check-readme-template.py"),
         ("privacy-claims", "scripts/check-privacy-claims.sh"),
+        ("label-write-identity", "scripts/check-label-write-token.py"),
     )
 
     def _by_script(self) -> dict[str, object]:

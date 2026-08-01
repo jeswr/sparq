@@ -1048,6 +1048,27 @@ jobs:
         run: python3 scripts/check-advisory-registry.py --self-test
       - name: "Enforce advisory-job registry + gate-intent placement (C2/C3/C4) — GATING"
         run: python3 scripts/check-advisory-registry.py
+      # [OPUS-5] sparq-org/sparq#5133 (follow-up to #4911) — A LABEL WRITE MUST CARRY A BOT
+      # IDENTITY. #4911's root cause is orchestration writing `needs:user`-class holds with the
+      # maintainer's ALIAS credential, so the `labeled` timeline event names a human and every
+      # owner-resolving detector downstream reads a machine park as human-owned. Both of #4911's
+      # fixes live in jeswr/agent-account-registry and NEITHER is implementable here — #5133 exists
+      # to say so, and THIS STEP DOES NOT DISCHARGE #4911's verification obligation.
+      # What it does own is #5133's sparq-side finding, which was an AUDIT ("no alias PAT appears
+      # in any label-writing step") with nothing holding it in place. sparq already holds
+      # REGISTRY_RING_TOKEN — aimed at that very registry — and KB_DUMP_TOKEN, which kb-dump.yml
+      # documents as a PAT; wiring either into a label write is a two-line diff no other check
+      # would see, and would make sparq a SECOND producer of the #4911 defect. Self-test first:
+      # a detector that has only run over a clean tree has not been shown to detect anything, and
+      # every detection branch was individually mutated to confirm its 4 positives / 6 negatives
+      # go red rather than pass vacuously.
+      # Stdlib-only (no PyYAML), so it also runs from scripts/preflight.py before a push.
+      # Quoted: an unquoted ` #5133)` would be a YAML trailing COMMENT, silently truncating the
+      # step name in the run log.
+      - name: "Self-test the label-write identity guard (R1/R2 fixtures — #5133)"
+        run: python3 scripts/check-label-write-token.py --self-test
+      - name: "Enforce bot identity on every label-writing step (R1/R2) — GATING"
+        run: python3 scripts/check-label-write-token.py
       # [OPUS-4.8] sparq-org/sparq#3475: the fast-fix ring's ONLY privileged
       # capability is the cross-repo REGISTRY_RING_TOKEN doorbell. Because a
       # `workflow_run` workflow is ALSO delivered for fork / cross-repo triggering
