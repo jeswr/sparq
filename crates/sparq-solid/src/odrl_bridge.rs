@@ -1002,9 +1002,14 @@ fn recipient_principal_allowed(p: &str) -> bool {
 ///   maps faithfully.
 /// - A recipient IRI inside the reserved pair encoding is dropped from the grant head
 ///   (it could otherwise impersonate a minted pair principal).
-/// - A `neq`/`isNoneOf` carve-out naming a party COLLECTION falls back to one-shot
-///   ([SONNET-4.6] sq-rf9uv): a frozen `noneOf` cannot re-check membership, so a member
-///   the request did not evidence would escape the exception and keep access (fail-open).
+/// - A `neq`/`isNoneOf` carve-out naming a party collection **the request supplied
+///   `odrl:partOf` evidence for** falls back to one-shot ([SONNET-4.6] sq-rf9uv): a
+///   frozen `noneOf` cannot re-check membership, so a member the request did not evidence
+///   would escape the exception and keep access (fail-open). The evidence-shaped LIMIT of
+///   that check — with no evidence at all a collection is indistinguishable from a plain
+///   party IRI, so the matcher is persisted and cannot bite — is documented on
+///   [`materialize_prohibition_conditional`] and pinned by the bridge test
+///   `collection_carve_out_without_evidence_persists_an_unenforceable_matcher`.
 ///
 /// Returns a [`BridgeOutcome`]; on a conditional grant `grant_triple` reports the
 /// `(agent, auth:effect, graph)` of the FIRST emitted grant (audit anchor) and
@@ -1082,8 +1087,11 @@ pub fn materialize_permission_conditional(
                 // [SONNET-4.6] sq-rf9uv: a carve-out naming a party COLLECTION cannot be
                 // frozen into `noneOf` heads — a member the request did not evidence would
                 // escape the exception and keep access (fail-OPEN). One-shot instead, where
-                // the evaluator does the real identity-or-membership check.
-                if heads_name_party_collection(request, &excepts) {
+                // the evaluator does the real identity-or-membership check. Only reachable
+                // when this request evidenced a member; an UNEVIDENCED collection is
+                // indistinguishable from a plain party here and still slips past (the
+                // residual gap, documented on `materialize_prohibition_conditional`).
+                if heads_name_evidenced_party_collection(request, &excepts) {
                     fallback_reasons.push(format!(
                         "permission {} carves out a party collection (unlisted members would \
                          escape a frozen noneOf); one-shot path",
@@ -1163,11 +1171,31 @@ pub fn materialize_permission_conditional(
 /// - A reserved-encoded recipient/exclusion cannot become an enforceable matcher; the
 ///   rule falls back to one-shot rather than emit a deny condition that cannot bite
 ///   (which would FAIL OPEN — a deny silently dropped widens access).
-/// - A deny head naming a party COLLECTION falls back to one-shot ([SONNET-4.6]
-///   sq-rf9uv) — the DENY dual of the allow path's member expansion. A concrete deny head
-///   cannot re-check membership, so every member the request did not evidence would
-///   escape the deny; the collection-member expansion is sound in the ALLOW direction
-///   only.
+/// - A deny head naming a party collection **the request supplied `odrl:partOf` evidence
+///   for** falls back to one-shot ([SONNET-4.6] sq-rf9uv) — the DENY dual of the allow
+///   path's member expansion. A concrete deny head cannot re-check membership, so every
+///   member the request did not evidence would escape the deny; the collection-member
+///   expansion is sound in the ALLOW direction only.
+///
+/// ## The limit of the collection check (NOT closed)
+///
+/// Collection-ness is only ever KNOWN to the bridge through the request's own
+/// `odrl:partOf` evidence: neither [`Request`] nor a parsed [`Policy`] carries an
+/// `rdf:type odrl:PartyCollection` fact, so the internal
+/// `heads_name_evidenced_party_collection` check can only ask whether THIS request
+/// supplied members. A prohibition (or an ALLOW carve-out) naming a collection the
+/// request evidenced NOTHING for is therefore indistinguishable from one naming a plain
+/// party, takes the ordinary concrete-head path, and persists a bare collection IRI that
+/// matches no member session — so an unevidenced member escapes the restriction.
+///
+/// That is the UNCHANGED behaviour from before the check existed: it narrows the
+/// pre-existing fail-open window to the evidenced case, it does not close it. Closing it
+/// requires collection IDENTITY carried independently of the member list (declared
+/// collection IRIs on the request, or type metadata retained by the policy parser) —
+/// tracked as follow-up work, not solved here. Both gaps are pinned by the bridge tests
+/// `collection_prohibition_without_evidence_persists_an_unenforceable_head` and
+/// `collection_carve_out_without_evidence_persists_an_unenforceable_matcher`, which
+/// assert the real enforcement-path outcome rather than the intended one.
 ///
 /// Returns a [`BridgeOutcome`]; on a conditional deny `prohibited == true`,
 /// `deny_triple` reports the `(agent, auth:effect, graph)` anchor of the first emitted
@@ -1231,8 +1259,11 @@ pub fn materialize_prohibition_conditional(
                 // membership, so freezing it to the members the request evidenced lets every
                 // unlisted member of the prohibited collection escape the deny (as does the
                 // bare collection IRI, which matches no member session at all). The one-shot
-                // path's evaluator does the real identity-or-membership check.
-                if heads_name_party_collection(request, &agents) {
+                // path's evaluator does the real identity-or-membership check. Only
+                // reachable when this request evidenced a member — an UNEVIDENCED collection
+                // reads as a plain party and still persists a bare-IRI deny head that binds
+                // no member (the residual gap, documented on this fn).
+                if heads_name_evidenced_party_collection(request, &agents) {
                     fallback_reasons.push(format!(
                         "prohibition {} denies a party collection (unlisted members would \
                          escape a frozen deny head); one-shot path",
@@ -1299,10 +1330,12 @@ pub fn materialize_prohibition_conditional(
 /// a single `auth:Public` head (any session matches) — a legitimately public rule whose
 /// action/target/duties were already satisfied at materialization.
 ///
-/// The heads returned here are identity-space and request-independent. A head naming an
-/// `odrl:PartyCollection` is resolved against the request's membership evidence
-/// afterwards by [`expand_party_collection_heads`] (ALLOW only) — see [SONNET-4.6]
-/// sq-rf9uv for why the DENY dual must not do the same.
+/// The heads returned here are identity-space and request-independent, and nothing here
+/// (or in the parsed [`Policy`]) knows whether a head is an `odrl:PartyCollection` — that
+/// is resolved afterwards, and ONLY against the request's own membership evidence, by
+/// [`expand_party_collection_heads`] (ALLOW only). See [SONNET-4.6] sq-rf9uv for why the
+/// DENY dual must not do the same, and *The limit of the collection check* on
+/// [`materialize_prohibition_conditional`] for the un-evidenced case neither can detect.
 fn condition_agents(rule: &Rule, recipients: &[String]) -> Vec<String> {
     if recipients.is_empty() {
         // [OPUS-4.8] sq-9n1q4: a bare `odrl:assignee` PROPERTY scopes the head to that
@@ -1354,7 +1387,7 @@ fn condition_excepts(except: &[String]) -> Vec<String> {
 /// dropped, exactly as [`condition_agents`] drops a reserved-encoded recipient.
 ///
 /// This is sound for a positive ALLOW head only. The DENY dual and an ALLOW's `noneOf`
-/// carve-out must NOT be expanded this way — see [`heads_name_party_collection`].
+/// carve-out must NOT be expanded this way — see [`heads_name_evidenced_party_collection`].
 fn expand_party_collection_heads(request: &Request, heads: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for head in heads {
@@ -1374,8 +1407,8 @@ fn expand_party_collection_heads(request: &Request, heads: &[String]) -> Vec<Str
     out
 }
 
-/// Does any of `heads` name a party collection the request supplied membership evidence
-/// for? The fail-closed trigger for the two directions where
+/// Does any of `heads` name a party collection **this request supplied membership
+/// evidence for**? The fail-closed trigger for the two directions where
 /// [`expand_party_collection_heads`] would FAIL OPEN. [SONNET-4.6] sq-rf9uv.
 ///
 /// The membership evidence is caller-supplied and possibly PARTIAL, and the head is
@@ -1385,7 +1418,18 @@ fn expand_party_collection_heads(request: &Request, heads: &[String]) -> Vec<Str
 /// collection would keep access, which is the widening the bridge exists to prevent. There
 /// is no faithful frozen head for those, so the whole rule falls back to the one-shot path,
 /// whose evaluator does the real identity-or-membership check (frozen but sound).
-fn heads_name_party_collection(request: &Request, heads: &[String]) -> bool {
+///
+/// **This is evidence-detection, NOT type-detection — read the name literally.** A
+/// non-empty member set proves the head IS a collection; an empty one proves nothing.
+/// Nothing reachable from here records `rdf:type odrl:PartyCollection`
+/// ([`Request::party_collection_members`] is the only signal, and it is documented to
+/// return empty both for a plain party IRI and for an un-evidenced collection), so a
+/// collection this request happened to supply no `odrl:partOf` edges for reads as a plain
+/// party and slips past. The residual fail-open window that leaves, and what it would
+/// take to close, is documented under *The limit of the collection check* on
+/// [`materialize_prohibition_conditional`]. Do not restate this predicate as "is a
+/// collection" — the gap is exactly that difference.
+fn heads_name_evidenced_party_collection(request: &Request, heads: &[String]) -> bool {
     heads
         .iter()
         .any(|h| !request.party_collection_members(h).is_empty())

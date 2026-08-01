@@ -325,6 +325,14 @@ impl Request {
     /// with respect to the edges supplied here: sound to widen an ALLOW head to (never
     /// beyond) them, but NOT sound to narrow a DENY to them — an unlisted member would
     /// escape the deny. Callers must keep that asymmetry.
+    ///
+    /// **Not a collection TEST.** Because the empty result is shared by a plain party
+    /// IRI and by a collection this request simply supplied no edges for, an empty
+    /// return does NOT mean "not a collection", and a caller must not read it as one —
+    /// a `Request` carries no `rdf:type odrl:PartyCollection` fact to distinguish them.
+    /// A caller that needs to fail CLOSED on collection-valued input (the bridge's DENY
+    /// and carve-out directions) can use a non-empty result as proof it is looking at a
+    /// collection, but gets no signal at all in the un-evidenced case.
     pub fn party_collection_members(&self, collection: &str) -> Vec<&str> {
         self.party_memberships
             .iter()
