@@ -96,6 +96,18 @@
 //!                             between body reads, reset after each chunk — an honest large upload is not
 //!                             penalised, only a stall). Closes the slow-body DoS a complete-header client
 //!                             could otherwise use. 0 disables   [30, env SPARQ_BODY_READ_TIMEOUT]
+//!   --stream-max-live-generations N
+//!                             [SONNET-4.6 sq-7d3dj.28] streaming ADMISSION: at/over N live generations
+//!                             (ring-retained OR reader-pinned) a SELECT-JSON response is served BUFFERED
+//!                             instead of streamed (a Warning header says so), so a chunked body cannot pin
+//!                             an unbounded number of stale generations. 0 disables admission
+//!                             [32, env SPARQ_STREAM_MAX_LIVE_GENERATIONS]
+//!   --stream-pin-timeout S    [SONNET-4.6 sq-7d3dj.28] per-stream PIN CAP: max SECONDS the server waits
+//!                             for a streaming client to accept the NEXT chunk (idle deadline, reset after
+//!                             each chunk — an honest slow-link export is not penalised, only a stall). A
+//!                             stalled reader's stream is abandoned so its generation pin is released, and
+//!                             the body is truncated (X-Sparq-Truncated: pin-deadline), never silently
+//!                             short. 0 disables      [30, env SPARQ_STREAM_PIN_TIMEOUT]
 //!   --max-results N           maximum SELECT rows (413 beyond), 0 off    [unlimited, env SPARQ_MAX_RESULTS]
 //!   --max-query-rows N        [OPUS-4.8 sq-ebii] coarse MEMORY CAP: working-set row ceiling on EVERY
 //!                             query form (413 beyond), 0 off             [unlimited, env SPARQ_MAX_QUERY_ROWS]
@@ -310,6 +322,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--body-read-timeout" => {
                 let secs: u64 = parse_flag(&mut args, "--body-read-timeout")?;
                 config.body_read_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+            }
+            // [SONNET-4.6] sq-7d3dj.28: streaming admission — the held-generation cap above which a
+            // SELECT-JSON response degrades to the buffered path; 0 disables admission. See
+            // ServerConfig::stream_max_live_generations.
+            "--stream-max-live-generations" => {
+                let n: usize = parse_flag(&mut args, "--stream-max-live-generations")?;
+                config.stream_max_live_generations = (n > 0).then_some(n);
+            }
+            // [SONNET-4.6] sq-7d3dj.28: per-stream pin cap — the slow-reader idle drain deadline
+            // (seconds); 0 disables it (a stalled reader pins its generation for as long as it
+            // holds the connection). See ServerConfig::stream_pin_timeout.
+            "--stream-pin-timeout" => {
+                let secs: u64 = parse_flag(&mut args, "--stream-pin-timeout")?;
+                config.stream_pin_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--max-results" => {
                 let n: usize = parse_flag(&mut args, "--max-results")?;
@@ -644,6 +670,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
                      [--query-timeout SECS] [--update-where-timeout SECS] [--no-adaptive-commit] [--header-read-timeout SECS] \
                      [--max-body-bytes N] [--max-concurrent N] \
+                     [--stream-max-live-generations N] [--stream-pin-timeout SECS] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
                      [--max-subscriptions-per-conn N]{time_travel}{service}{facets}{complete}{brtpf}{shacl}{n3_patch}{terse}{templates}{backup}{change_stream} \
@@ -928,7 +955,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
-        "guards: query-timeout={} update-where-timeout={} header-read-timeout={} body-read-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
+        "guards: query-timeout={} update-where-timeout={} header-read-timeout={} body-read-timeout={} \
+         stream-max-live-generations={} stream-pin-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
          max-query-rows={} max-query-bytes={} max-decompress-ratio={}x max-subscriptions={} \
          max-subscriptions-per-conn={}",
         config
@@ -945,6 +973,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // [OPUS-4.8] sq-lodb: connection-layer body read/idle deadline (slow-body guard).
         config
             .body_read_timeout
+            .map_or("off".into(), |t| format!("{}s", t.as_secs())),
+        // [SONNET-4.6] sq-7d3dj.28: the two streaming resource bounds — the admission cap on
+        // held generations, and the per-stream slow-reader drain deadline that releases a pin.
+        config
+            .stream_max_live_generations
+            .map_or("off".into(), |n| n.to_string()),
+        config
+            .stream_pin_timeout
             .map_or("off".into(), |t| format!("{}s", t.as_secs())),
         config.max_body_bytes,
         config.max_concurrent,

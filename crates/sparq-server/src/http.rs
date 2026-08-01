@@ -313,6 +313,48 @@ pub struct ServerConfig {
     /// the default [`query_timeout`](Self::query_timeout); an operator behind a flaky network widens
     /// it, a hostile-input operator tightens it.
     pub body_read_timeout: Option<Duration>,
+    /// [SONNET-4.6] (sq-7d3dj.28) **Streaming admission — the held-generation cap.** The
+    /// largest [`GenerationRing::live_generations`] pressure reading at which a SELECT-JSON
+    /// response is still allowed to STREAM. At or over it the request gracefully DEGRADES to
+    /// the buffered serialiser (same bytes, `Content-Length`, plus a `Warning` header) rather
+    /// than being shed.
+    ///
+    /// **What it bounds, and why the ring's own `K` does not.** A streamed body keeps its
+    /// `spawn_blocking` worker — and therefore its `Arc<Generation>` pin — alive for as long as
+    /// the client is still draining chunks (bounded-channel backpressure). The ring's retention
+    /// bound `RingConfig::retain` bounds only the ring's OWN references: a reader's pin keeps a
+    /// generation resident after it has aged out of retention, so N concurrently-stalled
+    /// streams across N publishes hold N stale generations. Note the tower concurrency limit
+    /// does NOT cover this either — its permit is released when the handler returns the
+    /// response, not when the body finishes draining. This is the missing bound
+    /// (`research/wave-d-pull-streaming-response-body.md` §7).
+    ///
+    /// The reading only exceeds `retain + 1` when a reader outlives retention, so on a
+    /// read-mostly or fast-draining server it never approaches the default. `None` disables
+    /// admission (every SELECT-JSON response streams, whatever the pressure). Default 32:
+    /// generous headroom over the ring's default `retain` (4) — several dozen simultaneously
+    /// stale pins is already pathological — while still bounding an unbounded accumulation.
+    pub stream_max_live_generations: Option<usize>,
+    /// [SONNET-4.6] (sq-7d3dj.28) **Per-stream pin cap — the slow-reader drain deadline.** The
+    /// longest the streaming worker will wait for the client to accept the NEXT chunk. It is an
+    /// IDLE deadline between consecutive chunk hand-offs, reset after every chunk (the read-side
+    /// analogue of [`body_read_timeout`](Self::body_read_timeout), and of the writer's
+    /// `await_update_worker` wall-clock cap) — so an honest client streaming a huge export over
+    /// a slow link is never penalised by total transfer time, only a stalled reader is.
+    ///
+    /// Without it a Slowloris-style reader that simply stops reading parks the blocking worker
+    /// on a full channel forever, pinning its generation indefinitely — the leak
+    /// [`stream_max_live_generations`](Self::stream_max_live_generations) can only cap in
+    /// aggregate, never release. When the deadline elapses the worker abandons the query, drops
+    /// the pin, and the body is TRUNCATED under the sq-7d3dj.26 contract: the document-closing
+    /// `]}}` is never written and the reason is reported as `pin-deadline`. A stream whose
+    /// engine work had in fact completed is still reported truncated, never complete — the
+    /// undelivered chunks are dropped with the pin, so fail-closed is the honest answer.
+    ///
+    /// `None` disables it (an unbounded drain — a stalled reader pins its generation for as
+    /// long as it holds the connection). Default 30s, matching
+    /// [`body_read_timeout`](Self::body_read_timeout): a stall, not a slow link.
+    pub stream_pin_timeout: Option<Duration>,
     /// Maximum SELECT result rows. Exceeding it is an honest 413 refusal (the engine
     /// aborts evaluation via the row budget), never a silent truncation.
     pub max_results: Option<usize>,
@@ -843,6 +885,19 @@ impl Default for ServerConfig {
             // never penalised by total time. 0 / SPARQ_BODY_READ_TIMEOUT=0 disables it. See
             // ServerConfig::body_read_timeout.
             body_read_timeout: Some(Duration::from_secs(30)),
+            // [SONNET-4.6] sq-7d3dj.28: streaming admission ON by default, at a reading that a
+            // healthy server never reaches (the ring retains 4 + the current generation, and a
+            // reader only ADDS to the count once it outlives retention). It is the bound that
+            // makes SELECT-JSON streaming-by-default safe: without it N stalled readers pin N
+            // stale generations with nothing to cap them. 0 / SPARQ_STREAM_MAX_LIVE_GENERATIONS=0
+            // disables admission. See ServerConfig::stream_max_live_generations.
+            stream_max_live_generations: Some(32),
+            // [SONNET-4.6] sq-7d3dj.28: 30s idle drain deadline — the read-side complement to the
+            // slow-BODY guard above, and the only mechanism that RELEASES a generation a stalled
+            // reader is pinning (admission alone can cap the count, never free one). Reset after
+            // every chunk, so an honest slow-link export is never penalised. 0 /
+            // SPARQ_STREAM_PIN_TIMEOUT=0 disables it. See ServerConfig::stream_pin_timeout.
+            stream_pin_timeout: Some(Duration::from_secs(30)),
             max_results: None,
             // [OPUS-4.8] sq-ebii: memory cap OFF by default (no surprise refusals on an
             // unconfigured server); an operator exposing the endpoint opts a ceiling in.
@@ -1019,7 +1074,11 @@ impl ServerConfig {
     /// `SPARQ_HEADER_READ_TIMEOUT` ([OPUS-4.8] sq-2gqr: the slow-loris connection header-read
     /// deadline in seconds; `0` disables, default 15),
     /// `SPARQ_BODY_READ_TIMEOUT` ([OPUS-4.8] sq-lodb: the slow-body request-body read/idle
-    /// deadline in seconds; `0` disables, default 30), `SPARQ_MAX_RESULTS`,
+    /// deadline in seconds; `0` disables, default 30),
+    /// `SPARQ_STREAM_MAX_LIVE_GENERATIONS` ([SONNET-4.6] sq-7d3dj.28: the streaming-admission
+    /// held-generation cap; `0` disables admission, default 32) and
+    /// `SPARQ_STREAM_PIN_TIMEOUT` ([SONNET-4.6] sq-7d3dj.28: the per-stream slow-reader idle
+    /// drain deadline in seconds; `0` disables, default 30), `SPARQ_MAX_RESULTS`,
     /// `SPARQ_MAX_QUERY_ROWS` ([OPUS-4.8] sq-ebii: the coarse memory cap; `0` disables) and
     /// `SPARQ_MAX_DECOMPRESS_RATIO` ([OPUS-4.8] sq-ebii: the zip-bomb guard; `0` refuses gzip
     /// bodies) environment variables — plus, with the `time-travel` feature,
@@ -1066,6 +1125,16 @@ impl ServerConfig {
         // unbounded body read — a slow body can hold the slot forever), anything else sets it.
         if let Some(secs) = env_parse::<u64>("SPARQ_BODY_READ_TIMEOUT") {
             cfg.body_read_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+        // [SONNET-4.6] sq-7d3dj.28: streaming admission — the held-generation cap; `0` disables
+        // admission (every SELECT-JSON response streams whatever the ring pressure).
+        if let Some(n) = env_parse::<usize>("SPARQ_STREAM_MAX_LIVE_GENERATIONS") {
+            cfg.stream_max_live_generations = (n > 0).then_some(n);
+        }
+        // [SONNET-4.6] sq-7d3dj.28: per-stream pin cap — the slow-reader idle drain deadline
+        // (seconds); `0` disables it (a stalled reader pins its generation indefinitely).
+        if let Some(secs) = env_parse::<u64>("SPARQ_STREAM_PIN_TIMEOUT") {
+            cfg.stream_pin_timeout = (secs > 0).then(|| Duration::from_secs(secs));
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_RESULTS") {
             cfg.max_results = (n > 0).then_some(n);
@@ -1739,8 +1808,14 @@ pub(crate) const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 
 /// A request's pinned generation: holding this `Arc` keeps the generation's immutable
 /// snapshot alive no matter how far the writer publishes past it. Pinned ONCE per
-/// request and kept for the lifetime of response production (streamed bodies included —
-/// see `chunked_response`), so every response is snapshot-consistent with its start.
+/// request and kept for as long as the response producer still READS the graph, so every
+/// response is snapshot-consistent with its start.
+///
+/// [SONNET-4.6] (sq-7d3dj.28) "Still reads the graph" is narrower than "until the client has
+/// the last byte", and deliberately so: `chunked_response` releases the pin once the chunks —
+/// owned text that borrows nothing — are built, and the streamed body's worker
+/// (`stream_select_json`) drops it when it stops producing. A slow client therefore delays no
+/// reclamation it does not have to; see `stream_admission` for why that bound matters.
 pub type PinnedGen = Arc<Generation<Graph>>;
 
 /// The catch-all pod: the visibility scope every query implicitly reads, and the
@@ -3059,6 +3134,14 @@ impl AppState {
     /// being produced; `gen.snapshot()` is the immutable [`Graph`] to evaluate against.
     pub fn current(&self) -> PinnedGen {
         self.ring().current()
+    }
+
+    /// [SONNET-4.6] (sq-7d3dj.28) The ring's snapshot-pressure signal: how many generations are
+    /// alive anywhere — retained by the ring OR pinned by an in-flight reader. Read-only; the
+    /// streaming-admission check ([`stream_admission`]) compares it against
+    /// [`ServerConfig::stream_max_live_generations`] before committing to a chunked response.
+    pub(crate) fn live_generations(&self) -> usize {
+        self.ring().live_generations()
     }
 
     /// [OPUS-4.8] (sq-o5bi) Pins the current generation for an ONLINE backup export: a
@@ -6619,7 +6702,17 @@ async fn run_query_pinned(
             // [OPUS-4.8] (sq-7d3dj.34.1) The floor path (JSON SELECT stream + ASK) runs the
             // algebra already parsed in `prepare` via the engine's `*_prepared` entry points —
             // no second parse per request.
-            if !is_ask && fmt == Format::Json {
+            // [SONNET-4.6] (sq-7d3dj.28) Streaming ADMISSION: a chunked body pins its
+            // generation for the whole client drain, so under ring pressure we decline to
+            // stream and fall through to the buffered serialiser below (identical bytes, and
+            // it never pins past serialize). `Some(warning)` means declined; the header is
+            // attached to whatever the buffered path answers.
+            let admission = if !is_ask && fmt == Format::Json {
+                stream_admission(state, &config)
+            } else {
+                None
+            };
+            if !is_ask && fmt == Format::Json && admission.is_none() {
                 // [SONNET-4.6] (sq-7d3dj.26) Whether THIS client negotiated HTTP trailers
                 // decides how a mid-stream truncation is signalled (trailer vs. an aborted
                 // chunked framing) — see `StreamingJsonBody`. Resolved here, while the
@@ -6657,7 +6750,9 @@ async fn run_query_pinned(
                     }
                 })
             });
-            await_worker(task, &config).await
+            // [SONNET-4.6] (sq-7d3dj.28) A response the streaming path declined carries the
+            // `Warning` explaining the degradation; every other response is untouched.
+            with_admission_warning(await_worker(task, &config).await, admission)
         }
         // CONSTRUCT / DESCRIBE (T16): an RDF graph result, negotiated between
         // `application/n-triples` (default) and `text/turtle` (the N-Triples body is a
@@ -6928,6 +7023,125 @@ fn render_select(
 /// `blocking_send`) rather than letting a large serialised result pile up in server memory.
 const STREAM_CHANNEL_CAP: usize = 4;
 
+/// [SONNET-4.6] (sq-7d3dj.28) **Streaming admission** — the ring-pressure check a SELECT-JSON
+/// response must pass before it is allowed to STREAM.
+///
+/// A streamed body holds its generation pin for the whole client drain (§4/§7 of
+/// `research/wave-d-pull-streaming-response-body.md`), and neither the ring's retention bound
+/// `K` (which bounds only the ring's own references) nor the tower concurrency limit (whose
+/// permit is released when the handler returns, not when the body drains) bounds that. So when
+/// [`GenerationRing::live_generations`] has reached
+/// [`ServerConfig::stream_max_live_generations`] the response is DEGRADED to the buffered
+/// serialiser rather than shed: the buffered path produces the same bytes, is always
+/// memory-bounded, and never pins past serialize — the design's stated preference over a `503`
+/// (a correct answer beats a refusal when a correct answer is affordable).
+///
+/// Returns `None` to admit the stream, or `Some(warning)` — the `Warning` header value naming
+/// the reading and the cap — when it was declined.
+///
+/// **Cost, stated plainly.** [`GenerationRing::live_generations`] takes the ring's writer-side
+/// mutex and prunes its weak registry, so this adds one short lock — over a registry whose
+/// length is the live-generation count, since `publish` prunes it too — to each SELECT-JSON
+/// request. That is not free, and the ring's own `at` docs warn against the writer-side mutex on
+/// the hot path. The exact reading is taken deliberately: it is the signal the design specifies,
+/// its critical section is orders of magnitude shorter than the query it guards, and the check
+/// is skipped entirely when the cap is unset. A lock-free pressure gauge is the obvious
+/// follow-up if a benchmark ever attributes anything measurable to it.
+fn stream_admission(state: &AppState, config: &ServerConfig) -> Option<header::HeaderValue> {
+    let cap = config.stream_max_live_generations?;
+    let live = state.live_generations();
+    if live < cap {
+        return None;
+    }
+    // RFC 9111 §5.5 warn-code 199 "Miscellaneous warning" with the agent and a quoted text.
+    // Positional `format!` args (CodeQL rust/unused-variable false positive on inline captures).
+    header::HeaderValue::from_str(&format!(
+        "199 sparq \"streamed response declined: {} live generations at/over the --stream-max-live-generations cap of {}; served buffered\"",
+        live, cap
+    ))
+    .ok()
+}
+
+/// [SONNET-4.6] (sq-7d3dj.28) Attaches the [`stream_admission`] `Warning` to a response the
+/// buffered path produced BECAUSE streaming was declined. `None` (the overwhelmingly common
+/// case — admission passed, or the format never streams) returns the response untouched, so no
+/// non-degraded response grows a header.
+fn with_admission_warning(mut response: Response, warning: Option<header::HeaderValue>) -> Response {
+    if let Some(warning) = warning {
+        response.headers_mut().insert(header::WARNING, warning);
+    }
+    response
+}
+
+/// [SONNET-4.6] (sq-7d3dj.28) How a chunk hand-off to the HTTP body ended.
+enum SendOutcome {
+    /// The body accepted it (immediately, or once it had drained a slot).
+    Sent,
+    /// The receiver is gone — the client disconnected, or a `HEAD` stopped reading.
+    Closed,
+    /// The channel stayed full for the whole [`ServerConfig::stream_pin_timeout`]: the reader
+    /// has stalled and the worker must let go of its generation pin.
+    Stalled,
+}
+
+/// [SONNET-4.6] (sq-7d3dj.28) How often the worker re-offers a chunk to a full channel while
+/// waiting out a slow reader, and the ceiling that backoff climbs to. Only reached when the
+/// channel is ALREADY full — i.e. the client is the bottleneck — so this polling interval adds
+/// no latency to any stream a client is keeping up with, and once the backoff reaches its
+/// ceiling a long stall costs ~20 wake-ups per second rather than a spin.
+const STREAM_SEND_POLL_MIN: Duration = Duration::from_millis(1);
+const STREAM_SEND_POLL_MAX: Duration = Duration::from_millis(50);
+
+/// [SONNET-4.6] (sq-7d3dj.28) Hands one item to the HTTP body under the per-stream pin cap.
+///
+/// With no cap configured this is exactly the historical `blocking_send`: park until the body
+/// drains a slot, however long that takes. With a cap it is an IDLE deadline — the wait is
+/// bounded per hand-off and starts fresh for each one, so a client that keeps draining is never
+/// penalised by total transfer time, while one that stops reading releases the generation pin
+/// within the cap.
+///
+/// The bounded wait is a `try_send` retry loop rather than an `await` on `send_timeout`: this
+/// runs on a `spawn_blocking` thread, where driving a future would mean nesting a `block_on`
+/// inside the runtime. `try_send` succeeds outright whenever the body has room, so the loop is
+/// only ever entered under genuine backpressure.
+fn send_chunk(
+    tx: &tokio::sync::mpsc::Sender<StreamItem>,
+    mut item: StreamItem,
+    pin_timeout: Option<Duration>,
+) -> SendOutcome {
+    let Some(pin_timeout) = pin_timeout else {
+        return match tx.blocking_send(item) {
+            Ok(()) => SendOutcome::Sent,
+            Err(_) => SendOutcome::Closed,
+        };
+    };
+    let deadline = std::time::Instant::now() + pin_timeout;
+    let mut backoff = STREAM_SEND_POLL_MIN;
+    loop {
+        match tx.try_send(item) {
+            Ok(()) => return SendOutcome::Sent,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return SendOutcome::Closed,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return SendOutcome::Stalled;
+                }
+                item = returned;
+                // Never sleep past the deadline: the cap is the bound on how long this
+                // generation stays pinned, so overshooting it would defeat the guard.
+                std::thread::sleep(backoff.min(deadline - now));
+                backoff = (backoff * 2).min(STREAM_SEND_POLL_MAX);
+            }
+        }
+    }
+}
+
+/// [SONNET-4.6] (sq-7d3dj.28) Truncation reason for a stream the per-stream pin cap
+/// ([`ServerConfig::stream_pin_timeout`]) abandoned because the reader stalled. Part of the
+/// stable `X-Sparq-Truncated` vocabulary alongside `deadline` / `max-rows` / `max-bytes` /
+/// `cancelled` / `panic` / `error`.
+const TRUNCATED_PIN_DEADLINE: &str = "pin-deadline";
+
 /// [SONNET-4.6] (sq-7d3dj.26) Trailer field asserting the streamed body is the COMPLETE result.
 /// Sent (value `true`) only after the engine has confirmed it produced every chunk.
 const TRAILER_COMPLETE: &str = "x-sparq-complete";
@@ -7042,9 +7256,9 @@ enum BodyState {
 ///
 /// Once the first byte of a `200 OK` body is on the wire the status is committed, so a
 /// mid-stream abort (deadline, `--max-results` / `--max-query-rows` row cap, `--max-query-bytes`
-/// byte cap, a `DELETE /queries/{id}` cancellation, or an engine panic) can only TRUNCATE the
-/// body — it can never retract into a 413/503. The load-bearing invariant
-/// (`research/wave-d-pull-streaming-response-body.md` §6) is therefore:
+/// byte cap, a `DELETE /queries/{id}` cancellation, a `--stream-pin-timeout` stalled reader, or
+/// an engine panic) can only TRUNCATE the body — it can never retract into a 413/503. The
+/// load-bearing invariant (`research/wave-d-pull-streaming-response-body.md` §6) is therefore:
 ///
 /// > A client MUST NOT be able to mistake a truncated stream for a complete result.
 ///
@@ -7064,8 +7278,8 @@ enum BodyState {
 ///    design forbids.
 /// 2. **A signal the client cannot miss.** If the client negotiated trailers (`TE: trailers`)
 ///    the body closes normally and emits `X-Sparq-Truncated: <reason>` (`deadline` | `max-rows`
-///    | `max-bytes` | `cancelled` | `panic` | `error`), or `X-Sparq-Complete: true` on the happy
-///    path. If it did not — hyper would drop a trailers frame anyway — the body instead FAILS
+///    | `max-bytes` | `cancelled` | `pin-deadline` | `panic` | `error`), or `X-Sparq-Complete:
+///    true` on the happy path. If it did not — hyper would drop a trailers frame anyway — the body instead FAILS
 ///    the frame, which aborts the chunked stream without its terminating zero-length chunk, so
 ///    the client sees a transport error. Either way the truncation is loud.
 ///
@@ -7081,6 +7295,12 @@ struct StreamingJsonBody {
     held: Option<Bytes>,
     /// The client negotiated `TE: trailers`.
     trailers_ok: bool,
+    /// [SONNET-4.6] (sq-7d3dj.28) Raised by the worker when it abandoned the query because this
+    /// reader stalled past [`ServerConfig::stream_pin_timeout`]. A worker that gives up on a
+    /// full channel cannot post a terminal marker (there is no room), so this is what
+    /// distinguishes that truncation from the panicking-worker one — the truncation itself is
+    /// already guaranteed by the missing marker, this only NAMES it correctly.
+    stalled: Arc<std::sync::atomic::AtomicBool>,
     state: BodyState,
 }
 
@@ -7169,9 +7389,15 @@ impl http_body::Body for StreamingJsonBody {
                         }
                     };
                     // The worker vanished without a terminal marker — a panic in the engine
-                    // or the serialiser. Truncated, never "complete".
+                    // or the serialiser, or (sq-7d3dj.28) a worker that abandoned a stalled
+                    // reader and had no room to post one. Truncated, never "complete".
                     let Some(item) = next else {
-                        match this.truncate("panic") {
+                        let reason = if this.stalled.load(std::sync::atomic::Ordering::SeqCst) {
+                            TRUNCATED_PIN_DEADLINE
+                        } else {
+                            "panic"
+                        };
+                        match this.truncate(reason) {
                             Some(e) => return Poll::Ready(Some(Err(e))),
                             None => continue,
                         }
@@ -7250,6 +7476,14 @@ struct StreamShape {
 /// aborted chunked framing. This is the honest default (documented in the crate docs + the
 /// `http-server` SKILL): a streamed body cannot retroactively become a 413/503, but it can
 /// never be mistaken for a complete result either.
+///
+/// **Bounded pin lifetime.** [SONNET-4.6] (sq-7d3dj.28) The worker holds the generation pin for
+/// as long as it is producing chunks, which — under the bounded channel — means for as long as
+/// the client is draining. [`ServerConfig::stream_pin_timeout`] bounds that: each chunk hand-off
+/// waits at most the configured idle deadline for the body to take it, and a reader that stalls
+/// past it has the query abandoned so the pin is dropped, with the truncation reported as
+/// `pin-deadline`. Whether a response streams here AT ALL is decided upstream by
+/// [`stream_admission`] against the ring's live-generation pressure.
 async fn stream_select_json(
     gen: PinnedGen,
     // [OPUS-4.8] (sq-7d3dj.34.1) The query PARSED ONCE in `prepare` — the engine runs it via
@@ -7269,26 +7503,52 @@ async fn stream_select_json(
     let StreamShape { head_only, trailers_ok } = shape;
     let ct = Format::Json.select_content_type();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamItem>(STREAM_CHANNEL_CAP);
+    // [SONNET-4.6] (sq-7d3dj.28) The per-stream pin cap and the flag the worker raises when it
+    // gives up on a stalled reader. The flag — not the channel — carries that verdict, because
+    // a worker abandoning a FULL channel has, by construction, no room to post a terminal
+    // marker; the body reads it when the channel closes without one.
+    let pin_timeout = config.stream_pin_timeout;
+    let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_stalled = stalled.clone();
     tokio::task::spawn_blocking(move || {
         // Hold the registry guard alive for the entire streaming evaluation.
         let _guard = qr_guard;
         with_engine_scope_allow(&allow, || {
             let graph = gen.snapshot();
-            let mut sink = |chunk: String| match tx.blocking_send(StreamItem::Chunk(Bytes::from(chunk.into_bytes()))) {
-                Ok(()) => std::ops::ControlFlow::Continue(()),
-                // The receiver was dropped — the client disconnected (or a HEAD request
-                // stopped reading). Abandon the rest of the work.
-                Err(_) => std::ops::ControlFlow::Break(()),
+            let mut sink = |chunk: String| {
+                match send_chunk(&tx, StreamItem::Chunk(Bytes::from(chunk.into_bytes())), pin_timeout) {
+                    SendOutcome::Sent => std::ops::ControlFlow::Continue(()),
+                    // The receiver was dropped — the client disconnected (or a HEAD request
+                    // stopped reading). Abandon the rest of the work.
+                    SendOutcome::Closed => std::ops::ControlFlow::Break(()),
+                    // [SONNET-4.6] (sq-7d3dj.28) The reader stalled past the pin cap. Abandon
+                    // the query so the generation pin is released NOW; the body turns the flag
+                    // into a `pin-deadline` truncation.
+                    SendOutcome::Stalled => {
+                        worker_stalled.store(true, std::sync::atomic::Ordering::SeqCst);
+                        std::ops::ControlFlow::Break(())
+                    }
+                }
             };
             let outcome = sparq_engine::query_json_stream_prepared_with_budget(graph, &query, &budget, &mut sink);
             // [SONNET-4.6] (sq-7d3dj.26) ALWAYS post a terminal marker: the body side treats
             // "channel closed without one" as a truncation (a panicking worker), so the
             // completion claim can only ever come from the engine actually returning `Ok`.
             // A send failure here just means the client already went away.
-            let _ = tx.blocking_send(match outcome {
-                Ok(()) => StreamItem::Done,
-                Err(e) => StreamItem::Failed(e),
-            });
+            // [SONNET-4.6] (sq-7d3dj.28) …unless the reader has stalled: posting the marker
+            // must not itself become an unbounded wait on a full channel (that would pin the
+            // generation for exactly as long as the cap exists to prevent), and a stream we
+            // abandoned mid-result must never be claimed complete. The flag is already set in
+            // the first case; a stall detected only HERE sets it before the marker is dropped.
+            if !worker_stalled.load(std::sync::atomic::Ordering::SeqCst) {
+                let terminal = match outcome {
+                    Ok(()) => StreamItem::Done,
+                    Err(e) => StreamItem::Failed(e),
+                };
+                if matches!(send_chunk(&tx, terminal, pin_timeout), SendOutcome::Stalled) {
+                    worker_stalled.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
             // `gen` (the generation pin) is held until the worker returns, so every snapshot
             // borrow above is valid for the whole streamed evaluation.
         });
@@ -7360,6 +7620,7 @@ async fn stream_select_json(
                 rx: Some(rx),
                 held: None,
                 trailers_ok,
+                stalled,
                 state: BodyState::Streaming,
             });
             let builder = Response::builder()
@@ -7435,6 +7696,12 @@ mod truncation_safety_tests {
     /// Feeds `items` through a real bounded channel (closed after the last one) into a
     /// `StreamingJsonBody`, then drains every frame.
     async fn drain(items: Vec<StreamItem>, trailers_ok: bool) -> Drained {
+        drain_stalled(items, trailers_ok, false).await
+    }
+
+    /// [SONNET-4.6] (sq-7d3dj.28) [`drain`] with the worker's stalled-reader flag raised, i.e.
+    /// the per-stream pin cap gave up on this client and dropped the channel without a marker.
+    async fn drain_stalled(items: Vec<StreamItem>, trailers_ok: bool, stalled: bool) -> Drained {
         let (tx, rx) = tokio::sync::mpsc::channel(items.len().max(1));
         for item in items {
             tx.try_send(item).unwrap();
@@ -7445,6 +7712,7 @@ mod truncation_safety_tests {
             rx: Some(rx),
             held: None,
             trailers_ok,
+            stalled: Arc::new(std::sync::atomic::AtomicBool::new(stalled)),
             state: BodyState::Streaming,
         };
         let mut out = Drained { body: Vec::new(), trailers: None, failed: false };
@@ -7538,6 +7806,73 @@ mod truncation_safety_tests {
         assert_eq!(out.trailer(TRAILER_COMPLETE), None);
         serde_json::from_slice::<serde_json::Value>(&out.body)
             .expect_err("a truncated body MUST fail to parse as JSON");
+    }
+
+    /// [SONNET-4.6] (sq-7d3dj.28) A worker that abandoned a STALLED reader also closes the
+    /// channel without a marker — it was blocked on a full channel, so it had no room to post
+    /// one. The truncation is already guaranteed by the missing marker; the raised flag is what
+    /// makes the body NAME it `pin-deadline` instead of misreporting an engine panic.
+    #[tokio::test]
+    async fn a_stalled_reader_is_truncated_as_a_pin_deadline_not_a_panic() {
+        let out = drain_stalled(vec![chunk(HEAD), chunk(TAIL)], true, true).await;
+        assert_eq!(
+            out.trailer(TRAILER_TRUNCATED).as_deref(),
+            Some(TRUNCATED_PIN_DEADLINE)
+        );
+        assert_eq!(out.trailer(TRAILER_COMPLETE), None);
+        // The closing chunk was queued but never confirmed, so it is dropped like any other
+        // mid-stream abort: the client cannot read the prefix as a complete result.
+        assert_eq!(out.text(), HEAD);
+        serde_json::from_slice::<serde_json::Value>(&out.body)
+            .expect_err("a truncated body MUST fail to parse as JSON");
+    }
+
+    /// [SONNET-4.6] (sq-7d3dj.28) The pin cap NEVER converts a confirmed-complete stream into a
+    /// truncation: the flag is only consulted when the channel closed without a marker, so a
+    /// `Done` that did get through still closes the document and claims completeness.
+    #[tokio::test]
+    async fn the_stall_flag_does_not_truncate_a_stream_the_worker_completed() {
+        let out = drain_stalled(vec![chunk(HEAD), chunk(TAIL), StreamItem::Done], true, true).await;
+        assert!(!out.failed);
+        assert_eq!(out.text(), format!("{}{}", HEAD, TAIL));
+        assert_eq!(out.trailer(TRAILER_COMPLETE).as_deref(), Some("true"));
+        assert_eq!(out.trailer(TRAILER_TRUNCATED), None);
+    }
+
+    /// [SONNET-4.6] (sq-7d3dj.28) `send_chunk` under a pin cap: an item the body has room for
+    /// goes straight through (the fast path costs no polling), and a FULL channel that never
+    /// drains reports `Stalled` — the signal that releases the generation pin — rather than
+    /// parking the worker forever. A closed channel still reads as the client having gone away.
+    #[tokio::test]
+    async fn send_chunk_bounds_the_wait_on_a_full_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamItem>(1);
+        assert!(matches!(
+            send_chunk(&tx, chunk(HEAD), Some(Duration::from_millis(50))),
+            SendOutcome::Sent
+        ));
+        // The one slot is now taken and nothing is draining it.
+        let waited = std::time::Instant::now();
+        assert!(matches!(
+            send_chunk(&tx, chunk(TAIL), Some(Duration::from_millis(50))),
+            SendOutcome::Stalled
+        ));
+        assert!(
+            waited.elapsed() >= Duration::from_millis(50),
+            "the cap is a deadline, not an immediate refusal: {:?}",
+            waited.elapsed()
+        );
+        // Draining the slot makes the very next hand-off succeed again — the deadline is per
+        // hand-off (idle), so a client that resumes reading is not penalised.
+        rx.recv().await.unwrap();
+        assert!(matches!(
+            send_chunk(&tx, chunk(TAIL), Some(Duration::from_millis(50))),
+            SendOutcome::Sent
+        ));
+        drop(rx);
+        assert!(matches!(
+            send_chunk(&tx, chunk(TAIL), Some(Duration::from_millis(50))),
+            SendOutcome::Closed
+        ));
     }
 
     /// Each abort class the streamed path can hit is named distinctly, matching the status
@@ -8837,11 +9172,20 @@ pub(crate) fn text_response(
 /// engine's chunking contract, byte-identical body content — as the buffered path.
 /// HEAD mirrors GET: same headers, empty body.
 ///
-/// `pin` is the generation the chunks were evaluated against; the body stream owns it,
-/// so the generation stays pinned until the response finishes (or the client goes away)
-/// — the ring can never let the snapshot's memory go while the body is in flight. Today
-/// the chunks are fully materialised strings, so this is belt-and-braces; it becomes
-/// load-bearing the moment chunks evaluate lazily (Wave D push/pull streaming).
+/// `pin` is the generation the chunks were evaluated against, and it is RELEASED HERE: the
+/// caller hands it over and this function drops it while building the response, before any byte
+/// reaches the client.
+///
+/// [SONNET-4.6] (sq-7d3dj.28) It was previously moved INTO the body stream, keeping the
+/// generation resident until the last byte had been written to a possibly-slow client. That was
+/// belt-and-braces against a future in which these chunks evaluate lazily — but Wave D's lazy
+/// path landed as a SEPARATE body ([`StreamingJsonBody`], whose worker owns its own pin for
+/// exactly as long as it reads the graph), so every chunk arriving here is still a fully
+/// materialised owned `String` that borrows nothing. Holding the pin therefore bought no safety
+/// and cost snapshot residency for the whole drain — which is exactly what left the
+/// streaming-admission fallback ([`stream_admission`]) unable to bound anything: degrading to
+/// the buffered path is only the safer choice if the buffered response does not itself hold a
+/// generation until the client has finished reading.
 fn chunked_response(
     status: StatusCode,
     content_type: &str,
@@ -8850,15 +9194,17 @@ fn chunked_response(
     pin: PinnedGen,
 ) -> Response {
     let len: usize = chunks.iter().map(String::len).sum();
+    // The chunks are owned text; nothing below reads the graph, so the snapshot can be
+    // reclaimed now rather than when the client finishes draining.
+    drop(pin);
     let body = if head_only {
         axum::body::Body::empty()
     } else {
-        axum::body::Body::from_stream(futures_util::stream::iter(chunks.into_iter().map(
-            move |c| {
-                let _pinned_for_stream_lifetime = &pin;
-                Ok::<_, std::convert::Infallible>(Bytes::from(c.into_bytes()))
-            },
-        )))
+        axum::body::Body::from_stream(futures_util::stream::iter(
+            chunks
+                .into_iter()
+                .map(|c| Ok::<_, std::convert::Infallible>(Bytes::from(c.into_bytes()))),
+        ))
     };
     Response::builder()
         .status(status)
