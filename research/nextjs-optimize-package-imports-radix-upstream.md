@@ -81,27 +81,75 @@ Largest never-used contributors: `react-select` (51,434 B), `react-menu` (35,113
 
 The 60 lockfile `@radix-ui/*` entries are *exactly* `radix-ui@1.6.0`'s transitive closure — nothing else in
 the tree pulls a Radix primitive — so installing the monolith installs the whole primitive set by
-construction. Note this is an **unminified source-artifact** figure: it is an upper bound on emitted bytes
-and is deliberately not comparable to the minified bundle figure in Evidence A. The two agree in direction
-and in which primitives dominate.
+construction. That is not asserted by hand: the script below walks the closure from `radix-ui` and **fails**
+unless it equals the lockfile's `@radix-ui/*` set, and likewise fails unless the used-primitive closure is a
+subset of it. The three seeds are the primitives `site/` actually imports — `Slot`, `Dialog`, `Tooltip`,
+`import { … } from "radix-ui"` across `ui/badge.tsx`, `ui/button.tsx`, `ui/sheet.tsx`, `ui/tooltip.tsx`,
+`command-palette.tsx` (5 sites). Note this is an **unminified source-artifact** figure: it is an upper bound
+on emitted bytes and is deliberately not comparable to the minified bundle figure in Evidence A. The two
+agree in direction and in which primitives dominate.
 
-Reproduce (network + this repo's lockfile only):
+Reproduce (network + this repo's lockfile only) — prints every row of the table, the percentage, and the
+largest-never-used list, at the versions the lockfile pins; throws if any package, version or jsDelivr
+response is missing:
 
 ```js
-// node repro.js
+// node repro.js — from the repo root. Recomputes every value in the table above.
 const P = require('./package-lock.json').packages;
-const names = Object.keys(P).filter(k => k.startsWith('node_modules/@radix-ui/'));
-const mjs = async (n, v) => {
-  const j = await (await fetch(`https://data.jsdelivr.com/v1/packages/npm/${n}@${v}`)).json();
+const ROOT = 'radix-ui', USED = ['@radix-ui/react-slot', '@radix-ui/react-dialog', '@radix-ui/react-tooltip'];
+const die = m => { throw new Error(m); };
+const entry = n => P['node_modules/' + n] || die(`not in lockfile: ${n}`);
+// Transitive closure over @radix-ui/* dependency edges. The lockfile tree is flat here
+// (no nested node_modules/@radix-ui copies), so a name resolves to exactly one version.
+const closure = (seeds, keepSeeds) => {
+  const seen = new Set(), q = [...seeds];
+  while (q.length) {
+    const n = q.pop();
+    if (seen.has(n)) continue;
+    seen.add(n);
+    for (const d of Object.keys(entry(n).dependencies || {})) if (d.startsWith('@radix-ui/')) q.push(d);
+  }
+  if (!keepSeeds) for (const s of seeds) seen.delete(s);
+  return seen;
+};
+const mjs = async n => {                       // sum of published .mjs bytes AT THE LOCKED VERSION
+  const v = entry(n).version, r = await fetch(`https://data.jsdelivr.com/v1/packages/npm/${n}@${v}`);
+  if (!r.ok) die(`jsDelivr ${r.status} for ${n}@${v}`);
+  const j = await r.json();
+  if (!Array.isArray(j.files) || j.version !== v) die(`bad jsDelivr payload for ${n}@${v}`);
   let t = 0;
   (function walk(fs) { for (const f of fs) f.type === 'directory' ? walk(f.files) : f.name.endsWith('.mjs') && (t += f.size); })(j.files);
   return t;
 };
+const sum = async ns => (await Promise.all([...ns].map(mjs))).reduce((a, b) => a + b, 0);
 (async () => {
-  let total = 0;
-  for (const k of names) total += await mjs(k.replace('node_modules/', ''), P[k].version);
-  console.log(names.length, 'packages,', total, 'ESM bytes');
+  const barrel = closure([ROOT], false), used = closure(USED, true);
+  const locked = new Set(Object.keys(P).filter(k => k.startsWith('node_modules/@radix-ui/')).map(k => k.slice('node_modules/'.length)));
+  // (1) the barrel's closure IS exactly the set of @radix-ui/* packages the lockfile installs
+  if (barrel.size !== locked.size || [...locked].some(n => !barrel.has(n))) die('barrel closure != lockfile @radix-ui/* set');
+  // (2) what the app imports is a subset of what the barrel links
+  for (const n of used) if (!barrel.has(n)) die(`used package outside barrel closure: ${n}`);
+  const unused = [...barrel].filter(n => !used.has(n));
+  const [own, cB, uB, nB] = [await mjs(ROOT), await sum(barrel), await sum(used), await sum(unused)];
+  if (uB + nB !== cB) die('used + unused != closure bytes');
+  console.log(`own dist/*.mjs   1 pkg  ${own} B`);
+  console.log(`barrel closure  ${barrel.size} pkgs ${cB} B`);
+  console.log(`used closure    ${used.size} pkgs ${uB} B`);
+  console.log(`never used      ${unused.length} pkgs ${nB} B (${(100 * nB / cB).toFixed(1)} %)`);
+  console.log('largest never used:', (await Promise.all(unused.map(async n => [n, await mjs(n)])))
+    .sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, b]) => `${n} ${b}`).join(', '));
 })();
+```
+
+Run in this checkout on 2026-08-01 (`node v20`), it prints exactly the table's values and passes all three
+assertions:
+
+```
+own dist/*.mjs   1 pkg  4378 B
+barrel closure  60 pkgs 529292 B
+used closure    24 pkgs 98419 B
+never used      36 pkgs 430873 B (81.4 %)
+largest never used: @radix-ui/react-select 51434, @radix-ui/react-menu 35113, @radix-ui/react-navigation-menu 32440, @radix-ui/react-scroll-area 29987, @radix-ui/react-toast 26477
 ```
 
 ## Why #76065 is stale (the rebase note)
