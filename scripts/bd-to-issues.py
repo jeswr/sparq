@@ -38,6 +38,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 ROLE_BY_TYPE = {"feature": "impl", "bug": "impl", "task": "impl", "chore": "ci",
@@ -390,20 +391,46 @@ def migration_owned(issues, writers):
 
 
 def fetch_bd_map(repo, issues=None):
-    """(trusted, unverified) {bd-id: issue_number} maps from existing issues carrying a
-    `<!-- bd-id:... -->` marker (resume). trusted = the issue ALSO carries MIGRATION_LABEL
-    (attaching one needs triage/write permission); unverified = marker-only — could be a
-    pre-label legacy migration OR an attacker decoy, so never trusted on its own
-    (see resolve_resume_map, PR #2528 review round 2)."""
+    """(trusted, unverified, duplicates) from existing issues carrying a `<!-- bd-id:... -->`
+    marker (resume). trusted/unverified are {bd-id: issue_number}: trusted = the issue ALSO carries
+    MIGRATION_LABEL (attaching one needs triage/write permission); unverified = marker-only — could
+    be a pre-label legacy migration OR an attacker decoy, so never trusted on its own
+    (see resolve_resume_map, PR #2528 review round 2).
+
+    duplicates = {bd-id: [number, ...]} for a bd-id whose owning issue is AMBIGUOUS. Those bd-ids
+    are in NEITHER map, and apply_migration fails closed on any of them that is in the plan
+    (issue #5155). A {bd-id: number} map cannot represent "two issues claim this bead", so building
+    one by plain assignment silently picked a claimant by list order — including on the TRUSTED
+    path, which had no duplicate rule at all. A resumed --apply then mapped the bead to an arbitrary
+    one of the claimants and pass 2 wrote the `Blocked-by:`/`Parent:` markers onto that one only, so
+    which issue carries the board's dependency edges depended on issue-list order. Ambiguity is
+    refused rather than guessed here — the rule migration_owned already applies on the marker-only
+    path, and the rule ci-close-merged-beads.py::map_beads_to_open_issues applies to this same
+    marker channel on the READ side (its `ambiguous` bucket). This was the consumer still guessing.
+
+    An authenticated issue SHADOWED by marker-only copies is NOT ambiguous: the labelled issue is
+    canonical and resolve_resume_map already treats the copies as inert."""
     issues = fetch_issues(repo) if issues is None else issues
-    trusted, unverified = {}, {}
+    trusted_claims, unverified_claims = {}, {}
     for it in issues:
         mm = MARKER_RE.search(it.get("body") or "")
         if not mm:
             continue
         labels = {lb["name"] if isinstance(lb, dict) else lb for lb in it.get("labels") or []}
-        (trusted if MIGRATION_LABEL in labels else unverified)[mm.group(1)] = it["number"]
-    return trusted, unverified
+        (trusted_claims if MIGRATION_LABEL in labels else unverified_claims).setdefault(
+            mm.group(1), []).append(it["number"])
+    duplicates = {}
+    for bid, nums in trusted_claims.items():
+        if len(nums) > 1:                    # every claimant is named, labelled or not
+            duplicates[bid] = sorted(nums + unverified_claims.get(bid, []))
+    for bid, nums in unverified_claims.items():
+        if bid in duplicates or len(trusted_claims.get(bid, ())) == 1:
+            continue                         # already ambiguous, or a labelled issue breaks the tie
+        if len(nums) > 1:
+            duplicates[bid] = sorted(nums)   # no canonical labelled issue to break the tie
+    trusted = {bid: nums[0] for bid, nums in trusted_claims.items() if bid not in duplicates}
+    unverified = {bid: nums[0] for bid, nums in unverified_claims.items() if bid not in duplicates}
+    return trusted, unverified, duplicates
 
 
 def resolve_resume_map(trusted, unverified, checkpoint_map, owned=frozenset()):
@@ -658,7 +685,7 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
     node_ids = {it["number"]: it["id"] for it in issues_snapshot}
     have_labels = {it["number"]: [lb["name"] if isinstance(lb, dict) else lb
                                   for lb in it.get("labels") or []] for it in issues_snapshot}
-    trusted, unverified = fetch_bd_map(repo, issues_snapshot)
+    trusted, unverified, ambiguous = fetch_bd_map(repo, issues_snapshot)
     try:
         ckpt = json.load(open(checkpoint, encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
@@ -668,11 +695,23 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
     owned = migration_owned(issues_snapshot, _writer_logins(repo, {a for a in authors if a}))
     id_map, backfill, unverifiable = resolve_resume_map(trusted, unverified, ckpt, owned)
     ids = list(open_ids)[: limit] if limit else list(open_ids)
+    planned = set(ids)
+    # Fail closed (issue #5155): a bd-id claimed by MORE THAN ONE issue has no unambiguous owner,
+    # and this run is about to WRITE to that owner — pass 2's edge markers and pass 3's labels.
+    # Picking one by list order is guessing, which the read side of this same marker channel
+    # (ci-close-merged-beads.py) already refuses to do. Stop for operator review instead.
+    dup = {b: n for b, n in ambiguous.items() if b in planned}
+    if dup:
+        raise SystemExit(
+            f"refusing --apply: {len(dup)} planned bd-id(s) are claimed by MORE THAN ONE issue, so "
+            f"the mapping is ambiguous (a resumed run would map the bead, its dependency markers "
+            f"and its autoclose to an arbitrary one) — close or re-marker the extras: "
+            f"{sorted((b, ['#' + str(n) for n in nums]) for b, nums in dup.items())[:10]}")
     # Fail closed (PR #2528 review round 2): a marker-only issue with NO migration provenance
     # (not labeled, not in the trusted checkpoint) may be an attacker decoy pre-created to
     # capture a bd-id. Refuse to label it, map to it, OR create a competing issue — stop for
     # operator review instead.
-    bad = {b: n for b, n in unverifiable.items() if b in set(ids)}
+    bad = {b: n for b, n in unverifiable.items() if b in planned}
     if bad:
         raise SystemExit(
             f"refusing --apply: {len(bad)} existing issue(s) carry a bd-id body marker but have "
@@ -759,9 +798,9 @@ def marker_index(issues):
     A marker-only issue is therefore an unfinished migration or a decoy — never a pass.
 
     Duplicates are kept because "one bd-id, two issues" is a defect this reconcile looks for.
-    fetch_bd_map collapses a repeated bd-id by dict assignment (last write wins). That is right for
-    resume — resolve_resume_map re-derives provenance afterwards — but it is precisely the wrong
-    shape for a count reconcile."""
+    fetch_bd_map answers the same question for the WRITE path (it returns them as `duplicates` and
+    --apply refuses to resume onto one — issue #5155); here they are counted and named rather than
+    refused, because --verify reports and never edits."""
     authenticated, marker_only = {}, {}
     for it in issues:
         mm = MARKER_RE.search(it.get("body") or "")
@@ -1006,6 +1045,68 @@ def _self_test():
     idm, bf, unv = resolve_resume_map({}, {"sq-legacy": 9}, {"sq-legacy": 8})
     chk("checkpoint number mismatch stays unverifiable", (idm, bf, unv),
         ({}, {}, {"sq-legacy": 9}))
+
+    # --- fetch_bd_map ambiguity on the WRITE path (issue #5155) ----------------------------------
+    # A {bd-id: number} map cannot say "two issues claim this bead", so plain assignment picked one
+    # by list order — and the TRUSTED (labelled) path had no duplicate rule at all, unlike
+    # migration_owned (marker-only) and ci-close-merged-beads.py (the read side of the same marker
+    # channel). A resumed --apply mapped the bead and wrote pass 2's edge markers onto an ARBITRARY
+    # one of the claimants.
+    def _mk(num, bid, labeled=True):
+        return {"number": num, "id": f"I_{num}", "title": f"{bid}: t",
+                "labels": [{"name": MIGRATION_LABEL}] if labeled else [],
+                "body": f"prose\n<!-- bd-id:{bid} -->\n"}
+
+    tr, unv_m, dups = fetch_bd_map(None, [_mk(1, "sq-solo"), _mk(2, "sq-two"), _mk(3, "sq-two")])
+    chk("two AUTHENTICATED issues claiming one bd-id are ambiguous, not last-write-wins",
+        (dups, "sq-two" in tr), ({"sq-two": [2, 3]}, False))
+    chk("an unambiguous authenticated issue still maps", (tr, unv_m), ({"sq-solo": 1}, {}))
+    # An ambiguous bd-id names EVERY claimant, labelled or not — the operator has to see all the
+    # issues to decide which to close, and reporting only one class would send them to the wrong one.
+    tr, unv_m, dups = fetch_bd_map(None, [_mk(2, "sq-two"), _mk(3, "sq-two"),
+                                          _mk(4, "sq-two", labeled=False),
+                                          _mk(5, "sq-two", labeled=False)])
+    chk("every claimant of an ambiguous bd-id is named, labelled or not",
+        (dups, tr, unv_m), ({"sq-two": [2, 3, 4, 5]}, {}, {}))
+    # Marker-only duplicates are refused on the same rule migration_owned already applies…
+    tr, unv_m, dups = fetch_bd_map(None, [_mk(4, "sq-mo", labeled=False),
+                                          _mk(5, "sq-mo", labeled=False)])
+    chk("two marker-only issues claiming one bd-id are ambiguous too",
+        (dups, unv_m), ({"sq-mo": [4, 5]}, {}))
+    # …but an authenticated issue SHADOWED by marker-only copies is canonical, not ambiguous
+    # (resolve_resume_map already treats the copies as inert), so this must NOT abort a resume.
+    tr, unv_m, dups = fetch_bd_map(None, [_mk(6, "sq-sh"), _mk(7, "sq-sh", labeled=False),
+                                          _mk(8, "sq-sh", labeled=False)])
+    chk("a labelled issue shadowed by marker-only copies is canonical, not ambiguous",
+        (dups, tr), ({}, {"sq-sh": 6}))
+
+    # The WRITE path itself: returning the duplicates is only half the fix — --apply has to refuse.
+    # Stub the two network seams apply_migration crosses before the check (the board snapshot and
+    # the collaborator-permission lookup) plus the two it would cross AFTER, so a regression that
+    # drops the refusal creates an issue in the fixture rather than reaching for the network.
+    created_calls = []
+    saved = {n: globals()[n] for n in
+             ("fetch_issues", "_writer_logins", "ensure_labels", "_create_issue")}
+    globals()["fetch_issues"] = lambda repo: [_mk(2, "sq-two"), _mk(3, "sq-two")]
+    globals()["_writer_logins"] = lambda repo, logins, cache=None: set()
+    globals()["ensure_labels"] = lambda repo, labels: None
+    globals()["_create_issue"] = lambda repo, bid, bead, crates=None: (
+        created_calls.append(bid), 99)[1]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # A WRITABLE checkpoint path on purpose: a run that wrongly proceeds must get as far as
+            # pass 1 and be caught by the created-nothing assertion, not die on an unwritable path
+            # (which would pass for the wrong reason and hide which guard actually stopped it).
+            try:
+                apply_migration("o/r", {"sq-two": {"id": "sq-two", "title": "t"}}, {}, {},
+                                checkpoint=os.path.join(tmp, "map.json"), reconcile=False)
+                got = "no-exit"
+            except SystemExit as e:
+                got = "MORE THAN ONE issue" in str(e)
+        chk("--apply refuses to resume onto an ambiguous bd-id", got, True)
+        chk("the refused run creates nothing (it stops before pass 1)", created_calls, [])
+    finally:
+        globals().update(saved)
 
     # --- marker shape (audit 2026-07-25, #3797) --------------------------------------------------
     # Prose that DOCUMENTS the marker is not a bead mapping. The old `(\S+?)` capture scanned "…"
