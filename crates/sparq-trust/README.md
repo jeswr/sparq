@@ -77,7 +77,7 @@ view; `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
   `trust:issuerDid` instead of `trust:issuerKey` hex (`DidKeyResolver` decodes `did:key` offline; `DidWebResolver`
   reads `did:web` via a **pluggable** fetcher). **Narrows** the forgery vector D′ (no absolute anchor).
 - **Security properties** (`secprop` / `admissibility`, **opt-in `secprop-vocab` / `secprop-admissibility`**, `sq-5oru9` / `sq-ufsi9`) — the sparq **`sec-prop:` extension**
-  ([`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl); proof-system dimensions + the **assurance / audit-status axis** the vendored ontology lacks) and the §4.3 ODRL → admissible-proof-set reduction as a RUNNABLE N3 ruleset on `sparq-reason` (Rust **default-deny**). Reasons over ANNOTATIONS, not crypto (`sq-qhy4`).
+  ([`secprop-ext.ttl`](../sparq-secprop-vocab/ontologies/secprop-ext.ttl), owned by the dependency-free [`sparq-secprop-vocab`](../sparq-secprop-vocab) leaf since [#3705](https://github.com/jeswr/sparq/issues/3705); proof-system dimensions + the **assurance / audit-status axis** the vendored ontology lacks) and the §4.3 ODRL → admissible-proof-set reduction as a RUNNABLE N3 ruleset on `sparq-reason` (Rust **default-deny**). Reasons over ANNOTATIONS, not crypto (`sq-qhy4`). Three VENDORED dimension IRIs used as `secx:property` values (`SEC_PROP_POST_QUANTUM_FORGERY` / `_SNOOPING` / `SEC_PROP_SIGNATURE_TYPE_LEAKAGE`) are re-asserted verbatim as `sec-prop:SecurityProperty` subjects and listed in `ALL_SECPROP_IRIS` ([#3441](https://github.com/jeswr/sparq/issues/3441)).
 - **`trustx:` certification-scope vocabulary** (`framework_vocab`, **opt-in `framework-vocab`**, `sq-6syab.2` / [#1592](https://github.com/jeswr/sparq/issues/1592)) —
   the trust-expression layer for **framework-certified-issuer** trust: a verifier→holder trust-requirements graph, two modes (enumerated `trustsIssuer` OR framework-certified), positive status attestation. Turtle ([`trust-framework.ttl`](ontologies/trust/trust-framework.ttl)) extends `trust:` + references vendored `sec-req:` eIDAS/UK-DVS individuals (no fork). **Anchored, not proven** (`sq-qhy4`).
 - **Holder-side trust-expression evaluation + conformance suite** (`expression`, **opt-in `expression`**, `sq-6syab.4`/`.3`/`.6` / [#1592](https://github.com/jeswr/sparq/issues/1592)) —
@@ -110,7 +110,7 @@ view; `--features trust-graph-did` forwards the DID issuer-key binding (`sq-pfae
 ## 📚 Learn more
 
 - Machine-readable [`trust.ttl`](ontologies/trust/trust.ttl) + [`SEMANTICS.md`](ontologies/trust/SEMANTICS.md)
-  (`sq-pfae.2`) + [`secprop-ext.ttl`](ontologies/zkp-sparql/secprop-ext.ttl); design record
+  (`sq-pfae.2`) + [`secprop-ext.ttl`](../sparq-secprop-vocab/ontologies/secprop-ext.ttl); design record
   `research/solid-trust-graph-authz-design.md` (§3.2 storage; §4 delegation; §6.0 PoC) —
   [#940](https://github.com/jeswr/sparq/issues/940). `cargo doc -p sparq-trust --all-features`.
 

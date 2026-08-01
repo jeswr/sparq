@@ -3468,6 +3468,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "p384"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
+dependencies = [
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5423,6 +5435,7 @@ dependencies = [
  "sparq-conformance-floors",
  "sparq-core",
  "sparq-engine",
+ "sparq-secprop-vocab",
 ]
 
 [[package]]
@@ -5556,6 +5569,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-secprop-vocab"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "oxttl 0.2.3",
+]
+
+[[package]]
 name = "sparq-serve"
 version = "0.1.0"
 dependencies = [
@@ -5677,6 +5698,7 @@ dependencies = [
  "sparq-policy",
  "sparq-reason",
  "sparq-trust",
+ "sparq-vc",
  "sparq-zk",
  "wasm-bindgen-test",
 ]
@@ -5749,6 +5771,7 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-reason",
+ "sparq-secprop-vocab",
  "sparq-shacl",
  "sparq-zk",
 ]
@@ -5852,16 +5875,21 @@ dependencies = [
  "ark-serialize",
  "ark-std",
  "blake3",
+ "bs58",
  "ed25519-dalek",
  "getrandom 0.4.2",
+ "oxjsonld",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "p256",
+ "p384",
+ "serde_json",
  "sha2 0.10.9",
  "spargebra",
  "sparq-canon",
  "sparq-core",
  "sparq-engine",
+ "sparq-secprop-vocab",
  "subtle",
  "zeroize",
 ]

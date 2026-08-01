@@ -27,13 +27,15 @@
 #
 #   HARD gates (FAIL the build; picked up by the ci-summary aggregator):
 #     • markdownlint  — structural markdown defects over the user-facing + governance
-#                       doc surface (root docs, skills/, docs/, crates/, and — as of
-#                       sq-rqyo — research/ + zk/). Tuned to the repo's house style via
-#                       .markdownlint-cli2.jsonc.
+#                       doc surface (root docs, skills/, docs/, crates/, metrics/, the
+#                       book/ mdBook sources — added by issue #5020 — and, as of
+#                       sq-rqyo, research/ + zk/). Tuned to the repo's house style via
+#                       .markdownlint-cli2.jsonc, which carries the authoritative globs.
 #     • typos         — high-confidence spelling errors in those same docs (markdown
 #                       only), with a domain allowlist in _typos.toml.
-#     • internal-links — lychee --offline over those docs: every relative link AND
-#                       heading-anchor (#fragment) must resolve. Deterministic (no net).
+#     • internal-links — lychee --offline over those docs (incl. book/, issue #5020): every
+#                       relative link AND heading-anchor (#fragment) must resolve.
+#                       Deterministic (no net).
 #     • privacy-claims — greps the OUTWARD claim surface for unqualified ZK/MPC
 #                       privacy/soundness claims (the empirical-honesty mandate; the v1
 #                       ZK verifier is pending external audit + sparq-mpc is semi-honest
@@ -192,18 +194,19 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: lychee@0.23.0
 
       # ---- former job: markdownlint (docs) ----
       - name: markdownlint (docs)
         # npx pins the exact cli2 version; the config (.markdownlint-cli2.jsonc) carries
-        # the tuned ruleset AND the HARD-scope globs (root docs + skills/ + docs/ + crates/).
+        # the tuned ruleset AND the authoritative HARD-scope globs (do not re-enumerate
+        # them here — the copy that used to live on this line had gone stale).
         run: npx --yes markdownlint-cli2@0.18.1
 
       # ---- former job: typos (docs) ----
@@ -239,12 +242,18 @@ jobs:
         with:
           # --offline → no network (deterministic); --include-fragments validates
           # #heading anchors. fail=true makes broken internal links a HARD failure.
+          # [OPUS-5] issue #5020: './book/**/*.md' added — the mdBook sources were in
+          # NEITHER this list nor the markdownlint HARD globs, so a broken intra-book
+          # ./*.md link shipped unchecked. No exclusion is needed for the pages'
+          # `{{#include ../../README.md:anchor}}` / `{{#rustdoc_include}}` directives:
+          # they are not markdown link syntax, so lychee's extractor never emits them
+          # as URIs (verified locally against lychee 0.23.0, the pinned version).
           args: >-
             --offline
             --include-fragments
             --no-progress
             README.md AGENTS.md ASSURANCE.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CLAUDE.md
-            './skills/**/*.md' './docs/**/*.md' './crates/**/*.md'
+            './skills/**/*.md' './docs/**/*.md' './crates/**/*.md' './book/**/*.md'
           fail: true
           # Don't post a tracking issue (read-only token; gating is enough).
           jobSummary: true
@@ -435,6 +444,17 @@ jobs:
       - name: "Enforce inference report ↔ ci.yml ratchet/job-name ↔ central scoreboard floor agree — GATING"
         run: python3 scripts/check-inference-report-drift.py
 
+      # [OPUS-5] #5021: hermetic self-test of the mdBook link-fixup preprocessor
+      # (scripts/mdbook-rewrite-links.py) — which repo-relative link targets get rewritten
+      # to the mount-portable blob URL and which are left alone. It runs HERE, on every PR,
+      # rather than only in docs.yml, because docs.yml fires on a hand-maintained path
+      # filter AND a preprocessor regression is SILENT: mdBook exits 0 and simply emits a
+      # link that 404s under the book mount. The lowercase-root-doc case is the defect #5021
+      # reports; narrowing `_ROOT_MD` back to `[A-Z]` reds exactly that case here.
+      # Hermetic: no network, no files, no subprocess (same pattern as the lints above).
+      - name: Self-test mdbook-rewrite-links.py (which link targets get rewritten)
+        run: python3 scripts/mdbook-rewrite-links.py --self-test
+
       - name: Demo deployment manifests
         run: |
           bash deploy/demo/check.sh
@@ -589,7 +609,9 @@ jobs:
       # Both suites are hermetic (stdlib only, no gh/network):
       # the script's own rule self-test, plus the independent safety tests
       # (fail-closed / no unpark-without-an-area / no invented label / the three
-      # rule orderings that were measured wrong on the live backlog).
+      # rule orderings that were measured wrong on the live backlog / — since
+      # #5003 — the candidate fetch's REACH and its no-silent-truncation guards,
+      # which are fail-QUIET defects a live cron cannot surface on its own).
       - name: Self-test triage-area.py (needs:area classifier — fail-closed + no-drift)
         run: |
           python3 scripts/triage-area.py --self-test
@@ -914,6 +936,16 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
+      # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
+      # outage there concluded `failure` with nothing measured and ejected an unrelated
+      # PR from the merge queue. It is now restored from an Actions cache. Same
+      # invisible-regression shape as the posture test above — drop the restore step and
+      # CI stays green while silently re-coupling to a third party's uptime. This runs
+      # the REAL bash `fetch_pinned_file` against a stub curl to prove the offline-on-hit
+      # property, pins the ci.yml wiring, and pins that the ratchet was NOT weakened.
+      - name: Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)
+        run: python3 scripts/tests/test_inference_corpus_cache.py
       # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
       # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
       # versioned binary; reverting to `cargo install wasm-pack` would keep the lane

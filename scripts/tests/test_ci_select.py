@@ -824,21 +824,40 @@ class RealMetadataShapeTests(unittest.TestCase):
         self.assertNotIn("sparq-parse", sel.affected)  # parse does not depend on geo
 
     # ---- sq-m4bxc additional-readers acceptance, REAL metadata + REAL map ------
-    # These use the SHIPPED ci/path-ownership.toml `readers` entries against live
-    # cargo metadata: a change to sparq-trust's shared secprop vocab must select
-    # sparq-zk (a sparq-zk->sparq-trust dep is a cycle, so the reverse closure
-    # cannot reach it), and a change to sparq-solid's rule corpus must select
+    # This uses the SHIPPED ci/path-ownership.toml `readers` entry against live
+    # cargo metadata: a change to sparq-solid's rule corpus must select
     # sparq-reason (sparq-solid depends on sparq-reason — the reverse cycle).
-    def test_secprop_ext_change_selects_zk_and_trust(self):
+    #
+    # [OPUS-5] sq-3705: the secprop vocabulary needs NO map entry any more. It was
+    # the other residual — sparq-zk `include_str!`d sparq-trust's secprop-ext.ttl
+    # because a sparq-zk->sparq-trust edge is a cycle — and it is now closed
+    # structurally instead, by a real dependency on a zero-dep leaf crate.
+    def test_secprop_vocab_change_selects_its_consumers(self):
         real_map = cs.load_ownership_map(str(MAP_FILE))
         sel = cs.select(
-            ["crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl"],
+            ["crates/sparq-secprop-vocab/ontologies/secprop-ext.ttl"],
             self.meta, real_map,
         )
         self.assertEqual(sel.mode, "selected")
-        self.assertIn("sparq-zk", sel.affected,
-                      "a secprop-ext.ttl change must run sparq-zk's cross-crate drift test")
-        self.assertIn("sparq-trust", sel.affected)
+        # Reached by the ORDINARY reverse-dependency closure: each consumer takes
+        # an (optional) `sparq-secprop-vocab` edge, and the selector's graph is
+        # feature-blind, so all three are attributed with no `readers` entry.
+        for consumer in ("sparq-zk", "sparq-trust", "sparq-policy"):
+            self.assertIn(
+                consumer, sel.affected,
+                f"a secprop-ext.ttl change must run {consumer}'s secprop tests",
+            )
+
+    def test_secprop_vocab_needs_no_readers_entry(self):
+        # The same selection holds with an EMPTY map — proof it is the cargo
+        # edges doing the work, not a path-ownership patch (sq-3705).
+        sel = cs.select(
+            ["crates/sparq-secprop-vocab/ontologies/secprop-ext.ttl"],
+            self.meta, [],
+        )
+        self.assertEqual(sel.mode, "selected")
+        for consumer in ("sparq-zk", "sparq-trust", "sparq-policy"):
+            self.assertIn(consumer, sel.affected)
 
     def test_solid_rules_change_selects_reason(self):
         real_map = cs.load_ownership_map(str(MAP_FILE))
