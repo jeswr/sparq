@@ -236,6 +236,14 @@ run doctests, so a `cargo test --doc` lane must survive any consolidation); and 
 always-run legs into fewer, fatter jobs where the per-job constant tax dominates their
 runtime. Explicitly disjoint from sq-piapk (coverage-instrumented topology is piapk's).
 
+**Child record:** `research/ci-leg-walltime-inventory.md` (`sq-6vshe.7`) — ships the
+steering-data instrument (`scripts/ci_leg_walltime_inventory.py`) and corrects three of
+this section's five premises against the tree as it now stands: the build-once archive and
+the run-once doctest lane already exist in `ci.yml`, and the fold-into-fatter-jobs
+mechanism already exists in the feature-matrix bin-packer. It also finds that extending
+the archive to the conformance legs is blocked (different cargo profile, the `sq-vya1`
+archive-feature guard, non-test targets) and redirects that lever to bin-packing.
+
 ## 9. Program — beads, ordered by payoff-per-risk
 
 | # | Bead | What (one line) | Payoff | Risk | Tier |
