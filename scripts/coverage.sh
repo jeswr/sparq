@@ -210,6 +210,22 @@ PER_COMMIT_CRATES=(
   # `service`, so it MUST be measured WITH `service` (the `case` in measure() below names it).
   # Brings the moved client + its ~1.3k test LOC under the ratchet ("no crate silently dropped").
   sparq-engine-service
+  # [OPUS-5] #5139 (follow-up to sq-gg0qq.11 / #2741): the ported Solid/LWS server core.
+  # It was tracked by the test-PRESENCE gate only (bench/coverage-presence.json, floor
+  # 1000 #[test]s) and by NEITHER coverage gate's line-%, because seeding a %-floor needs
+  # a real `cargo llvm-cov` run and the routed environments have had no usable toolchain.
+  # Adding it here brings it under MEASUREMENT ("no crate silently dropped"); the %-FLOOR
+  # itself is still unseeded — see the honest note in the DEDICATED_PIPELINE_CRATES block
+  # below and the `coverage-lws` job in .github/workflows/ci.yml.
+  #
+  # NO `case` arm in measure(): unlike the opt-in crates above, this crate's default
+  # feature set (`default = ["embedded-sparq", "sparql-endpoint"]`) already compiles the
+  # first-class surface — the in-process SPARQ store backend and the SPARQL endpoint — so a
+  # default-feature build is representative. Its remaining features (redis-replay /
+  # odrl-authz / trust-graph / http-sparq / http3 / wasm) are separate opt-in seams each
+  # already covered by its own `opt-in sparq-lws-core (…)` feature-matrix leg; folding them
+  # in here would change the denominator for reasons this change did not measure.
+  sparq-lws-core
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
@@ -244,7 +260,30 @@ NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nigh
 # The DEDICATED_PIPELINE_CRATES set below records exactly that: crates that are in
 # PER_COMMIT_CRATES and gated, but gated OUTSIDE SHARD_GROUPS. The invariant becomes:
 #     union(SHARD_GROUPS) ∪ DEDICATED_PIPELINE_CRATES  ==  PER_COMMIT_CRATES   (disjoint).
-DEDICATED_PIPELINE_CRATES=(sparq-engine)
+#
+# [OPUS-5] #5139: sparq-lws-core joins that set, for a DIFFERENT reason than sparq-engine.
+# Engine is here because it is the wall-clock POLE and needed splitting. lws-core is here
+# because of WHERE its cost lands. The `coverage-measure` matrix runs on essentially every
+# Rust PR (it skips only when the affected closure is provably empty), and lws-core sits in
+# the reverse-dep closure of sparq-core/sparq-engine — so it would be IN the changed cone,
+# and therefore MEASURED, on most Rust PRs. Appending a large crate with a 37-file
+# integration surface to a SHARD would lengthen that shard, and the matrix's wall-clock is
+# the max over shards, so it would raise the coverage floor cost of PRs that never touch
+# the crate — against the "keep untouched-PR cost flat / watch CI congestion" constraint
+# carried over from #2741. A DEDICATED lane gated on `contains(affected, "sparq-lws-core")`
+# runs CONCURRENTLY with the shards instead, so it adds nothing to the critical path unless
+# it is itself the pole, and it does not run at all on a selected-mode PR that leaves the
+# crate unaffected. See the `coverage-lws` job in .github/workflows/ci.yml.
+#
+# HONEST STATUS OF ITS FLOOR (do not read this membership as "gated"): sparq-lws-core has
+# NO entry in bench/coverage-floor.json yet, so `coverage-gate.py --check{,-robust}` — which
+# iterates the FLOOR file — enforces nothing for it. This change wires the MEASUREMENT so
+# the number exists; the floor is seeded from that first real run (the lane prints the exact
+# `floor(measured) - MARGIN` value and uploads its summary artifact). That is the same
+# measure-then-seed-then-gate bootstrap the coverage ratchet itself used, and that
+# bench/mutants-baseline.json is still using — NOT an invented number, which is precisely
+# what the `seed_pending` machinery (sq-iwf3c) exists to prevent.
+DEDICATED_PIPELINE_CRATES=(sparq-engine sparq-lws-core)
 
 # INVARIANT (guarded by `coverage.sh --check-shards`, a fast no-compile CI step): the union
 # of SHARD_GROUPS PLUS DEDICATED_PIPELINE_CRATES equals PER_COMMIT_CRATES exactly and is

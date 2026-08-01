@@ -1235,15 +1235,17 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
 
     # The regex the coverage-demoted-filer uses (in ci.yml) to find a FAILED DEMOTED
     # measure leg by job name. Kept in sync with the workflow's `--jq ... test("...")`.
-    _DEMOTED_LEG_RE = re.compile(r"^coverage (ratchet \(shard |engine )")
+    _DEMOTED_LEG_RE = re.compile(r"^coverage (ratchet \(shard |engine |lws )")
 
     @classmethod
     def setUpClass(cls):
         cls.ci = _load(CI_YML)
         cls.cov_gate = _coverage_gate_module()
 
-    # The measure legs whose instrumented run left the queue.
-    DEMOTED_JOBS = ("coverage-measure", "coverage-engine-run")
+    # The measure legs whose instrumented run left the queue. [OPUS-5] #5139:
+    # `coverage-lws` (the sparq-lws-core dedicated lane) is instrumented measurement
+    # too, so it carries the SAME event envelope and belongs to the same demotion.
+    DEMOTED_JOBS = ("coverage-measure", "coverage-engine-run", "coverage-lws")
 
     def _runs(self, job_id, *, event="pull_request", draft=False, mode="full",
               affected="[]", rust_changed="true"):
@@ -1287,6 +1289,86 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
                 f"post-merge enforcement point the demotion depends on, and is EXEMPT "
                 f"from the sq-6vshe.14 push-run skip",
             )
+
+    # ---- the sparq-lws-core dedicated lane (#5139) ---------------------------
+    def test_lws_lane_is_crate_gated_but_fail_closed(self):
+        """[OPUS-5] #5139: `coverage-lws` narrows the SELECTION axis from the matrix's
+        "affected is non-empty" to "affected NAMES sparq-lws-core" — that narrowing is the
+        whole point (the crate is large and sits in most Rust PRs' cone, so a SHARD
+        placement would raise the coverage cost of PRs that never touch it).
+
+        Both halves are pinned, because getting either wrong is silent:
+          * it must SKIP under ENFORCED selection when the crate is unaffected — otherwise
+            the lane is just a shard with extra steps and the congestion argument is void;
+          * it must RUN whenever the selection is NOT 'selected' (full / shadow / an
+            unresolvable selector output — which is also how push-to-main resolves), or a
+            selector hiccup would silently drop the measurement."""
+        job = "coverage-lws"
+        self.assertTrue(
+            self._runs(job, mode="selected",
+                       affected='["sparq-core","sparq-lws-core"]'),
+            "coverage-lws must run when enforced selection names sparq-lws-core",
+        )
+        self.assertFalse(
+            self._runs(job, mode="selected", affected='["sparq-core","sparq-geo"]'),
+            "coverage-lws must SKIP when enforced selection proves sparq-lws-core "
+            "unaffected — that skip is the lane's reason to exist (#5139 congestion "
+            "constraint carried from #2741)",
+        )
+        for mode in ("full", "shadow", ""):
+            self.assertTrue(
+                self._runs(job, mode=mode, affected="[]"),
+                f"coverage-lws must run fail-closed on mode={mode!r}: a non-'selected' "
+                f"or unresolvable selection can never narrow the measurement",
+            )
+
+    def test_lws_lane_folds_into_the_single_coverage_verdict(self):
+        """The ci-summary `gate` must keep seeing ONE terminal coverage check. If the lane
+        is not in the aggregate's `needs`, a red lane would be invisible to the gate; if
+        the aggregate stopped counting `skipped` as satisfied, the crate-gated skip (the
+        COMMON case) would red every PR that leaves sparq-lws-core unaffected."""
+        needs = self.ci["jobs"]["coverage"].get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("coverage-lws", needs,
+                      "the `coverage` aggregate must need the sparq-lws-core lane, or its "
+                      "failure never reaches the ci-summary gate")
+        body = "\n".join(str(s.get("run", ""))
+                         for s in self.ci["jobs"]["coverage"]["steps"])
+        self.assertIn("needs.coverage-lws.result", body,
+                      "the aggregate must actually READ the lane's result, not merely "
+                      "depend on it")
+
+    def test_lws_lane_measures_exactly_its_one_crate(self):
+        """The lane's cost argument rests on it measuring ONE crate: `COVERAGE_CRATES` is
+        coverage.sh's explicit-subset input and outranks both COVERAGE_SHARD and the
+        changed-cone filter. A drift to a shard/tier selection here would silently
+        reintroduce the whole-matrix cost this lane exists to avoid."""
+        steps = self.ci["jobs"]["coverage-lws"]["steps"]
+        measure = [s for s in steps if "coverage.sh" in str(s.get("run", ""))]
+        self.assertEqual(len(measure), 1,
+                         "expected exactly one coverage.sh measure step in coverage-lws")
+        self.assertEqual(measure[0].get("env", {}).get("COVERAGE_CRATES"),
+                         "sparq-lws-core",
+                         "coverage-lws must pin COVERAGE_CRATES to the one crate it owns")
+        self.assertNotIn("COVERAGE_SHARD", measure[0].get("env", {}),
+                         "coverage-lws must not also take a shard selection")
+
+    def test_lws_crate_is_measured_in_exactly_one_place(self):
+        """scripts/coverage.sh's `--check-shards` partition invariant is what proves no
+        per-commit crate is silently un-measured or double-measured. sparq-lws-core is
+        gated OUTSIDE SHARD_GROUPS (by this lane), so it must be declared in
+        DEDICATED_PIPELINE_CRATES — exactly as sparq-engine is for its split pipeline."""
+        cov_sh = (REPO_ROOT / "scripts" / "coverage.sh").read_text(encoding="utf-8")
+        dedicated = re.search(r"^DEDICATED_PIPELINE_CRATES=\((.*?)\)$", cov_sh,
+                              re.MULTILINE)
+        self.assertIsNotNone(dedicated, "DEDICATED_PIPELINE_CRATES not found")
+        self.assertIn("sparq-lws-core", dedicated.group(1).split(),
+                      "sparq-lws-core is gated outside SHARD_GROUPS, so --check-shards "
+                      "would flag it as un-gated unless it is declared dedicated")
+        for group in re.findall(r'^\s+"(sparq-[^"]+)"$', cov_sh, re.MULTILINE):
+            self.assertNotIn("sparq-lws-core", group.split(),
+                             "sparq-lws-core must NOT also sit in a SHARD_GROUPS shard — "
+                             "that would measure it twice")
 
     def test_engine_merge_skips_when_its_partitions_are_demoted(self):
         """`coverage-engine-merge` has no event guard of its own — it must inherit the
@@ -1414,6 +1496,8 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
             for val in self.ci["jobs"][job_id]["strategy"]["matrix"][var]:
                 must_match.append(tmpl.replace("${{ matrix.%s }}" % var, str(val)))
         must_match.append(self.ci["jobs"]["coverage-engine-merge"]["name"])
+        # [OPUS-5] #5139: the sparq-lws-core dedicated lane is a demoted measure leg too.
+        must_match.append(self.ci["jobs"]["coverage-lws"]["name"])
         for real in must_match:
             self.assertRegex(
                 real, self._DEMOTED_LEG_RE,
@@ -1429,7 +1513,7 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
         # The regex literal must still be the one the workflow actually runs.
         body = "\n".join(str(s.get("run", ""))
                          for s in self.ci["jobs"]["coverage-demoted-filer"]["steps"])
-        self.assertIn("^coverage (ratchet \\\\(shard |engine )", body,
+        self.assertIn("^coverage (ratchet \\\\(shard |engine |lws )", body,
                       "the workflow's --jq regex must match the one pinned here")
 
 

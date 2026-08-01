@@ -3655,6 +3655,187 @@ jobs:
           name: coverage-summary-engine
           path: target/coverage/coverage-summary.json
 
+  # ============================================================================
+  # [OPUS-5] #5139 (follow-up to sq-gg0qq.11 / #2741): sparq-lws-core DEDICATED
+  # COVERAGE LANE.
+  #
+  # WHY A DEDICATED LANE AND NOT A SHARD. The `coverage-measure` matrix above runs on
+  # essentially every Rust PR (it skips only when the affected closure is provably
+  # EMPTY), and sparq-lws-core sits in the reverse-dep closure of sparq-core /
+  # sparq-engine — so it lands in the enforced changed CONE, and would therefore be
+  # MEASURED, on most Rust PRs. The matrix's wall-clock is the MAX over its shards, so
+  # appending this crate (large; 37 integration-test files under
+  # crates/sparq-lws-core/tests/, plus its inline units — 1014 #[test]s counted by the
+  # presence gate) to a shard would lengthen that shard and raise the coverage floor
+  # cost of PRs that never touch it — against
+  # the "keep untouched-PR cost flat / watch CI congestion" constraint carried over
+  # from #2741. This lane runs CONCURRENTLY with the shards instead, so it adds nothing
+  # to the critical path unless it is itself the pole, and it does not run at all on a
+  # selected-mode PR that leaves the crate unaffected. scripts/coverage.sh records the
+  # crate in DEDICATED_PIPELINE_CRATES so `--check-shards` still proves the
+  # SHARD_GROUPS ∪ DEDICATED == PER_COMMIT_CRATES partition (measured in exactly one
+  # place, never silently un-measured).
+  #
+  # WHAT THIS LANE DOES *NOT* DO YET — stated plainly, because the job name would
+  # otherwise over-claim. sparq-lws-core has NO entry in bench/coverage-floor.json, and
+  # coverage-gate.py iterates the FLOOR file, so the `--check-robust` step below
+  # enforces NOTHING for this crate today. Seeding a floor requires a real
+  # `cargo llvm-cov` number and no routed environment has had a usable toolchain (that
+  # is exactly why #2741 could not close this, and committing an unmeasured floor is
+  # what the `seed_pending` machinery, sq-iwf3c, exists to prevent). So this lane wires
+  # the MEASUREMENT; the floor is seeded from its first real run — the "Report the floor
+  # this measurement would seed" step below prints the exact value and the summary
+  # artifact carries the JSON to feed `coverage-gate.py --seed`. Same
+  # measure-then-seed-then-gate bootstrap the coverage ratchet itself used and that
+  # bench/mutants-baseline.json is still using. Until the floor lands, the crate stays
+  # guarded by the test-PRESENCE gate (bench/coverage-presence.json, floor 1000 tests),
+  # which `coverage-floors` runs on every PR AND on merge_group.
+  #
+  # The job NAME carries no workspace-member token (`lws`, not `sparq-lws-core`) so
+  # scripts/ci_selection_alarm.py's delimited-token matcher cannot mis-implicate the
+  # crate for a coverage failure that is not a selection bug — same reason the
+  # coverage-engine-* names are generic. It carries no `advisory`/`informational` word
+  # and is NOT declared in .github/advisory-registry.json, so it GATES.
+  # ============================================================================
+  coverage-lws:
+    name: coverage lws measure (dedicated lane)
+    needs: [changes, coverage-floors, select]
+    # Same EVENT envelope as coverage-measure (schedule/merge_group/draft demotions —
+    # see that job's `if:` for the full rationale), with the SELECTION axis narrowed
+    # from "affected is non-empty" to "affected names THIS crate". Fail-closed exactly
+    # like every other crate-gated lane in this file: `mode != 'selected'` (full /
+    # shadow / unresolvable selection, which includes push-to-main and every internal
+    # selector error) => RUN. So the post-merge enforcement point the sq-6vshe.17
+    # demotion depends on is preserved: this lane still measures on push-to-main.
+    if: >-
+      github.event_name != 'schedule' &&
+      github.event_name != 'merge_group' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-lws-core"'))
+    runs-on: ubuntu-latest
+    # [SONNET-4.6] sq-6vshe.11: re-deliver the lld link flag past cargo-llvm-cov's
+    # RUSTFLAGS (see coverage-measure above). VALUE MUST STAY IDENTICAL across every
+    # cargo-llvm-cov job; enforced by scripts/check-coverage-rustflags.py.
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Free runner disk before build + instrumented test
+        run: ./scripts/ci-free-disk.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools-preview
+      # [OPUS-5] REQUIRED once the root `rust-toolchain.toml` pin exists — the action
+      # above adds the component to the toolchain IT manages (`stable`), which the
+      # toolchain file outranks. Same step every other coverage job carries.
+      - name: Ensure llvm-tools-preview on the pinned toolchain
+        run: rustup component add llvm-tools-preview
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Own key. The shards' entry is a STRICT SUBSET of what this lane compiles:
+          # sparq-lws-core pulls in the whole axum / hyper / tower / rustls / axum-server
+          # server stack (and the pinned solid-oidc-verifier git dep) on TOP of the
+          # sparq-core/sparq-engine closure the shards already build. rust-cache skips
+          # saving on an exact key hit, so sharing `coverage-measure`'s entry would mean
+          # whichever job saved first wins it and the other restores partially — the
+          # same HONEST RESIDUAL documented on that job's cache step, but here it is
+          # avoidable for one cache slot.
+          shared-key: coverage-lws
+          # [OPUS-5] sq-h2gz6 / [SONNET-4.6] sq-aemq7 — CACHE-SAVE DISCIPLINE: restore
+          # always, save on push-to-main only. Canonical note on `build-archive`'s cache
+          # step; pinned by scripts/tests/test_mergequeue_cache_posture.py.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-llvm-cov
+        # [OPUS-4.8] sq-tool-pin: an explicit `with: tool:` is MANDATORY under a SHA pin —
+        # the pin drops install-action's `@<tool>` ref, so without it nothing is installed
+        # and `cargo llvm-cov` ENOENTs.
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
+      - name: Measure sparq-lws-core + enforce every committed floor (max-remeasure gate)
+        # COVERAGE_CRATES is coverage.sh's explicit-subset input and takes precedence over
+        # both COVERAGE_SHARD and the changed-cone filter, so this lane measures exactly
+        # one crate and nothing else. `--check-robust` is the SAME gate the shards run: it
+        # re-measures only sub-floor crates (K=3, keeping the per-crate MAX, because
+        # llvm-cov only ever UNDERCOUNTS) and fails only on a reproducible breach. It is
+        # invoked here rather than skipped so that the day sparq-lws-core's floor is seeded
+        # this lane gates it with no further wiring — and so a floor crate that ever leaks
+        # into this subset is still checked. TODAY it enforces nothing for sparq-lws-core:
+        # the crate has no floor entry, and the gate iterates the floor file. The other 40
+        # floor crates are correctly reported MISSING (not measured in this subset — each is
+        # gated by the shard or pipeline that DOES measure it), which is non-fatal without
+        # --require-all, exactly as it is for every shard.
+        #
+        # COVERAGE_FETCH_FIXTURES=0: the W3C SPARQL / inference / SHACL fixture fetches
+        # coverage.sh performs by default exist for the crates whose tests SKIP without
+        # them. None of sparq-lws-core's 37 integration-test files reference those suites
+        # (its only in-crate fixtures are the TLS PEMs under
+        # crates/sparq-lws-core/tests/fixtures/), so the fetches would be pure lane cost
+        # with no effect on the measured number.
+        env:
+          COVERAGE_CRATES: sparq-lws-core
+          COVERAGE_FETCH_FIXTURES: "0"
+        run: |
+          set -o pipefail
+          ./scripts/coverage.sh
+          python3 scripts/coverage-gate.py --check-robust target/coverage/coverage-summary.json
+      - name: Report the floor this measurement would seed (issue 5139)
+        # The one step that makes the un-seeded state self-closing instead of a TODO: it
+        # prints the exact `floor(measured) - margin_points` value to write into
+        # bench/coverage-floor.json, reading the margin FROM that file so the two can never
+        # drift. Reporting only: the trailing `|| true` is what makes "never fails the
+        # lane" true — coverage-gate.py above is the sole gate here. Once the floor is
+        # committed it says so and asks to be deleted, so it cannot rot into a stale
+        # instruction.
+        if: always() && hashFiles('target/coverage/coverage-summary.json') != ''
+        run: |
+          python3 - target/coverage/coverage-summary.json bench/coverage-floor.json <<'PY' | tee -a "$GITHUB_STEP_SUMMARY" || true
+          import json, math, sys
+          summary = json.load(open(sys.argv[1]))
+          floors = json.load(open(sys.argv[2]))
+          crate = "sparq-lws-core"
+          row = (summary.get("crates") or {}).get(crate)
+          entry = floors["crates"].get(crate)
+          if entry is not None:
+              committed = entry["floor"] if isinstance(entry, dict) else entry
+              print(f"### coverage: `{crate}` now has a committed floor "
+                    f"({committed}) — #5139 is closed and this reporting step is "
+                    f"obsolete. Delete it from .github/workflows/ci.yml.")
+          elif not (row and row.get("measured")):
+              print(f"### coverage: `{crate}` was NOT measured in this run "
+                    f"(the measure step errored) — no seed value to report.")
+          else:
+              margin = floors["margin_points"]
+              val = row["lines_pct"]
+              seed = max(0, math.floor(val) - margin)
+              print(f"### coverage: `{crate}` measured **{val:.2f}%** "
+                    f"({row['lines_covered']}/{row['lines_total']} lines)")
+              print()
+              print(f"NO line-% floor is committed for this crate yet (#5139), so this "
+                    f"lane currently enforces nothing for it — the test-PRESENCE gate is "
+                    f"what guards it. To close that: download the "
+                    f"`coverage-summary-lws` artifact from this run and commit")
+              print()
+              print(f"    bench/coverage-floor.json -> crates.{crate}.floor = {seed}"
+                    f"   # floor({val:.2f}) - {margin}")
+              print()
+              print(f"Edit that ONE entry by hand — do NOT run "
+                    f"`coverage-gate.py --seed` on this lane's summary: --seed rebuilds "
+                    f"the floor file from the crates the summary contains, and this one "
+                    f"contains only `{crate}`, so it would DROP the other floors (the "
+                    f"--check-monotonic gate would then red the PR). The value above is "
+                    f"exactly what --seed would compute. Once it lands this lane GATES "
+                    f"the crate with no further wiring.")
+          PY
+      - name: Upload sparq-lws-core coverage summary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-summary-lws
+          path: target/coverage/coverage-summary.json
+
   coverage:
     # [OPUS-4.8] sq-p0hcd: single AGGREGATED pass/fail for the sharded coverage gate,
     # keeping the EXACT original required-check NAME so any tooling / branch-protection
@@ -3672,7 +3853,10 @@ jobs:
     # skipped, so this aggregate is skipped too (reporting `skipped`, which the
     # gate treats as satisfied under a green selection) rather than emitting a
     # vacuous green `coverage` success over zero measurements.
-    needs: [coverage-floors, coverage-measure, coverage-engine-run, coverage-engine-merge]
+    # [OPUS-5] #5139: the sparq-lws-core dedicated lane folds in here too, so the
+    # ci-summary `gate` still sees ONE coverage verdict. It SKIPS on a selected-mode PR
+    # that leaves the crate unaffected, and `skipped` counts as satisfied below.
+    needs: [coverage-floors, coverage-measure, coverage-engine-run, coverage-engine-merge, coverage-lws]
     # [FABLE-5] label-trigger guard: always() bypasses the skipped-needs propagation,
     # so this verdict job must carry the guard explicitly or it would still run (as a
     # trivially-green no-op) on every non-`ci-full` label flip. Skipped is equally
@@ -3698,10 +3882,12 @@ jobs:
           measure='${{ needs.coverage-measure.result }}'
           eng_run='${{ needs.coverage-engine-run.result }}'
           eng_merge='${{ needs.coverage-engine-merge.result }}'
+          lws='${{ needs.coverage-lws.result }}'
           echo "coverage-floors=$floors  coverage-measure(matrix)=$measure"
           echo "engine-split: run=$eng_run merge=$eng_merge"
+          echo "lws dedicated lane: $lws"
           rc=0
-          for r in "$floors" "$measure" "$eng_run" "$eng_merge"; do
+          for r in "$floors" "$measure" "$eng_run" "$eng_merge" "$lws"; do
             case "$r" in
               success|skipped) ;;
               *) echo "::error::coverage gate FAILED — a needed job concluded '$r'"; rc=1 ;;
@@ -3772,14 +3958,15 @@ jobs:
         run: |
           set -euo pipefail
           # List THIS workflow-run's jobs and find a FAILED leg whose measurement is the
-          # part demoted off merge_group. The regex matches EXACTLY the three demoted job
+          # part demoted off merge_group. The regex matches EXACTLY the four demoted job
           # names — "coverage ratchet (shard N/3)", "coverage engine run (partition N/3)",
-          # "coverage engine merge + ratchet (per-crate)" — and NOT the still-queued
+          # "coverage engine merge + ratchet (per-crate)" and [OPUS-5] #5139
+          # "coverage lws measure (dedicated lane)" — and NOT the still-queued
           # "coverage floors (…)", the "coverage ratchet + test-presence gate (per-crate)"
           # aggregate, or the nightly "coverage (nightly, …)" tier. Pinned by
           # scripts/tests/test_ci_select_wiring.py against the live job names.
           failed="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
-            --jq '.jobs[] | select(.conclusion == "failure") | select(.name | test("^coverage (ratchet \\(shard |engine )")) | .name' \
+            --jq '.jobs[] | select(.conclusion == "failure") | select(.name | test("^coverage (ratchet \\(shard |engine |lws )")) | .name' \
             | head -n1 || true)"
           if [ -z "$failed" ]; then
             echo "No DEMOTED coverage measure leg failed in this run (a coverage-floors red is a normal red main build) — nothing to file."
