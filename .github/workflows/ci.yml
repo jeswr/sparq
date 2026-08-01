@@ -4137,7 +4137,43 @@ jobs:
             timeout_minutes: 360
           - crate: sparq-vectors
             timeout_minutes: 360
+          # [SONNET-4.6] sq-qcnn.41: sparq-server QUIRK — measure it FEATURE-ON, so the ceiling
+          # it is about to be seeded with is honest. cargo-mutants generates mutants from the
+          # SOURCE (it walks `mod` items regardless of the `#[cfg]` on them), but a
+          # default-feature build never COMPILES the gated modules, so every mutant inside one
+          # is trivially "missed" — non-compiled code, NOT a test gap. Same class as the
+          # sparq-canon / sparq-prov quirks above, and the same artifact that forced this
+          # baseline to re-measure sparq-fedplan (committed 0-caught/534-survived) and
+          # sparq-fedclient (0/553). It matters MORE here than for either of those: ceilings
+          # only ever FALL (`--seed` will not raise one without `--allow-higher` + review), so
+          # an inflated FIRST seed is sticky — hence this lands BEFORE the crate is baselined.
+          # SCALE (structural counts from the tree, reproduce with grep + wc): the
+          # `#[cfg(feature = …)] mod` items the DEFAULT build leaves out are solid_authz 2647,
+          # tpf 1333, descriptors 1145, access_audit 614, streams 592, n3_patch 497,
+          # templates 373, audit 294 = 7495 of 25702 src lines (~29%), and src/http.rs carries
+          # a further 301 `cfg(feature = …)` sites naming a default-OFF feature.
+          # THE SET = the LEG-PROVEN subset: every feature named below already has a
+          # `test: true` leg in .github/feature-matrix.d/sparq-server.yml, so its suite is
+          # known-green on this runner image. That matters because cargo-mutants runs an
+          # UNMUTATED baseline first and aborts the whole sweep if it fails — a feature set
+          # nobody has ever executed could cost the crate its run.
+          # DELIBERATELY OUT, each with a reason. The ceiling therefore still carries
+          # trivially-surviving mutants from these, and must be re-tightened as they gain legs:
+          #   • shacl / backup / n3-patch — NO CI executor runs their suites (shacl + backup
+          #     are explicit entries in scripts/check-feature-test-execution.allowlist.json).
+          #     They COMPILE (the gating workspace `--all-features` clippy proves that much),
+          #     but "compiles" is not "passes", and this lane cannot risk the baseline run.
+          #   • http2 / http3 — transport plumbing (TLS / a second UDP listener) with few
+          #     mutable lines, whose socket + TLS test cost every mutant would then pay.
+          #   • zlib-ng — a flate2 backend swap; no leg, and no sparq-server code of its own.
+          #   • test-seams — a TEST seam, not product surface.
+          # COST, stated plainly: a feature-ON sweep compiles and runs strictly more per mutant
+          # than today's feature-OFF one, and this crate has no seedable run on record (the last
+          # one noted above was killed by runner shutdown). No timing is guessed here — RE-TUNE
+          # this entry from the first run that completes (raise timeout_minutes, or move it to the
+          # SUB-SHARDS idiom below), using that run's own timings as the evidence of record.
           - crate: sparq-server
+            features: audit-log,access-audit,change-stream,federation-descriptors,solid-authz,odrl-authz,solid-authz-trust,templates,tpf,brtpf,query-registry,facets,complete,service,time-travel,geo,terse,response-compression
             timeout_minutes: 360
           - crate: sparq-mpc
             timeout_minutes: 360
@@ -4311,10 +4347,12 @@ jobs:
       - name: Run cargo-mutants for this crate + ratchet against the baseline
         # [OPUS-4.8] sq-qcnn.11: measure exactly THIS shard's crate (--package). The static
         # exclusions (presence-gated / non-host crates) live in .cargo/mutants.toml.
-        # matrix.features carries the whole-surface features for the two DEFAULT-OFF crates
-        # (sparq-core mmap,dict-spill / sparq-substrate numeric,join,compare,rows) — passed via
-        # env (not inline ${{ }}) to keep it out of the shell-injection surface. A per-crate
-        # failure is tolerated (continue-on-error) while seeding — the gate verdict is --check.
+        # matrix.features carries the per-crate whole-surface feature set for every crate whose
+        # measured surface is DEFAULT-OFF (sparq-core, sparq-substrate, sparq-sim, sparq-canon,
+        # sparq-prov, sparq-fedplan, sparq-fedclient, sparq-server — see the QUIRK comments on
+        # each include entry) — passed via env (not inline ${{ }}) to keep it out of the
+        # shell-injection surface. A per-crate failure is tolerated (continue-on-error) while
+        # seeding — the gate verdict is --check.
         # [SONNET-4.6] sq-qcnn.28: continue-on-error:true at STEP level (in addition to job
         # level) so that a runner shutdown mid-cargo-mutants does not mark the job as failure:
         # the artifact upload (if: always()) still runs, and the job exits success even when the
