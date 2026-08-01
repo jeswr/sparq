@@ -405,6 +405,69 @@ class TestM4CadenceFidelity(unittest.TestCase):
         self.assertEqual(f, [])
         self.assertEqual(c.get("sample-truncated"), 1)
 
+    def test_coverage_is_judged_per_WINDOW_not_once_against_M1s(self):
+        """A full 100-run page reaching back ~6.9h COVERS a 6h window and does NOT cover
+        M4's 24h one. Deciding truncation once at fetch time against `--window-hours`
+        therefore leaks M1's window into M4: at `--window-hours 6` this sample would be
+        called complete and M4 would divide by a 24h declaration over a ~7h count."""
+        lane = _lane(fires=0, crons=self.HOURLY)
+        newest = NOW - dt.timedelta(minutes=alarm.CRON_GRACE_MINUTES + 1)
+        lane["schedule_run_times"] = [newest - dt.timedelta(minutes=4 * i)
+                                      for i in range(100)]
+        self.assertTrue(alarm.sample_truncated(lane, NOW - dt.timedelta(hours=24)))
+        self.assertFalse(alarm.sample_truncated(lane, NOW - dt.timedelta(hours=6)))
+        f, c = alarm.find_cadence_fidelity_gaps([lane], NOW)
+        self.assertEqual(f, [])
+        self.assertEqual(c.get("sample-truncated"), 1)
+
+    def test_a_page_that_came_back_SHORT_is_complete_not_truncated(self):
+        """ANTI-VACUITY for the guard above: `sample_truncated` must key on the page being
+        FULL, not merely on the oldest run being young, or every quiet lane would mute
+        itself and M4 could never raise at all."""
+        lane = _lane(fires=3, crons=self.HOURLY)
+        self.assertFalse(alarm.sample_truncated(lane, NOW - dt.timedelta(hours=24)))
+
+    def test_THE_CALL_PATH_M4_keeps_its_24h_window_when_M1s_is_overridden(self):
+        """`--window-hours` is M1's. M4's floor and admission ceiling are validated
+        against a 24h census only, and the header states plainly that a six-hour
+        degradation must stay invisible to M4 — so handing M4 the CLI window would let
+        `--window-hours 6` manufacture a chronic declaration finding out of exactly the
+        sub-day burstiness M4 is documented not to see.
+
+        The fixture separates the two windows: an hourly lane that delivered 10 firings,
+        all of them between 7h and 23h ago. Over 24h that is 10/23 = 0.43, above the
+        floor. Over 6h it is 0 of a declared 5, far below it.
+        """
+        lane = _lane(fires=0, crons=self.HOURLY)
+        lane["schedule_run_times"] = [NOW - dt.timedelta(hours=h) for h in range(7, 17)]
+
+        m4_at_24h, _ = alarm.find_cadence_fidelity_gaps([lane], NOW)
+        m4_at_6h, _ = alarm.find_cadence_fidelity_gaps([lane], NOW, 6)
+        self.assertEqual(m4_at_24h, [], "10 of a declared 23 is above the floor")
+        self.assertEqual(len(m4_at_6h), 1,
+                         "fixture is vacuous unless the two windows disagree")
+
+        run = TestCensusAndExitCodes._run
+        import contextlib
+        import io
+        # Assertions key on CENSUS STATES, never on the mode names: every mode name is
+        # printed on every run as a census heading, so a containment check on one of those
+        # is true whether the detector fired or not.
+        for extra, expect_m1 in ((), False), (("--window-hours", "6"), True):
+            with self.subTest(window=extra or "default"):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = run(lanes=[lane], live=[], extra=extra)
+                out = buf.getvalue()
+                # M1 DOES honour the override — without this the M4 assertion below would
+                # pass on a build that ignored `--window-hours` everywhere.
+                self.assertEqual("firing-deficit: 1" in out, expect_m1)
+                self.assertEqual(rc, 1 if expect_m1 else 0)
+                # M4 reached `declaration-honoured`, which is only true on its own 24h
+                # window; on a 6h one this same lane is `declaration-unachievable`.
+                self.assertIn("declaration-honoured: 1", out)
+                self.assertNotIn("declaration-unachievable", out)
+
     def test_a_lane_younger_than_the_window_is_skipped_and_counted(self):
         f, c = alarm.find_cadence_fidelity_gaps([_lane(fires=0, created_hours_ago=2)], NOW)
         self.assertEqual(f, [])
@@ -728,7 +791,7 @@ class TestCensusAndExitCodes(unittest.TestCase):
             self.assertIn(expect, buf.getvalue())
 
     @staticmethod
-    def _run(lanes, live, baselines=None):
+    def _run(lanes, live, baselines=None, extra=()):
         state = {
             "repo": "o/r",
             "lanes": [dict(x, schedule_run_times=[t.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -741,7 +804,7 @@ class TestCensusAndExitCodes(unittest.TestCase):
             json.dump(state, fh)
             path = fh.name
         return alarm.main(["--state-file", path, "--now", "2026-07-28T12:00:00Z",
-                           "--dry-run"])
+                           "--dry-run", *extra])
 
 
 class TestIssueBody(unittest.TestCase):

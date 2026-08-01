@@ -264,10 +264,15 @@ CRON_MIN_EXPECTED = 1
 CRON_DELIVERY_FLOOR = 0.60
 
 # --- M4: declared-vs-achieved cadence fidelity (#4802) -----------------------------
-# WINDOW: the same 24h as M1, and reusing the same fetched run times. 24h is "several
-# times the period" by a wide margin for every lane M4 admits (the shortest-period lane it
-# can admit declares 13 fires/day), so a single busy hour cannot move it: one lost hour of
-# a `*/10` lane costs 6 of 142 declared fires, 4%.
+# WINDOW: 24h, reusing the same fetched run times as M1. 24h is "several times the period"
+# by a wide margin for every lane M4 admits (the shortest-period lane it can admit declares
+# 13 fires/day), so a single busy hour cannot move it: one lost hour of a `*/10` lane costs
+# 6 of 142 declared fires, 4%.
+# FIXED, and deliberately NOT `--window-hours`. The floor and the admission ceiling below
+# are validated against a 24h census and nothing else; at `--window-hours 6` the same 0.40
+# floor would be judging six-hour delivery, which is exactly the sub-day burstiness the
+# header says M4 must NOT try to see. `run()` therefore does not thread the M1 CLI window
+# into M4 — see the call site.
 M4_WINDOW_HOURS = CRON_WINDOW_HOURS
 # ADMISSION. A lane is only asked the fidelity question if its DECLARED rate exceeds what
 # this repo has been measured to deliver at all — i.e. nominal > the M1 cap of 12/24h.
@@ -526,6 +531,27 @@ def m1_scope(on: dict) -> tuple[bool, list[str], bool]:
 # ---------------------------------------------------------------------------------
 # detectors — pure functions over already-fetched state
 # ---------------------------------------------------------------------------------
+def sample_truncated(lane: dict, start: dt.datetime) -> bool:
+    """Does this lane's newest-100 run sample fail to reach back to `start`?
+
+    COVERAGE IS WINDOW-RELATIVE, so it cannot be decided once at fetch time and then
+    shared: M1 runs on `--window-hours` and M4 on its own fixed `M4_WINDOW_HOURS`, and a
+    sample that reaches back over one need not reach back over the other. Deciding it once
+    against M1's window let `--window-hours 6` call M4's 24h sample complete when it was
+    not — an UNDERCOUNT, which on M4's ratio manufactures a fiction out of a healthy lane —
+    and, in the other direction, let a window LONGER than 24h mute M4 on a sample that
+    covers M4's window perfectly well. Each detector asks about its own window instead.
+
+    An explicit `truncated` flag on the lane still wins, so a hermetic `--state-file`
+    fixture can express the condition without carrying 100 timestamps.
+    """
+    if lane.get("truncated"):
+        return True
+    times = lane.get("schedule_run_times") or []
+    # A page that came back SHORT is the lane's whole history: complete, however old it is.
+    return len(times) >= 100 and min(times) > start
+
+
 def find_cron_deficits(lanes: list[dict], now: dt.datetime,
                        window_hours: float = CRON_WINDOW_HOURS) -> tuple[list[dict], dict]:
     """M1. `lanes` = [{workflow, crons, cron_only, in_scope, state, schedule_run_times}].
@@ -641,10 +667,11 @@ def find_cadence_fidelity_gaps(lanes: list[dict], now: dt.datetime,
         if lane.get("state") != "active":
             bump("disabled")
             continue
-        # The run sample is the newest 100. If it does not reach back to the window start
-        # the count is an UNDERCOUNT, which on this ratio manufactures a fictional lane out
-        # of a healthy one. Fail-safe quiet, and counted so the skip is visible.
-        if lane.get("truncated"):
+        # The run sample is the newest 100. If it does not reach back to THIS detector's
+        # window start the count is an UNDERCOUNT, which on this ratio manufactures a
+        # fictional lane out of a healthy one. Fail-safe quiet, and counted so the skip is
+        # visible. Evaluated against M4's own `start`, never M1's — see `sample_truncated`.
+        if sample_truncated(lane, start):
             bump("sample-truncated")
             continue
         created = lane.get("created_at")
@@ -867,13 +894,15 @@ def fetch_lanes(repo: str, workflows_dir: Path, window_hours: float,
                 raise AlarmError(f"{path.name}: schedule-run response carries no workflow_runs")
             times = [_ts(r["created_at"]) for r in payload["workflow_runs"]
                      if r.get("created_at")]
+            lane["schedule_run_times"] = times
             # COVERAGE GUARD: the sample is the newest 100 runs. If the OLDEST sampled run
             # is newer than the window start, the count is TRUNCATED and would manufacture
             # a phantom deficit. Treat as indeterminate (fail-safe quiet), never as 0.
-            if times and min(times) > start and len(times) >= 100:
+            # Decided here for M1 ONLY, because `in_scope` is M1's admission and `start`
+            # is M1's `--window-hours`. M4 re-asks `sample_truncated` against its own 24h
+            # window; no truncation flag is written here, or M1's window would decide M4's.
+            if sample_truncated(lane, start):
                 lane["in_scope"] = False
-                lane["truncated"] = True
-            lane["schedule_run_times"] = times
         lanes.append(lane)
     return lanes
 
@@ -1005,7 +1034,11 @@ def run(args: argparse.Namespace) -> int:
 
     m1, c1 = find_cron_deficits(lanes, now, args.window_hours)
     m3, c3 = find_execution_overruns(live, baselines, now)
-    m4, c4 = find_cadence_fidelity_gaps(lanes, now, args.window_hours)
+    # M4 runs on M4_WINDOW_HOURS, NOT on `--window-hours`. Its floor and its admission
+    # ceiling are validated against a 24h census only; handing it a sub-day window would
+    # make it judge the exact short-scale burstiness the header says it must not see, and
+    # a longer one would leave it reading a floor no measurement supports.
+    m4, c4 = find_cadence_fidelity_gaps(lanes, now)
     # INCIDENT vs CHRONIC. Only the incident modes set the exit code; M4 is true on a good
     # day and would leave this hourly lane permanently red, muting M1 and M3 with it. See
     # the M4 section of the header.
