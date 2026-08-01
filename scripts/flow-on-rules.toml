@@ -35,8 +35,12 @@
 #   unless_paths      = ["glob", ...]  # SUPPRESSION: if ANY changed file matches, the rule
 #                                      #   does NOT fire (the PR already did the follow-on work).
 #                                      #   A glob may use `{crate}`, which resolves to the crate
-#                                      #   being evaluated → suppression PER CRATE rather than
-#                                      #   PR-global (see when_new_crate_public below)
+#                                      #   being evaluated. On a per-crate rule
+#                                      #   (when_new_crate_public) a matched file suppresses ONLY
+#                                      #   the crate it is ATTRIBUTABLE to — its path, or its
+#                                      #   content in the merged checkout, names that crate — so a
+#                                      #   shared artifact cannot silently cover a crate the diff
+#                                      #   never mentioned (see when_new_crate_public below)
 #   when_new_crate_public = true       # refine a new-crate rule to PUBLIC crates only —
 #                                      #   a `publish = false` stub is exempt (same as gate G1).
 #                                      #   The rule is evaluated ONCE PER added public crate, so
@@ -116,11 +120,15 @@
 # Each rule is separate so one satisfied artifact suppresses only its own follow-on.
 #
 # A PR adding SEVERAL public crates mints a full set for EACH (flow-on.py evaluates
-# these rules once per added public crate). Their `unless_paths` deliberately carry
-# no `{crate}`: both artifacts live in SHARED files (`site/src/data/surfaces.ts`,
-# `book/src/SUMMARY.md`), so a diff touching them cannot say WHICH of two new crates
-# it covers — suppression there is PR-wide by construction, and the honest fallback
-# is to close the surviving issue by hand if the work was in fact already done.
+# these rules once per added public crate). Both artifacts live in SHARED files
+# (`site/src/data/surfaces.ts`, `book/src/**`) that a diff touches once however many
+# crates it adds, so a bare path match cannot say WHICH crate was covered. Suppression
+# is therefore ATTRIBUTED per crate (flow-on.py `artifact_covers_crate`): the matched
+# artifact must NAME the crate — in its path, or in its content in the merged checkout
+# (a site `Surface` record links `crates/<crate>/README.md`; a guide page `{{#include}}`s
+# the same README / SKILL anchors). A crate the artifact never mentions keeps its
+# follow-on, so an issue that can be closed with "already done" is the worst case
+# rather than a silently dropped one.
 
 [[rule]]
 id = "new-crate-site-advert"

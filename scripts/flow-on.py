@@ -47,6 +47,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RULES = REPO_ROOT / "scripts" / "flow-on-rules.toml"
 BENCH_REGISTRY = REPO_ROOT / "bench" / "benchmarks.toml"
 
+# [OPUS-5] (#2547) Root the `unless_paths` coverage probe reads a changed shared
+# artifact from. In CI the flow-on workflow runs on the MERGED checkout, so this
+# is the post-merge content of the file the PR touched. Overridable so tests can
+# supply a fixture checkout without depending on the live site/book content.
+CHECKOUT_ROOT = REPO_ROOT
+
 # Labels every flow-on issue carries (in addition to a rule's own labels and the
 # routing labels computed by routing_labels() below).
 BASE_LABELS = ["flow-on", "auto"]
@@ -136,10 +142,12 @@ class Rule:
     # not mis-fire the "new top-level circuit" follow-on. Only filters the
     # `when_new_paths` check; other predicates are unaffected.
     exclude_new_paths: list[str] = field(default_factory=list)
-    # [OPUS-5] (#2547) SUPPRESSION: if ANY changed path matches one of these
-    # globs the rule does NOT fire — the PR already did the follow-on work in the
-    # same diff, so minting an issue would be noise. This is the declarative form
-    # of the hard-coded SKILL_PATHS suppression the docs rule uses.
+    # [OPUS-5] (#2547) SUPPRESSION: if a changed path matches one of these globs
+    # the rule does NOT fire — the PR already did the follow-on work in the same
+    # diff, so minting an issue would be noise. This is the declarative form of
+    # the hard-coded SKILL_PATHS suppression the docs rule uses. On a per-crate
+    # rule the matched path must ALSO be attributable to the crate under
+    # evaluation (see artifact_covers_crate, called from rule_matches).
     unless_paths: list[str] = field(default_factory=list)
     # [OPUS-5] (#2547) When true the rule fires only if the PR ADDS a crate
     # manifest for a PUBLIC crate (no `publish = false`). An internal stub — 47 of
@@ -313,6 +321,43 @@ def _any_glob_match(globs: list[str], paths: list[str]) -> bool:
     return False
 
 
+# [OPUS-5] (#2547) Crate-name token match: the name must not be a fragment of a
+# longer name, or `sparq-core` would claim coverage from a `sparq-core-ng` entry.
+# `\b` is not enough — a hyphen is a non-word character, so `\bsparq-core\b`
+# matches inside `sparq-core-ng`.
+def _mentions_crate(text: str, crate: str) -> bool:
+    return (
+        re.search(rf"(?<![A-Za-z0-9_-]){re.escape(crate)}(?![A-Za-z0-9_-])", text)
+        is not None
+    )
+
+
+def artifact_covers_crate(path: str, crate: str) -> bool:
+    """True iff the changed artifact at `path` is demonstrably ABOUT `crate`.
+
+    [OPUS-5] (#2547) Suppression must be ATTRIBUTABLE. A shared artifact file —
+    `site/src/data/surfaces.ts`, `book/src/**` — is touched once no matter how
+    many new crates a PR adds, so "the file changed" cannot mean "every new
+    crate is covered": a PR adding crates A and B while advertising only A used
+    to silently drop B's follow-on. Coverage is established when either
+
+      * the PATH names the crate (an `unless_paths` glob carrying `{crate}`), or
+      * the artifact's CONTENT in the merged checkout names the crate — a site
+        `Surface` record links `crates/<crate>/README.md`, and a guide page is a
+        `{{#include}}` wrapper over the same README / SKILL anchors.
+
+    Anything else (file unreadable, crate unmentioned) is NOT coverage, and the
+    caller keeps that crate's follow-on. Minting an issue that can be closed with
+    a one-line "already done" beats silently losing the work."""
+    if _mentions_crate(path, crate):
+        return True
+    try:
+        text = (CHECKOUT_ROOT / path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return _mentions_crate(text, crate)
+
+
 def _bench_suite_needs_dashboard_follow_on(suite: str) -> bool:
     """Return whether a registered suite lacks an unfeatured disposition."""
     try:
@@ -365,16 +410,23 @@ def rule_matches(
             return False
     # [OPUS-5] (#2547) Declarative suppression: the same PR already did the work.
     # A glob may carry `{crate}`, which resolves to the crate this evaluation is
-    # for — so a rule whose artifact path names the crate suppresses PER CRATE.
-    # A placeholder-free glob stays PR-global, which is the honest reading for a
-    # SHARED artifact file (`site/src/data/surfaces.ts`, `book/src/SUMMARY.md`):
-    # the path cannot say WHICH of two new crates it covers.
+    # for. When the rule is evaluated PER CRATE, a matched path only suppresses
+    # that crate's follow-on if it is ATTRIBUTABLE to it (artifact_covers_crate):
+    # the shared artifact files (`site/src/data/surfaces.ts`, `book/src/**`) are
+    # touched once however many crates a PR adds, so a bare glob match would drop
+    # the follow-ons of every crate the diff did NOT actually cover. Rules
+    # evaluated once for the whole PR (crate is None) keep the plain any-match
+    # reading — there is no crate to attribute to.
     if rule.unless_paths:
         globs = rule.unless_paths
-        if crate is not None:
+        if crate is None:
+            if _any_glob_match(globs, changed):
+                return False
+        else:
             globs = [expand(g, {"crate": crate}) for g in globs]
-        if _any_glob_match(globs, changed):
-            return False
+            matched = [p for p in changed if _any_glob_match(globs, [p])]
+            if any(artifact_covers_crate(p, crate) for p in matched):
+                return False
     # [OPUS-5] (#2547) Public-crate refinement for the new-crate rules: an internal
     # `publish = false` stub gets no website / guide / test-method follow-on, the
     # same escape hatch G1 gives it for bench + SKILL.

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import io
 import os
@@ -38,6 +39,30 @@ def _load_module():
 
 
 flow_on = _load_module()
+
+
+@contextlib.contextmanager
+def checkout_with(files: dict[str, str] | None = None):
+    """[OPUS-5] (#2547) Run the body with flow-on reading shared artifacts from a
+    fixture checkout instead of this repo.
+
+    `unless_paths` suppression now ATTRIBUTES a shared artifact to a crate by
+    reading its content from the merged checkout. Fixturing that content keeps
+    these tests hermetic — asserting against the live `site/src/data/surfaces.ts`
+    would make them pass or fail on which crates happen to be advertised today.
+    Crate publish status is unaffected: it still reads the real manifests."""
+    original = flow_on.CHECKOUT_ROOT
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        for rel, text in (files or {}).items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        flow_on.CHECKOUT_ROOT = root
+        try:
+            yield root
+        finally:
+            flow_on.CHECKOUT_ROOT = original
 
 
 class RuleLoadingTest(unittest.TestCase):
@@ -188,7 +213,17 @@ class NewPublicCrateFollowOnTest(unittest.TestCase):
     def test_site_entry_in_the_same_pr_suppresses_only_the_site_follow_on(self):
         added = [f"crates/{self.PUBLIC_CRATE}/Cargo.toml"]
         changed = added + ["site/src/data/surfaces.ts"]
-        by_rule = self._eval(changed=changed, added=added)
+        # The site record names the crate it advertises (its README link), so the
+        # artifact is attributable to this crate and suppresses its follow-on.
+        with checkout_with(
+            {
+                "site/src/data/surfaces.ts": (
+                    '{ slug: "core", readme: '
+                    f'"https://github.com/jeswr/sparq/blob/main/crates/{self.PUBLIC_CRATE}/README.md" }}'
+                )
+            }
+        ):
+            by_rule = self._eval(changed=changed, added=added)
         self.assertNotIn("new-crate-site-advert", by_rule)
         self.assertIn("new-crate-guide-docs", by_rule)
         self.assertIn("new-crate-test-methods", by_rule)
@@ -196,10 +231,58 @@ class NewPublicCrateFollowOnTest(unittest.TestCase):
     def test_guide_page_in_the_same_pr_suppresses_only_the_guide_follow_on(self):
         added = [f"crates/{self.PUBLIC_CRATE}/Cargo.toml"]
         changed = added + ["book/src/SUMMARY.md", "book/src/getting-started/new.md"]
-        by_rule = self._eval(changed=changed, added=added)
+        with checkout_with(
+            {
+                "book/src/SUMMARY.md": "- [Core](./getting-started/new.md)",
+                "book/src/getting-started/new.md": (
+                    f"{{{{#include ../../../crates/{self.PUBLIC_CRATE}/README.md}}}}"
+                ),
+            }
+        ):
+            by_rule = self._eval(changed=changed, added=added)
         self.assertNotIn("new-crate-guide-docs", by_rule)
         self.assertIn("new-crate-site-advert", by_rule)
         self.assertIn("new-crate-test-methods", by_rule)
+
+    def test_an_artifact_that_never_names_the_crate_does_not_suppress(self):
+        # The conservative half of attribution: touching the shared site file for
+        # some OTHER reason establishes no coverage for this crate, so its
+        # follow-on survives. Silently dropping it is the failure mode that a bare
+        # "the path matched" suppression had.
+        added = [f"crates/{self.PUBLIC_CRATE}/Cargo.toml"]
+        changed = added + ["site/src/data/surfaces.ts"]
+        with checkout_with(
+            {"site/src/data/surfaces.ts": '{ slug: "sparql", title: "SPARQL" }'}
+        ):
+            by_rule = self._eval(changed=changed, added=added)
+        self.assertIn("new-crate-site-advert", by_rule)
+        self.assertEqual(
+            by_rule["new-crate-site-advert"].dedup_key,
+            f"site-advert-{self.PUBLIC_CRATE}",
+        )
+
+    def test_an_unreadable_artifact_does_not_suppress(self):
+        # Coverage must be POSITIVELY established: a file that is not in the
+        # checkout (or is unreadable) proves nothing, so the follow-on survives.
+        added = [f"crates/{self.PUBLIC_CRATE}/Cargo.toml"]
+        changed = added + ["site/src/data/surfaces.ts"]
+        with checkout_with():  # empty fixture checkout — the artifact is absent
+            by_rule = self._eval(changed=changed, added=added)
+        self.assertIn("new-crate-site-advert", by_rule)
+
+    def test_a_longer_crate_name_does_not_claim_coverage(self):
+        # Token match, not substring: an entry for `sparq-core-ng` must NOT count
+        # as coverage for `sparq-core` (a bare `in` test would say it does).
+        self.assertFalse(
+            flow_on._mentions_crate(
+                f"crates/{self.PUBLIC_CRATE}-ng/README.md", self.PUBLIC_CRATE
+            )
+        )
+        self.assertTrue(
+            flow_on._mentions_crate(
+                f"crates/{self.PUBLIC_CRATE}/README.md", self.PUBLIC_CRATE
+            )
+        )
 
     def test_modifying_an_existing_crate_mints_nothing(self):
         # The manifest must be ADDED: an edit to an existing crate is not a new
@@ -301,14 +384,26 @@ class MultipleNewPublicCratesTest(unittest.TestCase):
         for fo in fos:
             self.assertIn(self.PUBLIC_CRATE, fo.dedup_key)
 
-    def test_a_shared_artifact_suppresses_that_rule_for_the_whole_pr(self):
-        # `site/src/data/surfaces.ts` and `book/src/**` are SHARED files: a diff
-        # touching them cannot say WHICH new crate it covers, so their
-        # suppression is PR-wide by construction (documented in the rules file).
-        # The rules with no artifact in the diff must still mint for BOTH crates.
+    def test_a_shared_artifact_suppresses_only_the_crate_it_covers(self):
+        # `site/src/data/surfaces.ts` is a SHARED file: a PR adding two crates
+        # touches it once, so "the path matched" cannot mean both crates are
+        # advertised. Attribution reads the merged checkout — the record here
+        # names only PUBLIC_CRATE, so ONLY its site follow-on is suppressed and
+        # OTHER_PUBLIC_CRATE keeps its own (with its own dedup key). The rules
+        # whose artifact is absent entirely still mint for BOTH.
         added, changed = self._both(["site/src/data/surfaces.ts"])
-        fos = self._eval_list(changed=changed, added=added)
-        self.assertEqual([fo for fo in fos if fo.rule_id == "new-crate-site-advert"], [])
+        with checkout_with(
+            {
+                "site/src/data/surfaces.ts": (
+                    f'{{ slug: "core", readme: "crates/{self.PUBLIC_CRATE}/README.md" }}'
+                )
+            }
+        ):
+            fos = self._eval_list(changed=changed, added=added)
+        self.assertEqual(
+            {fo.dedup_key for fo in fos if fo.rule_id == "new-crate-site-advert"},
+            {f"site-advert-{self.OTHER_PUBLIC_CRATE}"},
+        )
         for rule_id in ("new-crate-guide-docs", "new-crate-test-methods"):
             self.assertEqual(
                 {fo.dedup_key for fo in fos if fo.rule_id == rule_id},
@@ -317,6 +412,25 @@ class MultipleNewPublicCratesTest(unittest.TestCase):
                     for c in (self.PUBLIC_CRATE, self.OTHER_PUBLIC_CRATE)
                 },
             )
+
+    def test_a_guide_page_for_one_crate_leaves_the_other_guide_follow_on(self):
+        # Same attribution for `book/src/**`: a guide page that `{{#include}}`s
+        # one crate's README covers that crate only. Round-1's PR-wide reading
+        # dropped the second crate's chapter with no surviving issue to close.
+        added, changed = self._both(["book/src/SUMMARY.md", "book/src/core.md"])
+        with checkout_with(
+            {
+                "book/src/SUMMARY.md": "- [Core](./core.md)",
+                "book/src/core.md": (
+                    f"{{{{#include ../../crates/{self.PUBLIC_CRATE}/README.md}}}}"
+                ),
+            }
+        ):
+            fos = self._eval_list(changed=changed, added=added)
+        self.assertEqual(
+            {fo.dedup_key for fo in fos if fo.rule_id == "new-crate-guide-docs"},
+            {f"guide-doc-{self.OTHER_PUBLIC_CRATE}"},
+        )
 
     def test_a_crate_named_artifact_suppresses_only_that_crate(self):
         # When a rule's `unless_paths` glob carries `{crate}` the artifact CAN be
