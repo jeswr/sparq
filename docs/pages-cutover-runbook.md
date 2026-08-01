@@ -2,10 +2,15 @@
      Rewritten for #5530: the original runbook described a pre-cutover state that no
      longer exists, and recommended a rollback that would now take the live site down. -->
 
-# GitHub Pages: cutover record (COMPLETE)
+# GitHub Pages: cutover record
 
 > **This is no longer an actionable runbook.** The cutover it sequenced — moving
-> `sparq` from a branch-served Pages site to a GitHub Actions producer — is **done**.
+> `sparq` from a branch-served Pages site to a GitHub Actions producer — is **done on
+> the repo side**: the producer exists and every prerequisite the original document
+> listed is either implemented or tracked below. The matching **Pages service
+> setting** is reported as flipped but is not verified by this document; see
+> [Provenance](#provenance-of-the-claims-below).
+>
 > It is kept as a record of the resulting topology and, more importantly, as a
 > **warning**: the rollback the original document recommended would now take the
 > live site offline. See [Do not "roll back"](#do-not-roll-back).
@@ -13,28 +18,56 @@
 ## Provenance of the claims below
 
 Verified on 2026-08-01 by reading the **in-repo workflows** at commit `83b592c2` —
-**not** by probing the live site or the Pages API. Anyone acting on repo *settings*
-should re-confirm the live state first (`gh api repos/sparq-org/sparq/pages`); the
-file tree can only tell you what the producer *would* publish, not what the Pages
-service is currently serving.
+**not** by probing the live site or the Pages API. The file tree can only tell you
+what the producer *would* publish, not what the Pages service is currently serving.
+
+So read the two kinds of claim below differently:
+
+- **Artifact shape** (what `pages.yml` builds, what it overlays, what its smoke check
+  asserts) is established by the workflow source, and is as reliable as the file tree.
+- **Pages *service settings*** (the source mode, the custom domain the service has
+  registered, which producer actually owns the live deploy) is **not** established
+  here. Where this document reports them it is relaying an **undated** comment in
+  [`pages.yml`](../.github/workflows/pages.yml) (its `PAGES SOURCE (DONE …)` header,
+  which records a `gh api` result without a date), not a probe run for this document.
+
+**Before acting on anything in the settings class, confirm it yourself:**
+
+```bash
+gh api repos/sparq-org/sparq/pages --jq '{build_type, cname, html_url}'
+curl -sSI https://sparq.jeswr.org/ | head -1
+```
 
 Note the repo also moved orgs: it is **`sparq-org/sparq`**, not `jeswr/sparq`. Every
 API call and URL in the original document targeted the old owner and the old
 `github.io` host, and would misfire today.
 
-## What is live now
+## What the repo is configured to publish
 
-- **The producer is [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).**
-  It builds the Next.js feature-showcase, overlays the benchmark dashboards and the
-  operational GUI, runs an artifact smoke check, and deploys via `actions/deploy-pages`.
-  (The original document's central claim — that `.github/workflows/` contained *no*
-  Actions Pages producer — has not been true for a long time.)
-- **The site serves at the custom domain `https://sparq.jeswr.org/`**, root-relative
-  (`basePath ''`), pinned by [`site/public/CNAME`](../site/public/CNAME) and asserted
-  by the smoke check. The old `https://jeswr.github.io/sparq/...` URLs are historical.
-- **Pages source is `build_type: workflow`** and the one-time owner flip (`sq-vbq9`)
-  is resolved, so `pages.yml`'s deploy step **is** the live publisher.
-- **There is exactly one deploy slot, and `pages.yml` owns it.**
+Established by the workflow source (artifact class):
+
+- **The only Actions Pages producer is
+  [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).** It builds the
+  Next.js feature-showcase, overlays the benchmark dashboards and the operational GUI,
+  runs an artifact smoke check, and deploys via `actions/deploy-pages`. (The original
+  document's central claim — that `.github/workflows/` contained *no* Actions Pages
+  producer — has not been true for a long time.)
+- **The artifact is built for the custom domain `https://sparq.jeswr.org/`**,
+  root-relative (`basePath ''`): [`site/public/CNAME`](../site/public/CNAME) is copied
+  to `out/CNAME` and the smoke step fails the run if it is missing or wrong. The old
+  `https://jeswr.github.io/sparq/...` URLs are historical.
+- **No other workflow ships a deploy job**, so within the repo nothing competes with
+  `pages.yml` for Pages' single deploy slot.
+
+Relayed, **not** verified here (settings class — confirm with the commands above
+before acting):
+
+- `pages.yml`'s header comment states Pages source is `build_type: workflow` and the
+  one-time owner flip (`sq-vbq9`) is resolved, which would make its deploy step the
+  live publisher. That comment is undated and this document did not re-check it. If
+  the source mode were *not* `workflow`, `pages.yml`'s deploy step would be failing
+  and the live site would still be served from a branch — a state that changes which
+  advice below applies.
 
 The single artifact assembles three things:
 
@@ -83,10 +116,15 @@ and the `dev/` dashboard tree, so:
 - the operational GUI at `/app/` would `404`;
 - only the dashboards under `/dev/bench*/` would survive.
 
-There is no longer a scenario in which that is the recovery action. If a deploy
-publishes a bad artifact, the fix is to **fix forward or re-run `pages.yml` from a
-good commit** — the producer is the source of truth, and a re-run republishes the
-whole tree.
+There is no longer a scenario in which that is the recovery action. This holds
+whichever source mode the service is actually in: if it is already `workflow`, the
+flip breaks the live site; if it is not, the flip is not a recovery either, because
+the branch has not been a complete site since `pages.yml` took over the root.
+
+If a deploy publishes a bad artifact, the fix is to **fix forward or re-run
+`pages.yml` from a good commit** — a re-run republishes the whole tree. That
+presumes the deploy step is in fact the live publisher; if a re-run visibly changes
+nothing, check the source mode (above) before assuming the workflow is at fault.
 
 ## Where the invariants live now
 
