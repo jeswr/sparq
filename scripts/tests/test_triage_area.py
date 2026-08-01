@@ -23,6 +23,17 @@
 #      root cause of the mislabels this tool exists to clean up. Asserted PER RULE
 #      (see TestScopeDiscipline), because the realistic edit changes one rule.
 #
+# and — since #5003 widened the queue from "the parked issues" to "every AREA-LESS
+# open issue" — the two properties that make that widening safe:
+#
+#   5. REACH — the fetch must SEE the never-parked area-less class, and must not
+#      silently truncate. Both defects are invisible from outside: a sweep that
+#      never fetched an issue looks exactly like a sweep with nothing to do
+#      (TestFetchReach).
+#   6. WIDER REACH, IDENTICAL WRITES — an issue that was never parked may only ever
+#      GAIN `area:` labels; the unpark is decided per issue from its own labels
+#      (TestUnparkDiscipline).
+#
 # Run:  python3 scripts/tests/test_triage_area.py
 # (stdlib only; no pytest required — also discoverable by `pytest`.)
 
@@ -31,6 +42,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import re
 import sys
 import unittest
@@ -246,7 +258,7 @@ class TestNoDrift(unittest.TestCase):
             {"number": 13, "title": "make sure the pinned overview issue is kept",
              "body": "", "labels": [{"name": TA.PARK_LABEL}]},
         ]
-        for name, stub in (("parked_issues", lambda: issues),
+        for name, stub in (("candidate_issues", lambda: issues),
                            ("live_area_labels", lambda: {"area:sparq-reason-dl"})):
             real = getattr(TA, name)
             setattr(TA, name, stub)
@@ -278,6 +290,198 @@ class TestNoDrift(unittest.TestCase):
                                     {"name": TA.PARK_LABEL}]}], CRATES)
         self.assertEqual(rows[0][1], [])
         self.assertTrue(rows[0][2].startswith("SKIP"))
+
+
+class TestFetchReach(unittest.TestCase):
+    """[OPUS-5] (#5003) The candidate FETCH must SEE the whole area-less population.
+
+    Two independent reach defects, both invisible from the outside — a sweep that
+    never fetched an issue looks exactly like a sweep with nothing to do:
+
+      1. REACH. The fetch was `--label needs:area`, i.e. only the issues triage.py /
+         bd-to-issues.py PARKED. The class that actually blocks dispatch is "no
+         `area:` label", and an issue the event triager never ran on carries neither
+         a status nor a park. #3816 measured 832 open no-area issues against a park
+         an order of magnitude smaller. A label query cannot express the absence of
+         a label, so widening any downstream predicate could not have helped: an
+         issue that is never fetched is never classified.
+      2. TRUNCATION. `gh issue list --limit 1000` stops at the limit and reports
+         nothing. Latent while the queue is under the limit, and it re-arms silently
+         the moment it is not — on a half-hourly cron, where nobody is watching.
+
+    The stub below emulates BOTH `gh` shapes faithfully — `gh api --paginate`
+    exhausts the page chain, `gh api` without it returns one page, `gh issue list
+    --label L --limit N` returns only labelled rows truncated newest-first — so
+    every reverted implementation is EXECUTABLE here and fails on missing ROWS
+    rather than on an unrecognised command line. That is what makes these
+    behavioural guards and not spelling tests.
+    """
+
+    #: One page is 100, so a fetch that forgets `--paginate` returns 100 of these;
+    #: the old `--limit 1000` returns the newest 1000 and drops #1..#200.
+    PARKED = 1200
+    #: Area-less and NEVER PARKED: no `needs:area`, no `status:*`, nothing a label
+    #: query can select on. This is the population the widening exists to reach.
+    NEVER_PARKED = (90001, 90002, 90003)
+    #: Already attributed — a maintainer's decision the sweep must not re-open.
+    HAS_AREA = 90101
+    #: The issues endpoint returns PRs too.
+    PULL_REQUEST = 90201
+
+    def setUp(self):
+        self.corpus = [
+            {"number": n, "title": "DL L4: narrow the RL disjointWith guard",
+             "body": "", "labels": [{"name": TA.PARK_LABEL}]}
+            for n in range(1, self.PARKED + 1)
+        ]
+        self.corpus += [
+            {"number": n, "title": "DL L4: narrow the RL disjointWith guard",
+             "body": "", "labels": [{"name": "priority:P2"}]}
+            for n in self.NEVER_PARKED
+        ]
+        self.corpus.append({"number": self.HAS_AREA, "title": "DL L4: whatever",
+                            "body": "", "labels": [{"name": "area:sparq-core"}]})
+        self.corpus.append({"number": self.PULL_REQUEST, "title": "DL L4: a PR",
+                            "body": "", "labels": [{"name": TA.PARK_LABEL}],
+                            "pull_request": {"url": "x"}})
+        self.calls = []
+        real = TA._gh
+        TA._gh = self._stub_gh
+        self.addCleanup(lambda: setattr(TA, "_gh", real))
+
+    def _stub_gh(self, args):
+        """Faithful emulator of both CLI shapes — see the class docstring."""
+        self.calls.append(list(args))
+        if args[0] == "api":
+            rows = list(self.corpus)
+            pages = [rows[i:i + 100] for i in range(0, len(rows), 100)] or [[]]
+            return json.dumps(pages if "--paginate" in args else pages[:1])
+        if args[0:2] == ["issue", "list"]:
+            # `gh issue list` really does exclude PRs, unlike the REST issues
+            # endpoint — model that, so the PR assertion below is testing THIS
+            # implementation's filter and not an artifact of the stub.
+            label = args[args.index("--label") + 1]
+            rows = [r for r in self.corpus if "pull_request" not in r
+                    and label in {lb["name"] for lb in r["labels"]}]
+            limit = int(args[args.index("--limit") + 1]) if "--limit" in args else len(rows)
+            return json.dumps(sorted(rows, key=lambda r: -r["number"])[:limit])
+        raise AssertionError(f"unexpected gh invocation: {args}")
+
+    def test_a_never_parked_area_less_issue_reaches_the_queue(self):
+        """THE REACH GUARD. A `--label needs:area` fetch cannot return an issue that
+        carries no park, so reverting the fetch drops all of NEVER_PARKED here."""
+        nums = {it["number"] for it in TA.candidate_issues()}
+        self.assertEqual([n for n in self.NEVER_PARKED if n in nums],
+                         list(self.NEVER_PARKED),
+                         "issues that were never parked are unreachable — the sweep "
+                         "still only sees the park, not the area-less class")
+
+    def test_the_fetch_does_not_silently_truncate(self):
+        """THE TRUNCATION GUARD. `--limit 1000` keeps the newest 1000 and reports
+        nothing about the rest; a single page keeps 100. Both lose the OLDEST rows,
+        which on a work-queue sweep are the ones that have waited longest."""
+        nums = sorted(it["number"] for it in TA.candidate_issues())
+        self.assertEqual(len(nums), self.PARKED + len(self.NEVER_PARKED))
+        self.assertEqual(nums[:3], [1, 2, 3],
+                         "the oldest issues were dropped by a limited fetch")
+        self.assertEqual(len(set(nums)), len(nums), "an issue was fetched twice")
+
+    def test_the_fetch_uses_cursor_pagination(self):
+        TA.candidate_issues()
+        self.assertTrue(self.calls, "candidate_issues() made no gh call at all")
+        self.assertTrue(all(c[0] == "api" and "--paginate" in c for c in self.calls),
+                        f"the fetch used a fixed-limit call: {self.calls}")
+
+    def test_an_already_attributed_issue_is_not_re_fetched(self):
+        """Widening the reach must not re-open settled work: an issue that already
+        carries an `area:` is the maintainer's/author's decision, not ours."""
+        self.assertNotIn(self.HAS_AREA, {it["number"] for it in TA.candidate_issues()})
+
+    def test_pull_requests_are_not_candidates(self):
+        """The issues endpoint returns PRs; a PR has no dispatch partition, so
+        labelling one would be pure noise on the board."""
+        self.assertNotIn(self.PULL_REQUEST,
+                         {it["number"] for it in TA.candidate_issues()})
+
+    def test_a_runaway_snapshot_fails_closed(self):
+        """The ceiling is the other half of dropping the limit: pagination to
+        exhaustion must still refuse to half-report an implausible snapshot rather
+        than quietly editing thousands of live issues."""
+        with self.assertRaises(SystemExit):
+            TA.open_issues(ceiling=10)
+
+
+class TestUnparkDiscipline(unittest.TestCase):
+    """[OPUS-5] (#5003) Wider reach, IDENTICAL writes.
+
+    Most rows in the widened queue were never parked. Such an issue must only ever
+    GAIN `area:` labels: emitting `--remove-label needs:area` for it is a write the
+    sweep has no business making, and it reports a park-clearing that never
+    happened. The park half of the no-drift invariant (TestNoDrift) is unchanged for
+    the issues that ARE parked."""
+
+    def _capture_gh(self):
+        calls = []
+        real = TA._gh
+        TA._gh = lambda a: (calls.append(list(a)), "")[1]
+        self.addCleanup(lambda: setattr(TA, "_gh", real))
+        return calls
+
+    def test_a_never_parked_issue_is_not_unparked(self):
+        calls = self._capture_gh()
+        TA.apply_row(31, ["area:sparq-core"], unpark=False)
+        argv = calls[0]
+        self.assertNotIn("--remove-label", argv,
+                         f"the sweep removed a park the issue never had: {argv}")
+        self.assertEqual(argv.count("--add-label"), 1)
+
+    def test_a_parked_issue_still_travels_with_its_unpark(self):
+        calls = self._capture_gh()
+        TA.apply_row(32, ["area:sparq-core"], unpark=True)
+        argv = calls[0]
+        self.assertEqual(argv[argv.index("--remove-label") + 1], TA.PARK_LABEL)
+
+    def test_the_empty_add_guard_holds_in_both_modes(self):
+        """A bare unpark is refused with `unpark=True`; with `unpark=False` there is
+        nothing legitimate to write either, so the same guard must stop it reaching
+        `gh` as a contentless edit."""
+        calls = self._capture_gh()
+        for unpark in (True, False):
+            with self.assertRaises(ValueError):
+                TA.apply_row(4242, [], unpark=unpark)
+        self.assertEqual(calls, [], f"a contentless edit reached gh: {calls}")
+
+    def test_main_decides_the_unpark_per_issue(self):
+        """End-to-end through `main() --apply`: the decision is read from each
+        issue's OWN labels, not from a single flag for the whole sweep."""
+        calls = []
+        real = TA._gh
+        TA._gh = lambda a: (calls.append(list(a)), "")[1]
+        self.addCleanup(lambda: setattr(TA, "_gh", real))
+        issues = [
+            {"number": 41, "title": "DL L4: narrow the RL disjointWith guard",
+             "body": "", "labels": [{"name": TA.PARK_LABEL}]},
+            {"number": 42, "title": "DL L4: narrow the RL disjointWith guard",
+             "body": "", "labels": [{"name": "priority:P2"}]},
+        ]
+        for name, stub in (("candidate_issues", lambda: issues),
+                           ("live_area_labels", lambda: {"area:sparq-reason-dl"})):
+            prev = getattr(TA, name)
+            setattr(TA, name, stub)
+            self.addCleanup(lambda n=name, r=prev: setattr(TA, n, r))
+        real_argv = sys.argv
+        sys.argv = ["triage-area.py", "--apply"]
+        self.addCleanup(lambda: setattr(sys, "argv", real_argv))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(TA.main(), 0)
+
+        edits = {c[2]: c for c in calls if c[:2] == ["issue", "edit"]}
+        self.assertEqual(sorted(edits), ["41", "42"])
+        self.assertIn("--remove-label", edits["41"])
+        self.assertNotIn("--remove-label", edits["42"],
+                         f"main() unparked a never-parked issue: {edits['42']}")
+        for argv in edits.values():
+            self.assertIn("area:sparq-reason-dl", argv)
 
 
 class TestRuleTableHygiene(unittest.TestCase):

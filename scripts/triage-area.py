@@ -44,9 +44,23 @@
 # (its area is the maintainer's/author's, not ours). `needs:area` is removed ONLY
 # in the same call that adds >=1 real `area:` label, so the two never drift.
 #
+# REACH: EVERY AREA-LESS OPEN ISSUE, NOT JUST THE PARKED ONES (#5003). This used to
+# fetch `--label needs:area`, i.e. only the issues `triage.py` / `bd-to-issues.py`
+# had parked. But the park is one SOURCE of area-less issues, not the class: an
+# issue the event triager never ran on carries no `status:*` label and no park at
+# all, and is just as area-less and just as undispatchable. #3816 measured 832 open
+# issues with no `area:` label against a park population an order of magnitude
+# smaller. A label query cannot return the class the sweep exists to rescue — the
+# same structural hole `retriage.py::_fetch_candidates` was widened to close — so
+# the queue is now ONE unlabelled open-issue snapshot filtered by the absence of an
+# `area:` label. Widening the REACH does not widen what is WRITTEN: `classify()` is
+# still fail-closed, and an issue that was never parked can only ever GAIN `area:`
+# labels — `apply_row(unpark=...)` never removes a park it did not have.
+#
 #   python3 scripts/triage-area.py --self-test    # offline rule unit tests
 #   python3 scripts/triage-area.py                # dry run: full proposed mapping
-#   python3 scripts/triage-area.py --apply        # apply (add area:*, drop needs:area)
+#   python3 scripts/triage-area.py --apply        # apply (add area:*; drop needs:area
+#                                                 #  only where it was actually set)
 #
 # Maintainer authorisation for the automated pass: sparq-org/sparq#1135 (2026-07-26).
 #
@@ -426,17 +440,76 @@ def live_area_labels():
     return {d["name"] for d in data if d["name"].startswith("area:")}
 
 
-def parked_issues():
-    """LIST API, fully paginated — `gh search` reads a lagging index and has caused
-    three wrong conclusions in this repo."""
-    return json.loads(_gh(["issue", "list", "--repo", REPO, "--label", PARK_LABEL,
-                           "--state", "open", "--limit", "1000",
-                           "--json", "number,title,body,labels"]))
+FETCH_CEILING = 10000
+
+
+def label_names(issue):
+    """The label names on a `gh`/REST issue payload. Both shapes spell a label as
+    `{"name": ...}`, so one reader serves the snapshot fetch and the plan."""
+    return {lb.get("name") for lb in (issue.get("labels") or []) if isinstance(lb, dict)}
+
+
+def open_issues(ceiling=FETCH_CEILING):
+    """Every OPEN issue, via REAL cursor pagination.
+
+    [OPUS-5] (#5003) This was `gh issue list --limit 1000`, which SILENTLY
+    TRUNCATES: the CLI stops at the limit and reports nothing — no warning, no
+    non-zero exit. On a half-hourly cron a silently-dropped tail is never noticed,
+    and this is a work-queue sweep, so a dropped issue is not classified late, it is
+    never classified on any tick. `gh api --paginate` follows the Link headers to
+    exhaustion instead; the explicit ceiling still fails CLOSED on a runaway
+    snapshot rather than half-reporting (same shape as `retriage.py::_fetch_label`
+    and `ready-issues.py::_fetch`).
+
+    `gh search` is deliberately not used: it reads a lagging index and has caused
+    three wrong conclusions in this repo.
+
+    The issues endpoint returns PRs too; they are dropped here (a PR carries no
+    dispatch partition, and labelling one would be pure noise on the board)."""
+    pages = json.loads(_gh(["api", "--paginate", "--slurp",
+                            f"repos/{REPO}/issues?state=open&per_page=100"]) or "[]")
+    rows = [i for page in pages if isinstance(page, list) for i in page
+            if isinstance(i, dict) and "pull_request" not in i]
+    if len(rows) >= ceiling:
+        raise SystemExit(
+            f"triage-area: fetched {len(rows)} open issues >= ceiling {ceiling} — the "
+            "snapshot looks runaway (fail-closed). Raise the ceiling deliberately.")
+    return rows
+
+
+def candidate_issues():
+    """Every OPEN issue carrying NO `area:` label — parked `needs:area` or not.
+
+    [OPUS-5] THE REACH DEFECT (#5003). This used to be a `--label needs:area` query.
+    That returns the issues `triage.py` / `bd-to-issues.py` PARKED, but the park is
+    one source of area-less issues, not the class: an issue the event triager never
+    ran on carries no `status:*` label and no park either, and is equally area-less
+    and equally undispatchable: `ready-issues.py::packages_of` resolves a label-set
+    with no `area:` to the `GLOBAL` partition, whose `()` path is a prefix of every
+    other, so it serializes against everything. #3816 counted 832 open issues with
+    no `area:` against a park an order of magnitude smaller.
+
+    A label query is structurally unable to return the class defined by a MISSING
+    label — the same hole `retriage.py::_fetch_candidates` was widened to close, and
+    for the same reason: an issue that is never FETCHED is never tested.
+
+    Reach is not permission. Every gate below is unchanged — `classify()` still
+    fail-closes to no label, `live_area_labels()` still rejects an invented one, and
+    `apply_row(unpark=...)` still refuses to remove a park the issue never had. The
+    only new write this widening can produce is an `area:` label on an area-less
+    issue, which is exactly what the tool is for."""
+    return [it for it in open_issues()
+            if not any((n or "").startswith("area:") for n in label_names(it))]
 
 
 def plan(issues, crates):
     """The proposed mapping. Deterministic, and a no-op for an issue that already
-    carries an area (idempotence: re-running never re-decides settled work)."""
+    carries an area (idempotence: re-running never re-decides settled work).
+
+    The already-has-an-area check is also `candidate_issues()`'s fetch filter. Kept
+    here as the second line of defence: `plan()` is the only caller of `classify()`,
+    so a future fetch that widens again cannot silently start re-deciding work a
+    maintainer already settled."""
     rows = []
     for it in sorted(issues, key=lambda i: i["number"]):
         names = [lb["name"] for lb in it.get("labels", [])]
@@ -448,10 +521,17 @@ def plan(issues, crates):
     return rows
 
 
-def apply_row(number, add):
-    """Add the area labels AND drop the park in ONE call. They must not drift: an
-    issue with an area but still parked stays undispatchable, and a cleared park
-    with no area silently reserves the serializing __global__ partition.
+def apply_row(number, add, unpark=True):
+    """Add the area labels AND — when the issue is actually parked — drop the park,
+    in ONE call. They must not drift: an issue with an area but still parked stays
+    undispatchable, and a cleared park with no area silently reserves the
+    serializing __global__ partition.
+
+    `unpark=False` is the never-parked half of the widened reach (#5003). Since the
+    queue is every AREA-LESS open issue rather than every PARKED one, most rows now
+    carry no `needs:area` at all. Such an issue must only ever GAIN `area:` labels:
+    emitting `--remove-label needs:area` for it would be a write the sweep has no
+    business making, and it would report a park-clearing it did not perform.
 
     FAIL CLOSED on an empty `add`. `main()` already filters unclassified rows out
     before it gets here, but that filter is one edit away from the apply loop and
@@ -459,12 +539,16 @@ def apply_row(number, add):
     triaged, `retriage.py` promotes it, and it then reserves the serializing
     `__global__` partition — which collapses the dispatch frontier to a single
     worker. The invariant therefore lives in the ONLY function that can emit the
-    unpark, not in the caller that happens to protect it today."""
+    unpark, not in the caller that happens to protect it today. It is asserted for
+    BOTH values of `unpark`: with no areas there is nothing legitimate to write
+    either way."""
     if not add:
         raise ValueError(
             f"refusing a bare unpark of #{number}: `{PARK_LABEL}` may only be "
             "removed in the same call that adds >=1 area: label")
-    args = ["issue", "edit", str(number), "--repo", REPO, "--remove-label", PARK_LABEL]
+    args = ["issue", "edit", str(number), "--repo", REPO]
+    if unpark:
+        args += ["--remove-label", PARK_LABEL]
     for a in add:
         args += ["--add-label", a]
     _gh(args)
@@ -572,7 +656,7 @@ def main():
 
     crates = crate_names()
     known = live_area_labels()
-    rows = plan(parked_issues(), crates)
+    rows = plan(candidate_issues(), crates)
 
     unknown = sorted({lb for _, add, _ in rows for lb in add} - known)
     if unknown:
@@ -592,7 +676,7 @@ def main():
             continue
         print(f"#{it['number']:<5} {','.join(a[5:] for a in add):<40} {why}")
         print(f"       {it['title'][:150]}")
-    print(f"\n-- {len(classified)} classified, {len(left)} left parked "
+    print(f"\n-- {len(classified)} classified, {len(left)} left unattributed "
           f"(no confident evidence), {len(rows)} scanned")
     for it, _, _ in left:
         print(f"   LEFT #{it['number']} {it['title'][:120]}")
@@ -601,8 +685,12 @@ def main():
         print("\n(dry run — re-run with --apply to write labels)")
         return 0
     for it, add, _ in classified:
-        apply_row(it["number"], add)
-        print(f"applied #{it['number']} {','.join(add)}")
+        # The unpark is decided PER ISSUE from its own labels: the queue is now every
+        # area-less open issue, so most rows were never parked and must gain only areas.
+        parked = PARK_LABEL in label_names(it)
+        apply_row(it["number"], add, unpark=parked)
+        print(f"applied #{it['number']} {','.join(add)}"
+              f"{' -' + PARK_LABEL if parked else ''}")
     return 0
 
 

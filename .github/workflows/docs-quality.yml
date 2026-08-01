@@ -537,7 +537,9 @@ jobs:
       # Both suites are hermetic (stdlib only, no gh/network):
       # the script's own rule self-test, plus the independent safety tests
       # (fail-closed / no unpark-without-an-area / no invented label / the three
-      # rule orderings that were measured wrong on the live backlog).
+      # rule orderings that were measured wrong on the live backlog / — since
+      # #5003 — the candidate fetch's REACH and its no-silent-truncation guards,
+      # which are fail-QUIET defects a live cron cannot surface on its own).
       - name: Self-test triage-area.py (needs:area classifier — fail-closed + no-drift)
         run: |
           python3 scripts/triage-area.py --self-test
