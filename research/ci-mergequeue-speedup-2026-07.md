@@ -287,8 +287,9 @@ gate, 3.8 m, the code_scanning ruleset expects analyses — small win, real risk
 >   test can observe, so a flip to `HEADGREEN` would silently invalidate the argument.
 >   Mechanising that check is follow-up work, not part of this docs-only bead.
 > * the decision is closed as **KEEP-selected** under proceed-and-document, with the
->   stricter rule's cost given as a **projection** from the §2.1–2.2 profile
->   (≈ +4–10 m median entry wall), explicitly not a measured post-change result.
+>   stricter rule's cost given qualitatively as a **projection** from the §2.1–2.2
+>   profile (the median entry wall reverts to the slower full-matrix shape), explicitly
+>   not a measured post-change result.
 
 ### 3.5 Lever 5 — benchmarks → nightly EC2 (sibling lane; cross-reference only)
 

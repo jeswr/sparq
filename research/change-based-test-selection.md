@@ -635,19 +635,21 @@ follow-up work, not done here (docs-only bead).
 run the full matrix. It is the maximally conservative posture and needs no argument at
 all to justify.
 
-**The cost.** It would reverse most of lever 4. From the 2026-07-10 profile
-(`ci-mergequeue-speedup-2026-07.md` §2.1–2.2): today's median entry wall is dominated by
-`ci.yml`, and an entry whose test shards are selection-skipped lands near the low end of
-that distribution (run `29105286547`: 11.9 m, coverage the pole) while an
-engine-touching full-matrix entry sits near the top (run `29105265898`: 18.9 m, the
-serial `build+archive → slowest shard` chain). Forcing full would put *every* entry on
-the second shape and would also restore the full opt-in `feature-matrix` leg set in
-place of the ~15–20 selected engine legs. **Projected effect: roughly +4–10 m on the
-median entry wall**, plus the runner-slot contention that lengthens tails during a
-drain. This is a projection derived from the cited profile, **not** a measured
-post-change result — the honest way to obtain the real number is to flip it and sample
-merge-group entry walls, which is precisely the experiment the projection says is not
-worth running.
+**The cost.** It would reverse most of lever 4. The 2026-07-10 profile
+(`ci-mergequeue-speedup-2026-07.md` §2.1–2.2 — the tables there and the run logs they
+cite are the source of truth for every figure below, which is why none is restated
+here) records two distinct entry shapes: `ci.yml` dominates the median entry wall, an
+entry whose test shards are selection-skipped lands near the low end of that
+distribution with a coverage shard as its pole (run `29105286547`), and an
+engine-touching full-matrix entry sits near the top on the serial
+`build+archive → slowest shard` chain (run `29105265898`). Forcing full would put
+*every* entry on the second, materially slower shape, and would restore the full opt-in
+`feature-matrix` leg set in place of the much smaller selected engine leg set.
+**Projected effect: the median entry wall reverts to the full-matrix shape**, plus the
+runner-slot contention that lengthens tails during a drain. That is a qualitative
+projection from the cited profile, **not** a measured post-change result — the honest
+way to obtain a real number is to flip it and sample merge-group entry walls, which is
+precisely the experiment the projection says is not worth running.
 
 **Recommendation: KEEP selection on `merge_group` (do not adopt the stricter rule).**
 Rationale, in order of weight:
@@ -669,7 +671,7 @@ Rationale, in order of weight:
 Authored under the **proceed-and-document** rule: this closes the decision as *keep-
 selected* so the rest of lever 4 is unblocked. It is a recommendation with its premises
 and its falsifiers written down, not a maintainer sign-off — a maintainer who weighs
-premise A's unpinned status more heavily than the projected 4–10 m can overturn it with
+premise A's unpinned status more heavily than the projected slowdown can overturn it with
 the one-line change above, and §10.3 says exactly what to re-check if they do.
 
 ### 10.5 Explicit non-extensions (REJECTED — recorded so they are not re-proposed)
@@ -677,10 +679,11 @@ the one-line change above, and §10.3 says exactly what to re-check if they do.
 Lever 4 is **not** being extended to the following. Each was considered and rejected on
 measured grounds; the shared shape is *small win, real risk*.
 
-| Candidate | Measured today | Verdict |
+| Candidate | Position in the profile | Verdict |
 |---|---|---|
-| conformance ratchets | 44–76 s each, run in parallel | **REJECTED** — never the pole; scoping them adds selector surface for no wall-clock |
-| `container-scan` | 3.6 m median, parallel | **REJECTED** — parallel, not the pole |
-| CodeQL language-scoping | 3.8 m median, confirmed non-pole (§2.1) | **REJECTED** — it is the *security* gate and the `code_scanning` ruleset expects analyses to be produced; narrowing the analysed language set risks a missing-analysis stall for a saving the profile shows is ~0 |
+| conformance ratchets | short legs, run in parallel | **REJECTED** — never the pole; scoping them adds selector surface for no wall-clock |
+| `container-scan` | parallel with the critical path | **REJECTED** — parallel, not the pole |
+| CodeQL language-scoping | confirmed non-pole (§2.1) | **REJECTED** — it is the *security* gate and the `code_scanning` ruleset expects analyses to be produced; narrowing the analysed language set risks a missing-analysis stall for a saving the profile shows as negligible |
 
-(Timings from `ci-mergequeue-speedup-2026-07.md` §2.1–2.2, 2026-07-10 profile.)
+(Positions from `ci-mergequeue-speedup-2026-07.md` §2.1–2.2, 2026-07-10 profile; the
+per-leg timings stay in that record's tables and in the run logs it links, not here.)
