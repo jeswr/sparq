@@ -178,11 +178,11 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: lychee@0.23.0
 
@@ -537,7 +537,9 @@ jobs:
       # Both suites are hermetic (stdlib only, no gh/network):
       # the script's own rule self-test, plus the independent safety tests
       # (fail-closed / no unpark-without-an-area / no invented label / the three
-      # rule orderings that were measured wrong on the live backlog).
+      # rule orderings that were measured wrong on the live backlog / — since
+      # #5003 — the candidate fetch's REACH and its no-silent-truncation guards,
+      # which are fail-QUIET defects a live cron cannot surface on its own).
       - name: Self-test triage-area.py (needs:area classifier — fail-closed + no-drift)
         run: |
           python3 scripts/triage-area.py --self-test
@@ -878,6 +880,16 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
+      # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
+      # outage there concluded `failure` with nothing measured and ejected an unrelated
+      # PR from the merge queue. It is now restored from an Actions cache. Same
+      # invisible-regression shape as the posture test above — drop the restore step and
+      # CI stays green while silently re-coupling to a third party's uptime. This runs
+      # the REAL bash `fetch_pinned_file` against a stub curl to prove the offline-on-hit
+      # property, pins the ci.yml wiring, and pins that the ratchet was NOT weakened.
+      - name: Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)
+        run: python3 scripts/tests/test_inference_corpus_cache.py
       # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
       # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
       # versioned binary; reverting to `cargo install wasm-pack` would keep the lane

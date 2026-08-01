@@ -28,6 +28,15 @@ steady-state cost. The steady-state cost is **entry-wall × capacity-3 serializa
 
 ### 2.1 Per-workflow entry wall on `merge_group` (n≈17–20 successful runs each, last 250)
 
+> **STALE AS A BASELINE — do not diff post-2026-07 numbers against this table.** [OPUS-5]
+> The 2026-08-01 re-sample under §3.4a below measured the ci-summary entry wall at a
+> median well ABOVE the 15.1 m recorded here. That regression was already present on
+> 2026-07-26 — so it predates the sq-6vshe.17 demotion and is not caused by it; this
+> record does not establish which change between 07-10 and 07-26 caused it. The table
+> remains as the dated
+> 2026-07-10 snapshot that motivated the levers; the operative baseline is now the
+> pre-cutover window in the §3.4a measurement note.
+
 | workflow (check family)  | median | p90    | max    | on the gate? |
 |--------------------------|--------|--------|--------|--------------|
 | ci-summary (gate waiter) | 15.1 m | 23.4 m | 28.9 m | IS the gate — duration ≈ entry critical path |
@@ -258,9 +267,59 @@ This needs an explicit maintainer-visible design (proceed-and-document), not a q
 >   recovery path (a governed lowering under `--allow-lower`), never a new crate row, and
 >   it fails **open** if the alarm probe is unavailable.
 >
-> The estimated saving above is a **projection from the 2026-07-10 profile, not a measured
-> post-change result**; the next merge-group entry-wall sample is what will confirm or
-> refute it.
+> **MEASURED 2026-08-01 (issue #5147) — the −2–6 m projection lands at the BOTTOM of its
+> band; the saving is real but the absolute wall is WORSE than §2.1.** [OPUS-5]
+> Cutover = commit `3ab83df` (PR #5146, 2026-07-30T22:22:32Z), the commit that introduced
+> the `github.event_name != 'merge_group'` guard. Sample = successful `merge_group`
+> ci-summary runs split on `run_started_at`, duration = `updated_at − run_started_at`
+> (the §6 method): **n=94 post** (n=80 after excluding the sub-8-minute trivial-entry mode
+> — see below), against the n≥15 the issue asked for.
+>
+> | window (successful `merge_group` ci-summary) | n | median | p90 |
+> |---|---|---|---|
+> | PRE, matched 40.9 h immediately before cutover | 31 | 23.7 m | 27.6 m |
+> | PRE, broader 2026-07-26…07-28 baseline | 146 | 21.7 m | 27.4 m |
+> | **POST, cutover → 2026-08-01T15:15Z** | **80** | **20.2 m** | **24.6 m** |
+>
+> (Entries ≥8 m only. The raw distribution is bimodal — a ~2–4 m mode carrying 9–15 % of
+> every window, consistent with entries whose change-class skips the Rust matrix, though
+> the job level of that mode was not inspected — so an all-entries median tracks
+> window composition as much as it tracks CI. All-entries figures move the same way:
+> 23.2 → 19.4 m median, 27.6 → 24.6 m p90.)
+>
+> **Verdict: CONFIRMED, at the low end.** Median saving **−1.5 m** against the broader
+> pre baseline and **−3.5 m** against the matched-window one; p90 **−2.8 to −3.0 m**.
+> The honest range is **−1.5 to −3.5 m median**, i.e. the bottom of the projected −2–6 m,
+> and below it on the more conservative baseline. Corroborated independently on `ci.yml`'s
+> own wall (heavy entries: median 22.4 → 19.6 m, p90 27.5 → 24.0 m). Not a quiet-period
+> artifact: the post window carried ~2.8 times the pre window's entry rate (0.83 → 2.30
+> entries/h), so it measured *more* pool contention, not less.
+>
+> **Mechanism verified**, not just inferred — on post-cutover run `30652403619` every
+> instrumented coverage MEASURE leg reports `skipped` while `coverage floors` and
+> `coverage ratchet + test-presence gate` report `success`, exactly the topology the
+> guard above specifies.
+>
+> **Two corrections this sample forces:**
+> 1. **§2.1's 15.1 m median / 23.4 m p90 is no longer the baseline.** The wall had already
+>    regressed to ~21.7 m median by 2026-07-26, *before* this bead. So the post-change
+>    ~20 m median is BETTER than the run this demotion inherited and WORSE than the
+>    2026-07-10 snapshot; reading it against §2.1 would falsely score this bead as a
+>    regression. The §6 re-profile caveat has fired again.
+> 2. **The next pole is the build→test serial chain** — the branch issue #5147 named for a
+>    saving at the low end of the band. On run `30652403619` (26.5 m wall) the chain is
+>    build+archive 9.1 m → slowest shard `bulk 1/3` 16.6 m ≈ 25.7 m serial, essentially the
+>    entire wall, with the coverage legs no longer even candidates. Both hops are well past
+>    §2.2 (build+archive was 369–447 s; slowest shard was 655 s), and the imbalance §3.3
+>    flagged persists with the slow shard's identity moved (`bulk 1/3` 16.6 m vs `bulk 2/3`
+>    8.7 m). **→ lever sq-6vshe.7 (shard rebalance), not further demotion.**
+>    *Caveat: this hop decomposition is ONE post-cutover run, not a distribution — it is
+>    enough to locate the pole, NOT enough to attribute the (1) regression to these hops.
+>    A job-level pre/post sample is the follow-up.*
+>
+> Method: unauthenticated `GET /repos/sparq-org/sparq/actions/workflows/{ci-summary.yml,
+> ci.yml}/runs?event=merge_group&status=success` (300 + 200 runs) and
+> `GET /actions/runs/30652403619/jobs`.
 
 **(b) Selection-soundness memo + the fmx4u §7 P8 decision → bead sq-6vshe.18 — SAFE.**
 The union-diff-vs-target-tip argument that makes merge-group selection sound under
@@ -290,24 +349,31 @@ tail, not the median. No bead here — owned by the sibling; do not double-imple
 | 1 | push-to-main skip (validated SHAs) | sq-6vshe.14 | SAFE (fail-open) | 200–400 runner-min/merge; −0.5–2 m wall; collapse-tail removal; unlocks #3 | **SAFE-QUICK-WIN** |
 | 2 | bench → nightly EC2 | (sibling lane) | SAFE as designed there | −3.7 m leg + flake-requeue tail | in-flight |
 | 3 | queue settings (build 3→5; min-wait audit) | sq-6vshe.16 | SAFE after #1 | drain ×1.67 deep-queue; the min-wait audit closed **inert** (§3.3 RESOLVED) so the "≤5 m flat" it once promised is **0** | **SAFE-QUICK-WIN** (maintainer ruleset edit, still blocked on #1) |
-| 4 | coverage off merge_group | sq-6vshe.17 | recoverable-ratchet argument, needs protocol | −2–6 m median entry wall | **NEEDS-CAREFUL-DESIGN** |
-| 5 | test-shard rebalance | sq-6vshe.7 (existing, annotated) | SAFE | −3–5 m engine-entry p90 | existing bead |
+| 4 | coverage off merge_group | sq-6vshe.17 | LANDED; **measured** (§3.4a, 2026-08-01) | **−1.5–3.5 m median / −2.8–3.0 m p90 measured**, vs −2–6 m projected | **DONE** |
+| 5 | test-shard rebalance | sq-6vshe.7 (existing, annotated) | SAFE | −3–5 m engine-entry p90 | existing bead — **now the top pole** (§3.4a) |
 | 6 | cache/artifact diet + sccache A/B | sq-6vshe.15 | SAFE, measure-first | −0.5–2 m | SAFE |
 | 7 | selection memo + P8 decision | sq-6vshe.18 | SAFE (docs/audit) | 0 direct; closes an open soundness decision | SAFE-QUICK-WIN |
 | 8 | gate waiter off the runner slot | sq-6vshe.19 | SAFE but fiddly | frees 3–6 runner slots during drains | discovered, P3 |
 | — | CodeQL off the blocking path | — | **REJECTED** — measured non-pole (3.8 m), security gate | ~0 | falsified premise |
 
-**End-state estimate** (levers 1+3+4a+5 + the existing .7): median entry wall
-15.1 m → ~9–12 m; engine-entry p90 23.4 m → ~17–19 m (then bounded by the
-build→test chain, whose next lever is the .7 rebalance and the closed-for-now .3/.4
-engine-split reopening conditions); a position-6 PR ≈ 40–60 m → ~15–25 m.
+**End-state estimate — 2026-07-10 projection, SUPERSEDED as an absolute target.** [OPUS-5]
+It reads: (levers 1+3+4a+5 + the existing .7) median entry wall 15.1 m → ~9–12 m;
+engine-entry p90 23.4 m → ~17–19 m (then bounded by the build→test chain, whose next
+lever is the .7 rebalance and the closed-for-now .3/.4 engine-split reopening
+conditions); a position-6 PR ≈ 40–60 m → ~15–25 m. The 2026-08-01 re-sample (§3.4a)
+measures the post-.17 median at ~20 m, so this arithmetic starts from a base ~6 m too
+low. Its *relative* deltas may still hold; its absolute targets do not. Re-derive after
+sq-6vshe.7 lands.
 
 ## 5. Discovered work (beaded unless noted)
 
 - sq-6vshe.19 — the ci-summary gate is a WAITER occupying a runner slot ~15–23 m per
   entry (×3–5 concurrent entries, + the push waiter). Its own doctrine (sq-90cv4) names
   moving it off the build-runner slot as the deferred deep fix.
-- sq-6vshe.7 (existing) — annotated with the measured bulk-shard imbalance (655 s vs
+- sq-6vshe.7 (existing) — **re-annotated 2026-08-01: now the top pole.** On post-.17 run
+  `30652403619` the imbalance persists and has grown in absolute terms (`bulk 1/3` 16.6 m
+  vs `bulk 2/3` 8.7 m), and build+archive → slowest shard is ~25.7 m of a 26.5 m wall.
+  Originally annotated with the 2026-07-10 bulk-shard imbalance (655 s vs
   340 s) and the formal-verification change-coupled-Kani 22.7 m outlier (a per-leg
   wall-time item squarely in that bead's inventory scope).
 - The `min_entries_to_merge_wait_minutes` semantics audit (folded into sq-6vshe.16).

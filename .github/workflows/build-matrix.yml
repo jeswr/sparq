@@ -127,7 +127,7 @@ jobs:
       # INTO the released binary, so the shipped artifact is self-describing for post-build audit
       # (`cargo audit bin <file>` / `auditable info <file>`). Negligible size cost; no runtime overhead.
       - name: Install cargo-auditable
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-auditable
       - name: Build sparq-cli + sparq-server (${{ matrix.cpu || 'default-cpu' }})
