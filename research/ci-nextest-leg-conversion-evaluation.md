@@ -89,7 +89,7 @@ validated against the exact `grep`/`awk` anchors below.
 
 `[profile.ci]` sets `retries = 2`. The parsers are anchored and take the **first** match:
 
-```
+```sh
 grep -oE 'pass [0-9]+ / fail' geo-conformance.out | grep -oE '[0-9]+' | head -1
 grep -E '^TOTAL service ' service-eval-conformance.out | awk '{print $3}' | head -1
 grep -E '^OWL 2 EL ratchet pass ' el-suite-conformance.out | awk '{print $6}' | head -1
@@ -108,11 +108,12 @@ semantics — a change to gating floor-enforcement logic across every conformanc
 exchange for a retry these legs do not need (see §2.3). The bead asked whether the parsing
 survives; it does not, and the repair is disproportionate.
 
-Note the two `^`-anchored families (`^TOTAL …`, `^OWL 2 EL ratchet pass …`, `^RIF-Core
-expressivity assertions `, `^QL entailment graduated floor `) carry an additional silent-
-failure risk: if nextest's restored-output framing indents or prefixes captured stdout, the
-anchor stops matching and the lane reports an empty scoreboard. Which of nextest's output
-modes preserve a bare line start is **not verified in this record** — the toolchain is not
+Note the two `^`-anchored families (`^TOTAL …`, `^OWL 2 EL ratchet pass …`,
+`^RIF-Core expressivity assertions …`, `^QL entailment graduated floor …`) carry an
+additional silent-failure risk: if nextest's restored-output framing indents or prefixes
+captured stdout, the anchor stops matching and the lane reports an empty scoreboard. Which
+of nextest's output modes preserve a bare line start is **not verified in this record** —
+the toolchain is not
 installable on the box this was written on (read-only rustup root). Any future attempt must
 verify it empirically first; see §6.
 
