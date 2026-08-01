@@ -1,18 +1,23 @@
 //! [FABLE-5] sq-6tgxp — the FR-6 fail-closed load/error contract as a **table oracle**
-//! over [`AclStatus`] + [`AclStatus::is_retryable`], locking the 401-vs-403-vs-503 split
-//! a Solid resource server (epic sq-gg0qq) must honour when mapping a [`WacDecision`] to
-//! an HTTP status:
+//! over [`AclStatus`] + [`AclStatus::is_retryable`], locking the 403-vs-503 split a Solid
+//! resource server (epic sq-gg0qq) must honour when mapping a [`WacDecision`] to an HTTP
+//! status:
 //!
-//! | decision                                             | HTTP  |
-//! |------------------------------------------------------|-------|
-//! | `allow == true` (necessarily `Resolved`)             | `200` |
-//! | retryable deny (`Unloaded` / `Transient`)            | `503` |
-//! | definitive deny, **anonymous** requester             | `401` |
-//! | definitive deny, authenticated (`Resolved` / `NoAcl`)| `403` |
+//! | decision                                              | HTTP  |
+//! |-------------------------------------------------------|-------|
+//! | `allow == true` (necessarily `Resolved`)              | `200` |
+//! | retryable deny (`Unloaded` / `Transient`)             | `503` |
+//! | definitive deny (`Resolved` / `NoAcl`), ANY requester | `403` |
+//!
+//! sq-qonip: the split takes **no authentication state**. Solid permits `401` as well as
+//! `403` for a definitive deny to an *anonymous* requester; sparq takes the stricter `403`
+//! uniformly, matching `sparq-server`'s `solid_authz::deny_status_code` (which has no
+//! session input). Withholding the 401 retry invitation can only under-invite a retry — it
+//! can never widen a deny into a grant. See [`anonymous_definitive_deny_is_403_not_401`].
 //!
 //! Invariants pinned here (all fail-closed, per `decide.rs` FR-6 / sq-snopa.2):
 //! - `is_retryable()` holds **exactly** for `{Unloaded, Transient}` and NOT for
-//!   `{Resolved, NoAcl}` — retryable statuses map to a distinct 503-class, never 40x.
+//!   `{Resolved, NoAcl}` — retryable statuses map to a distinct 503-class, never 403.
 //! - A retryable status **never** surfaces as `allow == true`.
 //! - `acl_link_header()` is `Some` **iff** `governing_acl` is `Some` — including
 //!   `Unloaded`, where the ACL is discovered even though the view is unmaterialized.
@@ -61,21 +66,21 @@ fn materialized_store(nquads: &str) -> PodStore {
 }
 
 /// The FR-6 status-mapping oracle a resource server applies to a [`WacDecision`]: the
-/// single source of truth for the 200/401/403/503 split this suite locks. `authenticated`
-/// is the server's authentication state for the requester (`Session::agent.is_some()`).
-fn http_status(d: &WacDecision, authenticated: bool) -> u16 {
+/// single source of truth for the 200/403/503 split this suite locks.
+///
+/// sq-qonip: it takes **no authentication state**, mirroring `sparq-server`'s
+/// `solid_authz::deny_status_code` — a definitive deny is a `403` whether or not the
+/// requester presented a WebID. The `401` "authenticate and retry" lane Solid also permits
+/// for anonymous requesters is deliberately not taken; see the module docs.
+fn http_status(d: &WacDecision) -> u16 {
     if d.allow {
         200
     } else if d.status.is_retryable() {
         // Unloaded / Transient: operational, not a permission outcome — retryable class.
         503
-    } else if authenticated {
-        // Resolved-deny / NoAcl for an authenticated principal: definitive forbidden.
-        403
     } else {
-        // Definitive deny for an ANONYMOUS requester: authentication might succeed —
-        // the client should obtain a token and retry.
-        401
+        // Resolved-deny / NoAcl: a definitive, authoritative forbidden, for every requester.
+        403
     }
 }
 
@@ -119,7 +124,6 @@ fn status_to_http_table() {
     struct Row {
         name: &'static str,
         decision: WacDecision,
-        authenticated: bool,
         expect_allow: bool,
         expect_status: AclStatus,
         expect_http: u16,
@@ -129,7 +133,6 @@ fn status_to_http_table() {
         Row {
             name: "authoritative allow (alice holds Read)",
             decision: materialized.decide(&alice(), RESOURCE, Mode::Read),
-            authenticated: true,
             expect_allow: true,
             expect_status: AclStatus::Resolved,
             expect_http: 200,
@@ -137,39 +140,34 @@ fn status_to_http_table() {
         Row {
             name: "authoritative deny: authenticated principal lacks the mode",
             decision: materialized.decide(&alice(), RESOURCE, Mode::Write),
-            authenticated: true,
             expect_allow: false,
             expect_status: AclStatus::Resolved,
             expect_http: 403,
         },
         Row {
-            name: "anonymous over a resource requiring auth: obtain a token",
+            name: "anonymous over a resource requiring auth: definitive deny",
             decision: materialized.decide(&anonymous(), RESOURCE, Mode::Read),
-            authenticated: false,
             expect_allow: false,
             expect_status: AclStatus::Resolved,
-            expect_http: 401,
+            expect_http: 403,
         },
         Row {
             name: "no discoverable ACL, authenticated: definitive deny",
             decision: no_acl_store.decide(&alice(), "https://pod.ex/d", Mode::Read),
-            authenticated: true,
             expect_allow: false,
             expect_status: AclStatus::NoAcl,
             expect_http: 403,
         },
         Row {
-            name: "no discoverable ACL, anonymous: auth might yet succeed",
+            name: "no discoverable ACL, anonymous: definitive deny",
             decision: no_acl_store.decide(&anonymous(), "https://pod.ex/d", Mode::Read),
-            authenticated: false,
             expect_allow: false,
             expect_status: AclStatus::NoAcl,
-            expect_http: 401,
+            expect_http: 403,
         },
         Row {
             name: "ACL discovered but view unmaterialized: retryable",
             decision: unloaded_store.decide(&alice(), RESOURCE, Mode::Read),
-            authenticated: true,
             expect_allow: false,
             expect_status: AclStatus::Unloaded,
             expect_http: 503,
@@ -177,7 +175,6 @@ fn status_to_http_table() {
         Row {
             name: "malformed resource IRI: typed transient error, retryable",
             decision: materialized.decide(&alice(), "not a valid iri", Mode::Read),
-            authenticated: true,
             expect_allow: false,
             expect_status: AclStatus::Transient,
             expect_http: 503,
@@ -189,7 +186,7 @@ fn status_to_http_table() {
         assert_eq!(d.allow, row.expect_allow, "[{}] allow", row.name);
         assert_eq!(d.status, row.expect_status, "[{}] status", row.name);
         assert_eq!(
-            http_status(d, row.authenticated),
+            http_status(d),
             row.expect_http,
             "[{}] HTTP mapping",
             row.name
@@ -220,6 +217,64 @@ fn status_to_http_table() {
             row.name
         );
     }
+}
+
+/// sq-qonip — an **anonymous** definitive deny maps to `403`, NOT `401`, exactly like an
+/// authenticated one.
+///
+/// Solid permits either code here; sparq takes the stricter `403` uniformly, and the
+/// mapping has no session input at all (mirroring `sparq-server`'s
+/// `solid_authz::deny_status_code`, whose only inputs are the `AclStatus` retryability
+/// bits). Pinned so the docs and the shipped shell cannot drift apart again: the audit that
+/// raised this found `decide.rs` + this table promising a `401` the server never emits.
+///
+/// Correctness-neutral and never fail-open — withholding the "authenticate and retry"
+/// invitation can only under-invite a retry, it can never widen a deny into a grant.
+#[test]
+fn anonymous_definitive_deny_is_403_not_401() {
+    let materialized = materialized_store(POD_WITH_ROOT_ACL);
+    let no_acl_store = materialized_store(POD_WITHOUT_ACL);
+
+    // The two definitive-deny statuses, reached by an ANONYMOUS requester.
+    let anon_resolved = materialized.decide(&anonymous(), RESOURCE, Mode::Read);
+    let anon_no_acl = no_acl_store.decide(&anonymous(), "https://pod.ex/d", Mode::Read);
+    // Their AUTHENTICATED counterparts: alice holds Read but not Write, and the ACL-less
+    // pod denies her too.
+    let auth_resolved = materialized.decide(&alice(), RESOURCE, Mode::Write);
+    let auth_no_acl = no_acl_store.decide(&alice(), "https://pod.ex/d", Mode::Read);
+
+    for (name, d) in [
+        ("Resolved, anonymous", &anon_resolved),
+        ("NoAcl, anonymous", &anon_no_acl),
+    ] {
+        assert!(!d.allow, "[{}] fail-closed", name);
+        assert!(
+            !d.status.is_retryable(),
+            "[{}] a definitive deny, not the retryable 503 class",
+            name
+        );
+        assert_eq!(
+            http_status(d),
+            403,
+            "[{}] an anonymous definitive deny is 403, never the permitted-but-untaken 401",
+            name
+        );
+    }
+
+    // The authenticated counterparts map IDENTICALLY: the code carries no session signal,
+    // so an observer cannot tell the two apart by status.
+    assert_eq!(anon_resolved.status, auth_resolved.status);
+    assert_eq!(
+        http_status(&anon_resolved),
+        http_status(&auth_resolved),
+        "Resolved deny: anonymous and authenticated share one code"
+    );
+    assert_eq!(anon_no_acl.status, auth_no_acl.status);
+    assert_eq!(
+        http_status(&anon_no_acl),
+        http_status(&auth_no_acl),
+        "NoAcl deny: anonymous and authenticated share one code"
+    );
 }
 
 /// `Unloaded` still discovers + advertises the governing ACL (decide.rs FR-5/FR-6): the

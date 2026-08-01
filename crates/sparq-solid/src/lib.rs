@@ -846,8 +846,9 @@ impl PodStore {
     /// # Fail-closed (FR-6, sq-snopa.2 — never fail OPEN)
     ///
     /// Every uncertainty path denies. The typed [`WacDecision::status`] lets a server map
-    /// the deny to the right HTTP code — **401/403** for a definitive deny
-    /// ([`AclStatus::Resolved`] without the mode, or [`AclStatus::NoAcl`]); a **retryable
+    /// the deny to the right HTTP code — **403** for a definitive deny, anonymous
+    /// requesters included ([`AclStatus::Resolved`] without the mode, or
+    /// [`AclStatus::NoAcl`]); a **retryable
     /// 503** for an operational one ([`AclStatus::Unloaded`] — the view was never
     /// materialized; [`AclStatus::Transient`] — e.g. a malformed resource IRI) — but the
     /// `allow == false` is already correct regardless of the status. See [`AclStatus`].

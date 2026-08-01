@@ -68,11 +68,24 @@ impl AclScope {
 /// The typed fail-closed load/error contract for a decision (FR-6, sq-snopa.2).
 ///
 /// Carries over the hard-won fail-OPEN lessons: it lets a resource server distinguish a
-/// *definitive* deny (map to **401/403**) from a *retryable* one (map to **503**) —
+/// *definitive* deny (map to **403**) from a *retryable* one (map to **503**) —
 /// **without ever failing open**. The [`WacDecision::allow`] flag is `false` for every
 /// status except [`AclStatus::Resolved`], and `Resolved` only ever carries the verdict
 /// the materialized auth view actually supports. A server that ignores `status` entirely
 /// still gets the correct allow/deny; `status` only refines the *HTTP code*.
+///
+/// # Anonymous definitive denies map to **403**, not 401 (sq-qonip)
+///
+/// The Solid protocol permits either code for a definitive deny to an *anonymous*
+/// requester: **403** ("forbidden, full stop") or **401** ("authenticate and retry").
+/// `AclStatus` deliberately carries **no** authentication state, and the shipped HTTP shell
+/// (`sparq-server`'s `solid-authz` `deny_status_code`) maps every definitive deny to a
+/// **403** whether or not the requester presented a WebID.
+///
+/// That is the *stricter* of the two and is correctness-neutral: withholding the 401 retry
+/// invitation can only under-invite a retry, it can never widen a deny into a grant. A
+/// downstream server that wants the 401 lane applies it in its own shell — it knows its
+/// authentication state, this crate does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AclStatus {
     /// A governing ACL was discovered and the auth view is loaded: the decision is
@@ -81,8 +94,8 @@ pub enum AclStatus {
     Resolved,
     /// No governing ACL exists anywhere up the container chain (the resource is
     /// **un-protected by any discoverable ACL**). Fail-closed ⇒ `allow == false`. A
-    /// Solid server treats this as a definitive deny — map to **403** (or **401** for an
-    /// anonymous principal that might succeed once authenticated).
+    /// Solid server treats this as a definitive deny — map to **403**, for an anonymous
+    /// requester too (the permitted 401 lane is deliberately not taken; see the enum docs).
     NoAcl,
     /// A governing ACL was discovered, but the authorization view is **not loaded**
     /// (`materialize_wac` / `materialize_acp` has not been run, so no verdict can be
@@ -98,10 +111,11 @@ pub enum AclStatus {
 
 impl AclStatus {
     /// Whether this status denotes a **retryable** (operational/transient) condition a
-    /// server should map to **503**, rather than a definitive permission outcome
-    /// (401/403). Convenience for the resource-server status mapping; `Unloaded` and
-    /// `Transient` are retryable, `Resolved` and `NoAcl` are definitive. Fail-closed is
-    /// orthogonal — every non-`Resolved` status still carries `allow == false`.
+    /// server should map to **503**, rather than a definitive permission outcome (**403**
+    /// — anonymous requesters included). Convenience for the resource-server status
+    /// mapping; `Unloaded` and `Transient` are retryable, `Resolved` and `NoAcl` are
+    /// definitive. Fail-closed is orthogonal — every non-`Resolved` status still carries
+    /// `allow == false`.
     pub fn is_retryable(self) -> bool {
         matches!(self, AclStatus::Unloaded | AclStatus::Transient)
     }

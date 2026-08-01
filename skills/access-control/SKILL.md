@@ -296,7 +296,10 @@ Materialize the authorization view from the access-control documents, then enfor
   is, never a verdict, so it is safe to emit on a deny.
 - `AclStatus` — the **typed fail-closed load/error contract** (FR-6, sq-snopa.2): a server
   maps `Resolved` (authoritative — `allow` is the real verdict; a deny is **403**), `NoAcl`
-  (no governing ACL anywhere up the chain — definitive **403/401**), `Unloaded` (a governing
+  (no governing ACL anywhere up the chain — definitive **403**, anonymous requesters
+  included: `AclStatus` carries no authentication state and the shipped `solid-authz` shell
+  takes the stricter of the two codes Solid permits, never the 401 retry invitation),
+  `Unloaded` (a governing
   ACL exists but `materialize_*` was never run — a **retryable 503**), and `Transient`
   (a typed transient error, e.g. a malformed resource IRI — a **retryable 503**).
   `AclStatus::is_retryable()` separates the 503s from the definitive denies. **It never
