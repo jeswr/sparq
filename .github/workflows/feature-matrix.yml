@@ -505,8 +505,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # [OPUS-5] sq-nd4yj — PRE-MERGE C1: run the structural guard on the tree the merge
-  # WOULD produce (PR head ⊕ the CURRENT base tip), not the one GitHub froze when this
-  # run was triggered.
+  # WOULD produce (PR head ⊕ the base tip AS OF THIS RUN), not the one GitHub froze when
+  # this run was triggered. Read the SCOPE paragraph below before treating a green here
+  # as a verdict about the merge candidate: it is evidence about one named base SHA.
   #
   # WHY. C1 (`scripts/check-feature-test-execution.py --check`, run in `setup` above) is
   # a WHOLE-TREE invariant: a feature-gated test in one crate is covered by an executor
@@ -546,6 +547,31 @@ jobs:
   # graded. That is deliberate — see the two reasons above — but it is a green that
   # asserts nothing, so read the annotation before trusting it.
   #
+  # SCOPE — THE VERDICT IS ABOUT ONE BASE SHA, AND IT GOES STALE (PR #5253 review round
+  # 1). This job NARROWS the stale-green window; it does not close it. It grades head ⊕
+  # the base tip it resolves WHILE RUNNING, and no PR event re-runs it afterwards: a
+  # push to the base branch does not re-trigger workflows for the open PRs targeting it,
+  # so a completed green stays green over a base that has since moved on — the same
+  # lifecycle hole described above for `setup`, merely with a smaller window. Two
+  # consequences, stated plainly rather than papered over:
+  #   (1) This job's green is EVIDENCE ABOUT A NAMED BASE SHA, not proof about the
+  #       current merge candidate. It therefore publishes the SHA it graded to the step
+  #       summary; compare that against the PR's base tip before trusting an old green.
+  #   (2) The proof about the tree that actually ships stays where it already was:
+  #       `setup` re-runs the SAME `--check` on the `merge_group` ref, whose SHA contains
+  #       the latest base BY CONSTRUCTION (GitHub builds it from the queue batch on top
+  #       of the current base). That run is what genuinely withholds a bad merge, and it
+  #       cannot go stale, because the ref IS the merge candidate. (`setup` skips a batch
+  #       the change-class gate calls docs-only/orchestration-only — but no such batch can
+  #       break C1: every C1 input, `crates/**` + `.github/feature-matrix.d/**` +
+  #       scripts/coverage.sh + the allowlist JSON, is deliberately OFF the inert
+  #       allowlist in scripts/ci_select.py, so a batch touching one classifies engine.)
+  # So: this job is a left-shifted EARLY WARNING that keeps a merge-only C1 violation
+  # from dequeuing a whole batch. It is not a pre-queue guarantee, and nothing downstream
+  # may treat it as one. The lifecycle wiring both halves depend on — the merge_group
+  # trigger, and `setup`'s C1 not being pull_request-only — is pinned by
+  # scripts/tests/test_feature_matrix_assemble.py (TestPreMergeC1Job).
+  #
   # WHY A SEPARATE JOB rather than another step in `setup`: a failing step in `setup`
   # withholds the ENTIRE opt-in matrix — every `opt-in <crate> (…)` check goes expected-
   # but-MISSING, the trap the failure-attribution step above exists to explain. A
@@ -554,7 +580,10 @@ jobs:
   #
   # GATING: the job name carries neither "advisory" nor "informational" and is declared
   # in no `.github/advisory-registry.json` entry, so `ci-summary / gate` treats it as a
-  # required sibling. On merge_group/push/schedule it skips (skipped => non-failing).
+  # required sibling. On merge_group/push/schedule THIS JOB skips (skipped =>
+  # non-failing) — re-merging a ref that is already a merge result is meaningless — but
+  # C1 itself does not skip there: `setup` runs it on that ref, which is the
+  # cannot-go-stale verdict the SCOPE paragraph points at.
   # Wiring pinned by scripts/tests/test_feature_matrix_assemble.py (TestPreMergeC1Job).
   premerge-c1:
     needs: [changes]
@@ -586,6 +615,7 @@ jobs:
         id: merge
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           # FAIL CLOSED on a broken assumption: if the base branch is not in the local
@@ -596,6 +626,21 @@ jobs:
             echo "::error title=pre-merge C1 could not run::origin/${BASE_REF} is missing from the checkout — the fetch-depth: 0 checkout in this job is a precondition of the test merge."
             exit 1
           }
+          # RECORD THE BASE THIS VERDICT IS ABOUT (PR #5253 review round 1). The check-run
+          # this job produces goes stale the moment the base advances — GitHub re-runs
+          # nothing for an open PR when its base moves — so publish the exact SHA graded
+          # instead of leaving "the current base tip" to mean "whenever you happened to
+          # look". A reader (or a merge-fixer triaging an old green) can then tell a
+          # verdict about today's base from one about a base three merges ago.
+          BASE_SHA="$(git rev-parse "origin/${BASE_REF}")"
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## pre-merge C1 — the tree this run is about"
+            echo
+            echo "PR head \`${HEAD_SHA}\` ⊕ base \`${BASE_REF}\` @ \`${BASE_SHA}\` — graded below unless the test merge conflicts, in which case nothing was graded and a \`::warning\` says so."
+            echo
+            echo "**Any conclusion this job reaches is about that base SHA only.** If \`${BASE_REF}\` has advanced since this run, no PR event re-ran this job, so its conclusion says nothing about the tree the PR would produce now. The C1 verdict that cannot go stale is the \`assemble feature matrix\` job's run on the \`merge_group\` ref, whose SHA contains the latest base by construction."
+          } >> "$GITHUB_STEP_SUMMARY"
           # `--no-commit` leaves the merged tree in the working directory (all we need);
           # an unchanged base is "Already up to date." and exits 0, which simply re-runs
           # the guard on the same tree `setup` saw. A non-zero exit here is a CONFLICT.
@@ -611,10 +656,12 @@ jobs:
         # Deliberately gated on a CLEAN test merge: running the guard against a
         # conflicted working tree would grade a tree that is not the merge result.
         if: steps.merge.outputs.merged == 'true'
+        env:
+          BASE_SHA: ${{ steps.merge.outputs.base_sha }}
         run: |
           set -euo pipefail
           if ! python3 scripts/check-feature-test-execution.py --check; then
-            echo "::error title=pre-merge C1 failed on the MERGED tree::The C1 structural guard FAILS on the tree this PR would produce once merged with the current base branch. (The 'assemble feature matrix' job grades the event-time merge ref instead, so it can be green while this is red — the violation lives in the merge, not in either side.) A feature-gated test and the CI executor that runs it — a .github/feature-matrix.d leg, a scripts/coverage.sh case arm, or an allowlist entry — are on opposite sides of it. Add the missing leg in THIS PR: merging as-is reds C1 on main, which withholds the whole opt-in matrix on every branch (sq-nd4yj)."
+            echo "::error title=pre-merge C1 failed on the MERGED tree::The C1 structural guard FAILS on the tree this PR produces when merged with base ${BASE_SHA}. (The 'assemble feature matrix' job grades the event-time merge ref instead, so it can be green while this is red — the violation lives in the merge, not in either side.) A feature-gated test and the CI executor that runs it — a .github/feature-matrix.d leg, a scripts/coverage.sh case arm, or an allowlist entry — are on opposite sides of it. Add the missing leg in THIS PR: merging as-is reds C1 on main, which withholds the whole opt-in matrix on every branch (sq-nd4yj)."
             exit 1
           fi
 

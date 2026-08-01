@@ -922,12 +922,20 @@ class TestPreMergeC1Job(unittest.TestCase):
     #2193 had just landed, while the gated tests stayed, and C1 then RED-ded main and every
     branch until f6a06580. The `setup` job's C1 cannot see that class: on `pull_request` it
     grades `refs/pull/N/merge`, frozen at event time, and GitHub does not re-run the checks
-    when the base moves. The `premerge-c1` job re-merges the CURRENT base tip and re-runs
-    the SAME `--check`. (Scope, stated in the job's own header: it grades CLEAN merges only
-    — a conflicting PR has no merge ref for anyone to grade, and a locally-resolved push to
-    main runs no PR CI, which is how 700ec341 itself got in.) Each assertion below is one
-    of the properties that makes the job able to do that; delete the job, or weaken any of
-    them, and this test goes red.
+    when the base moves. The `premerge-c1` job re-merges the base tip AS OF ITS OWN RUN and
+    re-runs the SAME `--check`. (Scope, stated in the job's own header: it grades CLEAN
+    merges only — a conflicting PR has no merge ref for anyone to grade, and a
+    locally-resolved push to main runs no PR CI, which is how 700ec341 itself got in.) Each
+    assertion below is one of the properties that makes the job able to do that; delete the
+    job, or weaken any of them, and this test goes red.
+
+    LIFECYCLE (PR #5253 review round 1). `premerge-c1` narrows the stale-green window
+    without closing it: a push to the base branch re-triggers nothing for the open PRs
+    targeting it, so this job's completed green can outlive the base it graded. The job
+    therefore claims only "head ⊕ THIS named base SHA was clean", and the verdict that
+    cannot go stale is `setup`'s C1 on the `merge_group` ref — a SHA that contains the
+    latest base by construction. Two tests below pin exactly that division of labour: the
+    job must publish the base SHA it graded, and the merge_group path must stay wired.
 
     TEXT-BASED (block slicing on the job's fixed indent) rather than yaml.safe_load, on
     purpose: PyYAML is an install step in CI but is absent on a bare dev box, where the
@@ -943,7 +951,7 @@ class TestPreMergeC1Job(unittest.TestCase):
         cls.block = cls._job_block(cls.text, cls.JOB_ID)
 
     @staticmethod
-    def _job_block(text: str, job_id: str) -> str:
+    def _job_block(text: str, job_id: str, why: str = "") -> str:
         """The `jobs.<job_id>` mapping, verbatim: from its 2-space-indented key line to
         (exclusive) the next line at that indent. Job-level keys sit at 4 spaces and
         steps deeper, so the terminator is unambiguous."""
@@ -952,14 +960,34 @@ class TestPreMergeC1Job(unittest.TestCase):
             start = lines.index(f"  {job_id}:")
         except ValueError:
             raise AssertionError(
-                f"feature-matrix.yml declares no `{job_id}` job — the pre-merge C1 guard "
-                "(sq-nd4yj) is GONE, so a violation that only exists in the merged tree "
-                "(gated test on one side, its matrix leg on the other) reaches main and "
-                "reds C1 on every branch."
+                f"feature-matrix.yml declares no `{job_id}` job — "
+                + (why or
+                   "the pre-merge C1 guard (sq-nd4yj) is GONE, so a violation that only "
+                   "exists in the merged tree (gated test on one side, its matrix leg on "
+                   "the other) reaches main and reds C1 on every branch.")
             ) from None
         out = [lines[start]]
         for line in lines[start + 1:]:
             if re.match(r"^  \S", line):
+                break
+            out.append(line)
+        return "\n".join(out)
+
+    @staticmethod
+    def _top_level_block(text: str, key: str) -> str:
+        """The top-level `<key>:` mapping, verbatim: from its column-0 key line to
+        (exclusive) the next column-0 line. Same slicing contract as `_job_block`, one
+        indent level up — used for the `on:` trigger block."""
+        lines = text.splitlines()
+        try:
+            start = lines.index(f"{key}:")
+        except ValueError:
+            raise AssertionError(
+                f"feature-matrix.yml has no top-level `{key}:` block"
+            ) from None
+        out = [lines[start]]
+        for line in lines[start + 1:]:
+            if re.match(r"^\S", line):
                 break
             out.append(line)
         return "\n".join(out)
@@ -996,6 +1024,49 @@ class TestPreMergeC1Job(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", self.block)
         self.assertIn("needs.changes.outputs.rust_changed == 'true'", self.block)
         self.assertIn("needs: [changes]", self.block)
+
+    def test_publishes_the_base_sha_it_graded(self):
+        """PR #5253 review round 1. The job resolves the base tip WHILE RUNNING, and no PR
+        event re-runs it when the base later advances — so a completed green can be a
+        verdict about a base the PR would no longer merge with. The job must therefore
+        name the SHA it graded (step output + job summary); without that, an old green and
+        a current one are indistinguishable and "the CURRENT base tip" is unfalsifiable."""
+        self.assertIn('BASE_SHA="$(git rev-parse "origin/${BASE_REF}")"', self.block,
+                      "the job must resolve the base tip to a concrete SHA")
+        self.assertIn('echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"', self.block,
+                      "the graded base SHA must be a step output so later steps can cite it")
+        self.assertIn('>> "$GITHUB_STEP_SUMMARY"', self.block,
+                      "the graded base SHA must reach the job summary a human reads")
+        self.assertIn("HEAD_SHA: ${{ github.event.pull_request.head.sha }}", self.block,
+                      "the summary must name the PR head it merged, not just the base")
+
+    def test_unstaleable_c1_verdict_stays_wired_on_merge_group(self):
+        """PR #5253 review round 1 — the LIFECYCLE half, not another substring of this job.
+
+        Because this job's verdict is scoped to one base SHA and GitHub re-runs nothing for
+        an open PR when the base advances, it CANNOT be the last word on the merge
+        candidate; the job header says so. That honesty only holds while the invariant is
+        ALSO enforced on a ref whose SHA contains the latest base by construction — the
+        merge queue's `merge_group` ref. Assert that path end to end: the workflow triggers
+        on merge_group, and the job that runs C1 (`setup`) is not restricted to
+        pull_request, so the merge_group run actually grades it. Drop either and the only
+        remaining C1 verdict is a staleable one."""
+        on_block = self._top_level_block(self.text, "on")
+        self.assertIn("  merge_group:", on_block,
+                      "feature-matrix.yml must still trigger on merge_group — that run is "
+                      "the C1 verdict on the tree that actually ships, and the pre-merge "
+                      "job explicitly defers to it")
+        setup = self._job_block(
+            self.text, "setup",
+            why="`setup` is where the whole-tree C1 guard runs on the merge_group ref; "
+                "without it the only C1 verdict left is the pre-merge job's, which is "
+                "scoped to a base SHA that can go stale (PR #5253 review round 1).")
+        self.assertIn("python3 scripts/check-feature-test-execution.py --check", setup,
+                      "`setup` must still run the real C1 guard")
+        self.assertNotIn("pull_request", setup.split("steps:")[0],
+                         "`setup`'s job-level condition must NOT restrict it to "
+                         "pull_request — the merge_group run is the C1 verdict that "
+                         "cannot go stale")
 
     def test_job_is_unprivileged(self):
         """It checks out the PR merge ref; it needs nothing but the source."""
