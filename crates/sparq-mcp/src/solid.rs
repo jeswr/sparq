@@ -144,8 +144,12 @@
 //! - RDF sources only: `content_type` must be Turtle or N-Triples (or JSON-LD when the
 //!   opt-in `jsonld` feature is enabled) — see the non-RDF scope-out above. [GPT-5.6]
 //! - The SPARQL `update` tool delegates to the session-checked
-//!   `PodStore::update_as` / `update_as_acp`, which applies the per-graph write
-//!   permission check but not the wall-clock/row budget the read tools enforce.
+//!   `PodStore::update_as_with_budget` / `update_as_acp_with_budget`, which applies the
+//!   per-graph write permission check under the SAME wall-clock/row budget the read tools
+//!   enforce. Only the WHERE-bearing parts of an update consult that budget (the
+//!   authorization check's `GRAPH ?var` binding SELECT and the apply's
+//!   `DELETE`/`INSERT … WHERE`); `INSERT`/`DELETE DATA` and `CLEAR`/`DROP` are bounded by
+//!   their operand size, which the request body-size limit already caps.
 //! - Time-windowed conditional grants fail closed unless [`SolidServerConfig::now`]
 //!   supplies a request clock.
 
@@ -1240,8 +1244,17 @@ impl SolidMcpServer {
         Ok(json!({}))
     }
 
-    /// `update`: session-checked SPARQL Update (`PodStore::update_as` — every touched
-    /// graph needs this session's write permission, fail-closed, atomic).
+    /// `update`: session-checked SPARQL Update (`PodStore::update_as_with_budget` — every
+    /// touched graph needs this session's write permission, checked in full BEFORE
+    /// anything is applied, so a denial mutates nothing).
+    ///
+    /// Runs under the server's [`Self::budget`] exactly as the read tools do, so a
+    /// pathological `DELETE`/`INSERT … WHERE` aborts at the deadline / row cap as a tool
+    /// error instead of running the server out of memory — mcp-solid §9.4's "every
+    /// tool-issued evaluation MUST be bounded" MUST. A budget trip during the *apply*
+    /// inherits `update_in_place`'s non-atomic-on-error contract (the store keeps whatever
+    /// the update reached), exactly as the unbudgeted path already did.
+    /// [SONNET-4.6] sq-yhlf0.
     fn tool_update(&mut self, args: &Value) -> Result<String, String> {
         let sparql = arg_str(args, "sparql")?.to_string();
         let config = self.config.clone();
@@ -1251,10 +1264,11 @@ impl SolidMcpServer {
             issuer: config.issuer.as_deref(),
             now: config.now.as_deref(),
         };
+        let budget = self.budget();
         if self.config.acp {
-            self.store.update_as_acp(&session, &sparql)?;
+            self.store.update_as_acp_with_budget(&session, &sparql, &budget)?;
         } else {
-            self.store.update_as(&session, &sparql)?;
+            self.store.update_as_with_budget(&session, &sparql, &budget)?;
         }
         Ok("ok".to_string())
     }

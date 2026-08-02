@@ -61,6 +61,7 @@ use crate::loader::{ACL_SUFFIX, ACR_SUFFIX};
 use crate::{AuthIndex, Mode, Session};
 use oxrdf::{NamedNode, Term, Variable};
 use rustc_hash::FxHashSet;
+use sparq_engine::QueryBudget;
 use spargebra::algebra::{GraphPattern, GraphTarget, QueryDataset};
 use spargebra::term::{GraphName, GraphNamePattern};
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
@@ -362,17 +363,29 @@ fn rescope_dataset(graph: &sparq_core::Graph, u: &QueryDataset) -> QueryDataset 
 ///
 /// Fail-closed cases that still fall back to the wildcard (rather than risk a hole):
 ///
-/// - the WHERE cannot be evaluated (parse/serialize/engine error) — `Err(need)`;
+/// - the WHERE cannot be evaluated (parse/serialize/engine error) —
+///   `Err(ResolveFail::Wildcard(need))`;
 /// - a slot binds to a **blank-node** graph name: the engine *would* write to it
 ///   ([`gnp_subst`] accepts blank nodes), but the auth view only ever grants write on
-///   named graphs, so write can never be proven — `Err(need)`.
+///   named graphs, so write can never be proven — `Err(ResolveFail::Wildcard(need))`.
 ///
 /// Bindings the engine *drops* (an unbound variable, or a literal/triple where a graph
 /// name is required — [`gnp_subst`] returns `None`) produce no write and are ignored.
+///
+/// # Budget ([SONNET-4.6] sq-yhlf0)
+///
+/// The binding SELECT is itself an evaluation the *caller's* update triggered, so it runs
+/// under the caller's [`QueryBudget`] — an unlimited budget (the default, via
+/// [`crate::PodStore::update_as`]) is byte-for-byte the previous behaviour. A budget trip
+/// is deliberately NOT folded into the wildcard fallback: the evaluation was cut short on
+/// purpose, so it surfaces as [`ResolveFail::Budget`] and aborts the whole check with the
+/// engine's budget message, rather than being reported to the caller as an unexplained
+/// permission denial.
 fn resolve_var_graphs(
     graph: &sparq_core::Graph,
     r: &VarGraphResolve,
-) -> Result<Vec<(NamedNode, Need)>, Need> {
+    budget: &QueryBudget,
+) -> Result<Vec<(NamedNode, Need)>, ResolveFail> {
     // The strongest need across this operation's slots is the fallback level (and the
     // floor for any escalation): if we must give up, give up at the level that protects
     // every slot.
@@ -392,8 +405,12 @@ fn resolve_var_graphs(
         },
         base_iri: None,
     };
-    let Ok(result) = sparq_engine::query(graph, &select.to_string()) else {
-        return Err(fallback); // un-evaluable WHERE → conservative
+    let result = match sparq_engine::query_with_budget(graph, &select.to_string(), budget) {
+        Ok(result) => result,
+        // A budget trip is not an "un-evaluable WHERE" — report the bound, don't hide it
+        // behind a wildcard denial ([SONNET-4.6] sq-yhlf0).
+        Err(e) if is_budget_error(&e) => return Err(ResolveFail::Budget(e)),
+        Err(_) => return Err(ResolveFail::Wildcard(fallback)), // un-evaluable WHERE → conservative
     };
 
     // Column index of each slot variable in the result (a projected variable absent from
@@ -413,7 +430,7 @@ fn resolve_var_graphs(
                 }
                 // A blank-node graph name IS written by the engine but can never be
                 // authorized → fail closed to the wildcard.
-                Some(Term::BlankNode(_)) => return Err(fallback),
+                Some(Term::BlankNode(_)) => return Err(ResolveFail::Wildcard(fallback)),
                 // Unbound, or a literal/triple term: the engine drops the quad
                 // (`gnp_subst` → None), so no write happens — nothing to authorize.
                 _ => {}
@@ -421,6 +438,26 @@ fn resolve_var_graphs(
         }
     }
     Ok(out)
+}
+
+/// Why [`resolve_var_graphs`] could not hand back a precise variable-`GRAPH` target set.
+/// [SONNET-4.6] sq-yhlf0.
+enum ResolveFail {
+    /// Fall back to the conservative all-graphs wildcard at this need (fail-closed): the
+    /// WHERE could not be evaluated, or a slot bound to an unauthorizable graph name.
+    Wildcard(Need),
+    /// The binding SELECT exhausted the caller's [`QueryBudget`], carrying the engine's
+    /// `"query budget exceeded (…)"` message. Aborts the check outright — an evaluation
+    /// stopped on purpose must be reported as such, not laundered into a denial.
+    Budget(String),
+}
+
+/// Is `e` the engine's cooperative-budget abort (`"query budget exceeded (timeout)"` and
+/// its `max-rows` / `max-bytes` / `cancelled` siblings — see [`QueryBudget`]) rather than a
+/// genuine evaluation failure? The engine reports a budget trip only through that message,
+/// so the shared prefix identifies the whole class. [SONNET-4.6] sq-yhlf0.
+fn is_budget_error(e: &str) -> bool {
+    e.contains("query budget exceeded")
 }
 
 /// Does the session have `need` on the concrete graph `g`?
@@ -480,12 +517,18 @@ pub(crate) struct Permit {
 /// Authorize an update string for `session` against `auth` over the dataset `graph`,
 /// WITHOUT mutating anything. `Ok(Permit)` means every target is writable; `Err(msg)`
 /// is a deny (fail-closed) and the caller must not apply the update.
+///
+/// `budget` bounds the only evaluation this check performs — the `GRAPH ?var` binding
+/// SELECT in [`resolve_var_graphs`]. A budget trip there aborts the check with the
+/// engine's `"query budget exceeded (…)"` message (still fail-closed: nothing is
+/// applied). [SONNET-4.6] sq-yhlf0.
 pub(crate) fn check(
     graph: &sparq_core::Graph,
     auth: &AuthIndex,
     session: &Session,
     sparql: &str,
     group_docs: &FxHashSet<String>,
+    budget: &QueryBudget,
 ) -> Result<Permit, String> {
     let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
     let mut reqs = analyze(&upd);
@@ -506,8 +549,17 @@ pub(crate) fn check(
     // so resolved targets are authorized on exactly the same footing as static ones.
     // (Resolve first, then fold in — `resolve_var_graphs` borrows `reqs.var_graphs`, the
     // folding mutates the rest of `reqs`.)
-    let resolutions: Vec<Result<Vec<(NamedNode, Need)>, Need>> =
-        reqs.var_graphs.iter().map(|r| resolve_var_graphs(graph, r)).collect();
+    let mut resolutions: Vec<Result<Vec<(NamedNode, Need)>, Need>> =
+        Vec::with_capacity(reqs.var_graphs.len());
+    for r in &reqs.var_graphs {
+        match resolve_var_graphs(graph, r, budget) {
+            Ok(resolved) => resolutions.push(Ok(resolved)),
+            Err(ResolveFail::Wildcard(need)) => resolutions.push(Err(need)),
+            // The budget is shared across every slot, so once it is exhausted there is no
+            // point resolving the rest — abort the whole check ([SONNET-4.6] sq-yhlf0).
+            Err(ResolveFail::Budget(e)) => return Err(e),
+        }
+    }
     for res in resolutions {
         match res {
             Ok(resolved) => {
@@ -685,7 +737,7 @@ mod differential_writeset_tests {
         );
         let mut out = BTreeSet::new();
         for r in &reqs.var_graphs {
-            match resolve_var_graphs(graph, r) {
+            match resolve_var_graphs(graph, r, &QueryBudget::unlimited()) {
                 Ok(resolved) => {
                     for (n, _need) in resolved {
                         out.insert(n.as_str().to_owned());

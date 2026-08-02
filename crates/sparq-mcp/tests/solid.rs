@@ -1233,3 +1233,103 @@ fn resources_requests_reject_a_missing_uri_parameter() {
         assert!(resp["error"]["message"].as_str().unwrap().contains(method));
     }
 }
+
+// ───────────── Class B (budget — mcp-solid §9.4, [SONNET-4.6] sq-yhlf0) ─────────────
+
+/// A write-enabled pod server whose `QueryBudget` deadline is `query_timeout_secs`
+/// wall-clock seconds away. `0` yields an already-expired deadline — the deterministic
+/// way to observe the bound without racing a real pathological evaluation.
+fn server_with_timeout(agent: &str, query_timeout_secs: Option<u64>) -> SolidMcpServer {
+    let config = SolidServerConfig {
+        agent: Some(agent.to_string()),
+        allow_update: true,
+        query_timeout_secs,
+        ..SolidServerConfig::default()
+    };
+    SolidMcpServer::with_config(pod(), config).expect("materializes")
+}
+
+/// A `DELETE … WHERE` whose WHERE is a 3-way cross product over every named graph — the
+/// pathological shape §9.4 exists to bound. Its DELETE template targets a STATIC graph
+/// alice holds `acl:Write` on, so authorization passes and the only thing that can stop
+/// it is the budget.
+const PATHOLOGICAL_UPDATE: &str = "\
+DELETE { GRAPH <https://pod.ex/notes/n1> { ?s ?p ?o } } \
+WHERE { GRAPH ?g1 { ?s ?p ?o } GRAPH ?g2 { ?a ?b ?c } GRAPH ?g3 { ?d ?e ?f } }";
+
+/// mcp-solid §9.4 MUST: every tool-issued evaluation is bounded. The `update` tool now
+/// runs `PodStore::update_as_with_budget` under the SAME server budget the read tools
+/// use, so a pathological WHERE trips the deadline and comes back as a TOOL ERROR.
+///
+/// Mutation guard: revert `tool_update` to the unbudgeted `PodStore::update_as` and this
+/// goes green-with-no-error (the update simply applies), failing the `is_err` assert.
+#[test]
+fn a_pathological_update_trips_the_deadline_as_a_tool_error() {
+    let mut s = server_with_timeout(ALICE, Some(0));
+    let (text, is_err) = tool(&mut s, "update", json!({"sparql": PATHOLOGICAL_UPDATE}));
+    assert!(is_err, "an exhausted deadline must fail the update tool, not apply it: {text}");
+    assert!(
+        text.contains("query budget exceeded (timeout)"),
+        "the tool error must name the BUDGET, not a permission denial: {text}"
+    );
+}
+
+/// The other half of the guard: the identical update under the server's normal (generous)
+/// budget SUCCEEDS. Without this, the test above would also pass if the update were simply
+/// malformed or denied — it pins the failure on the deadline and nothing else.
+#[test]
+fn the_same_update_succeeds_under_a_generous_budget() {
+    let mut s = server_with_timeout(ALICE, Some(30));
+    let (text, is_err) = tool(&mut s, "update", json!({"sparql": PATHOLOGICAL_UPDATE}));
+    assert!(!is_err, "the update is well-formed and authorized: {text}");
+    // It really did delete: n1's triple is gone from the shared dataset.
+    let (rows, query_err) = tool(
+        &mut s,
+        "query",
+        json!({"sparql": "SELECT ?o WHERE { GRAPH <https://pod.ex/notes/n1> { ?s ?p ?o } }"}),
+    );
+    assert!(!query_err, "query tool works: {rows}");
+    assert!(!rows.contains("hello"), "the budgeted apply really ran: {rows}");
+}
+
+/// A budget trip during the APPLY must not be mistaken for an authorization failure, and
+/// must leave the caller with the engine's message rather than a `"update denied: …"`.
+/// (The deny path is separately covered; this asserts the two error classes stay apart.)
+#[test]
+fn a_budget_trip_is_reported_distinctly_from_an_authorization_denial() {
+    let mut s = server_with_timeout(ALICE, Some(0));
+    let (budget_text, budget_err) = tool(&mut s, "update", json!({"sparql": PATHOLOGICAL_UPDATE}));
+    assert!(budget_err, "the budget trip is an error: {budget_text}");
+    assert!(
+        budget_text.contains("query budget exceeded") && !budget_text.contains("update denied"),
+        "a bounded evaluation must name the budget, not be laundered into a permission \
+         denial: {budget_text}"
+    );
+
+    // Bob may only READ `secret/`; his write is denied on the AUTHORIZATION path, which
+    // runs before any evaluation, so he gets the deny message even with a dead budget.
+    let mut bob = server_with_timeout(BOB, Some(0));
+    let (deny_text, deny_err) = tool(
+        &mut bob,
+        "update",
+        json!({"sparql": "DROP GRAPH <https://pod.ex/secret/s1>"}),
+    );
+    assert!(deny_err, "bob holds no write grant: {deny_text}");
+    assert!(deny_text.contains("update denied"), "the deny path is unchanged: {deny_text}");
+}
+
+/// `INSERT DATA` carries no WHERE, so it consults no budget — an exhausted deadline must
+/// NOT block it. This is the documented boundary of the bound (operand-size-limited
+/// operations are capped by the request body-size limit, not the `QueryBudget`); without
+/// it, "bound everything" could silently become "bound nothing writes".
+#[test]
+fn an_exhausted_budget_does_not_block_a_whereless_insert_data() {
+    let mut s = server_with_timeout(ALICE, Some(0));
+    let (text, is_err) = tool(
+        &mut s,
+        "update",
+        json!({"sparql": "INSERT DATA { GRAPH <https://pod.ex/notes/n1> { \
+             <https://pod.ex/notes/n1#it> <https://ex.dev/ns#tag> \"x\" } }"}),
+    );
+    assert!(!is_err, "INSERT DATA consults no budget: {text}");
+}
