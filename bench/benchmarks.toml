@@ -30,6 +30,21 @@
 #                       dashboard. Non-capability families (cli-*/hw/ci/serve/
 #                       memtier/parse/compress/wikidata/…) are exempt from the
 #                       dashboard requirement without needing this flag. [OPUS-4.8]
+#
+# SCOPE — ADDING/RENAMING A QUERY IS A TWO-FILE CHANGE ([OPUS-5] issue #5235).
+# bench/dashboard/metric-labels.json is a COMMITTED GENERATED companion: it maps each
+# raw metric stem to its readable dashboard label, and scripts/gen-metric-labels.py
+# derives it from the benchmark query files themselves (the `.rq` file_stem() under
+# bench/*/queries*/, plus the deep-taxonomy tiers). Adding, removing or renaming a
+# query `.rq` therefore moves the stem set and MUST regenerate the companion in the
+# SAME PR:
+#     python3 scripts/gen-metric-labels.py
+# The `dashboard labels (lint + drift)` job in .github/workflows/bench.yml REDs
+# otherwise (`gen-metric-labels.py --check`). Editing a query's BODY does not move its
+# stem and stays a SINGLE-file change. A bead / issue / PR scoped to the query
+# directory alone forbids the regeneration it requires and must be re-scoped rather
+# than worked (the #2384 contradiction). Declared in
+# .github/generated-companions.json.
 
 # =============================================================================
 # QUERY — engine compute + differential correctness vs reference engines

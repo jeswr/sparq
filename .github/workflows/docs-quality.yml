@@ -1166,6 +1166,31 @@ jobs:
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
         run: python3 scripts/check-fast-fix-ring-guard.py
+
+      # ---- generated-companion scope registry (#5235, generalising #2384) ----
+      # [OPUS-5] The guard above is one instance of a REPO-WIDE shape: a committed file
+      # DERIVED from other committed sources and pinned by a byte-comparing gate. Such a
+      # pair carries a scope trap — #2384 found a bead scoped to
+      # `.github/feature-matrix.d/<crate>.yml` ALONE forbidding the
+      # `feature-matrix-legnames.golden.txt` regeneration it simultaneously required, so
+      # the worker had to DECLINE. #2384 fixed that one surface; #5235 swept the rest and
+      # this gate keeps the sweep from decaying. It enforces, from
+      # `.github/generated-companions.json`: C1 every registered path resolves (incl. the
+      # regen command naming a generator that still exists — a dead recipe REDs); C2 every
+      # declared scope-anchor file actually STATES the two-file rule and names the
+      # companion, so the rule sits where a task DECOMPOSER reads it (a new feature-matrix
+      # fragment added without the SCOPE comment REDs here); C3 every
+      # `scripts/tests/*.golden.*` is declared, so a future golden cannot land with no
+      # recorded regen command and no anchor. It does NOT check freshness — each pair's own
+      # gate does that (test_feature_matrix_assemble.py, check-fast-fix-ring-guard.py,
+      # `gen-metric-labels.py --check`). GATING: deterministic, in-repo, no network, no
+      # build. The --self-test mutation table proves each check has teeth.
+      - name: Self-test the generated-companion registry gate (#5235 mutation table)
+        run: python3 scripts/check-generated-companions.py --self-test
+      - name: "Enforce generated companions are declared + scope-anchored (#5235) — GATING"
+        run: python3 scripts/check-generated-companions.py
+      - name: generated-companion registry — checker tests — GATING
+        run: python3 scripts/tests/test_generated_companions.py
       # [OPUS-5] #4966: the SAME two doorbells, from the opposite direction — a MISSING
       # REGISTRY_RING_TOKEN must fail LOUD instead of suppressing ~130 rings into green
       # runs. Extracts each ring job's real `run:` script from the live YAML and

@@ -23,9 +23,18 @@
 #   scripts/gen-metric-labels.py --check         # drift gate: exit 1 if the file is out of date
 #   scripts/gen-metric-labels.py --stdout        # print JSON to stdout, don't write
 #
-# DRIFT GATE: `--check` regenerates in memory and diffs against the committed file. Wire it into
-# CI so adding/renaming a query without regenerating labels fails fast (the committed JSON is the
-# served artifact — generation at serve time would need Python in the Pages job).
+# DRIFT GATE: `--check` regenerates in memory and diffs against the committed file. Wired into the
+# `dashboard labels (lint + drift)` job in .github/workflows/bench.yml so adding/renaming a query
+# without regenerating labels fails fast (the committed JSON is the served artifact — generation at
+# serve time would need Python in the Pages job).
+#
+# SCOPE ([OPUS-5] issue #5235). bench/dashboard/metric-labels.json is a COMMITTED GENERATED
+# companion of the query corpus, so adding, removing or renaming a `.rq` under bench/*/queries*/
+# (or adding a deep-taxonomy tier) is a TWO-FILE change — the query AND the label map. A bead /
+# issue / PR scoped to the query directory alone forbids the regeneration it requires and must be
+# re-scoped (the #2384 contradiction). Editing a query's BODY does not move its file_stem() and
+# stays a SINGLE-file change. Declared in .github/generated-companions.json; the scope rule is
+# restated in bench/benchmarks.toml, which is what a decomposer reads when scoping bench work.
 import argparse
 import json
 import os

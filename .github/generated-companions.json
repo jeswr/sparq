@@ -1,0 +1,54 @@
+{
+ "_doc": "Generated-companion registry. [OPUS-5] sparq-org/sparq#5235, generalising the #2384 fix. A GENERATED COMPANION is a file that is COMMITTED to git but DERIVED from other committed sources, and pinned by a byte-comparing (or regenerate-and-diff) gate. Such a pair carries a scope trap: a bead/issue/PR scoped to the SOURCE ALONE forbids the companion regeneration it simultaneously requires, so the worker must decline (#2384) or land a red gate. The fix is always the same two things, and this registry is what makes them checkable: (a) the EXACT regeneration command is recorded here and next to the source, and (b) the TWO-FILE SCOPE RULE is stated in every `scope_anchors` file — i.e. in a file the task DECOMPOSER actually reads when it scopes the source. scripts/check-generated-companions.py enforces C1 (every registered path resolves), C2 (every scope-anchor file states the rule AND names the companion path), C3 (every scripts/tests/*.golden.* file is registered here, so a new golden cannot land undeclared). Adding a checked-in generated artifact = adding an entry here. Deleting one = deleting its entry.",
+ "_marker": "The literal token every scope-anchor must contain, alongside the companion path, is TWO-FILE (matched case-insensitively). Chosen to be greppable — `git grep -il two-file` finds the anchors — but that grep is a SUPERSET, not the anchor list: the phrase also occurs in this registry, in the checker, in the docs-quality wiring, and in scripts/check-fv-manifest.py, which uses it for an unrelated config relation (KANI_STEP_BUDGET vs a workflow backstop) and is NOT a generated companion. The authoritative anchor list is the `scope_anchors` of the entries below.",
+ "companions": {
+  "scripts/tests/feature-matrix-legnames.golden.txt": {
+   "sources": [
+    ".github/feature-matrix.d/*.yml"
+   ],
+   "regen": "python3 scripts/assemble-feature-matrix.py --names > scripts/tests/feature-matrix-legnames.golden.txt",
+   "pinned_by": "scripts/tests/test_feature_matrix_assemble.py::test_golden_is_exact_names_output (byte-exact stdout)",
+   "gate": "feature-matrix.yml / setup (`assemble feature matrix`)",
+   "trigger": "ONLY when the emitted leg-NAME set changes — adding, removing or renaming a leg. Editing a leg's features/test/tier/tier-reason or its comments leaves the name set untouched and stays a SINGLE-file change; do not scope the golden into a task that cannot change a `name:`.",
+   "scope_anchors": [
+    ".github/feature-matrix.d/README.md",
+    ".github/feature-matrix.d/*.yml",
+    "scripts/assemble-feature-matrix.py"
+   ],
+   "owner_issue": 2384,
+   "registered": "2026-08-02"
+  },
+  "scripts/tests/fast-fix-ring.golden.yml": {
+   "sources": [
+    ".github/workflows/fast-fix-ring.yml"
+   ],
+   "regen": "python3 scripts/check-fast-fix-ring-guard.py --update-golden",
+   "pinned_by": "scripts/check-fast-fix-ring-guard.py (WHOLE-FILE byte pin, inert-normalized)",
+   "gate": "docs-quality.yml / quick-gates",
+   "trigger": "ANY edit to the workflow, including a comment — the pin is the whole file and deliberately does not strip comments, so there is no single-file edit. The golden bump IS the human-review checkpoint for this security-load-bearing workflow (#3475); regenerate it in the SAME PR, never hand-edit it.",
+   "scope_anchors": [
+    ".github/workflows/fast-fix-ring.yml",
+    "scripts/check-fast-fix-ring-guard.py"
+   ],
+   "owner_issue": 5235,
+   "registered": "2026-08-02"
+  },
+  "bench/dashboard/metric-labels.json": {
+   "sources": [
+    "bench/*/queries/*.rq",
+    "bench/*/queries-heavy/*.rq",
+    "bench/deep-taxonomy/expected.tsv"
+   ],
+   "regen": "python3 scripts/gen-metric-labels.py",
+   "pinned_by": "python3 scripts/gen-metric-labels.py --check (regenerate in memory + diff the committed file)",
+   "gate": "bench.yml / dashboard-labels (`dashboard labels (lint + drift)`)",
+   "trigger": "Adding, removing or renaming a benchmark query `.rq` file (the label map is keyed by `file_stem()`), or adding a deep-taxonomy tier. Editing a query's BODY does not move the stem and stays a SINGLE-file change.",
+   "scope_anchors": [
+    "bench/benchmarks.toml",
+    "scripts/gen-metric-labels.py"
+   ],
+   "owner_issue": 5235,
+   "registered": "2026-08-02"
+  }
+ }
+}

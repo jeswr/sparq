@@ -19,6 +19,17 @@
 # passes through review + branch protection). REGISTRY_RING_TOKEN is therefore no
 # longer reachable from PR-head-controlled content. See §ADVERSARIAL below.
 #
+# SCOPE — EDITING THIS FILE IS A TWO-FILE CHANGE ([OPUS-5] issue #5235).
+# scripts/check-fast-fix-ring-guard.py pins this WHOLE FILE byte-for-byte (after inert
+# trailing-whitespace normalization) against scripts/tests/fast-fix-ring.golden.yml, and
+# deliberately does NOT strip comments — so EVERY edit here, including a comment-only
+# one, must regenerate the golden IN THE SAME PR:
+#     python3 scripts/check-fast-fix-ring-guard.py --update-golden
+# That golden bump is the intended human-review checkpoint for a security-load-bearing
+# workflow (#3475), not an inconvenience. A bead / issue / PR scoped to this workflow
+# ALONE forbids the regeneration it requires and must be re-scoped rather than worked
+# (the #2384 contradiction). Declared in .github/generated-companions.json.
+#
 # WHAT IT DOES (unchanged behaviour, ported verbatim from the old fix-ring job): when
 # the ci-summary `gate` REDs on a pull_request run for a PIPELINE-OWNED PR (armed for
 # auto-merge, or labeled review:pass / review:changes; never drafts or the human-owned

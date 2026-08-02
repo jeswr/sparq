@@ -100,6 +100,14 @@
 # (or copy the normalized workflow into the golden by hand). The golden bump is the
 # review checkpoint.
 #
+# SCOPE ([OPUS-5] issue #5235). Because the pin is the WHOLE FILE and deliberately does
+# not strip comments, there is no such thing as a single-file edit to the ring workflow:
+# touching `.github/workflows/fast-fix-ring.yml` at all is a TWO-FILE change — the
+# workflow AND `scripts/tests/fast-fix-ring.golden.yml`. Any bead / issue / PR that edits
+# the workflow MUST scope both, or its own spec forbids the regeneration it requires
+# (the #2384 contradiction) and this gate REDs. Declared in
+# `.github/generated-companions.json` and enforced by check-generated-companions.py.
+#
 # NEGATIVE COVERAGE (--self-test, hermetic — no gh/git/network): the live workflow
 # passes, and EACH round-1..5 bypass — the round-1..4 guard removals / OR-wraps /
 # negations / demotions / uncalled-function move / alt dispatch spelling / second job,
