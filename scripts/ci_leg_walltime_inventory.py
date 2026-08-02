@@ -20,12 +20,20 @@ step was a compile". So the split is inferred from step NAMES (`classify_step`),
 an approximation, and the honest consequence is designed in rather than hidden:
 
   * every step that no rule matches lands in OTHER, never silently in a flattering bucket;
-  * the report ALWAYS prints the OTHER share and the top unmatched step names, so a table
-    whose classification has decayed says so on its face;
-  * `--max-other-pct` turns that into a hard exit for unattended use.
+  * the report names the top unmatched steps whenever there are any, so a table whose
+    classification has decayed says so on its face;
+  * the decay signal is the UNCLASSIFIED share — the wall-clock of steps no rule matched —
+    which is tracked separately from the OTHER bucket. OTHER is a WORKLOAD category and
+    also holds deliberately-recognised guard/ratchet/report steps; a leg that spends real
+    time in those is fully classified and must not read as decayed. Conflating the two
+    would make a healthy classifier look broken (and vice versa: a large recognised gate
+    step would mask genuine decay by dominating the same percentage);
+  * `--max-unclassified-pct` turns the unclassified share into a hard exit for unattended
+    use.
 
-Read a bucket split with OTHER above a few percent as "this leg is not classified yet",
-not as "this leg has no compile".
+Read an UNCLASSIFIED share above a few percent as "this leg is not classified yet", not
+as "this leg has no compile". A large OTHER share with a zero unclassified share means
+something else entirely: the leg really does spend its time in gates and reports.
 
 WHAT IS DELIBERATELY OUT OF SCOPE. Coverage-instrumented jobs are `sq-piapk`'s topology,
 not this bead's, and are EXCLUDED by default (`--include-coverage` to opt in). The
@@ -43,9 +51,12 @@ BUCKETS. Per job:
   doctest      the `cargo test --doc` lane — broken out because sq-6vshe.7(d) is
                explicitly a doctest-cost audit and nextest never runs doctests
   test         actual test execution (nextest run, cargo test, wasm-pack test, pytest, …)
-  other        unmatched, plus ratchet/guard/report scripts
+  other        ratchet/guard/report scripts (recognised), plus anything unmatched
   unaccounted  job wall-clock minus the sum of its steps (runner overhead the step list
                does not itemise) — reported, never redistributed
+
+The unmatched slice of OTHER is ALSO tracked on its own (`unmatched_secs` per leg,
+`unclassified_pct` overall) — that, not the OTHER share, is the classifier-decay metric.
 
 USAGE
   # measure (needs `gh` authenticated; writes a reproducible dump)
@@ -57,7 +68,7 @@ USAGE
   # hermetic self-test (no gh, no network)
   ci_leg_walltime_inventory.py --self-test
 
-EXIT CODES. 0 clean; 1 a declared threshold was breached (--max-other-pct); 2 the
+EXIT CODES. 0 clean; 1 a declared threshold was breached (--max-unclassified-pct); 2 the
 instrument could not measure — no runs, no jobs, gh failure, unreadable dump. Reporting a
 table over an empty population is the one thing it must never do.
 """
@@ -81,6 +92,10 @@ QUEUE, SETUP, FIXTURE, COMPILE, DOCTEST, TEST, OTHER = (
     "queue", "setup", "fixture", "compile", "doctest", "test", "other",
 )
 BUCKETS = [SETUP, FIXTURE, COMPILE, DOCTEST, TEST, OTHER]
+
+# The unmatched slice of OTHER, carried as its own field. NOT a bucket — it is a subset of
+# OTHER, so adding it to BUCKETS would double-count against `unaccounted` and `wall`.
+UNMATCHED = "unmatched_secs"
 
 # --- step-name classification -------------------------------------------------------
 #
@@ -196,6 +211,9 @@ def decompose_job(job: dict) -> dict | None:
         "wall": wall,
         QUEUE: _span(job.get("created_at"), job.get("started_at")),
         **buckets,
+        # the decay signal: the slice of OTHER that no rule matched. A subset of OTHER,
+        # deliberately not a bucket of its own.
+        UNMATCHED: sum(unmatched.values()),
         # never redistributed: runner overhead the step list does not itemise
         "unaccounted": max(0.0, wall - accounted),
         "rules": dict(rules),
@@ -227,12 +245,13 @@ def aggregate(jobs: list[dict], *, include_coverage: bool = False) -> dict:
         key = (row["workflow"], row["leg"])
         acc = legs.setdefault(key, {
             "workflow": row["workflow"], "leg": row["leg"], "n": 0,
-            "walls": [], "sums": dict.fromkeys([QUEUE, *BUCKETS, "unaccounted"], 0.0),
+            "walls": [],
+            "sums": dict.fromkeys([QUEUE, *BUCKETS, UNMATCHED, "unaccounted"], 0.0),
             "rules": defaultdict(float),
         })
         acc["n"] += 1
         acc["walls"].append(row["wall"])
-        for field in (QUEUE, *BUCKETS, "unaccounted"):
+        for field in (QUEUE, *BUCKETS, UNMATCHED, "unaccounted"):
             acc["sums"][field] += row[field]
         for rule, secs in row["rules"].items():
             acc["rules"][rule] += secs
@@ -255,12 +274,18 @@ def aggregate(jobs: list[dict], *, include_coverage: bool = False) -> dict:
 
     total_wall = sum(r["mean_wall"] * r["n"] for r in rows)
     total_other = sum(r["mean"][OTHER] * r["n"] for r in rows)
+    total_unmatched = sum(r["mean"][UNMATCHED] * r["n"] for r in rows)
     return {
         "legs": rows,
         "leg_count": len(rows),
         "job_samples": sum(r["n"] for r in rows),
         "coverage_jobs_excluded": skipped_coverage,
+        # WORKLOAD share of the OTHER bucket — gates/ratchets/reports AND unmatched work.
+        # A high value is not by itself a classifier problem.
         "other_pct": (100.0 * total_other / total_wall) if total_wall else 0.0,
+        # CLASSIFIER-DECAY share — only the steps no rule matched. This is what
+        # --max-unclassified-pct thresholds.
+        "unclassified_pct": (100.0 * total_unmatched / total_wall) if total_wall else 0.0,
         "unmatched_steps": sorted(unmatched_total.items(), key=lambda kv: -kv[1]),
     }
 
@@ -289,7 +314,10 @@ def render_markdown(stats: dict, *, top: int = 0) -> str:
     out.append(
         f"{stats['leg_count']} legs over {stats['job_samples']} job samples; "
         f"{stats['coverage_jobs_excluded']} coverage jobs excluded (sq-piapk's topology). "
-        f"Unclassified share of measured wall-clock: {stats['other_pct']:.1f}%."
+        f"OTHER workload share of measured wall-clock: {stats['other_pct']:.1f}% "
+        f"(recognised gate/ratchet/report steps plus anything unmatched). "
+        f"Unclassified share (steps NO rule matched — the classifier-decay signal): "
+        f"{stats['unclassified_pct']:.1f}%."
     )
     if stats["unmatched_steps"]:
         out.append("")
@@ -338,8 +366,11 @@ def _step(name: str, start: str, end: str) -> dict:
 
 def _self_test() -> int:
     failures: list[str] = []
+    checks_run = 0
 
     def check(name: str, condition: bool) -> None:
+        nonlocal checks_run
+        checks_run += 1
         if not condition:
             failures.append(name)
 
@@ -412,6 +443,7 @@ def _self_test() -> int:
     check("setup 60s", abs(row[SETUP] - 60.0) < 0.01)
     check("test 120s", abs(row[TEST] - 120.0) < 0.01)
     check("other 10s", abs(row[OTHER] - 10.0) < 0.01)
+    check("unmatched 10s", abs(row[UNMATCHED] - 10.0) < 0.01)
     # 240 wall - (60+120+10) accounted = 50s the step list does not itemise
     check("unaccounted 50s", abs(row["unaccounted"] - 50.0) < 0.01)
     check("unmatched named", "Frobnicate" in row["unmatched"])
@@ -427,8 +459,22 @@ def _self_test() -> int:
     check("two samples", stats["job_samples"] == 2)
     check("coverage excluded counted", stats["coverage_jobs_excluded"] == 1)
     check("other_pct ~4.2", abs(stats["other_pct"] - (100 * 10 / 240)) < 0.1)
+    check("unclassified_pct ~4.2 (the OTHER here IS unmatched)",
+          abs(stats["unclassified_pct"] - (100 * 10 / 240)) < 0.1)
     check("include_coverage opt-in works",
           aggregate([job, cov], include_coverage=True)["leg_count"] == 2)
+
+    # DISCRIMINATION: a RECOGNISED gate step is real OTHER workload but is NOT classifier
+    # decay. If unclassified_pct ever tracks the whole OTHER bucket again, this reds.
+    gated = {**job, "steps": [
+        _step("Set up job", "2026-07-01T00:00:10Z", "2026-07-01T00:00:20Z"),          # 10 setup
+        _step("Enforce ratchet (pass count must not regress)",
+              "2026-07-01T00:00:20Z", "2026-07-01T00:02:20Z"),                        # 120 other
+    ]}
+    gstats = aggregate([gated])
+    check("recognised gate grows OTHER", gstats["other_pct"] > 45.0)
+    check("recognised gate leaves unclassified at zero", gstats["unclassified_pct"] == 0.0)
+    check("recognised gate names no unmatched step", gstats["unmatched_steps"] == [])
 
     # percentile edges
     check("p50 of one value", abs(percentile([7.0], 0.5) - 7.0) < 1e-9)
@@ -439,11 +485,12 @@ def _self_test() -> int:
     md = render_markdown(stats)
     check("markdown names the leg", "bulk 1/3" in md)
     check("markdown states unclassified share", "Unclassified share" in md)
+    check("markdown states OTHER workload share", "OTHER workload share" in md)
     check("markdown lists the unmatched step", "Frobnicate" in md)
 
     for failure in failures:
         print(f"FAIL: {failure}")
-    print(f"{len(known) + 25 - len(failures)} checks passed, {len(failures)} failed")
+    print(f"{checks_run - len(failures)} checks passed, {len(failures)} failed")
     return 1 if failures else 0
 
 
@@ -462,8 +509,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="opt in to coverage jobs (sq-piapk's topology; off by default)")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--top", type=int, default=0, help="only the N slowest legs")
-    parser.add_argument("--max-other-pct", type=float, default=None,
-                        help="exit 1 if the unclassified share exceeds this")
+    parser.add_argument("--max-unclassified-pct", type=float, default=None,
+                        help="exit 1 if the share of wall-clock in steps NO rule matched "
+                             "exceeds this (classifier decay; NOT the OTHER workload share)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
 
@@ -504,9 +552,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(render_markdown(stats, top=args.top))
 
-    if args.max_other_pct is not None and stats["other_pct"] > args.max_other_pct:
-        print(f"\nFAIL: unclassified share {stats['other_pct']:.1f}% exceeds "
-              f"--max-other-pct {args.max_other_pct}", file=sys.stderr)
+    if (args.max_unclassified_pct is not None
+            and stats["unclassified_pct"] > args.max_unclassified_pct):
+        print(f"\nFAIL: unclassified share {stats['unclassified_pct']:.1f}% exceeds "
+              f"--max-unclassified-pct {args.max_unclassified_pct}", file=sys.stderr)
         return 1
     return 0
 

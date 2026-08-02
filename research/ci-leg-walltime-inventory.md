@@ -45,7 +45,7 @@ per-step `started_at`/`completed_at` the jobs API already returns:
 | `compile` | `cargo build`/`check`, `nextest archive`, clippy, rustdoc, `wasm-pack build`, maturin |
 | `doctest` | the `cargo test --doc` lane — broken out because (d) is a doctest audit and nextest never runs doctests |
 | `test` | actual execution: `nextest run`, `cargo test`, `wasm-pack test`, pytest, the conformance/oracle drivers |
-| `other` | ratchet/guard/report scripts, plus **anything no rule matched** |
+| `other` | ratchet/guard/report scripts (deliberately *recognised* — real workload, not a classification failure), plus **anything no rule matched** |
 | `unaccounted` | job wall-clock minus the sum of its steps — runner overhead the step list does not itemise; reported, never redistributed |
 
 ```sh
@@ -66,9 +66,15 @@ step shapes no rule knows: an unmatched step still lands somewhere and the table
 renders. Three things make that visible instead of silent:
 
 1. an unmatched step lands in `other`, never in a flattering bucket;
-2. the report always prints the unclassified share of measured wall-clock and names the
-   top unmatched steps, so a decayed table says so on its face;
-3. `--max-other-pct` turns that into a hard non-zero exit for unattended use.
+2. the report always prints the top unmatched steps, so a decayed table says so on its
+   face — plus **two distinct percentages**, because `other` is a workload bucket that
+   also holds *recognised* gate/ratchet/report steps: `other_pct` is that whole bucket's
+   workload share, while **`unclassified_pct` counts only the steps no rule matched** and
+   is the decay signal. Conflating them would let a leg that legitimately spends its time
+   in gates read as "unclassified", and would let a large recognised gate step mask real
+   decay inside the same number;
+3. `--max-unclassified-pct` turns `unclassified_pct` into a hard non-zero exit for
+   unattended use.
 
 `scripts/tests/test_ci_leg_walltime_inventory.py` pins the seam that the script's own
 `--self-test` structurally cannot see: it classifies **every real step name in the live
@@ -79,8 +85,9 @@ everything. It also pins the `sq-piapk` non-overlap (coverage jobs excluded unle
 in), that a *skipped* leg is never averaged in as a cheap sample, and that every
 fail-loud path exits 2 rather than rendering a table over an empty population.
 
-**Read a bucket split with a high `other` share as "this leg is not classified yet", not
-as "this leg has no compile".**
+**Read a high `unclassified_pct` as "this leg is not classified yet", not as "this leg has
+no compile". A high `other` share with `unclassified_pct` at zero means something else
+entirely: the leg really does spend its time in gates and reports.**
 
 ## 3. (b) The partition rebalance — what the leg names do and do not mean
 

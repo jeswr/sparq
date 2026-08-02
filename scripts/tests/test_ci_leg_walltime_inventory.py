@@ -262,7 +262,21 @@ class TestReportStatesItsOwnUncertainty(unittest.TestCase):
         md = inv.render_markdown(inv.aggregate([job]))
         self.assertIn("Zorblat the quux", md)
 
-    def test_max_other_pct_can_red(self) -> None:
+    def test_recognised_gate_work_is_other_workload_not_classifier_decay(self) -> None:
+        # OTHER is a WORKLOAD bucket: `script-gate` deliberately books recognised
+        # guards/ratchets/reports there. A leg that spends real time in them is fully
+        # classified, so the decay metric must stay at zero while OTHER grows. If
+        # unclassified_pct is ever computed from the whole OTHER bucket again, this reds.
+        job = _job()
+        job["steps"].append(_step("Enforce ratchet (pass count must not regress)",
+                                  "2026-07-01T00:04:10Z", "2026-07-01T00:09:10Z"))
+        job["completed_at"] = "2026-07-01T00:09:10Z"
+        stats = inv.aggregate([job])
+        self.assertGreater(stats["other_pct"], 45.0)
+        self.assertEqual(stats["unclassified_pct"], 0.0)
+        self.assertEqual(stats["unmatched_steps"], [])
+
+    def test_max_unclassified_pct_can_red_on_unmatched_steps(self) -> None:
         job = _job()
         job["steps"].append(_step("Zorblat the quux",
                                   "2026-07-01T00:04:10Z", "2026-07-01T00:09:10Z"))
@@ -272,10 +286,24 @@ class TestReportStatesItsOwnUncertainty(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             self.assertEqual(inv.main(["--from-json", handle.name,
-                                       "--max-other-pct", "1"]), 1)
+                                       "--max-unclassified-pct", "1"]), 1)
             # Control: a generous bound passes, so the exit code tracks the threshold.
             self.assertEqual(inv.main(["--from-json", handle.name,
-                                       "--max-other-pct", "99"]), 0)
+                                       "--max-unclassified-pct", "99"]), 0)
+
+    def test_the_threshold_ignores_recognised_gate_time(self) -> None:
+        # The other half of the same seam, at the CLI: a leg dominated by a RECOGNISED
+        # gate step must not trip the classifier-decay threshold at all.
+        job = _job()
+        job["steps"].append(_step("Enforce ratchet (pass count must not regress)",
+                                  "2026-07-01T00:04:10Z", "2026-07-01T00:09:10Z"))
+        job["completed_at"] = "2026-07-01T00:09:10Z"
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump([job], handle)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(inv.main(["--from-json", handle.name,
+                                       "--max-unclassified-pct", "0"]), 0)
 
 
 class TestInScriptSelfTestPasses(unittest.TestCase):
