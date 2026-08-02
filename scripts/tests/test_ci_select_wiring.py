@@ -2164,7 +2164,12 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
 
     [OPUS-5] sq-g25hr added codeql.yml to the gated set (the ~20-40min CodeQL
     analysis was the longest merge_group pole for a zero-Rust batch) and widened
-    `_INERT_CLASSES` with `deploy-only` + `inert-mixed`."""
+    `_INERT_CLASSES` with `deploy-only` + `inert-mixed`.
+
+    [OPUS-5] #5249 widened it once more with `map-safe` — an ownership-map
+    `safe = true` verdict, which the CLOSURE layer already honoured (empty affected
+    set) while the CLASS layer still said `engine`, so a site-only batch ran the full
+    Rust matrix + CodeQL despite the two layers looking at the same diff."""
 
     @classmethod
     def setUpClass(cls):
@@ -2244,7 +2249,8 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
         # run (engine/mixed/any unknown token => rust=true).
         inert = self.select_mod._INERT_CLASSES
         self.assertEqual(
-            inert, ("orchestration-only", "docs-only", "deploy-only", "inert-mixed"),
+            inert,
+            ("orchestration-only", "docs-only", "deploy-only", "map-safe", "inert-mixed"),
             "classifier tokens drifted — update the workflow case-arms in lock-step "
             "(they match on these literal strings)")
         # The arm is spelled docs-first for readability; assert on the SET so a
