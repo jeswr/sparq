@@ -138,15 +138,20 @@ import re
 import subprocess
 import sys
 
+import review_lane_visibility as visibility
+
 BASE_LABELS = ["review-alarm", "auto"]
 KEY_PREFIX = "review-lane-alarm-key"
 ALARM_KEY = "blind-spot"
 
-# The registry review lane's own admission regex, replicated VERBATIM from
-# scripts/dispatch-claim.py (registry, master @ 2026-07-26). Kept byte-identical on
-# purpose: this alarm's whole claim is "the registry lane cannot see these PRs", so the
-# reachability test must be the registry's test and not a paraphrase of it.
-REGISTRY_HEAD_REF_RE = re.compile(r"^sparq-agent/issue-([1-9][0-9]*)-")
+# The registry review lane's own admission regex — now OWNED by
+# scripts/review_lane_visibility.py and re-exported here, not re-declared (sparq#4677).
+# This alarm is the DETECTOR; scripts/verdict-bridge.py is the LABELLER; before #4677 the
+# labeller had no reachability condition at all and enrolled PRs this detector was
+# simultaneously reporting as unreachable. Two components that write state about the same
+# population must share ONE predicate object, or the copies drift and the labeller
+# manufactures invisible backlog.
+REGISTRY_HEAD_REF_RE = visibility.REGISTRY_HEAD_REF_RE
 
 # A verdict line, anchored to a WHOLE line. The pattern is applied to an individually
 # stripped line — never searched across a body — so no amount of surrounding prose can
@@ -178,8 +183,9 @@ RECEIPT_CLASS_RE = re.compile(r"\bclass=[A-Za-z][A-Za-z0-9_-]*\b")
 # `app/` prefix and a `[bot]` suffix stripped) because GitHub reports the SAME App under
 # all three spellings — `gh` as `app/x`, REST as `x[bot]`, GraphQL as `x` — and an
 # un-normalised comparison would read as a guard while never matching. Same rule as
-# scripts/release_pr_guard.py's `normalize_login`, re-stated locally rather than imported
-# to keep this alarm stdlib-only and free-standing (see the header).
+# scripts/release_pr_guard.py's `normalize_login` — and since sparq#4677 it IS that rule,
+# reached through `review_lane_visibility`, because this alarm now imports that module for
+# the reachability predicate and a locally restated copy would only be free to drift.
 RECEIPT_AUTHOR_LOGINS = frozenset({"sparq-orchestrator"})
 # Symmetric, because a receipt may be posted either side of the write it explains. Sized
 # off the one measured interval sparq#4911 gives (86s, PR #3620) with room to spare; a
@@ -209,20 +215,23 @@ def registry_lane_reachable(pr: dict, repo: str) -> bool:
     Only the three structural gates are replicated. The registry additionally requires a
     provenance record, but that is a LIVE registry read this repo has no token for, and it
     can only ever narrow admission further — so treating a PR as reachable here is the
-    CONSERVATIVE direction (it under-reports the blind spot, never over-reports it)."""
+    CONSERVATIVE direction (it under-reports the blind spot, never over-reports it).
+
+    The gates themselves live in `review_lane_visibility`; this function is the REST shape
+    adapter for them (sparq#4677). The App-author gate is applied through
+    `visibility.login_is_app`, because the trailing bot marker is how a REST response
+    spells "this author is an App" — a GraphQL caller reads `author { __typename }` for
+    the same fact — and only the SHAPE differs between the two, never the test.
+    """
     if not isinstance(pr, dict):
         raise AlarmError("pull-request listing carried a non-object entry")
     head = pr.get("head") or {}
-    ref = str(head.get("ref") or "")
-    head_repo = (head.get("repo") or {}).get("full_name")
-    login = str((pr.get("user") or {}).get("login") or "")
-    if not REGISTRY_HEAD_REF_RE.match(ref):
-        return False
-    if head_repo != repo:
-        return False
-    if not login.endswith("[bot]"):
-        return False
-    return True
+    return visibility.lane_reachable(
+        head_ref=head.get("ref"),
+        head_repo=(head.get("repo") or {}).get("full_name"),
+        author_is_app=visibility.login_is_app((pr.get("user") or {}).get("login")),
+        repo=repo,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -329,13 +338,12 @@ def _normalise_login(login: object) -> str:
 
     One App is spelled three ways depending on which surface reports it:
     `app/sparq-orchestrator` (`gh`), `sparq-orchestrator[bot]` (REST),
-    `sparq-orchestrator` (GraphQL)."""
-    name = str(login or "").strip().lower()
-    if name.startswith("app/"):
-        name = name[len("app/"):]
-    if name.endswith("[bot]"):
-        name = name[: -len("[bot]")]
-    return name
+    `sparq-orchestrator` (GraphQL).
+
+    DELEGATED since sparq#4677. This used to restate `release_pr_guard.normalize_login`
+    to keep the alarm free-standing; the alarm now imports the shared visibility module
+    (which imports that guard) either way, so a second copy buys nothing and can drift."""
+    return visibility.normalize_login(login)
 
 
 def _is_receipt_author(who: dict) -> bool:
@@ -433,6 +441,51 @@ def classify_pr(pr: dict, comments: list[dict], repo: str, events: list[dict] | 
     return "blind-spot"
 
 
+def pr_disposition(pr: dict, repo: str) -> str:
+    """`lane` / `hand-dispatch` / `maintainer` for a REST-shaped PR (sparq#4677)."""
+    head = pr.get("head") or {}
+    return visibility.disposition(
+        head_ref=head.get("ref"),
+        head_repo=(head.get("repo") or {}).get("full_name"),
+        author_is_app=visibility.login_is_app((pr.get("user") or {}).get("login")),
+        repo=repo,
+        author_login=(pr.get("user") or {}).get("login"),
+        title=pr.get("title"),
+    )
+
+
+def flag_label_census(pr: dict, repo: str) -> dict:
+    """Census rows for the LABELLED population — sparq#4677 ask 3.
+
+    The defect that issue records was found by accident: `verdict-bridge.py` was applying
+    `review:unreviewed` to PRs the registry review lane structurally cannot enumerate, and
+    nothing measured the disagreement, so the class could grow without bound while every
+    per-run success rate the lane reported stayed healthy (the rates are computed over a
+    population that EXCLUDES these PRs entirely).
+
+    Two kinds of row, both emitted every tick:
+
+    * ``labelled-<flag>`` — how many open PRs carry each disposition label. A population,
+      not a rate: a rate cannot express "nothing ever entered this state".
+    * ``mislabelled-unreviewable`` — the DEFECT itself: a PR marked ``review:unreviewed``
+      (which means "the lane can see this and a review is coming") that the lane cannot
+      see. This should read 0 once the labeller and the detector share a predicate, and it
+      stays here precisely so a REGRESSION in that agreement is a number rather than
+      another accident. The converse row ``mislabelled-reachable`` catches the opposite
+      drift — a reachable PR marked as unreachable — which would hide a real review lane.
+    """
+    rows: dict = {}
+    labels = _labels(pr)
+    reachable = registry_lane_reachable(pr, repo)
+    for label in sorted(visibility.FLAG_LABELS & labels):
+        rows[f"labelled-{label.split(':', 1)[1]}"] = 1
+    if visibility.UNREVIEWED_LABEL in labels and not reachable:
+        rows["mislabelled-unreviewable"] = 1
+    if reachable and (labels & (visibility.FLAG_LABELS - {visibility.UNREVIEWED_LABEL})):
+        rows["mislabelled-reachable"] = 1
+    return rows
+
+
 def _parse_iso(ts: str) -> dt.datetime:
     try:
         return dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
@@ -460,6 +513,8 @@ def find_blind_spot(
         events = (events_by_pr or {}).get(number) or (events_by_pr or {}).get(str(number)) or []
         state = classify_pr(pr, comments, repo, events)
         census[state] = census.get(state, 0) + 1
+        for row, count in flag_label_census(pr, repo).items():
+            census[row] = census.get(row, 0) + count
         hold_notes: list[str] = []
         if HUMAN_HOLD_LABELS & _labels(pr):
             owner = hold_ownership(pr, events, comments)
@@ -490,18 +545,39 @@ def find_blind_spot(
                 "age_hours": round(age, 1),
                 "discredited": discredited,
                 "hold_notes": hold_notes,
+                # sparq#4677 ask 2: a maintainer-owned PR is still reported — silent
+                # accumulation is what this alarm exists to prevent — but the row now says
+                # WHOSE decision it is waiting on, which is a different human response.
+                "disposition": pr_disposition(pr, repo),
             }
         )
     findings.sort(key=lambda f: -f["age_hours"])
     return findings, census
 
 
+DISPOSITION_NOTES = {
+    visibility.MAINTAINER: (
+        "MAINTAINER-OWNED — the release-plz Release PR / a dependabot bump: no automated "
+        "review lane covers it and no automated path may arm it, so merging is a "
+        "maintainer's decision (#1135)"
+    ),
+    visibility.HAND_DISPATCH: (
+        "needs a HAND-DISPATCHED review — a head-bound `VERDICT: pass` comment promotes "
+        "and arms it normally"
+    ),
+}
+
+
 def finding_note(finding: dict) -> str:
     """The one-line explanation printed AND rendered into the issue table. Machine-hold
     provenance leads: "this hold was never a human's" is the reason the row is here at
-    all, and it needs a different human response from a stale or missing verdict."""
+    all, and it needs a different human response from a stale or missing verdict.  The
+    DISPOSITION follows (sparq#4677): "nobody is coming" and "the maintainer is coming"
+    are the same silence on the wire and want opposite responses from a reader."""
     parts = list(finding.get("hold_notes") or []) + list(finding.get("discredited") or [])
-    return "; ".join(parts) or "no verdict comment at all"
+    note = "; ".join(parts) or "no verdict comment at all"
+    disposition_note = DISPOSITION_NOTES.get(str(finding.get("disposition") or ""))
+    return f"{note}; {disposition_note}" if disposition_note else note
 
 
 # --------------------------------------------------------------------------- #
@@ -543,6 +619,16 @@ def render_issue_body(findings: list[dict], census: dict, repo: str, max_age_hou
         "A verdict is countable only when it is line-anchored (`VERDICT: pass|fail` as the "
         "comment's last non-blank line), names the current head as a standalone 40-hex SHA, "
         "and was **not** posted by the PR's own author.",
+        "",
+        "`labelled-*` counts the DISPOSITION labels `verdict-bridge` writes: "
+        "`review:unreviewed` (the review lane can enumerate this PR), `review:unreachable` "
+        "(it cannot — a hand-dispatched verdict is the only route) and "
+        "`review:maintainer-owned` (the release-plz Release PR / dependabot, merged by a "
+        "maintainer by standing policy). **`mislabelled-unreviewable` is the sparq#4677 "
+        "defect itself** — a PR marked as enrolled that no review producer can see. It "
+        "should read 0; a non-zero row means the labeller and this detector have stopped "
+        "agreeing, which is how the class grew unnoticed the first time. "
+        "`mislabelled-reachable` catches the opposite drift.",
         "",
         "A `needs:user` / `review:needs-user` hold exempts a PR from this alarm only when a "
         "HUMAN applied it — resolved from the `labeled` timeline event, and downgraded to a "

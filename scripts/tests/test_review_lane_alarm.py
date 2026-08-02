@@ -41,10 +41,13 @@ SCRIPT = REPO_ROOT / "scripts" / "review_lane_alarm.py"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "review-alarm.yml"
 DOCS_QUALITY = REPO_ROOT / ".github" / "workflows" / "docs-quality.yml"
 
+# The alarm imports the SHARED visibility predicate (sparq#4677), which lives beside it.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 _spec = importlib.util.spec_from_file_location("review_lane_alarm", SCRIPT)
 alarm = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(alarm)
+visibility = importlib.import_module("review_lane_visibility")
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -308,6 +311,88 @@ class TestNonAlarmingStates(unittest.TestCase):
             {"blind-spot": 1, "draft": 1, "human-held": 1, "registry-lane": 1,
              "hold-owner-unknown": 1},
         )
+
+
+class TestLabelledButUnreviewableCensus(unittest.TestCase):
+    """sparq#4677 — a labeller in THIS repo was marking PRs `review:unreviewed` that the
+    reviewer in `jeswr/agent-account-registry` structurally cannot enumerate, and nothing
+    measured the disagreement. Four live PRs, 20-29h, including the first crates.io
+    release PR. The detector now censuses the labelled population every tick."""
+
+    NOW = "2026-07-28T00:00:00Z"
+
+    def _census(self, prs):
+        return alarm.find_blind_spot(prs, {}, REPO, alarm._parse_iso(self.NOW), 24)[1]
+
+    def test_the_defect_row_counts_a_pr_marked_enrolled_that_no_lane_can_see(self):
+        census = self._census([pr(number=1, labels=("review:unreviewed",))])
+        self.assertEqual(census.get("mislabelled-unreviewable"), 1)
+        self.assertEqual(census.get("labelled-unreviewed"), 1)
+
+    def test_the_defect_row_is_ZERO_for_a_pr_the_lane_can_actually_see(self):
+        """The control arm. Without it, a row that counted every labelled PR would look
+        identical to one that counts only the mislabelled ones."""
+        census = self._census([
+            pr(number=1, ref="sparq-agent/issue-9-1-1", login="sparq-orchestrator[bot]",
+               labels=("review:unreviewed",)),
+        ])
+        self.assertIsNone(census.get("mislabelled-unreviewable"))
+        self.assertEqual(census.get("labelled-unreviewed"), 1)
+
+    def test_the_correctly_disposed_labels_are_counted_and_not_flagged_as_defects(self):
+        census = self._census([
+            pr(number=1, labels=(visibility.UNREACHABLE_LABEL,)),
+            pr(number=2, ref="release-plz-2026-07-27T02-19-35Z",
+               login="sparq-orchestrator[bot]", labels=(visibility.MAINTAINER_LABEL,)),
+        ])
+        self.assertEqual(census.get("labelled-unreachable"), 1)
+        self.assertEqual(census.get("labelled-maintainer-owned"), 1)
+        self.assertIsNone(census.get("mislabelled-unreviewable"))
+        self.assertIsNone(census.get("mislabelled-reachable"))
+
+    def test_the_opposite_drift_is_caught_too(self):
+        """A reachable PR marked unreachable would HIDE a working review lane."""
+        census = self._census([
+            pr(number=1, ref="sparq-agent/issue-9-1-1", login="sparq-orchestrator[bot]",
+               labels=(visibility.UNREACHABLE_LABEL,)),
+        ])
+        self.assertEqual(census.get("mislabelled-reachable"), 1)
+
+    def test_a_labelled_unreviewable_pr_is_still_reported_not_exempted(self):
+        """A disposition label is routing, not absolution: the release PR sat 22h. The
+        finding survives, and the note says whose decision it is waiting on."""
+        findings, census = alarm.find_blind_spot(
+            [pr(number=4460, ref="release-plz-2026-07-27T02-19-35Z",
+                login="sparq-orchestrator[bot]", created="2026-07-27T00:00:00Z",
+                labels=(visibility.MAINTAINER_LABEL,))],
+            {}, REPO, alarm._parse_iso(self.NOW), 24)
+        self.assertEqual([f["number"] for f in findings], [4460])
+        self.assertEqual(findings[0]["disposition"], visibility.MAINTAINER)
+        self.assertIn("MAINTAINER-OWNED", alarm.finding_note(findings[0]))
+        self.assertIn("mislabelled-unreviewable", alarm.render_issue_body(
+            findings, census, REPO, 24), "the defect row must be explained in the issue")
+
+    def test_the_detector_and_the_labeller_share_ONE_predicate_module(self):
+        """Not "the two agree today" — the same object. A second copy of the predicate is
+        the defect sparq#4677 records, so the alarm must not re-declare the gates."""
+        self.assertIs(alarm.visibility, visibility)
+        self.assertIs(alarm.REGISTRY_HEAD_REF_RE, visibility.REGISTRY_HEAD_REF_RE)
+        # CODE only — the header QUOTES the registry's three gates verbatim as
+        # documentation, and that quotation is the point of the header. What must not
+        # come back is an executable second copy.
+        code = "\n".join(
+            line for line in SCRIPT.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        for reimplementation in (
+            'r"^sparq-agent/issue-([1-9][0-9]*)-"',
+            'login.endswith("[bot]")',
+        ):
+            self.assertNotIn(
+                reimplementation,
+                code,
+                "the alarm re-implemented a gate that belongs to review_lane_visibility",
+            )
 
 
 class TestAMachineWrittenHoldBuysNoExemption(unittest.TestCase):
@@ -639,10 +724,15 @@ class TestWorkflowWiring(unittest.TestCase):
 
     def test_the_sparse_checkout_includes_the_script(self):
         # A sparse-checkout that misses the script would fail the run at HEAD, but silently
-        # drift if the script is ever renamed; pin the pairing.
+        # drift if the script is ever renamed; pin the pairing. Since sparq#4677 the alarm
+        # also imports the shared visibility predicate (and, through it, the release
+        # guard) at module scope — a missing one is an ImportError before any read.
         for step in self.steps:
             if str(step.get("uses", "")).startswith("actions/checkout@"):
-                self.assertIn("scripts/review_lane_alarm.py", step["with"]["sparse-checkout"])
+                for needed in ("scripts/review_lane_alarm.py",
+                               "scripts/review_lane_visibility.py",
+                               "scripts/release_pr_guard.py"):
+                    self.assertIn(needed, step["with"]["sparse-checkout"], needed)
 
 
 class TestGateCallSite(unittest.TestCase):

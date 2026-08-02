@@ -55,6 +55,13 @@ def load(path: Path, name: str) -> ModuleType:
 vb = load(SCRIPTS / "verdict-bridge.py", "verdict_bridge")
 auto_arm = load(SCRIPTS / "auto-arm.py", "auto_arm_policy")
 rearm = load(SCRIPTS / "rearm-sweeper.py", "rearm_sweeper_policy")
+# The LIVE shared visibility predicate + the LIVE release guard. `import_module`, not
+# `load`: these are importable module names that `verdict-bridge.py` has ALREADY imported,
+# and re-executing the file would hand this suite a second, distinct copy of the very
+# object #4677 says must be single — `test_the_labeller_and_the_detector_share_ONE_
+# predicate_object` would then pass against a copy and prove nothing.
+visibility = importlib.import_module("review_lane_visibility")
+release_guard = importlib.import_module("release_pr_guard")
 
 HEAD = "a" * 40
 OTHER = "b" * 40
@@ -396,11 +403,26 @@ def node(number: int, **overrides) -> dict:
     orchestrator App and its commits are authored by `claude`, while reviewers comment
     under a DIFFERENT login. A fixture whose author fields were absent would make every
     grant fail closed for the wrong reason and hide real regressions.
+
+    The DEFAULT fixture is a PR the registry review lane can enumerate (#4677): a worker
+    branch, this repo's own head, an App author. The dispositions that lane cannot see
+    are exercised explicitly in `TestReviewLaneVisibility`. Note that `headRefName` is
+    load-bearing in BOTH directions — dropping it makes `release_pr_guard` fail closed,
+    so an under-specified fixture would silently stop attesting anything.
     """
     labels = overrides.pop("labels", ())
     reviews = overrides.pop("reviews", ())
+    author_login = overrides.pop("author", "sparq-orchestrator")
     base = {
-        "author": {"login": overrides.pop("author", "sparq-orchestrator")},
+        "author": {
+            "login": author_login,
+            "__typename": overrides.pop("author_typename", "Bot"),
+        },
+        "headRefName": overrides.pop(
+            "head_ref", f"sparq-agent/issue-{number}-30221671021-1"
+        ),
+        "headRepository": {"nameWithOwner": overrides.pop("head_repo", REPO)},
+        "title": overrides.pop("title", "fix: a change"),
         "commits": overrides.pop("commits", commits_connection()),
         "reviews": {
             "nodes": [
@@ -482,8 +504,11 @@ class FakeGitHub:
                 if add not in names:
                     names.append(add)
             if "--remove-label" in argv:
-                drop = argv[argv.index("--remove-label") + 1]
-                names = [n for n in names if n != drop]
+                # `gh` takes a comma-separated StringSlice here, and `reflag` uses it to
+                # clear every stale disposition flag in ONE edit (#4677). Splitting the
+                # same way the CLI does keeps the fake honest about what the write did.
+                drop = set(argv[argv.index("--remove-label") + 1].split(","))
+                names = [n for n in names if n not in drop]
             node["labels"] = dict(node["labels"], nodes=[{"name": n} for n in names])
 
     def labels_of(self, number: int) -> set:
@@ -1440,11 +1465,16 @@ class TestAuthorXorReviewer(unittest.TestCase):
                 query = getattr(vb, name)
                 lines = [line.strip() for line in query.splitlines()]
                 self.assertIn(
-                    "author{login}",
+                    "author{login __typename}",
                     lines,
                     "the PR-node-level author field is gone; the `reviews` one does "
-                    "not feed the guard",
+                    "not feed the guard, and `__typename` is the only spelling of "
+                    "'this author is an App' a GraphQL response carries (#4677)",
                 )
+                # #4677 — the DISPOSITION inputs. Dropping one makes `release_pr_guard`
+                # fail CLOSED (nothing is ever attested again), which is safe but silent.
+                for line in ("headRefName title", "headRepository{nameWithOwner}"):
+                    self.assertIn(line, lines, f"{line} is gone from the PR node")
                 start = query.find("commits(last:")
                 self.assertGreater(start, 0, "the commits connection is gone")
                 block = query[start : start + 260]
@@ -1899,13 +1929,177 @@ class TestCrossPolicyConsistency(unittest.TestCase):
         self.assertEqual(missing, set(), f"rearm-sweeper excludes these: {missing}")
 
     def test_the_informational_label_is_not_a_hold_in_any_policy(self):
-        """review:unreviewed must never block an arm, or flagging would deadlock it."""
-        label = vb.UNREVIEWED_LABEL
-        self.assertNotIn(label, auto_arm.HUMAN_OR_TRUST_LABELS)
-        self.assertNotIn(label, auto_arm.REVIEW_CHANGES_LABELS)
-        self.assertNotIn(label, rearm.EXCLUDED_LABELS)
-        self.assertEqual(rearm.exclusion_labels(frozenset({label})), [])
-        self.assertEqual(vb.hold_labels({label}), [])
+        """A disposition flag must never block an arm, or flagging would deadlock it.
+
+        All THREE are checked, not just `review:unreviewed` (#4677): a new informational
+        label that happened to land inside an arming exclusion — or inside the `needs:*`
+        namespace rule — would silently convert a visibility aid into a merge blocker.
+        """
+        for label in sorted(vb.FLAG_LABELS):
+            with self.subTest(label=label):
+                self.assertNotIn(label, auto_arm.HUMAN_OR_TRUST_LABELS)
+                self.assertNotIn(label, auto_arm.REVIEW_CHANGES_LABELS)
+                self.assertNotIn(label, rearm.EXCLUDED_LABELS)
+                self.assertEqual(rearm.exclusion_labels(frozenset({label})), [])
+                self.assertEqual(vb.hold_labels({label}), [])
+
+    def test_the_bridge_never_attests_a_pr_the_release_guard_blocks(self):
+        """#1135 + #4677: auto-arm and rearm-sweeper both refuse the release-plz Release
+        PR on branch/author/title. Attesting it would paint `review:pass` onto a PR every
+        arming lane then declines — and on the Release PR that reads as clearance to
+        publish 17 crates irreversibly. The refusal keys on the SAME live predicate."""
+        passing = comment(f"{HEAD}\n\nVERDICT: pass")
+        blocked = vb.pr_fixture(
+            disposition=visibility.MAINTAINER,
+            arm_block=release_guard.arm_block_reason(head_ref="release-plz-main"),
+        )
+        self.assertNotEqual(vb.decide(blocked, [passing]).action, "promote")
+        # auto-arm agrees, on its own live policy object rather than a copy of it.
+        self.assertTrue(release_guard.arm_block_reason(head_ref="release-plz-main"))
+        # Control arm: the identical PR with no block DOES promote, so this is not vacuous.
+        self.assertEqual(
+            vb.decide(vb.pr_fixture(disposition=visibility.MAINTAINER), [passing]).action,
+            "promote",
+        )
+
+
+class TestReviewLaneVisibility(unittest.TestCase):
+    """#4677 — the labeller's visibility predicate must agree with the reviewer's.
+
+    The reviewer lives in `jeswr/agent-account-registry` and cannot see a PR whose head
+    ref fails `^sparq-agent/issue-([1-9][0-9]*)-`. This labeller used to mark such PRs
+    `review:unreviewed` anyway, which manufactured invisible backlog that LOOKED enrolled.
+    """
+
+    # The four PRs measured on live sparq in #4677, by (head ref, author, App?).
+    MEASURED = (
+        ("ci/auto-arm-workflows-permission", "jeswr", False, visibility.HAND_DISPATCH),
+        ("research/knowledge-management-strategy", "jeswr", False, visibility.HAND_DISPATCH),
+        ("release-plz-2026-07-27T02-19-35Z", "sparq-orchestrator", True, visibility.MAINTAINER),
+        ("dependabot/github_actions/actions-minor-1", "dependabot", True, visibility.MAINTAINER),
+    )
+
+    def _parse(self, ref, login, is_app, title="chore: a change"):
+        bridge = vb.VerdictBridge(REPO, "main", gh=lambda argv: "", log=lambda _: None)
+        return bridge.parse_node(
+            node(1, head_ref=ref, author=login,
+                 author_typename="Bot" if is_app else "User", title=title),
+            "success",
+        )
+
+    def test_none_of_the_measured_prs_is_marked_enrolled(self):
+        for ref, login, is_app, expected in self.MEASURED:
+            with self.subTest(ref=ref):
+                pr = self._parse(ref, login, is_app)
+                self.assertEqual(pr.disposition, expected)
+                self.assertNotEqual(
+                    vb.desired_flag_label(pr),
+                    vb.UNREVIEWED_LABEL,
+                    "a PR the review lane cannot enumerate must not look enrolled",
+                )
+
+    def test_a_real_worker_branch_is_still_enrolled(self):
+        """The control arm: with the predicate inverted this test fails, so the one
+        above cannot pass by marking EVERYTHING unreachable."""
+        pr = self._parse("sparq-agent/issue-2908-30221671021-1", "sparq-orchestrator", True)
+        self.assertEqual(pr.disposition, visibility.LANE)
+        self.assertEqual(vb.desired_flag_label(pr), vb.UNREVIEWED_LABEL)
+
+    def test_each_reachability_gate_is_individually_load_bearing(self):
+        """Same branch, one gate broken at a time — the registry AND-s all three, so a
+        labeller that dropped any one of them would enrol PRs the lane still refuses."""
+        worker = "sparq-agent/issue-2908-1-1"
+        self.assertEqual(
+            self._parse(worker, "jeswr", False).disposition,
+            visibility.HAND_DISPATCH,
+            "a human author on a worker branch is not the worker App",
+        )
+        bridge_ = vb.VerdictBridge(REPO, "main", gh=lambda argv: "", log=lambda _: None)
+        forked = bridge_.parse_node(
+            node(1, head_ref=worker, head_repo="attacker/sparq"), "success"
+        )
+        self.assertNotEqual(forked.disposition, visibility.LANE, "a fork head is unreachable")
+
+    def test_the_labeller_and_the_detector_share_ONE_predicate_object(self):
+        """Not "the two agree today" — the same object. A copy is the defect (#4677)."""
+        alarm = importlib.import_module("review_lane_alarm")
+        self.assertIs(alarm.REGISTRY_HEAD_REF_RE, visibility.REGISTRY_HEAD_REF_RE)
+        self.assertIs(vb.FLAG_LABELS, visibility.FLAG_LABELS)
+
+    def test_the_already_mislabelled_population_is_repaired_not_frozen(self):
+        """`flag` only fires on a PR carrying NO `review:*` label, so the four live PRs
+        would keep their wrong label forever without the `reflag` action."""
+        for ref, login, is_app, expected in self.MEASURED:
+            with self.subTest(ref=ref):
+                bridge = vb.VerdictBridge(REPO, "main", gh=lambda argv: "", log=lambda _: None)
+                pr = bridge.parse_node(
+                    node(1, head_ref=ref, author=login,
+                         author_typename="Bot" if is_app else "User",
+                         title="chore: a change", labels=(vb.UNREVIEWED_LABEL,)),
+                    "success",
+                )
+                decision = vb.decide(pr, [])
+                self.assertEqual(decision.action, "reflag")
+                self.assertEqual(decision.label, visibility.flag_label(expected))
+                self.assertEqual(decision.remove_labels, (vb.UNREVIEWED_LABEL,))
+
+    def test_reflag_swaps_the_flag_in_one_edit_and_touches_nothing_else(self):
+        """The write is a single `gh pr edit` carrying both halves: a remove-then-add
+        would leave a window in which the PR carries no disposition at all."""
+        fake = FakeGitHub(
+            [node(4200, head_ref="release-plz-main", author="github-actions",
+                  title="chore: release v0.2.0",
+                  labels=[vb.UNREVIEWED_LABEL, "area:ci"])],
+            comments={4200: []},
+        )
+        bridge(fake).run()
+        self.assertEqual(
+            fake.writes,
+            [["pr", "edit", "4200", "--repo", REPO,
+              "--add-label", vb.MAINTAINER_LABEL,
+              "--remove-label", vb.UNREVIEWED_LABEL]],
+        )
+
+    def test_two_stale_flags_are_cleared_in_the_SAME_edit(self):
+        """A PR can carry more than one flag (a hand edit, or a disposition that moved
+        twice). Clearing them one per sweep would leave the PR reading as two lanes at
+        once for a cycle, so the remove side is a comma-separated set in one write."""
+        fake = FakeGitHub(
+            [node(4200, head_ref="research/x", author="jeswr", author_typename="User",
+                  labels=[vb.UNREVIEWED_LABEL, vb.MAINTAINER_LABEL])],
+            comments={4200: []},
+        )
+        bridge(fake).run()
+        self.assertEqual(len(fake.writes), 1, fake.writes)
+        argv = fake.writes[0]
+        self.assertEqual(argv[argv.index("--add-label") + 1], vb.UNREACHABLE_LABEL)
+        self.assertEqual(
+            set(argv[argv.index("--remove-label") + 1].split(",")),
+            {vb.UNREVIEWED_LABEL, vb.MAINTAINER_LABEL},
+        )
+        self.assertEqual(fake.labels_of(4200), {vb.UNREACHABLE_LABEL})
+
+    def test_the_run_log_emits_the_labelled_but_unreviewable_census(self):
+        """#4677 ask 3: the class was found by accident. A per-run write count cannot
+        express it — a run that writes nothing looks identical whether the population is
+        zero or a hundred — so the population itself is logged EVERY tick."""
+        fake = FakeGitHub(
+            [
+                node(1, head_ref="sparq-agent/issue-1-worker"),
+                node(2, head_ref="research/x", author="jeswr", author_typename="User"),
+                node(3, head_ref="dependabot/cargo/serde-1.0", author="dependabot",
+                     labels=[vb.UNREVIEWED_LABEL]),
+            ],
+            comments={1: [], 2: [], 3: []},
+        )
+        driver = bridge(fake, dry_run=True)
+        driver.run()
+        joined = "\n".join(driver.logs)
+        self.assertIn("mislabelled=1", joined)
+        self.assertIn(f"{visibility.LANE}=1", joined)
+        self.assertIn(f"{visibility.HAND_DISPATCH}=1", joined)
+        self.assertIn(f"{visibility.MAINTAINER}=1", joined)
+        self.assertIn("PR #3: MISLABELLED", joined)
 
     def test_the_attestation_label_matches_the_arming_predicate(self):
         self.assertEqual(vb.REVIEW_ATTESTATION, auto_arm.REVIEW_LABEL)
@@ -2172,6 +2366,11 @@ class TestWorkflowWiring(unittest.TestCase):
         step = self.step_by_run_needle("scripts/verdict-bridge.py --self-test")
         self.assertNotIn("if", step)
         self.assertIn("scripts/gh_retry.py --self-test", step["run"])
+        # #4677: the visibility predicate decides which label every flag writes, and the
+        # release guard decides what may never be attested. A live run must prove both
+        # before it touches a label.
+        self.assertIn("scripts/review_lane_visibility.py --self-test", step["run"])
+        self.assertIn("scripts/release_pr_guard.py --self-test", step["run"])
 
     def test_the_live_run_step_invokes_the_bridge_with_a_repo(self):
         step = self.step_by_run_needle(LIVE_RUN_NEEDLE)
@@ -2205,10 +2404,20 @@ class TestWorkflowWiring(unittest.TestCase):
         )
 
     def test_the_informational_label_is_reified_before_use(self):
-        """Without `gh label create`, every flag decision fails its label edit."""
+        """Without `gh label create`, every flag decision fails its label edit.
+
+        The names + descriptions are RENDERED from the policy module (#4677) rather than
+        restated in YAML, so what is pinned here is that the step reads them from that
+        module — a hard-coded subset would silently stop reifying a label the policy can
+        still decide to write.
+        """
         step = self.step_by_run_needle("gh label create")
-        self.assertIn(vb.UNREVIEWED_LABEL, step["run"])
+        self.assertIn("review_lane_visibility.py --labels", step["run"])
         self.assertIn("--force", step["run"], "creation must be idempotent")
+        # …and the module renders EVERY label `decide()` can write, this one included.
+        rendered = {row.split("\t")[0] for row in visibility.render_label_rows()}
+        self.assertEqual(rendered, set(vb.FLAG_LABELS))
+        self.assertIn(vb.UNREVIEWED_LABEL, rendered)
         order = [self.steps.index(step), self.steps.index(
             self.step_by_run_needle(LIVE_RUN_NEEDLE)
         )]
@@ -2218,7 +2427,14 @@ class TestWorkflowWiring(unittest.TestCase):
         checkouts = [s for s in self.steps if "actions/checkout" in str(s.get("uses"))]
         self.assertEqual(len(checkouts), 1)
         sparse = checkouts[0]["with"]["sparse-checkout"]
-        for needed in ("scripts/verdict-bridge.py", "scripts/gh_retry.py"):
+        for needed in (
+            "scripts/verdict-bridge.py",
+            "scripts/gh_retry.py",
+            # #4677: imported at module scope — a missing one is an ImportError at
+            # startup, and the visibility predicate is the whole point of the labeller.
+            "scripts/review_lane_visibility.py",
+            "scripts/release_pr_guard.py",
+        ):
             self.assertIn(needed, sparse, f"{needed} would be missing at runtime")
         self.assertEqual(
             checkouts[0]["with"]["ref"],

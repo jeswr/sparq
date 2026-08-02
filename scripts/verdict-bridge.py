@@ -136,10 +136,35 @@ retract   head-bound verdict is fail (or AMBIGUOUS) and ``review:pass`` is prese
           orchestrator applied by hand is never fought.  Deleting the pass COMMENT is
           therefore not a retraction gesture the bridge can see — post a fail instead.
 flag      green + mergeable + non-draft + no head-bound verdict + no ``review:*`` label
-          -> add ``review:unreviewed``.  Purely informational: no arming predicate
-          anywhere consumes this label, so it can never block or cause a merge.
-unflag    ``review:unreviewed`` is stale (a verdict or another ``review:*`` label
-          arrived) -> remove it.
+          -> add the DISPOSITION label `scripts/review_lane_visibility.py` assigns:
+          ``review:unreviewed`` when the registry review lane can enumerate the PR,
+          ``review:unreachable`` when it cannot and a hand-dispatched verdict is the only
+          route, ``review:maintainer-owned`` when standing policy already makes the merge
+          a maintainer's (the release-plz Release PR, dependabot).  All three are purely
+          informational: no arming predicate anywhere consumes them, so they can never
+          block or cause a merge.
+reflag    the flag label on the PR disagrees with its disposition -> swap it in ONE edit.
+          This is what re-disposes the PRs the pre-#4677 labeller marked
+          ``review:unreviewed`` for a lane that structurally cannot see them; without it
+          the mislabelled population is frozen, because ``flag`` only ever fires on a PR
+          carrying no ``review:*`` label at all.
+unflag    the flag is stale (a verdict arrived — somebody came) -> remove it.  ONE
+          exception: a PR `release_pr_guard` says no automated path may arm (#1135) keeps
+          ``review:maintainer-owned``, because who merges it is not something a verdict
+          can change; that case ``reflag``s instead.
+
+VISIBILITY MUST AGREE WITH THE REVIEWER'S (issue #4677)
+-------------------------------------------------------
+This module is the LABELLER.  The REVIEWER lives in another repository
+(`jeswr/agent-account-registry`) and admits a PR only on a head-ref / head-repo / App-author
+predicate.  Until #4677 this file applied ``review:unreviewed`` with NO reachability
+condition, so it enrolled PRs into a lane that could never see them — MEASURED: all four
+labelled PRs failed the registry's gate, including the first crates.io release PR, and the
+string ``review:unreviewed`` appears nowhere in the registry codebase.  A labeller with
+wider vision than its worker manufactures invisible backlog, and the label makes that
+backlog look enrolled.  The predicate is therefore no longer restated here: both this
+labeller and `scripts/review_lane_alarm.py` (the detector that censuses the gap every
+tick) import the SAME object from `scripts/review_lane_visibility.py`.
 """
 
 # [OPUS-5] sparq-org/sparq — maintainer observation 2026-07-26: "there seem to be a
@@ -192,11 +217,19 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
 import gh_retry
+import release_pr_guard
+import review_lane_visibility as visibility
 
 
 PROGRAM = "verdict-bridge"
 REVIEW_ATTESTATION = "review:pass"
-UNREVIEWED_LABEL = "review:unreviewed"
+# Re-exported, never re-derived: the disposition -> label mapping and the reachability
+# predicate behind it belong to `review_lane_visibility`, which the review-lane DETECTOR
+# imports too.  Two copies that agree today is the exact defect #4677 records.
+UNREVIEWED_LABEL = visibility.UNREVIEWED_LABEL
+UNREACHABLE_LABEL = visibility.UNREACHABLE_LABEL
+MAINTAINER_LABEL = visibility.MAINTAINER_LABEL
+FLAG_LABELS = visibility.FLAG_LABELS
 
 # Mirrors auto-arm.py's HUMAN_OR_TRUST_LABELS + REVIEW_CHANGES_LABELS.  Promoting a PR
 # that auto-arm would refuse anyway would only paint a misleading attestation onto it.
@@ -275,11 +308,18 @@ class PullRequest:
     # False when the commit list was truncated, so the set above is a LOWER BOUND and
     # disjointness cannot be proven.  Refuses every grant; never blocks a retraction.
     contributors_complete: bool = True
+    # WHO IS GOING TO REVIEW THIS PR — `review_lane_visibility.LANE` / `HAND_DISPATCH` /
+    # `MAINTAINER`.  Defaults to HAND_DISPATCH, not LANE: a PullRequest built without the
+    # head-ref fields must never claim an enrolment in a lane that cannot see it (#4677).
+    disposition: str = visibility.HAND_DISPATCH
+    # Non-empty when `release_pr_guard` says NO automated path may arm this PR.  Carried
+    # rather than recomputed so `decide()` stays pure and label-independent.
+    arm_block: str = ""
 
 
 @dataclass(frozen=True)
 class Decision:
-    action: str  # promote | retract | flag | unflag | none
+    action: str  # promote | retract | flag | reflag | unflag | none
     reason: str
     # True when a head-bound, trusted `VERDICT: pass` at this head was DISCARDED because
     # its author wrote commits at that head.  Drives the ::warning that stops a refused
@@ -288,6 +328,12 @@ class Decision:
     # True when a counted pass came from whoever OPENED the PR.  ADVISORY: reported so
     # the population stays measurable, never acted on.  See `is_opener`.
     opener_verdict: bool = False
+    # The flag label to ADD (`flag` / `reflag`) and the flag label(s) to REMOVE
+    # (`reflag` / `unflag`).  Empty for every other action.  Part of the identity of a
+    # decision, so `reconfirm` compares them too: a re-read that moved a PR from one
+    # disposition to another must abandon the stale write, not apply it.
+    label: str = ""
+    remove_labels: tuple[str, ...] = ()
 
 
 def normalize_login(login: object) -> str:
@@ -507,6 +553,19 @@ def is_green_and_ready(pr: PullRequest) -> bool:
     )
 
 
+def desired_flag_label(pr: PullRequest) -> str:
+    """The flag label this PR SHOULD carry, or ``""`` when it should carry none.
+
+    The disposition is computed in ``parse_node`` from the head ref / head repo / author,
+    by `review_lane_visibility` — the same object the review-lane detector uses.  A PR
+    that is not green-and-ready gets ``""``: flagging is a visibility aid for the ready
+    population, and a red PR is already visible as red.
+    """
+    if not is_green_and_ready(pr):
+        return ""
+    return visibility.flag_label(pr.disposition)
+
+
 def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
     """Pure core. No I/O — every guard below is unit-tested in isolation.
 
@@ -523,7 +582,13 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
     countable, self_passes, opener_passes = classify_verdicts(comments, pr.head_sha, pr)
     verdict = countable[-1] if countable else None
 
-    def out(action: str, reason: str) -> Decision:
+    def out(
+        action: str,
+        reason: str,
+        *,
+        label: str = "",
+        remove: Iterable[str] = (),
+    ) -> Decision:
         """Stamp every exit so neither a refusal nor an advisory exits silently."""
         if self_passes:
             who = ", ".join(sorted({f"@{v.author}" for v in self_passes}))
@@ -548,10 +613,16 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
             reason,
             self_review=bool(self_passes),
             opener_verdict=bool(opener_passes),
+            label=label,
+            remove_labels=tuple(sorted(remove)),
         )
 
     has_attestation = REVIEW_ATTESTATION in pr.labels
-    flagged = UNREVIEWED_LABEL in pr.labels
+    # EVERY flag label, not just `review:unreviewed`: a PR carrying the wrong one is
+    # already labelled, and the pre-#4677 population is carrying exactly that.
+    present_flags = FLAG_LABELS & pr.labels
+    flagged = bool(present_flags)
+    want_flag = desired_flag_label(pr)
 
     if verdict is None:
         # A discarded self-review is POSITIVE evidence, not absence.  The "never retract
@@ -572,14 +643,34 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
         # NEVER retract on absence: an orchestrator-applied label has no comment behind
         # it, and removing it would fight the human lane and un-arm a real review.
         if flagged:
-            return out("none", "flagged, still unreviewed")
+            # #4677: the flag on the PR may name the WRONG lane.  `flag` below cannot fix
+            # that — it only fires on a PR with no `review:*` label at all — so a PR the
+            # pre-fix labeller enrolled in a lane that cannot see it would stay enrolled
+            # forever.  Correcting it is one edit (add the right label, remove the wrong
+            # one), and it is only ever a swap BETWEEN flag labels: no other label is
+            # touched, and a PR whose desired flag is "" (it went red or draft) is left
+            # exactly as it is, because this branch never removes a flag on its own.
+            if want_flag and present_flags != {want_flag}:
+                stale = ", ".join(sorted(present_flags))
+                return out(
+                    "reflag",
+                    f"flagged {stale} but the disposition is {pr.disposition} — "
+                    f"correcting to {want_flag}",
+                    label=want_flag,
+                    remove=present_flags,
+                )
+            return out("none", f"flagged {', '.join(sorted(present_flags))}, still unreviewed")
         other_review_label = any(
             label.startswith("review:") for label in pr.labels
         )
         if other_review_label or has_attestation:
             return out("none", "already in a review lane")
-        if is_green_and_ready(pr):
-            return out("flag", "green + mergeable but invisible to every lane")
+        if want_flag:
+            return out(
+                "flag",
+                f"green + mergeable but invisible to every lane ({pr.disposition})",
+                label=want_flag,
+            )
         return out("none", "no head-bound verdict")
 
     if verdict.value == AMBIGUOUS:
@@ -595,18 +686,41 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
             )
         if (
             not flagged
-            and is_green_and_ready(pr)
+            and want_flag
             and not any(label.startswith("review:") for label in pr.labels)
         ):
             return out(
-                "flag", f"ambiguous verdict line by {verdict.author} — needs a re-review"
+                "flag",
+                f"ambiguous verdict line by {verdict.author} — needs a re-review "
+                f"({pr.disposition})",
+                label=want_flag,
             )
         return out(
             "none", f"ambiguous verdict line by {verdict.author} — polarity unreadable"
         )
 
-    if flagged:
-        return out("unflag", f"verdict arrived ({verdict.value})")
+    # A verdict retires the flag — it is a "nobody is coming" marker and somebody came.
+    # ONE exception: an arm-blocked PR (#1135) is a maintainer's merge whatever any
+    # verdict says, so `review:maintainer-owned` records a PERMANENT routing rather than
+    # a wait state and is re-asserted here instead of removed.  Deciding this from
+    # `arm_block` and not from the label keeps the two consistent even when a verdict
+    # lands before the bridge ever flagged the PR.
+    permanent = MAINTAINER_LABEL if (pr.arm_block and is_green_and_ready(pr)) else ""
+    present_after_verdict = FLAG_LABELS & pr.labels
+    if permanent and present_after_verdict != {permanent}:
+        return out(
+            "reflag",
+            f"verdict arrived ({verdict.value}) but no automated path may arm this PR "
+            f"({pr.arm_block})",
+            label=permanent,
+            remove=present_after_verdict,
+        )
+    if present_after_verdict and not permanent:
+        return out(
+            "unflag",
+            f"verdict arrived ({verdict.value})",
+            remove=present_after_verdict,
+        )
 
     if verdict.value == "fail":
         if has_attestation:
@@ -620,6 +734,14 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
     holds = hold_labels(pr.labels)
     if holds:
         return out("none", f"hold ({', '.join(holds)})")
+    if pr.arm_block:
+        # #1135 / #4677: `release_pr_guard.arm_block_reason` — the SINGLE predicate
+        # auto-arm and rearm-sweeper already refuse on — says no automated path may arm
+        # this PR.  Attesting it anyway paints `review:pass` onto a PR every arming lane
+        # will then decline, which is precisely the "misleading attestation" HOLD_LABELS
+        # exists to prevent, and on the Release PR the attestation reads as clearance to
+        # publish 17 crates irreversibly.  Keyed on branch/author/title, never on a label.
+        return out("none", f"arm-blocked ({pr.arm_block})")
     if has_attestation:
         return out("none", "already attested")
     if pr.is_draft:
@@ -654,7 +776,15 @@ def run_gh_read(argv: list[str]) -> str:
 # scripts/tests/test_verdict_bridge.py::TestScopedRunAuthority.
 PR_NODE_FIELDS = """
         number state isDraft baseRefName headRefOid mergeable
-        author{login}
+        # #4677 — the DISPOSITION inputs.  headRefName + headRepository decide whether the
+        # registry review lane can enumerate this PR at all; headRefName + author + title
+        # are `release_pr_guard`'s only inputs (dropping one makes it fail CLOSED, never
+        # open).  `__typename` is how a GraphQL response spells "this author is an App":
+        # the REST `x[bot]` suffix that `review_lane_alarm` reads is absent here, and
+        # comparing the bare login would make the App check silently never match.
+        headRefName title
+        headRepository{nameWithOwner}
+        author{login __typename}
         labels(first:100){nodes{name} pageInfo{hasNextPage}}
         # 100 is GitHub's DOCUMENTED per-connection maximum.  A larger `last:` is
         # currently accepted (probed: `last:250` returns without an error), but resting a
@@ -940,6 +1070,9 @@ class VerdictBridge:
             # Fail closed: an unseen label could be a hold.
             raise GhError(f"PR #{node.get('number')}: label set exceeds one page")
         contributors, complete = commit_contributors(node)
+        author = node.get("author") or {}
+        head_ref = str(node.get("headRefName") or "")
+        title = node.get("title")
         return PullRequest(
             number=int(node["number"]),
             state=str(node.get("state") or "").upper(),
@@ -955,7 +1088,22 @@ class VerdictBridge:
             ),
             contributors=contributors,
             contributors_complete=complete,
-            opener=normalize_login((node.get("author") or {}).get("login")),
+            opener=normalize_login(author.get("login")),
+            # #4677: the labeller's visibility predicate IS the reviewer's, imported.
+            disposition=visibility.disposition(
+                head_ref=head_ref,
+                head_repo=(node.get("headRepository") or {}).get("nameWithOwner"),
+                author_is_app=str(author.get("__typename") or "") == "Bot",
+                repo=self.repo,
+                author_login=author.get("login"),
+                title=title,
+            ),
+            arm_block=release_pr_guard.arm_block_reason(
+                head_ref=head_ref,
+                author_login=author.get("login"),
+                title=title,
+            )
+            or "",
         )
 
     def reconfirm(
@@ -996,6 +1144,15 @@ class VerdictBridge:
         writes = 0
         self_reviews = 0
         opener_verdicts = 0
+        # #4677 ask 3 — the labelled-but-unreviewable CENSUS, emitted EVERY tick rather
+        # than only when someone goes looking.  This class was found by accident, and a
+        # per-run write count cannot express it: a run that labels nothing looks identical
+        # whether the population is zero or a hundred.  `disposition_census` counts the
+        # green population by who can review it; `mislabelled` counts the specific defect
+        # (a flag naming a lane that cannot see the PR), so a regression in the predicate
+        # shows up as a non-zero row and not as silence.
+        disposition_census: dict[str, int] = {}
+        mislabelled = 0
         if self.only_pr is not None:
             nodes = self.fetch_one(self.only_pr)
             self.log(
@@ -1021,12 +1178,28 @@ class VerdictBridge:
                 errors += 1
                 continue
 
+            # Census FIRST, and unconditionally: it must count the population, not the
+            # subset this run happened to write to.
+            want = desired_flag_label(pr)
+            if want:
+                disposition_census[pr.disposition] = (
+                    disposition_census.get(pr.disposition, 0) + 1
+                )
+                wrong_flags = (FLAG_LABELS & pr.labels) - {want}
+                if wrong_flags:
+                    mislabelled += 1
+                    self.log(
+                        f"[{PROGRAM}] PR #{pr.number}: MISLABELLED — carries "
+                        f"{', '.join(sorted(wrong_flags))} but its disposition is "
+                        f"{pr.disposition}"
+                    )
+
             # VISIBLE TERMINAL STATE.  Emitted BEFORE the `none` short-circuit and
             # independently of the action, because the whole point of this guard is that
             # a refused self-approval usually produces NO label change at all — and a
             # refusal that writes nothing and says nothing is indistinguishable from
             # never having looked.  ::warning surfaces it in the Actions run summary; the
-            # `flag` action puts `review:unreviewed` on the PR itself, which is what
+            # `flag` action puts a disposition label on the PR itself, which is what
             # review-lane-alarm censuses as a blind spot.
             if decision.self_review:
                 self_reviews += 1
@@ -1060,22 +1233,32 @@ class VerdictBridge:
                 self.log(f"[{PROGRAM}] PR #{pr.number}: SKIP reconfirm-failed ({error})")
                 errors += 1
                 continue
-            if confirmed.action != decision.action:
+            # The LABELS are part of the decision's identity, not a detail derived from
+            # its name: a re-read that moved the PR from one disposition to another
+            # returns the same `flag`/`reflag` action carrying a DIFFERENT label, and
+            # writing the stale one would re-create the mislabel this run came to fix.
+            if (confirmed.action, confirmed.label, confirmed.remove_labels) != (
+                decision.action,
+                decision.label,
+                decision.remove_labels,
+            ):
                 self.log(
                     f"[{PROGRAM}] PR #{pr.number}: SKIP superseded — "
                     f"{decision.action} -> {confirmed.action} ({confirmed.reason})"
                 )
                 continue
             # `promote` removes NOTHING. `decide()` returns `unflag` before it can return
-            # `promote` whenever UNREVIEWED_LABEL is present, so a confirmed promote can
-            # never coexist with the flag: the pairing was dead code, and dead code on a
+            # `promote` whenever a WAITING flag is present, so a confirmed promote can
+            # never coexist with one: the pairing was dead code, and dead code on a
             # write path is where a stale-snapshot read hides. Pinned by
             # test_promote_and_the_unreviewed_flag_are_mutually_exclusive_by_construction.
+            # `flag`/`reflag`/`unflag` carry their own labels — see `desired_flag_label`.
             add, remove = {
                 "promote": (REVIEW_ATTESTATION, ""),
                 "retract": ("", REVIEW_ATTESTATION),
-                "flag": (UNREVIEWED_LABEL, ""),
-                "unflag": ("", UNREVIEWED_LABEL),
+                "flag": (decision.label, ""),
+                "reflag": (decision.label, ",".join(decision.remove_labels)),
+                "unflag": ("", ",".join(decision.remove_labels)),
             }[decision.action]
             try:
                 self.edit_labels(pr.number, add=add, remove=remove)
@@ -1083,9 +1266,13 @@ class VerdictBridge:
             except GhError as error:
                 self.log(f"[{PROGRAM}] PR #{pr.number}: label edit failed ({error})")
                 errors += 1
+        census = " ".join(
+            f"{state}={count}" for state, count in sorted(disposition_census.items())
+        )
         self.log(
             f"[{PROGRAM}] complete: writes={writes} errors={errors} "
-            f"self_reviews_refused={self_reviews} opener_verdicts={opener_verdicts}"
+            f"self_reviews_refused={self_reviews} opener_verdicts={opener_verdicts} "
+            f"mislabelled={mislabelled} green_by_disposition[{census}]"
         )
         return errors
 
@@ -1157,6 +1344,10 @@ def pr_fixture(**overrides) -> PullRequest:
         "mergeable": "MERGEABLE",
         "gate_conclusion": "success",
         "labels": frozenset(),
+        # The ORDINARY PR in this suite is one the registry review lane can enumerate, so
+        # every pre-#4677 assertion below keeps meaning what it meant. The unreachable and
+        # maintainer-owned dispositions are exercised explicitly.
+        "disposition": visibility.LANE,
     }
     base.update(overrides)
     base["labels"] = frozenset(base["labels"])
@@ -1383,6 +1574,104 @@ def self_test() -> None:
     assert decide(self_only, [self_pass]).action == "retract"
     assert decide(self_only, []).action == "none"
     assert decide(self_only, [indep_pass, self_pass]).action == "none"
+
+    # ---- #4677: the flag must name a lane that can actually see the PR --------------
+    # The enrolled case is unchanged: `review:unreviewed` still means "a review is coming".
+    enrolled = decide(pr_fixture(), [])
+    assert (enrolled.action, enrolled.label) == ("flag", UNREVIEWED_LABEL), enrolled
+    # An unreachable PR is NOT enrolled — it is marked for a hand-dispatched review.
+    unreachable = decide(pr_fixture(disposition=visibility.HAND_DISPATCH), [])
+    assert (unreachable.action, unreachable.label) == ("flag", UNREACHABLE_LABEL)
+    # ... and the release / dependabot classes are marked maintainer-owned instead.
+    owned = decide(pr_fixture(disposition=visibility.MAINTAINER), [])
+    assert (owned.action, owned.label) == ("flag", MAINTAINER_LABEL), owned
+    # THE LIVE POPULATION (#3798, #4193, #4460, #4488): already carrying the wrong flag,
+    # which `flag` alone can never repair because they are no longer unlabelled.
+    for disposition, want in (
+        (visibility.HAND_DISPATCH, UNREACHABLE_LABEL),
+        (visibility.MAINTAINER, MAINTAINER_LABEL),
+    ):
+        stale = decide(
+            pr_fixture(disposition=disposition, labels={UNREVIEWED_LABEL}), []
+        )
+        assert stale.action == "reflag", stale
+        assert stale.label == want and stale.remove_labels == (UNREVIEWED_LABEL,), stale
+    # ... and a flag that already agrees with the disposition is left alone (idempotent).
+    for disposition, label in (
+        (visibility.LANE, UNREVIEWED_LABEL),
+        (visibility.HAND_DISPATCH, UNREACHABLE_LABEL),
+        (visibility.MAINTAINER, MAINTAINER_LABEL),
+    ):
+        settled = decide(pr_fixture(disposition=disposition, labels={label}), [])
+        assert settled.action == "none", settled
+    # A PR that went red keeps whatever flag it has: `reflag` never fires without a
+    # desired label, so this branch cannot become a silent unflag-on-red.
+    red = decide(
+        pr_fixture(
+            disposition=visibility.MAINTAINER,
+            labels={UNREVIEWED_LABEL},
+            gate_conclusion="failure",
+        ),
+        [],
+    )
+    assert red.action == "none", red
+    # A verdict retires the flag, whichever one it is — somebody came.
+    for flag in (UNREVIEWED_LABEL, UNREACHABLE_LABEL, MAINTAINER_LABEL):
+        arrived = decide(pr_fixture(labels={flag}), [passing])
+        assert arrived.action == "unflag" and arrived.remove_labels == (flag,), arrived
+    # NEVER attest a PR no automated path may arm (#1135): the label would be a lie, and
+    # on the Release PR it reads as clearance to publish irreversibly. Its routing is
+    # PERMANENT, so the verdict re-asserts `review:maintainer-owned` instead of clearing.
+    block = release_pr_guard.arm_block_reason(head_ref="release-plz-main")
+    release = pr_fixture(disposition=visibility.MAINTAINER, arm_block=block)
+    blocked = decide(release, [passing])
+    assert blocked.action == "reflag" and blocked.label == MAINTAINER_LABEL, blocked
+    settled_release = decide(
+        pr_fixture(
+            disposition=visibility.MAINTAINER, arm_block=block, labels={MAINTAINER_LABEL}
+        ),
+        [passing],
+    )
+    assert settled_release.action == "none", settled_release
+    assert "arm-blocked" in settled_release.reason, settled_release
+    # ... control arm: with no arm block the SAME PR promotes, so the guard is not vacuous.
+    assert decide(pr_fixture(disposition=visibility.MAINTAINER), [passing]).action == "promote"
+
+    # END-TO-END through the real GraphQL node shape: the four measured #4677 PRs must
+    # each parse to the disposition the visibility module assigns, so a dropped query
+    # field shows up here rather than as a mislabelled live PR.
+    bridge = VerdictBridge("jeswr/sparq", "main", gh=lambda argv: "", log=lambda _: None)
+
+    def node(ref: str, login: str, typename: str, title: str) -> dict:
+        return {
+            "number": 1, "state": "OPEN", "isDraft": False, "baseRefName": "main",
+            "headRefOid": HEAD, "mergeable": "MERGEABLE", "headRefName": ref,
+            "title": title, "headRepository": {"nameWithOwner": "jeswr/sparq"},
+            "author": {"login": login, "__typename": typename},
+            "labels": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+            "commits": {"totalCount": 0, "nodes": []},
+        }
+
+    measured = [
+        ("sparq-agent/issue-2908-30221671021-1", "sparq-orchestrator", "Bot",
+         "fix: something", visibility.LANE),
+        ("ci/auto-arm-workflows-permission", "jeswr", "User",
+         "ci: auto-arm permissions", visibility.HAND_DISPATCH),
+        ("release-plz-2026-07-27T02-19-35Z", "github-actions", "Bot",
+         "chore: release v0.2.0", visibility.MAINTAINER),
+        ("dependabot/github_actions/actions-minor-1234", "dependabot", "Bot",
+         "chore(deps): bump actions", visibility.MAINTAINER),
+    ]
+    for ref, login, typename, title, expected in measured:
+        parsed = bridge.parse_node(node(ref, login, typename, title), "success")
+        assert parsed.disposition == expected, (ref, parsed.disposition)
+        assert desired_flag_label(parsed) == visibility.flag_label(expected)
+    # The Release PR additionally carries the arm block, so a head-bound pass can never
+    # attest it — it only ever re-asserts the maintainer-owned routing.
+    release_node = bridge.parse_node(node(*measured[2][:4]), "success")
+    assert release_node.arm_block, release_node
+    attempted = decide(release_node, [passing])
+    assert attempted.action == "reflag" and attempted.label == MAINTAINER_LABEL, attempted
 
     print(f"{PROGRAM} self-test: PASS")
 

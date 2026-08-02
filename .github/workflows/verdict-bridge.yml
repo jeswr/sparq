@@ -68,6 +68,17 @@
 # (retracting my pass)`) is AMBIGUOUS, not absent: it never promotes and it REMOVES an
 # existing review:pass. Discarding it would leave the superseded pass standing — strict
 # alone is fail-closed, strict-and-discard is fail-OPEN in composition.
+#
+# THE LABELLER MUST NOT SEE FURTHER THAN THE REVIEWER (sparq#4677). The informational flag
+# this workflow writes used to be a single `review:unreviewed` applied with no reachability
+# condition, while the only thing that PRODUCES a review lives in another repository
+# (jeswr/agent-account-registry) and admits a PR only on a head-ref / head-repo / App-author
+# predicate. MEASURED: all four flagged PRs — including the first crates.io release PR,
+# invisible purely because release-plz names its branch `release-plz-<timestamp>` — failed
+# that predicate, and `review:unreviewed` appears nowhere in the registry codebase. The
+# flag is now the DISPOSITION computed by scripts/review_lane_visibility.py, the same
+# object review-alarm.yml's detector uses, and the run log carries a per-disposition census
+# plus a `mislabelled=` count so the gap is visible every tick.
 name: verdict-bridge
 
 on:
@@ -110,7 +121,7 @@ on:
         default: false
 
 # pull-requests: write edits PR labels; issues: write reifies the informational
-# review:unreviewed label. No contents: write — this workflow never pushes.
+# disposition labels. No contents: write — this workflow never pushes.
 permissions:
   contents: read
   issues: write
@@ -200,22 +211,40 @@ jobs:
           sparse-checkout: |
             scripts/verdict-bridge.py
             scripts/gh_retry.py
+            scripts/review_lane_visibility.py
+            scripts/release_pr_guard.py
           sparse-checkout-cone-mode: false
 
       - name: Self-test policy
         run: |
           python3 scripts/gh_retry.py --self-test
+          python3 scripts/release_pr_guard.py --self-test
+          python3 scripts/review_lane_visibility.py --self-test
           python3 scripts/verdict-bridge.py --self-test
 
       # `--force` makes this idempotent: create on first run, no-op-update afterwards.
-      # Without the label reified, every `flag` decision would fail its label edit.
-      - name: Reify the informational review:unreviewed label
+      # Without the labels reified, every `flag` / `reflag` decision would fail its edit.
+      #
+      # RENDERED from scripts/review_lane_visibility.py rather than restated here (#4677):
+      # this workflow labels PRs by DISPOSITION — `review:unreviewed` only when the
+      # registry review lane can actually enumerate the PR, `review:unreachable` when no
+      # producer can, `review:maintainer-owned` when standing policy already makes the
+      # merge a maintainer's — and a label whose description contradicted the policy that
+      # applied it would recreate the very confusion this change removes. Reading the
+      # names AND the descriptions from the policy module makes that drift impossible.
+      # TAB-separated fields, so a description containing spaces or a comma stays one
+      # argument.
+      - name: Reify the informational disposition labels
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        run: >-
-          gh label create "review:unreviewed" --repo "${{ github.repository }}" --force
-          --color "ededed"
-          --description "Green + mergeable but no head-bound VERDICT — needs a review (informational; blocks nothing)"
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/review_lane_visibility.py --labels > /tmp/review-labels.tsv
+          while IFS=$'\t' read -r name color description; do
+            gh label create "$name" --repo "$REPO" --force \
+              --color "$color" --description "$description"
+          done < /tmp/review-labels.tsv
 
       - name: Bridge verdict comments to review labels
         env:

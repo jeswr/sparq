@@ -98,11 +98,19 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             scripts/review_lane_alarm.py
+            scripts/review_lane_visibility.py
+            scripts/release_pr_guard.py
           sparse-checkout-cone-mode: false
 
       # FIRST, unconditionally: a detector that cannot prove itself never gets to run.
+      # The SHARED visibility predicate (sparq#4677) proves itself in the same step: this
+      # detector and verdict-bridge.yml's labeller now rest on one object, and a detector
+      # that has not checked its own reachability test is measuring nothing.
       - name: Self-test the alarm (hermetic fixtures)
-        run: python3 scripts/review_lane_alarm.py --self-test
+        run: |
+          python3 scripts/release_pr_guard.py --self-test
+          python3 scripts/review_lane_visibility.py --self-test
+          python3 scripts/review_lane_alarm.py --self-test
 
       - name: Enumerate PRs no review producer can reach
         env:
