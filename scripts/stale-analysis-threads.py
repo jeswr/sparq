@@ -44,6 +44,20 @@
 # headline guard (its "THE HEADLINE GUARD" block: a LIVE analysis must not even enumerate
 # PRs, and inverting the DEAD filter reds it).
 #
+# That authority is a READ, so it goes stale: an administrator can re-enable the workflow
+# at any moment, including between the census and the mutation it authorises. So the
+# authority is RE-READ twice more — once after the census and before a single PR is
+# enumerated, and again immediately before each group of resolves — and any change at all
+# (a verdict that is no longer DEAD, a different `state` string, a newer run) revokes it:
+# the earlier read enumerates nothing, the later one defers the whole group to the next
+# tick without resolving or receipting. What that CANNOT do is close the window: the API
+# offers no compare-and-swap, so a re-enable landing between the last re-read and the
+# `resolveReviewThread` call is unavoidable and is NOT claimed to be prevented. The
+# re-reads shrink that window from "the whole sweep" to "one API round-trip", and the
+# blast radius of losing the race is bounded and reversible: a thread that a resurrected
+# analysis still cares about is re-filed by its next run, and the receipt says how to
+# un-resolve one by hand.
+#
 # The other rails, each pinned by the self-test:
 #   * EVERY comment in the thread must be authored by a declared dead analysis. One human
 #     reply — or one comment from a live/undeclared author — disqualifies the thread. A
@@ -56,9 +70,15 @@
 #     second tick finds nothing and posts nothing.
 #   * Every mutation is bounded per run (`--max-resolves`) and every skipped thread is
 #     still classified and COUNTED, so the census is total over what was read.
-#   * Every resolve is receipted: one comment per PR per analysis, naming that analysis,
-#     the workflow state that authorised the sweep, and every thread it resolved. A
-#     resolve that lands with no receipt is a FAILURE (exit 1), never a silent success.
+#   * Every resolve is receipted, and the receipt is posted FIRST. One comment per PR per
+#     analysis, naming that analysis, the workflow state that authorised the sweep, and
+#     every thread the sweep is about to resolve; it is then edited in place to report the
+#     outcome. Receipt-last cannot hold the invariant — a receipt that fails after the
+#     mutations leaves resolved threads with no record, and the next tick reads them as
+#     `already-resolved` and never retries, so the audit trail is permanently short. Posted
+#     first, a failed receipt costs a DEFERRED sweep (retried next tick) instead, and a
+#     failed EDIT leaves a receipt that still names every thread and says it is unfinalized.
+#     Either failure is a FAILURE (exit 1), never a silent success.
 #
 # WHAT IT IS NOT. Resolving a THREAD is not dismissing a FINDING. The ruleset's
 # `code_scanning` rule (CodeQL alerts, `errors_and_warnings`) is a separate gate and is
@@ -73,6 +93,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -163,6 +184,10 @@ OPEN_PR_THREADS_QUERY = """query($owner:String!,$name:String!,$cursor:String){
     }
   }
 }"""
+
+# `gh pr comment` echoes the new comment's URL. Its trailing id is the handle that lets the
+# intent receipt be EDITED into its final form instead of duplicated.
+COMMENT_ID_RE = re.compile(r"#issuecomment-(\d+)")
 
 RESOLVE_MUTATION = """mutation($threadId:ID!){
   resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}
@@ -357,20 +382,38 @@ class AnalysisState:
     last_run: str | None = None
 
 
-def receipt_comment(state: AnalysisState, threads: list[Thread]) -> str:
-    """The per-PR receipt. Names the authority for the sweep and every thread it touched."""
+def receipt_comment(state: AnalysisState, threads: list[Thread], *, finalized: bool) -> str:
+    """The per-PR receipt. Names the authority for the sweep and every thread it touched.
+
+    Two forms of ONE comment. The INTENT form (``finalized=False``) is posted BEFORE the
+    first resolve, so no thread can be resolved without a record of it already on the PR;
+    the FINAL form replaces it in place once the mutations are done and reports what
+    actually landed. See ``Sweeper.sweep_group``.
+    """
     last_run = f", last run {state.last_run}" if state.last_run else ""
-    rows = "\n".join(f"| `{thread.location()}` |" for thread in threads)
+    rows = "\n".join(f"| `{thread.location()}` |" for thread in threads) or "| _(none)_ |"
+    if finalized:
+        headline = f"**Stale-analysis review threads resolved — {len(threads)}.**"
+        column, pending = "resolved thread", ""
+    else:
+        headline = f"**Stale-analysis review threads — resolving {len(threads)}.**"
+        column = "thread"
+        pending = (
+            "\n\n*This receipt is posted before the mutations, so no thread can be resolved "
+            "without appearing here; it is edited to report the outcome once they finish. "
+            "While it still reads _resolving_, each thread's own state on this PR is the "
+            "outcome and the sweep's job log is authoritative.*"
+        )
     return (
         f"{MARKER}\n\n"
-        f"**Stale-analysis review threads resolved — {len(threads)}.**\n\n"
+        f"{headline}{pending}\n\n"
         f"`{state.analysis.login}` ({state.analysis.name}) filed the threads below, and the "
         f"analysis that files them is not running: workflow `{state.analysis.workflow}` "
         f"reports state `{state.state}`{last_run}. A thread from an analysis that no longer "
         f"runs can never be superseded by a re-scan, so under the `main` ruleset's "
         f"`required_review_thread_resolution` it is a permanent merge block with no "
         f"automated exit (sparq-org/sparq#4542).\n\n"
-        f"| resolved thread |\n|---|\n{rows}\n\n"
+        f"| {column} |\n|---|\n{rows}\n\n"
         f"This resolves the THREAD, not the finding. The code-scanning alert gate (the "
         f"ruleset's `code_scanning` rule) is untouched, and re-enabling "
         f"`{state.analysis.workflow}` re-files anything still live on its next analysis. "
@@ -450,6 +493,32 @@ class Sweeper:
             )
         return AnalysisState(analysis, DEAD, text, last_run)
 
+    def reauthorize(self, state: AnalysisState) -> AnalysisState | None:
+        """Re-read the authority behind `state`, or None if it no longer holds.
+
+        `analysis_state()` is a READ, and a read is only ever a fact about the past: an
+        administrator can re-enable the workflow after it, and the new run then owns —
+        and can supersede — the very threads this sweep is about to resolve. So the
+        verdict is re-taken before anything is enumerated and again before every group of
+        mutations, and it must come back IDENTICAL: still DEAD, the same raw `state`
+        string, and the same newest run. A newer run means the workflow RAN between the
+        two reads, which a workflow that was disabled for both of them should not have
+        been able to do — so that revokes the sweep too, even though the state still
+        reads disabled.
+
+        This SHRINKS the window; it cannot close it. The Actions API has no
+        compare-and-swap, so a re-enable that lands between this read and the
+        `resolveReviewThread` call it authorises is unavoidable — see the header. Revoked
+        is not a failure: the analysis is alive again and owns its threads, which is
+        exactly the state this script is built to keep its hands off.
+        """
+        fresh = self.analysis_state(state.analysis)
+        if fresh.verdict != DEAD:
+            return None
+        if (fresh.state, fresh.last_run) != (state.state, state.last_run):
+            return None
+        return fresh
+
     def run_census(self, analysis: Analysis) -> tuple[int, str | None] | None:
         """(unfinished run count, newest run's `created_at`), or None if unreadable.
 
@@ -462,8 +531,12 @@ class Sweeper:
           this script cannot verify, so it is not trusted alone: a run that is still going
           is overwhelmingly the newest one, and its status is a fact on the page.
 
-        The two reads cannot race a new run into existence because the caller has already
-        established that the workflow is disabled. Any unreadable, malformed or incoherent
+        The caller has established that the workflow is disabled, which makes a new run
+        between these two reads unlikely — but NOT impossible: `disabled` is a fact that
+        was true when it was read, and an administrator can re-enable the workflow at any
+        time. That is why the census is not the last word: `Sweeper.reauthorize` re-reads
+        this whole verdict before enumeration and again before every group of mutations,
+        and any change revokes the sweep. Any unreadable, malformed or incoherent
         answer (unparseable page, missing `total_count`, an unreadable status on a run that
         exists, completed > total) returns None, which the caller treats as UNKNOWN.
         """
@@ -572,8 +645,24 @@ class Sweeper:
             raise GhError(f"resolveReviewThread did not resolve {thread.id}")
         return True
 
-    def post_receipt(self, pr: int, body: str) -> None:
-        self.gh(["pr", "comment", str(pr), "--repo", self.repo, "--body", body])
+    def post_receipt(self, pr: int, body: str) -> str | None:
+        """Post the receipt; return the comment id `gh` echoes back, if it is readable.
+
+        The id is what makes the receipt EDITABLE, so the intent form posted before the
+        mutations can be finalized in place rather than duplicated.
+        """
+        url = self.gh(["pr", "comment", str(pr), "--repo", self.repo, "--body", body])
+        match = COMMENT_ID_RE.search(url or "")
+        return match.group(1) if match else None
+
+    def finalize_receipt(self, comment_id: str, body: str) -> None:
+        self.gh(
+            [
+                "api", "--method", "PATCH",
+                f"repos/{self.owner}/{self.name}/issues/comments/{comment_id}",
+                "-f", f"body={body}",
+            ]
+        )
 
     # ---- the run -----------------------------------------------------------------------
 
@@ -597,6 +686,17 @@ class Sweeper:
             # script has no business touching them and stops before reading a single PR.
             self.log(
                 f"[{PROGRAM}] no declared analysis is provably disabled — nothing to sweep."
+            )
+            return
+        # ...and re-take that verdict before spending a single read on PRs. The census
+        # above proves the analysis was dead when it was READ; a re-enable since then must
+        # cost this sweep, not a thread the resurrected analysis still owns.
+        dead = [fresh for fresh in map(self.reauthorize, dead) if fresh is not None]
+        if not dead:
+            self.log(
+                f"::warning title={PROGRAM} authorisation revoked::a declared analysis "
+                "stopped being provably disabled between the census and the sweep — "
+                "enumerated nothing."
             )
             return
         # Keyed by the NORMALIZED login, because that is what a thread's author reads as.
@@ -652,6 +752,15 @@ class Sweeper:
             self.sweep_group(pr, by_login[login], threads)
 
     def sweep_group(self, pr: int, state: AnalysisState, eligible: list[Thread]) -> None:
+        """Receipt FIRST, then resolve, then finalize the receipt in place.
+
+        Receipt-last is the shape that loses the audit trail: if the comment fails after
+        the mutations, the threads are resolved with no record, and every later tick
+        classifies them `already-resolved` and never retries the receipt. Posting the
+        intent receipt first inverts which half can be lost — a failed receipt costs a
+        deferred sweep the next tick redoes, and a resolve can no longer exist without a
+        comment naming it.
+        """
         if self.dry_run:
             self.deferred += len(eligible)
             self.log(
@@ -660,6 +769,32 @@ class Sweeper:
                 + ", ".join(thread.location() for thread in eligible)
             )
             return
+        fresh = self.reauthorize(state)
+        if fresh is None:
+            # The analysis came back to life between the census and this mutation. Backing
+            # off is the CORRECT outcome, not a failure: a live analysis owns its threads.
+            self.deferred += len(eligible)
+            self.log(
+                f"::warning title={PROGRAM} authorisation revoked::#{pr}: "
+                f"{state.analysis.workflow} is no longer provably disabled — deferred "
+                f"{len(eligible)} thread(s)."
+            )
+            return
+        try:
+            receipt = self.post_receipt(pr, receipt_comment(fresh, eligible, finalized=False))
+        except GhError as error:
+            # Nothing has been mutated yet, so this costs a deferred sweep and nothing
+            # else. Still a failure: an unreceiptable PR is one this script cannot audit.
+            self.deferred += len(eligible)
+            self.failures.append(f"#{pr} receipt: {error}")
+            self.log(f"::error title={PROGRAM} receipt failed::#{pr}: {error}")
+        else:
+            self.resolve_group(pr, fresh, eligible, receipt)
+
+    def resolve_group(
+        self, pr: int, state: AnalysisState, eligible: list[Thread], receipt: str | None
+    ) -> None:
+        """Resolve the threads the intent `receipt` already names, then finalize it."""
         done: list[Thread] = []
         for thread in eligible:
             try:
@@ -672,17 +807,25 @@ class Sweeper:
                 continue
             done.append(thread)
             self.resolved += 1
-        if not done:
+        if receipt is None:
+            # The intent receipt landed but `gh` did not echo an id we can edit. The audit
+            # record is complete — it names the authority and every thread — it just still
+            # reads "resolving", which it says out loud. A warning, not a failure.
+            self.log(
+                f"::warning title={PROGRAM} receipt not finalized::#{pr}: could not read the "
+                f"receipt comment id, so it still reads as intent; resolved {len(done)}."
+            )
             return
         try:
-            self.post_receipt(pr, receipt_comment(state, done))
+            self.finalize_receipt(receipt, receipt_comment(state, done, finalized=True))
         except GhError as error:
-            # A resolve with no receipt is unauditable — that is a failure, not a nit.
+            # The receipt is still on the PR and still names every thread, so nothing is
+            # unaudited — but it overstates the intent, so say so loudly.
             # No early `return` here: the collected failure IS the outcome, and
             # scripts/check-sticky-failure-exits.py reads a bare `return` in a
             # failure-recording handler as a swallowed failure.
-            self.failures.append(f"#{pr} receipt: {error}")
-            self.log(f"::error title={PROGRAM} receipt failed::#{pr}: {error}")
+            self.failures.append(f"#{pr} receipt finalize: {error}")
+            self.log(f"::error title={PROGRAM} receipt finalize failed::#{pr}: {error}")
         else:
             self.log(
                 f"[{PROGRAM}] #{pr}: resolved {len(done)} stale {state.analysis.login} thread(s)"
@@ -773,11 +916,17 @@ class FakeGh:
 
     def __init__(self, *, workflow_state="disabled_manually", pages=None,
                  resolve_error=None, comment_error=None, last_run="2026-07-18T14:01:00Z",
-                 runs_total=1, runs_completed=1, runs_error=None, newest_status="completed"):
+                 runs_total=1, runs_completed=1, runs_error=None, newest_status="completed",
+                 finalize_error=None, echo_comment_url=True):
         self.workflow_state = workflow_state
         self.pages = list(pages or [])
         self.resolve_error = resolve_error
         self.comment_error = comment_error
+        # The receipt is posted first and EDITED into its final form, so the fake has to
+        # echo a comment URL the way `gh pr comment` does and accept the PATCH.
+        self.finalize_error = finalize_error
+        self.echo_comment_url = echo_comment_url
+        self.comment_id = 100
         self.last_run = last_run
         # The run census: how many runs this workflow ever started, and how many finished.
         # Equal totals = quiescent; runs_total > runs_completed = something is still going.
@@ -792,7 +941,8 @@ class FakeGh:
     def mutations(self) -> list[list[str]]:
         return [
             argv for argv in self.calls
-            if argv[:2] == ["pr", "comment"] or any("mutation" in a for a in argv)
+            if argv[:2] == ["pr", "comment"] or "--method" in argv
+            or any("mutation" in a for a in argv)
         ]
 
     def resolves(self) -> list[list[str]]:
@@ -800,6 +950,9 @@ class FakeGh:
 
     def comments(self) -> list[list[str]]:
         return [argv for argv in self.calls if argv[:2] == ["pr", "comment"]]
+
+    def finalizations(self) -> list[list[str]]:
+        return [argv for argv in self.calls if argv[:3] == ["api", "--method", "PATCH"]]
 
     def reads(self) -> list[list[str]]:
         return [argv for argv in self.calls if argv not in self.mutations()]
@@ -811,7 +964,14 @@ class FakeGh:
         if argv[:2] == ["pr", "comment"]:
             if self.comment_error:
                 raise GhError(self.comment_error)
-            return ""
+            self.comment_id += 1
+            if not self.echo_comment_url:
+                return ""
+            return f"https://github.com/fixture/repo/pull/1#issuecomment-{self.comment_id}\n"
+        if argv[:3] == ["api", "--method", "PATCH"]:
+            if self.finalize_error:
+                raise GhError(self.finalize_error)
+            return "{}"
         if "resolveReviewThread" in joined:
             if self.resolve_error:
                 raise GhError(self.resolve_error)
@@ -833,6 +993,13 @@ class FakeGh:
             self.page_index += 1
             return page
         raise AssertionError(f"unexpected gh call: {argv}")
+
+
+def _body_of(argv: list[str]) -> str:
+    """The comment body off a `pr comment --body` OR an `api ... -f body=` argv."""
+    if "--body" in argv:
+        return argv[argv.index("--body") + 1]
+    return next(a.split("=", 1)[1] for a in argv if a.startswith("body="))
 
 
 def _sweeper(fake: FakeGh, **kw) -> Sweeper:
@@ -960,6 +1127,63 @@ def self_test() -> None:
     sweeper.run()
     assert sweeper.resolved == 2, sweeper.resolved
 
+    # ---- THE THIRD READ: the authority is RE-TAKEN before enumerating and before -------
+    # ---- mutating, because `disabled` is only ever a fact about the past ---------------
+    # An administrator can re-enable the workflow after the census; the run that starts
+    # then owns the very threads this sweep is about to resolve. Delete either
+    # self.reauthorize() call and exactly one of the two cases below goes red.
+    class ReenabledGh(FakeGh):
+        """`disabled_manually` for the first N workflow-state reads, `active` after."""
+
+        def __init__(self, *, disabled_reads, **kw):
+            super().__init__(**kw)
+            self.disabled_reads = disabled_reads
+            self.workflow_reads = 0
+
+        def __call__(self, argv):
+            joined = " ".join(argv)
+            if "actions/workflows/" in joined and "/runs?" not in joined:
+                self.workflow_reads += 1
+                if self.workflow_reads > self.disabled_reads:
+                    self.calls.append(list(argv))
+                    return _workflow_payload(STATE_ACTIVE)
+            return super().__call__(argv)
+
+    # Re-enabled between the census and the enumeration: not one PR is even read.
+    reenabled = ReenabledGh(disabled_reads=1, pages=[page])
+    sweeper = _sweeper(reenabled)
+    sweeper.run()
+    assert reenabled.mutations() == [], reenabled.mutations()
+    assert reenabled.page_index == 0, "a re-enabled analysis must not even enumerate PRs"
+    assert sweeper.resolved == 0 and sweeper.failures == []
+
+    # Re-enabled after the enumeration, while the sweep still holds its stale authority:
+    # the PRs were read, but the group is DEFERRED and nothing is resolved or receipted.
+    reenabled = ReenabledGh(disabled_reads=2, pages=[page])
+    sweeper = _sweeper(reenabled)
+    sweeper.run()
+    assert reenabled.page_index == 1, "the enumeration had already happened"
+    assert reenabled.mutations() == [], reenabled.mutations()
+    assert sweeper.resolved == 0 and sweeper.deferred == 2, sweeper.deferred
+    # Backing off a live analysis is the CORRECT outcome, so it is not a failure.
+    assert sweeper.failures == [] and sweep_exit(sweeper, transient=False) == 0
+
+    # A NEWER run revokes it too. The workflow reads disabled at both ends, but it cannot
+    # have run in between unless it was re-enabled and disabled again, and that run may
+    # have filed or superseded threads this sweep already enumerated.
+    class RanAgainGh(FakeGh):
+        def __call__(self, argv):
+            payload = super().__call__(argv)
+            if "/runs?" in " ".join(argv):
+                self.last_run = "2026-07-28T09:00:00Z"
+            return payload
+
+    ran_again = RanAgainGh(pages=[page])
+    sweeper = _sweeper(ran_again)
+    sweeper.run()
+    assert ran_again.mutations() == [] and ran_again.page_index == 0, ran_again.calls
+    assert sweeper.resolved == 0 and sweeper.failures == []
+
     # ---- the sweep itself --------------------------------------------------------------
     fake = FakeGh(pages=[page])
     sweeper = _sweeper(fake)
@@ -968,13 +1192,26 @@ def self_test() -> None:
     assert sweeper.counts == {ELIGIBLE: 2}, sweeper.counts
     assert [a for a in fake.resolves()], "threads must actually be resolved"
     assert len(fake.comments()) == 1, "exactly one receipt per PR"
-    body = fake.comments()[0][fake.comments()[0].index("--body") + 1]
-    assert body.startswith(MARKER), body
-    assert "disabled_manually" in body and "codeql.yml" in body, body
-    assert "2026-07-18T14:01:00Z" in body, body
-    assert "a.rs:7" in body, body
-    assert "code_scanning" in body and "#4542" in body, body
+    assert len(fake.finalizations()) == 1, "that receipt is EDITED, never duplicated"
+    for body in (_body_of(fake.comments()[0]), _body_of(fake.finalizations()[0])):
+        assert body.startswith(MARKER), body
+        assert "disabled_manually" in body and "codeql.yml" in body, body
+        assert "2026-07-18T14:01:00Z" in body, body
+        assert "a.rs:7" in body, body
+        assert "code_scanning" in body and "#4542" in body, body
+    # The receipt is posted as INTENT and finalized to the outcome.
+    assert "resolving 2" in _body_of(fake.comments()[0])
+    assert "resolved — 2" in _body_of(fake.finalizations()[0])
     assert sweep_exit(sweeper, transient=False) == 0
+
+    # ...and the receipt lands BEFORE the first resolve. Move post_receipt() back after
+    # the loop and this goes red — the whole point of finding #2.
+    order = [
+        "comment" if argv[:2] == ["pr", "comment"] else "resolve"
+        for argv in fake.calls
+        if argv[:2] == ["pr", "comment"] or any("resolveReviewThread" in a for a in argv)
+    ]
+    assert order == ["comment", "resolve", "resolve"], order
 
     # Mixed population: only the all-bot unresolved threads are touched, and the census
     # is TOTAL over what was read.
@@ -1085,17 +1322,72 @@ def self_test() -> None:
     sweeper = _sweeper(fake)
     sweeper.run()
     assert sweeper.resolved == 0 and len(sweeper.failures) == 2, sweeper.failures
-    assert fake.comments() == [], "no receipt when nothing was resolved"
+    # The intent receipt is already posted, so it is finalized to the truth — nothing
+    # resolved — rather than left claiming a sweep that never landed.
+    assert len(fake.comments()) == 2 and len(fake.finalizations()) == 2, fake.calls
+    for body in map(_body_of, fake.finalizations()):
+        assert "resolved — 0" in body and "_(none)_" in body, body
     assert sweep_exit(sweeper, transient=False) == 1
     # ...and a failure still exits non-zero when a transient ALSO happened (precedence).
     assert sweep_exit(sweeper, transient=True) == 1
 
-    # A resolve that lands with no receipt is a failure, not a silent success.
+    # ---- THE RECEIPT INVARIANT: no resolve can outlive its receipt --------------------
+    # A receipt that cannot be posted must cost the SWEEP, not the audit trail. Posted
+    # last (the pre-#5365 shape) these threads would be resolved and unreceipted forever:
+    # the next tick reads them `already-resolved`, so the receipt is never retried. Move
+    # post_receipt() back below the resolve loop and this goes red.
     fake = FakeGh(pages=[page], comment_error="HTTP 403")
+    sweeper = _sweeper(fake)
+    sweeper.run()
+    assert sweeper.resolved == 0 and sweeper.deferred == 2, (sweeper.resolved, sweeper.deferred)
+    assert fake.resolves() == [], "nothing may be resolved once the receipt has failed"
+    assert len(sweeper.failures) == 1, sweeper.failures
+    assert sweep_exit(sweeper, transient=False) == 1
+    # ...and because nothing was mutated, the NEXT tick completes the audit trail in full.
+    fake.comment_error = None
+    fake.pages, fake.page_index = [page], 0
+    tick2 = _sweeper(fake)
+    tick2.run()
+    assert tick2.resolved == 2 and tick2.failures == [], tick2.failures
+    assert len(fake.comments()) == 2, "one failed receipt, then one that landed"
+    assert len(fake.finalizations()) == 1 and len(fake.resolves()) == 2, fake.calls
+    final = _body_of(fake.finalizations()[0])
+    assert "resolved — 2" in final and final.count("a.rs:7") == 2, final
+
+    # A receipt that lands but cannot be EDITED is still a failure — yet the audit trail
+    # survives, because the intent receipt already names every thread that was resolved.
+    fake = FakeGh(pages=[page], finalize_error="HTTP 403")
     sweeper = _sweeper(fake)
     sweeper.run()
     assert sweeper.resolved == 2 and len(sweeper.failures) == 1, sweeper.failures
     assert sweep_exit(sweeper, transient=False) == 1
+    intent = _body_of(fake.comments()[0])
+    assert intent.count("a.rs:7") == 2 and "resolving 2" in intent, intent
+    # It says out loud that it is not the final word rather than overclaiming a sweep.
+    assert "_resolving_" in intent and "job log is authoritative" in intent, intent
+    # Honest about the terminal state: a later tick reads those threads as already
+    # resolved, so it re-resolves nothing and posts nothing — the receipt stays in its
+    # intent form, complete but unfinalized, and the exit code above is what reports it.
+    fake.pages = [_graphql_payload([_pr_node(3451, [
+        _thread_node("T1", authors=[CODEQL], resolved=True),
+        _thread_node("T2", authors=[CODEQL], resolved=True),
+    ])])]
+    fake.page_index, fake.finalize_error = 0, None
+    tick2 = _sweeper(fake)
+    tick2.run()
+    assert tick2.resolved == 0 and tick2.counts == {SKIP_RESOLVED: 2}, tick2.counts
+    assert len(fake.comments()) == 1 and len(fake.resolves()) == 2, "no duplicate of either"
+
+    # An un-editable receipt (no comment id echoed) is a WARNING, not a failure: the
+    # record on the PR is complete, it just still reads as intent.
+    logged = []
+    fake = FakeGh(pages=[page], echo_comment_url=False)
+    sweeper = Sweeper(repo="fixture/repo", gh=fake, log=logged.append)
+    sweeper.run()
+    assert sweeper.resolved == 2 and sweeper.failures == [], sweeper.failures
+    assert fake.finalizations() == [] and len(fake.comments()) == 1
+    assert any("receipt not finalized" in line for line in logged), logged
+    assert sweep_exit(sweeper, transient=False) == 0
 
     # A mutation that reports the thread still unresolved is a failure, not a success.
     class LyingGh(FakeGh):

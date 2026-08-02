@@ -471,10 +471,18 @@ Two lanes bound that failure mode, and neither weakens the rule:
   replied. An `active` workflow, a disabled one with a queued/in-progress run (disabling
   stops the next trigger, not the run already going), or any state or run census the API
   does not report readably — sweeps nothing, because a live analysis can still clear its
-  own threads. A PR whose review threads overflow one enumeration page is swept whole or
-  not at all, so it is skipped entirely rather than half-resolved. Every resolve is
+  own threads. That verdict is a read, so it is re-taken before any PR is enumerated and
+  again before every group of resolves, and any change — no longer disabled, a different
+  state, a newer run — defers the sweep to the next tick. The re-reads shrink the window
+  between authorisation and mutation; the Actions API has no compare-and-swap, so they
+  cannot close it. A PR whose review threads overflow one enumeration page is swept whole
+  or not at all, so it is skipped entirely rather than half-resolved. Every resolve is
   receipted on the PR (one comment per analysis), naming that analysis, the workflow state
-  that authorised the sweep, and every thread it resolved.
+  that authorised the sweep, and every thread it resolved. The receipt is posted **before**
+  the mutations and edited in place afterwards to report the outcome, so a receipt that
+  cannot be posted costs the sweep rather than the audit trail — receipt-last would leave
+  resolved threads unrecorded, and the next tick reads them as already-resolved and never
+  retries.
 
   This resolves a *thread*, never a *finding*: the `code_scanning` alert rule above is a
   separate gate and is untouched, and re-enabling the workflow re-files anything still
