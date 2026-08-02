@@ -215,7 +215,8 @@ jobs:
   # enqueue. The decide step now diffs the queued batch (base_sha...head_sha, the #3421
   # fetch pattern) and classifies it with `scripts/ci_select.py --classify-only` — the
   # SAME classify_change() the `select` pre-job runs on this event (no duplicated path
-  # lists). docs-only/orchestration-only => rust_changed=false; any other class, an
+  # lists). A class on ci_select.py `_INERT_CLASSES` => rust_changed=false; any other
+  # class ([OPUS-5] sq-g25hr: incl. `mixed`, i.e. engine + something inert), an
   # unresolvable SHA pair, or any classifier error => true (fail-safe = full run). The
   # skipped legs report `skipped` and the required ci-summary gate attributes them to
   # the green same-diff `select` pre-job (attributed skips, never missing legs).
@@ -286,8 +287,8 @@ jobs:
           elif [ "${EVENT_NAME}" = "merge_group" ]; then
             # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (see the job header note): diff the
             # queued batch (#3421 fetch pattern) and classify via scripts/ci_select.py
-            # --classify-only. docs-only/orchestration-only batch => skip; any other
-            # class, unknown token, unresolvable SHAs, or classifier error => full
+            # --classify-only. A batch on ci_select.py's `_INERT_CLASSES` => skip; any
+            # other class, unknown token, unresolvable SHAs, or classifier error => full
             # (fail-safe).
             rust=true
             ok=true
@@ -304,8 +305,10 @@ jobs:
             if [ "${ok}" = "true" ]; then
               cls="$(python3 scripts/ci_select.py --classify-only --event merge_group \
                        --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
+              # [OPUS-5] sq-g25hr: lists ci_select.py `_INERT_CLASSES` verbatim (pinned by
+              # scripts/tests/test_ci_select_wiring.py so the two cannot drift).
               case "${cls}" in
-                docs-only|orchestration-only) rust=false ;;
+                docs-only|orchestration-only|deploy-only|inert-mixed) rust=false ;;
                 *) rust=true ;;
               esac
             else
