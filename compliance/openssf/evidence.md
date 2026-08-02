@@ -101,22 +101,31 @@ flag where sparq also satisfies **silver/gold**.
 - **`delivery_unsigned`** — Met — releases are signed (provenance attestation, above). *(Gold-relevant.)*
 - **`vulnerabilities_fixed_60_days`** — Met — `SECURITY.md` response targets + the daily advisory watchdog ([`dependency-monitoring.yml`](../../.github/workflows/dependency-monitoring.yml)) surface advisories promptly; fixes ship in the next release.
 - **`vulnerabilities_critical_fixed`** — Met — no known unfixed critical vulns; the cargo-deny gate runs **two GATING steps** (`bans/sources/licenses` *and* `advisories`) on PR/push/merge_group with a fail-closed [`deny.toml`](../../deny.toml) (`yanked = "deny"`, two justified `unmaintained` ignores — neither a vuln). The daily watchdog ([`dependency-monitoring.yml`](../../.github/workflows/dependency-monitoring.yml)) is defence-in-depth. *(PR-time advisory gating is **un-degraded** — GX-1 closed by #210 / sq-toze.2; the CVSS-4.0 parse blocker sq-q8de is resolved.)*
-- **`no_leaked_credentials`** — Met — no secrets in tree; CodeQL + Scorecard scan; workflows use `${{ secrets }}`/OIDC only.
+- **`no_leaked_credentials`** — Met — no secrets in tree; workflows use `${{ secrets }}`/OIDC only, and Scorecard's `Token-Permissions`/`Dangerous-Workflow` analysis covers that surface. *(The CodeQL half of this answer is inert while GX-OSSF-4 is open; the `secret-literal grep` step in [`deploy-terraform-lint.yml`](../../.github/workflows/deploy-terraform-lint.yml) is advisory and scoped to the deploy submodules.)*
 
 ### Analysis
-- **`static_analysis`** — Met — CodeQL `security-and-quality` ([`codeql.yml`](../../.github/workflows/codeql.yml)) + clippy `-D warnings`.
-- **`static_analysis_common_vulnerabilities`** — Met — CodeQL security query suite.
-- **`static_analysis_fixed`** — Met — clippy is a hard gate (must be clean to land); CodeQL alerts treated as blocking (`docs/branch-protection.md`).
-- **`static_analysis_often`** — Met — CodeQL + clippy on **every** PR + weekly cron.
+
+> **Read this section against gap GX-OSSF-4.** The CodeQL workflow is **operationally
+> disabled** (`disabled_manually` since 2026-07-18) and produces no analysis on any
+> trigger; see [`gap-register.md`](./gap-register.md) GX-OSSF-4 and
+> [`docs/branch-protection.md` §CodeQL SAST — the durable posture](../../docs/branch-protection.md#codeql-sast--the-durable-posture-issue-5367).
+> The answers below are stated against what actually runs today, not against the
+> workflow file's presence.
+
+- **`static_analysis`** — Met — clippy `-D warnings` gates every PR ([`ci.yml`](../../.github/workflows/ci.yml)). *(CodeQL `security-and-quality` ([`codeql.yml`](../../.github/workflows/codeql.yml)) is the second tool on paper but is disabled — GX-OSSF-4 — so clippy is what carries this criterion today.)*
+- **`static_analysis_common_vulnerabilities`** — **Unmet** — the only tool aimed at common-vulnerability classes was CodeQL's security query suite, and it is disabled (GX-OSSF-4). Clippy is a lint, not a vulnerability scanner; `cargo deny check advisories` covers *dependency* CVEs, not first-party code. SUGGESTED-not-required at passing, so it does not block bronze — recorded honestly rather than carried on a workflow that does not run.
+- **`static_analysis_fixed`** — Met — clippy is a hard gate (must be clean to land). *(The CodeQL half — alerts treated as blocking via the ruleset's `code_scanning` rule, `docs/branch-protection.md` — is inert while GX-OSSF-4 is open: no analysis, no alerts.)*
+- **`static_analysis_often`** — Met — clippy on **every** PR. *(CodeQL's per-PR + weekly cron runs are not happening — GX-OSSF-4.)*
 - **`dynamic_analysis`** — Met — cargo-fuzz ([`fuzz.yml`](../../.github/workflows/fuzz.yml)) + Miri ([`miri.yml`](../../.github/workflows/miri.yml)).
 - **`dynamic_analysis_unsafe`** — Met — Miri (UB/aliasing/provenance) over `sparq-core` pure-Rust unsafe + the mmap-corruption oracle + fuzz matrix over the B5 mmap sites; attested in [`compliance/memsafety/unsafe-register.md`](../memsafety/unsafe-register.md). *(Strong silver/gold evidence.)*
 - **`dynamic_analysis_enable_assertions`** — Met w/justification — debug/test builds run with Rust's default `debug_assertions`; fuzz targets build with sanitiser-style instrumentation via cargo-fuzz.
 
 ### Badge level summary (drafted, honest)
-- **Passing (bronze):** all criteria Met, except `build_reproducible` (**Unmet**, GX-8). Per
-  badge rules a single justified `Met w/justification`/`N/A` does not block passing, but
-  `build_reproducible` is **SUGGESTED** (not required) at passing — so its honest *Unmet*
-  does **not** block the bronze badge. Confirm against the live form when filing.
+- **Passing (bronze):** all criteria Met, except `build_reproducible` (**Unmet**, GX-8) and
+  `static_analysis_common_vulnerabilities` (**Unmet**, GX-OSSF-4). Per badge rules a single
+  justified `Met w/justification`/`N/A` does not block passing, and **both** of these
+  criteria are **SUGGESTED** (not required) at passing — so their honest *Unmet* answers do
+  **not** block the bronze badge. Confirm against the live form when filing.
 - **Silver/Gold reach:** strict warnings (gold-grade), signed releases, two-person-review
   *rule* (solo-maintained in practice — the gold `two_person_review` honest nuance), fuzz +
   Miri dynamic analysis. sparq has unusually strong analysis evidence for its size.
@@ -130,14 +139,14 @@ flag where sparq also satisfies **silver/gold**.
 
 - **Pinned-Dependencies** — every action SHA-pinned across `.github/workflows/*` + Docker base digest-pinned ([`docs/branch-protection.md`](../../docs/branch-protection.md) "Pinned-Dependencies" note).
 - **Token-Permissions** — top-level `permissions:` least-privilege in every workflow (read-only default; per-job minimal writes).
-- **SAST** — [`codeql.yml`](../../.github/workflows/codeql.yml) (`security-and-quality`) + clippy gate + Scorecard's own analysis.
+- **SAST** — **gap (GX-OSSF-4)**: [`codeql.yml`](../../.github/workflows/codeql.yml) (`security-and-quality`) exists but is operationally disabled since 2026-07-18, so it feeds this check nothing; what remains is the clippy gate + Scorecard's own analysis. See [`docs/branch-protection.md` §CodeQL SAST — the durable posture](../../docs/branch-protection.md#codeql-sast--the-durable-posture-issue-5367).
 - **Dangerous-Workflow** — no `pull_request_target`+untrusted-checkout; no untrusted `${{ }}` injected into `run:`.
 - **Dependency-Update-Tool** — [`.github/dependabot.yml`](../../.github/dependabot.yml), 4 ecosystems.
 - **Fuzzing** — [`fuzz.yml`](../../.github/workflows/fuzz.yml) (cargo-fuzz, PR + daily) + [`shacl-diff-fuzz.yml`](../../.github/workflows/shacl-diff-fuzz.yml).
 - **Security-Policy** — [`SECURITY.md`](../../SECURITY.md) + [`.well-known/security.txt`](../../.well-known/security.txt).
 - **Signed-Releases** — [`release.yml`](../../.github/workflows/release.yml): `attest-build-provenance` (Sigstore SLSA) + `SHA256SUMS` + container `provenance: mode=max`.
 - **Branch-Protection** — [`docs/branch-protection.md`](../../docs/branch-protection.md) (doc-of-record; live ruleset out-of-repo). The solo-maintainer score-depression, the compensating controls, and a `gh api …/rulesets` verification procedure (with a rule-by-rule match table) are documented in its [§Solo-maintainer & the Scorecard score](../../docs/branch-protection.md#solo-maintainer--the-scorecard-code-review--branch-protection-score) (GX-OSSF-3 / sq-sto1).
-- **Code-Review** — solo-maintainer, agent-driven: there is no second human, so the live ruleset sets `required_approving_review_count: 0` (documented honestly, **not** faked with a Scorecard-discounted self-approval); the **compensating** automated review layer is Copilot code review on push + the CodeQL code-scanning gate + conversation-resolution. [`CODEOWNERS`](../../CODEOWNERS) records ownership for when a second reviewer is added. See [`docs/branch-protection.md` §Solo-maintainer](../../docs/branch-protection.md#solo-maintainer--the-scorecard-code-review--branch-protection-score).
+- **Code-Review** — solo-maintainer, agent-driven: there is no second human, so the live ruleset sets `required_approving_review_count: 0` (documented honestly, **not** faked with a Scorecard-discounted self-approval); the **compensating** automated review layer is Copilot code review on push + conversation-resolution (+ the CodeQL code-scanning gate, which is inert while GX-OSSF-4 is open). [`CODEOWNERS`](../../CODEOWNERS) records ownership for when a second reviewer is added. See [`docs/branch-protection.md` §Solo-maintainer](../../docs/branch-protection.md#solo-maintainer--the-scorecard-code-review--branch-protection-score).
 - **CI-Tests** — [`ci.yml`](../../.github/workflows/ci.yml) on every PR, aggregated by `ci-summary`.
 - **License** — [`LICENSE`](../../LICENSE) (MIT).
 - **Binary-Artifacts** — none committed.

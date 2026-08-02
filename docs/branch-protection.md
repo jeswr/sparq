@@ -97,10 +97,12 @@ CodeQL, which is operationally disabled via manual workflow-disable — see the 
 > check-run reflect the *ruleset's* intent, but the `codeql.yml` workflow is disabled
 > via `gh workflow disable` (Actions workflow state `disabled_manually`): the file is
 > retained on `main` with live triggers, but GitHub schedules no run, so no CodeQL
-> check-run is produced on any event and it neither runs nor gates today. Open PR
-> #3427 owns the successor policy (an advisory / retroactive posture) and the file's
-> triggers are left untouched here to avoid colliding with it. Read every "CodeQL …
-> gates" statement in this document against this note. (See *Merge-queue subset* below.)
+> check-run is produced on any event and it neither runs nor gates today. Read every
+> "CodeQL … gates" statement in this document against this note. (See *Merge-queue
+> subset* below.) **The durable posture — why no commit can re-enable it, what a
+> re-enable costs, and what compensates meanwhile — is recorded in
+> [§CodeQL SAST — the durable posture](#codeql-sast--the-durable-posture-issue-5367)
+> (issue #5367); PR #3427 can deliver only the advisory-registry half of its own title.**
 
 From the binding/packaging workflows (when those surfaces are exercised):
 
@@ -168,9 +170,10 @@ BYTE-IDENTICAL to before, with its full trigger set
 disabled via `gh workflow disable` (Actions workflow state `disabled_manually`), so
 GitHub does not schedule it on any event — no CodeQL check-run is produced on ANY
 trigger, so it neither runs nor gates. (This is an inert-file state, NOT an edit to the
-triggers — this PR does not modify codeql.yml at all; open PR #3427 owns the codeql.yml
-successor policy — an advisory / retroactive posture — so the file's triggers are left
-untouched here to avoid colliding with it.)
+triggers — that PR did not modify codeql.yml at all, and the triggers are still
+untouched. The durable posture for that state is
+[§CodeQL SAST — the durable posture](#codeql-sast--the-durable-posture-issue-5367),
+issue #5367.)
 Heavy or independent lanes that already ran and gated on the PR head dropped their
 `merge_group` trigger because the queue re-run added wall-clock per enqueue with no new
 signal: currently `formal-verification.yml` (Kani proofs), `fuzz.yml` (corpus replay),
@@ -234,6 +237,100 @@ What is **not** risked: no committed floor is ever silently lowered (the monoton
 never left the queue, and a deliberate lowering stays a governed, loud re-baseline), and
 the nightly full-coverage tier (`coverage-nightly`) is untouched.
 
+## CodeQL SAST — the durable posture (issue #5367)
+
+<!-- [OPUS-5] issue #5367 (follow-up to #4542). The DURABLE record for the disabled SAST
+     lane: what the state is, why no commit can change it, what re-enabling costs, and
+     what covers the gap meanwhile. Compliance side: gap GX-OSSF-4 in
+     compliance/openssf/gap-register.md. Do not re-litigate this in a workflow comment. -->
+
+**State (2026-08-02).** `.github/workflows/codeql.yml` is present on `main` with its full
+trigger set intact, and the workflow itself is **operationally disabled** — Actions
+workflow state `disabled_manually`, set out-of-band on 2026-07-18. GitHub schedules no
+run on any trigger, so the `CodeQL analysis (rust)` check-run appears on no head SHA, the
+lane gates nothing, and no CodeQL code-scanning alert is filed. Every other statement in
+this document about CodeQL *gating* describes the ruleset's intent and the posture on
+re-enable — not today.
+
+**Why no pull request can change it.** A workflow in `disabled_manually` stays disabled
+until someone flips it in the Actions UI or via `gh workflow enable`; editing
+`codeql.yml`, and merging a PR that edits it, both leave the state untouched. Open PR
+#3427 ("re-enable CodeQL as advisory") therefore cannot deliver its headline outcome from
+a diff: the *advisory* half is a commit (an
+[`.github/advisory-registry.json`](../.github/advisory-registry.json) entry), the
+*enable* half is a repository action only the maintainer can take. Waiting on that PR is
+what kept the outage undocumented.
+
+**Decision (2026-08-02, issue #5367; taken under
+[`proceed-and-document`](../.claude/skills/proceed-and-document/SKILL.md) and recorded in
+the [decision ledger](decisions/README.md)).** Of the two options in the issue, the one a
+commit can actually deliver is taken: the disabled state is **recorded as a tracked
+compliance gap**, not left implicit. Gap **GX-OSSF-4** in
+[`compliance/openssf/gap-register.md`](../compliance/openssf/gap-register.md) owns it and
+names the compensating controls plus the residual risk, and the OpenSSF self-cert answers
+that cited a live CodeQL were corrected to match. No workflow file is changed: the
+trigger set stays byte-identical (pinned by
+`scripts/tests/test_ci_select_wiring.py::TestDraftTierWiring::test_codeql_analyze_skips_on_draft_heads`),
+so re-enabling stays a one-command maintainer action with no diff to review first.
+This records the posture; it does not claim the SAST lane is fine.
+
+**What happens to threads filed while it was off.** A code-scanning review thread is
+cleared by the analysis that filed it — a later analysis of a newer head stops reporting
+the finding and the thread goes outdated. Disable the workflow and only the first half
+ever happened: the thread persists, nothing can supersede it, and under
+`required_review_thread_resolution` (see [§Required reviews](#required-reviews)) the PR is
+`BLOCKED` with every check green. MEASURED 2026-07-27 (`scripts/rearm-sweeper.py` header):
+PR #3451 was green-gated but blocked for 19 h on ten unresolved CodeQL review threads
+while armed for auto-merge. What exists on `main` today is the *visibility* half — the stuck-arm phase
+of [`rearm-sweeper.yml`](../.github/workflows/rearm-sweeper.yml) classifies such a PR
+`blocked-threads`, disarms it, parks it and leaves a receipt naming `threads-resolved` as
+the un-park condition — so the block is bounded and counted, but the resolution itself is
+manual as of this record. Issue #4542 tracks the automated exit. Re-enabling CodeQL does
+**not** retroactively clear these threads either — nothing re-analyses a PR that is
+already sitting there; a thread clears only once a fresh analysis runs for that PR (its
+next push, or a manual re-run) and no longer reports the finding.
+
+**Re-enabling: the procedure, and the two consequences to plan for.**
+
+```bash
+# 1. flip it (maintainer; not achievable from a commit)
+gh workflow enable codeql.yml --repo jeswr/sparq
+# 2. verify the state actually changed
+gh api repos/jeswr/sparq/actions/workflows/codeql.yml --jq .state   # expect: active
+# 3. verify a check-run reappears on the next PR head
+gh pr checks <pr> | grep 'CodeQL analysis (rust)'
+```
+
+1. **It GATES on day one.** Since #3773 the `ci-summary` aggregator excludes only check
+   names **declared** in [`.github/advisory-registry.json`](../.github/advisory-registry.json),
+   and `CodeQL analysis (rust)` has no entry — so the first failing analysis
+   reds the required `ci-summary / gate` for every PR. To land it *advisory* instead, add
+   a registry entry keyed exactly `CodeQL analysis (rust)` with
+   `{workflow: codeql.yml, job_id: analyze, owner_bead, promotion_criteria, registered}`
+   — the `analyze` job runs no `run:` steps, so C3's `gate_script_waiver` should not be
+   needed; confirm with `python3 scripts/check-advisory-registry.py` when the entry
+   lands. That entry is the part of "re-enable as advisory" a PR *can* deliver, and it
+   must land **before or with** the flip, never after.
+2. **An alert backlog lands at once.** The tree has had no CodeQL analysis since
+   2026-07-18, and the repo's standing requirement is zero open code-scanning alerts. The
+   ruleset's `code_scanning` rule (`errors_and_warnings` / all security alerts) blocks PRs
+   on new alerts, so budget a triage pass on the first `push`-to-`main` analysis before
+   the PR-blocking behaviour starts to matter.
+
+**What covers first-party code meanwhile — and what does not.** Compensating controls, all
+verifiable on `main`: clippy `-D warnings` gates every PR (`ci.yml`); `miri.yml`,
+`asan.yml`, `kani.yml` and `fuzz.yml` cover UB / memory-safety / bounded proofs on the
+crates they reach; `cargo-deny` plus the daily `dependency-monitoring.yml` cover
+*dependency* advisories; the Trivy SARIF uploads (`container-scan.yml`, `release.yml`) are
+the only current feeder of the code-scanning dashboard; Copilot code review runs on push.
+What is **not** covered: security-query static analysis of first-party Rust (the
+taint/injection-class queries in CodeQL's `security-and-quality` suite). Clippy is a lint,
+not a vulnerability scanner, and nothing here substitutes for that suite. Note also that
+the disabled state raises no alarm of its own: the detector that would otherwise notice a
+missing weekly CodeQL cron (`scripts/ci_execution_latency_alarm.py`, M1 cron-deficit)
+counts a non-`active` workflow in its census and skips it by design. This section and
+GX-OSSF-4 are the standing record.
+
 ## Draft-tier CI (reduced matrix on draft PR heads)
 
 <!-- [FABLE-5] Draft-tier CI design record (2026-07-17). Motivation: the autonomous
@@ -267,7 +364,7 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts. The `ready_for_review` run re-measures at full tier; since sq-6vshe.17 the `merge_group` run does **not** re-measure (only the fast floor gates run there — see *Coverage MEASUREMENT off the merge queue*), so the non-draft PR head and the post-merge `main` run are the measurement points |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
 | `cargo-fuzz` corpus replay (nightly toolchain + a libFuzzer build of every `fuzz/fuzz_targets/` target) | `fuzz.yml` `fuzz` | kept iff the PR carries `ci-full`/`fuzz-full` (`fuzz-full` also selects the randomized budget, so a bare draft skip would neuter it); otherwise the `ready_for_review` run re-replays at full tier. `differential-smoke` — the wrong-answer gate in the same workflow — is deliberately NOT draft-skipped: a wrong-answer regression is review-relevant |
-| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; the merge_group run is since sq-g25hr additionally class-gated — an inert batch produces no analysis, a batch with any Rust does — while push-main and the weekly schedule always analyse in full. The workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |
+| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; the merge_group run is since sq-g25hr additionally class-gated — an inert batch produces no analysis, a batch with any Rust does — while push-main and the weekly schedule always analyse in full. The workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today — see [§CodeQL SAST — the durable posture](#codeql-sast--the-durable-posture-issue-5367)) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
@@ -567,9 +664,10 @@ all risk and no win: **REJECTED**, and the alerts-at-zero posture plus the rules
 disable** (*Merge-queue subset* above): the conclusion stands, but its premise no longer
 describes today's CI — `codeql.yml` is `disabled_manually`, so no CodeQL check-run is
 produced on any event and it costs the queue nothing at all right now. The standing
-meaning is forward-looking: when PR #3427 settles the successor policy and CodeQL runs
-again, **queue latency is not a valid argument for keeping it off the blocking path** —
-that premise was measured and falsified.
+meaning is forward-looking: when a maintainer re-enables the workflow
+([§CodeQL SAST — the durable posture](#codeql-sast--the-durable-posture-issue-5367)) and
+CodeQL runs again, **queue latency is not a valid argument for keeping it off the
+blocking path** — that premise was measured and falsified.
 
 ## How this maps to the merge discipline
 
