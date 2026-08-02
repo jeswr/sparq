@@ -221,38 +221,42 @@ def _deploy_only_match(path: str) -> bool:
 
 # --- INERT-EDIT carve-out (CONTENT-based; #5237, generalising #2536) ---------
 # [OPUS-5] The two allowlists above are PATH-based proofs: "this file is never read
-# by the Rust matrix". They deliberately cannot cover a Rust-CI workflow (ci.yml,
-# bench.yml, fuzz.yml, feature-matrix.d/*.yml, ...) — those files genuinely DO gate
-# PRs, so by path they must keep forcing full. But a real share of the edits they
-# receive are pure COMMENT edits, which cannot change what CI does. (Measured over
-# 1500 first-parent commits of this repo at the time of writing: 11 of the 537 that
-# force mode=full do so ONLY because of a comment-only `.github/**` YAML edit.)
+# by the Rust matrix". They cannot cover a `.github/**` YAML file that genuinely DOES
+# gate PRs, so by path such a file must keep forcing full. But a share of the edits
+# those files receive are pure COMMENT edits, which cannot change what CI does.
 #
-# THE PROOF (content-based, per-revision-pair — not an allowlist): a `.github/**`
-# YAML file's edit is inert iff its PARSED YAML DOCUMENT is identical at the
-# merge-base and at head. The consumers of these files read them as YAML — GitHub
-# Actions itself for `.github/workflows/**`, scripts/assemble-feature-matrix.py
-# (and feature-matrix-tiers.py / check-feature-test-execution.py) for
-# `.github/feature-matrix.d/**`, the CodeQL CLI for `.github/codeql/**` — so two
-# revisions with the same parsed document are indistinguishable to every one of
-# them. Comments OUTSIDE a block scalar vanish under parsing, so a pure-comment
-# edit compares equal; a comment added INSIDE a `run: |` block stays part of the
-# scalar STRING and compares unequal, which fail-closes to the full matrix exactly
-# as it must (that text is executed).
+# THE PROOF (content-based, per-revision-pair): an ALLOWLISTED `.github/**` YAML
+# file's edit is inert iff its PARSED YAML DOCUMENT is identical at the merge-base
+# and at head. Comments OUTSIDE a block scalar vanish under parsing, so a
+# pure-comment edit compares equal; a comment added INSIDE a `|` block scalar stays
+# part of the scalar STRING and compares unequal, which fail-closes to the full
+# matrix exactly as it must (that text is a value, and is typically executed).
+#
+# THE PREMISE THE PROOF NEEDS — and why it is an ALLOWLIST, not a denylist. Parse
+# equality is inertness only if EVERY consumer of the file reads it as YAML. A
+# consumer that reads the raw TEXT breaks it: a comment carrying a searched-for
+# literal flips a `contains`/`count` assertion with the document unchanged, so the
+# selector could skip the very check that observes the comment. Enumerating the
+# raw-text readers (the first shape of this carve-out, which grepped `crates/**/*.rs`
+# for `.github/**` YAML path literals) is NOT sound, and the repo disproves it three
+# ways — none of them Rust, one of them undetectable by a full-path grep:
+#   * scripts/miri_classify_verdict.py `read_text`s `.github/workflows/miri.yml` and
+#     asserts substrings + an exact `count(...) == 4`;
+#   * scripts/check-fast-fix-ring-guard.py byte-pins `.github/workflows/`
+#     `fast-fix-ring.yml` against a golden with comments explicitly load-bearing —
+#     and builds the path as `Path(".github") / "workflows" / "fast-fix-ring.yml"`,
+#     so no full-path literal exists for a grep to find;
+#   * scripts/tests/test_mergequeue_cache_posture.py substring-scans the raw text of
+#     EVERY `.github/workflows/*.yml` (`RUST_CACHE in p.read_text()`), which no
+#     per-file inventory can ever discharge — it is a whole-directory raw-text read.
+# The third alone means NO `.github/workflows/**` file can be proven inert by parse
+# equality. So the carve-out fires only on trees whose consumers have been AUDITED as
+# parse-based, listed below; every other `.github/**` YAML keeps forcing full.
 #
 # WHY IT IS RESTRICTED TO `.github/**`: outside that tree a *.yml can be a test
 # FIXTURE that a crate reads verbatim (byte-for-byte, comments included), where
 # parse-equality would NOT be inertness. The restriction is part of the proof, not
 # a convenience.
-#
-# THE RAW-TEXT-READER EXCEPTION (_YAML_RAW_TEXT_READERS below): the "every consumer
-# parses it as YAML" premise is not free even inside `.github/**` — a crate test may
-# read a workflow as a STRING and grep it. Such a file is EXCLUDED, because for it
-# parse-equality is not inertness (a comment holding the searched-for substring can
-# flip a `contains` assertion with the document unchanged). The exclusion list is
-# pinned by `YamlRawTextReaderTests`, which greps `crates/**/*.rs` for `.github/**`
-# YAML paths and FAILS on any reader that is not declared — so a NEW crate-side
-# reader can never silently invalidate the proof.
 #
 # THE PyYAML POSITION (design §7 P1, "stdlib only", refined — NOT revoked): the
 # selector still RUNS on the stdlib alone. PyYAML is an OPTIONAL PRECISION
@@ -266,18 +270,26 @@ def _deploy_only_match(path: str) -> bool:
 _YAML_INERT_ROOT = ".github/"
 _YAML_SUFFIXES = (".yml", ".yaml")
 
-# `.github/**` YAML files that a WORKSPACE CRATE reads as raw TEXT (not as YAML).
-# For these, parse-equality is NOT a proof of inertness, so they are excluded from
-# the carve-out and keep hitting the `.github/` full-run trigger. Keep this list
-# EXACT — `YamlRawTextReaderTests` derives the true reader set from the crate
-# sources and fails if the two drift in either direction (an undeclared reader is
-# unsound; a stale entry silently costs precision).
-#   * differential.yml — crates/sparq-bench `every_category_has_a_nightly_shard`
-#     does `read_to_string` + `contains("category: <cat>,")` on it, so a comment
-#     carrying that literal changes the test's verdict without changing the document.
-_YAML_RAW_TEXT_READERS: list[str] = [
-    ".github/workflows/differential.yml",
-]
+# The AUDITED PARSE-ONLY trees: `.github/**` YAML path prefixes every one of whose
+# consumers loads the file with a YAML parser, never as raw text. ONLY these are
+# eligible for the carve-out. Adding an entry is a soundness decision and requires
+# auditing that tree's consumers; `YamlParseOnlyAllowlistTests` then pins the audit
+# mechanically — it fails when a new file names one of these paths (by basename,
+# which catches the segment-built-path case above) and when a new consumer of the
+# tree itself appears undeclared.
+#   * `.github/feature-matrix.d/` — per-crate feature-matrix leg DESCRIPTORS. Four
+#     consumers glob the directory and `yaml.safe_load` each fragment
+#     (scripts/assemble-feature-matrix.py, feature-matrix-tiers.py,
+#     check-feature-test-execution.py, scripts/tests/test_feature_matrix_assemble.py);
+#     the only other reference to the tree is a `paths:` filter in
+#     .github/workflows/feature-matrix.yml, which GitHub evaluates without reading a
+#     fragment. Nothing reads a fragment's text. That audited set is pinned by
+#     `YamlParseOnlyAllowlistTests._AUDITED_TREE_CONSUMERS`, so a new consumer reds.
+#     Over the 1500 first-parent commits before this was written, 117 touch this tree
+#     and 8 change only blank/`#`-comment diff lines — the value this buys.
+_YAML_PARSE_ONLY_TREES: tuple[str, ...] = (
+    ".github/feature-matrix.d/",
+)
 
 
 def _yaml_safe_loader():
@@ -322,16 +334,20 @@ def yaml_edit_is_inert(path: str, blob_reader, loader=None) -> bool:
 
     `blob_reader(side, path) -> str | None` reads the file's text at side
     "base"/"head" (None = unreadable/absent). FAIL-CLOSED on every uncertainty —
-    no reader, no PyYAML, a path outside `.github/**`, a non-YAML suffix, an
-    added/deleted/unreadable blob, a parse error, or any unequal document all
-    return False, which leaves the path on its normal full-run trigger.
+    no reader, no PyYAML, a path outside an AUDITED PARSE-ONLY tree
+    (`_YAML_PARSE_ONLY_TREES`), a non-YAML suffix, an added/deleted/unreadable blob,
+    a parse error, or any unequal document all return False, which leaves the path
+    on its normal full-run trigger.
     """
     if blob_reader is None:
         return False
     if not path.startswith(_YAML_INERT_ROOT) or not path.endswith(_YAML_SUFFIXES):
         return False
-    if path in _YAML_RAW_TEXT_READERS:
-        return False  # a crate greps this file's TEXT => parse-equality proves nothing
+    if not any(path.startswith(tree) for tree in _YAML_PARSE_ONLY_TREES):
+        # Not an audited parse-only tree: some consumer may read this file's raw
+        # TEXT, and parse-equality would then prove nothing. Notably every
+        # `.github/workflows/**` file is in this branch.
+        return False
     if loader is None:
         loader = _yaml_safe_loader()
         if loader is None:
@@ -827,10 +843,11 @@ def select(
             file_owners.append((path, "DEPLOY-SAFE"))
             continue
         # [OPUS-5] #5237: the CONTENT-based inert-edit carve-out, same pre-trigger
-        # position as the two path-based ones above. It is the only rescue for a
-        # Rust-CI `.github/**` YAML file (ci.yml, bench.yml, feature-matrix.d/*.yml
-        # …) from the `.github/` full-run trigger, and it fires ONLY on a proof that
-        # this revision pair's PARSED documents are identical (a pure-comment edit).
+        # position as the two path-based ones above. It is the only rescue from the
+        # `.github/` full-run trigger for a YAML file in an AUDITED PARSE-ONLY tree
+        # (`_YAML_PARSE_ONLY_TREES`), and it fires ONLY on a proof that this revision
+        # pair's PARSED documents are identical (a pure-comment edit). Every other
+        # `.github/**` YAML — `.github/workflows/**` included — falls through.
         # Like the others it contributes no crate, so a diff whose only trigger is
         # such an edit selects on the remaining paths instead of forcing full.
         if yaml_edit_is_inert(path, blob_reader, yaml_loader):

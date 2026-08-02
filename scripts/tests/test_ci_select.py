@@ -27,7 +27,6 @@ import importlib.util
 import io
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -936,6 +935,11 @@ class YamlInertEditTests(unittest.TestCase):
         job that runs this file, so these do execute in CI.
     """
 
+    # Every "is inert" fixture must sit in an AUDITED PARSE-ONLY tree
+    # (`_YAML_PARSE_ONLY_TREES`), because nothing outside one is eligible. Using a
+    # workflow path here would make these tests pass for the WRONG reason.
+    ELIGIBLE = ".github/feature-matrix.d/app.yml"
+
     def setUp(self):
         self.meta = _synthetic_meta()
 
@@ -969,7 +973,7 @@ class YamlInertEditTests(unittest.TestCase):
     # ---- fail-closed inputs (pure stdlib, injected loader) -------------------
     def test_no_blob_reader_never_proves_inert(self):
         # The default (hermetic --changed-file path): no revision pair => no proof.
-        self.assertFalse(cs.yaml_edit_is_inert(".github/workflows/ci.yml", None))
+        self.assertFalse(cs.yaml_edit_is_inert(self.ELIGIBLE, None))
 
     def test_path_outside_dot_github_is_never_inert(self):
         # Outside .github/** a *.yml can be a byte-exact crate test FIXTURE, where
@@ -986,22 +990,21 @@ class YamlInertEditTests(unittest.TestCase):
                                                loader=lambda t: {}))
 
     def test_missing_blob_on_either_side_is_never_inert(self):
-        # An ADDED or DELETED workflow: one side has no blob => no proof.
-        only_head = self._reader({("head", ".github/workflows/new.yml"): "a: 1"})
-        only_base = self._reader({("base", ".github/workflows/old.yml"): "a: 1"})
-        self.assertFalse(cs.yaml_edit_is_inert(".github/workflows/new.yml", only_head,
-                                               loader=lambda t: {"a": 1}))
-        self.assertFalse(cs.yaml_edit_is_inert(".github/workflows/old.yml", only_base,
-                                               loader=lambda t: {"a": 1}))
+        # An ADDED or DELETED descriptor: one side has no blob => no proof.
+        added, deleted = ".github/feature-matrix.d/new.yml", ".github/feature-matrix.d/old.yml"
+        only_head = self._reader({("head", added): "a: 1"})
+        only_base = self._reader({("base", deleted): "a: 1"})
+        self.assertFalse(cs.yaml_edit_is_inert(added, only_head, loader=lambda t: {"a": 1}))
+        self.assertFalse(cs.yaml_edit_is_inert(deleted, only_base, loader=lambda t: {"a": 1}))
 
     def test_parse_error_is_never_inert(self):
-        reader = self._reader({("base", ".github/workflows/ci.yml"): "a: 1",
-                               ("head", ".github/workflows/ci.yml"): "a: 1 # c"})
+        reader = self._reader({("base", self.ELIGIBLE): "a: 1",
+                               ("head", self.ELIGIBLE): "a: 1 # c"})
 
         def boom(_text):
             raise ValueError("not YAML")
 
-        self.assertFalse(cs.yaml_edit_is_inert(".github/workflows/ci.yml", reader, loader=boom))
+        self.assertFalse(cs.yaml_edit_is_inert(self.ELIGIBLE, reader, loader=boom))
 
     def test_absent_pyyaml_falls_back_to_full(self):
         # The P1 posture: with no parser the carve-out proves NOTHING, so the
@@ -1009,37 +1012,35 @@ class YamlInertEditTests(unittest.TestCase):
         real = cs._yaml_safe_loader
         cs._yaml_safe_loader = lambda: None
         try:
-            reader = self._reader({("base", ".github/workflows/ci.yml"): "a: 1",
-                                   ("head", ".github/workflows/ci.yml"): "a: 1 # c"})
-            self.assertFalse(cs.yaml_edit_is_inert(".github/workflows/ci.yml", reader))
-            sel = cs.select([".github/workflows/ci.yml"], self.meta, None, blob_reader=reader)
+            reader = self._reader({("base", self.ELIGIBLE): "a: 1",
+                                   ("head", self.ELIGIBLE): "a: 1 # c"})
+            self.assertFalse(cs.yaml_edit_is_inert(self.ELIGIBLE, reader))
+            sel = cs.select([self.ELIGIBLE], self.meta, None, blob_reader=reader)
             self.assertEqual(sel.mode, "full")
         finally:
             cs._yaml_safe_loader = real
 
     # ---- the selection consequences (injected loader) ------------------------
-    def test_inert_workflow_edit_rescues_the_diff_from_full(self):
-        docs = {("base", ".github/workflows/ci.yml"): "SAME",
-                ("head", ".github/workflows/ci.yml"): "SAME+comment"}
-        sel = cs.select([".github/workflows/ci.yml"], self.meta, None,
+    def test_inert_edit_rescues_the_diff_from_full(self):
+        docs = {("base", self.ELIGIBLE): "SAME", ("head", self.ELIGIBLE): "SAME+comment"}
+        sel = cs.select([self.ELIGIBLE], self.meta, None,
                         blob_reader=self._reader(docs),
-                        yaml_loader=lambda t: {"name": "ci"})  # identical documents
+                        yaml_loader=lambda t: {"crate": "app"})  # identical documents
         self.assertEqual(sel.mode, "selected")
         self.assertEqual(sel.affected, [])
-        self.assertIn((".github/workflows/ci.yml", "YAML-INERT"), sel.file_owners)
+        self.assertIn((self.ELIGIBLE, "YAML-INERT"), sel.file_owners)
 
-    def test_behaviour_changing_workflow_edit_still_forces_full(self):
-        docs = {("base", ".github/workflows/ci.yml"): "one",
-                ("head", ".github/workflows/ci.yml"): "two"}
-        sel = cs.select([".github/workflows/ci.yml"], self.meta, None,
+    def test_behaviour_changing_edit_still_forces_full(self):
+        docs = {("base", self.ELIGIBLE): "one", ("head", self.ELIGIBLE): "two"}
+        sel = cs.select([self.ELIGIBLE], self.meta, None,
                         blob_reader=self._reader(docs),
-                        yaml_loader=lambda t: {"name": t})  # documents DIFFER
+                        yaml_loader=lambda t: {"crate": t})  # documents DIFFER
         self.assertEqual(sel.mode, "full")
 
-    def test_inert_workflow_edit_narrows_rather_than_fulls_a_crate_pr(self):
-        # The common shape: a crate change plus a comment tidy-up in a Rust-CI
-        # workflow. Before #5237 the workflow path forced full and threw the
-        # narrowing away; now the crate closure is what runs.
+    def test_inert_edit_narrows_rather_than_fulls_a_crate_pr(self):
+        # The common shape: a crate change plus a comment tidy-up in that crate's
+        # feature-matrix descriptor. Before #5237 the `.github/` path forced full and
+        # threw the narrowing away; now the crate closure is what runs.
         docs = {("base", ".github/feature-matrix.d/app.yml"): "x",
                 ("head", ".github/feature-matrix.d/app.yml"): "x # note"}
         sel = cs.select([".github/feature-matrix.d/app.yml", "crates/app/src/lib.rs"],
@@ -1050,25 +1051,23 @@ class YamlInertEditTests(unittest.TestCase):
 
     def test_a_second_non_yaml_trigger_still_forces_full(self):
         # The carve-out rescues ONLY the path it proves; any other trigger wins.
-        docs = {("base", ".github/workflows/ci.yml"): "x",
-                ("head", ".github/workflows/ci.yml"): "x # note"}
-        sel = cs.select([".github/workflows/ci.yml", "Cargo.lock"], self.meta, None,
+        docs = {("base", self.ELIGIBLE): "x", ("head", self.ELIGIBLE): "x # note"}
+        sel = cs.select([self.ELIGIBLE, "Cargo.lock"], self.meta, None,
                         blob_reader=self._reader(docs),
-                        yaml_loader=lambda t: {"name": "ci"})
+                        yaml_loader=lambda t: {"crate": "app"})
         self.assertEqual(sel.mode, "full")
 
     def test_mutation_always_equal_canonical_reddens_a_real_change(self):
         # MUTATION SPOT-CHECK: break _canonical to a constant (i.e. "every edit is
         # inert") and the behaviour-CHANGING fixture above must wrongly go selected.
         # That proves the real comparison is what keeps a real CI change running.
-        docs = {("base", ".github/workflows/ci.yml"): "one",
-                ("head", ".github/workflows/ci.yml"): "two"}
+        docs = {("base", self.ELIGIBLE): "one", ("head", self.ELIGIBLE): "two"}
         real = cs._canonical
         cs._canonical = lambda node: "CONST"
         try:
-            sel = cs.select([".github/workflows/ci.yml"], self.meta, None,
+            sel = cs.select([self.ELIGIBLE], self.meta, None,
                             blob_reader=self._reader(docs),
-                            yaml_loader=lambda t: {"name": t})
+                            yaml_loader=lambda t: {"crate": t})
             self.assertEqual(sel.mode, "selected",
                              "the mutation did not change the outcome — the "
                              "behaviour-changing fixture is not discriminating")
@@ -1076,137 +1075,281 @@ class YamlInertEditTests(unittest.TestCase):
             cs._canonical = real
 
     # ---- the real-YAML claims the whole proof rests on -----------------------
-    _BASE_WF = (
-        "name: ci\n"
-        "on: [push]\n"
-        "jobs:\n"
-        "  build:\n"
-        "    # a comment on the job\n"
-        "    runs-on: ubuntu-latest\n"
-        "    steps:\n"
-        "      - run: |\n"
-        "          set -euo pipefail\n"
-        "          cargo test\n"
+    # A feature-matrix fragment (top-level LIST of legs, the real schema) carrying
+    # BOTH a plain comment and a `|` block scalar, so the two parse behaviours the
+    # proof depends on are exercised on an ELIGIBLE path. (`run:` is the workflow
+    # spelling of the same block scalar; what matters is that text inside one
+    # survives parsing and text outside one does not.)
+    _BASE_DOC = (
+        "- name: default\n"
+        "  # a comment on the leg\n"
+        "  features: []\n"
+        "  setup: |\n"
+        "    set -euo pipefail\n"
+        "    cargo test\n"
     )
 
-    def _real_inert(self, base_text, head_text, path=".github/workflows/ci.yml"):
+    def _real_inert(self, base_text, head_text, path=None):
+        path = path or self.ELIGIBLE
         return cs.yaml_edit_is_inert(path, self._reader({("base", path): base_text,
                                                          ("head", path): head_text}))
 
-    @unittest.skipUnless(HAVE_PYYAML, "PyYAML absent (the optional precision dep)")
-    def test_real_comment_only_edit_is_inert(self):
-        head = self._BASE_WF.replace("    # a comment on the job\n",
-                                     "    # a comment on the job, reworded\n"
-                                     "    # with a second line\n")
-        self.assertNotEqual(head, self._BASE_WF)
-        self.assertTrue(self._real_inert(self._BASE_WF, head))
+    def test_the_real_yaml_fixture_has_the_shape_those_tests_assume(self):
+        # Stdlib-only pin of the fixture the PyYAML-gated tests below mutate — they
+        # SKIP where PyYAML is absent, so without this an indentation slip in
+        # `_BASE_DOC` would only surface in CI. The comment line must sit OUTSIDE the
+        # block scalar and `cargo test` INSIDE it, or those tests prove nothing.
+        lines = self._BASE_DOC.splitlines()
+        self.assertIn("  # a comment on the leg", lines)
+        self.assertIn("  setup: |", lines)
+        scalar = lines[lines.index("  setup: |") + 1:]
+        self.assertTrue(scalar and all(ln.startswith("    ") for ln in scalar),
+                        f"block-scalar body is not indented past `setup: |`: {scalar}")
+        self.assertIn("    cargo test", scalar)
 
     @unittest.skipUnless(HAVE_PYYAML, "PyYAML absent (the optional precision dep)")
-    def test_real_comment_inside_a_run_block_is_NOT_inert(self):
-        # THE soundness case from #5237: text inside a `run: |` block scalar is part
-        # of the string and is EXECUTED, so it must fail closed to the full matrix.
-        head = self._BASE_WF.replace("          cargo test\n",
-                                     "          # explain the test invocation\n"
-                                     "          cargo test\n")
-        self.assertFalse(self._real_inert(self._BASE_WF, head))
+    def test_real_comment_only_edit_is_inert(self):
+        head = self._BASE_DOC.replace("  # a comment on the leg\n",
+                                      "  # a comment on the leg, reworded\n"
+                                      "  # with a second line\n")
+        self.assertNotEqual(head, self._BASE_DOC)
+        self.assertTrue(self._real_inert(self._BASE_DOC, head))
+
+    @unittest.skipUnless(HAVE_PYYAML, "PyYAML absent (the optional precision dep)")
+    def test_real_comment_inside_a_block_scalar_is_NOT_inert(self):
+        # THE soundness case from #5237: text inside a `|` block scalar is part of
+        # the string and is EXECUTED, so it must fail closed to the full matrix.
+        head = self._BASE_DOC.replace("    cargo test\n",
+                                      "    # explain the test invocation\n"
+                                      "    cargo test\n")
+        self.assertFalse(self._real_inert(self._BASE_DOC, head))
 
     @unittest.skipUnless(HAVE_PYYAML, "PyYAML absent (the optional precision dep)")
     def test_real_behaviour_change_is_not_inert(self):
-        head = self._BASE_WF.replace("ubuntu-latest", "ubuntu-24.04")
-        self.assertFalse(self._real_inert(self._BASE_WF, head))
+        head = self._BASE_DOC.replace("features: []", "features: [vectorized]")
+        self.assertFalse(self._real_inert(self._BASE_DOC, head))
 
     @unittest.skipUnless(HAVE_PYYAML, "PyYAML absent (the optional precision dep)")
     def test_real_comment_plus_behaviour_change_is_not_inert(self):
-        head = (self._BASE_WF.replace("ubuntu-latest", "ubuntu-24.04")
-                .replace("    # a comment on the job\n", "    # reworded\n"))
-        self.assertFalse(self._real_inert(self._BASE_WF, head))
+        head = (self._BASE_DOC.replace("features: []", "features: [vectorized]")
+                .replace("  # a comment on the leg\n", "  # reworded\n"))
+        self.assertFalse(self._real_inert(self._BASE_DOC, head))
 
     @unittest.skipUnless(HAVE_PYYAML, "PyYAML absent (the optional precision dep)")
     def test_real_malformed_head_yaml_is_not_inert(self):
-        self.assertFalse(self._real_inert(self._BASE_WF, "jobs:\n  - a\n b: [\n"))
+        self.assertFalse(self._real_inert(self._BASE_DOC, "legs:\n  - a\n b: [\n"))
 
     @unittest.skipUnless(HAVE_PYYAML, "PyYAML absent (the optional precision dep)")
-    def test_real_feature_matrix_descriptor_comment_edit_is_inert(self):
-        # Not only workflows: `.github/feature-matrix.d/*.yml` are DATA descriptors
-        # whose consumers (assemble-feature-matrix.py, feature-matrix-tiers.py,
-        # check-feature-test-execution.py) each literally do `yaml.safe_load`, so the
-        # parsed-document proof is exactly the right one for them too.
-        path = ".github/feature-matrix.d/app.yml"
-        base = "crate: app\nlegs:\n  - name: default\n    features: []\n"
-        head = "# describe the default leg\n" + base
-        self.assertTrue(self._real_inert(base, head, path=path))
+    def test_real_comment_only_workflow_edit_is_still_NOT_inert(self):
+        # The scope boundary, with real PyYAML: an edit that IS parse-inert stays
+        # ineligible on a workflow path, because `.github/workflows/**` is not an
+        # audited parse-only tree (raw-text consumers exist — see
+        # YamlParseOnlyAllowlistTests).
+        base = "name: ci\non: [push]\njobs: {}\n"
+        head = "# a comment\n" + base
+        self.assertFalse(self._real_inert(base, head, path=".github/workflows/ci.yml"))
 
 
-class YamlRawTextReaderTests(unittest.TestCase):
-    """[OPUS-5] #5237 — THE RAW-TEXT-READER OBLIGATION, the live counterpart of the
-    orchestration/deploy inertness greps above.
+class YamlParseOnlyAllowlistTests(unittest.TestCase):
+    """[OPUS-5] #5237 (PR #5722 review round 1) — THE PARSE-ONLY OBLIGATION, the live
+    counterpart of the orchestration/deploy inertness greps above.
 
-    The content-based carve-out rests on "every consumer of a `.github/**` YAML file
-    parses it as YAML". A crate test that instead reads one as a STRING and greps it
-    breaks that premise: a comment holding the searched-for literal flips the
-    assertion while the parsed document is unchanged. Those files must therefore be
-    declared in `_YAML_RAW_TEXT_READERS` and excluded from the carve-out.
+    The content-based carve-out rests on "every consumer of this YAML file parses it
+    as YAML". A consumer that instead reads the raw TEXT breaks that premise: a
+    comment holding the searched-for literal flips a `contains`/`count` assertion
+    while the parsed document is unchanged, so the selector could skip the very check
+    that observes the comment.
 
-    This test DERIVES the true reader set from crates/**/*.rs and pins it against the
-    declared list in BOTH directions, so a newly-added crate-side reader reds CI
-    instead of silently making a skip unsound.
+    The FIRST shape of this carve-out tried to ENUMERATE the raw-text readers by
+    grepping `crates/**/*.rs` for `.github/**` YAML path literals. That inventory is
+    unsound, and this repo disproves it three ways — none of them Rust:
+      * `scripts/miri_classify_verdict.py` substring/count-asserts `miri.yml`;
+      * `scripts/check-fast-fix-ring-guard.py` byte-pins `fast-fix-ring.yml` (with
+        comments load-bearing) via a path built from SEGMENTS, so no full-path
+        literal exists for any grep to find;
+      * `scripts/tests/test_mergequeue_cache_posture.py` substring-scans the raw text
+        of EVERY `.github/workflows/*.yml`, which no per-file inventory can discharge.
+    So the carve-out is now an ALLOWLIST of trees AUDITED as parse-only
+    (`_YAML_PARSE_ONLY_TREES`), and this class pins that audit mechanically in the
+    two directions a new commit can break it: a new consumer of the tree, and a new
+    file naming an individual allowlisted file.
     """
 
-    # A `.github/...yml|yaml` path appearing in a Rust STRING LITERAL. Doc comments
-    # and `//` comments merely NAME workflows (cross-references) and read nothing, so
-    # comment lines are excluded before matching.
-    _GH_YAML_RE = re.compile(r"(\.github/[A-Za-z0-9._/-]+?\.ya?ml)")
+    # Documentation/data suffixes: prose that NAMES a path is not a CONSUMER of it.
+    # Everything else in the tree is scanned, so a reader in ANY language counts.
+    _PROSE_SUFFIXES = frozenset({
+        ".md", ".mdx", ".txt", ".rst", ".csv", ".tsv", ".svg", ".png", ".jpg",
+        ".jpeg", ".gif", ".ico", ".pdf", ".lock", ".golden",
+    })
+
+    # The selector and this test name these paths in order to DEFINE and SCOPE the
+    # rule; they never read the YAML.
+    _EXEMPT = frozenset({"scripts/ci_select.py", "scripts/tests/test_ci_select.py"})
+
+    # The AUDITED consumers of `.github/feature-matrix.d/`. Each was read and each
+    # loads a fragment through a YAML parser (or does not open one at all):
+    #   * .github/workflows/feature-matrix.yml — names the tree in a `paths:` filter,
+    #     a step name and error prose; GitHub evaluates the filter, nothing is read.
+    #   * scripts/assemble-feature-matrix.py — `yaml.safe_load(fh)` per fragment.
+    #   * scripts/check-feature-test-execution.py — `safe_load(fh)` per fragment.
+    #   * scripts/feature-matrix-tiers.py — `yaml.safe_load(fh)` per fragment.
+    #   * scripts/tests/test_feature_matrix_assemble.py — asserts on
+    #     `yaml.safe_load(frag.read_text())`, i.e. on the parsed document.
+    # A NEW entry appearing here reds this suite until it is audited the same way.
+    _AUDITED_TREE_CONSUMERS = {
+        ".github/feature-matrix.d/": frozenset({
+            ".github/workflows/feature-matrix.yml",
+            "scripts/assemble-feature-matrix.py",
+            "scripts/check-feature-test-execution.py",
+            "scripts/feature-matrix-tiers.py",
+            "scripts/tests/test_feature_matrix_assemble.py",
+        }),
+    }
+
+    # Workflows whose RAW TEXT a non-Rust consumer reads — the concrete counterexamples
+    # from the review finding, kept as live regression fixtures. {workflow: reader}.
+    _KNOWN_RAW_TEXT_WORKFLOWS = {
+        ".github/workflows/miri.yml": "scripts/miri_classify_verdict.py",
+        ".github/workflows/fast-fix-ring.yml": "scripts/check-fast-fix-ring-guard.py",
+        ".github/workflows/differential.yml": "crates/sparq-bench/src/fuzz.rs",
+    }
 
     @classmethod
-    def _referenced_paths(cls) -> set[str]:
-        found: set[str] = set()
-        for rs in (REPO_ROOT / "crates").rglob("*.rs"):
+    def setUpClass(cls):
+        # (path, text) for every TRACKED non-prose file. `git ls-files` keeps the scan
+        # off build output and vendored trees; the suite self-SKIPS without git, same
+        # convention as the `cargo metadata` case (i) below.
+        cls.sources: list[tuple[str, str]] | None = None
+        if shutil.which("git") is None:
+            return
+        try:
+            listing = subprocess.run(
+                ["git", "ls-files", "-z"], cwd=str(REPO_ROOT), check=True,
+                capture_output=True, text=True, timeout=120,
+            ).stdout
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return
+        sources = []
+        for rel in listing.split("\0"):
+            if not rel or Path(rel).suffix.lower() in cls._PROSE_SUFFIXES:
+                continue
             try:
-                text = rs.read_text(encoding="utf-8", errors="replace")
-            except OSError:  # pragma: no cover - unreadable source
+                sources.append((rel, (REPO_ROOT / rel).read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):  # absent, binary or undecodable
                 continue
-            if ".github/" not in text:
-                continue
-            for line in text.splitlines():
-                stripped = line.lstrip()
-                if stripped.startswith("//"):
-                    continue  # a comment cross-reference, not a read
-                for m in cls._GH_YAML_RE.finditer(line):
-                    found.add(m.group(1).lstrip("/"))
-        return found
+        cls.sources = sources
 
-    def test_every_crate_side_yaml_reader_is_declared(self):
-        undeclared = self._referenced_paths() - set(cs._YAML_RAW_TEXT_READERS)
+    def _require_scan(self) -> list[tuple[str, str]]:
+        if self.sources is None:
+            self.skipTest("git ls-files unavailable — cannot derive the consumer set")
+        return self.sources
+
+    @staticmethod
+    def _names_outside_a_comment(text: str, needle: str) -> bool:
+        """Does `needle` appear on a line that is not a whole-line comment? Prose that
+        merely cross-references a path sits in `#`/`//` comments and reads nothing;
+        anything else is treated as a potential read (fail-closed)."""
+        if needle not in text:
+            return False
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            if needle in line:
+                return True
+        return False
+
+    # ---- the scan itself is real (non-vacuity) -------------------------------
+    def test_the_scan_sees_the_repository(self):
+        sources = self._require_scan()
+        self.assertGreater(len(sources), 500,
+                           "the tracked-source scan collapsed; every derivation below "
+                           "would then pass while checking nothing")
+        self.assertIn("scripts/miri_classify_verdict.py", {p for p, _ in sources})
+
+    # ---- direction 1: the allowlisted trees are what they claim to be --------
+    def test_allowlisted_trees_are_dot_github_directories_that_exist(self):
+        self.assertTrue(cs._YAML_PARSE_ONLY_TREES, "the allowlist is empty")
+        for tree in cs._YAML_PARSE_ONLY_TREES:
+            self.assertTrue(tree.startswith(".github/") and tree.endswith("/"),
+                            f"{tree} must be a directory prefix under .github/")
+            self.assertTrue((REPO_ROOT / tree).is_dir(),
+                            f"{tree} does not exist on disk (stale allowlist entry)")
+
+    def test_every_tree_consumer_is_declared_and_audited(self):
+        # Catches the DIRECTORY-level consumer — a script that globs the tree and
+        # never spells an individual file name, which the basename scan below cannot
+        # see. A new one reds here until someone audits how it reads a fragment.
+        sources = self._require_scan()
+        for tree in cs._YAML_PARSE_ONLY_TREES:
+            declared = self._AUDITED_TREE_CONSUMERS.get(tree)
+            self.assertIsNotNone(
+                declared, f"{tree} is allowlisted but has no audited-consumer set")
+            needle = tree.rstrip("/").split("/")[-1]  # e.g. "feature-matrix.d"
+            found = {
+                path for path, text in sources
+                if path not in self._EXEMPT and not path.startswith(tree)
+                and self._names_outside_a_comment(text, needle)
+            }
+            self.assertEqual(
+                found, set(declared),
+                f"the consumer set of {tree} drifted. A consumer that reads a fragment "
+                "as raw TEXT breaks the parse-equality proof — audit each new entry and "
+                "either add it here (parse-based) or drop the tree from "
+                "ci_select._YAML_PARSE_ONLY_TREES (fail-closed).",
+            )
+
+    def test_no_source_file_names_an_allowlisted_file_by_basename(self):
+        # Catches the per-FILE reader, including the segment-built path that defeats a
+        # full-path grep: `Path(".github") / "workflows" / "x.yml"` still spells the
+        # basename `x.yml`.
+        sources = self._require_scan()
+        offenders: dict[str, list[str]] = {}
+        for tree in cs._YAML_PARSE_ONLY_TREES:
+            for yml in sorted((REPO_ROOT / tree).glob("*.y*ml")):
+                for path, text in sources:
+                    if path in self._EXEMPT or path.startswith(tree):
+                        continue
+                    if self._names_outside_a_comment(text, yml.name):
+                        offenders.setdefault(f"{tree}{yml.name}", []).append(path)
         self.assertEqual(
-            undeclared, set(),
-            "a crate source names these .github YAML files OUTSIDE a comment, i.e. it "
-            "may read them as TEXT — parse-equality is then NOT a proof of inertness. "
-            "Add them to ci_select._YAML_RAW_TEXT_READERS (fail-closed: they must keep "
-            "forcing the full matrix).",
+            offenders, {},
+            "these files name an allowlisted YAML outside a comment, so they may read "
+            "it as TEXT — parse-equality would not be a proof of inertness. Audit the "
+            "reader; if it is not parse-based, drop the tree from "
+            "ci_select._YAML_PARSE_ONLY_TREES.",
         )
 
-    def test_no_declared_reader_is_stale(self):
-        stale = set(cs._YAML_RAW_TEXT_READERS) - self._referenced_paths()
-        self.assertEqual(
-            stale, set(),
-            "a _YAML_RAW_TEXT_READERS entry is no longer read by any crate source — "
-            "it silently costs precision; drop it.",
-        )
-
-    def test_declared_readers_exist_on_disk(self):
-        for entry in cs._YAML_RAW_TEXT_READERS:
-            self.assertTrue((REPO_ROOT / entry).exists(),
-                            f"{entry} does not exist on disk (stale exclusion)")
-
-    def test_a_declared_reader_is_never_proven_inert(self):
-        # The exclusion is load-bearing: even with IDENTICAL parsed documents and a
-        # working loader, a raw-text-read workflow must keep forcing the full matrix.
-        path = cs._YAML_RAW_TEXT_READERS[0]
+    # ---- direction 2: nothing outside the allowlist is ever rescued ----------
+    def test_no_workflow_is_ever_proven_inert(self):
+        # THE review finding, as a live regression: every one of these workflows has a
+        # raw-text consumer, and `.github/workflows/**` is wholesale ineligible anyway
+        # (test_mergequeue_cache_posture.py scans them all). Even with IDENTICAL parsed
+        # documents and a working loader they must keep forcing the full matrix.
         reader = lambda side, p: {"base": "a: 1", "head": "a: 1 # note"}[side]  # noqa: E731
-        self.assertFalse(cs.yaml_edit_is_inert(path, reader, loader=lambda t: {"a": 1}))
-        sel = cs.select([path], _synthetic_meta(), None, blob_reader=reader,
-                        yaml_loader=lambda t: {"a": 1})
-        self.assertEqual(sel.mode, "full")
+        for path in (*self._KNOWN_RAW_TEXT_WORKFLOWS, ".github/workflows/ci.yml"):
+            with self.subTest(workflow=path):
+                self.assertFalse(
+                    cs.yaml_edit_is_inert(path, reader, loader=lambda t: {"a": 1}))
+                sel = cs.select([path], _synthetic_meta(), None, blob_reader=reader,
+                                yaml_loader=lambda t: {"a": 1})
+                self.assertEqual(sel.mode, "full")
+
+    def test_the_cited_raw_text_readers_still_read_those_workflows(self):
+        # Keeps the RATIONALE in ci_select.py honest: if one of these readers is ever
+        # made parse-based, this reds and the comment must be rewritten rather than
+        # left overstating the hazard.
+        for workflow, reader in self._KNOWN_RAW_TEXT_WORKFLOWS.items():
+            with self.subTest(reader=reader):
+                source = REPO_ROOT / reader
+                self.assertTrue(source.is_file(), f"{reader} no longer exists")
+                text = source.read_text(encoding="utf-8", errors="replace")
+                self.assertIn(Path(workflow).name, text,
+                              f"{reader} no longer names {workflow}")
+                self.assertTrue(
+                    any(marker in text for marker in
+                        ("read_text", "read_to_string", "readlines", "read()")),
+                    f"{reader} no longer reads a file as text")
 
 
 class RealMetadataShapeTests(unittest.TestCase):

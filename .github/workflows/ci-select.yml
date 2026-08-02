@@ -133,9 +133,10 @@ jobs:
           python-version: "3.12"
       # [OPUS-5] #5237: PyYAML is the OPTIONAL PRECISION dep of the content-based
       # inert-edit carve-out (ci_select.py `yaml_edit_is_inert`) — it lets a
-      # PURE-COMMENT edit to a Rust-CI `.github/**` YAML file be proven inert by
-      # comparing the PARSED document at base and head, instead of forcing the full
-      # matrix off the `.github/` path trigger.
+      # PURE-COMMENT edit to a YAML file in an AUDITED PARSE-ONLY tree (currently
+      # `.github/feature-matrix.d/**`; see `_YAML_PARSE_ONLY_TREES`) be proven inert
+      # by comparing the PARSED document at base and head, instead of forcing the
+      # full matrix off the `.github/` path trigger.
       #
       # DELIBERATELY NON-FATAL (`continue-on-error`). This pre-job is a `needs:`
       # dependency of every heavy lane in four workflows, so a hard failure here
