@@ -46,10 +46,14 @@ use sparq_core::Graph;
 use sparq_engine::{DatasetView, DefaultGraphMode, FxHashSet, QueryResult};
 use std::sync::Arc;
 
+/// The total-order key a [`ScopePattern`] normalizes by: its subject / predicate /
+/// object in N-Triples form, `None` (wildcard) sorting first. [SONNET-4.6] sq-nc3c6.
+type PatternSortKey = (Option<String>, Option<String>, Option<String>);
+
 /// One triple pattern of a scope: each component is a concrete [`Term`] or a wildcard
 /// (`None`). No join variables — a `ScopePattern` is a per-triple predicate, so a
 /// masked sub-graph is well-defined without any evaluation-order dependence.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ScopePattern {
     s: Option<Term>,
     p: Option<Term>,
@@ -76,12 +80,32 @@ impl ScopePattern {
         }
         hit(&self.s, &triple[0]) && hit(&self.p, &triple[1]) && hit(&self.o, &triple[2])
     }
+
+    /// `true` iff every component is a wildcard — the pattern [`ScopePattern::any`]
+    /// (used to recognize a scope that masks nothing, see `GraphScope::masks_nothing`).
+    fn is_any(&self) -> bool {
+        self.s.is_none() && self.p.is_none() && self.o.is_none()
+    }
+
+    /// Total order key for scope normalization: the three components in their
+    /// N-Triples form, wildcards (`None`) sorting first. The serialization is injective
+    /// per component and the components are kept in separate tuple slots, so equal keys
+    /// hold **iff** the patterns are equal — normalization can neither merge two
+    /// different patterns nor split one. [SONNET-4.6] sq-nc3c6.
+    fn sort_key(&self) -> PatternSortKey {
+        let render = |t: &Option<Term>| t.as_ref().map(Term::to_string);
+        (render(&self.s), render(&self.p), render(&self.o))
+    }
 }
 
 /// The visibility scope applied to one source graph: a triple is visible iff it
 /// matches at least one `allow` pattern and no `deny` pattern (deny overrides allow;
 /// empty `allow` grants nothing — fail-closed).
-#[derive(Clone, Debug, Default)]
+///
+/// `PartialEq`/`Eq`/`Hash` compare the pattern lists **as written**; two scopes that
+/// describe the same mask in a different order become identical only after the crate's
+/// internal normalization, which is what the replica cache keys on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct GraphScope {
     allow: Vec<ScopePattern>,
     deny: Vec<ScopePattern>,
@@ -103,6 +127,36 @@ impl GraphScope {
     /// The visibility predicate: matches ≥ 1 allow AND 0 deny.
     pub fn visible(&self, triple: &[Term; 3]) -> bool {
         self.allow.iter().any(|a| a.matches(triple)) && !self.deny.iter().any(|d| d.matches(triple))
+    }
+
+    /// `true` iff this scope hides nothing: it carries [`ScopePattern::any`] among its
+    /// allow patterns and no deny pattern at all, so [`GraphScope::visible`] is `true`
+    /// for every triple. Conservative — a scope that happens to admit everything by some
+    /// other route simply reports `false` and takes the ordinary masking path.
+    ///
+    /// [SONNET-4.6] sq-nc3c6: lets [`PodStore::scoped_dataset`] hand back a cheap
+    /// [`sparq_core::Graph::fork`] of the source instead of decoding and rebuilding a
+    /// byte-for-byte identical replica (and instead of caching a full second copy of it).
+    pub(crate) fn masks_nothing(&self) -> bool {
+        self.deny.is_empty() && self.allow.iter().any(ScopePattern::is_any)
+    }
+
+    /// The **normalized** form — both pattern lists sorted (`ScopePattern::sort_key`)
+    /// and de-duplicated — so two scopes describing the same mask compare and hash equal
+    /// regardless of the order the policy layer emitted their patterns in. This is the
+    /// "normalized `GraphScope`" the replica cache keys on (design record §6).
+    ///
+    /// Normalizing cannot change what is visible: [`GraphScope::visible`] is an `any`
+    /// over `allow` and an `all` over `deny`, both of which are invariant under
+    /// reordering and duplication of their inputs. [SONNET-4.6] sq-nc3c6.
+    pub(crate) fn normalized(&self) -> GraphScope {
+        fn norm(patterns: &[ScopePattern]) -> Vec<ScopePattern> {
+            let mut out = patterns.to_vec();
+            out.sort_by_cached_key(ScopePattern::sort_key);
+            out.dedup();
+            out
+        }
+        GraphScope { allow: norm(&self.allow), deny: norm(&self.deny) }
     }
 }
 
@@ -199,23 +253,50 @@ impl PodStore {
     /// one contributes whole, and a non-accessible graph contributes nothing no
     /// matter what `scopes` says (restriction composes, never widens).
     ///
-    /// The replica materializes every contributing graph (O(accessible dataset) —
-    /// measured envelope in `bench/pattern-scope/`); reuse it across queries and
-    /// rebuild it after any store mutation or re-materialization.
+    /// Assembly is **cached** ([SONNET-4.6] sq-nc3c6, design record §6): an accessible
+    /// graph with no mask contributes a [`sparq_core::Graph::fork`] of the source (an
+    /// `Arc`-sharing logical copy, not a rebuild), and a genuinely masked graph
+    /// contributes a replica held in the store's bounded, sharded replica cache keyed by
+    /// (graph name, normalized scope) — so sessions resolving to the same scope class
+    /// share one build, and repeated queries under one scope amortize it. Every write
+    /// path drops the cache (`reindex_with` and the in-place `update_as` data write), so
+    /// a `ScopedDataset` built after a write always reflects it. The replica is still a
+    /// read-only snapshot of the moment it was built — rebuild it after mutating the
+    /// store.
     pub fn scoped_dataset(&self, s: &Session, mode: Mode, scopes: &FxHashMap<Term, GraphScope>) -> ScopedDataset {
         let accessible = self.accessible_set(s, mode);
-        let full = GraphScope::deny_within(Vec::new());
-        let mut decisions: FxHashMap<Term, GraphScope> = FxHashMap::default();
-        for (name, _) in &self.graph.named {
+        let mut graph = Graph::from_parts(Dict::new(), Vec::new());
+        for (name, sub) in &self.graph.named {
             if !accessible.contains(name) {
                 continue; // graph-level denial/absence wins — a scope never widens
             }
-            decisions.insert(name.clone(), scopes.get(name).unwrap_or(&full).clone());
+            let replica = match scopes.get(name) {
+                // Unmasked (or a mask that hides nothing): the source sub-graph verbatim.
+                // `fork` is O(pending delta) and shares the immutable storage, where
+                // `masked_graph` under an all-visible scope would decode and rebuild an
+                // identical copy. `named` is cleared so the replica carries exactly the
+                // sub-graph's own triples, as `masked_graph` does.
+                None => forked(sub),
+                Some(scope) if scope.masks_nothing() => forked(sub),
+                Some(scope) => self.scope_cache.get_or_build(name, scope, || masked_graph(sub, scope)),
+            };
+            // A fully masked graph is omitted entirely — indistinguishable from absent.
+            if !replica.is_empty() {
+                graph.named.push((name.clone(), replica));
+            }
         }
-        let graph = masked_dataset(&self.graph, &decisions);
         let named: FxHashSet<Term> = graph.named.iter().map(|(n, _)| n.clone()).collect();
         ScopedDataset { graph, named: Arc::new(named) }
     }
+}
+
+/// A logically-independent copy of `sub` holding exactly its own triples: the cheap
+/// structural [`sparq_core::Graph::fork`] (immutable storage `Arc`-shared) with any
+/// nested named graphs dropped, matching what [`masked_graph`] produces.
+fn forked(sub: &Graph) -> Graph {
+    let mut g = sub.fork();
+    g.named.clear();
+    g
 }
 
 #[cfg(test)]
@@ -341,6 +422,85 @@ mod tests {
         // Grant-less session: nothing, no matter the scopes.
         let none = store.scoped_dataset(&Session::default(), Mode::Read, &hide_scope());
         assert!(none.graph.named.is_empty());
+    }
+
+    // --- [SONNET-4.6] sq-nc3c6: the replica cache seam (design record §6) --------------
+
+    #[test]
+    fn graph_scope_normalized_is_order_and_duplicate_insensitive() {
+        let a = ScopePattern::new(None, Some(iri("http://ex/a")), None);
+        let b = ScopePattern::new(None, Some(iri("http://ex/b")), None);
+        let one = GraphScope::deny_within(vec![a.clone(), b.clone()]);
+        let two = GraphScope::deny_within(vec![b.clone(), a.clone(), b]);
+        assert_ne!(one, two, "the raw scopes differ as written");
+        assert_eq!(one.normalized(), two.normalized(), "…but describe one scope class");
+        assert_eq!(one.normalized().deny.len(), 2, "duplicates collapsed");
+        // Normalization is idempotent and preserves the visibility predicate.
+        let t = triple(T.0, "http://ex/a", T.2);
+        assert_eq!(one.visible(&t), one.normalized().visible(&t));
+        assert_eq!(one.normalized(), one.normalized().normalized());
+        // A DIFFERENT mask must not normalize into the same class.
+        assert_ne!(one.normalized(), GraphScope::deny_within(vec![a]).normalized());
+    }
+
+    #[test]
+    fn graph_scope_masks_nothing_recognizes_only_the_unrestricted_scope() {
+        assert!(GraphScope::deny_within(Vec::new()).masks_nothing());
+        assert!(!GraphScope::deny_within(vec![ScopePattern::any()]).masks_nothing());
+        assert!(!GraphScope::allow_only(Vec::new()).masks_nothing());
+        // Conservative: an allow list that admits everything WITHOUT the `any` pattern
+        // reports false and takes the ordinary masking path (still correct, just uncached).
+        assert!(!GraphScope::allow_only(vec![ScopePattern::new(None, Some(iri(T.1)), None)])
+            .masks_nothing());
+    }
+
+    #[test]
+    fn scoped_dataset_shares_one_replica_per_graph_and_scope_class() {
+        let store = pod();
+        assert_eq!(store.scope_cache.len(), 0, "cold");
+        let first = store.scoped_dataset(&alice(), Mode::Read, &hide_scope());
+        assert_eq!(store.scope_cache.len(), 1, "one masked replica built");
+        // A SECOND session resolving to the same scope class reuses that replica.
+        let second = store.scoped_dataset(&alice(), Mode::Read, &hide_scope());
+        assert_eq!(store.scope_cache.len(), 1, "scope class shared, not rebuilt");
+        assert_eq!(first.graph.named[0].1.len(), second.graph.named[0].1.len());
+        // A DIFFERENT scope class on the same graph is a distinct replica.
+        let mut other = FxHashMap::default();
+        other.insert(
+            iri("https://pod.ex/d"),
+            GraphScope::deny_within(vec![ScopePattern::new(None, Some(iri("http://ex/p")), None)]),
+        );
+        store.scoped_dataset(&alice(), Mode::Read, &other);
+        assert_eq!(store.scope_cache.len(), 2, "keyed by the scope too");
+    }
+
+    #[test]
+    fn scoped_dataset_forks_unmasked_graphs_instead_of_caching_a_copy() {
+        let store = pod();
+        // No scope entry at all…
+        let plain = store.scoped_dataset(&alice(), Mode::Read, &FxHashMap::default());
+        assert_eq!(plain.graph.named[0].1.len(), 2, "the whole source graph");
+        assert_eq!(store.scope_cache.len(), 0, "an unmasked graph needs no replica");
+        // …and an explicit scope that hides nothing takes the same fork path.
+        let mut nothing = FxHashMap::default();
+        nothing.insert(iri("https://pod.ex/d"), GraphScope::deny_within(Vec::new()));
+        let unrestricted = store.scoped_dataset(&alice(), Mode::Read, &nothing);
+        assert_eq!(unrestricted.graph.named[0].1.len(), 2);
+        assert_eq!(store.scope_cache.len(), 0, "a mask-nothing scope needs no replica");
+        // The fork is equivalent to the source for query purposes.
+        let q = "SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?o";
+        assert_eq!(plain.query_json(q).unwrap(), unrestricted.query_json(q).unwrap());
+    }
+
+    #[test]
+    fn rematerializing_drops_the_cached_replicas() {
+        let mut store = pod();
+        store.scoped_dataset(&alice(), Mode::Read, &hide_scope());
+        assert_eq!(store.scope_cache.len(), 1);
+        // `reindex_with` runs inside every materialize path — the invalidation seam that
+        // covers put_acl / delete_acl / bridge / trust writes.
+        store.materialize_wac().unwrap();
+        assert_eq!(store.scope_cache.len(), 0, "re-materialization drops the replicas");
     }
 
     #[test]

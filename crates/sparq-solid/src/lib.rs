@@ -41,6 +41,12 @@ pub mod trust_wire;
 #[cfg(feature = "pattern-scope")]
 pub mod pattern_scope;
 mod rewrite;
+// [SONNET-4.6] sq-nc3c6 (design record §6): the bounded, sharded masked-replica cache
+// that makes `scoped_dataset` amortize its per-call build across sessions sharing a
+// scope class, invalidated at the write-path seams. Same feature gate + no new
+// dependency (std `RwLock` + the existing `rustc-hash`).
+#[cfg(feature = "pattern-scope")]
+mod scope_cache;
 // [FABLE-5] sq-cnuqd (issue #1569): the BOUNDED, SHARDED, `&self`-readable session cache
 // that lets all read-side entry points take `&self` (concurrent `&PodStore` readers). No
 // feature gate + no new dependency (std `RwLock` + the existing `rustc-hash`).
@@ -270,6 +276,17 @@ pub struct PodStore {
     // serialising on one exclusive borrow. Same transient-index D3 semantics: `reindex`
     // clears/invalidates it; eviction only drops re-derivable memoized sets.
     cache: session_cache::SessionCache,
+    // [SONNET-4.6] sq-nc3c6 (design record §6): the masked-replica cache behind
+    // `scoped_dataset`, keyed by (graph name, normalized `GraphScope`). Present only
+    // under the `pattern-scope` feature, so the default build carries none of it.
+    //
+    // INVALIDATION — the same "one seam" discipline as `acl_index`/`group_docs`, widened
+    // by one: a replica depends on the source graph's CONTENT, not just on the auth view,
+    // so it is dropped both in `reindex` (which every `materialize_*`/`put_acl`/
+    // `delete_acl`/bridge/trust path routes through) AND after the in-place data write in
+    // `update_inner` — the one mutation that changes content without touching any grant.
+    #[cfg(feature = "pattern-scope")]
+    scope_cache: scope_cache::ReplicaCache,
     /// [OPUS-4.8] sq-dpk4 — the bridged-ODRL-grant ledger: what was bridged from which
     /// `(policy, request)`, plus the static-baseline auth view to rebuild from on a
     /// refresh. Only present when the `odrl-bridge` feature is enabled (the core build
@@ -436,6 +453,8 @@ impl PodStore {
             acl_index: OnceLock::new(), // [OPUS-4.8] sq-j8qtt: built lazily on first decide
             group_docs: OnceLock::new(), // [SONNET-4.6] #55: built lazily on first update
             cache: session_cache::SessionCache::new(), // [FABLE-5] sq-cnuqd: bounded + sharded
+            #[cfg(feature = "pattern-scope")]
+            scope_cache: scope_cache::ReplicaCache::new(), // [SONNET-4.6] sq-nc3c6
             #[cfg(feature = "odrl-bridge")]
             bridge_ledger: odrl_bridge::BridgeLedger::new(),
         }
@@ -693,6 +712,13 @@ impl PodStore {
         // `.acl` write that starts (or stops) referencing a group document is reflected on
         // the next update's re-materialization decision.
         self.group_docs.take();
+        // [SONNET-4.6] sq-nc3c6: every path that re-materializes has already mutated the
+        // graph (a `put_acl`/`delete_acl` replaces a whole named graph, a bridge/trust
+        // materialization writes `<urn:sparq:auth>`), so the masked replicas built from it
+        // may be stale. Dropping them is pure cache management — they are re-derived from
+        // the current graph on the next `scoped_dataset`.
+        #[cfg(feature = "pattern-scope")]
+        self.scope_cache.clear();
     }
 
     /// The graphs the current access-control documents reference via `acl:agentGroup`,
@@ -1264,7 +1290,18 @@ impl PodStore {
         let auth = Arc::clone(&self.auth);
         let permit = update::check(&self.graph, &auth, s, sparql, self.group_docs())?;
         // Authorized: apply through the engine's in-place delta path.
-        sparq_engine::update_in_place(&mut self.graph, sparql)?;
+        let applied = sparq_engine::update_in_place(&mut self.graph, sparql);
+        // [SONNET-4.6] sq-nc3c6 (design record §6): a DATA write is the one mutation that
+        // changes graph CONTENT without necessarily touching a grant — `permit.rematerialize`
+        // is false for an ordinary pod-document write, so `reindex_with`'s invalidation does
+        // not fire. Masked replicas are a pure function of that content, so drop them here or
+        // the next `scoped_dataset` would answer from a pre-write replica (a stale read, and
+        // a redaction-by-DELETE would be defeated by it). Dropped BEFORE the `?` so a FAILED
+        // apply invalidates too: we decline to assume an erroring apply left the graph
+        // untouched, and an unnecessary drop costs only a rebuild.
+        #[cfg(feature = "pattern-scope")]
+        self.scope_cache.clear();
+        applied?;
         // A change to the access-control rules invalidates the auth view.
         if permit.rematerialize {
             if acp {

@@ -1103,8 +1103,30 @@ graph-granular enforcement walk is reused unchanged.
 - `store.scoped_dataset(&Session, Mode, &scopes) -> ScopedDataset` — **refinement-only**
   (a scope can only shrink the session's graph-level accessible set, never widen), then
   `ScopedDataset::{query, query_json, ask, view}` on the same `wrap_read`/empty-default
-  path as `query_as`. Build once per (session × scopes), query many; rebuild after any
-  store mutation. READ path only (UPDATE stays graph-granular, record §2.4).
+  path as `query_as`. READ path only (UPDATE stays graph-granular, record §2.4).
+
+**Replica cache — [SONNET-4.6] sq-nc3c6 (record §6).** `scoped_dataset` no longer pays
+the full masked-subgraph build per call. An accessible graph with **no** mask (or a mask
+that hides nothing) contributes a `Graph::fork` of the source — an `Arc`-sharing logical
+copy, not a rebuild — and a genuinely masked graph contributes a replica held in a
+bounded, sharded, `&self`-readable cache keyed by **(graph name, normalized `GraphScope`)**.
+So two sessions whose policies resolve to the same scope class share one build, and a
+session issuing several queries under one scope amortizes it (`cold_build_ms` vs
+`warm_build_ms` in `bench/pattern-scope/`).
+
+Three properties worth knowing, because they are the ones a caller could get wrong:
+
+- **The key carries the whole normalized scope, not a fingerprint.** Keying on a 64-bit
+  hash alone would let a collision serve one scope's replica for another's mask — an
+  over-disclosure. The hash only picks the lock stripe.
+- **Every write drops the cache**, at both seams: `reindex_with` (all `materialize_*` /
+  `put_acl` / `delete_acl` / bridge / trust paths) and the in-place `update_as` data
+  write — the latter is required because an ordinary pod-document write does NOT
+  re-materialize the auth view. A `scoped_dataset` built after a write always reflects it.
+- **An already-built `ScopedDataset` is still a snapshot** of the moment it was built —
+  rebuild it after mutating the store. And mutating `store.graph` directly bypasses both
+  seams (as it already does for the session cache and the ACL index), so replicas built
+  from it can go stale.
 
 ## Related skills
 

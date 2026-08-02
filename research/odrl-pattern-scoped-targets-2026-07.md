@@ -243,14 +243,38 @@ of the evaluator entirely.
 
 ## 6. Production path (beyond the spike)
 
-* **Replica cache**: key = (graph name, scope fingerprint = hashed normalized scope);
-  value = masked `Graph` replica; invalidated by the store's existing write-path
-  generation bump (the `session_cache`/incremental-rematerialization precedents).
-  Sessions sharing a scope class share the replica — the common case (role-based
-  policies) has few distinct scopes.
-* **Memory**: worst case one replica per (graph × scope class) of scoped triples.
-  Honest bound, measured in `bench/pattern-scope/`; acceptable because pattern scopes
-  apply to specific sensitive graphs, not the whole store.
+* **Replica cache** — **SHIPPED** (`sq-nc3c6`, `crates/sparq-solid/src/scope_cache.rs`),
+  with three deliberate deviations from the sketch above, all recorded here because they
+  change the security argument, not just the code:
+  * **Key.** Not a bare fingerprint: the map key is `(graph name, NORMALIZED GraphScope)`
+    and the 64-bit hash is used ONLY to pick the lock stripe. Keying on a hash alone
+    would make a collision serve one scope's replica for another's mask — an
+    over-disclosure, i.e. fail-OPEN. Normalization (both pattern lists sorted +
+    de-duplicated) is what makes two orderings of the same mask one scope class, and it
+    cannot change visibility: `visible` is an `any` over `allow` and an `all` over
+    `deny`, both invariant under reordering and duplication.
+  * **Invalidation.** The store's existing generation bump (`reindex_with`) fires only
+    when the AUTH VIEW is re-materialized, and an ordinary pod-document write does not
+    re-materialize — so hanging invalidation off it alone would leave a stale replica
+    after every data write. The cache is therefore dropped at BOTH seams: `reindex_with`
+    (which every `materialize_*`/`put_acl`/`delete_acl`/bridge/trust path routes through)
+    and the in-place data write in `update_inner`. Wholesale, not diffed: v1 buys
+    soundness over precision, and a dropped replica is re-derived from the current graph.
+    Staleness here is a freshness bug rather than a mask bypass — a stale replica holds
+    only triples that were in the source and passed the same scope — but it would defeat
+    a redaction performed by DELETING data, which is why it is not tolerated.
+  * **Unmasked graphs are forked, never replicated.** An accessible graph with no scope
+    entry (or a scope that masks nothing) now contributes a `Graph::fork` of the source —
+    an `Arc`-sharing logical copy — instead of a decode → filter → rebuild that produced
+    an identical graph. This is where most of the old per-call O(accessible dataset) cost
+    lived, and it keeps the cache from holding a second full copy of the store.
+* **Memory**: worst case one replica per (graph × scope class) of scoped triples, made
+  finite by a hard `SHARDS * SHARD_CAP` cap with insertion-order eviction (a hit takes
+  only a read lock, so it cannot record recency without serialising concurrent readers).
+  The cap must exceed the number of scoped graphs one `scoped_dataset` pass touches or
+  each pass evicts what the next needs; the shipped value was sized against the bench
+  fixture's accessible-set size. Envelope in `bench/pattern-scope/` (`cold_build_ms` vs
+  `warm_build_ms`; work-box, non-canonical).
 * **v2 escape hatch** (only if measurement ever demands it): the in-line scan filter
   (§1-A) as an engine opt-in feature with a fuzzed differential oracle harness across
   every scan entry point — the bar it must clear is documented there.
@@ -261,4 +285,5 @@ of the evaluator entirely.
    `auth:PatternGrant` materialization + `AuthIndex` scope extraction (§5), gated on
    `pattern-scope` + `odrl-bridge`.
 2. `sq-nc3c6` — `feat(solid)`: scoped-replica cache + write-path invalidation (§6).
+   **SHIPPED** — see the §6 bullet for the three deviations from the original sketch.
 3. `sq-fznmq` — `spike(solid)`: pattern-scoped UPDATE enforcement design (§2.4).
