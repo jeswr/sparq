@@ -439,6 +439,17 @@ def _feature_breadth(group):
     return len(feats)
 
 
+def _group_identity(group):
+    """Stable identity of a group: the sorted tuple of the leg names it carries.
+
+    Used as pick_cache_seeds' FINAL tie-breaker. It must be a property of the
+    group ITSELF, never its position in the list handed to that function —
+    a positional index makes the seed depend on the order groups happen to be
+    supplied in, which is the very scheduling-noise dependence sq-an4by removes.
+    Legs are PARTITIONED across groups, so this identity is unique."""
+    return tuple(sorted(leg["name"] for leg in group["legs"]))
+
+
 def pick_cache_seeds(groups):
     """[OPUS-5] sq-an4by: mark exactly ONE cache-seed group per `cache_crate`
     (`cache_save: True`); every other group with that key is RESTORE-ONLY.
@@ -457,7 +468,10 @@ def pick_cache_seeds(groups):
 
     The seed is chosen deterministically — widest feature breadth first (see
     _feature_breadth: the group whose build populates the most of that crate's
-    optional dep graph), then heaviest, then lowest group index — so the cached
+    optional dep graph), then heaviest, then the lexicographically-smallest
+    _group_identity (the group's own leg names, NOT its position in the list
+    passed here: a positional index would let a reordered list win a different
+    group, reintroducing the order dependence) — so the cached
     content is a stable, deliberately-chosen superset rather than a race result.
     Saving only ever happens on push-to-main, where ci_select.py returns
     mode=full and the event is a BACKSTOP one, so the seed is computed over the
@@ -474,9 +488,9 @@ def pick_cache_seeds(groups):
     sq-3sbrr's per-crate keying deliberately abandoned: 46 buckets would blow the
     repo's 10 GB Actions-cache budget and LRU-evict everything."""
     seen = {}
-    for idx, g in enumerate(groups):
+    for g in groups:
         g["cache_save"] = False
-        rank = (-_feature_breadth(g), -g["weight"], idx)
+        rank = (-_feature_breadth(g), -g["weight"], _group_identity(g))
         best = seen.get(g["cache_crate"])
         if best is None or rank < best[0]:
             seen[g["cache_crate"]] = (rank, g)

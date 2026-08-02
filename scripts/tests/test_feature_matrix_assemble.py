@@ -745,14 +745,46 @@ class TestGrouping(unittest.TestCase):
         # Group ORDER must not decide the seed: the whole defect being fixed is a
         # winner chosen by whichever runner finished first.
         groups = self.mod.group_legs(self.legs)
+        # Capture the winners as PLAIN STRINGS before reselecting: `reversed()`
+        # copies only the outer list, so the second pick_cache_seeds() rewrites
+        # `cache_save` on these very dicts. Reading the group ids afterwards on
+        # both sides would compare post-mutation state with itself and pass no
+        # matter which group won.
         seeds = {g["cache_crate"] for g in groups if g["cache_save"]}
+        seed_ids = {g["group"] for g in groups if g["cache_save"]}
         shuffled = self.mod.pick_cache_seeds(list(reversed(groups)))
         self.assertEqual(
             {g["cache_crate"] for g in shuffled if g["cache_save"]}, seeds)
         self.assertEqual(
-            {g["group"] for g in shuffled if g["cache_save"]},
-            {g["group"] for g in groups if g["cache_save"]},
+            {g["group"] for g in shuffled if g["cache_save"]}, seed_ids,
             "the SAME group must seed the cache regardless of ordering")
+
+    def test_cache_seed_tie_break_is_group_identity_not_list_position(self):
+        # The real leg set may have no exact (breadth, weight) tie, so the
+        # order-independence of the FINAL tie-breaker needs a synthetic pair:
+        # same crate, breadth 1 each, identical weight, distinct identities.
+        # A positional index as the tie-breaker hands the key to whichever group
+        # came first in the list — scheduling noise wearing a deterministic coat.
+        legs = [
+            {"name": "alpha", "crate": "c1", "features": "fa", "test": True,
+             "weight": self.mod.GROUP_CAPACITY},
+            {"name": "beta", "crate": "c1", "features": "fb", "test": True,
+             "weight": self.mod.GROUP_CAPACITY},
+        ]
+        groups = self.mod.group_legs(legs)
+        self.assertEqual(len(groups), 2, "each over-full leg gets its own group")
+        self.assertEqual({self.mod._feature_breadth(g) for g in groups}, {1},
+                         "the tie-break only decides once breadth is equal")
+        self.assertEqual(len({g["weight"] for g in groups}), 1,
+                         "the tie-break only decides once weight is equal")
+        # Plain strings, captured BEFORE the reselection mutates these dicts.
+        winner = sorted(g["group"] for g in groups if g["cache_save"])
+        self.assertEqual(len(winner), 1)
+        reselected = self.mod.pick_cache_seeds(list(reversed(groups)))
+        self.assertEqual(
+            sorted(g["group"] for g in reselected if g["cache_save"]), winner,
+            "a tied pair must resolve to the same seed in either order — the "
+            "tie-breaker must be a property of the group, not its list index")
 
     def test_narrow_group_is_not_the_seed(self):
         # Synthetic two-group crate: the heavy `service` leg (the extra deps) and
