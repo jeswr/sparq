@@ -285,6 +285,20 @@ pub mod oblivious_join;
 pub mod netprofiles;
 pub mod transport;
 
+// [OPUS-5] sq-dz10l (Phase 6, epic sq-0dksu): the PER-PROTOCOL security-properties
+// annotation graph — the machine-readable form of this crate's per-operator
+// posture, keyed on the `mpc:` protocol IRIs (one per `backend::OperatorClass`).
+// Every assertion carries `secx:assumption secx:HonestMajority , secx:SemiHonest`,
+// so a preference requiring malicious security or a dishonest majority
+// MECHANICALLY excludes every sparq-mpc protocol — the honest encoding of
+// "semi-honest only" in the property DATA, not just prose (design record
+// research/security-properties-ontology-design.md §5c). Carries the ANTI-DRIFT
+// guard that pins each annotated assumption set to the `SecurityDescriptor` the
+// code actually reports. Behind the default-OFF `secprop-annotations` feature, so
+// the lean default build is byte-unchanged. See the module docs.
+#[cfg(feature = "secprop-annotations")]
+pub mod secprop;
+
 // [OPUS-4.8] sq-nuok: adversarial-share negative suite + 'no fake crypto' stub
 // gate. Test-only; compiled only under `cfg(test)` so it can drive the seedable
 // simulation RNG (`ShamirBackend::new_seeded`) and the deferred-stub trait

@@ -43,6 +43,30 @@ publish = false
 # The feature name is the warning: turning it on opts into insecure randomness.
 insecure-test-rng = []
 
+# [OPUS-5] sq-dz10l (Phase 6, epic sq-0dksu): the PER-PROTOCOL security-properties
+# annotation graph (`secprop` module) — the machine-readable form of this crate's
+# per-operator posture, keyed on the `mpc:` protocol IRIs (one per
+# `backend::OperatorClass`). Every assertion carries `secx:assumption
+# secx:HonestMajority , secx:SemiHonest`, so a preference requiring malicious
+# security or a dishonest majority MECHANICALLY excludes every sparq-mpc protocol —
+# the honest encoding of "semi-honest only" in the property DATA, not just prose
+# (design record research/security-properties-ontology-design.md §5c).
+#
+# Carries the guards: the ANTI-DRIFT check (the annotated assumption set must equal
+# the one derived from the `SecurityDescriptor` the code actually reports, in both
+# directions), no `Proven` on a positive property while sq-qhy4 is open, and
+# per-`OperatorClass` completeness.
+#
+# OFF by default: the default build is byte-unchanged and the `secprop` module is
+# compiled out. Pulls in the `oxttl` Turtle parser to load the static graph, plus
+# the ZERO-dependency `sparq-secprop-vocab` leaf for the `secx:` IRIs (it sits below
+# sparq-trust/sparq-policy/sparq-zk alike, so the edge is cycle-free and adds no
+# transitive dependency). The native-only / wasm-exclusion invariant is intact.
+#
+# RECORDS claims + their epistemic basis; asserts NO soundness/privacy property (the
+# estate is NOT externally audited, sq-qhy4, and is semi-honest only).
+secprop-annotations = ["dep:oxttl", "dep:sparq-secprop-vocab"]
+
 [dependencies]
 # The single-holder query engine. The MPC layer's whole point is to MINIMISE
 # data sharing: each holder evaluates a query fragment over ITS OWN graphs
@@ -95,3 +119,15 @@ subtle = "2"
 # fold into the 61-bit Mersenne field. Pinned to the same 0.11 line sparq-engine
 # uses so the workspace resolves a single `sha2`/`digest` version.
 sha2 = "0.11"
+
+# [OPUS-5] sq-dz10l — OPTIONAL, `secprop-annotations` feature only. The Turtle
+# parser that loads the static per-protocol annotation graph
+# (`ontologies/secprop-protocols.ttl`). Same `oxttl` the rest of the workspace uses,
+# reached once at parse time and never on a protocol path.
+oxttl = { workspace = true, optional = true }
+
+# [OPUS-5] sq-dz10l — OPTIONAL, `secprop-annotations` feature only. The shared
+# `sec-prop:`/`secx:` IRI constants + the canonical `secprop-ext.ttl` they are
+# pinned to, single-sourced in a ZERO-dependency leaf so taking the edge adds no
+# transitive dependency and creates no cycle.
+sparq-secprop-vocab = { path = "../sparq-secprop-vocab", optional = true }

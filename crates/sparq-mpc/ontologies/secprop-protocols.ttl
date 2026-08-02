@@ -1,0 +1,131 @@
+# secprop-protocols.ttl — the sparq-mpc PER-PROTOCOL security-properties annotation
+# graph.
+#
+# [OPUS-5] sq-dz10l (Phase 6; epic sq-0dksu; design record
+# research/security-properties-ontology-design.md §5c). 🤖 SPARQ agent —
+# security-properties ontology.
+#
+# WHAT THIS IS. The machine-readable form of the crate's per-operator security
+# posture. It is a STATIC annotation graph keyed on the MPC protocol IRIs
+# (`mpc:` — one per `backend::OperatorClass`, the axis along which this crate's
+# guarantees genuinely differ), expressed in the `secx:` extension vocabulary that
+# the ZERO-dependency `sparq-secprop-vocab` leaf owns. One annotation block per
+# protocol IRI: each `secx:hasProperty` is a reified (property, level, assurance,
+# audit-status, assumptions) claim.
+#
+# THE POINT (§5c). Every assertion here carries BOTH
+#   secx:assumption secx:HonestMajority , secx:SemiHonest
+# so a requester preference demanding MALICIOUS security or a DISHONEST-MAJORITY
+# threat model MECHANICALLY EXCLUDES every sparq-mpc protocol — the honest encoding
+# of "semi-honest only" in the PROPERTY DATA, not merely in prose. Prose can be
+# skimmed past; a `secx:assumption` edge cannot.
+#
+# WHAT IT IS NOT. It RECORDS claims + their epistemic basis; it is NOT a proof of any
+# property. The sparq MPC/ZK estate is research-grade and NOT externally audited
+# (bead sq-qhy4, P0; CR-G1 of compliance/cryptoreview/gap-register.md). Every
+# positive property below is therefore `secx:Claimed` +
+# `secx:ExternalSignOffPending` — never `secx:Proven`.
+#
+# ANTI-DRIFT (the load-bearing guard). The assumption set on each block is NOT
+# hand-maintained prose: `secprop::descriptor_drift_violations` recomputes it from
+# the `SecurityDescriptor` the code ACTUALLY reports for that `OperatorClass`
+# (`ShamirBackend::operator_descriptor`) and fails if the two disagree in EITHER
+# direction. So this file cannot over-claim a stronger adversary model than the
+# implementation reports, and cannot under-claim one either.
+#
+# COVERAGE + THE HONEST GAP. The subjects are exactly the three `OperatorClass`
+# variants — the per-operator axis `MpcBackend::operator_security` reports on, and
+# the completeness guard's key. The malicious-with-abort IT-MAC comparison path
+# (`crate::auth_compare`) is DELIBERATELY NOT a subject here: Phase 1 minted only
+# `secx:HonestMajority` + `secx:SemiHonest` and has NO positive `secx:Malicious` /
+# `secx:DishonestMajority` term, so an annotation for it could only be written by
+# mislabelling it semi-honest (a false exclusion) or by omitting its adversary axis
+# (a silent fail-open). Omission is the honest option: an unannotated protocol makes
+# NO claim and `secprop::admits_protocol` denies it by default (fail-closed).
+# Annotating it needs the Phase-1 vocabulary extended first.
+
+@prefix mpc:  <https://sparq.dev/ns/mpc#> .
+@prefix secx: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# ════════════════════════════════════════════════════════════════════════════
+# mpc:shamir-linear-aggregate — OperatorClass::LinearAggregate.
+# The degree-`t` linear/cumulative aggregate (SUM/COUNT): free local share
+# addition, reconstructed at degree `t`. Carries RS redundancy for every valid
+# honest-majority `(n, t = ⌊(n−1)/2⌋)`, so its OUTPUT GUARANTEE is the strongest in
+# the crate (detect-and-abort, or Berlekamp–Welch robust correction up to
+# `e = ⌊(n−t−1)/2⌋`).
+#
+# NOTE the axis separation: that RS hardening is an AXIS-2 output guarantee. It does
+# NOT upgrade the AXIS-1 adversary model — `degree_reduce` still has no in-protocol
+# check that a deviating party re-shared honestly — so the adversary assumption
+# remains `secx:SemiHonest`. Recording robustness as if it were active security is
+# exactly the over-claim this graph exists to prevent.
+# ════════════════════════════════════════════════════════════════════════════
+
+mpc:shamir-linear-aggregate
+  rdfs:label "Shamir degree-t linear aggregate (SUM/COUNT)"@en-GB ;
+  rdfs:comment "Honest-majority Shamir linear aggregate. RS-redundant reconstruction gives detect-and-abort / robust correction (an output guarantee), NOT malicious security."@en-GB ;
+  secx:hasProperty
+    # Input confidentiality. Any `<= t` parties' shares are independent of the
+    # secret — information-theoretic for a uniform dealer — but the masking
+    # coefficients come from an OS-seeded ChaCha20 CSPRNG (sq-1vt / sq-it50), so the
+    # honest level is COMPUTATIONAL hiding, not perfect. Downgrading it here rather
+    # than claiming `secx:PerfectHiding` is deliberate.
+    [ secx:property secx:Hiding ; secx:level secx:ComputationalHiding ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] ,
+    # Result correctness. Holds against a passive adversary under an honest
+    # majority; a party that actively deviates inside a re-sharing round is NOT
+    # caught, so this claim is worthless without BOTH assumptions below.
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .
+
+# ════════════════════════════════════════════════════════════════════════════
+# mpc:shamir-equality-join — OperatorClass::EqualityJoin.
+# The hidden-value join / secret-shared equality test: opens a degree-`2t` product.
+# At `n = 2t+1` (the odd-`n` honest-majority case the public constructor always
+# builds) degree `2t` has ZERO RS redundancy, so tampering on this open is
+# information-theoretically UNDETECTABLE — strictly weaker than the aggregate above
+# even at the same `(n, t)`. Same AXIS-1 assumption set; a weaker AXIS-2 guarantee.
+# ════════════════════════════════════════════════════════════════════════════
+
+mpc:shamir-equality-join
+  rdfs:label "Shamir degree-2t equality / hidden-value join open"@en-GB ;
+  rdfs:comment "Honest-majority secret-shared equality test (the circuit-PSI core). At n = 2t+1 the degree-2t open carries no RS redundancy, so tampering is undetectable; semi-honest only."@en-GB ;
+  secx:hasProperty
+    [ secx:property secx:Hiding ; secx:level secx:ComputationalHiding ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] ,
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .
+
+# ════════════════════════════════════════════════════════════════════════════
+# mpc:shamir-comparison — OperatorClass::Comparison.
+# Secret-shared greater-than / threshold (sq-rrz4, `crate::compare`):
+# bit-decomposition, MSB-first, chaining multiplications through `degree_reduce`,
+# opening ONLY the verdict bit. The final verdict opens at degree `t` (so the RS
+# checker can still catch a tampered FINAL open where `n > t+1`), but a cheat INSIDE
+# a re-sharing round is undetected — so the code reports, and this graph records,
+# the semi-honest-only baseline for the WHOLE chain rather than over-claiming the
+# final open's detection.
+# ════════════════════════════════════════════════════════════════════════════
+
+mpc:shamir-comparison
+  rdfs:label "Shamir secret-shared comparison / threshold verdict"@en-GB ;
+  rdfs:comment "Honest-majority bit-decomposition comparison opening only the verdict bit. Semi-honest only: a deviating re-share inside the chain is not detected."@en-GB ;
+  secx:hasProperty
+    [ secx:property secx:Hiding ; secx:level secx:ComputationalHiding ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] ,
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .

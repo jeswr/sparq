@@ -22,3 +22,15 @@
   crate: "sparq-mpc"
   features: "insecure-test-rng"
   test: true
+
+# [OPUS-5] sq-dz10l: the per-protocol security-properties annotation graph
+# (`secprop` module). Its tests are INLINE in src/secprop.rs behind the default-OFF
+# `secprop-annotations` feature, so the featureless workspace `cargo nextest` run
+# compiles them out entirely — without this leg the anti-drift guard (the annotated
+# `secx:assumption` set must equal the one derived from the `SecurityDescriptor` the
+# code actually reports) would never execute, which is precisely the silent-skip
+# class the feature-matrix exists to close.
+- name: "sparq-mpc (secprop-annotations)"
+  crate: "sparq-mpc"
+  features: "secprop-annotations"
+  test: true
