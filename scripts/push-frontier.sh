@@ -444,10 +444,24 @@ fi
 # A squash-merged branch was PUSHED (origin/<branch>..HEAD == 0), so the unpushed test
 # excludes it; only a genuinely-fresh, not-yet-pushed branch (no PR possible yet) survives.
 # This mirrors scripts/worktree-gc.sh's `wt_unpushed_count` "never-dropped" predicate.
+# [OPUS-5] sparq-org/sparq#5426 (the #4985 remainder sweep). `gh pr list --limit N`
+# truncates SILENTLY — no error, no warning, no "there was more" flag, just a short list.
+# This blob is enumerated FOR A DECISION: a PR missing from it is not subtracted, so its
+# surface reads as free and a second worker is dispatched onto a crate already in flight.
+# That is the sq-8rpq class of bug, arriving quietly. gh offers no truncation signal, so
+# SATURATION is the only one available — hence a cap far above the live open-PR population
+# plus the assertion below. Distinct from the `|| true` degradation: that covers gh FAILING
+# (blob empty, logged); this covers gh SUCCEEDING with a silently capped page.
+PR_LIST_CAP=1000
 if command -v gh >/dev/null 2>&1; then
   # head-branch names + titles of every open PR, joined per-line for substring search.
-  PR_BLOB="$(gh pr list --state open --limit 300 --json headRefName,title \
+  PR_BLOB="$(gh pr list --state open --limit "$PR_LIST_CAP" --json headRefName,title \
     -q '.[] | (.headRefName + " " + .title)' 2>/dev/null || true)"
+  PR_BLOB_LINES="$(printf '%s' "$PR_BLOB" | grep -c '' || true)"
+  [ "${PR_BLOB_LINES:-0}" -lt "$PR_LIST_CAP" ] || die \
+    "open-PR enumeration returned $PR_BLOB_LINES rows at its --limit $PR_LIST_CAP cap. gh
+   TRUNCATES SILENTLY, so the in-flight set is probably partial and the frontier would
+   hand out surfaces that are already being worked. Raise PR_LIST_CAP deliberately."
 else
   log "gh not found — open-PR in-flight subtraction will be EMPTY (unpushed worktrees still used)."
   PR_BLOB=""

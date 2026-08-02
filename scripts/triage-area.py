@@ -432,11 +432,31 @@ def crate_names():
         return ()
 
 
-def live_area_labels():
+LABEL_LIST_CAP = 500
+
+
+def live_area_labels(gh=None):
     """The area labels that ALREADY EXIST. Never `gh label create` — an invented
     partition is invisible to every consumer (ready-issues.py, push-frontier.sh)
-    and silently mis-partitions the frontier."""
-    data = json.loads(_gh(["label", "list", "--repo", REPO, "--limit", "500", "--json", "name"]))
+    and silently mis-partitions the frontier.
+
+    [OPUS-5] sparq-org/sparq#5426 (the #4985 remainder sweep). `open_issues` below was
+    fixed in #5003; this is the OTHER enumerate-for-a-decision fetch in this file and it
+    was left on a bare cap. `gh label list --limit N` truncates SILENTLY — no error, no
+    warning, no "there was more" flag — and the returned set is used as a WHITELIST: an
+    `area:` label that falls off the page reads as "does not exist", so every issue in that
+    area is parked as unclassified and starves the frontier exactly as if the label had
+    never been created. Saturation is the only truncation signal gh offers, so a saturated
+    page is refused rather than trusted as the complete label set."""
+    run = gh if gh is not None else _gh
+    data = json.loads(run(["label", "list", "--repo", REPO,
+                           "--limit", str(LABEL_LIST_CAP), "--json", "name"]))
+    if len(data) >= LABEL_LIST_CAP:
+        raise SystemExit(
+            f"refusing: the label list returned {len(data)} rows at its --limit "
+            f"{LABEL_LIST_CAP} cap. gh TRUNCATES SILENTLY, so the area whitelist is "
+            f"probably partial and issues in the missing areas would be parked as "
+            f"unclassified. Raise LABEL_LIST_CAP deliberately.")
     return {d["name"] for d in data if d["name"].startswith("area:")}
 
 
@@ -640,6 +660,33 @@ def self_test():
     rows = plan([{"number": 1, "title": "DL L4: whatever", "body": "",
                   "labels": [{"name": "area:sparq-core"}, {"name": PARK_LABEL}]}], crates)
     f += _chk("already-area is a no-op", rows[0][1], [])
+
+    # --- #5426: a SATURATED label page must be REFUSED, never used as the whitelist ------
+    # gh returns exactly `--limit` rows whether or not more existed, so a saturated page is
+    # indistinguishable from a complete one — and this set is a WHITELIST, so a label that
+    # fell off it reads as "does not exist" and parks every issue in that area. Exercised
+    # THROUGH `live_area_labels` so deleting the CALL SITE, not merely the check, goes red.
+    # The stub honours `--limit` (one that ignored it would let a truncating fetch pass).
+    asked = []
+
+    def capped_labels(argv, total):
+        asked.append(argv)
+        n = int(argv[argv.index("--limit") + 1])
+        return json.dumps([{"name": f"area:crate{i}"} for i in range(total)][:n])
+
+    try:
+        live_area_labels(gh=lambda a: capped_labels(a, LABEL_LIST_CAP + 25))
+        f += _chk("a SATURATED label page is refused (#5426)", "no SystemExit", "SystemExit")
+    except SystemExit as e:
+        f += _chk("a SATURATED label page is refused (#5426)",
+                  "TRUNCATES SILENTLY" in str(e), True)
+    # A guard of 500 policed against a `--limit 100` fetch could never fire; pin them together.
+    f += _chk("the cap POLICED is the cap REQUESTED",
+              asked[-1][asked[-1].index("--limit") + 1], str(LABEL_LIST_CAP))
+    # …and not "always raise": a page one row under the cap is complete and must be accepted.
+    f += _chk("a label page one row under the cap is accepted",
+              len(live_area_labels(gh=lambda a: capped_labels(a, LABEL_LIST_CAP - 1))),
+              LABEL_LIST_CAP - 1)
 
     print("SELF-TEST", "FAILED" if f else "PASSED")
     return 1 if f else 0

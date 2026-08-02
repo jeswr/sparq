@@ -600,8 +600,18 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
         except subprocess.CalledProcessError:
             p["files"] = []  # crate column degrades to label/em-dash — non-fatal
 
+    # [OPUS-5] sparq-org/sparq#5426 audited this cap and left it: it is a deliberate RECENCY
+    # WINDOW, not an attempt to enumerate. `--state merged` grows without bound, and the only
+    # thing read from these rows is which constituents a RECENT omnibus already absorbed —
+    # an omnibus 50 merges back has long since had its constituents closed, so a row falling
+    # off the tail changes no decision. That is what makes it exempt from the #4985 rule
+    # (paginate, or assert the page is below its cap): the rule applies where the result is
+    # enumerated FOR A DECISION, and here the tail is deliberately out of scope rather than
+    # accidentally missing. Widen it only if closure starts lagging by more than a window.
+    MERGED_OMNIBUS_WINDOW = 50
     merged = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "merged",
-                                "--limit", "50", "--search", "head:sparq-omnibus/",
+                                "--limit", str(MERGED_OMNIBUS_WINDOW),
+                                "--search", "head:sparq-omnibus/",
                                 "--json", "number,headRefName,body"]))
     merged_omnibus = [{"number": m["number"], "body": m.get("body", "")}
                       for m in merged

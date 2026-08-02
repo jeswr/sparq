@@ -278,6 +278,14 @@ DEFAULT_MAX_REARMS = 10
 # one makes parse_* yield None for it and arm_block_reason fail CLOSED — the guard can
 # degrade to refusing, never to admitting.
 PR_LIST_FIELDS = "number,state,isDraft,baseRefName,headRefName,labels,author,title"
+# [OPUS-5] sparq-org/sparq#5426 (the #4985 remainder sweep). `gh pr list --limit N`
+# truncates SILENTLY — no error, no warning, no "there was more" flag, just a short list.
+# `list_candidates` ENUMERATES-FOR-A-DECISION: a PR missing from the page is never re-armed
+# and the sweep still reports a candidate count as though it were the whole population.
+# `list_armed` below already cross-checks against a GraphQL `totalCount`; that total covers
+# ALL open PRs and so cannot police this LABEL-FILTERED page, which leaves saturation as
+# the only truncation signal available here.
+CANDIDATE_PAGE_CAP = 1000
 LIVE_QUERY = """query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
@@ -622,7 +630,7 @@ class RearmSweeper:
                     "--label",
                     REVIEW_ATTESTATION,
                     "--limit",
-                    "1000",
+                    str(CANDIDATE_PAGE_CAP),
                     "--json",
                     PR_LIST_FIELDS,
                 ]
@@ -630,6 +638,17 @@ class RearmSweeper:
         )
         if not isinstance(raw, list):
             raise GhError("gh pr list returned a non-list response")
+        # #5426: a SATURATED page is indistinguishable from a complete one, so refuse it
+        # rather than sweep a silently-partial candidate set. Unlike `list_armed`'s
+        # warn-and-continue, this raises: an un-re-armed PR stalls until a human notices,
+        # which is precisely what this sweep exists to prevent.
+        if len(raw) >= CANDIDATE_PAGE_CAP:
+            raise GhError(
+                f"the {REVIEW_ATTESTATION} candidate fetch returned {len(raw)} rows at "
+                f"its --limit {CANDIDATE_PAGE_CAP} cap. gh TRUNCATES SILENTLY, so this "
+                f"snapshot is probably partial and sweeping it would skip the tail of the "
+                f"candidate set with no signal. Raise CANDIDATE_PAGE_CAP deliberately."
+            )
         return [parse_list_pr(item) for item in raw]
 
     def live_state(self, number: int) -> PullRequest:
@@ -3433,6 +3452,37 @@ def self_test() -> None:
     assert sticky_code == 1, (sticky_code, out.getvalue(), err.getvalue())
     assert "arm-failure summary: PR #3011" in out.getvalue(), out.getvalue()
     assert "::warning" not in out.getvalue(), out.getvalue()
+
+    # --- #5426: a SATURATED candidate page must be REFUSED, never swept -----------------
+    # gh returns exactly `--limit` rows whether or not more existed, so a saturated page is
+    # indistinguishable from a complete one. Exercised THROUGH `list_candidates` so
+    # deleting the CALL SITE — not merely the check — goes red.
+    def sweeper_over(count: int) -> RearmSweeper:
+        listing = [fixture(3000 + i) for i in range(count)]
+        return RearmSweeper(
+            "sparq-org/sparq", "main",
+            gh=FakeGh(listing, {int(p["number"]): p for p in listing}),
+            log=lambda _m: None,
+        )
+
+    try:
+        sweeper_over(CANDIDATE_PAGE_CAP).list_candidates()
+        raise AssertionError("a SATURATED candidate page must be refused (#5426)")
+    except GhError as error:
+        assert "TRUNCATES SILENTLY" in str(error), error
+
+    # …and not "always raise": one row UNDER the cap is a complete page.
+    assert (
+        len(sweeper_over(CANDIDATE_PAGE_CAP - 1).list_candidates())
+        == CANDIDATE_PAGE_CAP - 1
+    ), "a page one row under the cap is complete and must be accepted"
+
+    # The cap POLICED must be the cap REQUESTED — a guard of 1000 against a `--limit 200`
+    # fetch can never fire. FakeGh ignores `--limit`, so nothing else pins the two together.
+    pinning = sweeper_over(3)
+    pinning.list_candidates()
+    cand_argv = next(c for c in pinning.gh.calls if c[:2] == ["pr", "list"])
+    assert cand_argv[cand_argv.index("--limit") + 1] == str(CANDIDATE_PAGE_CAP), cand_argv
 
     stuck_self_test()
 

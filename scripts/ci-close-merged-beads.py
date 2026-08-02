@@ -248,18 +248,38 @@ def map_beads_to_open_issues(bead_ids, issues):
     return closable, guarded, unmapped, ambiguous
 
 
-def gh_list_open_issues(repo):
+OPEN_ISSUE_LIST_CAP = 10000
+
+
+def gh_list_open_issues(repo, runner=None):
     """OPEN-issue snapshot (number/body/labels) — the same shape bd-to-issues.fetch_bd_map
-    lists, restricted to open (a closed mapped issue is already the desired end state)."""
-    cmd = ["gh", "issue", "list", "--state", "open", "--limit", "10000",
-           "--json", "number,body,labels"]
+    lists, restricted to open (a closed mapped issue is already the desired end state).
+
+    [OPUS-5] sparq-org/sparq#5426 (the #4985 remainder sweep). The cap stays, but it is now
+    ASSERTED rather than assumed. `gh issue list --limit N` truncates SILENTLY (newest-first,
+    no error, no warning, no "there was more" flag), and this snapshot is enumerated FOR A
+    DECISION: a bead whose issue is missing from the page is classified `unmapped` and its
+    issue is never closed, so the autoclose lane degrades into a no-op for the tail of the
+    backlog while still reporting success. Saturation is the only truncation signal gh
+    offers, so a saturated page is refused outright (same fail-closed shape as
+    scripts/bd-to-issues.py `fetch_issues` and scripts/ready-issues.py `_fetch`)."""
+    cmd = ["gh", "issue", "list", "--state", "open",
+           "--limit", str(OPEN_ISSUE_LIST_CAP), "--json", "number,body,labels"]
     if repo:
         cmd += ["-R", repo]
+    run = runner if runner is not None else subprocess.check_output
     try:
-        raw = subprocess.check_output(cmd, text=True)
+        raw = run(cmd, text=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise SystemExit(f"[{PROG}] ERROR: `gh issue list` failed: {e}")
-    return json.loads(raw or "[]")
+    rows = json.loads(raw or "[]")
+    if len(rows) >= OPEN_ISSUE_LIST_CAP:
+        raise SystemExit(
+            f"[{PROG}] ERROR: the open-issue snapshot returned {len(rows)} rows at its "
+            f"--limit {OPEN_ISSUE_LIST_CAP} cap. gh TRUNCATES SILENTLY, so this snapshot is "
+            f"probably partial — beads whose issues fell off the page would be reported "
+            f"`unmapped` and never closed. Raise OPEN_ISSUE_LIST_CAP deliberately.")
+    return rows
 
 
 def gh_close_issue(number, comment, repo):
@@ -405,6 +425,36 @@ def self_test() -> int:
         check("idempotent re-run sets changed=False", changed2, False)
     finally:
         os.unlink(tmp)
+
+    # --- #5426: a SATURATED open-issue snapshot must be REFUSED, never acted on -----------
+    # gh returns exactly `--limit` rows whether or not more existed, so a saturated page is
+    # indistinguishable from a complete one, and this lane would silently stop closing the
+    # tail of the backlog. Exercised THROUGH `gh_list_open_issues` so deleting the CALL SITE,
+    # not merely the check, goes red. The stub honours `--limit` (one that ignored it would
+    # let a truncating fetch pass) and truncates NEWEST-FIRST, as gh does.
+    asked = []
+
+    def capped_gh(cmd, text=True):
+        asked.append(cmd)
+        n = int(cmd[cmd.index("--limit") + 1])
+        rows = [{"number": i, "body": "", "labels": []} for i in range(1, corpus + 1)]
+        return json.dumps(rows[-n:])
+
+    corpus = OPEN_ISSUE_LIST_CAP + 250          # more open issues exist than the page carries
+    try:
+        gh_list_open_issues("sparq-org/sparq", runner=capped_gh)
+        check("a SATURATED open-issue snapshot is refused (#5426)", "no SystemExit", "SystemExit")
+    except SystemExit as e:
+        check("a SATURATED open-issue snapshot is refused (#5426)",
+              "TRUNCATES SILENTLY" in str(e), True)
+    # A cap of 10000 policed against a `--limit 200` fetch could never fire; pin them together.
+    check("the cap POLICED is the cap REQUESTED",
+          asked[-1][asked[-1].index("--limit") + 1], str(OPEN_ISSUE_LIST_CAP))
+
+    corpus = OPEN_ISSUE_LIST_CAP - 1            # …and the guard is not simply "always raise"
+    check("a snapshot one row under the cap is accepted",
+          len(gh_list_open_issues("sparq-org/sparq", runner=capped_gh)),
+          OPEN_ISSUE_LIST_CAP - 1)
 
     print()
     if fails == 0:

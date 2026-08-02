@@ -325,15 +325,37 @@ def _run(args, check=True):
 MARKER_RE = re.compile(r"<!--\s*bd-id:(sq-[0-9a-z]+(?:\.\d+)*)\s*-->")
 
 
-def fetch_issues(repo):
+ISSUE_LIST_CAP = 10000
+
+
+def fetch_issues(repo, runner=None):
     """Every issue (any state) with the fields the resume + reconcile passes need. ONE LIST call —
     the search index lags badly on this repo, so current state must come from the list API.
 
     `state` is carried for `--verify` only: a dependency edge whose endpoint issue is already
-    CLOSED cannot hold anything, so the reconcile must not report it as a live gap."""
-    out = _run(["gh", "issue", "list", "-R", repo, "--state", "all", "--limit", "10000",
-                "--json", "number,id,body,labels,author,title,state"]).stdout
-    return json.loads(out or "[]")
+    CLOSED cannot hold anything, so the reconcile must not report it as a live gap.
+
+    [OPUS-5] sparq-org/sparq#5426 (the #4985 remainder sweep). The cap stays — this is a
+    `--state all` fetch and the deliberate single-call shape is load-bearing — but it is now
+    ASSERTED rather than assumed. `gh issue list --limit N` truncates SILENTLY (newest-first,
+    no error, no warning, no "there was more" flag), and this snapshot is enumerated FOR A
+    DECISION: it is the resume map. An issue missing from it reads as "never migrated", so
+    `--apply` re-files a bead that already has an issue and `--verify` reports a live gap
+    that does not exist. Saturation is the only truncation signal gh offers, so acting on a
+    saturated page is refused outright — the same fail-closed shape as the `ceiling` check in
+    `fetch_native_blockers` below and in scripts/ready-issues.py `_fetch`."""
+    run = runner if runner is not None else _run
+    out = run(["gh", "issue", "list", "-R", repo, "--state", "all",
+               "--limit", str(ISSUE_LIST_CAP),
+               "--json", "number,id,body,labels,author,title,state"]).stdout
+    rows = json.loads(out or "[]")
+    if len(rows) >= ISSUE_LIST_CAP:
+        raise SystemExit(
+            f"refusing: the issue snapshot returned {len(rows)} rows at its --limit "
+            f"{ISSUE_LIST_CAP} cap. gh TRUNCATES SILENTLY, so the resume map is probably "
+            f"partial — migrating from it would re-file beads whose issues fell off the "
+            f"page. Raise ISSUE_LIST_CAP deliberately.")
+    return rows
 
 
 def _writer_logins(repo, logins, cache=None):
@@ -1459,6 +1481,37 @@ def _self_test():
         re.search(r'_MARKER_BLOCKED_BY = re\.compile\(r"(.+?)"\)',
                   open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "ready-issues.py"), encoding="utf-8").read()).group(1))
+
+    # --- #5426: a SATURATED issue snapshot must be REFUSED, never migrated from ------------------
+    # gh returns exactly `--limit` rows whether or not more existed, so a saturated page is
+    # indistinguishable from a complete one — and this snapshot IS the resume map, so a silently
+    # short one re-files beads whose issues fell off the page. Exercised THROUGH `fetch_issues` so
+    # deleting the CALL SITE, not merely the check, goes red. The stub honours `--limit` (a stub
+    # that ignored it would let a truncating fetch pass) and is asserted to have been ASKED for
+    # ISSUE_LIST_CAP: a cap of 10000 policed against a `--limit 200` fetch could never fire.
+    asked = []
+
+    def capped_gh(argv, check=True):
+        asked.append(argv)
+        n = int(argv[argv.index("--limit") + 1])
+        rows = [{"number": i, "id": f"I_{i}", "body": "", "labels": [],
+                 "author": {"login": "x"}, "title": "t", "state": "OPEN"}
+                for i in range(1, corpus_size + 1)]
+        # newest-first truncation, exactly as `gh issue list --limit N` behaves
+        return subprocess.CompletedProcess(argv, 0, json.dumps(rows[-n:]), "")
+
+    corpus_size = ISSUE_LIST_CAP + 250          # more issues exist than the page can carry
+    try:
+        fetch_issues("sparq-org/sparq", runner=capped_gh)
+        chk("a SATURATED issue snapshot is refused (#5426)", "no SystemExit", "SystemExit")
+    except SystemExit as e:
+        chk("a SATURATED issue snapshot is refused (#5426)", "TRUNCATES SILENTLY" in str(e), True)
+    chk("the cap POLICED is the cap REQUESTED (a guard above the fetch can never fire)",
+        asked[-1][asked[-1].index("--limit") + 1], str(ISSUE_LIST_CAP))
+
+    corpus_size = ISSUE_LIST_CAP - 1            # …and the guard is not simply "always raise"
+    chk("a snapshot one row under the cap is accepted",
+        len(fetch_issues("sparq-org/sparq", runner=capped_gh)), ISSUE_LIST_CAP - 1)
 
     print("bd-to-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1

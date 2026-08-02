@@ -323,6 +323,17 @@ PR_FIELDS = (
     "id,number,state,isDraft,headRefOid,headRefName,baseRefName,labels,autoMergeRequest,"
     "mergeStateStatus,author,title"
 )
+# [OPUS-5] sparq-org/sparq#5426 (the #4985 remainder sweep). `gh pr list --limit N`
+# truncates SILENTLY — no error, no warning, no "there was more" flag, just a short list.
+# This sweep ENUMERATES-FOR-A-DECISION: a PR missing from the page is never armed, and the
+# run still exits 0 reporting success over the PRs it happened to see. gh exposes no
+# truncation signal, so SATURATION is the only one available — hence a cap set far above
+# the live open-PR population plus `assert_not_truncated`, which turns a silent truncation
+# into a visible one. Kept LOCAL rather than lifted into a shared sibling module: a new
+# cross-script import has to be kept in step with this workflow's sparse-checkout manifest
+# (the #3776 failure mode documented at the top of this file), which is not a coupling
+# worth taking on for an eight-line assertion.
+OPEN_PR_PAGE_CAP = 1000
 ENABLE_AUTO_MERGE = """mutation($id:ID!,$oid:GitObjectID!){
   enablePullRequestAutoMerge(input:{pullRequestId:$id,expectedHeadOid:$oid,mergeMethod:SQUASH}){
     pullRequest{number headRefOid autoMergeRequest{enabledAt}}
@@ -453,6 +464,29 @@ class GhError(RuntimeError):
     """A gh command failed."""
 
 
+def assert_not_truncated(rows: list, cap: int, what: str) -> list:
+    """Refuse to act on a `gh --limit` page that came back SATURATED.
+
+    A saturated page is INDISTINGUISHABLE from a complete one — gh returns exactly `cap`
+    rows either way — so without this the sweep silently stops seeing the tail of the open
+    set and degrades invisibly. Raising instead makes the day that happens loud.
+
+    Deliberately a hard failure, not a `::warning`: an un-armed PR sits until a human
+    notices, and this sweep's whole remit is that nobody has to. Contrast
+    scripts/rearm-sweeper.py `list_armed`, which can afford to warn-and-continue because
+    it cross-checks against a GraphQL `totalCount` and its per-PR classifications stay
+    valid independently; no such authoritative total is available for this page.
+    """
+    if len(rows) >= cap:
+        raise GhError(
+            f"the {what} fetch returned {len(rows)} rows at its --limit {cap} cap. gh "
+            f"TRUNCATES SILENTLY, so this snapshot is probably partial and arming from it "
+            f"would skip the tail of the open set with no signal. Raise the cap "
+            f"deliberately (OPEN_PR_PAGE_CAP)."
+        )
+    return rows
+
+
 @dataclass(frozen=True)
 class PullRequest:
     node_id: str
@@ -581,13 +615,14 @@ class AutoArmer:
                     "--state",
                     "open",
                     "--limit",
-                    "1000",
+                    str(OPEN_PR_PAGE_CAP),
                     "--json",
                     PR_FIELDS,
                 ]
             )
         )
-        return [parse_pr(item) for item in raw]
+        return [parse_pr(item)
+                for item in assert_not_truncated(raw, OPEN_PR_PAGE_CAP, "open PR")]
 
     @property
     def scope_description(self) -> str:
@@ -2053,6 +2088,35 @@ def self_test() -> None:
         assert "--pr must be a PR number" in str(error), error
     else:
         raise AssertionError("a non-numeric --pr must be loud, never a whole-repo sweep")
+
+    # --- #5426: a SATURATED open-PR page must be REFUSED, never swept -------------------
+    # gh returns exactly `--limit` rows whether or not more existed, so a saturated page is
+    # indistinguishable from a complete one. Without this the sweep silently stops arming
+    # the tail of the open set and still exits 0. Exercised THROUGH `list_open` (not by
+    # calling `assert_not_truncated` directly) so deleting the CALL SITE — not merely the
+    # function — goes red.
+    def armer_over(count: int) -> AutoArmer:
+        listing = [fixture(number=3000 + i) for i in range(count)]
+        return AutoArmer("sparq-org/sparq", "main", FakeGh(listing), lambda _m: None)
+
+    try:
+        armer_over(OPEN_PR_PAGE_CAP).list_open()
+        raise AssertionError("a SATURATED open-PR page must be refused (#5426)")
+    except GhError as error:
+        assert "TRUNCATES SILENTLY" in str(error), error
+
+    # …and the guard must not be "always raise": one row UNDER the cap is a complete page.
+    assert (
+        len(armer_over(OPEN_PR_PAGE_CAP - 1).list_open()) == OPEN_PR_PAGE_CAP - 1
+    ), "a page one row under the cap is complete and must be accepted"
+
+    # The cap POLICED must be the cap REQUESTED. A guard set to 1000 against a `--limit
+    # 200` fetch can never fire — the page saturates at 200 and the assertion sees 200 <
+    # 1000. FakeGh ignores `--limit`, so this is the only thing pinning the two together.
+    saturating = FakeGh([fixture(number=3000 + i) for i in range(3)])
+    AutoArmer("sparq-org/sparq", "main", saturating, lambda _m: None).list_open()
+    list_argv = next(c for c in saturating.calls if c[:2] == ["pr", "list"])
+    assert list_argv[list_argv.index("--limit") + 1] == str(OPEN_PR_PAGE_CAP), list_argv
 
     print("auto-arm self-test: PASS")
 

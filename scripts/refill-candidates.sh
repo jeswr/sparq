@@ -192,10 +192,23 @@ fi
 # auto-removes finished worktrees, so hundreds pile up; reserving on *every* worktree
 # branch (the old behaviour) reserved every crate and left the frontier spuriously empty
 # (sq-8rpq part 3). The unpushed test mirrors scripts/worktree-gc.sh.
+# [OPUS-5] sparq-org/sparq#5426 (the #4985 remainder sweep). `gh pr list --limit N`
+# truncates SILENTLY — no error, no warning, no "there was more" flag, just a short list.
+# These branches are enumerated FOR A DECISION: a PR missing from the page leaves its
+# surface unflagged, so a candidate already in flight is offered up again. gh exposes no
+# truncation signal, so SATURATION is the only one available — hence a cap far above the
+# live open-PR population plus the assertion below. Distinct from the `|| true`
+# degradation, which covers gh FAILING; this covers gh SUCCEEDING with a capped page.
+PR_LIST_CAP=1000
 CONTENTION_BRANCHES=""
 if command -v gh >/dev/null 2>&1; then
-  CONTENTION_BRANCHES="$(gh pr list --state open --limit 200 --json headRefName \
+  CONTENTION_BRANCHES="$(gh pr list --state open --limit "$PR_LIST_CAP" --json headRefName \
     -q '.[].headRefName' 2>/dev/null || true)"
+  CONTENTION_COUNT="$(printf '%s' "$CONTENTION_BRANCHES" | grep -c '' || true)"
+  [ "${CONTENTION_COUNT:-0}" -lt "$PR_LIST_CAP" ] || die \
+    "open-PR enumeration returned $CONTENTION_COUNT rows at its --limit $PR_LIST_CAP cap.
+   gh TRUNCATES SILENTLY, so the contention set is probably partial and candidates already
+   in flight would be offered again. Raise PR_LIST_CAP deliberately."
 else
   log "gh not found — open-PR contention flags will be omitted (unpushed worktrees still used)."
 fi

@@ -244,11 +244,36 @@ def live_ref_state(ref: str) -> RefState:
     return out
 
 
-def live_counts(repo: str) -> Counts:
+# [OPUS-5] sparq-org/sparq#5426 (the #4985 remainder sweep). `gh issue list --limit N` and
+# `gh pr list --limit N` truncate SILENTLY — no error, no warning, no "there was more" flag,
+# just a short list. `live_counts` is the sharpest case in that sweep because its result IS a
+# COUNT: a truncated page does not merely drop rows, it publishes a WRONG NUMBER on the
+# maintainer-facing START-HERE board — pinned at exactly the cap, and entirely plausible.
+# Saturation is the only truncation signal gh offers, so the caps below sit far above the
+# live populations and are then ASSERTED. Raising is the established shape here: `live_counts`
+# is already the abort-before-anything-is-written step (see its call site).
+LABEL_COUNT_CAP = 1000
+HELD_PR_CAP = 300
+
+
+def _assert_not_truncated(rows: list, cap: int, what: str) -> list:
+    """Refuse a `gh --limit` page that came back SATURATED — it is indistinguishable from a
+    complete one, so publishing its length would ship a silently-capped count as a real one."""
+    if len(rows) >= cap:
+        raise RuntimeError(
+            f"the {what} fetch returned {len(rows)} rows at its --limit {cap} cap. gh "
+            f"TRUNCATES SILENTLY, so this count is probably capped rather than real, and "
+            f"publishing it would put a plausible wrong number on the board. Raise the cap "
+            f"deliberately."
+        )
+    return rows
+
+
+def live_counts(repo: str, gh=_gh) -> Counts:
     """Label populations + the held-PR list, from the LIST API (never the lagging search index)."""
 
     def label_count(label: str) -> int:
-        raw = _gh(
+        raw = gh(
             [
                 "issue",
                 "list",
@@ -259,30 +284,36 @@ def live_counts(repo: str) -> Counts:
                 "--state",
                 "open",
                 "--limit",
-                "1000",
+                str(LABEL_COUNT_CAP),
                 "--json",
                 "number",
             ]
         )
-        return len(json.loads(raw))
-
-    held = json.loads(
-        _gh(
-            [
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "open",
-                "--label",
-                "review:needs-user",
-                "--limit",
-                "300",
-                "--json",
-                "number,mergeable",
-            ]
+        return len(
+            _assert_not_truncated(json.loads(raw), LABEL_COUNT_CAP, f"open `{label}` issue")
         )
+
+    held = _assert_not_truncated(
+        json.loads(
+            gh(
+                [
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "open",
+                    "--label",
+                    "review:needs-user",
+                    "--limit",
+                    str(HELD_PR_CAP),
+                    "--json",
+                    "number,mergeable",
+                ]
+            )
+        ),
+        HELD_PR_CAP,
+        "held PR",
     )
     return Counts(
         needs_user=label_count("needs:user"),
@@ -946,6 +977,45 @@ def _self_test(config_path: Path) -> int:
     status.degrade("boom")
     status.notes.append("a later success")
     assert status.code == EXIT_DEGRADED, "the exit status must be sticky"
+
+    # --- #5426: a SATURATED page must be REFUSED, never published as a count --------------
+    # gh returns exactly `--limit` rows whether or not more existed, so a saturated page is
+    # indistinguishable from a complete one — and here the page LENGTH is the published
+    # number, so a silent truncation prints a plausible wrong count on the board rather than
+    # merely dropping rows. Exercised THROUGH `live_counts` so deleting a CALL SITE, not
+    # merely `_assert_not_truncated`, goes red. The stub honours `--limit` (one that ignored
+    # it would let a truncating fetch pass) and is asserted to have been ASKED for the cap
+    # being policed: a guard of 1000 over a `--limit 300` fetch could never fire.
+    asked: list[list[str]] = []
+
+    def capped_gh(argv: list[str], *, issues: int, prs: int) -> str:
+        asked.append(argv)
+        n = int(argv[argv.index("--limit") + 1])
+        want = issues if argv[0] == "issue" else prs
+        return json.dumps([{"number": i, "mergeable": "MERGEABLE"}
+                           for i in range(1, want + 1)][:n])
+
+    for label, issues, prs, cap in (
+        ("label-count", LABEL_COUNT_CAP + 10, 1, LABEL_COUNT_CAP),
+        ("held-PR", 1, HELD_PR_CAP + 10, HELD_PR_CAP),
+    ):
+        asked.clear()
+        try:
+            live_counts("sparq-org/sparq",
+                        gh=lambda a, i=issues, p=prs: capped_gh(a, issues=i, prs=p))
+            raise AssertionError(f"a SATURATED {label} page must be refused (#5426)")
+        except RuntimeError as exc:
+            assert "TRUNCATES SILENTLY" in str(exc), exc
+        assert any(a[a.index("--limit") + 1] == str(cap) for a in asked), (label, asked)
+
+    # …and not "always raise": pages one row UNDER each cap are complete and must be accepted.
+    counts = live_counts(
+        "sparq-org/sparq",
+        gh=lambda a: capped_gh(a, issues=LABEL_COUNT_CAP - 1, prs=HELD_PR_CAP - 1),
+    )
+    assert counts.needs_user == LABEL_COUNT_CAP - 1, counts
+    assert counts.held_prs == HELD_PR_CAP - 1, counts
+
     print("render-start-here.py --self-test: OK")
     return EXIT_OK
 
