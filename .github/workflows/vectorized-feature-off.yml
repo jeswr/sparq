@@ -66,8 +66,16 @@ on:
   # check-runs on the head SHA plus whatever their in-job scope decisions admit — and
   # a flip is two events, so this halves them. Asymmetric
   # on purpose: `labeled` (applying `ci-full` — force MORE work) is kept; `unlabeled`
-  # only ever narrows, and not re-evaluating leaves the wider, already-computed scope
-  # decision standing until the next push.
+  # only ever narrows, and not re-evaluating that removal leaves the wider,
+  # already-computed scope decision standing until the next SUBSCRIBED event
+  # re-evaluates it. Because this workflow has NO label guard (unlike the four
+  # ci-select callers, where only an escape-label `labeled` event starts real work),
+  # that next event can be ANY later `labeled` event — adding an unrelated
+  # `review:*`/`status:*` label starts both jobs, and the decide step below re-reads
+  # the CURRENT label set, so the scope can narrow before any push. The saving is
+  # FEWER RUNS, not a pinned decision; the direction is still fail-toward-more,
+  # since every event that does fire computes exactly what it would have computed
+  # with `unlabeled` still subscribed.
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review]
   merge_group:

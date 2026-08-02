@@ -65,11 +65,22 @@ on:
   # workflows read are the `ci-full`/`bench-full`/`fuzz-full` toggles, and those only
   # ever force MORE work. `labeled` is the direction that must be honoured promptly
   # (applying `ci-full` must widen the matrix now) and is KEPT. `unlabeled` only ever
-  # NARROWS: removing `ci-full` asks for a smaller matrix, and not re-evaluating
-  # simply leaves the wider, already-computed result standing until the next push. So
-  # this can never skip a job that runs today — it fails toward RUNNING MORE, the same
-  # direction every other guard here points. Pinned by
-  # scripts/tests/test_ci_select_wiring.py::test_label_toggle_reevaluates_selection.
+  # NARROWS: removing `ci-full` asks for a smaller matrix, and not re-evaluating that
+  # removal leaves the wider, already-computed result standing until THE NEXT
+  # SUBSCRIBED EVENT — a push/`synchronize`, a `reopened`/`ready_for_review`, or any
+  # later `labeled` event — re-evaluates it. It is NOT frozen until a push: every
+  # start re-reads the CURRENT label set, so a subsequent label event re-selects
+  # without the removed `ci-full`. Here and in the other three ci-select callers the
+  # #2546 guard narrows that window a lot (only an escape-label `labeled` event starts
+  # real work — e.g. applying `fuzz-full` after `ci-full` was removed), while
+  # `vectorized-feature-off.yml` carries NO label guard, so ANY later label event
+  # re-evaluates its scope there. What dropping `unlabeled` buys is therefore FEWER
+  # RUNS, not a pinned decision — and it is still fail-toward-more, because at any
+  # event that does fire the outcome is identical to what the retained subscription
+  # would have computed from the same label set. So this can never skip a job that
+  # runs today. Pinned by
+  # scripts/tests/test_ci_select_wiring.py::test_label_toggle_reevaluates_selection
+  # (which pins the `types:` wiring — the trigger membership — not the window above).
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review]
   # [OPUS-4.8] Merge queue: re-run the identical PR check-set on the queue's

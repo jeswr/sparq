@@ -371,11 +371,19 @@ belts, and rule 9 is diagnosis + a recorded decision rather than a belt (all in
    `vectorized-feature-off.yml` subscribe to **`labeled` only**. The two directions
    are not symmetric: applying `ci-full`/`bench-full`/`fuzz-full` asks for MORE work
    and is honoured immediately; removing one only ever asks for LESS, and not
-   re-evaluating simply leaves the wider, already-computed result standing until the
-   next push — so nothing that runs today can be skipped by this, and the failure
-   direction stays "runs more than strictly needed".
-   `test_ci_select_wiring.py::test_label_toggle_reevaluates_selection` pins both
-   halves (`labeled` required, `unlabeled` forbidden).
+   re-evaluating that removal leaves the wider, already-computed result standing until
+   the next SUBSCRIBED event re-evaluates it against the CURRENT label set. That is
+   *not* "until the next push": the first four are guarded (only an escape-label
+   `labeled` event past the #2546 guard starts real work, e.g. applying `fuzz-full`
+   after `ci-full` was removed), while `vectorized-feature-off.yml` has no label guard
+   at all, so ANY later `labeled` event — including an unrelated `review:*` label —
+   starts its jobs and re-decides their scope. The saving is fewer RUNS, not a pinned
+   decision; nothing that runs today can be skipped by this (each event that does fire
+   computes exactly what it would have computed with `unlabeled` still subscribed), so
+   the failure direction stays "runs more than strictly needed".
+   `test_ci_select_wiring.py::test_label_toggle_reevaluates_selection` pins the
+   `types:` wiring on both halves (`labeled` required, `unlabeled` forbidden) — the
+   trigger membership only, not the re-evaluation window described above.
 8. **An unsatisfiable hold REDs immediately, with the diagnosis (#3781).**
    [OPUS-5] Rule 4's hold is a WAIT for the `ready_for_review` full-tier re-runs.
    When every sibling has CONCLUDED, a draft-marked select still lacks a successor,

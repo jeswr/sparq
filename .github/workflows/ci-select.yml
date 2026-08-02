@@ -26,10 +26,13 @@
 #     the calling workflows react to `labeled`, so APPLYING the label re-evaluates.
 #     [OPUS-5] #5215: they deliberately do NOT react to `unlabeled` — the two
 #     directions are not symmetric. Applying ci-full asks for MORE work and must be
-#     honoured now; removing it only ever asks for LESS, so not re-evaluating simply
-#     leaves the wider, already-computed selection standing until the next push. That
-#     halves the vacuous label-flip runs (a flip is unlabeled+labeled) while failing,
-#     as always, toward running more. See ci.yml's `pull_request:` note.
+#     honoured now; removing it only ever asks for LESS, so not re-evaluating that
+#     removal leaves the wider, already-computed selection standing until the next
+#     SUBSCRIBED event re-runs this pre-job against the CURRENT label set — a push, or
+#     any later `labeled` event that clears the caller's #2546 guard (e.g. applying
+#     `fuzz-full`). That halves the vacuous label-flip runs (a flip is
+#     unlabeled+labeled) while failing, as always, toward running more. See ci.yml's
+#     `pull_request:` note.
 #   * CI_SELECT_MODE repo variable == the literal "shadow" => report-only rollback
 #     escape hatch (--shadow: compute + report the would-skip set, skip nothing).
 # Any other CI_SELECT_MODE value (incl. unset / "enforce") enforces. Fail-safe is
@@ -163,9 +166,10 @@ jobs:
           # `ci-full` label to a PR forces the FULL matrix (mode=full, nothing
           # skipped). The calling workflows react to `labeled` PR events so applying
           # the label re-runs this pre-job; [OPUS-5] #5215 removing the label no
-          # longer re-runs it (the callers dropped the `unlabeled` type), so the
-          # already-computed FULL selection stands until the next push — the
-          # fail-toward-more-testing direction. On non-PR
+          # longer re-runs it on its own (the callers dropped the `unlabeled` type),
+          # so the already-computed FULL selection stands until the next subscribed
+          # event re-runs this pre-job — a push, or any later `labeled` event past the
+          # caller's #2546 guard — the fail-toward-more-testing direction. On non-PR
           # events there is no pull_request payload, so this evaluates false and the
           # override is inert (non-PR events already resolve to full by construction).
           CI_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-full') }}
