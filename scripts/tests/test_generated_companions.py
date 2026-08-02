@@ -9,6 +9,12 @@
 #       mutation table, plus direct tests here for the boundary cases the table does
 #       not carry (a companion the registry does not sweep, the marker being
 #       case-insensitive, both-halves-required).
+#       The mutation table drives every check through the `check_root` AGGREGATE, and
+#       that aggregate skips check_c2 for any entry whose check_c1 already red — so a
+#       table-only suite can leave an individual check unpinned (delete check_c2 and
+#       the C2 rows still red via a neighbouring C1 offence). test_check_c1/c2/c3_*
+#       therefore call each check FUNCTION directly: deleting or inverting exactly one
+#       of the three reds its own test.
 #   (2) THE LIVE REGISTRY IS TRUE. A gate that only ever runs against fixtures proves
 #       nothing about this repo, so test_live_repo_is_clean runs the real check over
 #       the real checkout, and test_live_registry_declares_every_known_golden pins the
@@ -117,6 +123,66 @@ class TestCheckerHasTeeth(unittest.TestCase):
             "x\n", encoding="utf-8"
         )
         self.assertNotIn("C3 UNREGISTERED", self.repo.codes())
+
+    # ---- one direct test per check function -------------------------------
+    # Each drives the check ALONE, so it pins that check specifically rather than
+    # relying on the aggregate (see the module header). Each asserts both halves:
+    # green on the clean fixture, and the SPECIFIC offence code on each mutation the
+    # check owns — so inverting the check (always-red) fails too, not just deleting it.
+
+    COMPANION = "scripts/tests/demo.golden.txt"
+
+    def entry(self) -> dict:
+        return G.load_registry(self.repo.root)["companions"][self.COMPANION]
+
+    @staticmethod
+    def _codes(offences: list[str]) -> set[str]:
+        return {o.split(":", 1)[0] for o in offences}
+
+    def test_check_c1_reds_on_every_unresolvable_path(self):
+        root, comp = self.repo.root, self.COMPANION
+        clean = self.entry()
+        self.assertEqual(G.check_c1(root, comp, clean), [])
+
+        for label, entry, expect in (
+            ("dead regen recipe", dict(clean, regen="python3 scripts/gone.py"), "C1 REGEN"),
+            ("stale sources glob", dict(clean, sources=["gone/*.yml"]), "C1 SOURCES"),
+            ("stale anchor glob", dict(clean, scope_anchors=["gone/*.yml"]), "C1 SCOPE_ANCHORS"),
+            ("field dropped", {k: v for k, v in clean.items() if k != "trigger"}, "C1 FIELDS"),
+        ):
+            with self.subTest(label):
+                self.assertIn(expect, self._codes(G.check_c1(root, comp, entry)))
+
+        # The companion itself going missing — the entry is untouched, the file is not.
+        (root / comp).unlink()
+        self.assertIn("C1 COMPANION", self._codes(G.check_c1(root, comp, clean)))
+
+    def test_check_c2_reds_on_the_specific_unannotated_anchor(self):
+        root, comp = self.repo.root, self.COMPANION
+        entry = self.entry()
+        self.assertEqual(G.check_c2(root, comp, entry), [])
+
+        self.repo.anchor("one.yml").write_text("# leg, no scope note\n", encoding="utf-8")
+        offences = G.check_c2(root, comp, entry)
+        self.assertIn("C2 ANCHOR", self._codes(offences))
+        # Names the offending file — a decomposer has to know WHICH anchor to annotate.
+        self.assertTrue(any("one.yml" in o for o in offences), offences)
+        # ...and only that one: the annotated sibling must stay green.
+        self.assertFalse(any("two.yml" in o for o in offences), offences)
+
+    def test_check_c3_reds_only_on_an_undeclared_golden(self):
+        root = self.repo.root
+        registry = G.load_registry(root)
+        self.assertEqual(G.check_c3(root, registry), [])
+
+        # A non-golden file beside the goldens is not swept.
+        (root / "scripts" / "tests" / "test_thing.py").write_text("x\n", encoding="utf-8")
+        self.assertEqual(G.check_c3(root, registry), [])
+
+        (root / "scripts" / "tests" / "other.golden.yml").write_text("x\n", encoding="utf-8")
+        offences = G.check_c3(root, registry)
+        self.assertIn("C3 UNREGISTERED", self._codes(offences))
+        self.assertTrue(any("other.golden.yml" in o for o in offences), offences)
 
     def test_malformed_registry_fails_closed(self):
         (self.repo.root / ".github" / "generated-companions.json").write_text(
