@@ -178,12 +178,18 @@ jobs:
   # `scripts/ci_select.py --classify-only` — the IDENTICAL `classify_change()` path the
   # `select` pre-job runs on this event, so the two layers cannot disagree on a resolved
   # diff (no duplicated path lists; ci_select.py stays the single source of truth).
-  # Class docs-only/orchestration-only => rust_changed=false + docker_changed=false
+  # A class on ci_select.py `_INERT_CLASSES` => rust_changed=false + docker_changed=false
   # (sound: every path in the dorny `rust`/`docker` filter sets classifies `engine`, so
   # those classes PROVE both filters would be false — same trust model as the PR-level
   # gate, a pure function of the authoritative diff). Any OTHER class, an unresolvable
   # SHA pair, or ANY classifier error => true/true (fail-safe = full run, cost never
-  # soundness). Gate accounting: the skipped legs report `skipped` and the required
+  # soundness).
+  # [OPUS-5] sq-g25hr widened `_INERT_CLASSES` from {docs-only, orchestration-only} to
+  # also cover `deploy-only` (deploy/** + the deploy lint workflows) and `inert-mixed`
+  # (a diff confined to inert surfaces that SPANS more than one of them — previously
+  # collapsed into `mixed` and therefore paid the full suite). Nothing about the trust
+  # model changed: the class is still computed from the authoritative queued diff, so
+  # one crates/** path taints the batch back to `mixed` => the wildcard arm => full run. Gate accounting: the skipped legs report `skipped` and the required
   # ci-summary gate attributes them to the (green, same-diff) `select` pre-job —
   # attributed skips, never missing legs (scripts/ci_summary_gate.py, sq-fmx4u.3).
   # NOT gated by-class here: vectorized-feature-off.yml stays FULL on merge groups on
@@ -287,8 +293,13 @@ jobs:
             if [ "${ok}" = "true" ]; then
               cls="$(python3 scripts/ci_select.py --classify-only --event merge_group \
                        --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
+              # [OPUS-5] sq-g25hr: the arm lists ci_select.py `_INERT_CLASSES` verbatim
+              # (pinned by scripts/tests/test_ci_select_wiring.py so the two cannot drift).
+              # deploy-only = deploy/** + the deploy lint workflows; inert-mixed = a diff
+              # confined to inert surfaces that SPANS more than one of them (the observed
+              # cloud-deploy batch: manifests + their READMEs + deploy-*.yml).
               case "${cls}" in
-                docs-only|orchestration-only) rust=false; docker=false ;;
+                docs-only|orchestration-only|deploy-only|inert-mixed) rust=false; docker=false ;;
                 *) rust=true; docker=true ;;
               esac
             else

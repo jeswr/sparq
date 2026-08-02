@@ -497,8 +497,15 @@ impl SecretKey {
     ///
     /// Purely additive — it does not change [`Self::sign_commitment_with_status`]
     /// or any existing signature; bearer credentials remain valid. The verifier-side
-    /// fail-closed enforcement is deferred to T3 (sq-z8s7).
+    /// fail-closed enforcement has LANDED (T3/sq-z8s7): given the disclosed holder
+    /// key, `sparq_zk_compose::verifier::bind_holder_pop` recovers this signed
+    /// `holder_pk_digest` from the credential's attestation and rejects a presenter
+    /// whose key digest disagrees (`HolderKeyMismatch`); a relying party opting in
+    /// with `HolderBindingPolicy::require_binding()` additionally rejects a bearer
+    /// credential (`HolderBindingMissing`). Research-grade, NOT externally audited
+    /// (sq-qhy4) — no soundness or privacy property is claimed as achieved.
     // [OPUS-4.8] sq-y464 (HolderPoP T1): holder-bound issuance.
+    // [OPUS-5] sq-sg37 (HolderPoP T8): deferral note retired — T3/sq-z8s7 landed.
     pub fn sign_commitment_with_holder(
         &self,
         commitment: &Fr,
@@ -786,18 +793,25 @@ pub fn status_ref_commit_digest(list_id: &Fr, index_commitment: &Fr, version: u6
 /// version open. Domain-separated and binding under the Poseidon2
 /// collision/hiding assumption.
 ///
-/// # Future in-circuit use (sq-6qe, see `research/zk-statuslist-hide-iri-version.md`)
-/// The deferred fully-hidden circuit recomputes this commitment IN-CIRCUIT from
-/// the SAME private `(list_id, version)` it (a) proves member of the relying
-/// party's accepted `(list, version, status_list_root)` set and (b) freshness-checks
-/// (`version >= public min_version`), exposing it so the verifier byte-matches it
-/// against the ISSUER-SIGNED value — exactly the cross-binding discipline
-/// [`status_index_commitment`] uses for the index. So `list_id` and `version` are
-/// disclosed in NEITHER the signed object NOR any clear field, yet the proof is
-/// bound to a list/version the issuer attested and the relying party accepts.
+/// # In-circuit use today (sq-kndw, see `research/zk-statuslist-hide-iri-version.md`)
+/// The COMPILED fully-hidden member `revoke_hidden_ref_d10_a4` recomputes this
+/// commitment IN-CIRCUIT from the SAME private `(list_id, version)` it (a) proves
+/// member of the relying party's accepted `(list, version, status_list_root)` set
+/// and (b) freshness-checks (`version >= public min_version`), exposing it as a
+/// PUBLIC input so the verifier byte-matches it against the ISSUER-SIGNED value —
+/// exactly the cross-binding discipline [`status_index_commitment`] uses for the
+/// index. So `list_id` and `version` are disclosed in NEITHER the signed object NOR
+/// any clear field, yet the proof is bound to a list/version the issuer attested and
+/// the relying party accepts. The relying-party side is the
+/// `sparq_zk_compose::verifier` `bind_fully_hidden_revocation` stage (run by
+/// `verify_manifest`), which derives the accepted-set root and the epoch floor from
+/// its OWN curated snapshots and rebuilds the public inputs from them, so the prover
+/// chooses neither anchor. Research-grade, NOT externally audited (sq-qhy4) — no
+/// soundness or privacy property is claimed as achieved.
 ///
 /// Maps to a Noir `Poseidon2::hash([DOMAIN, list_id, version, ref_blinding], 4)`.
 // [OPUS-4.8] sq-6qe: hiding (list, version) reference commitment.
+// [OPUS-5] sq-kndw: deferral note retired — the fully-hidden member is compiled.
 pub fn status_ref_commitment(list_id: &Fr, version: u64, ref_blinding: &Fr) -> Fr {
     const SIG_DOMAIN_STATUS_REF_COMMITMENT: u64 = 0x5a4b_5349_475f_5243; // "ZKSIG_RC"
     poseidon2::hash(&[
@@ -819,16 +833,23 @@ pub fn status_ref_commitment(list_id: &Fr, version: u64, ref_blinding: &Fr) -> F
 /// three disclosure modes is possible.
 ///
 /// `ref_commitment` is [`status_ref_commitment`]`(list_id, version, ref_blinding)`
-/// and `index_commitment` is [`status_index_commitment`]`(index, blinding)`. The
-/// verifier (in the deferred sq-6qe path) recomputes this digest from the disclosed
-/// commitments to check the issuer signature; the fully-hidden revocation proof
-/// then cross-binds BOTH commitments in-circuit (the proven-unset index to
-/// `index_commitment`, and the membership-resolved `(list, version)` to
-/// `ref_commitment`), so the disclosure floor is "some accepted (list, version) in
-/// the RP's committed set, version >= public min_version, my hidden index unset".
+/// and `index_commitment` is [`status_index_commitment`]`(index, blinding)`. On the
+/// fully-hidden path (sq-kndw, landed) the verifier recomputes this digest from the
+/// disclosed commitments to check the issuer signature; the compiled
+/// `revoke_hidden_ref_d10_a4` proof then cross-binds BOTH commitments in-circuit (the
+/// proven-unset index to `index_commitment`, and the membership-resolved
+/// `(list, version)` to `ref_commitment`), so the disclosure floor is "some accepted
+/// (list, version) in the RP's committed set, version >= public min_version, my
+/// hidden index unset". That check is the `sparq_zk_compose::verifier`
+/// `bind_fully_hidden_revocation` stage, which also enforces single-use of the
+/// `(ref_commitment, index_commitment)` pair — the pair is stable per ISSUANCE, so
+/// the issuer must re-blind and RE-SIGN per presentation or the pair itself becomes a
+/// cross-presentation linkage handle. Research-grade, NOT externally audited
+/// (sq-qhy4) — no soundness or privacy property is claimed as achieved.
 ///
 /// Maps to a Noir `Poseidon2::hash([DOMAIN, ref_commitment, index_commitment], 3)`.
 // [OPUS-4.8] sq-6qe: fully-committed (list+version+index hidden) status-reference digest.
+// [OPUS-5] sq-kndw: deferral note retired — the fully-hidden path is landed.
 pub fn status_ref_fully_committed_digest(ref_commitment: &Fr, index_commitment: &Fr) -> Fr {
     const SIG_DOMAIN_STATUS_REF_FULL_COMMIT: u64 = 0x5a4b_5349_475f_4643; // "ZKSIG_FC"
     poseidon2::hash(&[
@@ -955,12 +976,15 @@ impl std::error::Error for HolderKeyError {}
 /// confused with the issuer key-set Merkle leaf computed over the same coordinates.
 ///
 /// # Mirrors the in-circuit digest (single source of truth)
-/// The B2 in-circuit holder PoK (deferred — T3/sq-z8s7) recomputes the SAME
+/// The B2 in-circuit holder PoK has LANDED (circuit T5/sq-xqfg, verifier
+/// T6/sq-i1dt): `zk/compose/compose_core/src/holder.nr`'s `holder_key_digest`,
+/// driven by the `holder_pok` member, recomputes the SAME
 /// `Poseidon2([ZKSIG_HK, hpk.x, hpk.y])` from a PRIVATE `hpk` and asserts it equals
 /// the PUBLIC `holder_pk_digest` the verifier folded into the issuer-signed message
 /// (design §2.B/B2). So this host helper and that gadget must agree bit-for-bit; a
 /// drift could not make a wrong holder key verify (the established
-/// issuer/verifier/circuit single-source discipline).
+/// issuer/verifier/circuit single-source discipline). Build the prover-side inputs
+/// with [`in_circuit_holder_witness`].
 ///
 /// # Identity key (fail-closed)
 /// The identity point has no affine coordinates and is not a valid binding key
@@ -1005,21 +1029,34 @@ pub fn holder_key_digest(hpk: &PublicKey) -> Result<Fr, HolderKeyError> {
 /// holder key is bound BY THE ISSUER AT MINT — a presenter cannot substitute its
 /// own key without invalidating the issuer signature.
 ///
-/// # Purely additive — back-compatible (this bead, T1, is signed-message-only)
+/// # Purely additive — back-compatible
 /// This adds a NEW message shape; it does not change [`commitment_message_with_status`]
 /// or any existing signature. A credential issued without holder binding (signed
 /// over the audit-#12 status message) remains a valid bearer credential — its
-/// signature still verifies under [`verify`] over that older message. The
-/// fail-CLOSED enforcement (a verifier REQUIRING the holder-bound message when a
-/// `holder` binding is disclosed, and rejecting a bearer credential where one is
-/// expected) is the VERIFIER's job and is deferred to T3 (sq-z8s7); the manifest
-/// wiring is T2 (sq-h8rg). T1 only adds the signed-message + digest primitives.
+/// signature still verifies under [`verify`] over that older message. Credentials
+/// minted before holder binding existed carry no attested digest, so the verifier
+/// treats them as BEARER — accepted on the sq-cwq registry + nonce-PoP path under
+/// the back-compatible default policy, rejected outright once the relying party
+/// opts into `HolderBindingPolicy::require_binding()`. Re-issuance is the migration
+/// path; an absent binding is never read as a satisfied one.
 ///
-/// Issuer and verifier (and the deferred B2 circuit) all recompute this message
-/// identically from the disclosed `(C(G), salt, status_ref, holder_pk_digest)`, so
-/// a drift cannot make a wrong holder binding verify (single source of truth,
-/// matching the audit-#12 message family).
+/// # End-to-end today (the enforcement side, for orientation)
+/// The fail-CLOSED enforcement this message enables now exists in
+/// `sparq-zk-compose`: `manifest::AttestedHolderBinding` carries the attested
+/// digest (T2/sq-h8rg), `verifier::bind_holder_pop` cross-checks a DISCLOSED holder
+/// key against it (B1, T3/sq-z8s7 — `HolderKeyMismatch` / `HolderBindingMissing`
+/// under `HolderBindingPolicy::require_binding()`), and `verifier::bind_holder_pok`
+/// binds an in-circuit `holder_pok` proof to the same digest so the key stays
+/// HIDDEN (B2, T5/sq-xqfg + T6/sq-i1dt, opt in with
+/// `HolderBindingPolicy::require_in_circuit_pok()`). Research-grade, NOT externally
+/// audited (sq-qhy4) — no soundness or privacy property is claimed as achieved.
+///
+/// Issuer, verifier, and the B2 circuit all recompute this message identically from
+/// the disclosed `(C(G), salt, status_ref, holder_pk_digest)`, so a drift cannot
+/// make a wrong holder binding verify (single source of truth, matching the
+/// audit-#12 message family).
 // [OPUS-4.8] sq-y464 (HolderPoP T1): holder-bound commitment message (new ZKSIG_C4 tag).
+// [OPUS-5] sq-sg37 (HolderPoP T8): T2/T3/T5/T6 deferral notes retired — all landed.
 const SIG_DOMAIN_COMMITMENT_HOLDER: u64 = 0x5a4b_5349_475f_4334; // "ZKSIG_C4"
 pub fn commitment_message_with_holder(
     commitment: &Fr,
@@ -1046,14 +1083,18 @@ pub fn commitment_message_with_holder(
 /// the PoP is bound to the relying party's fresh challenge).
 ///
 /// # Scope (honest)
-/// This binds possession of the holder KEY to the verifier's challenge. It does
-/// NOT, on its own, bind that key to a SPECIFIC credential — that requires an
-/// issuer-attested holder binding (the issuer signing the holder key into the
-/// credential), which is a documented deferral (see
-/// `sparq_zk_compose::verifier::bind_holder_pop`). The relying party anchors the
-/// holder key in an EXTERNAL holder registry (mirroring the issuer key-set `K`),
-/// so an absent/untrusted/forged PoP fails closed.
+/// This message binds possession of the holder KEY to the verifier's challenge. It
+/// does NOT, on its own, bind that key to a SPECIFIC credential — that is the job of
+/// the issuer-attested holder binding ([`commitment_message_with_holder`] /
+/// [`SecretKey::sign_commitment_with_holder`], sq-y464), which is no longer a
+/// deferral: `sparq_zk_compose::verifier::bind_holder_pop` runs BOTH checks, so the
+/// combined `HolderPop` gate proves "possession, freshly, of the key THIS issuer
+/// bound to THIS credential" and rejects trusted holder A presenting trusted holder
+/// B's credential. The relying party still anchors the holder key in an EXTERNAL
+/// holder registry (mirroring the issuer key-set `K`), so an absent/untrusted/forged
+/// PoP fails closed.
 // [OPUS-4.8] sq-cwq: holder proof-of-possession message (challenge-bound).
+// [OPUS-5] sq-sg37 (HolderPoP T8): deferral note retired — the binding is enforced.
 pub fn holder_pop_message(challenge: &Fr) -> Fr {
     const SIG_DOMAIN_HOLDER_POP: u64 = 0x5a4b_5349_475f_4850; // "ZKSIG_HP"
     poseidon2::hash(&[Fr::from(SIG_DOMAIN_HOLDER_POP), *challenge])

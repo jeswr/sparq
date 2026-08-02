@@ -296,7 +296,12 @@ Materialize the authorization view from the access-control documents, then enfor
   is, never a verdict, so it is safe to emit on a deny.
 - `AclStatus` — the **typed fail-closed load/error contract** (FR-6, sq-snopa.2): a server
   maps `Resolved` (authoritative — `allow` is the real verdict; a deny is **403**), `NoAcl`
-  (no governing ACL anywhere up the chain — definitive **403/401**), `Unloaded` (a governing
+  (no governing ACL anywhere up the chain — definitive **403**; `AclStatus` carries no
+  authentication state, so the shipped `solid-authz` shell emits that 403 for anonymous
+  requesters too. On an LDP resource-serving path that is a **known non-conformance**, not a
+  permitted stricter choice: Solid requires **401** + `WWW-Authenticate` when a request lacks
+  the credentials a protected resource needs, so a resource server must add that lane from
+  its own authentication state), `Unloaded` (a governing
   ACL exists but `materialize_*` was never run — a **retryable 503**), and `Transient`
   (a typed transient error, e.g. a malformed resource IRI — a **retryable 503**).
   `AclStatus::is_retryable()` separates the 503s from the definitive denies. **It never
@@ -859,9 +864,14 @@ single-use) plus the machine-reasonable **assurance / audit-status axis** that t
 `crates/sparq-trust/ontologies/zkp-sparql/`) lacks — **under the same
 `https://w3id.org/zkp-sparql/sec-prop#` namespace** (extend, do not fork; design
 `research/security-properties-ontology-design.md` §4.1). It is **data + Rust constants only** (a
-`const &str` registry + the canonical [`secprop-ext.ttl`](../../crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl),
+`const &str` registry + the canonical [`secprop-ext.ttl`](../../crates/sparq-secprop-vocab/ontologies/secprop-ext.ttl),
 pinned together by a drift test) — it is **not** an ODRL profile or a per-method annotation graph
-(those are the downstream Phase 3/4 beads `sq-bevd3`/`sq-uor3g`). The Phase 2 **N3 admissibility
+(those are the downstream Phase 3/4 beads `sq-bevd3`/`sq-uor3g`). Since
+[#3705](https://github.com/jeswr/sparq/issues/3705) the registry, the Turtle and that one drift
+test live in the **dependency-free `sparq-secprop-vocab` leaf crate**, and `sparq_trust::secprop`
+re-exports it — so the import path above is unchanged, and `sparq_policy::secprop`'s `DIM_*` and
+`sparq_zk::secprop`'s `secx:` terms are now aliases of the SAME constants rather than three copies
+kept in step by cross-package `include_str!` reads. The Phase 2 **N3 admissibility
 reasoner** over this vocabulary now ships — see below.
 
 The registry also names the three **vendored** (not minted) dimension IRIs the estate uses as
@@ -871,8 +881,12 @@ and are re-asserted in `secprop-ext.ttl` as `sec-prop:SecurityProperty` subjects
 IRI, label and type verbatim (issue #3441). That re-assertion adds **no** type the vendored source
 lacks — in particular they are **not** typed `owl:ObjectProperty` as the *minted* `secx:` dimensions
 are — so the extension still mints and refines nothing on his terms (extend, do not fork). Their
-purpose is to make the file self-contained for the `secx:property` range and to let the cross-crate
-dimension-IRI drift guards (`sq-mgxz8`) check subject presence directly.
+purpose is to make the file self-contained for the `secx:property` range and to let the
+dimension-IRI drift guards (`sq-mgxz8`) check subject presence directly. Since #3705 those guards
+are ordinary crate-edge checks against `sparq_secprop_vocab::ALL_SECPROP_IRIS` — in
+`sparq_policy::secprop` for the ODRL profile's dimensions, and in `sparq_zk::secprop` for the
+annotation graph's — so neither reads another package's files, and the `VENDORED_SEC_PROP_DIMS`
+exemption list #3441 made redundant is retired.
 
 The **assurance axis is the honesty mechanism**: `Proven ⊐ Claimed ⊐ Conjectured`, one axis
 orthogonal to every property. The **default** assurance for a sparq-asserted ZK property is

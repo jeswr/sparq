@@ -227,6 +227,12 @@ whose name begins with an uppercase letter, so a lowercase root-level target wou
 survive the preprocessor and 404 under the guide mount. Widening that pattern is a
 one-line change in a `ci`-area file and is left to the follow-up.
 
+**Update — that follow-up has landed (issue #5021).** `_ROOT_MD` now matches root-level
+markdown of ANY case, the README link named above is back to its repo-relative form, and
+the preprocessor carries a hermetic `--self-test` (run in `docs-quality.yml`'s HARD
+quick-gates job on every PR) whose lowercase-root-doc case reds if the pattern is
+narrowed again.
+
 ## 9. Gate-coverage gaps found while writing this
 
 Recorded here because they are adjacent to the anti-drift mandate and are not otherwise

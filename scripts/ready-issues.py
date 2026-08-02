@@ -314,6 +314,41 @@ def partition_path(key, roots=None):
          change, and it leaves every single-segment key (`upstream`, `cli`, `docs`, ...) exactly
          where it is today — those name nothing narrower, so they cannot be under-serialising.
 
+    [OPUS-5] sparq#5128 — WHAT RULE 3'S BUCKET ACTUALLY HOLDS, and why a not-yet-landed crate is
+    deliberately left in it. `keys_conflict` compares paths SEGMENT-WISE, never as strings, so
+    `("sparq",)` and `("sparq-core",)` are DISJOINT tuples: a key naming a crate that exists only
+    on a PR branch resolves to `("sparq",)` and collides with NO crate the tree already knows. The
+    bucket holds exactly the keys the tree cannot place — other not-yet-landed crates, and typos.
+    The reading that it "conflicts with every `sparq-*` key" is true only of the DEGENERATE tree
+    (`DegeneratePartitionRoots`), where rule 2 fires for nothing and everything falls to rule 3;
+    that case is refused before it can be planned, not resolved here.
+
+    The residual — two not-yet-landed crates sharing the bucket — is KEPT, and the proposal to
+    promote such a key to its own root when its PR adds `crates/<name>/Cargo.toml` is DECLINED,
+    for two independent reasons:
+      * The bucket is the ONLY thing serialising such a pair, so freeing the key is the
+        corrupting direction. NOT the reason first recorded here, which was wrong and is left
+        stated so it is not re-derived: nothing ENFORCES that a PR adding
+        `crates/<x>/Cargo.toml` also registers `<x>` in the root `[workspace] members`.
+        `gate-new-crate.py` (G1) requires a README, plus a benchmark and a `SKILL.md` where
+        applicable, and never membership; `assert_workspace_tree` checks only the DECLARED ->
+        disk direction (a declared member with no directory, plus an empty tree under a glob),
+        so an unregistered `crates/<x>/` directory passes both. Registering it is convention.
+        What IS enforced runs AGAINST the promotion. `pr-area-labels.py::derive_areas` is
+        all-or-nothing: `crates/<x>/...` attributes to an `area:<x>` label that does not exist
+        while the crate is unlanded unless one was hand-created, a single unattributable path
+        makes the whole PR `unresolved`, and an unresolved PR derives NO labels — not even the
+        `area:workspace` its root-manifest edit would otherwise map to. Nor does failing closed
+        widen it instead: `_reserving_packages` gives an unattributable OCCUPANT nothing to
+        reserve (only a no-area CANDIDATE goes to `__global__`). Promoting the keys would
+        therefore dispatch two workers onto a root manifest
+        they both intend to edit, with nothing left to hold them apart; the shared bucket
+        over-reserves instead, which is the safe direction.
+      * It is not expressible in the published contract. `--dump-partitions` exports a pure
+        key -> path mapping for the registry's second occupancy leg; a rule whose answer depends
+        on WHICH PR carries the key would resolve one way for an issue and another for a PR, and
+        the two legs would disagree — the drift sparq#4929 reports rather than a fix for it.
+
     The path is currently never deeper than one element ON PURPOSE: a sub-region collapses INTO its
     container rather than becoming a child of it. research/crate-region-parallelism.md §8 rejects
     intra-crate region partitioning as a parallelism lever (14.5% ceiling), and a two-level path
@@ -1235,6 +1270,36 @@ def _self_test():
           keys_conflict("upstream", "upstream-noir"), True)
     check("single-segment unknown key keeps its own partition",
           partition_path("deps"), ("deps",))
+    # [OPUS-5] sparq#5128 — RULE 3'S BUCKET, PINNED. The report that a not-yet-landed crate's key
+    # "conflicts with EVERY `sparq-*` key" reads the path as a STRING; `keys_conflict` compares it
+    # SEGMENT-WISE, so it collides with nothing the tree already recognises. Revert the comparison
+    # to a string prefix and the first row goes red.
+    check("a not-yet-landed crate key does NOT collide with a landed crate",
+          (partition_path("sparq-foo"),
+           keys_conflict("sparq-foo", "sparq-core"),
+           keys_conflict("sparq-foo", "sparq-server-http")),
+          (("sparq",), False, False))
+    check("...but two not-yet-landed crate keys DO share rule 3's bucket",
+          keys_conflict("sparq-foo", "sparq-bar"), True)
+    # ...and that residual is KEPT because the bucket is the only thing serialising such a pair.
+    # Their PRs cannot be relied on to co-hold a narrower reserving partition instead: a
+    # `crates/<x>/...` path attributes to an `area:<x>` label that does not exist while the crate
+    # is unlanded, `derive_areas` is all-or-nothing, so such a PR derives NOTHING — not even the
+    # `area:workspace` its root-manifest edit would map to — and an unattributable occupant
+    # reserves nothing. Promote the keys and the pair below dispatches together onto a manifest
+    # both would edit; leave them in the bucket and only one goes.
+    check("two not-yet-landed crate keys serialise on rule 3's bucket",
+          [i["number"] for i in compute_ready(
+              [iss(84, R + ["priority:P0", "area:sparq-foo"]),
+               iss(85, R + ["priority:P1", "area:sparq-bar"])], conflict_log=quiet)],
+          [84])
+    # ...and it is the SHARED bucket doing that, not the priority ordering: give the same pair
+    # keys the tree DOES recognise and both dispatch, so the row above is not vacuous.
+    check("...disjoint landed-crate keys in the same pair dispatch together",
+          [i["number"] for i in compute_ready(
+              [iss(84, R + ["priority:P0", "area:sparq-core"]),
+               iss(85, R + ["priority:P1", "area:sparq-engine"])], conflict_log=quiet)],
+          [84, 85])
     # ---------------------------------------------------------------------------------------
     # NATIVE dependency edges (the maintainer's own triage action). Every row below is written to
     # go RED if the native read is deleted, if the union is turned into a replacement, or if the

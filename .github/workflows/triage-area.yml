@@ -30,14 +30,23 @@
 #   * NEVER INVENTS A LABEL — every produced area is checked against the repo's LIVE label
 #     list and an unknown one is a hard error (exit 2), never a `gh label create`.
 #   * NO BARE UNPARK — `needs:area` is removed only in the same call that adds >=1 real
-#     `area:` label, so the two can never drift into "unparked with no partition".
+#     `area:` label, so the two can never drift into "unparked with no partition"; and
+#     since #5003 the unpark is decided PER ISSUE, so an issue that was never parked can
+#     only ever GAIN `area:` labels.
 #   * IDEMPOTENT — an issue that already carries an `area:` is a no-op, so re-running never
 #     re-decides settled work and a timed-out run resumes cleanly on the next tick.
+#
+# REACH (#5003). The sweep's queue is every OPEN issue with NO `area:` label, fetched with
+# real cursor pagination — not the `--label needs:area` query it started with, which could
+# see only the issues triage.py had PARKED and silently stopped at 1000 rows. The park is
+# one source of area-less issues, not the class: an issue the event triager never ran on is
+# equally area-less and equally undispatchable. Expect the scanned/left counts below to be
+# an order of magnitude larger than the park population #3816 measured against.
 #
 # THE UNATTRIBUTABLE CLASS GETS A REPORT, NOT SILENCE. #3816's third finding is that the
 # issues no classifier can attribute get no label, no report and no route back to a human —
 # they are simply re-skipped forever. The final step therefore ALWAYS writes the counts and
-# the full left-parked list to the run summary, whether or not anything was classified, so
+# the full unattributed list to the run summary, whether or not anything was classified, so
 # the residue is a visible number a maintainer can act on rather than an absence.
 #
 # GATING POSTURE: NOT A GATE. schedule + workflow_dispatch only — it never runs on a PR head
@@ -108,12 +117,12 @@ jobs:
         run: |
           set -euo pipefail
           log="$RUNNER_TEMP/triage-area.log"
-          # The script's own tally line: "-- N classified, M left parked (...), K scanned".
+          # The script's own tally line: "-- N classified, M left unattributed (...), K scanned".
           summary=$(sed -n 's/^-- //p' "$log" | tail -1)
           summary=${summary:-'no tally line — the classifier produced no report'}
           {
             printf '### needs:area classifier\n\n%s\n\n' "$summary"
-            printf 'The issues below carry no confident evidence in the checked-in rule table, so they stay parked `needs:area` and remain undispatchable until a human attributes them or a rule is added. This list is the route back to a maintainer that #3816 found missing.\n\n'
+            printf 'The issues below carry no confident evidence in the checked-in rule table, so they gain no `area:` label and remain undispatchable until a human attributes them or a rule is added. Since #5003 this list spans every area-less open issue, not only the ones parked `needs:area`. It is the route back to a maintainer that #3816 found missing.\n\n'
             sed -n 's/^   LEFT /- /p' "$log"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice title=needs:area residue::${summary}"
+          echo "::notice title=area-less residue::${summary}"

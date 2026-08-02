@@ -1,6 +1,8 @@
 <!-- [OPUS-5] sq-iigf — GitHub Pages cutover record. Docs only.
      Rewritten for #5530: the original runbook described a pre-cutover state that no
-     longer exists, and recommended a rollback that would now take the live site down. -->
+     longer exists, and recommended a rollback that would now take the live site down.
+     Updated for #5022: the mdBook guide is no longer an open question — pages.yml
+     builds it and overlays it into the same artifact at /guide/. -->
 
 # GitHub Pages: cutover record
 
@@ -17,9 +19,11 @@
 
 ## Provenance of the claims below
 
-Verified on 2026-08-01 by reading the **in-repo workflows** at commit `83b592c2` —
-**not** by probing the live site or the Pages API. The file tree can only tell you
-what the producer *would* publish, not what the Pages service is currently serving.
+Verified on 2026-08-01 by reading the **in-repo workflows** at commit `83b592c2`,
+plus the `/guide/` mount added by
+[#5022](https://github.com/sparq-org/sparq/issues/5022) and merged in here — **not**
+by probing the live site or the Pages API. The file tree can only tell you what the
+producer *would* publish, not what the Pages service is currently serving.
 
 So read the two kinds of claim below differently:
 
@@ -48,10 +52,11 @@ Established by the workflow source (artifact class):
 
 - **The only Actions Pages producer is
   [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).** It builds the
-  Next.js feature-showcase, overlays the benchmark dashboards and the operational GUI,
-  runs an artifact smoke check, and deploys via `actions/deploy-pages`. (The original
-  document's central claim — that `.github/workflows/` contained *no* Actions Pages
-  producer — has not been true for a long time.)
+  Next.js feature-showcase, overlays the benchmark dashboards, the operational GUI and
+  the mdBook guide, runs an artifact smoke check, and deploys via
+  `actions/deploy-pages`. (The original document's central claim — that
+  `.github/workflows/` contained *no* Actions Pages producer — has not been true for a
+  long time.)
 - **The artifact is built for the custom domain `https://sparq.jeswr.org/`**,
   root-relative (`basePath ''`): [`site/public/CNAME`](../site/public/CNAME) is copied
   to `out/CNAME` and the smoke step fails the run if it is missing or wrong. The old
@@ -69,13 +74,14 @@ before acting):
   and the live site would still be served from a branch — a state that changes which
   advice below applies.
 
-The single artifact assembles three things:
+The single artifact assembles four things:
 
 | Path | Contents | Source |
 |---|---|---|
 | `/` | Next.js feature-showcase + papers | `site/`, built in `pages.yml` |
 | `/dev/bench*/` | benchmark dashboards | overlaid from the `benchmark-data` branch |
 | `/app/` | operational GUI workbench | `gui/app`, built in `pages.yml` |
+| `/guide/` | mdBook guide | `book/`, built in `pages.yml` via `scripts/build-guide.sh` |
 
 ### The dashboards are folded in, not served from a branch
 
@@ -96,6 +102,25 @@ was descoped and its crons retired in
 exist on the branch. The smoke check asserts `dev/bench-ec2` is in the artifact **iff**
 it exists on the branch, rather than hard-failing every deploy on its absence.
 
+### The mdBook guide is overlaid at `/guide/`
+
+Pages has one deploy slot and `pages.yml` owns it, so the guide cannot ship from its
+own workflow. Per
+[`research/docs-site-single-sourcing-anti-drift.md`](../research/docs-site-single-sourcing-anti-drift.md)
+§7 option (a), `pages.yml` **builds** the guide with
+[`scripts/build-guide.sh`](../scripts/build-guide.sh) and overlays the render into the
+same artifact at `out/guide/`, exactly as it overlays `dev/bench*` and `/app`. The
+root stays the Next.js showcase; guide-at-root (option (b)) and a second deploy
+workflow (option (c)) are rejected there with reasons. Self-hosting `cargo doc` output
+was dropped in the same record in favour of linking docs.rs, so it is not part of the
+artifact.
+
+[`.github/workflows/docs.yml`](../.github/workflows/docs.yml) keeps its build-**validate**
+role and still ships **no** deploy job. Both lanes call the same
+`scripts/build-guide.sh` and pin the same mdBook version, so what PRs validate is what
+ships; [`scripts/check-guide-publish-wiring.py`](../scripts/check-guide-publish-wiring.py)
+gates that wiring end to end.
+
 ### Chart.js is vendored
 
 The original document listed "vendor Chart.js off the CDN" as an outstanding
@@ -114,6 +139,7 @@ and the `dev/` dashboard tree, so:
 
 - the feature-showcase root, the papers and every `/surface/*` route would `404`;
 - the operational GUI at `/app/` would `404`;
+- the mdBook guide at `/guide/` would `404`;
 - only the dashboards under `/dev/bench*/` would survive.
 
 There is no longer a scenario in which that is the recovery action. This holds
@@ -138,23 +164,20 @@ tempted to re-specify them here, edit the workflow instead:
 | Every `dev/bench*` series is folded in | glob-fold assertion in the overlay step |
 | Core dashboard files present, `data.js` non-empty | smoke step |
 | GUI lands at `/app/` with the right asset prefix | overlay assertion in `pages.yml` |
+| Guide lands at `/guide/`, `404.html` carries the matching `<base href>` | overlay + smoke assertions in `pages.yml` |
+| Guide validate and guide publish stay on one builder | `scripts/check-guide-publish-wiring.py` |
 | Dashboard assets stay wired into the published set | `scripts/check-dashboard-publish-wiring.py` |
 | Built site has no broken internal links | `scripts/check-site-links.sh` (lychee, pre-deploy) |
 
-## The one thing still open
+## Nothing from the original prerequisite list is still open
 
-**Where the mdBook guide is published.** [`.github/workflows/docs.yml`](../.github/workflows/docs.yml)
-builds and validates the guide but deliberately ships **no deploy job** — a second
-`actions/deploy-pages` would race `pages.yml` for the single slot and last-writer-wins
-over the showcase root. The `sq-w9sr` design placed the guide at the site root, which
-predates the showcase and is no longer viable. Reconciling that is tracked as the open
-product decision `sq-svtt` (guide at a `/guide/` sub-path vs. at the root vs. a merged
-deploy); mounting it at `/guide/` on the same artifact is implemented by
-[#5022](https://github.com/sparq-org/sparq/issues/5022), which had not landed as of the
-commit above — `pages.yml` overlays no `guide/` tree.
-
-Until that lands, the guide is a CI artifact only, not a published page. This is the
-sole remaining item from the original prerequisite list.
+The last outstanding item was **where the mdBook guide is published**. The `sq-w9sr`
+design placed it at the site root, which predates the showcase and is no longer
+viable; the product decision tracked as `sq-svtt` is settled by
+[#5022](https://github.com/sparq-org/sparq/issues/5022) in favour of a `/guide/`
+sub-path on the same artifact, implemented as described in
+[The mdBook guide is overlaid at `/guide/`](#the-mdbook-guide-is-overlaid-at-guide).
+The guide is a published page, not a CI artifact only.
 
 ## See also
 

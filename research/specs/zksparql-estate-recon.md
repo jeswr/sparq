@@ -60,7 +60,7 @@ guarantee under an adversarial prover.
 
 - **Security-properties vocabulary**: VENDORED `sec-prop` 8 properties
   (`crates/sparq-trust/ontologies/zkp-sparql/vocab/sec-prop.yaml.ld`) EXTENDED by
-  `secprop-ext.ttl` (`crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl`):
+  `secprop-ext.ttl` (`crates/sparq-secprop-vocab/ontologies/secprop-ext.ttl`):
   `ZeroKnowledgeType`, `Soundness`, `Completeness`, `Hiding`, `Binding`, `Anonymity`, `Setup`,
   `Interactivity`, `SelectiveDisclosure`, `SingleUse` plus `AssuranceLevel`, `AuditStatus`,
   `Assumption`, `PropertyScope` axes; Rust constants `crates/sparq-trust/src/secprop.rs`.

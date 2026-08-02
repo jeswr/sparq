@@ -43,14 +43,20 @@ dual-leaf = []
 # (no `Proven` on a positive property while sq-qhy4 is open; completeness; the
 # source-layer-only non-transfer rule). OFF by default: the default build is
 # byte-unchanged and the `secprop` module is compiled out. Pulls in the `oxttl`
-# Turtle parser to load the static graph. The `secx:` IRIs the graph references are
-# owned by sparq-trust's `secprop-vocab` vocabulary; sparq-trust depends on sparq-zk
-# (so sparq-zk CANNOT depend on sparq-trust — that is a cycle), therefore the
-# `secx:` constants this module needs are declared LOCALLY and a drift test pins them
-# to the canonical published `secprop-ext.ttl` via `include_str!` (a compile-time
-# file read, NOT a crate edge). RECORDS claims + their epistemic basis; asserts NO
-# soundness/privacy property (estate NOT externally audited, sq-qhy4).
-secprop-annotations = ["dep:oxttl"]
+# Turtle parser to load the static graph.
+#
+# [OPUS-5] sq-3705: the `secx:` IRIs the graph references now come from the
+# ZERO-dependency `sparq-secprop-vocab` leaf, which owns the constants, the canonical
+# `secprop-ext.ttl` and the single drift test. They used to be redeclared LOCALLY and
+# pinned by an `include_str!("../../sparq-trust/…")` — sparq-trust depends on sparq-zk,
+# so importing them back would have been a cycle — and that cross-package compile-time
+# read ALSO broke `cargo package` file inclusion for this crate. The leaf sits BELOW
+# sparq-trust, sparq-policy and sparq-zk alike, so the edge is cycle-free and pulls in
+# no transitive dependency (the leaf has none).
+#
+# RECORDS claims + their epistemic basis; asserts NO soundness/privacy property (estate
+# NOT externally audited, sq-qhy4).
+secprop-annotations = ["dep:oxttl", "dep:sparq-secprop-vocab"]
 # [OPUS-4.8] sq-9c5e: the OFF-circuit W3C Verifiable-Credential ingest BRIDGE
 # (`vc_bridge` module) — verify a source VC's W3C Data-Integrity proof
 # (`eddsa-rdfc-2022` / `ecdsa-rdfc-2019`) at the HOST (off-circuit, fail-closed),
@@ -132,6 +138,16 @@ blake3 = "1"
 # (`ontologies/secprop-methods.ttl`). Same `oxttl` the rest of the workspace uses
 # (sparq-core / sparq-trust). The default build pulls neither it nor the module.
 oxttl = { workspace = true, optional = true }
+
+# [OPUS-5] sq-3705 — OPTIONAL, `secprop-annotations` feature only. The shared
+# `sec-prop:`/`secx:` IRI constants + the canonical `secprop-ext.ttl` they are pinned
+# to. A ZERO-dependency LEAF crate deliberately placed BELOW sparq-trust (the vocabulary's
+# declared owner, which depends on THIS crate), so importing the constants is finally
+# cycle-free — replacing the local copies + the cross-package
+# `include_str!("../../sparq-trust/…")` drift test that broke `cargo package` here. It has
+# no dependencies of its own, so the opt-in build grows by a `const &str` table only and
+# the default build pulls nothing.
+sparq-secprop-vocab = { path = "../sparq-secprop-vocab", optional = true }
 
 # [OPUS-4.8] sq-u8a8 (epic sq-toze / from side-channel analysis sq-egx6, gap
 # CR-G5): secret-memory hygiene + constant-time-equality PRIMITIVES for the
