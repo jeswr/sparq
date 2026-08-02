@@ -359,8 +359,13 @@ def keys_conflict(a, b, roots=None):
 # simply do not OCCUPY: an in-flight PR or in-progress issue holding one of them no longer blocks
 # a new worker from being dispatched onto an issue that declares it. See `_reserving_packages`.
 #
-# THE MEASURED BASIS (live sparq snapshot, open non-parked PRs holding each area, counting
-# holder PAIRS that share at least one changed file):
+# THE MEASURED BASIS (2026-07-31 live sparq snapshot): cursor-paginate all OPEN PRs, exclude
+# `review:parked`, select holders by their `area:{ci,docs,deps}` labels, and read each holder's
+# complete changed-file list through the GraphQL PR `files` connection. A failed read must be
+# reported by PR number and excluded; genuinely empty lists remain holders. The 2026-07-31 record
+# did not preserve any failed-read numbers, so it supports no stronger claim about them. Holder
+# counts were 30 ci / 36 docs / 7 deps. The table counts all nCr holder pairs and the pairs sharing
+# at least one changed file:
 #
 #     area          holder pairs   sharing >=1 file
 #     area:ci            435         40   ( 9.2%) -> exempt
@@ -370,22 +375,21 @@ def keys_conflict(a, b, roots=None):
 #     crate areas          -          -   (57.1%) -> NOT exempt
 #                                                    (research/crate-region-parallelism.md §4)
 #
-# HONESTY NOTE: an earlier table reported 5% for `ci` and 3% for `docs`. Its pair counter dropped
-# every PR whose changed-file list was empty, conflating a failed read (which must be excluded) with
-# a genuinely empty PR (which intersects nothing but still belongs in the denominator). The larger
-# pair counts above retain genuinely empty PRs and exclude only named failed reads; every count is
-# the full nCr pair count for its holder set.
+# HONESTY NOTE: an earlier 2026-07-28 snapshot reported 5% for `ci` and 3% for `docs` from holder
+# sets of 16 ci / 12 docs / 3 deps. The larger counts above principally reflect re-measurement on
+# the later, larger snapshot; retaining genuinely empty PRs is a correctness fix to the denominator,
+# not an explanation for the larger numerators. Both snapshots support the same exemption decision.
 #
 # So the reservation on `ci`/`docs` was refusing most of a partition-starved frontier to prevent a
 # single-digit-percent file collision, while `deps` and the crate areas are serialising real overlap
 # and stay.
-# Measured counterfactual on that same snapshot, through this engine: baseline frontier 1;
+# Measured counterfactual on the 2026-07-28 snapshot, through this engine: baseline frontier 1;
 # `ci` non-reserving 2; `ci`+`docs` non-reserving 3; adding `deps` would give 4 (not taken).
 #
 # It is also aimed at the right axis only in part, and the comment says so rather than
-# overselling it: `ci`/`docs` reservation never serialised PR-vs-PR contention at all (14 open PRs
-# co-hold `ci` and 10 co-hold `docs` right now, concurrently — a PR enters those partitions by
-# TOUCHING A PATH, with zero admission control). All it ever did was refuse dispatch.
+# overselling it: `ci`/`docs` reservation never serialised PR-vs-PR contention at all (open PRs
+# already co-hold those areas concurrently — a PR enters those partitions by TOUCHING A PATH,
+# with zero admission control). All it ever did was refuse dispatch.
 #
 # FAIL-SAFE DIRECTION: `non_reserving_partitions()` validates this declaration and returns the
 # EMPTY set — i.e. today's fully-reserving behaviour — for anything malformed. Never the reverse.
@@ -1321,7 +1325,7 @@ def _self_test():
     check("...same for area:docs", offered("docs"), [20])
     check("...and for a key that resolves INTO the ci partition", offered("ci", "ci-fragments"),
           [20])
-    # The SAFETY half. deps: 3 of 3 live holder pairs collide, all on Cargo.lock. Crate areas:
+    # The SAFETY half. Every deps holder pair collides, all on Cargo.lock. Crate areas:
     # 57.1% (research/crate-region-parallelism.md §4). Widening the set to either is the mutation
     # this line exists to kill.
     check("area:deps STILL reserves (every live deps pair collides on Cargo.lock)",

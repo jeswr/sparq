@@ -1619,8 +1619,8 @@ class TestNonReservingCrossCuttingPartitions(unittest.TestCase):
     `candidates=376 frontier=3` — the two added rows declaring exactly `area:ci` and `area:docs`.
 
     The justification is a MEASURED conflict rate, not an argument (see NON_RESERVING_PARTITIONS
-    for the table): 5% of open `area:ci` holder pairs and 3% of `area:docs` pairs share a changed
-    file, against 100% for `area:deps` (all `Cargo.lock`) and 57.1% for crate areas. So the safety
+    for the dated table): few open `area:ci` and `area:docs` holder pairs share a changed file,
+    against 100% for `area:deps` (all `Cargo.lock`) and 57.1% for crate areas. So the safety
     half of this contract is as load-bearing as the throughput half, and both are pinned here.
 
     Every assertion runs END-TO-END through `compute_ready`. An assertion that only inspected
@@ -1657,7 +1657,8 @@ class TestNonReservingCrossCuttingPartitions(unittest.TestCase):
 
     # -- the SAFETY half: what must still reserve ------------------------------------------
     def test_deps_still_reserves_because_every_deps_pair_collides_on_the_lockfile(self):
-        # MEASURED: 3 of 3 open `area:deps` holder pairs share a changed file, all Cargo.lock.
+        # MEASURED: every open `area:deps` holder pair shares Cargo.lock; see the dated table in
+        # NON_RESERVING_PARTITIONS for the holder and pair counts.
         # Serialising deps is CORRECT and this exemption must never grow to include it.
         waiting = iss(20, READY + ["priority:P1", "area:deps"])
         self.assertEqual(
