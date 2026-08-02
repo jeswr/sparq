@@ -14,9 +14,11 @@
 //!   runs under the same budget — and a trip there is reported AS a budget trip, not
 //!   laundered into an "update denied" the caller would misread as a permissions problem.
 //!
-//! An already-expired deadline is the deterministic way to observe the bound (the same
+//! An ALREADY-EXHAUSTED budget is the deterministic way to observe the bound (the same
 //! device `sparq-engine`'s own budget tests use) — it removes the race an honestly
-//! pathological query would otherwise need to win.
+//! pathological query would otherwise need to win. How that is spelled is target-dependent
+//! (see `expired` below): `wasm32-unknown-unknown` has no monotonic clock, so
+//! [`QueryBudget`] carries no `deadline` field there and the portable row cap stands in.
 
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
@@ -48,12 +50,27 @@ fn sess(agent: &str) -> Session<'_> {
     Session { agent: Some(agent), client: None, issuer: None, now: None }
 }
 
-/// A budget whose wall-clock deadline has already passed.
+/// A budget that is already exhausted before evaluation starts: a wall-clock deadline in
+/// the past, so the executor's first cooperative poll trips it.
+#[cfg(not(target_arch = "wasm32"))]
 fn expired() -> QueryBudget {
     QueryBudget {
         deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
         ..QueryBudget::unlimited()
     }
+}
+
+/// The `wasm32-unknown-unknown` spelling of [`expired`]. `std::time::Instant` is unusable
+/// there (no monotonic clock — `Instant::now()` panics), so `QueryBudget::deadline` is
+/// `#[cfg(not(target_arch = "wasm32"))]` and does not exist on this target. The portable
+/// ROW dimension expresses the same "already exhausted" precondition: a cap of zero rows
+/// admits no materialised result, so it trips at the same cooperative poll sites the
+/// deadline does, with the same `"query budget exceeded (…)"` error class. Verified
+/// equivalent for every assertion in this file by running the whole module against this
+/// budget on the native target. [SONNET-4.6]
+#[cfg(target_arch = "wasm32")]
+fn expired() -> QueryBudget {
+    QueryBudget { max_rows: Some(0), ..QueryBudget::unlimited() }
 }
 
 fn triples(store: &PodStore, name: &str) -> usize {
@@ -117,7 +134,7 @@ fn an_exhausted_budget_aborts_the_apply_of_a_pathological_where() {
     let before = triples(&s, "https://pod.ex/notes/n1");
     let err = s
         .update_as_with_budget(&sess(ALICE), PATHOLOGICAL, &expired())
-        .expect_err("an expired deadline must abort the apply");
+        .expect_err("an exhausted budget must abort the apply");
     assert!(err.contains("query budget exceeded"), "must name the budget: {err}");
     assert!(
         !err.contains("update denied"),
@@ -133,7 +150,7 @@ fn an_exhausted_budget_aborts_the_apply_of_a_pathological_where() {
 #[test]
 fn the_same_pathological_update_applies_under_an_unlimited_budget() {
     // The positive control for the test above: without the budget this update is perfectly
-    // legal and DOES delete, so the abort above is attributable to the deadline alone.
+    // legal and DOES delete, so the abort above is attributable to the budget alone.
     let mut s = pod();
     assert!(triples(&s, "https://pod.ex/notes/n1") > 0, "there is something to delete");
     s.update_as_with_budget(&sess(ALICE), PATHOLOGICAL, &QueryBudget::unlimited())
@@ -154,7 +171,7 @@ fn an_exhausted_budget_aborts_the_variable_graph_authorization_check() {
     let before = triples(&s, "https://pod.ex/notes/n1");
     let err = s
         .update_as_with_budget(&sess(ALICE), PATHOLOGICAL_VAR_TARGET, &expired())
-        .expect_err("an expired deadline must abort the write-set resolution");
+        .expect_err("an exhausted budget must abort the write-set resolution");
     assert!(err.contains("query budget exceeded"), "must name the budget: {err}");
     assert!(
         !err.contains("update denied"),
@@ -178,7 +195,7 @@ fn an_exhausted_budget_still_denies_an_unauthorized_write() {
 #[test]
 fn a_whereless_insert_data_ignores_an_exhausted_budget() {
     // The documented boundary of the bound: INSERT/DELETE DATA and CLEAR/DROP consult no
-    // budget (they are bounded by their operand size), so an expired deadline must not
+    // budget (they are bounded by their operand size), so an exhausted budget must not
     // block them. Without this, "bound the update path" could silently become "block it".
     let mut s = pod();
     let before = triples(&s, "https://pod.ex/notes/n1");
