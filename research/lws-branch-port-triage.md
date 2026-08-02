@@ -3,17 +3,18 @@
 # LWS upstream branch triage — port-or-drop verdicts (sq-gg0qq.8)
 
 > **Status: TRIAGE RECORD (decision, no implementation).** Three upstream branches named by the
-> bead are triaged here to a written port-or-drop verdict, and the crate's remaining `M2-next`
-> markers are swept to a deferred-work list.
+> bead are triaged here to a written **port** verdict — the drop half is deferred, see the outcome
+> line — and the crate's remaining `M2-next` markers are swept to a deferred-work list.
 >
 > Bead: **sq-gg0qq.8** · Issue: **#2744** · Parent: **#2572** / `sq-gg0qq` · Blocked-by: **#2747**.
 > Companion record: [`lws-design-records.md`](./lws-design-records.md) (the reconstructed ADR
 > estate — §6 there is the normative description of the existence-non-disclosure family).
 >
-> **Outcome in one line:** all three branches are **DROP — subsumed by the import**. The
-> `crates/sparq-lws-core` import snapshot already contains each branch's merged result, verified
-> against the in-tree code and its tests. No code was ported, because there was nothing left to
-> port.
+> **Outcome in one line:** for all three branches the **headline capability is already present in
+> the import**, with tests — so **nothing was ported**. The **branch-level port/drop decision is
+> DEFERRED**, pending an upstream tip-vs-import comparison (**D5**) or maintainer confirmation
+> (**§8 Q1**): in-tree evidence can show a capability is here, but it cannot show a branch carried
+> nothing else. Do not delete an upstream branch on the strength of this record alone.
 
 ---
 
@@ -54,7 +55,7 @@ maintainer wants commit-level certainty, that needs a network-enabled pass that 
 `jeswr/solid-server-rs` as a remote and diffs each branch tip against import rev `1e555b10` — filed
 as deferred item **D5** in §5.
 
-## 1. Why "subsumed" is the expected answer, not a convenient one
+## 1. Why capability-level subsumption is the expected answer, not a convenient one
 
 The import commit is a single whole-tree snapshot:
 
@@ -64,21 +65,31 @@ The import commit is a single whole-tree snapshot:
 | That import is one commit | `47e11a5c` — *feat(lws): import jeswr/solid-server-rs as crates/sparq-lws-core (sq-gg0qq.2)* (#1949) |
 | Each of the three subjects' defining symbols was **introduced by that commit** | `git log -S` on `mint_blob_key`, `guard_post_existence_requires_read`, and the verifier rev string each return exactly `47e11a5c` |
 
-So the three branches were merged **upstream, before** the snapshot was taken. A branch whose work
-is already inside the snapshot you imported cannot be "ported" — it is already here. That is the
-single mechanism behind all three verdicts, and it is why the verdicts agree.
+So each capability was **already in upstream's tree when the snapshot was taken**, and work that is
+already inside the snapshot you imported cannot be "ported" — it is already here. That is the single
+mechanism behind all three verdicts, and it is why the verdicts agree.
+
+**What this does not establish.** `git log -S` in *this* repository shows only what the imported
+snapshot contains. It cannot distinguish "the branch was merged upstream before the snapshot" from
+"the capability reached upstream `main` by some other route while the branch carried further,
+unmerged work". So the mechanism licenses a *capability-level* verdict only; whether each named
+branch is itself safe to close out is **§8 Q1 / D5**, not a conclusion of this record.
 
 ## 2. The verdict table
 
+Verdicts are **capability-level** (see §0 and §1): "no port needed" is established, "the branch
+holds nothing else" is not.
+
 | Upstream branch | Subject | Verdict | Basis |
 |---|---|---|---|
-| `chore/repin-async-dns-verifier` | verifier git-pin bump to the async-DNS resolver | **DROP — subsumed** | pinned rev already resolves the async DNS resolver; cargo-vet delta already recorded (§3) |
-| `fix/unique-blob-keys` | blob-key collision fix (bytes integrity) | **DROP — subsumed** | unique-per-write minting implemented, fail-closed, 3 unit tests incl. a mutation check (§4) |
-| `phase-existence-non-disclosure` | 404-vs-403 existence non-disclosure | **DROP — subsumed** | the V2/V4/V5/V6 family + the exhaustive byte-identical matrix are in-tree and pinned (§5 of this doc, §6 of the design record) |
+| `chore/repin-async-dns-verifier` | verifier git-pin bump to the async-DNS resolver | **NO PORT — capability subsumed**; branch-level drop deferred | pinned rev already resolves the async DNS resolver; cargo-vet delta already recorded (§3) |
+| `fix/unique-blob-keys` | blob-key collision fix (bytes integrity) | **NO PORT — capability subsumed**; branch-level drop deferred | unique-per-write minting implemented, fail-closed, 3 unit tests incl. a mutation check (§4) |
+| `phase-existence-non-disclosure` | 404-vs-403 existence non-disclosure | **NO PORT — capability subsumed**; branch-level drop deferred | the V2/V4/V5/V6 family + the exhaustive byte-identical matrix are in-tree and pinned (§5 of this doc, §6 of the design record) |
 
-No branch is a **PORT**. No code changed under this bead.
+No branch is a **PORT**, and no code changed under this bead. No branch is certified **DROP**
+either: promoting these rows to a branch-level DROP needs D5 or the maintainer's answer to §8 Q1.
 
-## 3. `chore/repin-async-dns-verifier` — DROP (subsumed)
+## 3. `chore/repin-async-dns-verifier` — NO PORT (capability subsumed)
 
 **What the branch was for.** Bumping the `solid-oidc-verifier` git pin to a revision whose
 WebID/issuer resolution uses an **asynchronous, SSRF-guarded** DNS resolver rather than a blocking
@@ -121,7 +132,7 @@ supply-chain half of this branch's work, deliberately.
    housekeeping (lint fixes, CI tweaks) beyond the repin. The *repin* is subsumed; "the branch
    contained nothing else" is not asserted.
 
-## 4. `fix/unique-blob-keys` — DROP (subsumed)
+## 4. `fix/unique-blob-keys` — NO PORT (capability subsumed)
 
 **What the branch was for.** Blob keys derived deterministically from the resource IRI mean two
 writes to the same IRI reuse the same storage key. That is a bytes-integrity hazard: the orphan
@@ -166,7 +177,7 @@ atomic compare-and-delete retained as defence-in-depth
 and `src/store/body_cache.rs:11`. The `getrandom` dependency carries the rationale at
 `crates/sparq-lws-core/Cargo.toml:154`.
 
-## 5. `phase-existence-non-disclosure` — DROP (subsumed)
+## 5. `phase-existence-non-disclosure` — NO PORT (capability subsumed)
 
 **What the branch was for.** Closing the 404-vs-403 existence oracle: a requester who cannot read a
 target must not be able to tell "exists but forbidden" from "does not exist".
@@ -278,11 +289,11 @@ rather than implemented here.
    `hickory-net` @ 0.26.1 are `safe-to-deploy` **exemptions** with no audit entry; either audit them
    or import a trusted third-party audit, and re-verify the GHSA-q2qq-hmj6-3wpp claim against the
    advisory database rather than against the in-repo note.
-5. **D5 — Optional: commit-level confirmation of this triage.** Add `jeswr/solid-server-rs` as a
-   remote in a network-enabled pass and diff each of the three branch tips against import rev
-   `1e555b10`, to upgrade §2's capability-level verdicts to commit-level ones. Low value if the
-   maintainer already knows the branches merged upstream pre-snapshot — which is the point of §8's
-   first question.
+5. **D5 — Commit-level confirmation, required before any branch is deleted.** Add
+   `jeswr/solid-server-rs` as a remote in a network-enabled pass and diff each of the three branch
+   tips against import rev `1e555b10`, to upgrade §2's capability-level verdicts to branch-level
+   ones. This is the only in-repo route to a DROP verdict; the alternative is the maintainer
+   answering §8's first question from their own knowledge of the upstream history.
 6. **D6 — `object_store` blob backend.** The genuinely large open M2 item: the S3/Local adapter
    behind `BlobStore`, including `list`, the backend-native CAS witness for
    `delete_if_unchanged`, and the `stat` override. Sizeable; listed for completeness, not proposed
@@ -296,9 +307,12 @@ opportunistic; **D6** and **D7** are independent feature work.
 
 ## 8. Open questions for the maintainer
 
-1. **Are the three branches merged upstream and safe to delete?** This triage's verdict is that
-   their content is in the snapshot. Confirming they were merged (not abandoned mid-flight) turns
-   "subsumed" into a closed question and makes D5 unnecessary.
+1. **Are the three branches merged upstream and safe to delete?** *(Blocking for any branch
+   deletion.)* This triage establishes only that each branch's headline **capability** is in the
+   snapshot; from in-tree evidence it cannot tell a merged branch from an abandoned one, nor rule
+   out further commits beyond the headline. Confirming they were merged (not abandoned mid-flight,
+   and carrying nothing else) is what turns "capability subsumed" into a branch-level DROP — and is
+   the cheaper alternative to D5.
 2. **Was `phase-existence-non-disclosure` complete at the snapshot?** The branch name suggests a
    *phase* of a larger effort. §6 of the design record documents V2/V4/V5/V6 and the numbering skips
    V1 and V3 — if those are further variants that landed elsewhere (or never landed), that is a real
@@ -315,7 +329,8 @@ opportunistic; **D6** and **D7** are independent feature work.
 - **It does not re-audit the security properties it cites.** §5 reports what the in-tree guards and
   tests enforce and carries the code's own documented residual disclosure; it does not certify the
   existence-non-disclosure family as complete.
-- **It asserts no commit-level equivalence** between the upstream branch tips and the import. See
-  §0's stated limit — the claim is capability-level, and D5 is how it would be upgraded.
+- **It asserts no commit-level equivalence** between the upstream branch tips and the import, and
+  therefore **issues no branch-level DROP** and authorises no branch deletion. See §0's stated
+  limit — the claim is capability-level; D5 or §8 Q1 is how it would be upgraded.
 - **It claims no capability for the crate.** `sparq-lws-core` remains EXPERIMENTAL and
   `publish = false`.
