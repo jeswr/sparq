@@ -983,13 +983,16 @@ jobs:
       # property, pins the ci.yml wiring, and pins that the ratchet was NOT weakened.
       - name: Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)
         run: python3 scripts/tests/test_inference_corpus_cache.py
-      # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
-      # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
-      # versioned binary; reverting to `cargo install wasm-pack` would keep the lane
-      # green on a good day while re-exposing it to a transient crates.io blip
-      # (which red-gated PR #1131). Hermetic + stdlib-only (no PyYAML needed).
-      - name: js lane wasm-pack install posture (prebuilt + pinned — sq-khm3f)
-        run: python3 scripts/tests/test_js_wasm_pack_install.py
+      # [OPUS-5] sq-khm3f + #5304: same invisible-regression shape as the posture test
+      # above. Every lane that needs wasm-pack (ci/js/gui/pages/publish/release/site-*/
+      # nightly) installs it as a PREBUILT, SHA-pinned, exactly-versioned binary — the
+      # sole exception being release.yml's arm64 matrix rows, which the x86_64-only
+      # action cannot serve and which the test registers explicitly. Reverting any lane
+      # to `cargo install wasm-pack` would keep it green on a good day while re-exposing
+      # it to a transient crates.io blip (which red-gated PR #1131). Hermetic +
+      # stdlib-only (no PyYAML needed).
+      - name: wasm-pack install posture, all lanes (prebuilt + pinned — sq-khm3f/#5304)
+        run: python3 scripts/tests/test_wasm_pack_install.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
       # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;

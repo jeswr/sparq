@@ -198,9 +198,21 @@ jobs:
         if: needs.config.outputs.mode == 'full'
         with:
           targets: wasm32-unknown-unknown
+      # [OPUS-5] #5304 (extends sq-khm3f/#3236 beyond the `js` lane): install the
+      # PREBUILT binary, not `cargo install wasm-pack --locked` — that recompiled
+      # wasm-pack's whole chrono/wasm-bindgen source tree from crates.io on EVERY run,
+      # so one transient registry/CDN blip could red this lane on unrelated work (how
+      # PR #1131 died). jetli/wasm-pack-action fetches one static musl tarball with
+      # @actions/tool-cache, which retries a failed download, and drops the binary in
+      # ~/.cargo/bin. `version:` is pinned EXACTLY — v0.15.0 is wasm-pack's current
+      # release, i.e. what `cargo install` resolved to here (version-neutral today);
+      # `latest` would re-add an unauthenticated api.github.com release lookup, a
+      # second rate-limit-flake source. Full rationale: the same step in js.yml.
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
-        run: cargo install wasm-pack --locked
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -310,7 +322,9 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
-        run: cargo install wasm-pack --locked
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -427,7 +441,9 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
-        run: cargo install wasm-pack --locked
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -542,7 +558,9 @@ jobs:
           key: gui-e2e-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
-        run: cargo install wasm-pack --locked
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
       - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
         if: needs.config.outputs.mode == 'full'
         working-directory: js
