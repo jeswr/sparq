@@ -423,6 +423,16 @@ jobs:
         run: shellcheck scripts/ci-free-disk.sh scripts/tests/test_ci_free_disk.sh
       - name: Self-test ci-free-disk.sh (set -u safety + existence guards + #462 fold)
         run: bash scripts/tests/test_ci_free_disk.sh
+      # [OPUS-5] sq-c9q4r: the vacuous-replay guard for fuzz.yml's per-PR corpus-replay
+      # leg. That leg is BLOCKING, and `-runs=0` over an empty corpus exits 0 — so a
+      # future fuzz target added without committed seeds would report green having
+      # executed nothing. This guard is what makes that RED, so its own hermetic
+      # self-test (empty/absent dirs fatal; one seed in either dir passes; randomized
+      # mode exempt) runs HERE on every PR rather than only when the fuzz lane fires.
+      - name: shellcheck ci-fuzz-replay-guard.sh
+        run: shellcheck scripts/ci-fuzz-replay-guard.sh
+      - name: Self-test ci-fuzz-replay-guard.sh (empty corpus is fatal in replay mode)
+        run: bash scripts/ci-fuzz-replay-guard.sh --self-test
       # [OPUS-4.8] sq-4vo9m: the per-tick disk guard (df-check + merged-worktree prune +
       # gated main-target reclaim) that stops the autonomous loop from filling the work box
       # to ENOSPC. Validated HERE (hermetic: the harness PATH-shadows df/pgrep and sandboxes
