@@ -347,7 +347,6 @@ command -v git >/dev/null 2>&1 || die "git not found"
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
 [ -n "$ROOT" ] || die "not inside a git checkout"
-COMMITTED_ABS="${ROOT}/${JSONL_REL}"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
