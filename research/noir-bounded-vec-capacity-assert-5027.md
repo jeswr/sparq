@@ -10,6 +10,13 @@ positive control that keeps it non-vacuous. §5 does **not** specify the
 `BoundedVec::push` regression guard itself — the `BoundedVec` form (§5.6 item 2)
 is still unresolved and returns no verdict as shaped, so §4 item 2 stays open.
 §5 is a SPECIFICATION; it has not been run, and no line of it is a measurement.
+**Amended 2026-08-01** (SPARQ agent 🤖 [OPUS-5], issue #5063): §6 added — the §3.2
+finding called the gate row unreproducible and stopped there. §6 quotes the table
+verbatim, identifies the fixture it names (it exists, in the #5027 thread; it is **not**
+in the PR), records three checks that need no toolchain — one of which finds the two
+"0 delta" corpus rows **non-evidential** — and splits §4 item 1 into the provenance
+answer (unblocked today) and the re-take (still blocked on `sq-i50o4`). §6 measures
+nothing: this session had no `nargo` and no `bb` either.
 
 ## 0. What this record is, and what it is not
 
@@ -144,8 +151,17 @@ the flip, not a nicety.
 The bead's implementation work is **done and should not be repeated**. The open
 actions, in order:
 
-1. @jeswr confirms the §3.2 gate row's provenance or re-takes it (blocked on
-   `sq-i50o4` for a reproducible version).
+1. @jeswr confirms the §3.2 gate row's provenance or re-takes it. §6 (2026-08-01,
+   issue #5063) splits this into three, only one of which is blocked:
+   - **1a — the provenance answer.** Fixture source, `nargo` version, `bb` version,
+     `bb gates` invocation. **Unblocked today**, and a precondition of 1b: the commit
+     message carries none of the four, so today *nobody* can re-take the row (§6.1–6.2).
+   - **1b — the re-take.** Specified command-by-command in §6.4; blocked on `sq-i50o4`,
+     and even then it is corroboration, not the upstream arbiter (§6.4, §5.1 item 3).
+   - **1c — repair or drop the two "0 delta" corpus rows.** §6.3(a) establishes that no
+     package in the sparq compose corpus or its dependency closure calls
+     `BoundedVec::push`, so that row is entailed by the patch's shape and would read
+     identically for a wrong patch. **Unblocked**, and independent of `sq-i50o4`.
 2. Add a test that is red when the capacity bound is not enforced at constraint level
    (§3.1) — one that bypasses or mutates honest witness generation and demonstrates
    verifier/constraint-system rejection of an out-of-range index, **not** an
@@ -378,6 +394,185 @@ Two extensions, in priority order:
 - **Blocked on.** A box with `nargo` + `bb` — i.e. `sq-i50o4`, the same bottleneck
   §3.2, §10.8 and §10.10 record. Until then §5 stays a specification, and §4's
   ordering is unchanged: the flip is still blocked on items 1–3.
+
+## 6. The gate row — what is decidable today, and the re-take specified (2026-08-01, issue #5063)
+
+> 🤖 **SPARQ agent** [OPUS-5]. §3.2 established that the commit message's gate row
+> cannot be reproduced in the fleet environment and left it there. This section does
+> the part that does **not** need a toolchain: it quotes the table verbatim (§6.1),
+> identifies the fixture it names (§6.2), records three checks that need only text and
+> this repo (§6.3), and specifies both routes out — the provenance answer, which is
+> unblocked, and the re-take, which is not (§6.4). **Nothing here is a measurement.**
+> `command -v nargo bb` is empty in this session too, so no number below was taken
+> here; every number quoted is transcribed from the upstream commit message or
+> computed from numbers already in it. The upstream facts were re-fetched on
+> 2026-08-01 from `13314.patch` and the #5027 issue page.
+>
+> **Reference convention** (this record grew a §5 of its own on 2026-08-01, which
+> collides with the program record's numbering): below, `§5.1`, `§5.2`, `§6 item 5`
+> and `§10.x` are `noir-optimization-program.md`, as they already are in §3.2;
+> references to *this* record are written `§6.3`, `§4 item 1`, `§5.6 item 2`.
+
+### 6.1 The claim, quoted — and the four things the commit does not carry
+
+Verbatim from `13314.patch`, commit `efec45ef` (§1), so this record no longer
+paraphrases the thing it is auditing:
+
+> Measured on the noir#5027 reproducer (SIZE=500 conditional-push loop):
+>
+> | Metric        | Before | After  | Delta   |
+> |---------------|--------|--------|---------|
+> | ACIR opcodes  |  9 479 |  7 483 | −21.1 % |
+> | UltraHonk gates | 22 312 | 19 445 | −12.9 % |
+>
+> Standard benchmark corpus (sha512, semaphore, poseidon2, eddsa): 0 delta.
+> sparq compose corpus (8 packages): 0 delta.
+> noir_stdlib test suite: 409/409 passed.
+
+The message names **no fixture file, no `nargo` version, no `bb` version and no
+command**. §5.1 makes `bb`/`nargo` version-coupled (*"use `bbup`"*) and makes the
+`circuit_size` field of `bb gates` the arbiter, so a gate count without its `bb`
+version is not re-takeable *by anyone*, on any box — the block is not only
+`sq-i50o4`. The commit's own author line is `Ubuntu
+<ubuntu@ip-172-31-10-78.eu-west-2.compute.internal>`: a default identity on an
+ephemeral EC2 host, consistent with §5.2's *"per-PR on ephemeral workspace scripts"*
+story, and equally consistent with the artefacts being unrecoverable — the host is
+gone and the commit metadata carries no human attestation of the run either. Note
+also that the two corpus rows do not say **which metric** is 0-delta (opcodes,
+gates, or both); §6.3(a) makes that question moot for the sparq half, but it is part
+of the provenance ask for the noir half.
+
+### 6.2 The fixture exists upstream — and it is not in the PR
+
+"The noir#5027 reproducer (SIZE=500 conditional-push loop)" is *not* the issue's
+top-post program: that one is a plain array write loop (`fields[indices[i]] = i as
+Field`) with no `BoundedVec` in it, and the patch cannot move its counts at all. The
+phrase resolves instead to sirasistant's comment in the same thread (last edited
+2024-05-28), read on the #5027 page on 2026-08-01:
+
+```noir
+global SIZE = 500;
+
+fn main(fields: [Field; SIZE], to_keep: [bool; SIZE]) -> pub [Field; SIZE] {
+    let mut bounded_vec: BoundedVec<Field, SIZE> = BoundedVec::new();
+
+    for i in 0..SIZE {
+        if to_keep[i] {
+            bounded_vec.push(fields[i]);
+        }
+    }
+
+    assert_eq(bounded_vec.len(), 0);
+    bounded_vec.storage
+}
+```
+
+So the fixture is identifiable, which is a point in the row's favour. Three
+consequences, all of which a re-take has to respect:
+
+- **The PR ships it nowhere.** The diff is `bounded_vec.nr` only, +19 −1 (§1). That is
+  a deviation from §6 item 5 of the program record, which asks for the focused
+  benchmark fixture under `test_programs/benchmarks/`, and it is *why* the row is
+  unreproducible independently of `sq-i50o4`: with no pinned fixture there is nothing
+  to re-run even on a box that has `bb`. Pinning it is the cheapest half of the fix.
+- **It is compile-only.** `assert_eq(bounded_vec.len(), 0)` contradicts the pushes, so
+  the program cannot be *executed* with any witness that exercises `push`. `nargo
+  compile` + `bb gates` is fine (neither needs a witness); no execution-based
+  cross-check of the row is available, and §10.2's step-2 differential cannot be run on
+  this fixture at all.
+- **The thread's own number for this program is 1.6 M gates**, against the table's
+  22 312 "Before" — a ~72× gap. Two years of upstream work on exactly this issue may
+  account for all of it (that is the issue's whole subject), so this is **not** a
+  discrepancy claim; it is a statement that the "Before" cell is not comparable to any
+  published figure and stands or falls on its own provenance.
+
+### 6.3 Three checks that need no `nargo` and no `bb`
+
+All three were run in this session against this repo at `HEAD` and the pinned upstream
+tags; they are text and corpus checks, not measurements.
+
+**(a) The "0 delta" corpus rows are non-evidential — for the sparq half, provably.**
+The patch changes only `BoundedVec::push`. No package in the sparq compose corpus can
+call it: `grep -rn "BoundedVec\|\.push(" zk --include=*.nr` over all **55** `.nr` files
+under `zk/` returns **0 hits**, and the corpus's entire dependency closure returns 0
+too — all eight §5.2 compose packages depend on `sparq_zk_compose_core` alone, whose
+only external deps are `poseidon` `v0.3.0` (9 `.nr` files) and `sparq_ieee754`
+`v0.11.0`, both fetched at their pinned tags and grepped for the same two tokens: 0
+hits each. An uncalled generic stdlib method is never monomorphised into ACIR, so
+**"sparq compose corpus (8 packages): 0 delta" is entailed by the shape of the patch
+and would have read identically for a broken one.** It is a true row carrying no
+information: it is not a regression check, and it should not go upstream presented as
+one (§4 item 1c). The four noir benchmark `main.nr`s were also fetched at `master` and
+show no direct `BoundedVec` use, but their transitive deps (`sha512`, `ec`, `edwards`,
+`poseidon`) were **not** audited — so that half is *suspected* vacuous, not established.
+
+**(b) The gate row's percentage does not follow from its own two cells.**
+22 312 → 19 445 is a delta of 2 867, i.e. 12.8496 %, which is **−12.8 %** at one
+decimal by rounding or truncation alike — not the −12.9 % printed. The opcode row is
+correctly rounded (1 996 / 9 479 = 21.057 % → −21.1 %). This impugns no count; what it
+shows is that at least one cell was entered by hand rather than emitted by the script
+that produced the other, which is precisely the question §3.2 asks.
+
+**(c) Scale sanity, stated as questions a one-line answer disposes of.** The opcode
+delta is 1 996 = **4 × 499** over a 500-iteration loop — ~4 ACIR opcodes per elided
+`assert(len < MaxLen)`, but exactly one iteration short of 4 × 500. And the table's
+gates/opcodes ratio is ≈ 2.35× before and ≈ 2.60× after, *below* the 5–50× divergence
+band §5.1 records for this metric pair. Neither is an error and neither is evidence of
+one; both are unexplained details that a provenance answer settles for free.
+
+Recorded so no later reader is startled by it, and claimed as nothing more: the
+"Before" gate cell, 22 312, is adjacent by one to §5.2's `scan_k2_n64_r8` **ACIR
+opcode** baseline, 22 313 — different metric, different program, and no significance is
+asserted. Relatedly, the commit's corpus is exactly §5.2 minus its three probe bins,
+which §5.2 says were written for that assessment and *kept out of the sparq repo* —
+which is consistent with §3.2's label-match observation and, like it, establishes
+nothing about execution.
+
+### 6.4 The two routes, in cost order
+
+**Route A — confirm provenance (unblocked today; does not need `sq-i50o4`).** @jeswr
+states, in the PR thread or an amended commit message, four things: (1) the fixture
+source, verbatim or as a committed package; (2) the `nargo` version/commit; (3) the
+`bb` version, per §5.1's `bbup` coupling; (4) the `bb gates` invocation and the field
+read (`circuit_size`). This is a precondition of Route B as much as an alternative to
+it — without (1)–(3) a re-take is not comparing like with like.
+
+**Route B — re-take it (blocked on `sq-i50o4`).** Same box, same two binaries, both
+halves measured in one sitting; the *diff* is the claim, but each half records its own
+absolute numbers:
+
+```sh
+# 0. pin and record. Both versions go in the PR body; bb is installed via bbup (§5.1).
+git -C noir rev-parse HEAD && nargo --version && bb --version
+
+# 1. the fixture of §6.2 as its own package (bin, no deps), e.g. bounded_vec_push_500/.
+#    Compile-only: do NOT nargo execute — assert_eq(len, 0) contradicts the pushes.
+
+# 2. BEFORE, at the recorded master commit
+nargo compile
+nargo info --json                                   # ACIR opcode row
+bb gates -s ultra_honk -b target/<pkg>.json         # read `circuit_size` — the arbiter
+
+# 3. AFTER: apply 13314.patch to the same checkout, rebuild nargo, repeat step 2
+#    with the same bb binary.
+```
+
+Two honesty constraints on the result. First, per §5.2 and §5.1 item 3 a fleet-box
+`bb gates` number is **non-canonical**: upstream's arbiter is the
+`noir-lang/noir-gates-diff` sticky comment, which fork PRs do not get, so a maintainer
+(or @jeswr's fork CI) must surface it — a green re-take is corroboration, not the
+upstream verdict. Second, the corpus rows should not simply be re-run: per §6.3(a) the
+honest repair is to *replace* the sparq compose row with packages that actually call
+`push`, or to drop it and say so. §5.2's baseline corpus contains no such package
+today, which is why the row was vacuous in the first place.
+
+### 6.5 What this changes
+
+§4 item 1 is now 1a/1b/1c (see there): the provenance answer and the corpus-row repair
+are **unblocked and cheap**, and only the re-take waits on `sq-i50o4`. §3.2's verdict
+is unchanged and is not weakened by any of the above — the row remains unreproducible,
+which remains not the same as wrong. What §6 adds is that two of the three things
+blocking the flip on this axis were never blocked at all.
 
 Companion records: `noir-optimization-program.md` (§7 row 11, §10.2 acceptance
 protocol, §10.3 fleet spec, §10.11 status), `noir-optimization-new-opportunities.md`
