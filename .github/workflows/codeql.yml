@@ -25,7 +25,10 @@
 # concern predates the buildless migration (a trace-based `build-mode: manual` full-compile
 # analysis); this config already fixed that. If a future query pack forces a return to
 # trace-based build (see the `build-mode: manual` note below) and wall time regresses past
-# the pole threshold, revisit the demotion — merge_group CodeQL still gates every merge, so
+# the pole threshold, revisit the demotion — re-derive the pole with
+# `scripts/ci_merge_group_poles.py` (#5250) rather than quoting a figure from a bead, which
+# is how the stale ~20-40 min number above outlived its own refutation. merge_group CodeQL
+# still gates every merge, so
 # alerts-at-zero would be preserved even then. This is the maintainer security-posture
 # sign-off item (design §10.2); proceeding on the MEASURED "keep it" default per the
 # proceed-and-document rule (steer issue filed).

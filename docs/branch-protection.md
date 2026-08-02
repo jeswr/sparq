@@ -569,7 +569,10 @@ describes today's CI — `codeql.yml` is `disabled_manually`, so no CodeQL check
 produced on any event and it costs the queue nothing at all right now. The standing
 meaning is forward-looking: when PR #3427 settles the successor policy and CodeQL runs
 again, **queue latency is not a valid argument for keeping it off the blocking path** —
-that premise was measured and falsified.
+that premise was measured and falsified. Re-open the question only with a fresh
+measurement: `scripts/ci_merge_group_poles.py` reports which workflow actually *ends* a
+merge_group entry (issue #5250 — the stale figure was still being quoted forward into
+fast-lane scoping in #3005, long after the buildless migration falsified it).
 
 ## How this maps to the merge discipline
 

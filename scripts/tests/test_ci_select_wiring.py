@@ -2162,9 +2162,15 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
         merge_group trigger at all (pinned elsewhere) — this layer must NOT
         creep into them as a redundant/conflicting second gate.
 
-    [OPUS-5] sq-g25hr added codeql.yml to the gated set (the ~20-40min CodeQL
-    analysis was the longest merge_group pole for a zero-Rust batch) and widened
-    `_INERT_CLASSES` with `deploy-only` + `inert-mixed`."""
+    [OPUS-5] sq-g25hr added codeql.yml to the gated set and widened `_INERT_CLASSES`
+    with `deploy-only` + `inert-mixed`. [OPUS-5] #5250 corrects the SIZING that bead
+    was written against: it cited a "~20-40 min CodeQL" cost, which predates the
+    `build-mode: none` buildless migration and was already refuted by the measured
+    note in codeql.yml's own header. The skip is still sound and still worth having —
+    a rust-inert batch has no Rust to analyse, exactly as ci.yml and feature-matrix.yml
+    already treat it — but it is a modest saving, not the merge_group pole. Do not
+    re-introduce a wall-clock figure here: run `scripts/ci_merge_group_poles.py` to
+    re-derive which lane actually ends an entry today."""
 
     @classmethod
     def setUpClass(cls):
@@ -2268,9 +2274,11 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
             self.assertNotIn("engine", arms[0], wf_name)
 
     def test_codeql_merge_group_is_class_gated_not_force_true(self):
-        # [OPUS-5] sq-g25hr: the regression this bead fixes — codeql.yml used to
-        # hard-force rust_changed=true on merge_group, paying the full ~20-40min
-        # analysis for a zero-Rust batch. push/schedule MUST still force true.
+        # [OPUS-5] sq-g25hr: the waste this bead removes — codeql.yml used to
+        # hard-force rust_changed=true on merge_group, analysing the Rust workspace
+        # for a batch that changed no Rust. push/schedule MUST still force true.
+        # (#5250: the bead's "~20-40min" sizing for that analysis was stale — see the
+        # class docstring and codeql.yml's own measured header note.)
         step = self._decide(self.codeql, "codeql.yml")
         run = str(step.get("run", ""))
         self.assertIn('"${EVENT_NAME}" = "merge_group"', run,

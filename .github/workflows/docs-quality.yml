@@ -1044,6 +1044,19 @@ jobs:
       # leave CI.
       - name: Self-test the CI execution-latency alarm (3 choke modes + YAML seam)
         run: python3 scripts/tests/test_ci_execution_latency_alarm.py
+      # [OPUS-5] #5250: the merge-queue WALL-CLOCK POLE profiler
+      # (scripts/ci_merge_group_poles.py). Not a lane and not a gate — an on-demand
+      # instrument, wired here because its arithmetic is exactly the kind that rots
+      # silently: it exists because a "CodeQL costs ~20-40 min" figure outlived the
+      # buildless migration that falsified it and re-scoped an epic. Hermetic (no gh,
+      # no network; every case injects run payloads). The load-bearing cases are the
+      # ones where duration and pole-ness DISAGREE — a long lane that ends mid-pack is
+      # not the pole, and a closer whose runner-up ends a second behind owns no
+      # exclusive tail — plus the population rules, since a silently narrowed
+      # population is how a measurement lies while looking healthy. The suite pins its
+      # OWN call site here, so it cannot quietly leave CI.
+      - name: "Self-test the merge_group pole profiler (the closer is not the longest lane — #5250)"
+        run: python3 scripts/tests/test_ci_merge_group_poles.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #

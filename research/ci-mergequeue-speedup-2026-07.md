@@ -387,3 +387,20 @@ sq-6vshe.7 lands.
 scripts/ci_select.py + .github/workflows/ci-summary.yml; conclusions histogram over the
 same 250-run window. Snapshot 2026-07-10 — re-profile before acting on a ranking if the
 lane set has materially changed.
+
+**Re-profiling is now one command** (`scripts/ci_merge_group_poles.py`, issue #5250). It
+walks the same `event=merge_group` run population, groups it into per-entry batches by
+merge-queue `head_sha`, and reports which workflow **ends** each entry plus the exclusive
+tail it owns — the pole, rather than the longest-running lane. §2.1 has to draw that
+distinction by hand in its last column, and the `formal-verification` row is why it
+cannot be read off the durations: a lane with a near-zero median that is nonetheless the
+occasional pole. The profiler reports close-count and owned tail side by side, which
+separates "the lane the queue always waits on" from "the lane that rarely blocks but
+blocks hard".
+
+Prefer running it over quoting the table above — that table is already flagged stale, and
+the concrete failure mode this guards against has happened: issue #5250, where a CodeQL
+wall-clock figure that predated the `build-mode: none` buildless migration outlived the
+measurement that falsified it (§2.3) and was still being used to scope fast-lane work in
+#3005. Honest caveat on the tool: its pure core is unit-tested, but its `gh api` walk has
+not yet been exercised against the live API — validate the fetch path on first use.
