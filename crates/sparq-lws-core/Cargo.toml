@@ -345,6 +345,16 @@ h3-quinn = "0.0.10"
 # stack is native-only, and the wasm dev-graph must stay free of it.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 sparq-zk = { path = "../sparq-zk" }
+# [SONNET-4.6] sq-gg0qq.6: the `jeswr/lws-spec` access-decision conformance gate
+# (`tests/lws_spec_access_decision.rs`) executes the spec's OWN normative N3 rule set in-process,
+# so the oracle needs no node/EYE lane — sparq's N3 reasoner IS the reasoner. DEV-only and
+# non-wasm (matching `sparq-zk` above): it never reaches the library, the binary, or the wasm
+# dev-graph, and `--edges normal` dependency-boundary assertions do not see it.
+sparq-reason = { path = "../sparq-reason" }
+# The stratified N3 driver interns its final closure into a `sparq_core::dict::Dict`, so the
+# conformance gate names sparq-core directly rather than through a re-export. Already in the dev
+# graph via sparq-reason; naming it adds no crate.
+sparq-core = { path = "../sparq-core" }
 
 [features]
 # DEFAULT = the embedded in-process engine (sq-gg0qq.3): now that this crate lives IN the sparq

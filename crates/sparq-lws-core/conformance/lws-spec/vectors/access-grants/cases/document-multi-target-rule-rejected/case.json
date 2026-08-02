@@ -1,0 +1,43 @@
+{
+  "clauses": [
+    "core#odrl-profile"
+  ],
+  "expected": {
+    "errorCode": "TARGET_NOT_SINGULAR",
+    "ok": false
+  },
+  "id": "access-grants/document-multi-target-rule-rejected",
+  "input": {
+    "document": {
+      "@context": [
+        "http://www.w3.org/ns/odrl.jsonld",
+        "https://w3id.org/jeswr/lws/v1"
+      ],
+      "@type": "Offer",
+      "assigner": "https://id.example/alice",
+      "permission": [
+        {
+          "action": "read",
+          "assignee": "https://id.example/bob",
+          "target": [
+            {
+              "@type": "DataResource",
+              "uid": "https://storage.example/alice/notes/a.txt"
+            },
+            {
+              "@type": "Container",
+              "uid": "https://storage.example/alice/notes/"
+            }
+          ]
+        }
+      ],
+      "profile": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+      "uid": "https://storage.example/alice/.grants/vec-1"
+    }
+  },
+  "level": "MUST",
+  "operation": "validate-access-document",
+  "source": "lws-spec@59da847 core#odrl-profile (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a rule with more than one target is rejected"
+}

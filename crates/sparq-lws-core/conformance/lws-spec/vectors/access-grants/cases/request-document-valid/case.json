@@ -1,0 +1,36 @@
+{
+  "clauses": [
+    "core#odrl-profile"
+  ],
+  "expected": {
+    "documentClass": "request",
+    "ok": true
+  },
+  "id": "access-grants/request-document-valid",
+  "input": {
+    "document": {
+      "@context": [
+        "http://www.w3.org/ns/odrl.jsonld",
+        "https://w3id.org/jeswr/lws/v1"
+      ],
+      "@type": "Request",
+      "permission": [
+        {
+          "action": "read",
+          "assignee": "https://id.example/bob",
+          "target": {
+            "@type": "DataResource",
+            "uid": "https://storage.example/alice/notes/a.txt"
+          }
+        }
+      ],
+      "profile": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+      "uid": "https://app.example/requests/77"
+    }
+  },
+  "level": "MUST",
+  "operation": "validate-access-document",
+  "source": "lws-spec@59da847 core#odrl-profile (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a conforming access request (odrl:Request) validates"
+}

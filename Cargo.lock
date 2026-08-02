@@ -5324,6 +5324,7 @@ dependencies = [
  "sparq-engine",
  "sparq-http3",
  "sparq-policy",
+ "sparq-reason",
  "sparq-solid",
  "sparq-trust",
  "sparq-zk",

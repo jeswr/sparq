@@ -1,0 +1,142 @@
+{
+  "caseCount": 24,
+  "cases": [
+    {
+      "id": "access-grants/grant-document-valid",
+      "path": "cases/grant-document-valid/case.json"
+    },
+    {
+      "id": "access-grants/request-document-valid",
+      "path": "cases/request-document-valid/case.json"
+    },
+    {
+      "id": "access-grants/document-missing-profile-rejected",
+      "path": "cases/document-missing-profile-rejected/case.json"
+    },
+    {
+      "id": "access-grants/document-multi-action-rule-rejected",
+      "path": "cases/document-multi-action-rule-rejected/case.json"
+    },
+    {
+      "id": "access-grants/document-multi-target-rule-rejected",
+      "path": "cases/document-multi-target-rule-rejected/case.json"
+    },
+    {
+      "id": "access-grants/grant-permits-read",
+      "path": "cases/grant-permits-read/case.json"
+    },
+    {
+      "id": "access-grants/request-denied-without-grant",
+      "path": "cases/request-denied-without-grant/case.json"
+    },
+    {
+      "id": "access-grants/modify-includes-create",
+      "path": "cases/modify-includes-create/case.json"
+    },
+    {
+      "id": "access-grants/create-only-not-widened-to-modify",
+      "path": "cases/create-only-not-widened-to-modify/case.json"
+    },
+    {
+      "id": "access-grants/unknown-action-fail-closed",
+      "path": "cases/unknown-action-fail-closed/case.json"
+    },
+    {
+      "id": "access-grants/container-recursive-covers-descendant",
+      "path": "cases/container-recursive-covers-descendant/case.json"
+    },
+    {
+      "id": "access-grants/container-nonrecursive-excludes-descendant",
+      "path": "cases/container-nonrecursive-excludes-descendant/case.json"
+    },
+    {
+      "id": "access-grants/constraints-conjunctive-satisfied",
+      "path": "cases/constraints-conjunctive-satisfied/case.json"
+    },
+    {
+      "id": "access-grants/constraint-purpose-mismatch-denied",
+      "path": "cases/constraint-purpose-mismatch-denied/case.json"
+    },
+    {
+      "id": "access-grants/constraint-datetime-expired-denied",
+      "path": "cases/constraint-datetime-expired-denied/case.json"
+    },
+    {
+      "id": "access-grants/public-assignee-foaf-agent",
+      "path": "cases/public-assignee-foaf-agent/case.json"
+    },
+    {
+      "id": "access-grants/unsupported-constraint-fail-closed",
+      "path": "cases/unsupported-constraint-fail-closed/case.json"
+    },
+    {
+      "id": "access-grants/two-covering-grants-permit",
+      "path": "cases/two-covering-grants-permit/case.json"
+    },
+    {
+      "id": "access-grants/revoke-one-covering-grant-still-permitted",
+      "path": "cases/revoke-one-covering-grant-still-permitted/case.json"
+    },
+    {
+      "id": "access-grants/revoke-all-covering-grants-denied",
+      "path": "cases/revoke-all-covering-grants-denied/case.json"
+    },
+    {
+      "id": "access-grants/storage-resource-target-covers-storage",
+      "path": "cases/storage-resource-target-covers-storage/case.json"
+    },
+    {
+      "id": "access-grants/prohibition-denies-despite-permission",
+      "path": "cases/prohibition-denies-despite-permission/case.json"
+    },
+    {
+      "id": "access-grants/unmet-obligation-fail-closed",
+      "path": "cases/unmet-obligation-fail-closed/case.json"
+    },
+    {
+      "id": "access-grants/obligation-for-different-action-not-blocking",
+      "path": "cases/obligation-for-different-action-not-blocking/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#grants-are-records": [
+      "access-grants/grant-permits-read",
+      "access-grants/two-covering-grants-permit",
+      "access-grants/revoke-one-covering-grant-still-permitted",
+      "access-grants/revoke-all-covering-grants-denied"
+    ],
+    "core#odrl-profile": [
+      "access-grants/grant-document-valid",
+      "access-grants/request-document-valid",
+      "access-grants/document-missing-profile-rejected",
+      "access-grants/document-multi-action-rule-rejected",
+      "access-grants/document-multi-target-rule-rejected",
+      "access-grants/grant-permits-read",
+      "access-grants/request-denied-without-grant",
+      "access-grants/modify-includes-create",
+      "access-grants/create-only-not-widened-to-modify",
+      "access-grants/unknown-action-fail-closed",
+      "access-grants/container-recursive-covers-descendant",
+      "access-grants/container-nonrecursive-excludes-descendant",
+      "access-grants/constraints-conjunctive-satisfied",
+      "access-grants/constraint-purpose-mismatch-denied",
+      "access-grants/constraint-datetime-expired-denied",
+      "access-grants/public-assignee-foaf-agent",
+      "access-grants/unsupported-constraint-fail-closed",
+      "access-grants/two-covering-grants-permit",
+      "access-grants/revoke-one-covering-grant-still-permitted",
+      "access-grants/revoke-all-covering-grants-denied",
+      "access-grants/storage-resource-target-covers-storage",
+      "access-grants/prohibition-denies-despite-permission",
+      "access-grants/unmet-obligation-fail-closed",
+      "access-grants/obligation-for-different-action-not-blocking"
+    ],
+    "core#oracle-freedom": [
+      "access-grants/request-denied-without-grant"
+    ]
+  },
+  "description": "The ODRL Access Requests & Grants interface: conforming-document validation (REQUIRED profile declaration, odrl:Request/odrl:Offer, exactly one action and one target per rule) and default-deny grant evaluation — a permitting grant, a denied request, one-directional jlws:create/jlws:append ⊑ odrl:modify inclusion, unknown-action fail-closed, recursive vs non-recursive Container targets, conjunctive purpose/dateTime constraints, unsupported-constraint fail-closed, the foaf:Agent public assignee, and structural revocation composition over the recorded grant set. Every evaluate-access decision is reproduced by the normative executable rule set semantics/access-decision.n3 (test-suite/tools/oracle-access.mjs).",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "access-grants"
+}

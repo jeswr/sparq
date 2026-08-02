@@ -1,0 +1,53 @@
+{
+  "clauses": [
+    "core#odrl-profile"
+  ],
+  "expected": {
+    "documentClass": "grant",
+    "ok": true
+  },
+  "id": "access-grants/grant-document-valid",
+  "input": {
+    "document": {
+      "@context": [
+        "http://www.w3.org/ns/odrl.jsonld",
+        "https://w3id.org/jeswr/lws/v1"
+      ],
+      "@type": "Offer",
+      "assigner": "https://id.example/alice",
+      "permission": [
+        {
+          "action": "read",
+          "assignee": "https://id.example/bob",
+          "constraint": [
+            {
+              "leftOperand": "purpose",
+              "operator": "eq",
+              "rightOperand": "https://purpose.example/collaboration"
+            },
+            {
+              "leftOperand": "dateTime",
+              "operator": "lt",
+              "rightOperand": {
+                "@type": "xsd:dateTime",
+                "@value": "2026-12-31T00:00:00Z"
+              }
+            }
+          ],
+          "target": {
+            "@type": "Container",
+            "recursive": true,
+            "uid": "https://storage.example/alice/notes/"
+          }
+        }
+      ],
+      "profile": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+      "uid": "https://storage.example/alice/.grants/2f6c"
+    }
+  },
+  "level": "MUST",
+  "operation": "validate-access-document",
+  "source": "lws-spec@59da847 core#odrl-profile (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a conforming access grant (odrl:Offer with profile, singular rules, typed target, constraints) validates"
+}

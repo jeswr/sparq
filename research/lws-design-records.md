@@ -267,6 +267,7 @@ Verified in-tree members of that estate:
 | **DPoP-SK** — the sender-key DPoP profile (<https://jeswr.github.io/dpop-sk-spec/>) | cited by section; the spec's Appendix-A worked example is executed as a test vector | `src/pop/sk/**` (HKDF/HMAC DPoP-SK attestation) | `src/pop/sk/mod.rs:4-5`; `src/pop/sk/derive.rs:5`, `:162` |
 | **solid-oidc-verifier** (<https://github.com/jeswr/solid-oidc-verifier>) | git dependency at rev `89c896249a726398b78302fd2f65eef0a82af681`, `network` feature | baseline (cache-miss) Solid-OIDC access-token + DPoP proof verification; `JwksProvider` / `ReplayStore` | `Cargo.toml:230`; `src/auth.rs:5`; `src/lib.rs:15` |
 | **solid-oidc-verifier**, cache-hit path | same pin, used through the verifier's *public* primitives (`verify_proof_with_embedded_jwk`, `Jwk::thumbprint_sha256`, `proof_has_ath`, `peek_claims`) + the SHARED `ReplayStore` | on a verified-token-cache hit the cached token is reused, and `src/auth_cache.rs` re-verifies the fresh proof itself: signature, `htm`/`htu`/`iat`, `ath == H(token)`, the `jti` replay mark, and the `cnf.jkt` binding | `src/auth_cache.rs:13-31`, `:55-57` |
+| **lws-spec** — the JLWS profile (<https://github.com/jeswr/lws-spec>) | git rev `ffaea0497de41cd709a742e0c4a90831a500fd97`, vendored verbatim; its executable N3 access-decision semantics + the `access-grants` vector suite run as tests | the `evaluate-access` decision function of the strict ODRL access profile | `crates/sparq-lws-core/conformance/lws-spec/README.md`; `crates/sparq-lws-core/tests/lws_spec_access_decision.rs` |
 | **lws-acp** (<https://github.com/jeswr/lws-acp/tree/main/docs>) | consulted as prior art | the ACP/trust-graph authorization design | [`solid-trust-graph-authz-design.md`](./solid-trust-graph-authz-design.md) §; [`security-properties-ontology-design.md`](./security-properties-ontology-design.md) |
 
 The DPoP-SK row is the pattern worth copying: `src/pop/sk/derive.rs:162` runs the *spec's
@@ -275,12 +276,23 @@ the spec's arithmetic and this implementation's fails a test rather than sitting
 That is what "the specs are the contract" should mean mechanically — a pinned reference plus
 an executed vector, not a prose citation.
 
-**Unresolved, stated honestly.** The `sq-gg0qq.10` bead also names **`lws-spec`** and
-**`lws-ucs`** as members of this estate. Neither name appears anywhere in this
-repository — not in code, docs, `research/`, or `.beads/issues.jsonl` — so this pass has
-**no in-tree evidence of their location or content** and does not link them rather than
-guess a URL. Resolving them (and, if they are normative for shipped behaviour, pinning them
-the way DPoP-SK is pinned) is follow-up work, not something this record can assert.
+**`lws-spec` — resolved and pinned since this record was written.** The `sq-gg0qq.10` bead
+named **`lws-spec`** and **`lws-ucs`** as further members of this estate, and this record
+originally recorded that neither name appeared anywhere in the repository. `lws-spec` now
+does: **<https://github.com/jeswr/lws-spec>**, pinned at rev
+`ffaea0497de41cd709a742e0c4a90831a500fd97` under `sq-gg0qq.6` (issue #2746). It follows the
+DPoP-SK row's pattern rather than a prose citation — its *executable* access-decision N3 rule
+set and one of its ten language-neutral vector suites are vendored verbatim under
+`crates/sparq-lws-core/conformance/lws-spec/`, where 19 of the corpus's 157 vectors are executed
+on every `cargo test` by
+`tests/lws_spec_access_decision.rs`, so a drift between the spec's semantics and this
+repository fails a test. What is NOT wired (138 vectors — chiefly the 74 full-stack
+`http-exchange` cases, which need JLWS **profile** code this crate does not have) is
+enumerated in that directory's README, not glossed here.
+
+**`lws-ucs` — still unresolved, stated honestly.** That name still appears nowhere in this
+repository, so there remains **no in-tree evidence of its location or content**; this record
+does not link it rather than guess a URL.
 
 ## 9. What this record does not do
 
