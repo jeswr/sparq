@@ -164,15 +164,24 @@ demonstrably fired on compiler-generated IR (§10.12). **Corpus frequency was no
 measured here**, and this is again the PR #11580 "does it pay rent" question.
 
 **Amended 2026-08-02** (SPARQ agent 🤖 [OPUS-5], issue #5686): the sparq half of
-that frequency question is now answered at source level, and it is zero.
-`noir-corpus-row-audit-13263-13266.md` §4.3 finds the corpus closure carries no
+that frequency question is now answered at source level for **§5.2's 8
+`zk/compose` packages**, and there it is zero.
+`noir-corpus-row-audit-13263-13266.md` §4.3 finds their closure carries no
 qualifying mask at all — `compose_core`'s `&` operators are boolean, and
 `sparq_ieee754`'s constant masks are either `2^n - 1` (canonicalized before this
-pass) or feed an `==` rather than a truncate — so the PR body's *"11-program
-external corpus … all unchanged"* row cannot move. Unlike the sibling rows
-audited there, this one **already states that mechanism** in the PR body, so it
-does not read as a regression check and needs no repair beyond noting that the
-corpus contains *no* qualifying mask rather than few.
+pass) or feed an `==` rather than a truncate — so a row taken over those 8 cannot
+move. Whether that is the PR body's *"11-program external corpus … all
+unchanged"* row is **not established**: the body names no packages, and its count
+matching §5.2's 11 is not an identification (the audit's condition **(C)**,
+§4.1). Two things hold regardless of (C). The **fire branch** needs an `and` by a
+constant non-`2^n - 1` mask whose result feeds a `Truncate`; the *guard* is
+reached by any surviving `And` instruction, since the new arm is keyed on the
+`and` itself (§2) and not on the truncate — but that the corpus's boolean `&`s
+survive to this pass as `And`s is a compiler-emission assumption a source grep
+cannot settle. And this row, unlike the sibling rows audited there, **already
+states its mechanism** in the PR body, so it does not read as a regression check
+and needs no repair beyond noting that §5.2's 8 contain *no* qualifying mask
+rather than few.
 
 One structural reason to expect the shape to be *less* common than it first
 appears: the most idiomatic masks users write (`& 0xFF`, `& 0xFFFF`) are exactly
