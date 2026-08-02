@@ -608,6 +608,15 @@ jobs:
         run: |
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
+      # [OPUS-5] #5425: scripts/promote.py is the fourth member of that family — the pure core
+      # behind the promote-on-approval cron. Its suite covers the revision-bound 👍 rule AND
+      # (since #5425) the quarantine queue read, whose failure mode is fail-QUIET: a truncated
+      # fetch strands the oldest quarantined issues on every tick and reds nothing, so a live
+      # cron run cannot surface it. The cron re-runs this same suite before it writes any label,
+      # so this gate and that one fail on the same regression — here on the PR, there before
+      # any issue is touched.
+      - name: Self-test promote.py (revision-bound 👍 + no-silent-truncation queue read)
+        run: python3 scripts/promote.py --self-test
       # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
       # family — it CLEARS the `needs:area` park triage.py sets. As of #3816 it also
       # runs unattended every half hour (.github/workflows/triage-area.yml), which
