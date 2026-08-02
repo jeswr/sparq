@@ -12,12 +12,22 @@
 //!
 //! ## What this is FOR (design record §5c)
 //!
-//! Every assertion in the graph carries **both** [`SECX_HONEST_MAJORITY`] and
-//! [`SECX_SEMI_HONEST`] as `secx:assumption`. So a requester preference demanding
-//! **malicious security** or a **dishonest-majority** threat model *mechanically
-//! excludes* every sparq-mpc protocol — see [`admits_protocol`]. That is the honest
-//! encoding of "semi-honest only" **in the property data**, not merely in prose:
-//! prose can be skimmed past, a `secx:assumption` edge cannot.
+//! Admission is **positive-evidence-only**. A protocol satisfies an
+//! [`AdversaryRequirement`] only when the block is structurally usable *and* every
+//! assertion in it carries a `secx:assumption` that is positive **evidence for**
+//! that requirement — see [`supporting_assumptions`]. Absence of
+//! [`SECX_SEMI_HONEST`] is *not* evidence of malicious security, and the code never
+//! reads it as such.
+//!
+//! Phase 1 minted no positive `secx:Malicious` / `secx:DishonestMajority` term, so
+//! [`supporting_assumptions`] is **empty for both requirements** and *no* annotation
+//! — sparq's or anyone else's — can currently supply that evidence. Every protocol
+//! is therefore excluded by a malicious-security or dishonest-majority preference.
+//! Independently, every assertion in sparq's graph carries both
+//! [`SECX_HONEST_MAJORITY`] and [`SECX_SEMI_HONEST`], each an explicit
+//! [`disqualifying_assumptions`] entry for the corresponding requirement. That is
+//! the honest encoding of "semi-honest only" **in the property data**, not merely in
+//! prose: prose can be skimmed past, a `secx:assumption` edge cannot.
 //!
 //! ## What this records — and what it is NOT
 //!
@@ -52,8 +62,10 @@
 //! `secx:DishonestMajority` term, so annotating it could only mislabel it
 //! semi-honest (a false exclusion) or omit its adversary axis (a silent
 //! fail-open). Omission is the honest option — an unannotated protocol makes no
-//! claim, and [`admits_protocol`] denies it by default (fail-closed). Annotating it
-//! needs the Phase-1 vocabulary extended first.
+//! claim, and [`admits_protocol`] denies it by default (fail-closed); so is an
+//! annotated-but-structurally-unusable one (see
+//! [`ProtocolAnnotations::is_structurally_valid`]). Annotating it needs the Phase-1
+//! vocabulary extended first.
 //!
 //! ## Opt-in by construction
 //!
@@ -198,7 +210,9 @@ pub struct PropertyAssertion {
     /// The `secx:auditStatus`, if stated.
     pub audit_status: Option<String>,
     /// Every `secx:assumption` this claim rests on. **Empty means the claim states
-    /// no assumption** — which the guards treat as a drift, not as "assumption-free".
+    /// no assumption** — which the guards treat as a drift, not as "assumption-free",
+    /// and which makes the enclosing block structurally invalid for admission (see
+    /// [`ProtocolAnnotations::is_structurally_valid`]).
     pub assumptions: BTreeSet<String>,
 }
 
@@ -226,6 +240,13 @@ pub struct ProtocolAnnotations {
     pub protocol: String,
     /// The reified claims, in a stable `(property, level)` order.
     pub assertions: Vec<PropertyAssertion>,
+    /// How many `secx:hasProperty` nodes on this protocol were **discarded** as
+    /// malformed by the parser (no `secx:property`, or a missing/unknown
+    /// `secx:assurance`). Non-zero means the block is not a faithful reading of the
+    /// graph, so [`Self::is_structurally_valid`] — and hence every admission —
+    /// fails: a dropped assertion must never be mistaken for one that was never
+    /// there.
+    pub malformed_assertions: usize,
 }
 
 impl ProtocolAnnotations {
@@ -242,23 +263,77 @@ impl ProtocolAnnotations {
         self.assertions.iter().any(|a| a.rests_on(assumption))
     }
 
+    /// Whether this block is usable as the basis of an admission decision at all:
+    /// no assertion was discarded as malformed, there is at least one assertion, and
+    /// **every** assertion states at least one `secx:assumption`.
+    ///
+    /// An empty block, a block whose assertions state no assumptions, and a block
+    /// the parser had to drop nodes from all describe *nothing checkable* about the
+    /// threat model. Treating any of them as "no limitation found" is the fail-open
+    /// this predicate exists to prevent.
+    pub fn is_structurally_valid(&self) -> bool {
+        self.malformed_assertions == 0
+            && !self.assertions.is_empty()
+            && self.assertions.iter().all(|a| !a.assumptions.is_empty())
+    }
+
     /// Whether this protocol satisfies `requirement`.
     ///
-    /// This is the §5c exclusion, computed from the graph — **not** from prose:
+    /// This is the §5c exclusion, computed from the graph — **not** from prose — and
+    /// it is **positive-evidence-only**. It holds when all three are true:
     ///
-    /// - [`AdversaryRequirement::MaliciousSecurity`] is satisfied only if **no**
-    ///   claim rests on `secx:SemiHonest`. Every sparq-mpc protocol does, so every
-    ///   one is excluded.
-    /// - [`AdversaryRequirement::DishonestMajority`] is satisfied only if **no**
-    ///   claim rests on `secx:HonestMajority`. Likewise, all are excluded.
+    /// 1. [`Self::is_structurally_valid`] — otherwise there is no checkable claim.
+    /// 2. Every assertion rests on at least one [`supporting_assumptions`] IRI for
+    ///    `requirement`.
+    /// 3. No assertion rests on a [`disqualifying_assumptions`] IRI for it.
+    ///
+    /// Because the Phase-1 vocabulary minted no positive `secx:Malicious` /
+    /// `secx:DishonestMajority` term, (2) is currently unsatisfiable and this returns
+    /// `false` for **every** protocol. That is deliberate: the alternative — reading
+    /// the *absence* of `secx:SemiHonest` as evidence of malicious security — would
+    /// admit an empty, assumption-less or partially-dropped block under the strongest
+    /// threat models. (3) is not yet load-bearing on its own; it becomes so the moment
+    /// (2) can be satisfied, and keeps a self-contradictory annotation denied then.
     ///
     /// Prefer [`admits_protocol`] at a lookup boundary: it additionally denies an
     /// **unannotated** protocol (fail-closed), which this method cannot see.
     pub fn admits(&self, requirement: AdversaryRequirement) -> bool {
-        match requirement {
-            AdversaryRequirement::MaliciousSecurity => !self.rests_on(SECX_SEMI_HONEST),
-            AdversaryRequirement::DishonestMajority => !self.rests_on(SECX_HONEST_MAJORITY),
+        if !self.is_structurally_valid() {
+            return false;
         }
+        let support = supporting_assumptions(requirement);
+        let disqualifiers = disqualifying_assumptions(requirement);
+        self.assertions.iter().all(|a| {
+            support.iter().any(|s| a.rests_on(s)) && disqualifiers.iter().all(|d| !a.rests_on(d))
+        })
+    }
+}
+
+/// The `secx:assumption` IRIs that are positive **evidence for** `requirement` — an
+/// assertion carrying one of them supports the claim that the protocol meets it.
+///
+/// **Both are currently empty.** Phase 1 minted `secx:HonestMajority` and
+/// `secx:SemiHonest` only, and no positive `secx:Malicious` / `secx:DishonestMajority`
+/// counterpart, so the stronger threat models are honestly *unrepresentable* rather
+/// than inferred from an absence. Extending the Phase-1 vocabulary is what fills these
+/// in; until then [`ProtocolAnnotations::admits`] denies both requirements outright.
+pub fn supporting_assumptions(requirement: AdversaryRequirement) -> &'static [&'static str] {
+    match requirement {
+        AdversaryRequirement::MaliciousSecurity => &[],
+        AdversaryRequirement::DishonestMajority => &[],
+    }
+}
+
+/// The `secx:assumption` IRIs that **disqualify** an assertion from `requirement` —
+/// resting on one is positive evidence *against* it.
+///
+/// Unlike [`supporting_assumptions`] these are representable today, and every
+/// sparq-mpc assertion carries both, which is why the crate's own posture is excluded
+/// on evidence rather than on silence.
+pub fn disqualifying_assumptions(requirement: AdversaryRequirement) -> &'static [&'static str] {
+    match requirement {
+        AdversaryRequirement::MaliciousSecurity => &[SECX_SEMI_HONEST],
+        AdversaryRequirement::DishonestMajority => &[SECX_HONEST_MAJORITY],
     }
 }
 
@@ -279,6 +354,10 @@ pub enum AdversaryRequirement {
 /// An **unannotated** protocol makes no claim, so it satisfies no requirement and
 /// this returns `false`. That is the default-deny posture the trust-graph admission
 /// gate needs: absence of an annotation must never read as absence of a limitation.
+///
+/// The same holds one level down — [`ProtocolAnnotations::admits`] requires positive
+/// evidence over a [structurally valid](ProtocolAnnotations::is_structurally_valid)
+/// block, so an annotation that is *present but says nothing checkable* is denied too.
 pub fn admits_protocol(
     annotations: &BTreeMap<String, ProtocolAnnotations>,
     protocol: &str,
@@ -349,13 +428,20 @@ pub enum ViolationKind {
 /// objects, so we first index every triple by blank-node subject, then resolve each
 /// `(protocol, hasProperty, _:b)` edge to the pairs on `_:b`.
 pub fn parse_annotations() -> BTreeMap<String, ProtocolAnnotations> {
+    parse_annotations_str(PROTOCOLS_TTL)
+}
+
+/// [`parse_annotations`] over arbitrary Turtle — the testable seam, so the
+/// malformed-assertion accounting can be exercised on inputs the bundled graph
+/// deliberately never contains.
+fn parse_annotations_str(ttl: &str) -> BTreeMap<String, ProtocolAnnotations> {
     // blank-node id -> its (predicate IRI, object) pairs.
     let mut bnode_pairs: BTreeMap<String, Vec<(String, Term)>> = BTreeMap::new();
     // protocol IRI -> the blank-node ids of its assertion nodes.
     let mut protocol_assertion_bnodes: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-    for result in TurtleParser::new().for_reader(PROTOCOLS_TTL.as_bytes()) {
-        let t = result.expect("bundled secprop-protocols.ttl must be valid Turtle");
+    for result in TurtleParser::new().for_reader(ttl.as_bytes()) {
+        let t = result.expect("secprop annotation graph must be valid Turtle");
         let pred = t.predicate.into_string();
 
         match &t.subject {
@@ -381,11 +467,18 @@ pub fn parse_annotations() -> BTreeMap<String, ProtocolAnnotations> {
     let mut out: BTreeMap<String, ProtocolAnnotations> = BTreeMap::new();
     for (protocol, bnodes) in protocol_assertion_bnodes {
         let mut assertions = Vec::new();
+        // A `secx:hasProperty` node we cannot read is COUNTED, never silently
+        // dropped: an unreadable assumption list is exactly the case that must not
+        // look like "this protocol states no limitation".
+        let mut malformed_assertions = 0usize;
         for b in bnodes {
-            if let Some(pairs) = bnode_pairs.get(&b) {
-                if let Some(a) = assertion_from_pairs(pairs) {
-                    assertions.push(a);
-                }
+            match bnode_pairs
+                .get(&b)
+                .map(Vec::as_slice)
+                .and_then(assertion_from_pairs)
+            {
+                Some(a) => assertions.push(a),
+                None => malformed_assertions += 1,
             }
         }
         // Stable order: by (property, level) so output is deterministic.
@@ -397,6 +490,7 @@ pub fn parse_annotations() -> BTreeMap<String, ProtocolAnnotations> {
             ProtocolAnnotations {
                 protocol,
                 assertions,
+                malformed_assertions,
             },
         );
     }
@@ -642,29 +736,131 @@ mod tests {
         ));
     }
 
-    /// `admits` is genuinely data-driven, not a hard-coded `false`: a protocol whose
-    /// claims do NOT rest on `secx:SemiHonest` IS admitted under a malicious
-    /// preference. Without this the exclusion tests above would pass vacuously.
-    #[test]
-    fn admits_is_driven_by_the_assumption_data() {
-        let hypothetical = ProtocolAnnotations {
-            protocol: "https://sparq.dev/ns/mpc#hypothetical-malicious".to_owned(),
+    /// Build an otherwise-valid single-assertion block resting on `assumptions`.
+    fn block_resting_on(assumptions: &[&str]) -> ProtocolAnnotations {
+        ProtocolAnnotations {
+            protocol: "https://sparq.dev/ns/mpc#hypothetical".to_owned(),
             assertions: vec![PropertyAssertion {
                 property: sparq_secprop_vocab::SECX_SOUNDNESS.to_owned(),
                 level: Some(sparq_secprop_vocab::SECX_SOUND.to_owned()),
                 assurance: Assurance::Claimed,
                 audit_status: Some(SECX_EXTERNAL_SIGN_OFF_PENDING.to_owned()),
-                // rests on honest majority but NOT on semi-honest
-                assumptions: [SECX_HONEST_MAJORITY.to_owned()].into_iter().collect(),
+                assumptions: assumptions.iter().map(|a| (*a).to_owned()).collect(),
             }],
-        };
+            malformed_assertions: 0,
+        }
+    }
+
+    /// Admission is POSITIVE-EVIDENCE-only: dropping `secx:SemiHonest` from a block
+    /// does NOT buy it malicious security. This is the fail-open the absence-based
+    /// rule had — a protocol that simply never mentions the semi-honest assumption
+    /// used to be admitted under the strongest threat model on no evidence at all.
+    #[test]
+    fn absence_of_semi_honest_is_not_evidence_of_malicious_security() {
+        let honest_majority_only = block_resting_on(&[SECX_HONEST_MAJORITY]);
         assert!(
-            hypothetical.admits(AdversaryRequirement::MaliciousSecurity),
-            "a non-semi-honest protocol must satisfy a malicious-security preference"
+            !honest_majority_only.admits(AdversaryRequirement::MaliciousSecurity),
+            "no secx:SemiHonest edge is not the same as evidence of malicious security"
         );
         assert!(
-            !hypothetical.admits(AdversaryRequirement::DishonestMajority),
-            "an honest-majority protocol must still fail a dishonest-majority preference"
+            !honest_majority_only.admits(AdversaryRequirement::DishonestMajority),
+            "an honest-majority protocol must fail a dishonest-majority preference"
+        );
+    }
+
+    /// The structural-validity vectors the absence-based rule admitted for BOTH
+    /// stronger threat models: an empty block, a block whose assertions state no
+    /// assumptions, and a block the parser had to discard nodes from.
+    #[test]
+    fn structurally_unusable_blocks_are_denied_every_requirement() {
+        let empty = ProtocolAnnotations {
+            protocol: "https://sparq.dev/ns/mpc#empty".to_owned(),
+            assertions: Vec::new(),
+            malformed_assertions: 0,
+        };
+        let no_assumptions = block_resting_on(&[]);
+        let mut partly_dropped = block_resting_on(&[SECX_HONEST_MAJORITY]);
+        partly_dropped.malformed_assertions = 1;
+
+        for block in [&empty, &no_assumptions, &partly_dropped] {
+            assert!(
+                !block.is_structurally_valid(),
+                "{} must not be structurally valid",
+                block.protocol
+            );
+            for requirement in [
+                AdversaryRequirement::MaliciousSecurity,
+                AdversaryRequirement::DishonestMajority,
+            ] {
+                assert!(
+                    !block.admits(requirement),
+                    "{} must be denied {:?}",
+                    block.protocol,
+                    requirement
+                );
+            }
+        }
+        // ...and the sound shape IS structurally valid, so the predicate is not a
+        // hard-coded `false`.
+        assert!(block_resting_on(&[SECX_HONEST_MAJORITY]).is_structurally_valid());
+    }
+
+    /// An assertion the parser cannot read (missing/unknown `secx:assurance`) is
+    /// COUNTED, not silently discarded — otherwise a graph could shed exactly the
+    /// assumptions that disqualify it and read as unconstrained.
+    #[test]
+    fn unreadable_assertions_are_counted_and_deny_admission() {
+        let ttl = format!(
+            r#"
+            @prefix secx: <{}> .
+            <{}> secx:hasProperty [
+                secx:property secx:Soundness ;
+                secx:assumption secx:HonestMajority
+            ] .
+            "#,
+            SEC_PROP_NS, MPC_SHAMIR_COMPARISON,
+        );
+        let parsed = parse_annotations_str(&ttl);
+        let block = &parsed[MPC_SHAMIR_COMPARISON];
+        assert_eq!(
+            block.malformed_assertions, 1,
+            "an assertion with no secx:assurance must be counted as malformed"
+        );
+        assert!(block.assertions.is_empty());
+        assert!(!admits_protocol(
+            &parsed,
+            MPC_SHAMIR_COMPARISON,
+            AdversaryRequirement::MaliciousSecurity
+        ));
+        // The bundled graph, by contrast, parses cleanly.
+        assert!(annotations()
+            .values()
+            .all(|b| b.malformed_assertions == 0 && b.is_structurally_valid()));
+    }
+
+    /// The two evidence tables. `supporting_assumptions` being empty is the whole
+    /// reason every requirement is currently denied, so it is asserted explicitly
+    /// rather than left implicit in the admission results.
+    #[test]
+    fn evidence_tables_record_the_phase_1_vocabulary_gap() {
+        for requirement in [
+            AdversaryRequirement::MaliciousSecurity,
+            AdversaryRequirement::DishonestMajority,
+        ] {
+            assert!(
+                supporting_assumptions(requirement).is_empty(),
+                "Phase 1 minted no positive term for {:?}; update this test and the \
+                 module docs when it does",
+                requirement
+            );
+        }
+        assert_eq!(
+            disqualifying_assumptions(AdversaryRequirement::MaliciousSecurity),
+            [SECX_SEMI_HONEST]
+        );
+        assert_eq!(
+            disqualifying_assumptions(AdversaryRequirement::DishonestMajority),
+            [SECX_HONEST_MAJORITY]
         );
     }
 
@@ -769,6 +965,7 @@ mod tests {
                     audit_status: None,
                     assumptions: BTreeSet::new(),
                 }],
+                malformed_assertions: 0,
             },
         );
         let violations = audit_overclaim_violations(&ann);

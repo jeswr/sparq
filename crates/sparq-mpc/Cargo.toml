@@ -46,10 +46,13 @@ insecure-test-rng = []
 # [OPUS-5] sq-dz10l (Phase 6, epic sq-0dksu): the PER-PROTOCOL security-properties
 # annotation graph (`secprop` module) — the machine-readable form of this crate's
 # per-operator posture, keyed on the `mpc:` protocol IRIs (one per
-# `backend::OperatorClass`). Every assertion carries `secx:assumption
-# secx:HonestMajority , secx:SemiHonest`, so a preference requiring malicious
-# security or a dishonest majority MECHANICALLY excludes every sparq-mpc protocol —
-# the honest encoding of "semi-honest only" in the property DATA, not just prose
+# `backend::OperatorClass`). Admission is POSITIVE-EVIDENCE-only over a structurally
+# valid block, and Phase 1 minted no positive `secx:Malicious`/`secx:DishonestMajority`
+# term, so a preference requiring malicious security or a dishonest majority
+# MECHANICALLY excludes every protocol; every sparq-mpc assertion additionally carries
+# the disqualifying `secx:assumption secx:HonestMajority , secx:SemiHonest`. The honest
+# encoding of "semi-honest only" in the property DATA, not just prose — and absence of
+# an assumption is never read as a stronger guarantee
 # (design record research/security-properties-ontology-design.md §5c).
 #
 # Carries the guards: the ANTI-DRIFT check (the annotated assumption set must equal
