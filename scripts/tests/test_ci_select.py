@@ -866,32 +866,88 @@ class ReleaseLaneSafeTests(unittest.TestCase):
         for entry in self.RELEASE_LANE:
             self.assertNotIn(Path(entry).name, self.selector_gated, entry)
 
-    def test_guards_reading_a_release_workflow_run_outside_the_selector(self):
-        # Scope: `scripts/tests/**` — the files that ASSERT on a release workflow's
-        # contents. Deliberately not all of `scripts/`, where a mention is usually a
-        # prose cross-reference rather than a gate reading the file.
+    # The guards ci_select.py's release-lane comment NAMES as the lane that still
+    # validates each carved-out workflow. Discovery alone cannot pin this: a guard
+    # that stops being invoked simply stops being discovered, so the carve-out would
+    # lose its validating lane silently. This mapping makes the claim explicit and
+    # per-entry, so losing coverage for one release workflow cannot be masked by
+    # coverage for another.
+    REQUIRED_GUARDS = {
+        ".github/workflows/release.yml": (
+            "test_release_publish_guard.py",
+            "test_release_slsa_l3_provenance.py",
+            "test_release_container_multiarch.py",
+        ),
+        ".github/workflows/release-plz.yml": ("test_release_publish_guard.py",),
+        ".github/workflows/release-verify.yml": ("test_verify_release_provenance.sh",),
+        ".github/workflows/dist.yml": ("test_release_slsa_l3_provenance.py",),
+        ".github/workflows/publish.yml": ("test_release_publish_guard.py",),
+    }
+
+    def _runners_of(self, guard_name):
+        return {
+            wf for wf, text in self.wf_text.items()
+            if f"scripts/tests/{guard_name}" in text
+        }
+
+    def test_every_release_lane_entry_has_a_required_guard_that_runs(self):
+        # Per-entry, fail-closed: every carved-out workflow must name at least one
+        # guard, and each named guard must (a) exist, (b) actually read that workflow
+        # — so the mapping cannot drift into a lie — and (c) be invoked by at least
+        # one workflow the selector cannot skip.
         tests_dir = REPO_ROOT / "scripts" / "tests"
-        checked = 0
+        for entry in self.RELEASE_LANE:
+            guards = self.REQUIRED_GUARDS.get(entry, ())
+            self.assertTrue(
+                guards,
+                f"{entry} is allowlisted as orchestration-safe but REQUIRED_GUARDS names "
+                f"no guard that validates it — the carve-out is unaudited.",
+            )
+            for guard_name in guards:
+                guard = tests_dir / guard_name
+                self.assertTrue(guard.exists(), f"required guard {guard_name} does not exist")
+                self.assertIn(
+                    Path(entry).name, guard.read_text(encoding="utf-8", errors="ignore"),
+                    f"{guard_name} is listed as the guard for {entry} but does not read it",
+                )
+                runners = self._runners_of(guard_name)
+                self.assertTrue(
+                    runners - self.selector_gated,
+                    f"{guard_name} is the guard for {entry} but no workflow the selector "
+                    f"cannot skip runs it (runners: {sorted(runners) or 'none'}) — a "
+                    f"release-workflow PR would skip its own guard; either run it from a "
+                    f"non-gated workflow or drop {entry} from _ORCHESTRATION_SAFE.",
+                )
+
+    def test_guards_reading_a_release_workflow_run_outside_the_selector(self):
+        # Discovery sweep, on top of the explicit mapping: ANY file that asserts on a
+        # release workflow's contents must run outside the selector. Scope:
+        # `scripts/tests/**` — deliberately not all of `scripts/`, where a mention is
+        # usually a prose cross-reference rather than a gate reading the file.
+        tests_dir = REPO_ROOT / "scripts" / "tests"
+        checked = {entry: 0 for entry in self.RELEASE_LANE}
         for entry in self.RELEASE_LANE:
             name = Path(entry).name
             for guard in sorted(p for p in tests_dir.iterdir() if p.is_file()):
                 if name not in guard.read_text(encoding="utf-8", errors="ignore"):
                     continue
-                runners = {
-                    wf for wf, text in self.wf_text.items()
-                    if f"scripts/tests/{guard.name}" in text
-                }
-                if not runners:
-                    continue  # invoked by no workflow at all: a different problem
+                runners = self._runners_of(guard.name)
+                # Fail-CLOSED on the empty case: a guard that reads a release workflow
+                # but is invoked by NO workflow validates nothing, and skipping it here
+                # is exactly how the carve-out would silently lose its lane.
                 self.assertTrue(
                     runners - self.selector_gated,
-                    f"{guard.name} reads {entry} but every workflow that runs it "
-                    f"({sorted(runners)}) is selector-gated — a release-workflow PR "
-                    f"would skip this guard; either run it from a non-gated workflow "
+                    f"{guard.name} reads {entry} but no workflow the selector cannot skip "
+                    f"runs it (runners: {sorted(runners) or 'none'}) — a release-workflow "
+                    f"PR would skip this guard; either run it from a non-gated workflow "
                     f"or drop {entry} from _ORCHESTRATION_SAFE.",
                 )
-                checked += 1
-        self.assertGreater(checked, 0, "no release-workflow guard found — the audit is vacuous")
+                checked[entry] += 1
+            # Per-entry non-vacuity: coverage for one release workflow must not mask
+            # a total absence of guards for another.
+            self.assertGreater(
+                checked[entry], 0, f"no guard reads {entry} — the audit is vacuous for it"
+            )
 
 
 class RealMetadataShapeTests(unittest.TestCase):

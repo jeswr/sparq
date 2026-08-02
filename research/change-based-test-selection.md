@@ -155,7 +155,11 @@ enforced by `scripts/tests/test_ci_select.py`:
    those workflows as data (the release-publish / SLSA-provenance / multiarch /
    provenance-verify checks) are invoked from `docs-quality.yml`, which is not
    selector-gated — so a release-workflow PR is still validated by the lane that
-   validates release workflows, just not by the Rust engine matrix.
+   validates release workflows, just not by the Rust engine matrix. The test pins
+   this per allowlisted workflow, via an explicit entry→required-guard mapping, and
+   fails closed: a required guard that no non-gated workflow invokes — including one
+   that has stopped being invoked at all — is a failure, not a skip, so an entry
+   cannot silently lose its validating lane.
 
 `build-matrix.yml` is deliberately excluded: it is a real cargo build definition, and
 the fail-closed posture there is worth more than the one skipped workflow.
