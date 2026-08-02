@@ -34,6 +34,8 @@
 //
 // NO PERFORMANCE CLAIM is made anywhere here. NO secret (a bearer token) is ever persisted.
 
+import { parseGraphLenses, type GraphLens } from "./graph-lens.js";
+
 // ---------------------------------------------------------------------------
 // The data model.
 // ---------------------------------------------------------------------------
@@ -164,6 +166,19 @@ export interface Workspace {
    */
   serviceAllowlist?: string[];
   /**
+   * [OPUS-5] sq-ixc3.22 — the per-workspace GRAPH-VIZ LENSES: named sets of up to five SPARQL
+   * queries (start / expansion / node basics / edge basics / node panel) that define how the
+   * graph view explores and draws this workspace's data. The built-in default lens is NOT
+   * persisted here — only the user's own lenses are. Optional + backward-compatible: an older
+   * record simply omits it (no schema bump — purely additive, like `serviceAllowlist`).
+   */
+  graphLenses?: GraphLens[];
+  /**
+   * [OPUS-5] sq-ixc3.22 — the id of the lens the graph view opens with. Absent, or naming a lens
+   * that no longer exists, means the built-in {@link DEFAULT_LENS}.
+   */
+  activeLensId?: string;
+  /**
    * The schema version of this persisted record. Bumped if the on-disk shape changes so a
    * loader can migrate or discard an incompatible old record rather than crash.
    */
@@ -263,6 +278,10 @@ export function parseWorkspace(value: unknown): Workspace | null {
     rulesDocs: parseRulesDocs(v.rulesDocs),
     // [FABLE-5] sq-ixc3.14 — backward-compatible: no `serviceAllowlist` → empty (fail-closed).
     serviceAllowlist: parseServiceAllowlist(v.serviceAllowlist),
+    // [OPUS-5] sq-ixc3.22 — backward-compatible: no `graphLenses` → none (the built-in default
+    // lens is always offered, so an empty list still gives the view a working configuration).
+    graphLenses: parseGraphLenses(v.graphLenses),
+    activeLensId: typeof v.activeLensId === "string" ? v.activeLensId : undefined,
     schema: WORKSPACE_SCHEMA,
   };
 }

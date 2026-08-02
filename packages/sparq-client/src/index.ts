@@ -662,6 +662,45 @@ export {
   prettyTurtle,
 } from "./pretty-turtle.js";
 
+// [OPUS-5] sq-ixc3.22 — the programmable graph-viz LENS core (a named set of up to five SPARQL
+// queries defining start / expansion / node basics / edge basics / node panel) plus the RDF 1.2
+// reifier-annotation folding that turns reification plumbing into edge badges. Pure + DOM-free,
+// so the GUI graph view and any future host draw from one definition.
+export {
+  type GraphLens,
+  type GraphLensSlot,
+  type GraphLensSlotSpec,
+  type GraphNodeStyle,
+  type GraphEdgeStyle,
+  type GraphNodeDetailRow,
+  type GraphEdgeAnnotation,
+  type FoldedAnnotations,
+  DEFAULT_LENS,
+  DEFAULT_LENS_ID,
+  GRAPH_LENS_SLOTS,
+  LENS_TYPE_COLORS,
+  RDF_REIFIES,
+  bindFocusNode,
+  edgeKeyOf,
+  edgeKeyOfStatement,
+  edgeStyleIndex,
+  foldReifiedAnnotations,
+  graphLensId,
+  importGraphLens,
+  mergeNTriples,
+  newGraphLens,
+  nodeDetailRows,
+  nodeKeyOfRdfTerm,
+  nodeKeyOfSparqlTerm,
+  nodeStyleIndex,
+  parseGraphLens,
+  parseGraphLenses,
+  rankRadius,
+  serializeGraphLens,
+  termToNTriples,
+  typeColorIndex,
+} from "./graph-lens.js";
+
 export {
   type PrefixBinding,
   COMMON_PREFIXES,

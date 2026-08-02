@@ -165,6 +165,44 @@ snapshot of the asserted store and runs `reasonN3`; derived ground triples are l
 query-time closure. [SONNET-4.6] This is the honest live-wasm boundary: formula and quoted-graph
 conclusions are not inserted because the in-tab store represents ground triples only.
 
+## Graph lenses + RDF 1.2 annotations — `sq-ixc3.22`
+
+The **Graph view** tool is a *programmable* lens over the store, not a fixed drawing. A **lens** is
+a named set of up to **five SPARQL queries**, edited in the tool's `Lens` panel and **persisted on
+the workspace** (`Workspace.graphLenses` / `activeLensId`):
+
+| Slot | Form | Reads | What it does |
+|---|---|---|---|
+| `start` | `SELECT` | `?node` | the entry nodes `Run` opens on |
+| `expand` | `CONSTRUCT` | `?node` bound | one node's neighbourhood — clicking a node runs it and **merges** the result into the picture |
+| `nodeStyle` | `SELECT` | `?node ?type ?label ?rank` | node colour (deterministic per `?type`), caption, relative size |
+| `edgeStyle` | `SELECT` | `?s ?p ?o ?label` | per-edge caption override |
+| `nodeDetail` | `SELECT` | `?node` bound → `?key ?value` | the focused node's side panel |
+
+Every slot is a real query against the live store; a lens is configuration, never a second
+rendering path. `?node` is bound by substituting the focus term's N-Triples spelling — the
+substitution skips comments, IRIs and string literals, so a `?node` inside one is untouched. A
+lens leaving `start` or `expand` empty falls back to the tool's original behaviour (`Run` executes
+the query in the editor). Lenses are shareable: **Copy JSON** exports one and the import box
+accepts a pasted lens, always under a fresh id so it can never overwrite one of your own.
+
+The **built-in default lens** ranks nodes by **out-degree**, computed by a SPARQL `COUNT` over
+your data. That is a real computed ordering, not a stand-in for something richer: sparq's
+full-text index has a prefix-token ("autocomplete") search path, but exposes no per-term ranking
+through the in-tab wasm bundle, so there is no autocomplete-rank signal for the default lens to
+read. Any lens can bind `?rank` to whatever ranking predicate its own data carries.
+
+**RDF 1.2 annotation rendering is lens-independent** and always on. A result carrying reifying
+triples (`?r rdf:reifies <<( s p o )>>` plus the reifier's own properties) has those properties
+**folded onto the edge they describe** as a hoverable badge, instead of drawn as a cloud of
+anonymous plumbing nodes. Annotations whose described triple is **not** in the result are counted
+and reported rather than given an invented edge — RDF 1.2 reification does not assert the triple
+it describes. The seeded sample graph carries one reifier so the badge is visible out of the box.
+
+The lens model, the `?node` binding, the annotation folding and the styling readers are all pure
+and live in `@sparq/client` (`src/graph-lens.ts`, unit-tested in `test/graph-lens.test.mjs`), so a
+second host draws the same picture from the same definition.
+
 ## Shared TS client
 
 The frontend consumes the framework-agnostic `@sparq/client`

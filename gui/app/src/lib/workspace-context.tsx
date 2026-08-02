@@ -23,11 +23,14 @@
 
 import * as React from "react";
 import {
+  DEFAULT_LENS,
+  DEFAULT_LENS_ID,
   createSerializedWorkspaceSaver,
   createWorkspaceStore,
   describeWorkspaceSaveError,
   newWorkspace,
   parseServiceAllowlist,
+  type GraphLens,
   type SerializedWorkspaceSaver,
   type Workspace,
   type WorkspaceBackend,
@@ -148,6 +151,22 @@ export interface WorkspaceContextValue {
    * in-memory state. Call this whenever engine.run() returns outcome.kind === "update".
    */
   recordUpdateSnapshot: () => Promise<void>;
+  /**
+   * [OPUS-5] sq-ixc3.22 — every graph-viz lens the graph view can select: the built-in
+   * {@link DEFAULT_LENS} first, then this workspace's saved lenses in name order.
+   */
+  lenses: GraphLens[];
+  /** The lens the graph view opens with — the persisted selection, or the built-in default. */
+  activeLens: GraphLens;
+  /** Select a lens by id (persisted). An unknown id falls back to the built-in default. */
+  setActiveLensId: (id: string) => Promise<void>;
+  /**
+   * Insert or replace a user lens by id and make it active (persisted). Saving under the
+   * built-in lens's id is refused — the default must stay a stable reference point.
+   */
+  saveLens: (lens: GraphLens) => Promise<void>;
+  /** Delete a user lens by id (persisted); the built-in default is not deletable. */
+  deleteLens: (id: string) => Promise<void>;
 }
 
 const WorkspaceContext = React.createContext<WorkspaceContextValue | null>(null);
@@ -388,6 +407,64 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     await persist(next);
   }, [applyWorkspace, persist]);
 
+  // [OPUS-5] sq-ixc3.22 — graph-viz LENS persistence. A lens is plain data on the workspace
+  // record, so it saves through exactly the same best-effort path as every other field: mutate
+  // in memory first, write through, never let a persistence failure break the in-memory
+  // selection. The built-in default lens is never stored (it ships with the app) and is never
+  // overwritten or deleted — a shared lens that claims its id is rejected here as well as in
+  // the parser, so "Default" always means the same thing.
+  const setActiveLensId = React.useCallback(
+    async (id: string): Promise<void> => {
+      const base = workspaceRef.current;
+      if (!base || base.activeLensId === id) return;
+      const next: Workspace = { ...base, activeLensId: id, updatedAt: Date.now() };
+      applyWorkspace(next);
+      await persist(next);
+    },
+    [applyWorkspace, persist],
+  );
+
+  const saveLens = React.useCallback(
+    async (lens: GraphLens): Promise<void> => {
+      if (lens.id === DEFAULT_LENS_ID) return;
+      const base = workspaceRef.current ?? newWorkspace("default workspace", STARTER_QUERY);
+      const stored = base.graphLenses ?? [];
+      const saved: GraphLens = { ...lens, builtin: undefined, updatedAt: Date.now() };
+      const nextLenses = stored.some((l) => l.id === lens.id)
+        ? stored.map((l) => (l.id === lens.id ? saved : l))
+        : [...stored, saved];
+      const next: Workspace = {
+        ...base,
+        graphLenses: nextLenses,
+        activeLensId: lens.id,
+        updatedAt: Date.now(),
+      };
+      applyWorkspace(next);
+      await persist(next);
+    },
+    [applyWorkspace, persist],
+  );
+
+  const deleteLens = React.useCallback(
+    async (id: string): Promise<void> => {
+      if (id === DEFAULT_LENS_ID) return;
+      const base = workspaceRef.current;
+      if (!base) return;
+      const nextLenses = (base.graphLenses ?? []).filter((l) => l.id !== id);
+      const next: Workspace = {
+        ...base,
+        graphLenses: nextLenses,
+        // Deleting the ACTIVE lens falls back to the built-in default rather than leaving a
+        // dangling selection the view would have to resolve on every render.
+        activeLensId: base.activeLensId === id ? undefined : base.activeLensId,
+        updatedAt: Date.now(),
+      };
+      applyWorkspace(next);
+      await persist(next);
+    },
+    [applyWorkspace, persist],
+  );
+
   // (sq-7gdfp) — belt-and-suspenders save: on page unload, snapshot the live engine store into
   // the active workspace one final time. This catches any in-flight state that was not yet
   // persisted (e.g. if the debounce had not fired yet). For the localStorage backend the write
@@ -571,6 +648,17 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     [activate, applyWorkspace, persist, refreshList],
   );
 
+  // [OPUS-5] sq-ixc3.22 — the selectable lens list: the built-in default, then this
+  // workspace's own lenses sorted by name so the picker order is stable across reloads.
+  const lenses = React.useMemo<GraphLens[]>(() => {
+    const stored = [...(workspace?.graphLenses ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+    return [DEFAULT_LENS, ...stored];
+  }, [workspace]);
+  const activeLens = React.useMemo<GraphLens>(
+    () => lenses.find((l) => l.id === workspace?.activeLensId) ?? DEFAULT_LENS,
+    [lenses, workspace],
+  );
+
   const value = React.useMemo<WorkspaceContextValue>(
     () => ({
       workspace,
@@ -593,6 +681,11 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       removeRulesDoc,
       setRulesDocEnabled,
       recordUpdateSnapshot,
+      lenses,
+      activeLens,
+      setActiveLensId,
+      saveLens,
+      deleteLens,
     }),
     [
       workspace,
@@ -611,6 +704,11 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       removeRulesDoc,
       setRulesDocEnabled,
       recordUpdateSnapshot,
+      lenses,
+      activeLens,
+      setActiveLensId,
+      saveLens,
+      deleteLens,
     ],
   );
 

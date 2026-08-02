@@ -20,6 +20,15 @@ import * as React from "react";
 import {
   parseNTriples,
   COMMON_PREFIXES,
+  LENS_TYPE_COLORS,
+  edgeKeyOfStatement,
+  foldReifiedAnnotations,
+  nodeKeyOfRdfTerm,
+  rankRadius,
+  typeColorIndex,
+  type GraphEdgeAnnotation,
+  type GraphEdgeStyle,
+  type GraphNodeStyle,
   type RdfStatement,
   type RdfTerm,
 } from "@sparq/client";
@@ -42,8 +51,34 @@ export interface InferredAffordance {
   onExplain: (t: ExplainTarget) => void;
 }
 
+/**
+ * [OPUS-5] sq-ixc3.22 — the resolved styling a graph-viz LENS contributes to this render:
+ * `nodes` maps a node key (`nodeKeyOfRdfTerm`) to the node basics the lens's `nodeStyle` slot
+ * bound (`?type` → colour, `?label` → caption, `?rank` → relative size), `edges` maps an edge
+ * key (`edgeKeyOfStatement`) to the caption its `edgeStyle` slot bound. Both are optional and
+ * both degrade to the plain view when a lens leaves that slot empty — the graph never depends
+ * on a lens being configured.
+ */
+export interface GraphLensStyling {
+  nodes: ReadonlyMap<string, GraphNodeStyle>;
+  edges: ReadonlyMap<string, GraphEdgeStyle>;
+}
+
 /** The max triples we lay out before capping (a render bound, labelled — not a result bound). */
 const MAX_TRIPLES = 200;
+
+/** Node radius range the lens's `?rank` interpolates over (the un-ranked default is the mid). */
+const NODE_R_MIN = 4;
+const NODE_R_MAX = 11;
+
+/**
+ * The colour for a lens `?type` bucket: a fixed hue step over the deterministic palette slot, at
+ * a mid lightness that stays legible in both themes. Deterministic in the type IRI, so a shared
+ * lens paints the same picture for everyone who opens it.
+ */
+function typeColor(type: string): string {
+  return `hsl(${(typeColorIndex(type) * 360) / LENS_TYPE_COLORS} 62% 48%)`;
+}
 
 /** Abbreviate an IRI with a common prefix (`foaf:name`), else shorten to its last path segment. */
 function abbreviateIri(iri: string): string {
@@ -82,6 +117,8 @@ interface LaidOutNode {
   isLiteral: boolean;
   x: number;
   y: number;
+  /** [OPUS-5] sq-ixc3.22 — the term itself, so a click can report the focus node to the lens. */
+  term: RdfTerm;
 }
 
 interface LaidOutEdge {
@@ -97,12 +134,12 @@ function layout(statements: RdfStatement[], size: number): {
   edges: LaidOutEdge[];
 } {
   const order: string[] = [];
-  const meta = new Map<string, { label: string; isLiteral: boolean }>();
+  const meta = new Map<string, { label: string; isLiteral: boolean; term: RdfTerm }>();
   const note = (t: RdfTerm) => {
     const k = termKey(t);
     if (!meta.has(k)) {
       order.push(k);
-      meta.set(k, { label: termLabel(t), isLiteral: t.kind === "literal" });
+      meta.set(k, { label: termLabel(t), isLiteral: t.kind === "literal", term: t });
     }
   };
   const edges: LaidOutEdge[] = [];
@@ -123,9 +160,46 @@ function layout(statements: RdfStatement[], size: number): {
     const x = n <= 1 ? cx : cx + radius * Math.cos(angle);
     const y = n <= 1 ? cy : cy + radius * Math.sin(angle);
     const m = meta.get(k)!;
-    return { key: k, label: m.label, isLiteral: m.isLiteral, x, y };
+    return { key: k, label: m.label, isLiteral: m.isLiteral, term: m.term, x, y };
   });
   return { nodes, edges };
+}
+
+/**
+ * [OPUS-5] sq-ixc3.22 — the honest note for reifier annotations whose described triple is NOT in
+ * this result. RDF 1.2 reification does not assert the reified triple, so this is a normal
+ * outcome; the view reports the count rather than inventing an edge to hang them on.
+ */
+function UnattachedNote({ count }: { count: number }) {
+  return (
+    <p className="text-[11px] text-muted-foreground" data-graph-unattached-annotations={count}>
+      {count.toLocaleString()} annotation{count === 1 ? "" : "s"} describe a triple that is not in
+      this result, so {count === 1 ? "it has" : "they have"} no edge to sit on. RDF 1.2
+      reification does not assert the triple it describes — widen the query to draw them.
+    </p>
+  );
+}
+
+/** The `<title>` tooltip listing a folded reifier's properties, one per line. */
+function annotationTooltip(anns: readonly GraphEdgeAnnotation[]): string {
+  const head =
+    anns.length === 1
+      ? "1 RDF 1.2 annotation on this triple:"
+      : `${anns.length} RDF 1.2 annotations on this triple:`;
+  return [head, ...anns.map((a) => `  ${termLabel(a.p)} → ${termLabel(a.o)}`)].join("\n");
+}
+
+/** The `<title>` tooltip for a node: its full term plus whatever the lens resolved for it. */
+function nodeTooltip(
+  node: LaidOutNode,
+  style: GraphNodeStyle | undefined,
+  interactive: boolean,
+): string {
+  const lines = [node.term.nt];
+  if (style?.type) lines.push(`type: ${abbreviateIri(style.type)}`);
+  if (style?.rank !== undefined) lines.push(`rank: ${style.rank}`);
+  if (interactive) lines.push("Click to expand with the active lens");
+  return lines.join("\n");
 }
 
 /**
@@ -135,15 +209,34 @@ function layout(statements: RdfStatement[], size: number): {
 export function GraphView({
   ntriples,
   inferred,
+  lens,
+  focusKey,
+  onFocusNode,
 }: {
   ntriples: string;
   /** [FABLE-5] sq-ixc3.20 — mark + explain inferred edges (absent = no affordance). */
   inferred?: InferredAffordance | null;
+  /** [OPUS-5] sq-ixc3.22 — node/edge basics the active lens resolved (absent = plain view). */
+  lens?: GraphLensStyling | null;
+  /** [OPUS-5] sq-ixc3.22 — the node key currently focused, drawn with a selection ring. */
+  focusKey?: string | null;
+  /** [OPUS-5] sq-ixc3.22 — click/Enter on a node (absent = nodes are not interactive). */
+  onFocusNode?: (term: RdfTerm) => void;
 }) {
-  const { statements, total } = React.useMemo(() => {
+  // [OPUS-5] sq-ixc3.22 — RDF 1.2 reifier annotations are folded ONTO their edges BEFORE the
+  // render cap, so a reifier's properties become badges on the edge they describe instead of a
+  // cloud of plumbing nodes — and so an annotation is never lost to the cap while its edge
+  // survives it. Folding is unconditional: it needs no lens, only data that carries reification.
+  const { statements, total, annotations, unattached } = React.useMemo(() => {
     // `parseNTriples` returns `{ statements, passthrough }`; we only graph the parsed triples.
     const { statements: all } = parseNTriples(ntriples);
-    return { statements: all.slice(0, MAX_TRIPLES), total: all.length };
+    const folded = foldReifiedAnnotations(all);
+    return {
+      statements: folded.base.slice(0, MAX_TRIPLES),
+      total: folded.base.length,
+      annotations: folded.annotations,
+      unattached: folded.unattached,
+    };
   }, [ntriples]);
 
   const SIZE = 520;
@@ -163,11 +256,38 @@ export function GraphView({
     return m;
   }, [nodes]);
 
+  // [OPUS-5] sq-ixc3.22 — the observed `?rank` range across the DRAWN nodes, so relative node
+  // size is relative to what is on screen. Absent when the lens bound no rank at all.
+  const rankRange = React.useMemo(() => {
+    if (!lens) return null;
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = Number.NEGATIVE_INFINITY;
+    for (const node of nodes) {
+      const rank = lens.nodes.get(nodeKeyOfRdfTerm(node.term))?.rank;
+      if (rank === undefined || !Number.isFinite(rank)) continue;
+      lo = Math.min(lo, rank);
+      hi = Math.max(hi, rank);
+    }
+    return Number.isFinite(lo) && Number.isFinite(hi) ? { lo, hi } : null;
+  }, [lens, nodes]);
+
+  // [OPUS-5] sq-ixc3.22 — per-edge annotations, indexed the same way as `inferredFlags`
+  // (edge i ↔ statement i, because `layout` pushes exactly one edge per statement in order).
+  const edgeAnnotations = React.useMemo<Array<GraphEdgeAnnotation[] | undefined>>(
+    () => statements.map((st) => annotations.get(edgeKeyOfStatement(st))),
+    [statements, annotations],
+  );
+  const annotatedCount = React.useMemo(
+    () => edgeAnnotations.filter((a) => a !== undefined).length,
+    [edgeAnnotations],
+  );
+
   if (total === 0) {
     return (
-      <p className="p-3 text-sm text-muted-foreground" data-result-view="graph">
-        Empty graph — the template produced no triples.
-      </p>
+      <div className="p-3 text-sm text-muted-foreground" data-result-view="graph">
+        <p>Empty graph — the template produced no triples.</p>
+        {unattached > 0 && <UnattachedNote count={unattached} />}
+      </div>
     );
   }
 
@@ -184,6 +304,25 @@ export function GraphView({
           <span className="font-medium text-primary">Dashed edges are inferred</span> by the
           active inference regime (not asserted) — click one to see its derivation.
         </p>
+      )}
+      {/* [OPUS-5] sq-ixc3.22 — the RDF 1.2 annotation legend, only when something IS annotated. */}
+      {annotatedCount > 0 && (
+        <p
+          className="border-b bg-card px-3 py-1 text-[11px] text-muted-foreground"
+          data-graph-annotation-legend
+        >
+          <span className="font-medium text-foreground">
+            {annotatedCount.toLocaleString()} edge{annotatedCount === 1 ? "" : "s"} carry an
+            annotation badge
+          </span>{" "}
+          — RDF 1.2 reifiers describing that triple, folded onto it. Hover a badge for the
+          reifier&rsquo;s properties.
+        </p>
+      )}
+      {unattached > 0 && (
+        <div className="border-b px-3 py-1">
+          <UnattachedNote count={unattached} />
+        </div>
       )}
       {truncated && (
         <p className="border-b bg-warning/10 px-3 py-1 text-[11px] text-muted-foreground">
@@ -229,6 +368,10 @@ export function GraphView({
               isInferred && inferred
                 ? () => inferred.onExplain({ s: st.s.nt, p: st.p.nt, o: st.o.nt })
                 : undefined;
+            // [OPUS-5] sq-ixc3.22 — the lens's `edgeStyle` caption wins over the raw predicate;
+            // the RDF 1.2 reifier annotations fold onto this edge as a hoverable badge.
+            const caption = lens?.edges.get(edgeKeyOfStatement(st))?.label ?? e.label;
+            const anns = edgeAnnotations[i];
             return (
               <g
                 key={i}
@@ -281,51 +424,127 @@ export function GraphView({
                   textAnchor="middle"
                   dy={-2}
                 >
-                  {e.label}
+                  {caption}
                 </text>
+                {/* [OPUS-5] sq-ixc3.22 — the RDF 1.2 annotation badge. The count is drawn (not
+                    just a colour), and the reifier's properties are the <title> tooltip, so the
+                    information is available without hover-only affordances. */}
+                {anns && (
+                  <g data-annotated-edge data-annotation-count={anns.length}>
+                    <title>{annotationTooltip(anns)}</title>
+                    <circle
+                      cx={mx}
+                      cy={my + 6}
+                      r={5}
+                      fill="var(--card)"
+                      stroke="var(--muted-foreground)"
+                      strokeWidth={0.75}
+                    />
+                    <text
+                      x={mx}
+                      y={my + 6}
+                      className="fill-foreground"
+                      fontSize={6}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                    >
+                      {anns.length}
+                    </text>
+                  </g>
+                )}
               </g>
             );
           })}
 
-          {/* Nodes. Literals render as rounded rects, resources as circles. */}
-          {nodes.map((node) =>
-            node.isLiteral ? (
-              <g key={node.key}>
-                <rect
-                  x={node.x - 36}
-                  y={node.y - 10}
-                  width={72}
-                  height={20}
-                  rx={4}
-                  fill="var(--accent)"
-                  stroke="var(--border)"
+          {/* Nodes. Literals render as rounded rects, resources as circles.
+              [OPUS-5] sq-ixc3.22 — a lens's node basics restyle the resource circles: `?type`
+              picks a deterministic colour, `?rank` the radius, `?label` the caption. Nothing
+              here depends on a lens existing — an unconfigured view draws exactly as before. */}
+          {nodes.map((node) => {
+            const nodeKey = nodeKeyOfRdfTerm(node.term);
+            const style = lens?.nodes.get(nodeKey);
+            const caption = style?.label ?? node.label;
+            const focused = focusKey === nodeKey;
+            if (node.isLiteral) {
+              return (
+                <g key={node.key}>
+                  <rect
+                    x={node.x - 36}
+                    y={node.y - 10}
+                    width={72}
+                    height={20}
+                    rx={4}
+                    fill="var(--accent)"
+                    stroke="var(--border)"
+                  />
+                  <text
+                    x={node.x}
+                    y={node.y}
+                    className="fill-accent-foreground"
+                    fontSize={9}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                  >
+                    {caption}
+                  </text>
+                </g>
+              );
+            }
+            const r = rankRange
+              ? rankRadius(style?.rank, rankRange.lo, rankRange.hi, NODE_R_MIN, NODE_R_MAX)
+              : 6;
+            const focus = onFocusNode ? () => onFocusNode(node.term) : undefined;
+            return (
+              <g
+                key={node.key}
+                {...(focus
+                  ? {
+                      role: "button",
+                      tabIndex: 0,
+                      className: "cursor-pointer focus:outline-1 focus:outline-primary",
+                      onClick: focus,
+                      onKeyDown: (ev: React.KeyboardEvent) => {
+                        if (ev.key === "Enter" || ev.key === " ") {
+                          ev.preventDefault();
+                          focus();
+                        }
+                      },
+                      "data-graph-node": true,
+                      "aria-label": `${caption} — press Enter to expand with the active lens`,
+                    }
+                  : {})}
+              >
+                <title>{nodeTooltip(node, style, Boolean(focus))}</title>
+                {/* A wide transparent hit circle so a small node is still clickable. */}
+                {focus && <circle cx={node.x} cy={node.y} r={12} fill="transparent" />}
+                {focused && (
+                  <circle
+                    cx={node.x}
+                    cy={node.y}
+                    r={r + 4}
+                    fill="none"
+                    stroke="var(--primary)"
+                    strokeWidth={1.5}
+                  />
+                )}
+                <circle
+                  cx={node.x}
+                  cy={node.y}
+                  r={r}
+                  fill={style?.type ? typeColor(style.type) : "var(--primary)"}
                 />
                 <text
                   x={node.x}
-                  y={node.y}
-                  className="fill-accent-foreground"
-                  fontSize={9}
-                  textAnchor="middle"
-                  dominantBaseline="central"
-                >
-                  {node.label}
-                </text>
-              </g>
-            ) : (
-              <g key={node.key}>
-                <circle cx={node.x} cy={node.y} r={6} fill="var(--primary)" />
-                <text
-                  x={node.x}
-                  y={node.y - 10}
+                  y={node.y - r - 4}
                   className="fill-foreground"
                   fontSize={9}
                   textAnchor="middle"
                 >
-                  {node.label}
+                  {caption}
                 </text>
               </g>
-            ),
-          )}
+            );
+          })}
         </svg>
       </div>
     </div>
