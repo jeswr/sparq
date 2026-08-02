@@ -19,6 +19,7 @@ import type { SparqlResults, SparqlTerm } from "@sparq/client";
 import {
   CIRCUIT_DIGITS,
   COMMITTED_TERM_ANCHORS,
+  FIXED_CHALLENGE,
   PRIVATE_INPUT_KEY,
   PUBLIC_INPUT_KEYS,
   XSD_INTEGER,
@@ -337,6 +338,24 @@ test("the hidden value reaches the circuit only through the private digits", () 
   assert.equal(a.expected, b.expected); // both < 99
   assert.notEqual(a.operand_enc, b.operand_enc);
   assert.notDeepEqual(a.digits, b.digits);
+});
+
+test("challenge is a fixed constant, NOT a per-presentation nonce", () => {
+  // The panel and CircuitInputs both state that `challenge` carries no freshness/replay binding.
+  // Pinned so the docs cannot quietly start calling it a verifier nonce again: distinct
+  // presentations — different value, operator and bound — must all publish the SAME constant.
+  const inputs = [
+    buildCircuitInputs({ digits: "24", op: 0, bound: 99 }),
+    buildCircuitInputs({ digits: "30", op: 2, bound: 18 }),
+    buildCircuitInputs({ digits: "42", op: 5, bound: 42 }),
+  ];
+  for (const i of inputs) {
+    assert.equal(i.challenge, FIXED_CHALLENGE);
+  }
+  // The literal value, not just the constant: zk-prover.integration.test.ts tells the challenge
+  // and the disclosed verdict apart by COUNTING public inputs equal to the field element 1, which
+  // only works while the challenge is 0x1. Changing it must break here, in the cheap lane.
+  assert.equal(BigInt(FIXED_CHALLENGE), 1n);
 });
 
 test("operand_enc identifies the value to anyone holding the published anchor table", () => {

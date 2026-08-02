@@ -309,11 +309,23 @@ export const PUBLIC_INPUT_KEYS = ["challenge", "operand_enc", "op", "bound", "ex
 export const PRIVATE_INPUT_KEY = "digits";
 
 /**
+ * The constant this panel always publishes as `challenge`. The circuit treats the input as opaque,
+ * so a deployment that HAS a replay context can bind one by passing a fresh verifier-supplied
+ * value; this in-tab panel has no such context and therefore fixes it, providing no freshness or
+ * replay protection. Named so the constant is not mistaken for a nonce at its use site.
+ */
+export const FIXED_CHALLENGE = "0x1";
+
+/**
  * The Noir input map for `filter_int_d2`. A type ALIAS rather than an interface so it keeps the
  * implicit index signature `Noir.execute(Record<string, unknown>)` needs.
  */
 export type CircuitInputs = {
-  /** Per-presentation verifier nonce. */
+  /**
+   * A FIXED circuit/domain-separation input, always {@link FIXED_CHALLENGE}. The circuit shape
+   * allows a per-presentation verifier nonce here, but this panel does not use it as one: nothing
+   * supplies or checks a fresh value, so it carries NO freshness or replay binding.
+   */
   challenge: string;
   /** The committed term anchor — see {@link COMMITTED_TERM_ANCHORS}. */
   operand_enc: string;
@@ -348,7 +360,9 @@ export interface ProofRequest {
  * value came from the selected SPARQL row, from the workspace store, or from any issued
  * credential. The SELECT only supplies a LOCAL witness and picks which published anchor to claim
  * about; binding an `operand_enc` to a committed triple slot is the scan proof's job
- * (`sparq_zk_compose_core::scan`), which this tool does not ship.
+ * (`sparq_zk_compose_core::scan`), which this tool does not ship. Nor is the proof FRESH: the
+ * `challenge` is the constant {@link FIXED_CHALLENGE}, not a per-presentation verifier nonce, so
+ * an identical bundle verifies forever and replaying one is indistinguishable from proving anew.
  *
  * Throws when no committed anchor ships for the value, or when the bound is not a `u64`.
  */
@@ -361,7 +375,7 @@ export function buildCircuitInputs({ digits, op, bound }: ProofRequest): Circuit
     throw new Error("the bound must be a non-negative integer (the circuit takes a u64)");
   }
   return {
-    challenge: "0x1", // fixed here; the in-tab panel has no replay context to bind
+    challenge: FIXED_CHALLENGE,
     operand_enc: operandEnc,
     op: String(op),
     bound: String(bound),

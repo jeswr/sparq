@@ -293,6 +293,26 @@ jobs:
         working-directory: gui/app
         run: npm run test:unit
 
+      # [SONNET-4.6] sq-ixc3.17 — the REAL UltraHonk proof regression
+      # (gui/app/src/lib/zk-prover.integration.test.ts): generate and verify a proof through
+      # `proveFilter` itself against the SHIPPED ACIR and the pinned noir_js/bb.js.
+      #
+      # It is a SEPARATE npm target from `test:unit` because it instantiates the bb.js WASM
+      # prover (seconds, not milliseconds) — but it GATES, and must: it is the only check that
+      # catches an ACIR/nightly-package incompatibility, a wrong Noir input encoding, a
+      # `verifierTarget` mismatch or an unexpected public-input disclosure. This job carries no
+      # `.github/advisory-registry.json` entry, so it gates by default (see the header).
+      #
+      # Every input the test pins is already covered by this workflow's `paths:` filter — the
+      # prover code (`gui/**`), the committed ACIR artifact it reads from site/public/zk/
+      # (`site/**`), and the pinned @aztec/bb.js + @noir-lang/noir_js (`package-lock.json`) —
+      # so a change to any of them re-runs this step. Deps come from the root `npm install`
+      # above (gui/app is a root workspace member); no build is needed, since the test reads the
+      # repo's one committed ACIR copy directly rather than a synced build output.
+      - name: GUI frontend ZK proof integration test
+        working-directory: gui/app
+        run: npm run test:zk-proof
+
       # The hosted "Try the GUI live" web target (sub-path basePath).
       - name: GUI frontend static export (web target)
         working-directory: gui/app

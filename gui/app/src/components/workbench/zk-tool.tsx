@@ -465,15 +465,17 @@ export function ZkTool() {
             </div>
 
             <p className="text-[11px] text-muted-foreground">
-              The proof publishes the verifier nonce, the committed term anchor, the operator, the
-              bound and the resulting verdict. The store value itself is a private witness. The
-              circuit asserts the published verdict equals the one the hidden value satisfies, so
-              a claim that disagrees with the data cannot be proven at all — the witness solve
-              fails and this panel reports that failure verbatim. What it proves is knowledge of
-              an <span className="font-mono">xsd:integer</span> matching the committed anchor and
-              the comparison — not that the value came from this store: no dataset or credential
-              commitment is among the public inputs, so the query supplies a local witness rather
-              than attested provenance.
+              The proof publishes a fixed domain-separation constant, the committed term anchor,
+              the operator, the bound and the resulting verdict. The store value itself is a
+              private witness. The circuit asserts the published verdict equals the one the hidden
+              value satisfies, so a claim that disagrees with the data cannot be proven at all —
+              the witness solve fails and this panel reports that failure verbatim. What it proves
+              is knowledge of an <span className="font-mono">xsd:integer</span> matching the
+              committed anchor and the comparison — not that the value came from this store: no
+              dataset or credential commitment is among the public inputs, so the query supplies a
+              local witness rather than attested provenance. The published constant is not a
+              per-presentation verifier nonce, so this panel offers no freshness or replay
+              protection either: a bundle stays valid indefinitely and can be replayed verbatim.
             </p>
 
             {proof.kind === "proving" && (
