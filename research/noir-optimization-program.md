@@ -773,3 +773,37 @@ the PR's diff against `master`:
 The bead stays **open**, blocked on the §6 author review and on `sq-i50o4` like
 the rest of the program. Nothing was posted upstream, and the PR's body and review
 thread were not read — only its diff.
+
+### 10.14 Corpus-row audit of the four sibling drafts (#13263–#13266) — outcome (2026-08-02)
+
+> 🤖 **SPARQ agent** [OPUS-5], issue #5686. Full record:
+> `noir-corpus-row-audit-13263-13266.md`. Nothing was measured — no `nargo`,
+> no `bb` in this session either.
+
+§10.11's second finding (via §6.3(a) of the companion record) is that #13314's
+*"sparq compose corpus (8 packages): 0 delta"* row is **non-evidential**: no package
+in the corpus can call the patched `BoundedVec::push`, so the row would read the
+same for a broken patch. This audit applies the same test to the four §10.1 drafts.
+Two corrections first: the sibling **commit messages carry no corpus row at all**
+(the rows are in the PR *bodies*, so the repair target is upstream and author-only),
+and `sq-9xhoa` is **#13264**, not #13266.
+
+| PR | corpus reaches the patched path? | row verdict |
+|---|---|---|
+| **#13265** (`sq-fwcuo`, row 3) | **no** — zero radix decompositions of any width in the 8-package closure, explicit or compiler-generated (every variable-amount shift in `sparq_ieee754` is Brillig-only) | **non-evidential, same class as #13314**, and its stated reason ("real code rarely decomposes into a single limb explicitly") is not the operative one. **Repair or drop**: re-run over the decomposing packages (`holder_pok`, `hidden_issuer_d4`, `holder_set_d4`, `revoke_unset_d10`, `path_reach_d*`) to exercise the guard, or drop it and say why. The rewrite itself cannot be exercised at any selection — the smallest decomposition width in `zk/` is `D = 2` |
+| **#13264** (`sq-9xhoa`, row 2) | guard yes, **fire branch no** — the closure's only constant masks are `2^n − 1` (canonicalized before the pass) or feed an `==`, not a truncate | **entailed but disclosed** — the body already states this mechanism, so it does not read as a regression check. At most a one-word tightening |
+| **#13263** (`sq-3qwv1`, row 1) | **yes** — constrained unsigned div/mod by constants on the reachable IEEE-754 rounding path | **evidential**: an under-estimating `get_value_max_num_bits` would delete a live `% 8` and move the row. No repair |
+| **#13266** (`sq-rxir8`, row 4) | **yes**, densely; and the PR reports 6 in-tree movers besides | **evidential**, corroborative only. No repair |
+
+Two program-level items fall out. (1) **§6.1's provenance blockers do not replicate**:
+all four sibling bodies name `bb 5.0.0-nightly.20260522`, `bb gates -s ultra_honk` and
+`nargo info --force`, and each ships its named fixture in the PR — only #13314 does
+not, so only #13314's focused table is un-re-takeable. (2) The four bodies quote
+**four different corpora** (13 / 11 / 8 / 39 programs) and none names its packages;
+#13266's "31 real ZK circuit binaries" is confirmed against this repo (31 `type = "bin"`
+`zk/compose` packages at `397ce990`, 2026-07-04) and #13264's 11 matches §5.2 exactly,
+but #13263's 13 is two undocumented programs beyond §5.2. Naming the corpus — one line,
+a sparq commit plus a package list — is unblocked today and needs no `sq-i50o4`.
+
+All four beads stay **open** on the §6 author review; no correctness verdict in §10.12
+or §10.13 changes, and per `sq-qhy4` nothing in the audit certifies soundness.

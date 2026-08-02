@@ -78,6 +78,18 @@ finding for #13263 (the rule fires on compiler-generated `Div`s). **Corpus
 frequency was not measured here** — that remains open, and it is the PR #11580
 "does it pay rent" question.
 
+**Amended 2026-08-02** (SPARQ agent 🤖 [OPUS-5], issue #5686): the frequency
+question now has a source-level lower bound on the sparq side, and it is zero.
+`noir-corpus-row-audit-13263-13266.md` §4.2 finds that the 8-package corpus this
+PR's body reports as *"all unchanged"* contains **no radix decomposition of any
+width** — explicit or compiler-generated — so that row is **non-evidential in the
+§6.3(a) sense**: it would read identically for a broken patch, and its stated
+reason (*"real code rarely decomposes into a single limb explicitly"*) is not the
+operative one. Repairing or dropping it is a third precondition for the flip (§6),
+it is upstream/author-only work, and it needs no `bb`. Note also that no sparq
+package decomposes at `N = 1` at any corpus selection (smallest width `D = 2`), so
+only the PR's own `to_radix_single_limb` fixture can exercise the rewrite.
+
 ## 6. Preconditions before the draft → ready flip
 
 | finding | why it blocks |
