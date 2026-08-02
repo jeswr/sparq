@@ -178,8 +178,10 @@ mod gated {
     ///   compared for equality only.
     /// * Output-vocabulary / outside-EL — a conclusion in the `owl:equivalentClass` /
     ///   `owl:equivalentProperty` / `owl:TransitiveProperty` axiom form (the classifier
-    ///   emits `rdfs:subClassOf` edges, not those axioms) or using `owl:unionOf` (outside
-    ///   EL — recorded as a skipped axiom).
+    ///   emits `rdfs:subClassOf` edges, not those axioms), a conclusion typing an
+    ///   individual into an ANONYMOUS class (the realiser emits `rdf:type` rows for NAMED
+    ///   classes only, so the bnode-homomorphism check has no node to map onto), or using
+    ///   `owl:unionOf` (outside EL — recorded as a skipped axiom).
     ///
     /// [SONNET-4.6] sq-pbz04.2.4
     // [SONNET-4.6] sq-pbz04.2.10: pruned 16 graduated entries (now PASS via abox/realize_graph
@@ -215,11 +217,16 @@ mod gated {
         ),
         (
             "New-Feature-SelfRestriction-002",
-            "PERMANENT — conclusion types individual Peter into an owl:hasSelf restriction (the \
-             CONVERSE of CR-Self-1: a raw self-loop forces ∃r.Self class membership); the realiser \
-             handles the forward direction (hasSelf restriction → self-loop, sq-pbz04.2.6) but not \
-             the reverse nominal readoff that adds a ClassAssertion for the anonymous hasSelf class \
-             (documented sq-pbz04.2.6 follow-up)",
+            "PERMANENT (output-vocabulary) — conclusion types individual Peter into an ANONYMOUS \
+             owl:hasSelf restriction bnode. The REASONING half is no longer the blocker: CRs3 \
+             (sq-8zqwb, nominal reflexivity) now reads a same-nominal self-link `({a},{a}) ∈ R(r)` \
+             off as `∃r.Self ∈ S({a})`, the converse of CR-Self-1. What remains is an OUTPUT gap — \
+             the `∃r.Self` concept is minted with no dict term (`Names::self_concept` pushes None \
+             into to_dict), so the realiser's readoff turns that S-set entry back into the self-loop \
+             triple `a r a` and emits rdf:type rows for NAMED classes only; it never emits a \
+             ClassAssertion into the restriction bnode, leaving the bnode-homomorphism entailment \
+             check no node to map the conclusion's anonymous class onto (the same anonymous-class \
+             output-vocabulary gap as WebOnt-I5.5-005)",
         ),
         (
             "WebOnt-equivalentProperty-001",
