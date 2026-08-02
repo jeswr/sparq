@@ -571,6 +571,14 @@ jobs:
       # self-test in differential.yml).
       - name: Self-test demoted-lane failure filer (id/dedupe/append/log-tail logic)
         run: python3 scripts/ci-file-demoted-lane-failure.py --self-test
+      # [OPUS-5] #5281: the SIBLING filer (differential.yml / differential-update.yml) for
+      # the same reason. Its --self-test is invoked only from those workflows' `if: failure()`
+      # filing steps, so until now its logic — including the sq-c9q4r markdown-injection guard
+      # this issue adds, which keeps a fuzzer-generated repro from escaping the ``` fence of an
+      # issue THIS repo's CI opens — was never exercised on a PR. Hermetic: no gh, no repo
+      # writes (same stdlib-only, no-deps pattern as the step above).
+      - name: Self-test differential failure filer (id/dedupe/append/fence-defusal logic)
+        run: python3 scripts/ci-file-differential-failure.py --self-test
       # [OPUS-5] sq-jxeqz / #4559: the bench HARD-ZONE gate's pure logic
       # (scripts/bench_hardzone.py). Its --self-test previously ran ONLY inside bench.yml's
       # "Hard zone" step, which is guarded `github.event_name != 'schedule' && github.ref ==
