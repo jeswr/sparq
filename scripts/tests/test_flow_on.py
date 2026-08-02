@@ -113,6 +113,127 @@ class NewCrateTest(unittest.TestCase):
         self.assertNotIn("new-crate-bench-and-skill", {fo.rule_id for fo in fos})
 
 
+class PerCrateFanOutTest(unittest.TestCase):
+    """[OPUS-5] (#5242) `{crate}` must range over EVERY crate the PR added.
+
+    build_context() resolves `{crate}` to a single crate, so a PR landing two new
+    crates minted a `{crate}`-keyed follow-on for only the first — while merge gate
+    G1 (`gate-new-crate.py::added_crates`) already iterates over all of them. These
+    pin the fan-out and the two properties it must not break: a crate-agnostic
+    template is still minted exactly once, and a single-crate PR is unchanged."""
+
+    TWO_CRATES = [
+        "crates/sparq-alpha/Cargo.toml",
+        "crates/sparq-alpha/src/lib.rs",
+        "crates/sparq-beta/Cargo.toml",
+        "crates/sparq-beta/src/lib.rs",
+    ]
+
+    def _crate_rule(self):
+        """A synthetic new-crate rule whose templates name `{crate}`."""
+        return flow_on.Rule(
+            id="synthetic-new-crate",
+            when_new_paths=["crates/*/Cargo.toml"],
+            creates=[
+                flow_on.CreateTemplate(
+                    dedup_key="synthetic-{crate}",
+                    title="chore: follow up on new crate {crate}",
+                    body="PR #{pr} added `crates/{crate}`.",
+                )
+            ],
+        )
+
+    def _crate_agnostic_rule(self):
+        """Same trigger, but no `{crate}` anywhere — must stay single-minted."""
+        return flow_on.Rule(
+            id="synthetic-pr-scoped",
+            when_new_paths=["crates/*/Cargo.toml"],
+            creates=[
+                flow_on.CreateTemplate(
+                    dedup_key="synthetic-pr-{pr}",
+                    title="chore: one per PR",
+                    body="PR #{pr}.",
+                )
+            ],
+        )
+
+    def test_two_new_crates_mint_a_follow_on_for_each(self):
+        fos = flow_on.evaluate(
+            [self._crate_rule()], 42, "add two crates",
+            self.TWO_CRATES, self.TWO_CRATES, [],
+        )
+        self.assertEqual(
+            sorted(fo.dedup_key for fo in fos),
+            ["synthetic-sparq-alpha", "synthetic-sparq-beta"],
+        )
+        # The title and body are expanded per crate too, not just the key.
+        self.assertEqual(
+            sorted(fo.title for fo in fos),
+            [
+                "chore: follow up on new crate sparq-alpha",
+                "chore: follow up on new crate sparq-beta",
+            ],
+        )
+        for fo in fos:
+            crate = fo.dedup_key.removeprefix("synthetic-")
+            self.assertIn(f"`crates/{crate}`", fo.body)
+
+    def test_fan_out_covers_exactly_gate_g1s_added_crate_set(self):
+        # The proactive (G1) and reactive (flow-on) halves must agree on WHICH
+        # crates a diff adds — the disagreement #5242 reported.
+        gnc = flow_on._gnc
+        contexts = flow_on.build_contexts(42, "t", self.TWO_CRATES, self.TWO_CRATES)
+        self.assertEqual(
+            sorted({c["crate"] for c in contexts}),
+            sorted(gnc.added_crates(self.TWO_CRATES)),
+        )
+
+    def test_crate_agnostic_template_is_still_minted_once(self):
+        # Fanning out must not multiply a rule that never names {crate}: its
+        # dedup_key is identical in every context, so it collapses.
+        fos = flow_on.evaluate(
+            [self._crate_agnostic_rule()], 42, "add two crates",
+            self.TWO_CRATES, self.TWO_CRATES, [],
+        )
+        self.assertEqual([fo.dedup_key for fo in fos], ["synthetic-pr-42"])
+
+    def test_single_new_crate_is_unchanged(self):
+        added = ["crates/sparq-alpha/Cargo.toml", "crates/sparq-alpha/src/lib.rs"]
+        fos = flow_on.evaluate(
+            [self._crate_rule()], 42, "add one crate", added, added, [],
+        )
+        self.assertEqual([fo.dedup_key for fo in fos], ["synthetic-sparq-alpha"])
+
+    def test_a_new_file_in_an_existing_crate_is_not_treated_as_a_new_crate(self):
+        # Adding a module to sparq-core alongside a genuinely new crate: the base
+        # {crate} resolution picks the EXISTING crate (it scans directories, not
+        # Cargo.toml additions), so it must be replaced by the added-crate set —
+        # otherwise the fan-out would mint a false "new crate sparq-core" follow-on.
+        added = ["crates/sparq-core/src/new_mod.rs", "crates/sparq-new/Cargo.toml"]
+        self.assertEqual(
+            flow_on.build_context(42, "t", added, added)["crate"], "sparq-core"
+        )
+        contexts = flow_on.build_contexts(42, "t", added, added)
+        self.assertEqual([c["crate"] for c in contexts], ["sparq-new"])
+        fos = flow_on.evaluate([self._crate_rule()], 42, "t", added, added, [])
+        self.assertEqual([fo.dedup_key for fo in fos], ["synthetic-sparq-new"])
+
+    def test_no_added_crate_keeps_the_single_base_context(self):
+        # A pure modification adds no crate, so there is nothing to fan out over
+        # and {crate} still resolves from the changed pool exactly as before.
+        changed = ["crates/sparq-core/src/store/mod.rs"]
+        contexts = flow_on.build_contexts(42, "t", changed, [])
+        self.assertEqual([c["crate"] for c in contexts], ["sparq-core"])
+
+    def test_shipped_rules_are_unaffected_by_a_two_crate_diff(self):
+        # Regression guard on the live rule table: none of its templates name
+        # {crate}, so the fan-out must not change what a two-crate PR mints.
+        rules = flow_on.load_rules(RULES)
+        fos = flow_on.evaluate(rules, 42, "add two crates", self.TWO_CRATES, self.TWO_CRATES, [])
+        keys = [fo.dedup_key for fo in fos]
+        self.assertEqual(len(keys), len(set(keys)), f"duplicate follow-ons minted: {keys}")
+
+
 class ChangedSurfaceTest(unittest.TestCase):
     def setUp(self):
         self.rules = flow_on.load_rules(RULES)
