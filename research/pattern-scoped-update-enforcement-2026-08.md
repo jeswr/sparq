@@ -76,11 +76,32 @@ Two engine facts this design leans on, both confirmed by running them:
   (`Graph::insert` documents "re-inserting an existing triple is a no-op",
   `crates/sparq-core/src/lib.rs`; I ran both operations through
   `sparq_engine::update_in_place` and re-counted);
-* `sparq_engine::update_in_place_capturing` returns a resolved `UpdateEffect` log
+* `sparq_engine::update_in_place_capturing` returns an ordered `UpdateEffect` log
   (`Delta { slot, inserts, deletes }` per graph slot, plus `Clear`/`Drop`/`Create`), and
   `sparq_engine::apply_effects` replays that log onto another `Graph`
   (`crates/sparq-engine/src/update.rs`). Those two are the primitives §6 builds on — a
   capture/replay seam already exists for the durable-mirror use case.
+
+**That log is a replay script, not a state delta**, and §3/§6 must not conflate the two. Its
+"resolved" means *template*-resolved (bindings and minted blank nodes are pinned), not
+*state*-effective:
+
+* for `INSERT DATA` / `DELETE DATA` / `LOAD`, `record_delta` is handed the operation's own
+  operand and never intersects it with the slot's contents (by inspection of `record_delta`
+  and its call sites in `update.rs` — unlike the two bullets above, this correction is read
+  off the code, not measured), so a `DELETE DATA`
+  naming an absent triple records a delete of that triple even though nothing changed — and
+  an `INSERT DATA` of an already-present triple records an insert;
+* `Clear`/`Drop` record the *operation*, whose expansion is a function of the state it runs
+  against — state the log does not carry.
+
+Replay is still faithful for its own use case because it targets an *identically-seeded*
+graph, on which those records are exactly the no-ops they were at capture. Neither property
+survives replay onto a **different** graph — which is precisely what W1 does. The engine has
+already had to solve the structural half of this internally: the private
+`resolve_effect_records` walks the log against a *running per-slot view* so each `CLEAR`/`DROP`
+expands against the state at its own position in the body (`sq-aalh`). It is not a public
+surface; §6.1 derives what it needs.
 
 ### 1.3 Two channels I reproduced — the prerequisite, at the EXISTING granularity
 
@@ -153,8 +174,12 @@ and `M_a(D)` for the masked replica — exactly what `PodStore::scoped_dataset` 
 > **Visible-delta law.** An update `U` submitted by `a` is permitted only if the delta it
 > produces **over `a`'s own masked view** falls entirely inside `a`'s visible, writable
 > region; the store then applies **that** delta. Formally, with
-> `δ = delta(M_a(D), U)` (the resolved insert/delete batch the engine produces when `U` runs
-> against the replica):
+> `δ = delta(M_a(D), U)` the **effective** delta — the actual state change `U` makes to the
+> replica, taken operation by operation in request order: `δ⁻` is the triples present in the
+> replica immediately before the operation that removes them, `δ⁺` the triples absent
+> immediately before the operation that adds them. This is *not* the batch
+> `update_in_place_capturing` records (§1.2), which echoes each operation's requested operand;
+> §6.1 step 4 derives `δ` from that log:
 >
 > * **W-scope**: every triple in `δ⁺ ∪ δ⁻` satisfies `vis_a` and lies in a graph `a` may
 >   write in the required mode — otherwise the whole request is **denied** (never silently
@@ -227,7 +252,8 @@ until W1 lands.
 soundness argument is an identity rather than an audit obligation (§3, consequence 1), and it
 needs no new enforcement machinery in the engine's scan paths. Its costs are real and stated
 in §6.5: an O(read-accessible dataset) replica build on the write path, plus the delta-replay
-seam and its two hazards (structural effects, blank nodes).
+seam and its two hazards (deriving a true delta from a capture log that is not one — §6.3 —
+and blank nodes).
 
 **W2** is rejected because it breaks commutation: an insert the actor cannot see afterwards
 either vanishes from their view (their client's model diverges from the store) or must be
@@ -257,9 +283,9 @@ elsewhere — overloading them with a security meaning would be unreadable.
 | Construct | Semantics under a pattern scope on the target graph |
 |---|---|
 | `INSERT DATA` | each quad must satisfy `vis_a` for its graph's scope and the graph must be writable in `WriteOrAppend`; otherwise deny. A quad already present in `D` but masked for `a` cannot arise — a triple cannot be both visible (to be insertable) and masked |
-| `DELETE DATA` | only quads present in `M_a(D)` are removed. A quad the actor names that is masked is **not** deleted and the request is **not** an error — indistinguishable from naming a quad that does not exist, which §1.2 confirms is already a silent no-op. This is the delete-visibility answer: **a pattern-scoped delete cannot reach a masked triple** |
+| `DELETE DATA` | only quads present in `M_a(D)` are removed. A quad the actor names that is masked is **not** deleted and the request is **not** an error — indistinguishable from naming a quad that does not exist, which §1.2 confirms is already a silent no-op. This is the delete-visibility answer: **a pattern-scoped delete cannot reach a masked triple**. This row rests entirely on the effective-delta derivation (§6.1 step 4): validating the *captured* batch instead would deny the request (the masked quad appears in it verbatim), and replaying that batch onto the store would delete the masked triple |
 | `DELETE WHERE` | equivalent to `DELETE { P } WHERE { P }` over `M_a(D)`: matches, and therefore deletes, only visible triples. A `DELETE WHERE { GRAPH <g> { ?s ?p ?o } }` leaves every masked triple of `g` in place |
-| `DELETE … INSERT … WHERE` | `WHERE` is evaluated over `M_a(D)` (this is the F1 fix); delete quads are constrained as `DELETE DATA`, insert quads as `INSERT DATA`; a template that instantiates to a triple outside `vis_a` denies the request |
+| `DELETE … INSERT … WHERE` | `WHERE` is evaluated over `M_a(D)` (this is the F1 fix); delete quads are constrained as `DELETE DATA`, insert quads as `INSERT DATA`. The two are deliberately asymmetric: an **insert** template that instantiates to a triple outside `vis_a` denies the request, while a **delete** template that does so is a silent no-op — the triple is absent from the replica, so it never enters `δ⁻` (same argument as the `DELETE DATA` row) |
 | `GRAPH ?var` template slot | resolved against `M_a(D)`, not the full store — the precise resolution of `update.rs` moves onto the replica, which also closes F2. A binding to a graph absent from the replica cannot occur; the existing blank-node-graph-name bail stays |
 | `USING` / `WITH` | re-scope the replica exactly as `rescope_dataset` re-scopes the store today; the re-scoped set is intersected with the replica's graphs (restriction, never widening) |
 | `LOAD` | the fetched document's triples are validated exactly as `INSERT DATA` quads; any triple outside `vis_a` denies. The captured delta (not a re-fetch) is what reaches the store, so replica and store cannot diverge on a non-deterministic remote |
@@ -277,19 +303,42 @@ elsewhere — overloading them with a security meaning would be unreadable.
 ```text
 update_scoped_as(session, scopes, sparql):
   1. replica  ← scoped_dataset(session, Mode::Read, scopes)      # M_a(D), existing code
-  2. effects  ← update_in_place_capturing(replica_graph, sparql) # δ, over the replica ONLY
-  3. lower    ← structural effects (Clear/Drop) → explicit per-triple deltas over the replica
-  4. validate ← every quad of δ: vis_a(quad) ∧ graph writable in the required mode
+  2. before   ← replica_graph.fork()                             # pre-update snapshot
+  3. effects  ← update_in_place_capturing(replica_graph, sparql) # the LOG, over the replica ONLY
+  4. δ        ← effective_delta(before, effects)                 # §1.2 log → §3's delta
+  5. validate ← every quad of δ: vis_a(quad) ∧ graph writable in the required mode
                 (reuse update::check's Need/allowed logic, per quad instead of per graph)
-  5. deny     ← on any violation: return Err, store untouched
-  6. apply    ← apply_effects(store_graph, δ)   # replay the VALIDATED delta, not the text
-  7. remat    ← the existing .acl/.acr/group-document re-materialization rule
+  6. deny     ← on any violation: return Err, store untouched
+  7. apply    ← apply_effects(store_graph, δ)   # replay the VALIDATED delta, not the text
+  8. remat    ← the existing .acl/.acr/group-document re-materialization rule
 ```
 
-Steps 1, 2 and 6 are existing public surfaces (`PodStore::scoped_dataset`,
-`sparq_engine::update_in_place_capturing`, `sparq_engine::apply_effects`). Steps 3–5 are new
-and live entirely in `sparq-solid` behind the `pattern-scope` feature — **no engine change**,
-matching the read path's zero-engine-change commitment.
+Step 4 is the load-bearing one, and it is a **single ordered walk of the log, not a
+post-hoc pass over the finished replica**. It carries a running per-slot view seeded lazily
+from `before`, and for each effect in capture order:
+
+* `Delta { slot, inserts, deletes }` → emit `deletes ∩ view` then `inserts ∖ view`, and
+  update the view — this is what makes a `DELETE DATA` of an absent or masked quad contribute
+  nothing (§5) instead of a spurious denial;
+* `Clear`/`Drop` → emit a delete for every member of the view **at that position in the
+  body**, then empty it;
+* `Create` → no data effect (the §5 `CREATE GRAPH` row denies it for a scoped principal
+  anyway).
+
+The output is an **ordered** effect stream — a `Vec<UpdateEffect::Delta>` in capture order,
+one per operation-slot run — which step 7 replays as-is. It must not be flattened into one
+batch per graph: `INSERT DATA {t}; CLEAR GRAPH g; INSERT DATA {t}` and
+`INSERT DATA {t}; CLEAR GRAPH g` flatten to the same per-graph batch and have different
+results.
+
+Steps 1, 3 and 7 are existing public surfaces (`PodStore::scoped_dataset`,
+`sparq_engine::update_in_place_capturing`, `sparq_engine::apply_effects`); step 2 is
+`Graph::fork` (O(pending delta)). Steps 4–6 are new and live entirely in `sparq-solid` behind
+the `pattern-scope` feature — **no engine change**, matching the read path's zero-engine-change
+commitment. The honest cost of holding that line: step 4's running-view walk duplicates logic
+the engine already has privately in `resolve_effect_records` (§1.2). Exposing that instead is
+cheaper and keeps one implementation of a subtle walk — an engine change, so it is a call for
+the maintainer (Q6).
 
 ### 6.2 Why replay, not re-execute
 
@@ -299,15 +348,37 @@ cannot see. That is both a time-of-check/time-of-use gap and a direct reintroduc
 Replaying the captured delta is what makes determinacy (§3, consequence 1) mechanically true
 rather than argued.
 
-### 6.3 Hazard — structural effects must be lowered
+### 6.3 Hazard — the captured log is not the delta
 
-`UpdateEffect::{Clear, Drop, Create}` are recorded as *operations*, not deltas, precisely
-because they are pure functions of the text — which is what makes them wrong to replay here:
-`Clear(<g>)` over the replica clears only visible triples, but replayed against the store it
-clears everything. Step 3 must convert them into explicit per-triple deletes computed over
-the replica, or refuse the operation. Getting this wrong is a silent destruction bug, so the
-acceptance test must include a masked graph subjected to `CLEAR` and `DROP` with an assertion
-that the masked triples survive in the store.
+This is the sharpest edge in W1, and it has two faces. Both come from §1.2: the log is a
+replay script for an identically-seeded graph, and the store is not that graph.
+
+**Absent-operand records.** A `DELETE DATA` batch is recorded verbatim, so it names quads that
+are absent from the replica — including every masked quad, since masking is by physical
+omission. Replaying that batch onto the store deletes masked triples (a non-interference
+violation), and validating it denies requests §5 promises are silent no-ops. Step 4's
+intersection with the running view is what makes the §5 table true of the mechanism and not
+merely of the semantics; without it the two disagree on the commonest case.
+
+**Structural effects.** `Clear`/`Drop` are recorded as *operations* because they are pure
+functions of the text — which is exactly what makes them wrong to replay here: `Clear(<g>)`
+over the replica clears only visible triples, but replayed against the store it clears
+everything. They must be expanded into explicit per-triple deletes, and expansion has a state
+*and* a position: the triples to retract are the visible ones present **immediately before
+that operation**, not before the body and not after it. Lowering from the finished replica
+cannot work — the graph is empty by then — and lowering from the pre-body replica is wrong for
+`INSERT DATA {t}; CLEAR GRAPH g`, which must retract `t` too. Hence the running view of §6.1
+step 4 rather than a separate lowering pass. Refusing structural operations outright (Q4) is
+the conservative alternative and removes this face of the hazard entirely.
+
+Getting either wrong is a silent destruction bug, so the acceptance tests must include:
+
+* `DELETE DATA` naming (1) an absent triple, (2) a masked-but-present-in-`D` triple, (3) a
+  visible triple — (1) and (2) must be **indistinguishable** in verdict *and* in store effect,
+  and the masked triple must survive in the store;
+* a real multi-operation body — `INSERT DATA; CLEAR GRAPH <g>; INSERT DATA` over a masked `g`
+  — asserting that replay onto the store reproduces execution against the masked replica
+  (commutation) while `g`'s masked triples survive (non-interference).
 
 ### 6.4 Hazard — blank-node identity across the replica boundary
 
@@ -338,7 +409,7 @@ benchmark discipline's terms.
 ### 6.6 Atomicity and concurrency
 
 `update_as` takes `&mut self`, so replica-build and apply are already exclusive within a
-process; step 5's deny leaves the store untouched exactly as `check` does today. If the
+process; step 6's deny leaves the store untouched exactly as `check` does today. If the
 replay is ever split across a durable mirror, it must go through the request-atomic path
 (`update_in_place_atomic`) so a mid-request denial cannot leave a prefix applied.
 
@@ -395,16 +466,21 @@ difference between that and having emptied the graph.
    a principal holding `acl:Write`/`acl:Append` without `acl:Read` gets an empty `WHERE`, so
    `DELETE/INSERT … WHERE` becomes a no-op for them while `INSERT DATA` still works — that is
    correct under WAC (Write does not imply Read) but it is a change (Q3).
-2. **`feat(engine or solid)`: the delta-replay seam.** Structural-effect lowering (§6.3) and
-   the blank-node freshness rule (§6.4), with tests that a `CLEAR`/`DROP` over a masked
-   replica cannot destroy masked triples in the store.
+2. **`feat(engine or solid)`: the delta-replay seam.** The effective-delta walk of §6.1 step 4
+   — absent-operand intersection *and* ordered structural expansion against a running view
+   (§6.3) — plus the blank-node freshness rule (§6.4), with both §6.3 test batteries: the
+   three-way `DELETE DATA` indistinguishability case and the multi-operation
+   `INSERT; CLEAR; INSERT` case. Settle Q6 first: reuse the engine's `resolve_effect_records`
+   by making it public, or reimplement the walk in `sparq-solid`.
 3. **`feat(solid)`: `WriteScope` + the visible-delta validator** — `PodStore::update_scoped_as`
    behind `pattern-scope`, implementing §5's table and §6.1's pipeline. Fail-closed unit
    tests per row of that table.
 4. **`test(solid)`: the differential oracle.** For a battery of updates × scopes assert
    `M_a(apply(D, U)) == apply(M_a(D), U)` (commutation), `D ∖ vis_a` unchanged
    (non-interference), and verdict-equality between a store where the masked triples are
-   physically deleted and one where they are merely masked (determinacy). Plus a non-vacuity
+   physically deleted and one where they are merely masked (determinacy) — the battery must
+   include multi-operation bodies mixing data and structural operations, not just single
+   operations. Plus a non-vacuity
    mutation: a no-op mask must flip the test red — mirroring `tests/pattern_scope.rs`.
 5. **`test(solid)`: fuzz** random scopes × random updates against the oracle, mirroring
    `tests/pattern_scope_fuzz.rs`.
@@ -436,3 +512,9 @@ are ever built.
 5. **Do pattern-scoped writes earn their cost at all?** W1 is a genuine amount of machinery
    for one line of the maintainer invariant. If the near-term need is only *"share X except
    Y"* (read), W0 plus bead 1 may be the whole answer for a long time.
+6. **Reuse or reimplement the effective-delta walk?** §6.1 step 4 needs an ordered walk of a
+   capture log against a running per-slot view. The engine already has one — the private
+   `resolve_effect_records`, written for the durability journal (`sq-aalh`) — solving the same
+   hazard §6.3 describes. Making it public keeps a single implementation of a subtle walk but
+   costs W1 its zero-engine-change property; reimplementing it in `sparq-solid` keeps that
+   property and duplicates the subtlety. I lean to exposing it, but it is a public-API call.
