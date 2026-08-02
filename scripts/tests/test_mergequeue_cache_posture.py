@@ -41,10 +41,13 @@
 #      neither adoption nor rejection. What ci.yml now carries is only the HARNESS that
 #      makes the measurement possible: sccache is installed and wired as `RUSTC_WRAPPER`
 #      ONLY when a maintainer dispatches the workflow with `sccache_ab: on`. That `if:`
-#      guard, and the input's `off` default, are the entire safety property — drop either
-#      and an unmeasured, unadopted compiler wrapper goes live on the merge-queue critical
-#      path, which is precisely what the adoption bar exists to prevent. Both are pinned
-#      by TestSccacheArmIsDispatchOnly below.
+#      guard on all FOUR arm steps — install, credential export, wrapper enable, stats —
+#      and the input's `off` default, are the entire safety property. Drop the guard and
+#      an unmeasured, unadopted compiler wrapper goes live on the merge-queue critical
+#      path (precisely what the adoption bar exists to prevent), and the credential-export
+#      step additionally leaks `ACTIONS_RUNTIME_TOKEN` into `GITHUB_ENV` on automatic
+#      runs. All of it is pinned by TestSccacheArmIsDispatchOnly below — including a
+#      mutation test proving the credential-export guard specifically is covered.
 #
 # Hermetic: stdlib only (no PyYAML, no network, no gh) so it runs anywhere.
 # Run:  python3 scripts/tests/test_mergequeue_cache_posture.py
@@ -80,6 +83,16 @@ _STEP_START = re.compile(r"^ {6}- (name|uses|run|if|with|env):")
 # sample, and must not be caught: it sets no wrapper and runs no sccache binary.
 _SCCACHE_ENABLER = re.compile(
     r"RUSTC_WRAPPER|SCCACHE_GHA_ENABLED|tool:\s*sccache|\bsccache\s+--"
+)
+# The fourth arm step names NEITHER the wrapper nor the binary: it is an
+# `actions/github-script` block that re-exports the Actions cache-service credentials
+# into `GITHUB_ENV` so the `sccache` binary can reach the GHA backend at all. The
+# enabler pattern above cannot see it, so it is matched on the credential names
+# themselves. Its guard is if anything MORE load-bearing than the others': an
+# unguarded export puts `ACTIONS_RUNTIME_TOKEN` into `GITHUB_ENV`, and therefore into
+# the environment of every later step in the job, on automatic runs.
+_SCCACHE_CREDENTIAL_EXPORT = re.compile(
+    r"ACTIONS_RESULTS_URL|ACTIONS_CACHE_URL|ACTIONS_RUNTIME_TOKEN"
 )
 # The one condition under which an sccache enabler may run. `workflow_dispatch` is the
 # only trigger that can carry an input, so this expression is null — and the step skips
@@ -168,14 +181,46 @@ def all_steps(lines: list[str]) -> list[tuple[int, list[str]]]:
     ]
 
 
+def _matches(body: list[str], pattern: re.Pattern[str]) -> bool:
+    return any(pattern.search(l) for l in body if not _is_comment(l))
+
+
 def sccache_enabler_steps(path: Path) -> list[tuple[int, list[str]]]:
     """Steps that actually turn sccache on (install it, wrap rustc, or invoke it)."""
-    lines = _lines(path)
     return [
         (idx, body)
-        for idx, body in all_steps(lines)
-        if any(_SCCACHE_ENABLER.search(l) for l in body if not _is_comment(l))
+        for idx, body in all_steps(_lines(path))
+        if _matches(body, _SCCACHE_ENABLER)
     ]
+
+
+def sccache_credential_export_steps(path: Path) -> list[tuple[int, list[str]]]:
+    """Steps that hand the Actions cache-service credentials to the job environment."""
+    return [
+        (idx, body)
+        for idx, body in all_steps(_lines(path))
+        if _matches(body, _SCCACHE_CREDENTIAL_EXPORT)
+    ]
+
+
+def unguarded_sccache_arm_steps(lines: list[str]) -> list[tuple[int, str | None]]:
+    """Every sccache ARM step whose `if:` is not exactly the dispatch-input guard.
+
+    An arm step is one that enables sccache OR exports the backend credentials it
+    needs. Takes LINES rather than a path so the mutation test below can run it over
+    a deliberately-broken copy of ci.yml without writing to disk.
+    """
+    unguarded = []
+    for idx, body in all_steps(lines):
+        if not (
+            _matches(body, _SCCACHE_ENABLER)
+            or _matches(body, _SCCACHE_CREDENTIAL_EXPORT)
+        ):
+            continue
+        got = with_value(body, "if:")
+        if got != SCCACHE_ARM_GUARD:
+            unguarded.append((idx, got))
+    return unguarded
 
 
 def merge_group_workflows_with_rust_cache() -> list[Path]:
@@ -317,8 +362,9 @@ class TestNextestArchiveDiet(unittest.TestCase):
 class TestSccacheArmIsDispatchOnly(unittest.TestCase):
     """sq-6vshe.15 item 3 (#5164). The A/B harness may exist; the VERDICT does not.
     Until a >=60 s median win is measured, sccache must be unreachable from any
-    automatic trigger — so every enabler step carries the dispatch-input guard and the
-    input defaults to `off`."""
+    automatic trigger — so every ARM step (the ones that enable sccache, AND the one
+    that exports the Actions cache credentials it needs) carries the dispatch-input
+    guard, and the input defaults to `off`."""
 
     def test_the_enabler_walker_is_not_vacuous(self) -> None:
         found = sccache_enabler_steps(CI_YML)
@@ -329,22 +375,64 @@ class TestSccacheArmIsDispatchOnly(unittest.TestCase):
             "no longer understands its shape — in which case the guard below is unchecked.",
         )
 
-    def test_every_sccache_enabler_is_guarded_by_the_dispatch_input(self) -> None:
+    def test_the_credential_export_walker_is_not_vacuous(self) -> None:
+        # The enabler pattern does NOT match this step (it names neither the wrapper nor
+        # the binary), so without its own matcher the guard below would silently skip the
+        # one arm step that handles a secret. Pin that it is discovered.
+        found = sccache_credential_export_steps(CI_YML)
+        self.assertTrue(
+            found,
+            "no Actions-cache-credential export step found in ci.yml. Either the A/B "
+            "harness was removed (then delete this class and the item-3 note in the "
+            "header) or the step walker no longer understands its shape — in which case "
+            "the ACTIONS_RUNTIME_TOKEN export below is unguarded and unchecked.",
+        )
+
+    def test_every_sccache_arm_step_is_guarded_by_the_dispatch_input(self) -> None:
         for wf in sorted(WORKFLOWS.glob("*.yml")):
             if not triggers_on_merge_group(wf):
                 continue
-            for idx, body in sccache_enabler_steps(wf):
-                got = with_value(body, "if:")
-                self.assertEqual(
-                    got,
-                    SCCACHE_ARM_GUARD,
-                    f"{wf.name}:{idx + 1}: this step enables sccache but its `if:` is "
-                    f"{got!r}, not `{SCCACHE_ARM_GUARD}`. The workflow triggers on "
-                    "merge_group, so an unguarded enabler puts an UNMEASURED compiler "
-                    "wrapper on the merge-queue critical path — sq-6vshe.15 item 3 adopts "
+            for idx, got in unguarded_sccache_arm_steps(_lines(wf)):
+                self.fail(
+                    f"{wf.name}:{idx + 1}: this step arms the sccache A/B (it enables "
+                    f"sccache, or exports the Actions cache credentials sccache needs) "
+                    f"but its `if:` is {got!r}, not `{SCCACHE_ARM_GUARD}`. The workflow "
+                    "triggers on merge_group, so an unguarded arm step puts an UNMEASURED "
+                    "compiler wrapper on the merge-queue critical path — and an unguarded "
+                    "credential export additionally writes ACTIONS_RUNTIME_TOKEN into "
+                    "GITHUB_ENV for every later step in the job. sq-6vshe.15 item 3 adopts "
                     "sccache only on a measured >=60 s median win, and no such measurement "
                     "exists (research/ci-mergequeue-speedup-2026-07.md §3.2).",
                 )
+
+    def test_dropping_the_credential_export_guard_is_caught(self) -> None:
+        # MUTATION. The check above is only worth its comment if it goes red when the
+        # guard is actually removed — and the credential-export step is the one that
+        # slipped past the enabler pattern. Delete ITS `if:` line in memory and assert
+        # the detector names that exact step.
+        lines = _lines(CI_YML)
+        exports = sccache_credential_export_steps(CI_YML)
+        self.assertEqual(
+            len(exports), 1, f"expected exactly one credential export step, got {exports}"
+        )
+        start, body = exports[0]
+        guard_offsets = [
+            i for i, l in enumerate(body) if l.strip() == f"if: {SCCACHE_ARM_GUARD}"
+        ]
+        self.assertEqual(
+            len(guard_offsets),
+            1,
+            "the credential export step does not carry exactly one "
+            f"`if: {SCCACHE_ARM_GUARD}` line — the mutation below would be a no-op.",
+        )
+        mutated = lines[: start + guard_offsets[0]] + lines[start + guard_offsets[0] + 1 :]
+        self.assertIn(
+            start,
+            [idx for idx, _ in unguarded_sccache_arm_steps(mutated)],
+            "removing the `if:` guard from the ACTIONS_* credential export step did NOT "
+            "make the guard check red — the check does not cover that step, so the "
+            "ACTIONS_RUNTIME_TOKEN export could be armed on automatic runs unnoticed.",
+        )
 
     def test_the_ab_input_defaults_to_off(self) -> None:
         lines = _lines(CI_YML)
