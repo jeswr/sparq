@@ -172,6 +172,32 @@ try {
   );
 }
 
+// [OPUS-5] sq-ixc3.17 — sync the ZK tool's ACIR artifact. The `filter_int_d2` circuit
+// (zk/compose/filter_int_d2, compiled by nargo) is committed ONCE at site/public/zk/, whose term
+// encodings are drift-guarded against the native encoder by
+// crates/sparq-zk-compose/tests/site_age_enc_drift.rs. The GUI fetches it as a plain static asset
+// at runtime, so it must live under public/ — copied rather than committed a second time, keeping
+// one source of truth. Deliberately NOT content-hashed: it is not a wasm runtime file the
+// @sparq/client loader resolves through wasm-manifest.json. OPTIONAL, like the tier-b bundles:
+// without it the ZK tool reports the missing artifact instead of proving anything.
+const zkSrc = join(here, "..", "..", "..", "site", "public", "zk");
+const zkDest = join(here, "..", "public", "zk");
+const zkFiles = ["filter_int_d2.json"];
+
+try {
+  for (const f of zkFiles) await access(join(zkSrc, f));
+  await mkdir(zkDest, { recursive: true });
+  for (const f of zkFiles) {
+    await copyFile(join(zkSrc, f), join(zkDest, f));
+  }
+  console.log(`[sync-wasm] copied ${zkFiles.length} file(s) → public/zk/ (ZK circuit ACIR)`);
+} catch {
+  console.warn(
+    `[sync-wasm] ZK circuit artifact not found at ${zkSrc}; the ZK tool will report the\n` +
+      `            missing artifact rather than prove in-tab.`,
+  );
+}
+
 // [SONNET-4.6] sq-b66fc — write the manifest. Same contract as the site sync: maps
 // each logical runtime filename (relative to public/wasm/) to its content-hashed copy.
 // The @sparq/client resolveWasmAsset() loader reads this once and caches it; falls back

@@ -7,3 +7,8 @@ next-env.d.ts
 
 # The wasm bundle is synced in from js/wasm at build time (a build artifact, not source).
 /public/wasm/
+
+# [OPUS-5] sq-ixc3.17 — the ZK tool's ACIR artifact is synced in from site/public/zk at build
+# time so the repo keeps ONE committed copy (drift-guarded against the native encoder by
+# crates/sparq-zk-compose/tests/site_age_enc_drift.rs), not two that can silently diverge.
+/public/zk/

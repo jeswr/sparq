@@ -16,9 +16,11 @@
     "start": "npx --yes serve out",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test:unit": "node --import ./test-support/register-ts.mjs --test src/lib/editor-keys.test.ts src/lib/federation.test.ts src/lib/odrl.test.ts src/lib/tauri-fs.test.ts src/lib/import-batch.test.ts src/lib/workspace-actions-visibility.test.ts src/lib/rsp-feed.test.ts src/lib/plan-view.test.ts src/lib/query-monitor.test.ts src/lib/proof-view.test.ts src/lib/inferred-facts.test.ts src/lib/form-render-model.test.ts src/lib/forms-bridge.test.ts src/lib/file-decompress.test.ts src/lib/select-result-graph.test.ts scripts/strip-legacy-polyfills.test.mjs"
+    "test:unit": "node --import ./test-support/register-ts.mjs --test src/lib/editor-keys.test.ts src/lib/federation.test.ts src/lib/odrl.test.ts src/lib/tauri-fs.test.ts src/lib/import-batch.test.ts src/lib/workspace-actions-visibility.test.ts src/lib/rsp-feed.test.ts src/lib/plan-view.test.ts src/lib/query-monitor.test.ts src/lib/proof-view.test.ts src/lib/inferred-facts.test.ts src/lib/form-render-model.test.ts src/lib/forms-bridge.test.ts src/lib/file-decompress.test.ts src/lib/select-result-graph.test.ts src/lib/mpc-sim.test.ts src/lib/zk-filter.test.ts scripts/strip-legacy-polyfills.test.mjs"
   },
   "dependencies": {
+    "@aztec/bb.js": "5.0.0-nightly.20260324",
+    "@noir-lang/noir_js": "1.0.0-beta.21",
     "buffer": "^6.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

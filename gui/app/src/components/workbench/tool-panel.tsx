@@ -27,6 +27,8 @@ import { STREAMING_TOOL_OVERRIDE } from "@/components/workbench/streaming-tool.m
 import { SERVER_TOOL_OVERRIDE } from "@/components/workbench/server-tool.meta";
 import { ODRL_TOOL_OVERRIDE } from "@/components/workbench/odrl-tool.meta";
 import { PLAN_TOOL_OVERRIDE } from "@/components/workbench/plan-explorer.meta";
+import { ZK_TOOL_OVERRIDE } from "@/components/workbench/zk-tool.meta";
+import { MPC_TOOL_OVERRIDE } from "@/components/workbench/mpc-tool.meta";
 import { ToolStub } from "@/components/workbench/tool-stub";
 import { applyToolOverride, toolById, type ToolDef, type ToolOverride } from "@/data/tools";
 
@@ -77,6 +79,15 @@ const OdrlTool = lazyPanel(() =>
 const PlanExplorer = lazyPanel(() =>
   import("@/components/workbench/plan-explorer").then((m) => ({ default: m.PlanExplorer })),
 );
+// [OPUS-5] sq-ixc3.17 — the ZK panel's chunk pulls in the bb.js/noir_js dynamic-import call
+// sites; keeping it lazy (like every other panel) means a workbench that never opens the tab
+// never fetches them.
+const ZkTool = lazyPanel(() =>
+  import("@/components/workbench/zk-tool").then((m) => ({ default: m.ZkTool })),
+);
+const MpcTool = lazyPanel(() =>
+  import("@/components/workbench/mpc-tool").then((m) => ({ default: m.MpcTool })),
+);
 
 interface ToolPanelEntry {
   Component: ComponentType;
@@ -85,9 +96,8 @@ interface ToolPanelEntry {
 }
 
 /**
- * Static id → panel registry. Tools with no entry (vector / geosparql / zk / mpc — genuinely
- * deferred behind the sq-zeai portability spike and the ZK/MPC audit posture) fall back to the
- * shared honest ToolStub, exactly as before.
+ * Static id → panel registry. Tools with no entry (vector / geosparql — genuinely deferred behind
+ * the sq-zeai portability spike) fall back to the shared honest ToolStub, exactly as before.
  */
 const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // [FABLE-5] sq-ixc3.14 — blurb override: the Query tool now also runs federated SERVICE
@@ -111,6 +121,12 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // [FABLE-5] sq-ixc3.19 — the visual query-plan explorer (EXPLAIN/ANALYZE operator tree +
   // q-error heat + the this-workbench query monitor with endpoint Kill).
   plan: { Component: PlanExplorer, override: PLAN_TOOL_OVERRIDE },
+  // [OPUS-5] sq-ixc3.17 — the site's live-bbjs prover / live-sim demos ported to verbs over the
+  // live store. Their tiers are UNCHANGED (`live-bbjs` / `live-sim`): in-tab UltraHonk proving is
+  // real but research-grade with external sign-off pending (sq-qhy4), and the MPC panel is an
+  // in-tab illustration of the protocol shape, not the native honest-majority semi-honest crate.
+  zk: { Component: ZkTool, override: ZK_TOOL_OVERRIDE },
+  mpc: { Component: MpcTool, override: MPC_TOOL_OVERRIDE },
 };
 
 /**
