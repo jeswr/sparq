@@ -1,5 +1,10 @@
 # Hash-pinned dependencies for the docs-quality `skill-frontmatter` job. [OPUS-4.8]
 #
+# SECOND CONSUMER [OPUS-5] #5237: .github/workflows/ci-select.yml installs this same
+# PyYAML-only closure, BEST-EFFORT (continue-on-error), as the optional precision dep
+# of ci_select.py's content-based inert-edit carve-out. That job must keep working
+# when the install fails, so do not add a package here that ci-select would REQUIRE.
+#
 # Scorecard PinnedDependenciesID requires CI pip installs be pinned by HASH, not
 # just by `==` version (a `==` pin still trusts whatever PyPI serves for that
 # version). Installed with `pip install --require-hashes -r` so every artifact's

@@ -51,6 +51,13 @@
 # Stdlib only (design §7 P1): no third-party deps, no compile step. Runs under
 # the CI setup-python 3.12; `tomllib` (stdlib >= 3.11) is imported lazily and
 # only when a map file is actually present.
+#
+# ONE OPTIONAL PRECISION DEP — PyYAML ([OPUS-5] #5237). The content-based
+# inert-edit carve-out (`yaml_edit_is_inert`) imports `yaml` LAZILY and nowhere
+# else. It is optional in the strict sense: with PyYAML absent the selector runs
+# unchanged on the stdlib alone and simply proves less (every `.github/**` YAML
+# edit keeps forcing mode=full). P1 is therefore refined, not revoked — no
+# third-party dep is ever REQUIRED for a correct selection.
 
 from __future__ import annotations
 
@@ -210,6 +217,167 @@ def _deploy_only_match(path: str) -> bool:
     Same pre-trigger position and same fail-safe posture as
     _orchestration_safe_match — a non-matching path still hits the trigger => full."""
     return _allowlist_match(path, _DEPLOY_ONLY)
+
+
+# --- INERT-EDIT carve-out (CONTENT-based; #5237, generalising #2536) ---------
+# [OPUS-5] The two allowlists above are PATH-based proofs: "this file is never read
+# by the Rust matrix". They deliberately cannot cover a Rust-CI workflow (ci.yml,
+# bench.yml, fuzz.yml, feature-matrix.d/*.yml, ...) — those files genuinely DO gate
+# PRs, so by path they must keep forcing full. But a real share of the edits they
+# receive are pure COMMENT edits, which cannot change what CI does. (Measured over
+# 1500 first-parent commits of this repo at the time of writing: 11 of the 537 that
+# force mode=full do so ONLY because of a comment-only `.github/**` YAML edit.)
+#
+# THE PROOF (content-based, per-revision-pair — not an allowlist): a `.github/**`
+# YAML file's edit is inert iff its PARSED YAML DOCUMENT is identical at the
+# merge-base and at head. The consumers of these files read them as YAML — GitHub
+# Actions itself for `.github/workflows/**`, scripts/assemble-feature-matrix.py
+# (and feature-matrix-tiers.py / check-feature-test-execution.py) for
+# `.github/feature-matrix.d/**`, the CodeQL CLI for `.github/codeql/**` — so two
+# revisions with the same parsed document are indistinguishable to every one of
+# them. Comments OUTSIDE a block scalar vanish under parsing, so a pure-comment
+# edit compares equal; a comment added INSIDE a `run: |` block stays part of the
+# scalar STRING and compares unequal, which fail-closes to the full matrix exactly
+# as it must (that text is executed).
+#
+# WHY IT IS RESTRICTED TO `.github/**`: outside that tree a *.yml can be a test
+# FIXTURE that a crate reads verbatim (byte-for-byte, comments included), where
+# parse-equality would NOT be inertness. The restriction is part of the proof, not
+# a convenience.
+#
+# THE RAW-TEXT-READER EXCEPTION (_YAML_RAW_TEXT_READERS below): the "every consumer
+# parses it as YAML" premise is not free even inside `.github/**` — a crate test may
+# read a workflow as a STRING and grep it. Such a file is EXCLUDED, because for it
+# parse-equality is not inertness (a comment holding the searched-for substring can
+# flip a `contains` assertion with the document unchanged). The exclusion list is
+# pinned by `YamlRawTextReaderTests`, which greps `crates/**/*.rs` for `.github/**`
+# YAML paths and FAILS on any reader that is not declared — so a NEW crate-side
+# reader can never silently invalidate the proof.
+#
+# THE PyYAML POSITION (design §7 P1, "stdlib only", refined — NOT revoked): the
+# selector still RUNS on the stdlib alone. PyYAML is an OPTIONAL PRECISION
+# dependency: it is imported lazily and ONLY here, and its absence makes this
+# carve-out return False for every path, i.e. the pre-#5237 behaviour (the
+# `.github/` trigger fires => mode=full). A hand-rolled comment stripper was the
+# alternative and was rejected: hand-rolled YAML block-scalar tracking in a
+# soundness-critical path is exactly the risk this proof is meant to remove.
+# .github/workflows/ci-select.yml installs PyYAML best-effort (non-fatal), so a
+# failed install costs precision, never correctness.
+_YAML_INERT_ROOT = ".github/"
+_YAML_SUFFIXES = (".yml", ".yaml")
+
+# `.github/**` YAML files that a WORKSPACE CRATE reads as raw TEXT (not as YAML).
+# For these, parse-equality is NOT a proof of inertness, so they are excluded from
+# the carve-out and keep hitting the `.github/` full-run trigger. Keep this list
+# EXACT — `YamlRawTextReaderTests` derives the true reader set from the crate
+# sources and fails if the two drift in either direction (an undeclared reader is
+# unsound; a stale entry silently costs precision).
+#   * differential.yml — crates/sparq-bench `every_category_has_a_nightly_shard`
+#     does `read_to_string` + `contains("category: <cat>,")` on it, so a comment
+#     carrying that literal changes the test's verdict without changing the document.
+_YAML_RAW_TEXT_READERS: list[str] = [
+    ".github/workflows/differential.yml",
+]
+
+
+def _yaml_safe_loader():
+    """The lazily-imported `yaml.safe_load`, or None when PyYAML is absent.
+
+    Returning None is the fail-closed signal: the caller then proves nothing and
+    the path falls through to its `.github/` full-run trigger."""
+    try:
+        import yaml  # optional precision dep; see the block comment above
+    except Exception:  # ModuleNotFoundError, or a broken install
+        return None
+    return yaml.safe_load
+
+
+def _canonical(node):
+    """A TYPE-TAGGED, order-canonical form of a parsed YAML document, so that
+    `_canonical(a) == _canonical(b)` is document identity rather than Python's
+    looser `==`.
+
+    Two refinements over a plain `a == b` on the loaded objects, both in the
+    fail-closed direction (they can only make two documents compare UNEQUAL,
+    never equal):
+      * scalars carry their type name and `repr`, so YAML `true` never compares
+        equal to `1` (Python's `True == 1`) and `1` never equals `"1"`;
+      * mappings are compared as a key-sorted item set (key ORDER in a mapping is
+        not meaningful to any consumer) while sequences keep their order (step
+        order in a workflow IS meaningful).
+    """
+    if isinstance(node, dict):
+        return ("map", tuple(sorted(
+            ((_canonical(k), _canonical(v)) for k, v in node.items()), key=repr)))
+    if isinstance(node, (list, tuple)):
+        return ("seq", tuple(_canonical(v) for v in node))
+    if isinstance(node, (set, frozenset)):  # YAML !!set
+        return ("set", tuple(sorted((_canonical(v) for v in node), key=repr)))
+    return ("scalar", type(node).__name__, repr(node))
+
+
+def yaml_edit_is_inert(path: str, blob_reader, loader=None) -> bool:
+    """[OPUS-5] #5237: is this `.github/**` YAML edit PROVABLY inert — same parsed
+    document at base and head?
+
+    `blob_reader(side, path) -> str | None` reads the file's text at side
+    "base"/"head" (None = unreadable/absent). FAIL-CLOSED on every uncertainty —
+    no reader, no PyYAML, a path outside `.github/**`, a non-YAML suffix, an
+    added/deleted/unreadable blob, a parse error, or any unequal document all
+    return False, which leaves the path on its normal full-run trigger.
+    """
+    if blob_reader is None:
+        return False
+    if not path.startswith(_YAML_INERT_ROOT) or not path.endswith(_YAML_SUFFIXES):
+        return False
+    if path in _YAML_RAW_TEXT_READERS:
+        return False  # a crate greps this file's TEXT => parse-equality proves nothing
+    if loader is None:
+        loader = _yaml_safe_loader()
+        if loader is None:
+            return False  # no parser => no proof => run everything
+    base_text = blob_reader("base", path)
+    head_text = blob_reader("head", path)
+    if base_text is None or head_text is None:
+        return False  # added, deleted or unreadable on one side => no proof
+    try:
+        base_doc = loader(base_text)
+        head_doc = loader(head_text)
+    except Exception:  # any parse failure => no proof
+        return False
+    return _canonical(base_doc) == _canonical(head_doc)
+
+
+def git_blob_reader(base: str | None, head: str | None, repo_root: str | None):
+    """A `yaml_edit_is_inert` blob reader backed by `git show <rev>:<path>`.
+
+    Returns None (no reader at all => the carve-out is inert) when the revision
+    pair cannot be resolved. `base` is resolved to the MERGE-BASE so the two texts
+    are the same pair the three-dot `git diff base...head` reported as changed;
+    without that, an unrelated base-branch edit to the same file would compare
+    unequal and pointlessly force full.
+    """
+    if not base or not head:
+        return None
+    try:
+        merge_base = _run(["git", "merge-base", base, head], cwd=repo_root).strip()
+    except SelectorError:
+        return None
+    if not merge_base:
+        return None
+    revs = {"base": merge_base, "head": head}
+
+    def read(side: str, path: str) -> str | None:
+        rev = revs.get(side)
+        if rev is None:
+            return None
+        try:
+            return _run(["git", "show", f"{rev}:{path}"], cwd=repo_root)
+        except Exception:
+            # Absent on that side (add/delete), binary, or undecodable: no proof.
+            return None
+
+    return read
 
 
 # Change-class labels emitted for the audit trail (design: the gate renders an
@@ -608,8 +776,15 @@ def select(
     changed_paths: list[str],
     meta: dict,
     map_entries: list[dict] | None = None,
+    blob_reader=None,
+    yaml_loader=None,
 ) -> Selection:
     """Pure core: changed paths + cargo metadata + optional map -> Selection.
+
+    `blob_reader`/`yaml_loader` are the optional inputs to the #5237 content-based
+    inert-edit carve-out (see `yaml_edit_is_inert`). Both default to None, which
+    makes that carve-out a no-op — so a caller with no revision pair (the hermetic
+    --changed-file path) gets exactly the pre-#5237 selection.
 
     Raises SelectorError on any malformed input; main() traps that to mode=full.
     """
@@ -650,6 +825,16 @@ def select(
         # listing it here keeps the selection and the CLASS on one path list.
         if _deploy_only_match(path):
             file_owners.append((path, "DEPLOY-SAFE"))
+            continue
+        # [OPUS-5] #5237: the CONTENT-based inert-edit carve-out, same pre-trigger
+        # position as the two path-based ones above. It is the only rescue for a
+        # Rust-CI `.github/**` YAML file (ci.yml, bench.yml, feature-matrix.d/*.yml
+        # …) from the `.github/` full-run trigger, and it fires ONLY on a proof that
+        # this revision pair's PARSED documents are identical (a pure-comment edit).
+        # Like the others it contributes no crate, so a diff whose only trigger is
+        # such an edit selects on the remaining paths instead of forcing full.
+        if yaml_edit_is_inert(path, blob_reader, yaml_loader):
+            file_owners.append((path, "YAML-INERT"))
             continue
         trig = _trigger_match(path)
         if trig is not None:
@@ -1011,6 +1196,12 @@ def main(argv: list[str] | None = None) -> int:
                     raise SelectorError("--base is required for a diff-based run")
                 changed = git_changed_paths(args.base, args.head, repo_root)
 
+            # [OPUS-5] #5237: the content-based inert-edit carve-out needs BOTH blob
+            # versions of a changed `.github/**` YAML file. Absent a resolvable
+            # revision pair this is None and the carve-out is a no-op (=> full on
+            # any such path, the pre-#5237 behaviour).
+            blob_reader = git_blob_reader(args.base, args.head, repo_root)
+
             map_file = args.map_file
             if map_file is None and repo_root is not None:
                 candidate = os.path.join(repo_root, "ci", "path-ownership.toml")
@@ -1018,7 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
             map_entries = load_ownership_map(map_file)
 
             meta = load_metadata(args.metadata_file, repo_root)
-            sel = select(changed, meta, map_entries)
+            sel = select(changed, meta, map_entries, blob_reader=blob_reader)
 
     except Exception as exc:  # fail-closed boundary: ANY error => full run (design §4.3)
         # We could not even build the member list; emit full with an empty
