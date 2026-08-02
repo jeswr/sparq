@@ -129,7 +129,10 @@ test("the share matrix keeps exactly the diagonal and columns are the received v
       PARTIES[i].value,
       `row ${i} reconstructs its owner's value`,
     );
-    // Column j is what party j holds.
+  }
+  // Column j is what party j holds — a per-COLUMN property, so it gets its own loop rather than
+  // riding along in the row loop above (where `j` is out of scope past the inner loop).
+  for (let j = 0; j < n; j++) {
     assert.deepEqual(
       r.received[j],
       r.matrix.map((row) => row[j].value),
