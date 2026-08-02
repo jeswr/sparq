@@ -2461,6 +2461,10 @@ jobs:
         # GENUINE regression fails the runner's own `assert!(pass >= FLOOR)` on every
         # attempt and still reds the job — the floors are never weakened. `rc` is
         # captured from PIPESTATUS[0] (cargo, not tee).
+        # [OPUS-5] sq-mwnko: `--lib` added — `src/jsonld_bench.rs` is a
+        # `#[cfg(feature = "jsonld-suite")]` module, so its 17 unit tests (the
+        # `json_ld_equal` comparator the conformance ratchet itself trusts) compiled in
+        # no CI leg.
         run: |
           set -uo pipefail
           MAX_ATTEMPTS=2
@@ -2468,7 +2472,7 @@ jobs:
           while true; do
             echo "::group::JSON-LD conformance — attempt $attempt/$MAX_ATTEMPTS"
             rc=0
-            cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite -- --nocapture \
+            cargo test -p sparq-conformance --features jsonld-suite --lib --test jsonld_suite -- --nocapture \
               | tee jsonld-conformance.out
             rc=${PIPESTATUS[0]}
             echo "::endgroup::"
@@ -2634,9 +2638,12 @@ jobs:
         # Drives RAW HTTP at the in-process loopback server (no fetched data). The runner asserts
         # the pinned HTTP_PROTOCOL_FLOOR in-process AND prints a `TOTAL http-protocol <pass> <fail>
         # <div> (floor N)` line re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
+        # [OPUS-5] sq-mwnko: `--lib` added — `src/http_protocol.rs` is a
+        # `#[cfg(feature = "service-loopback")]` module, so its 9 unit tests (URL
+        # encoding, status-code classification, outcome tallying) compiled in no CI leg.
         run: |
           set -o pipefail
-          cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite -- --nocapture \
+          cargo test -p sparq-conformance --features http-protocol --lib --test http_protocol_suite -- --nocapture \
             | tee http-protocol-conformance.out
           if ! grep -qE '^TOTAL http-protocol ' http-protocol-conformance.out; then
             echo "::error::SPARQL-Protocol lane produced no 'TOTAL http-protocol' line — infra/build issue, not a conformance change. Re-run the job."
@@ -2662,9 +2669,12 @@ jobs:
         # Drives RAW HTTP at the in-process loopback server (no fetched data). The runner asserts the
         # pinned SD_GSP_FLOOR in-process AND prints a `TOTAL sd-gsp <pass> <fail> <div> (floor N)`
         # line re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
+        # [OPUS-5] sq-mwnko: `--lib` added — `src/sd_gsp.rs` is a
+        # `#[cfg(feature = "federation-descriptors")]` module, so its 8 unit tests
+        # compiled in no CI leg.
         run: |
           set -o pipefail
-          cargo test -p sparq-conformance --features federation-descriptors --test sd_gsp_suite -- --nocapture \
+          cargo test -p sparq-conformance --features federation-descriptors --lib --test sd_gsp_suite -- --nocapture \
             | tee sd-gsp-conformance.out
           if ! grep -qE '^TOTAL sd-gsp ' sd-gsp-conformance.out; then
             echo "::error::SD/GSP lane produced no 'TOTAL sd-gsp' line — infra/build issue, not a conformance change. Re-run the job."
@@ -2969,13 +2979,21 @@ jobs:
         # — the sq-qo1a9 DL-Lite_R certain-answer oracle ratchet (QL_DLLITE_FLOOR),
         # previously wired into NO CI lane (a discovered gap this step also closes);
         # (c) ql_experimental_arm — the taxonomy/no-binary-graduation invariants.
+        # [OPUS-5] sq-mwnko: PLUS `--lib`. `inference::sparql_entail::ql_tests` is
+        # `#[cfg(all(test, feature = "ql-experimental"))]`, so it compiles in NO other
+        # CI leg — the default `--workspace` nextest archive builds this crate without
+        # the feature, and there is no ql-experimental feature-matrix leg. Naming only
+        # the three `--test` targets therefore left those 15 unit tests running nowhere,
+        # and a stale assertion sat RED on main unnoticed (found in sq-p6yb7). `--lib`
+        # is the whole fix: one extra `--test` compile of this crate's own lib (its
+        # dependency graph is already built for the three suites), 34 tests run.
         # The pinned floor is asserted in-runner AND re-grepped here, read from source
         # so this step cannot drift from the in-runner const. HONESTLY sparq-EXTENSION
         # ratchets — NOT an OWL 2 QL / entailment-regime conformance claim.
         # `--nocapture` so the ratchet lines reach stdout.
         run: |
           set -uo pipefail
-          cargo test -p sparq-conformance --features ql-experimental --test ql_entailment_floor --test ql_dllite_suite --test ql_experimental_arm -- --nocapture \
+          cargo test -p sparq-conformance --features ql-experimental --lib --test ql_entailment_floor --test ql_dllite_suite --test ql_experimental_arm -- --nocapture \
             | tee ql-conformance.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::OWL 2 QL lane tests failed (exit $rc)"; exit "$rc"; }
@@ -3023,9 +3041,13 @@ jobs:
         # same test target, same `dl-direct` feature, same EXACT `==` pins (68 profile /
         # 184 direct) asserted in-runner and re-grepped from source — only the codegen
         # optimization level changes, never the assertions or the fail-closed behavior.
+        # [OPUS-5] sq-mwnko: `--lib` added. `inference::dl_suite` is a
+        # `#[cfg(feature = "dl-direct")]` module, so its 11 `#[cfg(test)]` unit tests
+        # (the fail-closed tri-state mappings — abstention-is-never-a-pass) compiled in
+        # no CI leg. Same gap as the QL lane above; same one-flag fix.
         run: |
           set -uo pipefail
-          cargo test --profile release-fast -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
+          cargo test --profile release-fast -p sparq-conformance --features dl-direct --lib --test dl_suite -- --nocapture \
             | tee dl-direct-conformance.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::OWL 2 Direct-Semantics arm test failed (exit $rc)"; exit "$rc"; }
