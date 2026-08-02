@@ -98,8 +98,10 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // its own crate (which takes the floors crate as a `dev-dependency`). Both read the
     // SAME compile-time constant, so they CANNOT drift — and the guard no longer reads
     // another crate's test source, which is what closed the `ci_audit_inputs.py`
-    // "residual 3". These eleven are the `SHARED_CRATE_FLOORS` set below; the
-    // `all_crate_test_suites_are_guarded` test exempts exactly them.
+    // "residual 3". Those eleven — plus the vendored solid-sparql-query
+    // query-semantics suite wired the same way later ([SONNET-4.6] sq-uthtb) — are the
+    // `SHARED_CRATE_FLOORS` set below; the `all_crate_test_suites_are_guarded` test
+    // exempts exactly them.
     //
     // [FABLE-5] sq-oy1f.40 — the SIX W3C JSON-LD 1.1 ratchets (toRdf, fromRdf,
     // compact, frame, expand, flatten) are NO LONGER listed here. Their floor consts
@@ -305,7 +307,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
 
 /// [SONNET-4.6] sq-z1xv8 — the suite labels whose ratchet floor is sourced at COMPILE
 /// TIME from the SHARED `sparq-conformance-floors` crate, imported into BOTH
-/// `scoreboard::SUITES` and the enforcing runner in its own crate. These eleven do NOT
+/// `scoreboard::SUITES` and the enforcing runner in its own crate. These twelve do NOT
 /// need — and must NOT have — a textual floor-sync row in `CRATE_LOCAL_FLOORS`: the
 /// registry and the runner read the SAME `const`, so they cannot drift, and reading the
 /// runner's source would mean reaching back out of this crate (the CI test-selection
@@ -319,12 +321,14 @@ const SHARED_CRATE_FLOORS: &[&str] = &[
     "Solid ACP decision parity",
     "Solid WAC differential oracle",
     "Solid ACP differential oracle",
+    // [SONNET-4.6] sq-uthtb — the vendored solid-sparql-query query-semantics suite.
+    "Solid SPARQL query semantics (Editor's Draft)",
     "SolidLab ODRL Test Suite",
     "text-search differential oracle",
     "RSP expressivity / SRBench correctness",
 ];
 
-/// [SONNET-4.6] sq-z1xv8 — the pinned floor VALUES the eleven shared-crate registry
+/// [SONNET-4.6] sq-z1xv8 — the pinned floor VALUES the twelve shared-crate registry
 /// rows must carry, as `(label, expected_floor)`. Because the registry imports the
 /// shared `const` directly, drift is impossible — but a silent LOWERING is not: editing
 /// `sparq-conformance-floors` down would drop the registry value with it. A ratchet may
@@ -342,6 +346,7 @@ const SHARED_CRATE_EXPECTED: &[(&str, usize)] = &[
     // A divergence count, not a rising ratchet: the only acceptable value is 0.
     ("Solid WAC differential oracle", 0),
     ("Solid ACP differential oracle", 0),
+    ("Solid SPARQL query semantics (Editor's Draft)", 15),
     ("SolidLab ODRL Test Suite", 67),
     ("text-search differential oracle", 18750),
     ("RSP expressivity / SRBench correctness", 317),
@@ -437,7 +442,7 @@ fn lib_sourced_jsonld_floors_are_pinned() {
     }
 }
 
-/// [SONNET-4.6] sq-z1xv8 — the registry's eleven shared-crate floors carry the pinned
+/// [SONNET-4.6] sq-z1xv8 — the registry's twelve shared-crate floors carry the pinned
 /// values (a ratchet may only RISE; a silent LOWERING of a
 /// `sparq_conformance_floors::<module>::<FLOOR>` const drops the registry value and
 /// trips this). Also asserts the registry row and the shared const are literally the
@@ -455,6 +460,10 @@ fn shared_crate_floors_are_pinned() {
         ("Solid ACP decision parity", floors::solid::ACP_SCENARIO_FLOOR),
         ("Solid WAC differential oracle", floors::solid::DIVERGENCE_FLOOR),
         ("Solid ACP differential oracle", floors::solid::DIVERGENCE_FLOOR),
+        (
+            "Solid SPARQL query semantics (Editor's Draft)",
+            floors::solid::SOLID_SPARQL_QUERY_CASE_FLOOR,
+        ),
         ("SolidLab ODRL Test Suite", floors::policy::ODRL_SUITE_FLOOR),
         ("text-search differential oracle", floors::text::BM25_ORACLE_FLOOR),
         ("RSP expressivity / SRBench correctness", floors::rsp::EXPRESSIVITY_FLOOR),
@@ -632,6 +641,9 @@ fn scoreboard_renders_all_suites() {
     assert!(md.contains("Solid ACP decision parity"));
     assert!(md.contains("Solid WAC differential oracle"));
     assert!(md.contains("Solid ACP differential oracle"));
+    // [SONNET-4.6] sq-uthtb — the vendored solid-sparql-query query-semantics suite,
+    // surfaced alongside the other Solid rows (it ran, but was invisible here).
+    assert!(md.contains("Solid SPARQL query semantics (Editor's Draft)"));
     // [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 toRdf + fromRdf ratchets.
     assert!(md.contains("W3C JSON-LD 1.1 toRdf"));
     assert!(md.contains("W3C JSON-LD 1.1 fromRdf"));

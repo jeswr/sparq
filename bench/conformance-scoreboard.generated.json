@@ -150,6 +150,21 @@
       }
     },
     {
+      "ci_job": "test",
+      "command": "cargo test -p sparq-solid --test conformance_solid_sparql_query",
+      "family": "Solid SPARQL query",
+      "floor_basis": "cases — the runner asserts EVERY vendored manifest case passes AND that the case count never drops below the floor (a suite that silently shrinks on a re-vendor is a coverage regression)",
+      "is_extension": false,
+      "label": "Solid SPARQL query semantics (Editor's Draft)",
+      "note": "the upstream query-semantics conformance suite of the Access-Controlled SPARQL Query over a Solid Pod EDITOR'S DRAFT (jeswr/solid-sparql-query — an Editor's Draft, NOT a W3C Recommendation), vendored byte-for-byte at a pinned upstream commit (see crates/sparq-solid/tests/conformance/solid-sparql-query/PROVENANCE.md) and driven through the REAL PodStore WAC-authorized read path: empty standing default graph, per-query union-default-graph opt-in, and the non-disclosure invariants. ONLY the query-semantics conformance class — the HTTP-protocol and content-mapping classes belong to the Solid server and the RDF parser and are NOT run here. The whole runner compiles out under the legacy-union-default-graph escape hatch, which deliberately reinstates the non-conformant union-always default",
+      "ratchet_floor": 15,
+      "runner": {
+        "crate": "sparq-solid",
+        "kind": "crate-test",
+        "target": "conformance_solid_sparql_query"
+      }
+    },
+    {
       "ci_job": "jsonld-conformance",
       "command": "cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite",
       "family": "W3C JSON-LD",
@@ -560,8 +575,8 @@
   ],
   "title": "sparq conformance scoreboard",
   "totals": {
-    "conformance_floor_total": 5435,
-    "conformance_suites": 25,
+    "conformance_floor_total": 5450,
+    "conformance_suites": 26,
     "extension_assertion_total": 19706,
     "extension_suites": 11
   }

@@ -20,6 +20,14 @@ use std::collections::BTreeSet;
 
 const SUITE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/conformance/solid-sparql-query");
 
+/// [SONNET-4.6] sq-uthtb — the case-count FLOOR, guarding against the vendored suite
+/// silently shrinking on a re-vendor. It is the SHARED const the central conformance
+/// scoreboard's `Solid SPARQL query semantics (Editor's Draft)` row imports too
+/// (`sparq_conformance::scoreboard::SUITES`), so the enforced floor and the reported
+/// floor are one number and cannot drift. Raise it in `sparq-conformance-floors` (and
+/// its `SHARED_CRATE_EXPECTED` pin) when the upstream suite grows.
+const CASE_FLOOR: usize = sparq_conformance_floors::solid::SOLID_SPARQL_QUERY_CASE_FLOOR;
+
 fn load_manifest() -> serde_json::Value {
     let path = format!("{SUITE_DIR}/manifest.json");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
@@ -158,5 +166,10 @@ fn solid_sparql_query_query_semantics_conformance() {
 
     assert_eq!(passed, cases.len(), "every case in the suite must run and pass");
     // Guard against silent shrinkage of the vendored suite.
-    assert!(passed >= 15, "the query-semantics suite unexpectedly shrank to {passed} cases");
+    assert!(
+        passed >= CASE_FLOOR,
+        "the query-semantics suite unexpectedly shrank to {} cases (floor {})",
+        passed,
+        CASE_FLOOR
+    );
 }

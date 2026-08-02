@@ -90,6 +90,15 @@ pub mod solid {
     /// Enforced as `ACP_SCENARIO_FLOOR` in `sparq-solid/tests/common/mod.rs`.
     pub const ACP_SCENARIO_FLOOR: usize = 13;
 
+    /// Case-count floor for the VENDORED upstream `solid-sparql-query`
+    /// **query-semantics** conformance suite (the *Access-Controlled SPARQL Query
+    /// over a Solid Pod* Editor's Draft). Enforced as
+    /// `SOLID_SPARQL_QUERY_CASE_FLOOR` in
+    /// `sparq-solid/tests/conformance_solid_sparql_query.rs`, which additionally
+    /// asserts that EVERY case in the vendored manifest passes — so this floor
+    /// guards against the suite silently SHRINKING on a re-vendor.
+    pub const SOLID_SPARQL_QUERY_CASE_FLOOR: usize = 15;
+
     /// Divergence-count floor for the WAC + ACP differential oracles (engine vs
     /// an independent reference evaluator vs the hand `Expect` table). Unlike a
     /// pass count this is NOT a rising ratchet: the only acceptable divergence
@@ -146,6 +155,10 @@ mod tests {
             ("geo::OGC_QUERY_REWRITE_FLOOR", geo::OGC_QUERY_REWRITE_FLOOR),
             ("solid::WAC_SCENARIO_FLOOR", solid::WAC_SCENARIO_FLOOR),
             ("solid::ACP_SCENARIO_FLOOR", solid::ACP_SCENARIO_FLOOR),
+            (
+                "solid::SOLID_SPARQL_QUERY_CASE_FLOOR",
+                solid::SOLID_SPARQL_QUERY_CASE_FLOOR,
+            ),
             ("policy::ODRL_SUITE_FLOOR", policy::ODRL_SUITE_FLOOR),
             ("text::BM25_ORACLE_FLOOR", text::BM25_ORACLE_FLOOR),
             ("rsp::EXPRESSIVITY_FLOOR", rsp::EXPRESSIVITY_FLOOR),

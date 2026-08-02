@@ -178,7 +178,12 @@ Materialize the authorization view from the access-control documents, then enfor
     own schedule; new code should use `GRAPH ?g` or the spec-minted opt-in.
   - **conformance:** the query-semantics conformance class of the spec is vendored + run in
     `crates/sparq-solid/tests/conformance_solid_sparql_query.rs` (upstream suite in
-    `jeswr/solid-sparql-query:test-suite/query-semantics/`) and passes all 15 cases.
+    `jeswr/solid-sparql-query:test-suite/query-semantics/`) and passes all 15 cases. It is
+    surfaced in the central conformance scoreboard alongside the WAC/ACP rows as
+    `Solid SPARQL query semantics (Editor's Draft)` ([SONNET-4.6] sq-uthtb); its
+    `ratchet_floor` IS the shared
+    `sparq_conformance_floors::solid::SOLID_SPARQL_QUERY_CASE_FLOOR` const the runner
+    asserts against, so the reported and the enforced case floor are one number.
 - `store.query_as_rewrite(&Session, Mode, sparql)` — the v1 **`FROM NAMED` rewrite**
   portability path: enforces the same policy on any standard SPARQL 1.1 engine (one
   deliberate semantic difference noted in-source: a caller `FROM <g>` can only restrict

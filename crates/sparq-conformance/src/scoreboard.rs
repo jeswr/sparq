@@ -416,6 +416,47 @@ pub const SUITES: &[Suite] = &[
         note: "engine vs an independent reference evaluator vs the hand Expect table, \
                over the ACP parity corpus (zero divergence)",
     },
+    // [SONNET-4.6] sq-uthtb (issue #1546 follow-up) — the VENDORED upstream
+    // `solid-sparql-query` QUERY-SEMANTICS conformance suite. It was already run
+    // (`crates/sparq-solid/tests/conformance_solid_sparql_query.rs`, all 15 cases
+    // passing) but lived OUTSIDE this scoreboard, so the Solid rows under-reported
+    // what sparq ratchets: WAC/ACP answer "who may read what", this suite answers
+    // "what MUST a query engine over a WAC-authorized pod return". The runner stays
+    // crate-local in sparq-solid (this dev-only crate must not take sparq-solid as a
+    // dep — same constraint as SHACL/geo/the WAC/ACP rows above); the floor is the
+    // shared `sparq_conformance_floors::solid::SOLID_SPARQL_QUERY_CASE_FLOOR` const
+    // the runner and this row BOTH import, so they cannot drift.
+    //
+    // `ci_job` is the generic `test` job (the same honest value the two
+    // sparq-conformance-local ungated rows carry): the runner is default-on and runs
+    // in the ordinary `cargo test --workspace` shards — the dedicated
+    // `solid-conformance` job runs only `--test conformance_wac --test conformance_acp`,
+    // so naming it here would overclaim.
+    Suite {
+        label: "Solid SPARQL query semantics (Editor's Draft)",
+        family: "Solid SPARQL query",
+        runner: Runner::CrateTest {
+            krate: "sparq-solid",
+            target: "conformance_solid_sparql_query",
+        },
+        ci_job: "test",
+        ratchet_floor: sparq_conformance_floors::solid::SOLID_SPARQL_QUERY_CASE_FLOOR,
+        floor_basis: "cases — the runner asserts EVERY vendored manifest case passes AND \
+                      that the case count never drops below the floor (a suite that \
+                      silently shrinks on a re-vendor is a coverage regression)",
+        note: "the upstream query-semantics conformance suite of the Access-Controlled \
+               SPARQL Query over a Solid Pod EDITOR'S DRAFT (jeswr/solid-sparql-query — \
+               an Editor's Draft, NOT a W3C Recommendation), vendored byte-for-byte at a \
+               pinned upstream commit (see \
+               crates/sparq-solid/tests/conformance/solid-sparql-query/PROVENANCE.md) and \
+               driven through the REAL PodStore WAC-authorized read path: empty standing \
+               default graph, per-query union-default-graph opt-in, and the \
+               non-disclosure invariants. ONLY the query-semantics conformance class — \
+               the HTTP-protocol and content-mapping classes belong to the Solid server \
+               and the RDF parser and are NOT run here. The whole runner compiles out \
+               under the legacy-union-default-graph escape hatch, which deliberately \
+               reinstates the non-conformant union-always default",
+    },
     // [OPUS-4.8] sq-oy1f.2 / sq-3uos5 / sq-oy1f.19 / sq-oy1f — the W3C JSON-LD 1.1
     // conformance ratchets. The runner is crate-local here (`tests/jsonld_suite.rs`)
     // but behind the OPT-IN `jsonld-suite` feature (forwards to sparq-core/jsonld +
