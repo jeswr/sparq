@@ -478,6 +478,21 @@ dishonest majority** exactly as `shamir_degree_recon` does (`backend.rs:411–41
 axis*, so the old enum reads correctly without change (the richer truth — that the *adversary*
 is now malicious, not merely that the open is RS-checked — lives in `security.adversary`).
 
+> **[OPUS-5] AS BUILT, `authenticated_abort` sets `adversary: SemiHonest`, not `Malicious`
+> (sq-km34, review round 1).** The `AdversaryModel::Malicious` line above is what this
+> record specifies and what the construction targets; it is NOT what the code reports
+> today, because promoting AXIS-1 would publish an *unaudited* malicious-security claim
+> through the public API while `sq-qhy4` (external accredited-cryptographer sign-off) is
+> an unresolved release gate — in-process tamper tests evidence tamper-EVIDENCE on the
+> deviations they exercise, not the malicious-security theorem. The IT-MAC hardening is
+> therefore reported on the OUTPUT-GUARANTEE axis, exactly as `shamir_degree_recon`
+> reports its RS-checked hardening; the `malicious_security` projection noted above is
+> unaffected (`Abort(Unanimous)` → `HonestMajorityAbort` regardless of AXIS-1), so step
+> (5)'s `SemiHonestOnly → Abort` acceptance still holds. Restore the `Malicious` line
+> when `sq-qhy4` closes; until then the guard test
+> `auth_join::tests::the_adversary_axis_is_not_promoted_before_external_sign_off` fails
+> if it is restored early.
+
 **Fail-closed selection still refuses the impossible cells.** The `SecurityRequirement` +
 fail-closed registry (sq-a6p1, CLOSED) compares a federation's `min_adversary` /
 `min_output_guarantee` / `max_corruption` against `BackendInfo` / `operator_security`. After
@@ -560,9 +575,11 @@ sq-pwr — ids recorded in the report:
    Acceptance: `secure_equal` promotes `EqualityJoin` from `SemiHonestOnly → Abort` at
    `n=2t+1`; differential parity with plaintext join preserved. Depends on (1)–(4).
 
-   > **[OPUS-5] LANDED — with two deviations from this text, both deliberate.** The
-   > implementation is `crates/sparq-mpc/src/auth_join.rs`
-   > (`malicious_secure_equal` / `malicious_hidden_join` / `equality_join_security`),
+   > **[OPUS-5] LANDED as EXPERIMENTAL, UNAUDITED scaffolding — with three deviations
+   > from this text, all deliberate.** The implementation is
+   > `crates/sparq-mpc/src/auth_join.rs`
+   > (`experimental_tamper_evident_secure_equal` /
+   > `experimental_tamper_evident_hidden_join` / `equality_join_security`),
    > not an edit to `join.rs`: it is an opt-in TWIN, mirroring how `auth_compare` twins
    > `compare`, so the semi-honest `HiddenValueJoin` is byte-for-byte unchanged and keeps
    > its honest `SemiHonestOnly` reporting. Consequently **(a)** the promotion is reported
@@ -577,7 +594,23 @@ sq-pwr — ids recorded in the report:
    > reversed, a *matching* pair can be flipped to a non-match for free with `σ = 0` — and
    > **the MAC does not authenticate `r ≠ 0`**, so the `randomness.rs` `r = 0` threat is
    > untouched and mask integrity still rests on the trusted-dealer draw. Both are pinned
-   > by tests in that module. External sign-off remains pending (`sq-qhy4`).
+   > by tests in that module. **(c)** The tier is reported as an **AXIS-2-only**
+   > promotion: `SecurityDescriptor::authenticated_abort` builds `SemiHonest +
+   > Abort(Unanimous)`, NOT the `Malicious + Abort(Unanimous)` this record specifies
+   > above. Reporting AXIS-1 `Malicious` would publish an unaudited
+   > malicious-security claim through the API while `sq-qhy4` — external
+   > accredited-cryptographer sign-off — is an UNRESOLVED release gate; the
+   > in-process tamper tests evidence tamper-EVIDENCE on the deviations they
+   > exercise, not the malicious-security theorem. The hardening is therefore
+   > reported on the output-guarantee axis exactly as `shamir_degree_recon` reports
+   > its RS-checked hardening, and the back-compat `malicious_security` projection is
+   > unchanged (`Abort(Unanimous)` → `HonestMajorityAbort`), so the `SemiHonestOnly →
+   > Abort` acceptance criterion still holds. The entry points carry the
+   > `experimental_tamper_evident_*` prefix for the same reason (the containment
+   > `auth_disclose` already applies to its own IT-MAC twin). AXIS-1 moves when
+   > `sq-qhy4` closes — the guard test
+   > `the_adversary_axis_is_not_promoted_before_external_sign_off` fails if it moves
+   > sooner.
 6. **Malicious-secure comparison (depends on sq-rrz4 + this stack).** When the secure
    greater-than lands (sq-rrz4), build it on authenticated mul/reduce so the boolean verdict is
    MAC-checked. Acceptance: secure verdict == plaintext `(sum > threshold)`, tamper in any gate

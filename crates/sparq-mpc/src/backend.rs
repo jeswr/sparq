@@ -435,13 +435,29 @@ impl SecurityDescriptor {
     }
 
     /// [OPUS-5] sq-km34 — the **IT-MAC authenticated** descriptor: honest-majority,
-    /// AXIS-1 `Malicious`, AXIS-2 `Abort(Unanimous)` (design §3). This is the tier an
-    /// operator reaches when every value on its path carries an information-theoretic
-    /// MAC under a secret-shared `[α]` and the batch is MAC-checked before any value
-    /// is acted on ([`crate::shamir::MacSession::mac_check_and_open`]) — soundness
-    /// then comes from the secrecy of `α`, NOT from Reed–Solomon redundancy, which is
-    /// why it holds at the minimal `n = 2t+1` where [`Self::shamir_degree_recon`]'s
+    /// AXIS-2 `Abort(Unanimous)` where an unauthenticated open detects nothing. This
+    /// is the tier an operator reaches when every value on its path carries an
+    /// information-theoretic MAC under a secret-shared `[α]` and the batch is
+    /// MAC-checked before any value is acted on
+    /// ([`crate::shamir::MacSession::mac_check_and_open`]) — detection then comes
+    /// from the secrecy of `α`, NOT from Reed–Solomon redundancy, which is why it
+    /// holds at the minimal `n = 2t+1` where [`Self::shamir_degree_recon`]'s
     /// redundancy argument has nothing to work with.
+    ///
+    /// **AXIS-1 stays [`AdversaryModel::SemiHonest`] — a deliberate deviation from
+    /// design §3, which specifies `Malicious` here.** Reporting `Malicious` would
+    /// publish an unaudited malicious-security claim through the API while the
+    /// external accredited-cryptographer sign-off that would license it is an
+    /// UNRESOLVED release gate (`sq-qhy4`); in-process tamper tests evidence
+    /// tamper-EVIDENCE, not the malicious-security theorem. So the IT-MAC hardening
+    /// is reported on the OUTPUT-GUARANTEE axis exactly as
+    /// [`Self::shamir_degree_recon`] reports its RS-checked hardening ("the
+    /// active-security hardening is the guarantee axis, not a claim that the parties
+    /// are malicious"). The back-compat [`Self::malicious_security`] projection is
+    /// unaffected — `Abort(Unanimous)` still maps to
+    /// [`MaliciousSecurity::HonestMajorityAbort`], so the `SemiHonestOnly → Abort`
+    /// promotion the design record asks for still holds. Flip AXIS-1 when `sq-qhy4`
+    /// closes, not before.
     ///
     /// Deliberately NOT [`AbortKind::Identifiable`]: detect-and-abort with no sound
     /// cheater attribution (true IA needs authenticated per-party transcripts +
@@ -461,7 +477,8 @@ impl SecurityDescriptor {
             return SecurityDescriptor::semi_honest_only(n, t);
         }
         SecurityDescriptor {
-            adversary: AdversaryModel::Malicious,
+            // NOT `Malicious`: unaudited (sq-qhy4) — see the doc comment above.
+            adversary: AdversaryModel::SemiHonest,
             output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
             threshold,
             public_verifiability: PublicVerifiability(false),

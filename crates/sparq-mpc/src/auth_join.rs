@@ -1,6 +1,6 @@
 // [OPUS-5] sq-km34 (design §6 step 5, the CORE of the bead): the IT-MAC on the
 // equality/multiplication open, so the hidden-value equi-join is honest-majority
-// malicious-WITH-ABORT at the MINIMAL `n = 2t+1` — the one cell the capability
+// TAMPER-EVIDENT-WITH-ABORT at the MINIMAL `n = 2t+1` — the one cell the capability
 // matrix names as the real semi-honest hole. The semi-honest twin
 // (`join::HiddenValueJoin`) opens the masked product `m = d·r` at degree `2t`,
 // where `n = 2t+1` carries ZERO Reed–Solomon redundancy, so a forged product
@@ -10,9 +10,22 @@
 // whole batch BEFORE any match bit is acted on, so that deviation ABORTS instead.
 // Read the "What this does NOT close" section before making any tier claim.
 
-//! [OPUS-5] sq-km34 — honest-majority **malicious-with-abort** hidden-value
+//! [OPUS-5] sq-km34 — honest-majority **tamper-evident-with-abort** hidden-value
 //! equality / equi-join (design `research/mpc-malicious-security-design.md`
 //! §2.4–§2.5, §6 step 5; Hole 1 and Hole 3).
+//!
+//! **⚠ EXPERIMENTAL, and NOT an audited malicious-security guarantee.** The design
+//! record §3 *aspires* to malicious-with-abort, and the construction below is built
+//! for it — but what the in-process tests can establish is **tamper-evidence on the
+//! deviations they exercise**, not the malicious-security theorem, and the external
+//! accredited-cryptographer review that would discharge the difference is an
+//! UNRESOLVED release gate (`sq-qhy4`). So the public entry points are named
+//! `experimental_tamper_evident_*` (the same containment
+//! [`crate::auth_disclose`] applies to its own IT-MAC twin: a doc caveat under a
+//! `malicious_*` name is not containment), and [`equality_join_security`]
+//! deliberately does NOT report AXIS-1 [`crate::backend::AdversaryModel::Malicious`]
+//! — see that function. Treat this module as research scaffolding: do NOT deploy it
+//! as the integrity tier against a genuinely malicious party. `[OPUS-5]`
 //!
 //! ## The hole this closes
 //!
@@ -80,13 +93,18 @@
 //!   separate CONFIDENTIALITY axis (beads sq-jnkm / sq-xhaw —
 //!   [`crate::join::HiddenValueJoin::fully_oblivious_batched_join`] is the
 //!   never-opened-bit tier, and it is semi-honest).
-//! - **NOT identifiable abort, NOT GOD, NOT dishonest-majority.** The tier is
-//!   AXIS-1 `Malicious` × AXIS-2 `Abort(Unanimous)` × AXIS-3 `HonestMajority`
-//!   ([`equality_join_security`]). A cheater can always force an abort, no cheater
-//!   is attributed, and `n ≤ 2t` is refused.
-//! - **NOT externally audited.** Like every soundness/privacy statement in this
-//!   crate, the argument above is INTERNAL; external accredited-cryptographer
-//!   sign-off is PENDING (bead `sq-qhy4`). Research-grade.
+//! - **NOT identifiable abort, NOT GOD, NOT dishonest-majority.** The REPORTED
+//!   tier is AXIS-1 `SemiHonest` × AXIS-2 `Abort(Unanimous)` × AXIS-3
+//!   `HonestMajority` ([`equality_join_security`]) — the IT-MAC hardening is
+//!   reported on the OUTPUT-GUARANTEE axis, as
+//!   [`crate::backend::SecurityDescriptor::shamir_degree_recon`] already reports
+//!   its RS-checked hardening. A cheater can always force an abort,
+//!   no cheater is attributed, and `n ≤ 2t` is refused.
+//! - **NOT externally audited — and that is why AXIS-1 is not promoted.** Like every
+//!   soundness/privacy statement in this crate, the argument above is INTERNAL;
+//!   external accredited-cryptographer sign-off is PENDING (bead `sq-qhy4`), which
+//!   is an unresolved RELEASE GATE, not a formality the in-process tamper tests can
+//!   discharge. Research-grade.
 //!
 //! ## coZK-2025/1026 (opening on an inconsistent witness)
 //!
@@ -118,7 +136,7 @@ use oxrdf::Term;
 fn check_party_count(n: usize, t: usize) -> Result<(), MpcError> {
     if n < 2 * t + 1 {
         return Err(MpcError::Protocol(format!(
-            "malicious-secure hidden equality needs n >= 2t+1 (the authenticated multiplication's \
+            "authenticated hidden equality needs n >= 2t+1 (the authenticated multiplication's \
              degree reduction does, and the IT-MAC check is honest-majority); got n = {n}, t = {t}"
         )));
     }
@@ -126,7 +144,7 @@ fn check_party_count(n: usize, t: usize) -> Result<(), MpcError> {
 }
 
 /// The authenticated masked difference `[[m]] = [[a − b]] · [[r]]` for ONE
-/// candidate pair — the malicious-secure core of the equality test, and the only
+/// candidate pair — the authenticated core of the equality test, and the only
 /// place this module spends a multiplication.
 ///
 /// `[[d]] = [[a]] − [[b]]` is a FREE local linear op (the MAC is linear in the
@@ -164,8 +182,8 @@ fn masked_zero_test(
     session.auth_mul(d, &r)
 }
 
-/// **Malicious-secure secure equality over two SECRET keys**, opening only the
-/// match bit — and only after the batched IT-MAC check passes.
+/// **EXPERIMENTAL tamper-evident secure equality over two SECRET keys**, opening
+/// only the match bit — and only after the batched IT-MAC check passes.
 ///
 /// The IT-MAC twin of [`crate::join::HiddenValueJoin`]'s private `secure_equal`. Returns
 /// `a == b` without ever reconstructing `a`, `b`, or their difference: the ONLY
@@ -181,11 +199,16 @@ fn masked_zero_test(
 /// parties in one process; they are secret-shared (authenticated) internally and
 /// never used after sharing, exactly as the dealer that shares them does.
 ///
-/// `n >= 2t+1` is fail-closed. Honest-majority, malicious-with-abort against a
-/// deviating compute party, relative to the trusted-dealer mask assumption — read
-/// the module docs' "What this does NOT close" before relying on the tier.
-/// `[OPUS-5]`
-pub fn malicious_secure_equal(backend: &ShamirBackend, a: Fp, b: Fp) -> Result<bool, MpcError> {
+/// `n >= 2t+1` is fail-closed. Honest-majority, tamper-evident-with-abort against
+/// the deviations exercised by this module's tests, relative to the trusted-dealer
+/// mask assumption. This is NOT an audited malicious-security guarantee — read the
+/// module docs' banner and "What this does NOT close" before relying on the tier
+/// (external sign-off is pending, `sq-qhy4`). `[OPUS-5]`
+pub fn experimental_tamper_evident_secure_equal(
+    backend: &ShamirBackend,
+    a: Fp,
+    b: Fp,
+) -> Result<bool, MpcError> {
     check_party_count(backend.parties(), backend.threshold())?;
 
     let mut dealer = backend.dealer();
@@ -220,9 +243,10 @@ fn checked_match_bits(
         .collect())
 }
 
-/// **Malicious-secure hidden-value equi-join** over two holders' PRIVATE join
-/// keys — the IT-MAC twin of [`crate::join::HiddenValueJoin::join`], and the
-/// `EqualityJoin` promotion this bead exists to deliver.
+/// **EXPERIMENTAL tamper-evident hidden-value equi-join** over two holders'
+/// PRIVATE join keys — the IT-MAC twin of [`crate::join::HiddenValueJoin::join`],
+/// and the `EqualityJoin` promotion this bead exists to deliver. NOT an audited
+/// malicious-security guarantee (module banner; `sq-qhy4` pending).
 ///
 /// Output schema and rows are identical to the semi-honest twin (the key is never
 /// projected; the disclosed payload columns of matching pairs are emitted, then
@@ -234,7 +258,7 @@ fn checked_match_bits(
 ///
 /// Every candidate pair's masked product is authenticated and accumulated, and the
 /// entire `|L|·|R|` batch is verified by a **single** batched MAC-check before ANY
-/// match bit is read. The marginal round cost of the malicious upgrade is therefore
+/// match bit is read. The marginal round cost of the IT-MAC upgrade is therefore
 /// `O(1)` per join, not `O(1)` per pair — checking per pair would forfeit exactly
 /// that. Pinned by `one_sigma_open_amortises_the_whole_cross_product`.
 ///
@@ -244,9 +268,12 @@ fn checked_match_bits(
 /// plus ~2× the share volume for the MAC halves). Batching for one `σ` also means
 /// the whole cross-product's authenticated sharings are held at once —
 /// `O(|L|·|R|·n)` field elements — so the all-pairs shape is a memory cost here
-/// as well as the documented time cost. Same feasibility envelope as the
-/// semi-honest twin (≤10³–10⁴ rows/holder on a LAN, minutes — not sub-second);
-/// do not extrapolate.
+/// as well as a time cost. The shape is quadratic in the row counts and this is a
+/// batch-scale, interactive-latency-hostile operation: **do not put it behind a
+/// synchronous query path, and do not extrapolate from small inputs.** No
+/// row-count or wall-clock envelope is quoted here — there is no canonical
+/// benchmark artifact for this path, and any figure written into a doc-comment
+/// would go stale unmeasured.
 ///
 /// ## Leakage is UNCHANGED (this is an integrity upgrade only)
 ///
@@ -259,7 +286,7 @@ fn checked_match_bits(
 ///
 /// `n >= 2t+1` is fail-closed; an empty cross-product runs no crypto and spends no
 /// `σ` open. `[OPUS-5]`
-pub fn malicious_hidden_join(
+pub fn experimental_tamper_evident_hidden_join(
     backend: &ShamirBackend,
     left: &HiddenKeyedRows,
     right: &HiddenKeyedRows,
@@ -330,11 +357,24 @@ pub fn malicious_hidden_join(
 /// tier off the path it actually runs. The contrast is pinned by
 /// `equality_join_promotion_is_reported_only_for_the_authenticated_path`.
 ///
+/// **The promotion is on AXIS-2 ONLY, and that is deliberate.** The descriptor
+/// reports `SemiHonest` + `Abort(Unanimous)`: detect-and-abort where the
+/// unauthenticated path detects nothing, WITHOUT asserting AXIS-1
+/// [`crate::backend::AdversaryModel::Malicious`]. Promoting the adversary axis
+/// would publish an unaudited malicious-security claim through the API, and the
+/// external accredited-cryptographer review that would license it is an unresolved
+/// release gate (`sq-qhy4`); the in-process tamper tests below evidence
+/// tamper-EVIDENCE on the deviations they exercise, not the theorem. This mirrors
+/// [`SecurityDescriptor::shamir_degree_recon`], which reports its RS-checked
+/// hardening the same way ("the active-security hardening is the guarantee axis").
+/// AXIS-1 moves when `sq-qhy4` closes, not before — pinned by
+/// `the_adversary_axis_is_not_promoted_before_external_sign_off`.
+///
 /// Projects (via [`SecurityDescriptor::malicious_security`]) to
 /// [`crate::backend::MaliciousSecurity::HonestMajorityAbort`] under an honest
-/// majority — the `SemiHonestOnly → Abort` promotion — and fails closed to
-/// [`SecurityDescriptor::semi_honest_only`] when `n ≤ 2t`, where this module's
-/// entry points refuse to run at all. `[OPUS-5]`
+/// majority — the `SemiHonestOnly → Abort` promotion the design record asks for —
+/// and fails closed to [`SecurityDescriptor::semi_honest_only`] when `n ≤ 2t`,
+/// where this module's entry points refuse to run at all. `[OPUS-5]`
 pub fn equality_join_security(backend: &ShamirBackend) -> SecurityDescriptor {
     SecurityDescriptor::authenticated_abort(backend.parties(), backend.threshold())
 }
@@ -384,50 +424,55 @@ mod tests {
     }
 
     #[test]
-    fn malicious_secure_equal_is_correct_at_the_minimal_party_count() {
+    fn tamper_evident_secure_equal_is_correct_at_the_minimal_party_count() {
         let backend = minimal_backend(0xA11CE);
-        assert!(malicious_secure_equal(&backend, fp(12345), fp(12345)).unwrap());
-        assert!(!malicious_secure_equal(&backend, fp(12345), fp(12346)).unwrap());
-        assert!(malicious_secure_equal(&backend, Fp::zero(), Fp::zero()).unwrap());
-        assert!(!malicious_secure_equal(&backend, Fp::zero(), fp(1)).unwrap());
+        assert!(experimental_tamper_evident_secure_equal(&backend, fp(12345), fp(12345)).unwrap());
+        assert!(!experimental_tamper_evident_secure_equal(&backend, fp(12345), fp(12346)).unwrap());
+        assert!(
+            experimental_tamper_evident_secure_equal(&backend, Fp::zero(), Fp::zero()).unwrap()
+        );
+        assert!(!experimental_tamper_evident_secure_equal(&backend, Fp::zero(), fp(1)).unwrap());
     }
 
     #[test]
-    fn malicious_secure_equal_agrees_with_the_semi_honest_twin_over_many_pairs() {
+    fn tamper_evident_secure_equal_agrees_with_the_semi_honest_twin_over_many_pairs() {
         let backend = minimal_backend(0xB0B);
         let join = HiddenValueJoin::new(backend.clone());
         for a in 0..7u64 {
             for b in 0..7u64 {
-                let malicious = malicious_secure_equal(&backend, fp(a * 31), fp(b * 31)).unwrap();
+                let authenticated =
+                    experimental_tamper_evident_secure_equal(&backend, fp(a * 31), fp(b * 31))
+                        .unwrap();
                 // The semi-honest twin's scalar entry is private; drive it through the
                 // one-row-each join, whose output is non-empty iff the keys matched.
                 let semi = join
                     .join(&rows("l", &[(a * 31, "x")]), &rows("r", &[(b * 31, "y")]))
                     .unwrap();
                 assert_eq!(
-                    malicious,
+                    authenticated,
                     a == b,
-                    "malicious equality must equal plaintext equality for ({a}, {b})"
+                    "the authenticated equality must equal plaintext equality for ({a}, {b})"
                 );
                 assert_eq!(
-                    malicious,
+                    authenticated,
                     !semi.rows.is_empty(),
-                    "malicious and semi-honest equality must agree for ({a}, {b})"
+                    "authenticated and semi-honest equality must agree for ({a}, {b})"
                 );
             }
         }
     }
 
     /// ACCEPTANCE (design §6 step 5, "differential parity with plaintext join
-    /// preserved"): on an HONEST run the malicious-secure join returns exactly the
+    /// preserved"): on an HONEST run the authenticated join returns exactly the
     /// semi-honest join's answer, which is exactly the plaintext join's answer.
     #[test]
-    fn malicious_hidden_join_matches_the_plaintext_and_semi_honest_joins() {
+    fn tamper_evident_hidden_join_matches_the_plaintext_and_semi_honest_joins() {
         let backend = minimal_backend(0xC0FFEE);
         let left = rows("l", &[(10, "a"), (20, "b"), (30, "c"), (20, "b2")]);
         let right = rows("r", &[(20, "p"), (30, "q"), (40, "r"), (20, "s")]);
 
-        let malicious = malicious_hidden_join(&backend, &left, &right).unwrap();
+        let authenticated =
+            experimental_tamper_evident_hidden_join(&backend, &left, &right).unwrap();
         let semi = HiddenValueJoin::new(backend.clone())
             .join(&left, &right)
             .unwrap();
@@ -445,16 +490,16 @@ mod tests {
         }
         canonicalize_rows(&mut plaintext);
 
-        assert_eq!(malicious.vars, semi.vars, "identical output schema");
+        assert_eq!(authenticated.vars, semi.vars, "identical output schema");
         assert_eq!(
-            malicious.rows, plaintext,
-            "malicious join must equal the plaintext join on an honest run"
+            authenticated.rows, plaintext,
+            "the authenticated join must equal the plaintext join on an honest run"
         );
         assert_eq!(
-            malicious.rows, semi.rows,
-            "malicious join must equal the semi-honest join on an honest run"
+            authenticated.rows, semi.rows,
+            "the authenticated join must equal the semi-honest join on an honest run"
         );
-        assert_eq!(malicious.rows.len(), 5, "2·2 on key 20 + 1 on key 30");
+        assert_eq!(authenticated.rows.len(), 5, "2·2 on key 20 + 1 on key 30");
     }
 
     #[test]
@@ -462,7 +507,7 @@ mod tests {
         let backend = minimal_backend(0xE117);
         let empty = rows("l", &[]);
         let right = rows("r", &[(1, "p")]);
-        let out = malicious_hidden_join(&backend, &empty, &right).unwrap();
+        let out = experimental_tamper_evident_hidden_join(&backend, &empty, &right).unwrap();
         assert!(out.rows.is_empty());
     }
 
@@ -475,7 +520,7 @@ mod tests {
     /// over `[α·d]·[r]` that never saw `δ`, so `σ = −λδ·α ≠ 0` and the check ABORTS
     /// with [`MpcError::MacCheckFailed`].
     ///
-    /// We reproduce `malicious_secure_equal`'s exact body, substituting only the
+    /// We reproduce `experimental_tamper_evident_secure_equal`'s exact body, substituting only the
     /// tampering `auth_mul` — the same idiom `adversarial_tests` uses to model a
     /// deviating party against a primitive whose production path offers no hook.
     #[test]
@@ -643,7 +688,7 @@ mod tests {
         );
     }
 
-    /// **ACCEPTANCE (amortisation, design §5).** The malicious upgrade costs ONE
+    /// **ACCEPTANCE (amortisation, design §5).** The IT-MAC upgrade costs ONE
     /// `σ` open for the WHOLE `|L|·|R|` cross-product, not one per pair — measured
     /// against the real code path, not asserted in prose.
     #[test]
@@ -837,7 +882,9 @@ mod tests {
     /// **ACCEPTANCE (design §6 step 5, the reporting half).** The promotion is
     /// reported for the AUTHENTICATED path only: `SemiHonestOnly → Abort` at the
     /// minimal `n = 2t+1`, while `ShamirBackend::operator_descriptor` keeps telling
-    /// the truth about the semi-honest `HiddenValueJoin` path it describes.
+    /// the truth about the semi-honest `HiddenValueJoin` path it describes. The
+    /// promotion is on AXIS-2 only — see
+    /// `the_adversary_axis_is_not_promoted_before_external_sign_off`.
     #[test]
     fn equality_join_promotion_is_reported_only_for_the_authenticated_path() {
         let backend = minimal_backend(0x5EC);
@@ -852,9 +899,8 @@ mod tests {
             "the semi-honest hidden join is still SemiHonestOnly at n = 2t+1"
         );
 
-        // The authenticated path: the sq-km34 promotion.
+        // The authenticated path: the sq-km34 promotion, on AXIS-2.
         let auth = equality_join_security(&backend);
-        assert_eq!(auth.adversary, AdversaryModel::Malicious, "AXIS-1 promoted");
         assert!(
             matches!(auth.output_guarantee, OutputGuarantee::Abort(_)),
             "AXIS-2 is detect-and-abort, never GOD"
@@ -871,15 +917,43 @@ mod tests {
         assert!(auth.malicious_security(0).is_malicious_secure());
     }
 
+    /// **The audit gate, pinned as a test.** `sq-qhy4` — external
+    /// accredited-cryptographer sign-off — is an UNRESOLVED release gate, so no
+    /// public surface of this module may report AXIS-1 `Malicious`: the in-process
+    /// tamper tests above establish tamper-evidence on the deviations they
+    /// exercise, not the malicious-security theorem. Flipping
+    /// `SecurityDescriptor::authenticated_abort` back to `AdversaryModel::Malicious`
+    /// turns this RED. Delete it only together with `sq-qhy4`.
+    #[test]
+    fn the_adversary_axis_is_not_promoted_before_external_sign_off() {
+        for n in [3usize, 5, 7] {
+            let backend = ShamirBackend::new(n).unwrap();
+            let auth = equality_join_security(&backend);
+            assert_eq!(
+                auth.adversary,
+                AdversaryModel::SemiHonest,
+                "sq-qhy4 is pending: the authenticated equality/join path must NOT \
+                 report AXIS-1 Malicious at n = {}",
+                n
+            );
+            // ...while the AXIS-2 hardening it DOES evidence is still reported.
+            assert!(matches!(auth.output_guarantee, OutputGuarantee::Abort(_)));
+        }
+    }
+
     /// Fail-closed: a dishonest majority (`n <= 2t`) is REFUSED by the entry points
-    /// and never described as malicious-with-abort by the descriptor.
+    /// and never described as tamper-evident-with-abort by the descriptor.
     #[test]
     fn dishonest_majority_is_refused_and_never_over_claimed() {
         let backend = ShamirBackend::with_unchecked_threshold(3, 2); // n = 3 <= 2t = 4
-        let err = malicious_secure_equal(&backend, fp(1), fp(1)).unwrap_err();
+        let err = experimental_tamper_evident_secure_equal(&backend, fp(1), fp(1)).unwrap_err();
         assert!(matches!(err, MpcError::Protocol(_)), "got {err:?}");
-        let err = malicious_hidden_join(&backend, &rows("l", &[(1, "a")]), &rows("r", &[(1, "b")]))
-            .unwrap_err();
+        let err = experimental_tamper_evident_hidden_join(
+            &backend,
+            &rows("l", &[(1, "a")]),
+            &rows("r", &[(1, "b")]),
+        )
+        .unwrap_err();
         assert!(matches!(err, MpcError::Protocol(_)), "got {err:?}");
         assert_eq!(
             equality_join_security(&backend).malicious_security(0),
@@ -919,7 +993,7 @@ mod tests {
         );
     }
 
-    /// The keys are never reconstructed on the malicious path: the only value the
+    /// The keys are never reconstructed on the authenticated path: the only value the
     /// join opens is the masked product (and the identically-zero `σ`). For unequal
     /// keys that product is neither key, nor their difference.
     #[test]

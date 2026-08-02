@@ -205,24 +205,29 @@ pub mod hidden_distinct;
 pub mod hidden_path;
 pub mod holder;
 pub mod join;
-// [OPUS-5] sq-km34 (design §6 step 5, the CORE of the bead): the MALICIOUS-SECURE
-// (honest-majority, with-abort) twin of the hidden-value equality / equi-join in
-// `join`. The semi-honest twin opens the masked product `m = d·r` at degree `2t`,
-// which at the MINIMAL honest-majority party count `n = 2t+1` carries ZERO RS
-// redundancy — so a forged product share silently FLIPS a match verdict, the one
-// cell `research/mpc-sparql-capability-matrix.md` names as the real semi-honest
-// hole. This module authenticates the equality product (`MacSession::auth_mul`,
-// §2.4 route (a)) and MAC-checks the WHOLE `|L|·|R|` batch in ONE `σ` open before
-// any match bit is acted on (`MacSession::mac_check_and_open`, §2.5), so that
-// deviation ABORTS instead — soundness from the secret `α`, not from redundancy.
-// Reported via `auth_join::equality_join_security` (Malicious + Abort(Unanimous)),
-// deliberately NOT by relabelling `ShamirBackend::operator_descriptor`, which keeps
-// describing the unauthenticated path. Read the module docs' "What this does NOT
-// close" before making a tier claim: the MAC authenticates `m = d·r`, NOT `r != 0`,
-// so mask integrity still rests on the trusted-dealer draw (the `crate::randomness`
-// `r = 0` threat, exhibited by a witness test); the L2 match-graph leak is
-// unchanged (integrity axis, not confidentiality); and external
-// accredited-cryptographer sign-off is PENDING (sq-qhy4).
+// [OPUS-5] sq-km34 (design §6 step 5, the CORE of the bead): the EXPERIMENTAL
+// IT-MAC (honest-majority, tamper-evident-with-abort) twin of the hidden-value
+// equality / equi-join in `join`. The semi-honest twin opens the masked product
+// `m = d·r` at degree `2t`, which at the MINIMAL honest-majority party count
+// `n = 2t+1` carries ZERO RS redundancy — so a forged product share silently
+// FLIPS a match verdict, the one cell `research/mpc-sparql-capability-matrix.md`
+// names as the real semi-honest hole. This module authenticates the equality
+// product (`MacSession::auth_mul`, §2.4 route (a)) and MAC-checks the WHOLE
+// `|L|·|R|` batch in ONE `σ` open before any match bit is acted on
+// (`MacSession::mac_check_and_open`, §2.5), so that deviation ABORTS instead —
+// detection from the secret `α`, not from redundancy.
+// Reported via `auth_join::equality_join_security` as an AXIS-2 promotion
+// (SemiHonest + Abort(Unanimous)) — deliberately NOT AXIS-1 `Malicious`, because
+// external accredited-cryptographer sign-off is PENDING (sq-qhy4) and the
+// in-process tamper tests evidence tamper-EVIDENCE, not the malicious-security
+// theorem — and deliberately NOT by relabelling
+// `ShamirBackend::operator_descriptor`, which keeps describing the unauthenticated
+// path. Read the module docs' banner and "What this does NOT close" before making
+// a tier claim: the MAC authenticates `m = d·r`, NOT `r != 0`, so mask integrity
+// still rests on the trusted-dealer draw (the `crate::randomness` `r = 0` threat,
+// exhibited by a witness test), and the L2 match-graph leak is unchanged
+// (integrity axis, not confidentiality). Research scaffolding, not a deployable
+// integrity tier.
 pub mod auth_join;
 pub mod metrics;
 pub mod partial;
@@ -406,11 +411,15 @@ pub use join::{
     BatchedHiddenInput, BatchedJoinOutput, DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows,
     HiddenValueJoin, JoinPlan,
 };
-// [OPUS-5] sq-km34: the malicious-secure (honest-majority, with-abort) hidden-value
-// equality / equi-join surface — IT-MAC-carried equality product, whole
-// cross-product MAC-checked in ONE sigma open before any match bit is acted on, and
-// the promoted per-path security descriptor. Tier caveats: see the module docs.
-pub use auth_join::{equality_join_security, malicious_hidden_join, malicious_secure_equal};
+// [OPUS-5] sq-km34: the EXPERIMENTAL, honest-majority, tamper-evident-with-abort
+// hidden-value equality / equi-join surface — IT-MAC-carried equality product,
+// whole cross-product MAC-checked in ONE sigma open before any match bit is acted
+// on, and the per-path security descriptor (AXIS-2 only; AXIS-1 stays SemiHonest
+// until sq-qhy4). Tier caveats: see the module docs.
+pub use auth_join::{
+    equality_join_security, experimental_tamper_evident_hidden_join,
+    experimental_tamper_evident_secure_equal,
+};
 pub use metrics::{CommCounter, FIELD_BYTES};
 pub use oblivious::{
     shuffle, sort_by, sort_with_keys, AccessPattern, Comparator, SecretColumn, ShuffleCost,
