@@ -8,7 +8,7 @@
 # (#1395) traced back to budget pressure starts making warm caches restore cold.
 # That is exactly the regression this bead fixed, so the grouping is pinned here.
 #
-# The test binds THREE things together so none of them can drift alone:
+# The test binds FOUR things together so none of them can drift alone:
 #   1. ci.yml — every job in the declared group carries the shared key, and no
 #      job outside it does.
 #   2. scripts/ci-cache-closure-overlap.py — its GROUPED table names real ci.yml
@@ -17,6 +17,11 @@
 #   3. the MEASUREMENT itself — the script's own `--check` runs here, so a
 #      dependency change that pulls one member's closure away from the rest
 #      reds instead of quietly costing that job a cold dependency build.
+#   4. the CLOSURE MODEL that measurement rests on — a model that counted every
+#      declared dependency regardless of `optional = true` would report a
+#      phantom common core and wave any grouping through, so the feature
+#      resolution is pinned directly, both on a synthetic manifest and
+#      end-to-end on the real ones.
 #
 # Hermetic: stdlib only (no PyYAML, no network, no gh, no cargo).
 # Run:  python3 scripts/tests/test_cache_shared_key_grouping.py
@@ -163,6 +168,88 @@ class TestTheMeasurementStillHolds(unittest.TestCase):
             "the declared shared-key grouping no longer matches the measured "
             "dependency closures — see the FAIL lines above. Run "
             "`python3 scripts/ci-cache-closure-overlap.py` for the full table.",
+        )
+
+
+class TestFeatureResolution(unittest.TestCase):
+    """The closure model must not count a dependency the job never compiles.
+
+    This is the assumption everything else rests on: if `optional = true` were
+    ignored, every job touching `sparq-conformance` would be credited with its
+    whole opt-in graph (the tokio/axum loopback server, the JSON-LD parser, four
+    reasoners), the resulting phantom common core would push unrelated closures
+    over the floor, and `--check` would wave any grouping through.
+    """
+
+    # A synthetic manifest, so this pins the RESOLVER rather than whatever the
+    # real crates happen to declare today.
+    FIXTURE = {
+        "package": {"name": "fixture"},
+        "features": {
+            "default": ["plain"],
+            "plain": [],
+            "with-opt": ["dep:opt"],
+            "with-weak": ["always?/extra"],
+            "chain": ["with-opt"],
+        },
+        "dependencies": {
+            "always": {"version": "1"},
+            "opt": {"version": "1", "optional": True},
+            # No `dep:implicit` anywhere, so it defines an implicit feature.
+            "implicit": {"version": "1", "optional": True},
+        },
+        "dev-dependencies": {"only-dev": {"version": "1"}},
+    }
+
+    def enabled(self, features, default=True, kinds=frozenset({"normal", "build"})):
+        return set(
+            overlap.enabled_deps(self.FIXTURE, set(features), default, set(kinds))
+        )
+
+    def test_an_optional_dependency_is_absent_until_a_feature_activates_it(self) -> None:
+        self.assertNotIn("opt", self.enabled([]))
+        self.assertIn("opt", self.enabled(["with-opt"]))
+
+    def test_a_feature_reached_transitively_activates_its_dependency(self) -> None:
+        self.assertIn("opt", self.enabled(["chain"]))
+
+    def test_an_optional_dependency_with_no_dep_reference_has_an_implicit_feature(self) -> None:
+        self.assertNotIn("implicit", self.enabled([]))
+        self.assertIn("implicit", self.enabled(["implicit"]))
+
+    def test_a_non_optional_dependency_is_always_present(self) -> None:
+        self.assertIn("always", self.enabled([], default=False))
+
+    def test_default_features_are_only_applied_when_asked_for(self) -> None:
+        # `default` -> `plain` activates no dependency, so observe it through the
+        # feature edge instead: a weak `always?/extra` fires on a non-optional dep.
+        self.assertEqual(
+            overlap.enabled_deps(self.FIXTURE, {"with-weak"}, True, {"normal"})["always"][1],
+            frozenset({"extra"}),
+        )
+
+    def test_dev_dependencies_are_only_pulled_by_test_building_commands(self) -> None:
+        self.assertNotIn("only-dev", self.enabled([]))
+        self.assertIn("only-dev", self.enabled([], kinds={"normal", "build", "dev"}))
+
+    def test_the_real_closure_tracks_a_feature_gated_dependency(self) -> None:
+        """End-to-end: the async runtime `service-loopback` pulls in is absent
+        from the default build of the same crate."""
+        workspace = overlap.load_workspace()
+        by_name, by_id = overlap.load_lock()
+
+        def closure(cmd):
+            return overlap.external_closure((cmd,), workspace, by_name, by_id)
+
+        off = closure(overlap.Cmd("sparq-conformance", dev=True))
+        on = closure(overlap.Cmd("sparq-conformance", ("service-loopback",), dev=True))
+        self.assertNotIn("tokio", {name for name, _ in off})
+        self.assertIn("tokio", {name for name, _ in on})
+        self.assertLess(
+            off,
+            on,
+            "turning a feature ON must only ADD packages; if the default closure is "
+            "not a subset of the feature-on one the resolver is losing edges.",
         )
 
 
