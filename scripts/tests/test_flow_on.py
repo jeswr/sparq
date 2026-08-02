@@ -53,6 +53,12 @@ class RuleLoadingTest(unittest.TestCase):
             # [OPUS-4.8] ZK circuit gate-count follow-on (a PR-description
             # deliverable, present in the rules file) — enforce the contract.
             "new-zk-circuit-gatecount",
+            # [OPUS-5] (#2547) The un-gateable half of a new crate's obligations:
+            # test methods, a website entry, a guide page. Gate G1 owns the
+            # gateable half (README + bench + SKILL) and these must not re-emit it.
+            "new-crate-test-methods",
+            "new-crate-site-advertisement",
+            "new-crate-guide-page",
         ):
             self.assertIn(required, ids)
         # [OPUS-4.8] (bead sq-l0a0) The new-crate bench/SKILL follow-on rule was
@@ -111,6 +117,200 @@ class NewCrateTest(unittest.TestCase):
         added: list[str] = []
         fos = self._eval(changed=changed, added=added)
         self.assertNotIn("new-crate-bench-and-skill", {fo.rule_id for fo in fos})
+
+
+class NewCratePublicSurfaceFollowOnTest(unittest.TestCase):
+    """[OPUS-5] (#2547) A new PUBLIC crate must mint the three UN-GATEABLE
+    follow-ons — test methods, website entry, guide page — and nothing that gate G1
+    already enforces in-PR. A `publish = false` stub mints none of them (G1's own
+    stub escape hatch), and a rule whose surface the PR already touched suppresses
+    itself rather than blindly minting (the sq-l0a0 lesson)."""
+
+    NEW_CRATE_RULES = {
+        "new-crate-test-methods",
+        "new-crate-site-advertisement",
+        "new-crate-guide-page",
+    }
+
+    def setUp(self):
+        self.rules = flow_on.load_rules(RULES)
+
+    def _ids(self, changed, added, title="feat: add sparq-foo crate"):
+        fos = flow_on.evaluate(self.rules, 77, title, changed, added, [])
+        return {fo.rule_id for fo in fos}, fos
+
+    def test_new_public_crate_mints_all_three_follow_ons(self):
+        # A G1-compliant new-crate PR (bench + README + SKILL in-PR) still owes the
+        # un-gateable trio, so all three fire.
+        added = [
+            "crates/sparq-foo/Cargo.toml",
+            "crates/sparq-foo/src/lib.rs",
+            "crates/sparq-foo/README.md",
+        ]
+        changed = added + ["bench/benchmarks.toml", "skills/sparq-foo/SKILL.md"]
+        ids, fos = self._ids(changed, added)
+        self.assertEqual(self.NEW_CRATE_RULES, ids & self.NEW_CRATE_RULES)
+        keys = {fo.dedup_key for fo in fos}
+        self.assertIn("new-crate-test-methods-sparq-foo", keys)
+        self.assertIn("new-crate-site-sparq-foo", keys)
+        self.assertIn("new-crate-guide-sparq-foo", keys)
+
+    def test_follow_ons_are_dispatch_ready_and_area_routed(self):
+        # Every minted follow-on must carry an area:* label and reach status:ready
+        # — triage.py parks a no-area issue on the serializing __global__ partition.
+        added = ["crates/sparq-foo/Cargo.toml"]
+        _, fos = self._ids(added, added)
+        by_rule = {fo.rule_id: fo for fo in fos}
+        for rule_id in self.NEW_CRATE_RULES:
+            with self.subTest(rule=rule_id):
+                labels = by_rule[rule_id].labels
+                self.assertTrue(
+                    any(lb.startswith("area:") for lb in labels), labels
+                )
+                self.assertIn("status:ready", labels)
+        # The test-methods follow-on routes to the NEW crate's own area, which is
+        # only expressible through label placeholder expansion.
+        self.assertIn("area:sparq-foo", by_rule["new-crate-test-methods"].labels)
+        self.assertIn("role:impl", by_rule["new-crate-test-methods"].labels)
+        self.assertIn("role:site", by_rule["new-crate-site-advertisement"].labels)
+        self.assertIn("role:docs", by_rule["new-crate-guide-page"].labels)
+
+    def test_site_rule_suppressed_when_pr_already_touched_the_site(self):
+        added = ["crates/sparq-foo/Cargo.toml"]
+        changed = added + ["site/src/data/surfaces.ts"]
+        ids, _ = self._ids(changed, added)
+        self.assertNotIn("new-crate-site-advertisement", ids)
+        # The other two are unaffected.
+        self.assertIn("new-crate-guide-page", ids)
+        self.assertIn("new-crate-test-methods", ids)
+
+    def test_guide_rule_suppressed_when_pr_already_touched_the_book(self):
+        added = ["crates/sparq-foo/Cargo.toml"]
+        changed = added + ["book/src/SUMMARY.md", "book/src/foo.md"]
+        ids, _ = self._ids(changed, added)
+        self.assertNotIn("new-crate-guide-page", ids)
+        self.assertIn("new-crate-site-advertisement", ids)
+        self.assertIn("new-crate-test-methods", ids)
+
+    def test_publish_false_stub_mints_nothing(self):
+        # `sparq-canon` really does carry `publish = false` on disk, so this
+        # exercises the SHARED gate-G1 stub predicate rather than a fixture.
+        added = ["crates/sparq-canon/Cargo.toml", "crates/sparq-canon/README.md"]
+        ids, _ = self._ids(added, added, title="feat: add sparq-canon stub")
+        self.assertEqual(set(), ids & self.NEW_CRATE_RULES)
+
+    def test_modifying_an_existing_crate_mints_nothing(self):
+        # Cargo.toml CHANGED but not ADDED → no new crate, no follow-ons.
+        changed = ["crates/sparq-core/Cargo.toml", "crates/sparq-core/src/lib.rs"]
+        ids, _ = self._ids(changed, [], title="chore: bump a dependency")
+        self.assertEqual(set(), ids & self.NEW_CRATE_RULES)
+
+    def test_nested_cargo_toml_is_not_a_new_crate(self):
+        # `fnmatch`'s `*` crosses `/`, so the when_new_paths glob alone matches a
+        # two-level-deep manifest (the #1655 defect shape). Gate G1's own
+        # `added_crates` regex is anchored to `crates/<x>/Cargo.toml`, so the
+        # shared predicate rejects it.
+        added = ["crates/sparq-foo/vendor/dep/Cargo.toml"]
+        ids, _ = self._ids(added, added, title="chore: vendor a dependency")
+        self.assertEqual(set(), ids & self.NEW_CRATE_RULES)
+
+    def test_no_gateable_artifact_is_re_asked_for(self):
+        # Gate G1 blocks the merge until the bench/README/SKILL exist, so a
+        # follow-on for them would be the redundant noise of #245/#246/#264/#265.
+        added = ["crates/sparq-foo/Cargo.toml"]
+        _, fos = self._ids(added, added)
+        titles = " ".join(fo.title for fo in fos).lower()
+        self.assertNotIn("register a bench", titles)
+        self.assertNotIn("readme", titles)
+        self.assertNotIn("skill.md", titles)
+
+    def test_dedup_keys_name_the_crate_not_the_pr(self):
+        # The key names the CRATE, so a re-merge or a second PR for the same crate
+        # hits the existing open issue instead of duplicating the follow-on.
+        added = ["crates/sparq-foo/Cargo.toml"]
+        _, fos_a = self._ids(added, added)
+        fos_b = flow_on.evaluate(self.rules, 78, "another title", added, added, [])
+
+        def keys(fos):
+            return {
+                fo.dedup_key for fo in fos if fo.rule_id in self.NEW_CRATE_RULES
+            }
+
+        self.assertEqual(keys(fos_a), keys(fos_b))
+        self.assertEqual(len(keys(fos_a)), len(self.NEW_CRATE_RULES))
+        for key in keys(fos_a):
+            self.assertNotIn("77", key)
+            self.assertNotIn("78", key)
+
+
+class UnlessPathsPredicateTest(unittest.TestCase):
+    """[OPUS-5] (#2547) The generic `unless_paths` suppression predicate: a rule
+    does not fire when the merged PR already touched the surface the follow-on
+    would ask about."""
+
+    def _rule(self, **kw):
+        return flow_on.Rule(
+            id="r",
+            when_paths=["crates/**"],
+            creates=[flow_on.CreateTemplate("k", "t", "b")],
+            **kw,
+        )
+
+    def test_absent_predicate_does_not_suppress(self):
+        self.assertTrue(
+            flow_on.rule_matches(self._rule(), ["crates/a/x.rs"], [], [], "t")
+        )
+
+    def test_matching_changed_path_suppresses(self):
+        rule = self._rule(unless_paths=["site/**"])
+        self.assertFalse(
+            flow_on.rule_matches(
+                rule, ["crates/a/x.rs", "site/src/page.tsx"], [], [], "t"
+            )
+        )
+
+    def test_non_matching_changed_path_does_not_suppress(self):
+        rule = self._rule(unless_paths=["site/**"])
+        self.assertTrue(
+            flow_on.rule_matches(rule, ["crates/a/x.rs"], [], [], "t")
+        )
+
+    def test_unless_paths_alone_is_not_a_trigger(self):
+        # A rule with ONLY a suppression predicate has nothing to fire on; loading
+        # it must fail loudly rather than mint on every merge.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rules.toml"
+            path.write_text(
+                '[[rule]]\nid = "bad"\nunless_paths = ["site/**"]\n'
+                '[[rule.create]]\ndedup_key = "k"\ntitle = "t"\nbody = "b"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                flow_on.load_rules(path)
+
+
+class LabelExpansionTest(unittest.TestCase):
+    """[OPUS-5] (#2547) Labels are placeholder-expanded so a follow-on can route to
+    `area:{crate}`; a label left incomplete by an unresolved placeholder is dropped
+    (fail-closed to triage.py's `needs:area` parking, never a dangling `area:`)."""
+
+    def test_expands_known_placeholder(self):
+        self.assertEqual(
+            flow_on.expand_labels(["area:{crate}", "kind:test"], {"crate": "sparq-foo"}),
+            ["area:sparq-foo", "kind:test"],
+        )
+
+    def test_drops_label_left_incomplete(self):
+        self.assertEqual(
+            flow_on.expand_labels(["area:{crate}", "kind:test"], {"crate": ""}),
+            ["kind:test"],
+        )
+
+    def test_leaves_literal_labels_untouched(self):
+        self.assertEqual(
+            flow_on.expand_labels(["docs", "area:site"], {"crate": "x"}),
+            ["docs", "area:site"],
+        )
 
 
 class ChangedSurfaceTest(unittest.TestCase):

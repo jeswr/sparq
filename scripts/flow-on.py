@@ -60,6 +60,20 @@ SKILL_PATHS = ("skills/",)
 DOCS_RULE_ID = "changed-public-feature-docs"
 BENCH_DASHBOARD_RULE_ID = "new-bench-dashboard-row"
 
+# [OPUS-5] (#2547) The new-crate follow-on rules — the UN-GATEABLE remainder of a
+# new crate's obligations (test METHODS beyond unit tests, a website entry, a guide
+# page). Merge gate G1 owns the gateable half (README + registered bench + SKILL.md
+# in the SAME PR), so these rules deliberately do NOT re-emit any of those. All
+# three share one extra predicate: fire only for a genuinely-new PUBLIC crate (see
+# _new_public_crate_added).
+NEW_CRATE_RULE_IDS = frozenset(
+    {
+        "new-crate-test-methods",
+        "new-crate-site-advertisement",
+        "new-crate-guide-page",
+    }
+)
+
 
 # Sibling scripts are loaded by path (the scripts dir is not an importable package).
 def _load_script_module(stem: str):
@@ -82,6 +96,13 @@ _pad = _load_script_module("pub_api_diff")
 # the retriage cron — flow-on computes each follow-on's routing labels with it so
 # the three triage surfaces can never drift.
 _triage = _load_script_module("triage")
+
+# [OPUS-5] (#2547) The proactive new-crate gate G1. The new-crate follow-on rules
+# reuse ITS definitions of "this PR adds crate <x>" (added_crates) and "the crate is
+# an intentional `publish = false` stub" (crate_is_stub), so the reactive rules and
+# the merge gate can never disagree about which crates are in scope — the same
+# single-sourcing pattern as pub_api_diff between gate G2 and the docs rule above.
+_gnc = _load_script_module("gate-new-crate")
 
 # [FABLE-5] (#2474) Default priority for minted follow-ons, matching the retriage
 # cron's convergence default (scripts/retriage.py DEFAULT_PRIORITY).
@@ -131,6 +152,14 @@ class Rule:
     # not mis-fire the "new top-level circuit" follow-on. Only filters the
     # `when_new_paths` check; other predicates are unaffected.
     exclude_new_paths: list[str] = field(default_factory=list)
+    # [OPUS-5] (#2547) SUPPRESSION predicate: the rule does NOT fire when any
+    # CHANGED path matches one of these globs — "the merged PR already did this
+    # work, so the follow-on would be noise". It is the general form of the
+    # SKILL_PATHS suppression hard-coded for the docs rule, and it is what keeps
+    # the new-crate site/guide follow-ons from re-asking for an entry the same PR
+    # already added. Distinct from `exclude_new_paths`, which narrows the ADDED
+    # pool a `when_new_paths` glob is matched against rather than vetoing the rule.
+    unless_paths: list[str] = field(default_factory=list)
     when_label: str | None = None
     when_title: str | None = None
     creates: list[CreateTemplate] = field(default_factory=list)
@@ -170,6 +199,7 @@ def load_rules(path: Path) -> list[Rule]:
             when_paths=list(raw.get("when_paths", [])),
             when_new_paths=list(raw.get("when_new_paths", [])),
             exclude_new_paths=list(raw.get("exclude_new_paths", [])),
+            unless_paths=list(raw.get("unless_paths", [])),
             when_label=raw.get("when_label"),
             when_title=raw.get("when_title"),
             creates=creates,
@@ -242,6 +272,29 @@ def expand(text: str, ctx: dict[str, str]) -> str:
     return re.sub(r"\{([a-z_]+)\}", repl, text)
 
 
+def expand_labels(labels: list[str], ctx: dict[str, str]) -> list[str]:
+    """[OPUS-5] (#2547) Expand placeholders in a template's labels, dropping any
+    label that a placeholder left incomplete.
+
+    A follow-on's `area:*` label must name the crate/surface the work lands in
+    (scripts/flow-on-rules.toml header), which for the new-crate rules is the crate
+    the PR just added — only expressible as `area:{crate}`. A placeholder that
+    resolves to the empty string would yield a meaningless dangling label such as
+    `area:`, so such labels are DROPPED rather than applied. That is safe here: the
+    new-crate rules only fire when `{crate}` resolves (see _new_public_crate_added),
+    and a rule whose area label somehow vanished fails CLOSED — triage.py parks a
+    no-area issue as `needs:area` for a human rather than mis-routing it."""
+    out: list[str] = []
+    for label in labels:
+        expanded = expand(label, ctx).strip()
+        # An unresolved placeholder leaves a bare prefix ("area:") or an empty
+        # string; neither is a usable label.
+        if not expanded or expanded.endswith(":"):
+            continue
+        out.append(expanded)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Rule evaluation
 # --------------------------------------------------------------------------- #
@@ -279,6 +332,34 @@ def _bench_suite_needs_dashboard_follow_on(suite: str) -> bool:
     return False
 
 
+def _new_public_crate_added(changed: list[str], added: list[str]) -> bool:
+    """[OPUS-5] (#2547) True iff this diff adds a new PUBLIC crate that the
+    new-crate follow-on templates would name correctly.
+
+    Two conditions, both load-bearing:
+
+    * The crate the templates will name — `{crate}`, which build_context resolves
+      to the first `crates/<x>/` directory in (added + changed) — must itself be a
+      crate whose `Cargo.toml` was ADDED (gate G1's `added_crates`). Without this
+      check a PR that merely touches an existing crate alongside some other new
+      directory could mint a follow-on naming the wrong (or an old) crate.
+    * That crate must NOT be a `publish = false` stub. That marker is G1's
+      documented stub escape hatch, and it means exactly what these follow-ons
+      care about: an internal-only crate has no public surface to advertise on the
+      website, no guide page to write, and no cross-method test obligation beyond
+      its own unit tests. Reusing `crate_is_stub` keeps one definition of "stub"
+      shared with the gate.
+
+    Reads the crate's `Cargo.toml` from the checkout. The engine runs post-merge on
+    a checkout that already contains the new crate, so the read succeeds in CI; a
+    missing file (hermetic tests, or a crate added then deleted) is treated as
+    NOT-a-stub by `crate_is_stub`, which is the strict default."""
+    crate = _first_segment_after("crates/", added + changed)
+    if not crate or crate not in _gnc.added_crates(added):
+        return False
+    return not _gnc.crate_is_stub(crate, changed)
+
+
 def rule_matches(
     rule: Rule,
     changed: list[str],
@@ -299,9 +380,18 @@ def rule_matches(
             new_pool = [p for p in added if not _any_glob_match(rule.exclude_new_paths, [p])]
         if not _any_glob_match(rule.when_new_paths, new_pool):
             return False
+    # [OPUS-5] (#2547) The merged PR already did this follow-on's work → suppress.
+    if rule.unless_paths and _any_glob_match(rule.unless_paths, changed):
+        return False
     if rule.when_label is not None and rule.when_label not in labels:
         return False
     if rule.when_title is not None and not re.search(rule.when_title, title, re.IGNORECASE):
+        return False
+
+    # [OPUS-5] (#2547) The new-crate follow-ons cover only a genuinely-new PUBLIC
+    # crate: a `publish = false` stub is exempt (same escape hatch as gate G1), and
+    # the crate the templates name must be one this PR actually added.
+    if rule.id in NEW_CRATE_RULE_IDS and not _new_public_crate_added(changed, added):
         return False
 
     if rule.id == BENCH_DASHBOARD_RULE_ID:
@@ -363,7 +453,7 @@ def evaluate(
                 f"\n\n> 🤖 SPARQ agent — auto-generated by the flow-on engine "
                 f"(rule `{rule.id}`) from merged PR #{pr}. Reconcile into a bead."
             )
-            labels_full = list(dict.fromkeys(BASE_LABELS + tmpl.labels))
+            labels_full = list(dict.fromkeys(BASE_LABELS + expand_labels(tmpl.labels, ctx)))
             # [FABLE-5] (#2474) dispatch-visibility: append role/priority/status
             # routing labels at creation (see routing_labels for why the event
             # path can never label these issues).
