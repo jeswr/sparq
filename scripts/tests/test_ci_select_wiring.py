@@ -353,6 +353,45 @@ def eval_job_if(cond: str, ctx: dict) -> bool:
     return _truthy(_GhExpr(" ".join(str(cond).split()), ctx).parse())
 
 
+# [SONNET-4.6] issue #5149 review round 1: a GitHub expression reaches a `needs`
+# entry by TWO spellings — dotted property access (`needs.job.outputs.x`) and
+# index access (`needs['job'].outputs.x`) — so a dot-only pattern would let a
+# bracket-indexed gate slip past the reference pins below. Match both, and report
+# any OTHER `needs` access (a non-literal index like `needs[matrix.job]`, or a
+# bare `needs` handed to `toJSON(...)`) as UNCLASSIFIED rather than dropping it:
+# fail-closed, like every other guard-shape check in this suite.
+_NEEDS_ACCESS_RE = re.compile(
+    r"""(?<![A-Za-z0-9_.\-])needs(?:
+            \.(?P<dot>[A-Za-z0-9_-]+)
+          | \s*\[\s*(?P<idx>'(?:[^']|'')*'|"[^"]*")\s*\]
+          | (?P<other>(?![A-Za-z0-9_-]))
+        )""",
+    re.VERBOSE,
+)
+
+
+def needs_refs(cond: str) -> tuple[set[str], list[str]]:
+    """Extract the job ids a job-level `if:` reaches through the `needs` context.
+
+    Returns `(job_ids, unclassified)`, where `unclassified` holds a short excerpt
+    of every `needs` access whose target job id could not be read off the source.
+    A caller pinning a reference set must assert `unclassified == []` too — an
+    unreadable access is an unpinned gate, not an absent one.
+    """
+    refs: set[str] = set()
+    unclassified: list[str] = []
+    for m in _NEEDS_ACCESS_RE.finditer(cond):
+        if m.group("dot"):
+            refs.add(m.group("dot"))
+        elif m.group("idx") is not None:
+            lit = m.group("idx")
+            body = lit[1:-1]
+            refs.add(body.replace("''", "'") if lit[0] == "'" else body)
+        else:
+            unclassified.append(cond[m.start():m.start() + 40])
+    return refs, unclassified
+
+
 class TestWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1385,7 +1424,6 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
         "coverage": set(),
         "coverage-demoted-filer": {"coverage"},
     }
-    _NEEDS_REF_RE = re.compile(r"needs\.([A-Za-z0-9_-]+)\.")
 
     # The `needs:` EDGES of the chain jobs that inherit skip-propagation (i.e. every one
     # whose `if:` lacks `always()`). GitHub skips a job when a needed job is skipped, so
@@ -1428,7 +1466,13 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
         this set is only correct once that exemption is real."""
         for job_id, expected in self._CHAIN_NEEDS_REFS.items():
             cond = str(self.ci["jobs"][job_id].get("if", ""))
-            got = set(self._NEEDS_REF_RE.findall(cond))
+            got, unclassified = needs_refs(cond)
+            self.assertEqual(
+                unclassified, [],
+                f"ci.yml:{job_id}: this guard reaches `needs` in a form whose target job "
+                f"cannot be read off the source, so the pin below cannot see what it "
+                f"gates on. Spell the reference `needs.<job>.…` (or `needs['<job>'].…`)",
+            )
             self.assertEqual(
                 got, expected,
                 f"ci.yml:{job_id}: the post-merge coverage chain's guard changed its "
@@ -1436,6 +1480,39 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
                 f"the sq-6vshe.14 push-run skip, the coverage chain must be EXEMPT from "
                 f"it — that is the whole enforcement point the merge_group demotion "
                 f"(sq-6vshe.17) depends on",
+            )
+
+    def test_needs_ref_extraction_is_not_fooled_by_index_access(self):
+        """[SONNET-4.6] issue #5149 review round 1 — mutation test for the pin above.
+
+        The pin is only load-bearing if it sees a new `needs` gate however it is
+        SPELLED. GitHub accepts index access as well as property access, so a
+        sq-6vshe.14 conjunct written `needs['queue-validated'].outputs.skip != 'true'`
+        must move the extracted reference set (and thus RED the pin) exactly as the
+        dotted spelling does — and a `needs` access whose target is not a literal must
+        be reported rather than silently dropped."""
+        base = str(self.ci["jobs"]["coverage-engine-merge"].get("if", ""))
+        pinned = self._CHAIN_NEEDS_REFS["coverage-engine-merge"]
+        for conjunct in (
+            "needs['queue-validated'].outputs.skip != 'true'",
+            'needs["queue-validated"].outputs.skip != \'true\'',
+            "needs.queue-validated.outputs.skip != 'true'",
+        ):
+            refs, unclassified = needs_refs("%s && %s" % (base, conjunct))
+            self.assertEqual(unclassified, [], "%s must classify cleanly" % conjunct)
+            self.assertIn(
+                "queue-validated", refs,
+                "a `needs` gate spelled %s must be EXTRACTED — otherwise the push-skip "
+                "conjunct lands green and the leg silently leaves the push run" % conjunct,
+            )
+            self.assertNotEqual(refs, pinned,
+                                "the pin must RED on the mutant guard %s" % conjunct)
+        for opaque in ("needs[matrix.job].outputs.skip != 'true'", "toJSON(needs) != ''"):
+            _, unclassified = needs_refs("%s && %s" % (base, opaque))
+            self.assertTrue(
+                unclassified,
+                "an unclassifiable `needs` access (%s) must be REPORTED, not dropped — "
+                "dropping it would read as 'no new gate'" % opaque,
             )
 
     # ---- what the queue KEEPS ------------------------------------------------
