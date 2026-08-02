@@ -8,12 +8,21 @@
 //
 //   private witness: the store value's decimal digits
 //   public inputs:   challenge, operand_enc (the committed term anchor), op, bound, expected
-//                    — the value itself is NEVER public.
+//                    — the value itself is not a public input.
 //
 // What differs from the site page: the operand is a value the user's own SPARQL SELECT returned
 // from the LIVE WORKSPACE STORE, and `op`/`bound` are the user's choice (both are public circuit
 // inputs). The circuit asserts the claimed verdict equals the one the hidden value actually
 // satisfies, so a false claim is unsatisfiable — the witness solve fails and no proof exists.
+//
+// WHAT IS *NOT* PROVED — the public-input vector carries no dataset commitment, query-result
+// commitment, subject identifier or credential root, so a proof made here does NOT attest that
+// the operand came from the selected row, from the workspace store, or from an issued credential.
+// It attests knowledge of digits matching a PUBLISHED anchor, plus the comparison. Tying an
+// `operand_enc` to a committed triple slot is the scan proof's job, which this tool does not
+// ship; and because the anchor table is published in `zk-filter.ts`, a verifier holding it can
+// read off which of the four committed values a proof was made about. See `buildCircuitInputs`
+// for the exact statement.
 //
 // HONESTY: the cryptographic mechanics here are real and run in the browser. The broader sparq ZK
 // estate is research-grade, internally re-audited only, and external accredited-cryptographer
@@ -24,13 +33,7 @@
 // the workbench's shared chunks, mirroring the lean-wasm engine loader.
 
 import { basePath } from "@/lib/base-path";
-import {
-  CIRCUIT_MEMBER,
-  digitBytes,
-  evaluateOp,
-  termAnchor,
-  type OpCode,
-} from "@/lib/zk-filter";
+import { CIRCUIT_MEMBER, buildCircuitInputs, type ProofRequest } from "@/lib/zk-filter";
 
 /** Where `gui/app/scripts/sync-wasm.mjs` places the synced ACIR artifact. */
 const CIRCUIT_URL = () => `${basePath()}/zk/${CIRCUIT_MEMBER}.json`;
@@ -148,21 +151,24 @@ export function prewarmProver(): Promise<unknown> {
   return loadProver();
 }
 
-export interface ProofRequest {
-  /** The canonical digit string of the hidden store value (the private witness). */
-  digits: string;
-  op: OpCode;
-  /** The FILTER's public constant. */
-  bound: number;
+export type { ProofRequest };
+
+/** A proof exactly as `@aztec/bb.js` returns it — the bundle a verifier is handed. */
+export interface ProofBundle {
+  proof: Uint8Array;
+  publicInputs: string[];
 }
 
 export interface ProofResult {
-  /** The disclosed verdict — the only value-derived bit revealed. */
+  /** The disclosed verdict — the only value-derived bit the circuit itself reveals. */
   verdict: boolean;
-  /** Proof size in bytes — opaque to the verifier; reveals nothing about the hidden value. */
-  proofByteLength: number;
-  /** The public inputs the verifier sees (the hidden value is NOT among them). */
-  publicInputs: string[];
+  /**
+   * Exactly what a verifier is handed. The proof is generated with masking enabled (see
+   * {@link PROOF_OPTIONS}), and the value is not among the public inputs — but `operand_enc` IS,
+   * and it is drawn from the small published anchor table, which identifies the value to anyone
+   * holding that table.
+   */
+  bundle: ProofBundle;
   /** Independent in-tab verification of the proof against the same circuit. */
   verified: boolean;
   proveMs: number;
@@ -172,36 +178,31 @@ export interface ProofResult {
 }
 
 /**
- * Generate AND verify a real UltraHonk proof that the hidden store value satisfies
- * `value <op> bound`, entirely in the tab.
+ * Verify a proof bundle against the shipped circuit, with the SAME options {@link proveFilter}
+ * proves under. The verify half on its own, so a caller (and `zk-prover.integration.test.ts`) can
+ * check that a bundle whose PUBLIC claim has been altered is rejected — the property every
+ * "the circuit refuses a false claim" line in this tool's copy rests on.
+ */
+export async function verifyProofBundle(bundle: ProofBundle): Promise<boolean> {
+  const { backend } = await loadProver();
+  return backend.verifyProof(bundle, PROOF_OPTIONS);
+}
+
+/**
+ * Generate AND verify a real UltraHonk proof of the statement `buildCircuitInputs` documents:
+ * knowledge of digits whose `xsd:integer` term encoding equals the committed anchor, and that
+ * they satisfy `value <op> bound`. It does NOT attest that the value came from the selected row
+ * or from the live store — see the module header.
  *
  * Throws when no committed term anchor ships for the value (the encoding comes from the native
  * encoder and cannot be derived in-tab), and propagates the witness-solve failure verbatim when
  * the circuit refuses the claim — both are honest outcomes, never a fabricated result.
  */
-export async function proveFilter({ digits, op, bound }: ProofRequest): Promise<ProofResult> {
-  const operandEnc = termAnchor(digits);
-  if (!operandEnc) {
-    throw new Error(`no committed term anchor ships for the value ${digits}`);
-  }
-  if (!Number.isSafeInteger(bound) || bound < 0) {
-    throw new Error("the bound must be a non-negative integer (the circuit takes a u64)");
-  }
-  // The circuit asserts `result == expected`, so we publish the verdict the hidden value actually
-  // satisfies. Claiming the other one makes the witness solve fail — that is the property the
-  // panel demonstrates, not a bug to work around.
-  const verdict = evaluateOp(Number(digits), op, bound);
+export async function proveFilter(request: ProofRequest): Promise<ProofResult> {
+  const inputs = buildCircuitInputs(request);
+  const verdict = inputs.expected;
 
   const { Noir, backend, circuit, threads } = await loadProver();
-
-  const inputs = {
-    challenge: "0x1", // per-presentation verifier nonce (fixed here; no replay context in-tab)
-    operand_enc: operandEnc,
-    op: String(op),
-    bound: String(bound),
-    expected: verdict,
-    digits: digitBytes(digits), // PRIVATE — the exact value, never disclosed
-  };
 
   const noir = new Noir(circuit);
   const { witness } = await noir.execute(inputs);
@@ -218,8 +219,7 @@ export async function proveFilter({ digits, op, bound }: ProofRequest): Promise<
 
   return {
     verdict,
-    proofByteLength: proof.proof.length,
-    publicInputs: proof.publicInputs,
+    bundle: proof,
     verified,
     proveMs,
     verifyMs,

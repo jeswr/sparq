@@ -16,9 +16,18 @@
 // comparison verdict — so a claim that disagrees with the hidden value is unsatisfiable and no
 // proof can be produced.
 //
+// WHAT IS *NOT* PROVED: no dataset commitment, query-result commitment, subject identifier or
+// credential root is among the circuit's public inputs, so the proof does NOT attest that the
+// operand came from the selected row, from this store, or from an issued credential — the SELECT
+// only supplies a local witness and picks which published anchor to claim about. The panel's copy
+// says so at the point of claim rather than in a footnote. See `zk-filter.ts`'s
+// `buildCircuitInputs` for the exact statement.
+//
 // HONEST LIMIT, surfaced per row rather than hidden: the term anchor (`operand_enc`) comes from
 // the native encoder and cannot be derived in-tab, so only values whose anchor shipped with this
-// build are provable. Every other row stays in the list, labelled with the specific reason.
+// build are provable — and only when the row's term really is an `xsd:integer` literal, since the
+// circuit's token rebuild binds the datatype too. Every other row stays in the list, labelled
+// with the specific reason.
 //
 // HONESTY: the sparq ZK estate is research-grade — the v1 verifier is internally re-audited only
 // and external accredited-cryptographer sign-off is pending (sq-qhy4). A proof produced here is
@@ -137,9 +146,7 @@ function ProofReport({
     <div className="space-y-2 rounded-md border p-3" data-zk-report="">
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="text-muted-foreground">
-          claim: the hidden value of{" "}
-          <span className="font-mono">{candidate.subject || `row ${candidate.row + 1}`}</span> is{" "}
-          {symbol} {bound}
+          claim: the value behind the committed anchor is {symbol} {bound}
         </span>
         <Badge
           variant={result.verdict ? "success" : "muted"}
@@ -156,11 +163,18 @@ function ProofReport({
         </Badge>
       </div>
 
+      <p className="text-[11px] text-muted-foreground" data-zk-scope="">
+        Scope: the statement is about the committed term anchor only. You picked it locally from{" "}
+        <span className="font-mono">{candidate.subject || `row ${candidate.row + 1}`}</span>, but no
+        commitment to that row, to this store or to an issuing credential is among the public
+        inputs, so the proof does not attest where the value came from.
+      </p>
+
       <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-muted-foreground sm:grid-cols-4">
         {(
           [
             ["circuit", CIRCUIT_MEMBER],
-            ["proof bytes", String(result.proofByteLength)],
+            ["proof bytes", String(result.bundle.proof.length)],
             ["prove", `${result.proveMs.toFixed(0)} ms`],
             ["verify", `${result.verifyMs.toFixed(0)} ms`],
           ] as const
@@ -179,10 +193,13 @@ function ProofReport({
 
       <div>
         <p className="pb-1 text-[11px] font-medium text-muted-foreground">
-          Public inputs the verifier sees — the store value is NOT among them
+          Public inputs the verifier sees — the value is not one of them, but{" "}
+          <span className="font-mono">operand_enc</span> comes from the small anchor table this
+          build publishes, so a verifier holding that table can read off which committed value the
+          proof was made about
         </p>
         <ul className="space-y-0.5" data-zk-public-inputs="">
-          {result.publicInputs.map((pi, i) => (
+          {result.bundle.publicInputs.map((pi, i) => (
             <li key={i} className="break-all font-mono text-[11px] text-muted-foreground">
               {pi}
             </li>
@@ -452,7 +469,11 @@ export function ZkTool() {
               bound and the resulting verdict. The store value itself is a private witness. The
               circuit asserts the published verdict equals the one the hidden value satisfies, so
               a claim that disagrees with the data cannot be proven at all — the witness solve
-              fails and this panel reports that failure verbatim.
+              fails and this panel reports that failure verbatim. What it proves is knowledge of
+              an <span className="font-mono">xsd:integer</span> matching the committed anchor and
+              the comparison — not that the value came from this store: no dataset or credential
+              commitment is among the public inputs, so the query supplies a local witness rather
+              than attested provenance.
             </p>
 
             {proof.kind === "proving" && (

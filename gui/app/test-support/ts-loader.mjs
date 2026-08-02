@@ -23,11 +23,30 @@ const SPARQ_CLIENT_ENTRY = resolvePath(
   '../../../packages/sparq-client/src/index.ts',
 );
 
+// [SONNET-4.6] sq-ixc3.17 — the tsconfig `@/*` → `./src/*` alias, so a test can import an app
+// module that uses the alias internally (zk-prover.ts imports `@/lib/base-path`). Only `.ts`
+// candidates are tried: `load` below transpiles `.ts`, not `.tsx`, so pointing at a component
+// would fail later with a confusing error instead of here with a clear one.
+const SRC_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '../src');
+
 export async function resolve(specifier, context, next) {
   // Resolve the @sparq/client tsconfig path alias to the package's real TypeScript entry.
   // This lets gui/app unit tests that import helpers which use @sparq/client work in Node.
   if (specifier === '@sparq/client') {
     return { shortCircuit: true, url: pathToFileURL(SPARQ_CLIENT_ENTRY).href };
+  }
+
+  if (specifier.startsWith('@/')) {
+    const base = resolvePath(SRC_ROOT, specifier.slice(2));
+    for (const candidate of [`${base}.ts`, `${base}/index.ts`]) {
+      try {
+        await access(candidate);
+        return { shortCircuit: true, url: pathToFileURL(candidate).href };
+      } catch {
+        // try the next candidate
+      }
+    }
+    throw new Error(`ts-loader: cannot resolve "${specifier}" to a .ts module under ${SRC_ROOT}`);
   }
 
   // Allow explicit `.ts` imports (relative paths or file: URLs) so the test runner can load
