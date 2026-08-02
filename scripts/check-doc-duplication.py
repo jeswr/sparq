@@ -50,6 +50,11 @@
 # reported as a duplicate while a HAND-copy of the same text still is. The generator
 # that writes those regions is a separate follow-up bead (§10 item 2) and has NOT
 # landed; this is the consumer half, kept here so the two do not have to land together.
+# Because skipping is an EXEMPTION, the marker parser is strict and FAIL-CLOSED: only the
+# two documented shapes, each alone on its line, open and close a region, and a malformed,
+# nested, unmatched or UNTERMINATED marker skips NOTHING and is itself a gating finding.
+# Otherwise a lone `<!-- BEGIN-INJECT -->` would hide every following line — the whole
+# rest of the document — from the exact tier.
 #
 # Deterministic: stdlib-only, no network, no build. Reproduce locally with
 #   python3 scripts/check-doc-duplication.py            # exact tier (what CI gates on)
@@ -112,8 +117,19 @@ ALLOW_RE = re.compile(r"<!--\s*" + re.escape(ALLOW_MARKER) + r"\s*:(.*?)-->", re
 FRONTMATTER_RE = re.compile(r"\A---\r?\n.*?\r?\n---\r?\n", re.DOTALL)
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
-BEGIN_INJECT_RE = re.compile(r"<!--\s*BEGIN-INJECT\b")
-END_INJECT_RE = re.compile(r"<!--\s*END-INJECT\b")
+
+# §5 marker grammar — STRICT, because matching one is an exemption. The documented forms
+# are exactly `<!-- BEGIN-INJECT: <source> -->` (the source is required: it is what the
+# generator's `--check` mode regenerates from) and `<!-- END-INJECT -->`, each alone on
+# its line. INJECT_SHAPE_RE is the wider net used only to REPORT a line that is trying to
+# be a marker and is not one; it is anchored so a marker quoted mid-sentence in prose is
+# not mistaken for a real one.
+BEGIN_INJECT_RE = re.compile(r"^[ \t]*<!--[ \t]*BEGIN-INJECT:[ \t]*(\S.*?)[ \t]*-->[ \t]*$")
+END_INJECT_RE = re.compile(r"^[ \t]*<!--[ \t]*END-INJECT[ \t]*-->[ \t]*$")
+INJECT_SHAPE_RE = re.compile(r"^[ \t]*<!--[ \t]*(?:BEGIN|END)-INJECT\b")
+
+MARKER_FORMS = ("the documented forms are `<!-- BEGIN-INJECT: <source> -->` and "
+                "`<!-- END-INJECT -->`, each alone on its line")
 
 # Link normalisation. Inline links/images keep their TEXT and lose their TARGET;
 # reference links keep their text; link-reference DEFINITION lines vanish entirely;
@@ -156,19 +172,79 @@ def normalise(raw: str) -> str:
     return " ".join(text.split()).lower()
 
 
-def split_blocks(path: str, text: str) -> list[Block]:
+def inject_skip_lines(path: str, lines: list[str],
+                      errors: list[tuple[str, int, str]]) -> set[int]:
+    """1-based line numbers inside a WELL-FORMED `<!-- BEGIN-INJECT: … -->` region (§5).
+
+    Fail-closed. A region is skipped only when its BEGIN and END markers both match the
+    documented grammar exactly, nothing marker-shaped sits between them, and the BEGIN is
+    actually closed. Every other case — malformed shape, nested BEGIN, unmatched END,
+    unterminated BEGIN — skips NOTHING (so the lines stay in the comparison) and appends a
+    gating error, because the alternative is a one-line exemption for the rest of a file.
+
+    Markers inside a fenced code block are documentation of the convention, not markers,
+    and are ignored — matching how the block splitter treats a fence.
+    """
+    skip: set[int] = set()
+    in_fence = False
+    open_line = 0
+    region: list[int] = []
+    region_bad = False
+
+    for idx, line in enumerate(lines, 1):
+        if open_line:
+            if END_INJECT_RE.match(line):
+                if not region_bad:
+                    skip.update(region)
+                    skip.add(open_line)
+                    skip.add(idx)
+                open_line = 0
+                region = []
+                region_bad = False
+                continue
+            if INJECT_SHAPE_RE.match(line):
+                errors.append((path, idx,
+                               "nested or malformed INJECT marker inside the region opened "
+                               "at line %d — the region is NOT skipped" % open_line))
+                region_bad = True
+            region.append(idx)
+            continue
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence or not INJECT_SHAPE_RE.match(line):
+            continue
+        if BEGIN_INJECT_RE.match(line):
+            open_line = idx
+        elif END_INJECT_RE.match(line):
+            errors.append((path, idx, "`<!-- END-INJECT -->` with no matching "
+                                      "`<!-- BEGIN-INJECT: … -->`"))
+        else:
+            errors.append((path, idx, "malformed INJECT marker — %s" % MARKER_FORMS))
+
+    if open_line:
+        errors.append((path, open_line,
+                       "`<!-- BEGIN-INJECT: … -->` is never closed by `<!-- END-INJECT -->` "
+                       "— the region is NOT skipped"))
+    return skip
+
+
+def split_blocks(path: str, text: str) -> tuple[list[Block], list[tuple[str, int, str]]]:
     """Split one markdown document into comparable blocks.
 
     Fence-aware (a fenced code block containing blank lines stays ONE block, which
     matters because the dominant duplicate kind on this surface is a code example) and
-    INJECT-aware (§5).
+    INJECT-aware (§5). Returns the blocks plus any INJECT-marker errors, which the caller
+    reports as gating findings.
     """
     text = FRONTMATTER_RE.sub("", text)
+    lines = text.splitlines()
+    errors: list[tuple[str, int, str]] = []
+    skip = inject_skip_lines(path, lines, errors)
     blocks: list[Block] = []
     current: list[str] = []
     start = 1
     in_fence = False
-    in_inject = False
 
     def flush() -> None:
         nonlocal current
@@ -176,14 +252,9 @@ def split_blocks(path: str, text: str) -> list[Block]:
             blocks.append(Block(path, start, "\n".join(current)))
             current = []
 
-    for idx, line in enumerate(text.splitlines(), 1):
-        if in_inject:
-            if END_INJECT_RE.search(line):
-                in_inject = False
-            continue
-        if not in_fence and BEGIN_INJECT_RE.search(line):
+    for idx, line in enumerate(lines, 1):
+        if idx in skip:
             flush()
-            in_inject = True
             continue
         if FENCE_RE.match(line):
             in_fence = not in_fence
@@ -209,7 +280,8 @@ def split_blocks(path: str, text: str) -> list[Block]:
         if _is_comment_only(prev.raw):
             block.allow_reason = prev.allow_reason
 
-    return [b for b in blocks if len(b.norm) >= MIN_BLOCK_CHARS or b.bare_marker]
+    kept = [b for b in blocks if len(b.norm) >= MIN_BLOCK_CHARS or b.bare_marker]
+    return kept, errors
 
 
 def _is_comment_only(raw: str) -> bool:
@@ -267,15 +339,19 @@ def surface_files(root: Path = REPO_ROOT) -> list[str]:
     return sorted({p for p in out.stdout.splitlines() if p})
 
 
-def collect_blocks(root: Path, paths: list[str]) -> list[Block]:
+def collect_blocks(root: Path,
+                   paths: list[str]) -> tuple[list[Block], list[tuple[str, int, str]]]:
     blocks: list[Block] = []
+    errors: list[tuple[str, int, str]] = []
     for rel in paths:
         try:
             text = (root / rel).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        blocks.extend(split_blocks(rel, text))
-    return blocks
+        file_blocks, file_errors = split_blocks(rel, text)
+        blocks.extend(file_blocks)
+        errors.extend(file_errors)
+    return blocks, errors
 
 
 def exact_findings(blocks: list[Block], pairs: list[dict]) -> list[tuple[Block, Block]]:
@@ -354,11 +430,13 @@ def _summary(text: str) -> None:
 def run(near: bool, enforce: bool) -> int:
     pairs = load_pairs()
     files = surface_files()
-    blocks = collect_blocks(REPO_ROOT, files)
+    blocks, marker_errors = collect_blocks(REPO_ROOT, files)
 
     bare = bare_marker_findings(blocks)
     for b in bare:
         print(f"{b.path}:{b.lineno}: empty `{ALLOW_MARKER}` marker — a reason is required.")
+    for path, lineno, message in marker_errors:
+        print(f"{path}:{lineno}: {message}")
 
     if near:
         findings = near_findings(blocks, pairs)
@@ -396,6 +474,11 @@ def run(near: bool, enforce: bool) -> int:
     if bare:
         print(f"\n{len(bare)} empty `{ALLOW_MARKER}` marker(s): the text after the colon "
               "is the required justification.", file=sys.stderr)
+    if marker_errors:
+        print(f"\n{len(marker_errors)} malformed INJECT marker(s) (§5): {MARKER_FORMS}. "
+              "A region that is not well formed skips nothing — an unterminated "
+              "`<!-- BEGIN-INJECT: … -->` would otherwise exempt the whole rest of the "
+              "file from this gate.", file=sys.stderr)
     if findings:
         print(f"\n{len(findings)} {label} pair(s) on the published doc surface. "
               "Single-source the block — `{{#include}}` it in the guide, or move a code "
@@ -404,11 +487,11 @@ def run(near: bool, enforce: bool) -> int:
               f"genuinely intentional, annotate the block `<!-- {ALLOW_MARKER}: <why> -->` "
               "or add the file pair to scripts/doc-duplication-allowlist.json with a "
               "`why`. Do NOT widen the surface exclusions.", file=sys.stderr)
-    if not findings and not bare:
+    if not findings and not bare and not marker_errors:
         print(f"doc-duplication: clean — 0 {label} pair(s) across {len(blocks)} "
               f"comparable block(s) in {len(files)} file(s).")
 
-    return 1 if (enforce and (findings or bare)) else 0
+    return 1 if (enforce and (findings or bare or marker_errors)) else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -447,18 +530,19 @@ _FENCE_HALF_B = (
 
 
 def _analyse(files: dict[str, str], pairs: list[dict] | None = None):
-    """Write `files` to a temp dir and return (exact, near, bare) findings."""
+    """Write `files` to a temp dir and return (exact, near, bare, marker) findings."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         for name, body in files.items():
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(body, encoding="utf-8")
-        blocks = collect_blocks(root, sorted(files))
+        blocks, marker_errors = collect_blocks(root, sorted(files))
         return (
             exact_findings(blocks, pairs or []),
             near_findings(blocks, pairs or []),
             bare_marker_findings(blocks),
+            marker_errors,
         )
 
 
@@ -466,8 +550,8 @@ def self_test() -> int:
     failures: list[str] = []
 
     def case(label: str, files: dict[str, str], *, exact: int, near: int | None = None,
-             bare: int = 0, pairs: list[dict] | None = None) -> None:
-        got_exact, got_near, got_bare = _analyse(files, pairs)
+             bare: int = 0, markers: int = 0, pairs: list[dict] | None = None) -> None:
+        got_exact, got_near, got_bare, got_markers = _analyse(files, pairs)
         problems = []
         if len(got_exact) != exact:
             problems.append(f"exact={len(got_exact)} want {exact}")
@@ -475,6 +559,8 @@ def self_test() -> int:
             problems.append(f"near={len(got_near)} want {near}")
         if len(got_bare) != bare:
             problems.append(f"bare-marker={len(got_bare)} want {bare}")
+        if len(got_markers) != markers:
+            problems.append(f"marker-error={len(got_markers)} want {markers}")
         print(f"  [{'FAIL' if problems else 'PASS'}] {label}"
               + (f": {', '.join(problems)}" if problems else ""))
         if problems:
@@ -540,6 +626,32 @@ def self_test() -> int:
               f"# B\n\n<!-- BEGIN-INJECT: README.md#quickstart -->\n{_LONG}\n"
               "<!-- END-INJECT -->\n"},
          exact=0, near=0)
+    case("quiet: an INJECT marker shown inside a code FENCE documents the convention "
+         "and is not a marker",
+         {"README.md": "# A\n\n```text\n<!-- BEGIN-INJECT: README.md#quickstart -->\n"
+                       "…generated copy…\n<!-- END-INJECT -->\n```\n"},
+         exact=0, near=0, markers=0)
+
+    # --- Direction 1 again: every MALFORMED delimiter fails CLOSED (§5). Each case plants
+    # the duplicate INSIDE/AFTER the broken region, so it can only pass if the region is
+    # not honoured as an exemption — and the marker defect is itself reported. ---
+    case("fail-closed: an UNTERMINATED BEGIN-INJECT does not hide the rest of the file",
+         {"README.md": f"# A\n\n{_LONG}\n",
+          "docs/a.md": f"# B\n\n<!-- BEGIN-INJECT: README.md#quickstart -->\n\n{_LONG}\n"},
+         exact=1, markers=1)
+    case("fail-closed: a loose marker shape (no `: <source>`) is not honoured",
+         {"README.md": f"# A\n\n{_LONG}\n",
+          "docs/a.md": f"# B\n\n<!-- BEGIN-INJECT -->\n{_LONG}\n<!-- END-INJECT -->\n"},
+         exact=1, markers=2)
+    case("fail-closed: an END-INJECT with no BEGIN is reported",
+         {"README.md": f"# A\n\n{_LONG}\n",
+          "docs/a.md": f"# B\n\n{_LONG}\n\n<!-- END-INJECT -->\n"},
+         exact=1, markers=1)
+    case("fail-closed: a NESTED BEGIN-INJECT does not open an exempt region",
+         {"README.md": f"# A\n\n{_LONG}\n",
+          "docs/a.md": "# B\n\n<!-- BEGIN-INJECT: a.md#one -->\n"
+                       f"<!-- BEGIN-INJECT: a.md#two -->\n{_LONG}\n<!-- END-INJECT -->\n"},
+         exact=1, markers=1)
     case("quiet: YAML frontmatter is not compared",
          {"skills/a/SKILL.md": f"---\nname: a\ndescription: {_LONG}\n---\n\n# A\n",
           "skills/b/SKILL.md": f"---\nname: b\ndescription: {_LONG}\n---\n\n# B\n"},
