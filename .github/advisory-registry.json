@@ -36,19 +36,12 @@
    "promotion_criteria": "promote only after the lane is stable across observed PRs, its runtime remains within the documented workload budget, and a reviewed allowlist mechanism exists for provably equivalent surviving mutants",
    "registered": "2026-07-19"
   },
-  "secret-literal grep (advisory)": {
+  "deploy/terraform static checks (advisory)": {
    "workflow": "deploy-terraform-lint.yml",
-   "job_id": "secret-grep-advisory",
+   "job_id": "terraform-static-advisory",
    "owner_bead": "sq-sos84",
-   "promotion_criteria": "advisory while the multi-cloud Terraform deploy templates are new; promote by moving the R4 secret-literal grep into a gating deploy-lint job once the deploy surface is proven stable on main",
-   "registered": "2026-07-15"
-  },
-  "terraform validate (advisory)": {
-   "workflow": "deploy-terraform-lint.yml",
-   "job_id": "terraform-validate-advisory",
-   "owner_bead": "sq-sos84",
-   "promotion_criteria": "advisory while terraform validate runs credential-free across provider-version drift; promote by removing the (advisory) token once validate is proven stable on main across the pinned terraform_version",
-   "registered": "2026-07-15"
+   "promotion_criteria": "PER-STEP, following the docs-quality quick-advisory precedent (sq-6vshe.7(e) folded the former `secret-literal grep (advisory)` job and the four-row `terraform validate (advisory)` matrix into this one job — five runner claims to one — so their two entries, both registered 2026-07-15 under sq-sos84, are superseded by this one and their criteria are carried over verbatim below). R4 secret-literal grep: advisory while the multi-cloud Terraform deploy templates are new; promote by moving it into a gating deploy-lint job once the deploy surface is proven stable on main. terraform init/validate/fmt: advisory while it runs credential-free across provider-version drift; promote once validate is proven stable on main across the pinned terraform_version. A step promotes by MOVING into a gating job, which is also what splits this entry back apart — promoting only one half means splitting the job first, since a single check-run cannot be half-advisory.",
+   "registered": "2026-08-02"
   },
   "asan (mmap corruption corpus, informational)": {
    "workflow": "asan.yml",

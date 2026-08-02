@@ -5,7 +5,35 @@
 #
 # This workflow is NON-GATING (design record §4): "a cloud-CLI outage or a provider-
 # credential gap must never redden the engine's merge gate."
-# Job names contain "advisory" so the ci-summary gate aggregator excludes them.
+#
+# [OPUS-5] #3773 — advisory status is DECLARED in `.github/advisory-registry.json`, not
+# inferred from the job name. The single job below is declared there; the "(advisory)"
+# token in its name is naming hygiene (C2), not what makes it non-gating.
+#
+# [OPUS-5] sq-6vshe.7(e) / issue #5221 — ONE RUNNER CLAIM FOR THE WHOLE LANE.
+# This workflow used to declare two jobs, one of them a four-row matrix, i.e. FIVE
+# runner claims per event. Every row paid checkout + setup-terraform + a full provider
+# install in order to run `validate` + `fmt -check` over ~2.1k lines of HCL. That is the
+# fold criterion in `research/ci-structural-speedup.md` §8 ("the per-job constant tax
+# dominates their runtime"), on the follow-up surface
+# `research/ci-runner-consolidation-2026-07.md` §7.4 left open ("the remaining
+# multi-short-job workflows outside this batch").
+#
+# The provider install is the largest component of that tax and it was DUPLICATED across
+# rows: the root module requires aws + azurerm + google and pulls `random` in through the
+# azure submodule, while the three submodules require aws / azurerm+random / google — so
+# the same provider archives were installed twice over. Measured locally against these
+# exact modules with terraform 1.15.8 (plugin PAYLOAD sizes, not a CI timing): four
+# independent inits install ~2.0 GB of providers between them, where one job with a
+# shared `TF_PLUGIN_CACHE_DIR` installs each provider exactly once (~1.0 GB) and every
+# module's own `.terraform` directory is then tens of KB of links into that cache.
+#
+# Failure-signal cost of the fold (the hazard this bead is told to weigh): NONE at the
+# gate. Both former jobs were already declared advisory, so `ci-summary / gate` excluded
+# them and still does — merging them cannot coarsen a gating verdict. Within the lane,
+# per-module attribution is preserved by `::group::` blocks plus an explicit list of the
+# failing modules, and the matrix's `fail-fast: false` independence is preserved by
+# running all four modules and only then failing.
 #
 # Triggers: push/PR changes to deploy/terraform/**, or workflow_dispatch.
 # No cloud credentials required — static analysis only.
@@ -27,15 +55,29 @@ permissions:
 
 jobs:
   # -------------------------------------------------------------------------
-  # Secret-literal hygiene grep (R4) — advisory
+  # deploy/terraform static checks — advisory
+  #   1. secret-literal hygiene grep (R4)          — former job `secret-grep-advisory`
+  #   2. terraform init/validate/fmt, all modules  — former job `terraform-validate-advisory`
   # -------------------------------------------------------------------------
-  secret-grep-advisory:
-    name: secret-literal grep (advisory)
+  terraform-static-advisory:
+    name: deploy/terraform static checks (advisory)
     runs-on: ubuntu-latest
+    # The former jobs carried no explicit budget and inherited the 360-minute default;
+    # per `research/ci-runner-consolidation-2026-07.md` §3 a consolidated job gets one.
+    # 20 minutes is deliberately loose headroom over a lane whose only bulk work is the
+    # one-time provider install, not a measured budget.
+    timeout-minutes: 20
+    env:
+      # Read-through cache shared by all four `terraform init` invocations below, so each
+      # provider archive is downloaded and unpacked ONCE per run instead of once per
+      # module. Job-scoped: nothing is persisted between runs (the plugin set is ~1 GB,
+      # far past what belongs in the repo's GHA cache budget).
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # ---- former job: secret-literal grep (advisory) ----
       - name: Grep for plaintext secret literals in deploy/terraform
         run: |
           echo "Scanning deploy/terraform for committed secret literals (R4)..."
@@ -85,43 +127,44 @@ jobs:
           done
           echo "OK: all auth_token variables are marked sensitive"
 
-  # -------------------------------------------------------------------------
-  # Terraform static validation — per submodule — advisory
-  # -------------------------------------------------------------------------
-  terraform-validate-advisory:
-    name: terraform validate (advisory)
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        module:
-          - path: deploy/terraform
-            label: root
-          - path: deploy/terraform/modules/aws
-            label: aws
-          - path: deploy/terraform/modules/azure
-            label: azure
-          - path: deploy/terraform/modules/gcp
-            label: gcp
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
+      # ---- former job: terraform validate (advisory) ----
+      # `!cancelled()` keeps today's semantics: the grep and the terraform validation were
+      # SEPARATE jobs, so a secret-literal finding never suppressed the terraform findings.
+      # Without this guard the fold would silently narrow what one run reports.
       - name: Set up Terraform
+        if: ${{ !cancelled() }}
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           # [GPT-5.6] Keep CI on the validator version used for this review.
           terraform_version: 1.15.8
 
-      - name: terraform init (no backend)
-        working-directory: ${{ matrix.module.path }}
-        run: terraform init -backend=false
-
-      - name: terraform validate
-        working-directory: ${{ matrix.module.path }}
-        run: terraform validate
-
-      - name: terraform fmt -check
-        working-directory: ${{ matrix.module.path }}
-        run: terraform fmt -check -recursive
+      - name: terraform init + validate + fmt -check (root, aws, azure, gcp)
+        if: ${{ !cancelled() }}
+        # Same three commands the four matrix rows ran, over the same four module paths,
+        # via `-chdir` instead of a per-row `working-directory`. `-input=false` is added
+        # because a consolidated job now carries a timeout: a prompt would burn it rather
+        # than fail. The loop does NOT stop at the first bad module — that preserves the
+        # matrix's `fail-fast: false`, which was the whole point of running four rows.
+        run: |
+          set -uo pipefail
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          failed=""
+          for entry in "root:deploy/terraform" \
+                       "aws:deploy/terraform/modules/aws" \
+                       "azure:deploy/terraform/modules/azure" \
+                       "gcp:deploy/terraform/modules/gcp"; do
+            label="${entry%%:*}"
+            path="${entry#*:}"
+            echo "::group::terraform ${label} (${path})"
+            ok=1
+            terraform -chdir="${path}" init -backend=false -input=false || ok=0
+            if [ "${ok}" = 1 ]; then terraform -chdir="${path}" validate || ok=0; fi
+            if [ "${ok}" = 1 ]; then terraform -chdir="${path}" fmt -check -recursive || ok=0; fi
+            echo "::endgroup::"
+            if [ "${ok}" != 1 ]; then failed="${failed} ${label}"; fi
+          done
+          if [ -n "${failed}" ]; then
+            echo "::error title=terraform validate::failing module(s):${failed} — see the per-module ::group:: blocks above."
+            exit 1
+          fi
+          echo "OK: terraform init/validate/fmt clean for root, aws, azure, gcp"

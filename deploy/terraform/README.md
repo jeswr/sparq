@@ -127,9 +127,13 @@ sending credentials.
 
 The `.github/workflows/deploy-terraform-lint.yml` workflow runs
 `terraform init -backend=false && terraform validate && terraform fmt -check`
-per submodule, plus a secret-literal grep (R4 hygiene), on every PR touching
-`deploy/terraform/**`. No cloud credentials required. This workflow is
-non-gating (jobs are marked advisory, per design record §4).
+for the root module and each submodule, plus a secret-literal grep (R4 hygiene),
+on every PR touching `deploy/terraform/**`. No cloud credentials required. All of
+it runs in a single job so the checkout, the Terraform install and the provider
+install are paid once rather than once per module. This workflow is non-gating:
+its job is declared in `.github/advisory-registry.json`, which since #3773 is the
+only thing that excludes a check from the `ci-summary / gate` verdict (per design
+record §4).
 
 `terraform plan` requires provider credentials and is not run in CI.
 `terraform apply` requires credentials and is run locally or from a secure
