@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -71,21 +72,29 @@ _TABLE_ROW = re.compile(r"^\|\s*`max_entries_to_build`\s*\|\s*`(\d+)`\s*\|", re.
 
 _JOB_ID = re.compile(r"^  (?P<id>[A-Za-z0-9_-]+):\s*$")
 
+# GitHub Actions honours BOTH spellings. Scanning only one would let a push-skip job
+# added in the other extension slip past the coupling check below, leaving the doc
+# asserting a precondition that has in fact cleared.
+WORKFLOW_GLOBS = ("*.yml", "*.yaml")
+
 
 def _is_comment(line: str) -> bool:
     return line.lstrip().startswith("#")
 
 
-def workflows_defining_push_skip_job() -> list[str]:
+def workflows_defining_push_skip_job(workflows: Path | None = None) -> list[str]:
     """Workflow filenames that define a job whose id is a push-skip job id.
 
-    Only lines inside the top-level `jobs:` mapping are considered, and comment
-    lines are skipped — several files already discuss `sq-6vshe.14` and the
-    `queue-validated` job in PROSE (ci.yml's cache-coupling note is one), and
-    counting those would report the precondition as met while no such job runs.
+    Scans every `.yml` and `.yaml` file in `workflows` (default:
+    `.github/workflows/`). Only lines inside the top-level `jobs:` mapping are
+    considered, and comment lines are skipped — several files already discuss
+    `sq-6vshe.14` and the `queue-validated` job in PROSE (ci.yml's cache-coupling
+    note is one), and counting those would report the precondition as met while no
+    such job runs.
     """
+    root = WORKFLOWS if workflows is None else workflows
     hits = []
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    for path in sorted(p for glob in WORKFLOW_GLOBS for p in root.glob(glob)):
         lines = path.read_text(encoding="utf-8").split("\n")
         try:
             start = next(i for i, l in enumerate(lines) if re.match(r"^jobs:", l))
@@ -107,6 +116,19 @@ def marker() -> re.Match[str]:
     m = _MARKER.search(DOC.read_text(encoding="utf-8"))
     assert m is not None, "caller must check presence first"
     return m
+
+
+def expected_documented_value(status: str) -> int:
+    """The ONLY `max_entries_to_build` value the doc may carry for `status`.
+
+    `applied` means the maintainer applied the edit issue #5162 authorises, and that
+    issue authorises exactly one edit: the baseline raised to the approved target,
+    nothing else. So `applied` pins the exact target rather than merely "above the
+    baseline" — any other number documents a ruleset nobody licensed.
+    """
+    if status not in VALID_STATUSES:
+        raise ValueError(f"unknown marker status {status!r}")
+    return APPROVED_TARGET if status == "applied" else BASELINE
 
 
 class TestParserNonVacuity(unittest.TestCase):
@@ -152,6 +174,90 @@ class TestParserNonVacuity(unittest.TestCase):
             "the job scanner is matching comment lines — ci.yml only MENTIONS the "
             "queue-validated push skip, it does not define that job.",
         )
+
+
+class TestJobScannerAgainstFixtures(unittest.TestCase):
+    """Against the repo the scanner is all-negative today (no push-skip job exists
+    yet), so its POSITIVE path — the half that fires the FORGOTTEN alarm — is never
+    exercised. Drive it against controlled fixtures instead, in BOTH extensions
+    GitHub Actions accepts."""
+
+    _DEFINES_JOB = (
+        "name: fixture\n"
+        "on: [push]\n"
+        "jobs:\n"
+        "  queue-validated:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: 'true'\n"
+    )
+    _MENTIONS_JOB_ONLY = (
+        "name: fixture\n"
+        "on: [push]\n"
+        "# waits on the queue-validated push skip (sq-6vshe.14)\n"
+        "jobs:\n"
+        "  # queue-validated:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: 'true'\n"
+    )
+
+    def _scan(self, name: str, body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / name).write_text(body, encoding="utf-8")
+            return workflows_defining_push_skip_job(Path(td))
+
+    def test_a_defining_workflow_is_detected_in_either_extension(self) -> None:
+        for name in ("push-skip.yml", "push-skip.yaml"):
+            with self.subTest(workflow=name):
+                self.assertEqual(
+                    self._scan(name, self._DEFINES_JOB),
+                    [name],
+                    f"a workflow defining {'/'.join(sorted(PUSH_SKIP_JOB_IDS))} was not "
+                    f"detected in {name}. GitHub Actions runs both `.yml` and `.yaml`, "
+                    "so scanning only one extension would let the precondition clear "
+                    "while the coupling test below kept passing on a stale "
+                    "`status=blocked`.",
+                )
+
+    def test_a_prose_only_mention_is_ignored_in_either_extension(self) -> None:
+        for name in ("prose.yml", "prose.yaml"):
+            with self.subTest(workflow=name):
+                self.assertEqual(
+                    self._scan(name, self._MENTIONS_JOB_ONLY),
+                    [],
+                    f"{name} only MENTIONS the push skip in comments; counting that "
+                    "would demand a doc reconciliation for a job that does not run.",
+                )
+
+
+class TestStatusValueRuleIsExact(unittest.TestCase):
+    """The status/value rule decides whether a documented ruleset is one the
+    maintainer was licensed to ask for, so pin it directly — the repo-state test
+    only ever exercises the branch matching today's marker."""
+
+    def test_applied_requires_exactly_the_approved_target(self) -> None:
+        self.assertEqual(expected_documented_value("applied"), APPROVED_TARGET)
+
+    def test_applied_rejects_every_off_target_value(self) -> None:
+        for value in (BASELINE, APPROVED_TARGET - 1, APPROVED_TARGET + 1, 999):
+            with self.subTest(value=value):
+                self.assertNotEqual(
+                    value,
+                    expected_documented_value("applied"),
+                    f"status=applied must accept only {APPROVED_TARGET}; {value} is "
+                    f"not the edit issue #{STEER_ISSUE} authorises.",
+                )
+
+    def test_unapplied_statuses_require_the_baseline(self) -> None:
+        for status in ("blocked", "unblocked"):
+            with self.subTest(status=status):
+                self.assertEqual(expected_documented_value(status), BASELINE)
+
+    def test_an_unknown_status_is_an_error_not_a_silent_pass(self) -> None:
+        with self.assertRaises(ValueError):
+            expected_documented_value("shipped")
 
 
 class TestMarkerAgreesWithTheRenderedDoc(unittest.TestCase):
@@ -222,18 +328,21 @@ class TestDeferredRaiseIsCoupledToThePrecondition(unittest.TestCase):
         status, value = m.group("status"), int(m.group("value"))
         self.assertIn(status, VALID_STATUSES)
         if status == "applied":
-            self.assertGreater(
+            self.assertEqual(
                 value,
-                BASELINE,
-                f"status=applied claims the maintainer raised `max_entries_to_build`, "
-                f"but the documented value is still the {BASELINE} baseline. Either the "
-                "ruleset edit was not actually applied, or the doc was not updated with "
-                "the value that was.",
+                expected_documented_value(status),
+                f"status=applied claims the maintainer applied the ruleset edit issue "
+                f"#{STEER_ISSUE} authorises — `max_entries_to_build` {BASELINE} -> "
+                f"{APPROVED_TARGET}, nothing else touched — but the documented value is "
+                f"{value}. Either the edit was not actually applied, or the doc records "
+                f"a value that was never approved; {APPROVED_TARGET} is the only figure "
+                "measured (research/ci-mergequeue-speedup-2026-07.md §3.3) and the only "
+                "one the steer issue carries.",
             )
         else:
             self.assertEqual(
                 value,
-                BASELINE,
+                expected_documented_value(status),
                 f"status={status} means the ruleset edit has NOT been applied, so the "
                 f"documented value must still be the live baseline {BASELINE}. Writing "
                 "the target value into the doc before the maintainer applies it makes "
