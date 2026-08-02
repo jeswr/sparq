@@ -973,6 +973,17 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] #5231: the sibling of the posture test above, same invisible-regression
+      # shape. coverage-engine-merge is supposed to warm its object compile off the
+      # coverage-engine-run partitions' dep cache, but asked for it with rust-cache's
+      # `key:` — which COMPOSES with the job id rather than replacing it, so the two jobs
+      # resolved to different restore-key prefixes and the reuse never happened while the
+      # step comment said it did. Both steps now carry one `shared-key`; this pins them
+      # together and models rust-cache's key construction so the claim is checkable.
+      # Name QUOTED: an unquoted ` #5231)` would be parsed as a YAML comment and the
+      # step would display with the issue ref lopped off (cf. line ~937's quoted name).
+      - name: "coverage-engine dep-cache key reuse (shared-key, not key — #5231)"
+        run: python3 scripts/tests/test_coverage_engine_cache_key.py
       # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
       # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
       # outage there concluded `failure` with nothing measured and ejected an unrelated

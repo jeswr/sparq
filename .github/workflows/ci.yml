@@ -3485,8 +3485,35 @@ jobs:
       # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
-      # Per-partition dep cache: each partition compiles the same instrumented engine, so a
-      # shared-key cache warms the deps; keying by part avoids save-race clobbering.
+      # [OPUS-5] #5231 — ONE dep cache shared by the three run partitions AND the
+      # coverage-engine-merge job below. All four of those compiles go through
+      # coverage-engine-shard.sh with the SAME `--package "$CRATE" --features
+      # "$ENGINE_FEATURES"` (sparq-engine; parallel,regex,digest — both constants, not
+      # per-leg), off the same Cargo.lock and under the same RUSTFLAGS (the merge's
+      # bit-reproducibility requirement forces that last one, and
+      # scripts/check-coverage-rustflags.py gates it). So they want the SAME dependency
+      # closure and there is nothing for a per-leg key to keep apart. This
+      # is a straight generalisation of the coverage-measure step above, without that
+      # step's honest residual: those shards select DIFFERENT per-crate `--features`,
+      # these partitions do not.
+      #
+      # `shared-key`, NOT `key` — the distinction is load-bearing and was the #5231 bug.
+      # rust-cache's config.ts composes `key` WITH the automatic job segment (`key` then
+      # `-${GITHUB_JOB}`, since `add-job-id-key` defaults to true) and uses `shared-key`
+      # INSTEAD of it. So the former `key: coverage-engine-run-<part>` resolved to
+      # `…-coverage-engine-run-<part>-coverage-engine-run-…` here while the merge job's
+      # `key: coverage-engine-run-1` resolved to
+      # `…-coverage-engine-run-1-coverage-engine-merge-…` — two different restore-key
+      # PREFIXES, so the merge never restored anything these partitions saved, whatever
+      # its comment claimed. `shared-key` drops the job segment on both sides, which is
+      # the only way two differently-named jobs can land on one entry.
+      #
+      # Concurrent saves are not a hazard: `save-if` restricts saving to push-to-main,
+      # and a duplicate-key save is a benign no-op the cache API rejects rather than a
+      # clobber — the same argument the coverage-measure step above already makes.
+      #
+      # Pinned by scripts/tests/test_coverage_engine_cache_key.py: this key and the
+      # merge job's must stay identical, and neither may carry a `key:`.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
@@ -3494,11 +3521,7 @@ jobs:
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # [OPUS-5] sq-h2gz6 / [SONNET-4.6] sq-aemq7: the per-part key is LEFT ALONE
-          # here — it is outside both beads' named scope (coverage-shard-N), which
-          # collapsed only the coverage-SHARD matrix onto one `shared-key`, and unlike
-          # those shards the merge job below deliberately points at part 1's key.
-          key: coverage-engine-run-${{ matrix.part }}
+          shared-key: coverage-engine
       - name: Install cargo-llvm-cov + nextest
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action (the @<tool> ref is dropped by the pin). Both tools are needed:
@@ -3559,17 +3582,20 @@ jobs:
       # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
-      # Reuse a run partition's dep cache to warm the merge job's object compile.
+      # [OPUS-5] #5231 — reuse the run partitions' dep cache to warm this job's object
+      # compile. That reuse requires the SAME `shared-key` the partitions carry: a `key:`
+      # naming their key does NOT work, because rust-cache composes `key` with this job's
+      # own id and so resolves to a different restore-key prefix. Rationale in full on the
+      # coverage-engine-run cache step above; pinned together by
+      # scripts/tests/test_coverage_engine_cache_key.py.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
-          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py. The pinned
-          # `key:` stays (see the note above this step) — both beads collapsed only the
-          # coverage-SHARD matrix onto one `shared-key`.
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: coverage-engine-run-1
+          shared-key: coverage-engine
       - name: Install cargo-llvm-cov + nextest
         uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # cargo-llvm-cov
         with:
