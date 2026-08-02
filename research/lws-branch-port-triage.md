@@ -3,18 +3,18 @@
 # LWS upstream branch triage — port-or-drop verdicts (sq-gg0qq.8)
 
 > **Status: TRIAGE RECORD (decision, no implementation).** Three upstream branches named by the
-> bead are triaged here to a written **port** verdict — the drop half is deferred, see the outcome
-> line — and the crate's remaining `M2-next` markers are swept to a deferred-work list.
+> bead are triaged here to a written **port-or-drop** verdict — both halves answered, see the
+> outcome line — and the crate's remaining `M2-next` markers are swept to a deferred-work list.
 >
 > Bead: **sq-gg0qq.8** · Issue: **#2744** · Parent: **#2572** / `sq-gg0qq` · Blocked-by: **#2747**.
 > Companion record: [`lws-design-records.md`](./lws-design-records.md) (the reconstructed ADR
 > estate — §6 there is the normative description of the existence-non-disclosure family).
 >
-> **Outcome in one line:** for all three branches the **headline capability is already present in
-> the import**, with tests — so **nothing was ported**. The **branch-level port/drop decision is
-> DEFERRED**, pending an upstream tip-vs-import comparison (**D5**) or maintainer confirmation
-> (**§8 Q1**): in-tree evidence can show a capability is here, but it cannot show a branch carried
-> nothing else. Do not delete an upstream branch on the strength of this record alone.
+> **Outcome in one line:** all three branches are **DROP — nothing to port**. Each branch tip is a
+> git **ancestor of the import rev** `1e555b10`, so every commit on every one of them is already in
+> the snapshot (§0.1); the headline capability of each is additionally citable in-tree (§3–§5).
+> Both halves of the port/drop question are now answered from evidence, not inference — the earlier
+> revision of this record deferred the branch-level half, and that deferral is **closed**.
 
 ---
 
@@ -40,20 +40,36 @@ should be folded "into the sparq-solid-server Cargo.toml pin". No such crate exi
 workspace; the pin lives at `crates/sparq-lws-core/Cargo.toml:230`. (`crates/sparq-solid` is a
 different crate — the ODRL/Solid vocabulary estate — and does not carry this dependency.)
 
-### What follows from (a) — the honest limit on these verdicts
+## 0.1 The decisive check: every branch tip is an ancestor of the import
 
-This triage had **no network access and no upstream remote**, so it could not fetch the branch tips
-and could not compute a commit-level diff of branch-vs-import. The verdicts below are therefore
-grounded in a different, weaker-but-checkable claim:
+An earlier revision of this record was written without network access and could only argue
+*capability-level* subsumption from in-tree `file:line` citations, explicitly deferring the
+branch-level verdict. That limit no longer applies: the upstream remotes were reachable on this
+pass, so the commit-level comparison it deferred (item **D5**) was simply **run**.
 
-> **The capability each branch existed to deliver is present in the imported tree, with tests.**
+Cloning `jeswr/solid-server-rs` and asking, for each branch, which of its commits are *not* already
+in the import rev:
 
-That is *capability-level* subsumption, evidenced by `file:line` citations you can check. It is
-**not** a proof that no line of those branches is missing. Where a branch could plausibly have
-carried more than its headline capability, §4 says so rather than claiming completeness. If the
-maintainer wants commit-level certainty, that needs a network-enabled pass that adds
-`jeswr/solid-server-rs` as a remote and diffs each branch tip against import rev `1e555b10` — filed
-as deferred item **D5** in §5.
+```text
+git rev-list --count origin/<branch> --not 1e555b10
+chore/repin-async-dns-verifier   -> 0     git merge-base --is-ancestor -> ANCESTOR
+fix/unique-blob-keys             -> 0     git merge-base --is-ancestor -> ANCESTOR
+phase-existence-non-disclosure   -> 0     git merge-base --is-ancestor -> ANCESTOR
+```
+
+Every branch tip is an **ancestor** of `1e555b10`. Each branch was therefore merged upstream *before*
+the snapshot was taken, and — this is the part the capability argument could never reach — **carries
+no commit that the import lacks**. That answers §8 Q1 directly and upgrades all three rows from
+"capability subsumed" to a genuine branch-level **DROP**.
+
+Each branch tip is far *behind* the import (the tip-vs-import diff is dominated by tens of thousands
+of deleted lines — work added after the branch point), which is the expected shape for a merged,
+stale branch and the reason a raw two-dot diff is the wrong tool here; ancestry is the right one.
+
+**The one residual.** Ancestry is a fact about upstream's commit graph. It shows the branches hold
+nothing the import's *history* lacks; it does not by itself certify that sparq's import commit
+`47e11a5c` transcribed that tree faithfully. The capability-level citations in §3–§5 are what check
+the transcription, which is why both halves are kept rather than the ancestry check replacing them.
 
 ## 1. Why capability-level subsumption is the expected answer, not a convenient one
 
@@ -65,48 +81,106 @@ The import commit is a single whole-tree snapshot:
 | That import is one commit | `47e11a5c` — *feat(lws): import jeswr/solid-server-rs as crates/sparq-lws-core (sq-gg0qq.2)* (#1949) |
 | Each of the three subjects' defining symbols was **introduced by that commit** | `git log -S` on `mint_blob_key`, `guard_post_existence_requires_read`, and the verifier rev string each return exactly `47e11a5c` |
 
-So each capability was **already in upstream's tree when the snapshot was taken**, and work that is
-already inside the snapshot you imported cannot be "ported" — it is already here. That is the single
-mechanism behind all three verdicts, and it is why the verdicts agree.
+So each subject's defining text was **already in upstream's tree when the snapshot was taken**, and
+work that is already inside the snapshot you imported cannot be "ported" — it is already here. That
+is the mechanism behind the capability half of each verdict, and it is why the three agree.
 
-**What this does not establish.** `git log -S` in *this* repository shows only what the imported
-snapshot contains. It cannot distinguish "the branch was merged upstream before the snapshot" from
-"the capability reached upstream `main` by some other route while the branch carried further,
-unmerged work". So the mechanism licenses a *capability-level* verdict only; whether each named
-branch is itself safe to close out is **§8 Q1 / D5**, not a conclusion of this record.
+**The mechanism is only as strong as what the symbol denotes**, and that differs by subject. For
+`fix/unique-blob-keys` and `phase-existence-non-disclosure` the symbol *is* the implementation:
+`mint_blob_key` and `guard_post_existence_requires_read` are in-tree functions whose behaviour §4
+and §5 read directly and whose tests are in-tree. For `chore/repin-async-dns-verifier` the symbol is
+merely a **40-hex rev string** naming an out-of-tree dependency: that the string was in the snapshot
+shows only *which revision was pinned*, not *what that revision does*. Lockfile membership of
+`hickory-resolver` does not close that gap either — a dependency can go unused on the relevant path,
+or be used without the SSRF policy. §3 therefore does not infer the capability; it reads the pinned
+revision's own source and cites the call path.
+
+**What `git log -S` alone does not establish.** Run in *this* repository it shows only what the
+imported snapshot contains. It cannot distinguish "the branch was merged upstream before the
+snapshot" from "the capability reached upstream `main` by some other route while the branch carried
+further, unmerged work" — so on its own it licenses a *capability-level* verdict at best. That is
+precisely the gap **§0.1's ancestry check** closes, and why the branch-level verdicts rest on that
+check rather than on this table.
 
 ## 2. The verdict table
 
-Verdicts are **capability-level** (see §0 and §1): "no port needed" is established, "the branch
-holds nothing else" is not.
+Each verdict now rests on **two independent legs**: the branch-level ancestry check (§0.1 — the
+branch holds no commit the import lacks) and the capability-level in-tree evidence (§3–§5 — the
+thing the branch existed to deliver is here, and works).
 
 | Upstream branch | Subject | Verdict | Basis |
 |---|---|---|---|
-| `chore/repin-async-dns-verifier` | verifier git-pin bump to the async-DNS resolver | **NO PORT — capability subsumed**; branch-level drop deferred | pinned rev already resolves the async DNS resolver; cargo-vet delta already recorded (§3) |
-| `fix/unique-blob-keys` | blob-key collision fix (bytes integrity) | **NO PORT — capability subsumed**; branch-level drop deferred | unique-per-write minting implemented, fail-closed, 3 unit tests incl. a mutation check (§4) |
-| `phase-existence-non-disclosure` | 404-vs-403 existence non-disclosure | **NO PORT — capability subsumed**; branch-level drop deferred | the V2/V4/V5/V6 family + the exhaustive byte-identical matrix are in-tree and pinned (§5 of this doc, §6 of the design record) |
+| `chore/repin-async-dns-verifier` | verifier git-pin bump to the async-DNS resolver | **DROP — nothing to port** | ancestor of the import (§0.1); the import pins a *descendant* of the rev the branch repinned to, and that pinned source resolves via async hickory behind the SSRF gate (§3) |
+| `fix/unique-blob-keys` | blob-key collision fix (bytes integrity) | **DROP — nothing to port** | ancestor of the import (§0.1); unique-per-write minting implemented, fail-closed, 3 unit tests incl. a mutation check (§4) |
+| `phase-existence-non-disclosure` | 404-vs-403 existence non-disclosure | **DROP — nothing to port** | ancestor of the import (§0.1); the V2/V4/V5/V6 family + the exhaustive byte-identical matrix are in-tree and pinned (§5 of this doc, §6 of the design record) |
 
-No branch is a **PORT**, and no code changed under this bead. No branch is certified **DROP**
-either: promoting these rows to a branch-level DROP needs D5 or the maintainer's answer to §8 Q1.
+No branch is a **PORT**, and no code changed under this bead. All three are safe to delete on the
+strength of §0.1 — with the single caveat recorded there (ancestry certifies upstream's history, not
+the fidelity of sparq's transcription of it; §3–§5 are what check that).
 
-## 3. `chore/repin-async-dns-verifier` — NO PORT (capability subsumed)
+## 3. `chore/repin-async-dns-verifier` — DROP (nothing to port)
 
 **What the branch was for.** Bumping the `solid-oidc-verifier` git pin to a revision whose
 WebID/issuer resolution uses an **asynchronous, SSRF-guarded** DNS resolver rather than a blocking
 one — a housekeeping/hardening bump, with a cargo-vet delta for the new transitive crates.
 
-**Why it is subsumed.** The in-tree pin is an immutable `rev` pin whose resolved dependency graph
-**already contains** the async resolver:
+**The branch's own repin is superseded, not merely matched.** The branch tip pins the verifier at
+rev `836899d`, which still used `hickory-resolver` **0.24**; the imported tree pins `89c8962`, a
+**descendant** of `836899d` on the verifier's own history, using **0.26.1**. So the in-tree pin is at
+or beyond the branch's target:
 
-- `crates/sparq-lws-core/Cargo.toml:230` — `solid-oidc-verifier = { git = "…", rev = "89c896249a726398b78302fd2f65eef0a82af681", features = ["network"] }`
-- `Cargo.lock:4799-4812` — that package's dependency list includes `hickory-resolver`
-- `Cargo.lock:2119-2141` — `hickory-proto` and `hickory-resolver` both resolve to `0.26.1`
+| Where | Verifier rev | `hickory-resolver` |
+|---|---|---|
+| branch tip `origin/chore/repin-async-dns-verifier`, `Cargo.toml:50` | `836899d` | 0.24 |
+| import rev `1e555b10`, `Cargo.toml:94` = in-tree `crates/sparq-lws-core/Cargo.toml:230` | `89c8962` | 0.26.1 |
 
-`hickory-resolver` **is** the async DNS resolver (the Tokio-native successor to trust-dns); its
-presence in the pinned verifier's dependency set is exactly the property the repin existed to
-produce.
+The async, SSRF-guarded resolver design the branch existed to adopt is present at **both** revs —
+`836899d`'s `src/net.rs:127` already documents the dedicated-thread + `TokioAsyncResolver` fix — and
+the in-tree rev additionally carries the 0.24 → 0.26.1 migration
+(`TokioAsyncResolver::tokio_from_system_conf` → `Resolver::builder_tokio()`) that picks up the
+GHSA-q2qq-hmj6-3wpp `hickory-proto` fix. The import is therefore strictly ahead of the branch here.
 
-**The cargo-vet delta is already recorded**, and recorded under this bead family's own pre-flight:
+**The capability is verified at the source, not inferred from the lockfile.** Dependency membership
+is not use, so the pinned revision `89c8962` was checked out and read. The WebID/issuer resolution
+call path (all line numbers in `jeswr/solid-oidc-verifier` @ `89c8962`):
+
+1. **Both fetching seams share one guarded fetcher.** `NetworkWebIdResolver::new` builds
+   `SafeFetcher::system` (`src/webid.rs:214`) for the WebID-profile fetch; the issuer side — OIDC
+   discovery + JWKS — builds the same thing at `src/config.rs:261`. Both are `#[cfg(feature =
+   "network")]`, and `network` is the crate's **default** feature and the one our pin selects
+   explicitly (`Cargo.toml:230`), so this is the path this build takes.
+2. **The resolver really is async hickory.** `SafeFetcher::system` (`src/net.rs:304`) wires
+   `SystemResolver`, whose background thread builds `hickory_resolver::Resolver::builder_tokio()`
+   (`src/net.rs:199`) — falling back to an explicit `udp_and_tcp(&GOOGLE)` config, and **failing
+   closed** if even that cannot be built (`src/net.rs:212-218`) — then awaits `resolver.lookup_ip(…)`
+   per host (`src/net.rs:228-231`).
+3. **The SSRF policy is applied by the caller, on every record.** `SafeFetcher`'s fetch resolves the
+   host and runs **each** returned address through `classify_resolved_address_with_nat64`
+   (`src/net.rs:354`, the classifier at `src/webid.rs:166`), and *any* non-public record fails the
+   whole request — the documented DNS-rebinding mitigation, "the attacker cannot mix a public +
+   private record" (`src/net.rs:351-353`). The connection is then **pinned** to the validated
+   addresses, and redirects are followed manually with the whole gate re-applied per hop, under a
+   bounded hop count (`src/net.rs:319`, `:326`, bound documented at `:49-50`).
+
+**One correction to the branch's framing.** "Async rather than blocking" is true of the *resolver*
+but not of the fetch seam. `HostResolver::resolve_host` is deliberately a **synchronous** trait
+method (`src/net.rs:109`) and the HTTP hop uses `reqwest::blocking` on a dedicated OS thread
+(`src/net.rs:428-439`). The async hickory resolver runs on its own background current-thread runtime
+precisely *because* hickory's synchronous `lookup_ip` internally calls `Runtime::block_on` and would
+panic with "Cannot start a runtime from within a runtime" when a Tokio/axum handler calls
+`Verifier::verify` directly (`src/net.rs:127-140`) — which is exactly how `solid-server-rs`, and
+therefore `sparq-lws-core`, calls it. The repin fixed a **nested-runtime panic**, not a latency
+problem; anyone reading "async DNS" as "the verifier's fetch path is now async" would be misled.
+
+**Upstream has tests for the guard**, so this is a pinned property rather than a read of the source:
+`tests/webid_ssrf.rs` covers private-IP literals (`:165`), the per-record rebinding loop where one
+public + one private record must fail (`:211`), and redirect-to-private (`:220`); `src/net.rs:566`
+and `:577` cover the same through the fetcher with an injected adversarial resolver.
+
+**A cargo-vet delta is also recorded**, under this bead family's own pre-flight. This is
+supply-chain bookkeeping about *which* crates entered the graph — it is not what establishes the
+call path above (points 1–3 are), and its wording is a pre-existing in-repo assertion this pass did
+not re-verify against the advisory database (residual 2 below):
 
 | Crate | Version | Criteria | Note site |
 |---|---|---|---|
@@ -117,20 +191,26 @@ produce.
 
 The `hickory-resolver` note reads: *"solid-server-rs import pre-flight (sq-gg0qq.1): transitive of
 solid-oidc-verifier — its DNS-pinned SSRF-guarded async resolver (0.26.1 carries the
-GHSA-q2qq-hmj6-3wpp hickory-proto fix)."* So the sibling bead `sq-gg0qq.1` already did the
-supply-chain half of this branch's work, deliberately.
+GHSA-q2qq-hmj6-3wpp hickory-proto fix)."* So the sibling bead `sq-gg0qq.1` did the supply-chain half
+of this branch's work, deliberately. The note's *"DNS-pinned SSRF-guarded"* phrasing is corroborated
+by the call path above rather than relied upon for it.
 
-**Stated honestly — three residuals.**
+**Stated honestly — two residuals.**
 
 1. These are **exemptions**, not audits: `supply-chain/audits.toml` and `imports.lock` contain no
    `hickory` entry. An exemption is an accepted-risk marker, not a review. Converting the three
    hickory rows to real audits (or importing a trusted third-party audit) is genuine remaining
    work — deferred item **D4**.
-2. The GHSA-q2qq-hmj6-3wpp claim is **quoted from the existing in-repo note**, not independently
-   re-verified by this pass against the advisory database.
-3. Because the branch tip was unreachable, I cannot rule out that it also carried unrelated
-   housekeeping (lint fixes, CI tweaks) beyond the repin. The *repin* is subsumed; "the branch
-   contained nothing else" is not asserted.
+2. The GHSA-q2qq-hmj6-3wpp claim was **not** checked against the advisory database by this pass. It
+   now has two independent in-source corroborations — the in-repo cargo-vet note, and the pinned
+   verifier's own `Cargo.toml`, which documents the `>=0.26.1` pin as fixing exactly that advisory
+   (*"the 0.24 line's `hickory-proto` is vulnerable to GHSA-q2qq-hmj6-3wpp … the fix is only on
+   hickory-proto 0.26.1, reachable ONLY via hickory-resolver 0.26"*) — but two authors agreeing is
+   not an advisory-database check, and D4 still owns that.
+
+The residual that used to head this list — *"whether the pinned revision actually performs
+asynchronous, SSRF-guarded resolution is unverified"* — is **closed** by the call path above. So is
+the *"the branch may have carried unrelated commits"* residual, by §0.1's ancestry check.
 
 ## 4. `fix/unique-blob-keys` — NO PORT (capability subsumed)
 
@@ -289,30 +369,33 @@ rather than implemented here.
    `hickory-net` @ 0.26.1 are `safe-to-deploy` **exemptions** with no audit entry; either audit them
    or import a trusted third-party audit, and re-verify the GHSA-q2qq-hmj6-3wpp claim against the
    advisory database rather than against the in-repo note.
-5. **D5 — Commit-level confirmation, required before any branch is deleted.** Add
-   `jeswr/solid-server-rs` as a remote in a network-enabled pass and diff each of the three branch
-   tips against import rev `1e555b10`, to upgrade §2's capability-level verdicts to branch-level
-   ones. This is the only in-repo route to a DROP verdict; the alternative is the maintainer
-   answering §8's first question from their own knowledge of the upstream history.
+5. **D5 — Commit-level confirmation — ✅ DONE, not deferred.** This item asked for a network-enabled
+   pass comparing each branch tip against import rev `1e555b10`. It was run; all three tips are
+   ancestors of the import (§0.1), which is what upgraded §2 to branch-level DROP. Retained here as
+   a record of how the verdict was reached, not as outstanding work.
 6. **D6 — `object_store` blob backend.** The genuinely large open M2 item: the S3/Local adapter
    behind `BlobStore`, including `list`, the backend-native CAS witness for
    `delete_if_unchanged`, and the `stat` override. Sizeable; listed for completeness, not proposed
    for the next slice.
 7. **D7 — N-Triples/N-Quads/N3 read formats.** Extend `content.rs::classify` and the negotiation
    path. Small and self-contained.
+8. **D8 — Verify the pinned verifier's DNS resolution path — ✅ DONE, not deferred.** Raised because
+   §3 originally inferred the capability from `Cargo.lock` membership. Rev `89c8962` was checked out
+   and the WebID/issuer call path cited in §3; the async hickory resolver and the per-record SSRF
+   gate are both real and upstream-tested. Retained as provenance for §3's evidence.
 
 Ordering: **D2** first (doc-only, removes the misinformation that hid D1), then **D1** and **D3**
-together as the security-composition slice alongside the WAC bead, then **D4**. **D5** is
-opportunistic; **D6** and **D7** are independent feature work.
+together as the security-composition slice alongside the WAC bead, then **D4** (the only remaining
+supply-chain item, and the owner of the un-re-verified GHSA claim). **D6** and **D7** are independent
+feature work. **D5** and **D8** are done.
 
 ## 8. Open questions for the maintainer
 
-1. **Are the three branches merged upstream and safe to delete?** *(Blocking for any branch
-   deletion.)* This triage establishes only that each branch's headline **capability** is in the
-   snapshot; from in-tree evidence it cannot tell a merged branch from an abandoned one, nor rule
-   out further commits beyond the headline. Confirming they were merged (not abandoned mid-flight,
-   and carrying nothing else) is what turns "capability subsumed" into a branch-level DROP — and is
-   the cheaper alternative to D5.
+1. ~~**Are the three branches merged upstream and safe to delete?**~~ **ANSWERED — yes, by §0.1.**
+   Each tip is an ancestor of the import rev, so each was merged upstream before the snapshot and
+   carries no commit the import lacks. This no longer needs the maintainer's recollection. The one
+   thing worth a maintainer's eye is the residual §0.1 records: ancestry certifies upstream's
+   history, not the fidelity of sparq's transcription of that tree.
 2. **Was `phase-existence-non-disclosure` complete at the snapshot?** The branch name suggests a
    *phase* of a larger effort. §6 of the design record documents V2/V4/V5/V6 and the numbering skips
    V1 and V3 — if those are further variants that landed elsewhere (or never landed), that is a real
@@ -329,8 +412,14 @@ opportunistic; **D6** and **D7** are independent feature work.
 - **It does not re-audit the security properties it cites.** §5 reports what the in-tree guards and
   tests enforce and carries the code's own documented residual disclosure; it does not certify the
   existence-non-disclosure family as complete.
-- **It asserts no commit-level equivalence** between the upstream branch tips and the import, and
-  therefore **issues no branch-level DROP** and authorises no branch deletion. See §0's stated
-  limit — the claim is capability-level; D5 or §8 Q1 is how it would be upgraded.
+- **It asserts containment, not tree-equality.** §0.1 shows each branch tip is an *ancestor* of the
+  import rev — so no branch holds a commit the import lacks — which is what licenses the DROP. It is
+  not a claim that sparq's imported tree is byte-identical to upstream's at `1e555b10`; §3–§5's
+  in-tree citations are the check on the transcription.
+- **It does not audit the `solid-oidc-verifier` dependency.** §3 traces the resolution call path at
+  the pinned rev far enough to establish that the async hickory resolver *is* reached and that every
+  resolved record *is* run through the SSRF classifier, and it names upstream's tests for that. That
+  is a call-path verification, **not** a security audit of the classifier's completeness (whether its
+  private-range/NAT64 policy covers every case is upstream's to prove, not this record's).
 - **It claims no capability for the crate.** `sparq-lws-core` remains EXPERIMENTAL and
   `publish = false`.
