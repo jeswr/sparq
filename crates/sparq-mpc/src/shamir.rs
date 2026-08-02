@@ -264,12 +264,17 @@ impl ShamirBackend {
             // [OPUS-5] sq-km34: this arm describes the SEMI-HONEST
             // `join::HiddenValueJoin` path, and it stays SemiHonestOnly at `n = 2t+1`
             // because that path really is. The EXPERIMENTAL IT-MAC twin
-            // (`auth_join::experimental_tamper_evident_hidden_join`) reaches
+            // (`auth_join::experimental_tamper_evident_hidden_join`) is BUILT for
             // detect-and-abort at the SAME `(n, t)` — detection from the secret `α`,
-            // not from RS — and reports it via `auth_join::equality_join_security`
-            // (AXIS-2 only; AXIS-1 stays SemiHonest while sq-qhy4 is pending). Keep
-            // the two reportings distinct: promoting this arm would relabel the
-            // unauthenticated path, which no MAC covers.
+            // not from RS — but `auth_join::equality_join_security` reports the
+            // `semi_honest_only` baseline UNCONDITIONALLY while sq-qhy4 (external
+            // sign-off) is pending, so no public surface reads that path as
+            // actively secure. (It therefore under-claims relative to this arm at
+            // the even-`n` sizes where degree `2t` does carry RS redundancy —
+            // under-claiming is the safe direction.)
+            // The reportings stay SEPARATE FUNCTIONS regardless, so that when the
+            // gate closes the promotion lands per-PATH: promoting this arm would
+            // relabel the unauthenticated path, which no MAC covers.
             OperatorClass::EqualityJoin => match self.rs_correction_budget(2 * self.t) {
                 None => SecurityDescriptor::semi_honest_only(self.n, self.t),
                 Some(e) => SecurityDescriptor::shamir_degree_recon(self.n, self.t, e),

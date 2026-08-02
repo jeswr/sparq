@@ -216,11 +216,13 @@ pub mod join;
 // `|L|·|R|` batch in ONE `σ` open before any match bit is acted on
 // (`MacSession::mac_check_and_open`, §2.5), so that deviation ABORTS instead —
 // detection from the secret `α`, not from redundancy.
-// Reported via `auth_join::equality_join_security` as an AXIS-2 promotion
-// (SemiHonest + Abort(Unanimous)) — deliberately NOT AXIS-1 `Malicious`, because
-// external accredited-cryptographer sign-off is PENDING (sq-qhy4) and the
-// in-process tamper tests evidence tamper-EVIDENCE, not the malicious-security
-// theorem — and deliberately NOT by relabelling
+// Reported via `auth_join::equality_join_security` as the `SemiHonestOnly`
+// BASELINE — no axis promoted, because external accredited-cryptographer sign-off
+// is PENDING (sq-qhy4) and the in-process tamper tests evidence tamper-EVIDENCE,
+// not the malicious-security theorem. Promoting only AXIS-2 would not CONTAIN the
+// claim: `Abort(Unanimous)` projects through the back-compat `malicious_security`
+// to `HonestMajorityAbort`, which `is_malicious_secure` answers `true` for — and
+// deliberately NOT by relabelling
 // `ShamirBackend::operator_descriptor`, which keeps describing the unauthenticated
 // path. Read the module docs' banner and "What this does NOT close" before making
 // a tier claim: the MAC authenticates `m = d·r`, NOT `r != 0`, so mask integrity

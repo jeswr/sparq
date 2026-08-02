@@ -434,60 +434,22 @@ impl SecurityDescriptor {
         }
     }
 
-    /// [OPUS-5] sq-km34 — the **IT-MAC authenticated** descriptor: honest-majority,
-    /// AXIS-2 `Abort(Unanimous)` where an unauthenticated open detects nothing. This
-    /// is the tier an operator reaches when every value on its path carries an
-    /// information-theoretic MAC under a secret-shared `[α]` and the batch is
-    /// MAC-checked before any value is acted on
-    /// ([`crate::shamir::MacSession::mac_check_and_open`]) — detection then comes
-    /// from the secrecy of `α`, NOT from Reed–Solomon redundancy, which is why it
-    /// holds at the minimal `n = 2t+1` where [`Self::shamir_degree_recon`]'s
-    /// redundancy argument has nothing to work with.
-    ///
-    /// **AXIS-1 stays [`AdversaryModel::SemiHonest`] — a deliberate deviation from
-    /// design §3, which specifies `Malicious` here.** Reporting `Malicious` would
-    /// publish an unaudited malicious-security claim through the API while the
-    /// external accredited-cryptographer sign-off that would license it is an
-    /// UNRESOLVED release gate (`sq-qhy4`); in-process tamper tests evidence
-    /// tamper-EVIDENCE, not the malicious-security theorem. So the IT-MAC hardening
-    /// is reported on the OUTPUT-GUARANTEE axis exactly as
-    /// [`Self::shamir_degree_recon`] reports its RS-checked hardening ("the
-    /// active-security hardening is the guarantee axis, not a claim that the parties
-    /// are malicious"). The back-compat [`Self::malicious_security`] projection is
-    /// unaffected — `Abort(Unanimous)` still maps to
-    /// [`MaliciousSecurity::HonestMajorityAbort`], so the `SemiHonestOnly → Abort`
-    /// promotion the design record asks for still holds. Flip AXIS-1 when `sq-qhy4`
-    /// closes, not before.
-    ///
-    /// Deliberately NOT [`AbortKind::Identifiable`]: detect-and-abort with no sound
-    /// cheater attribution (true IA needs authenticated per-party transcripts +
-    /// broadcast that the in-process simulation lacks — see [`AbortKind`]). And
-    /// deliberately never a [`OutputGuarantee::GuaranteedOutput`]: a cheater can
-    /// always force the abort.
-    ///
-    /// **FAIL-CLOSED under a dishonest majority** (`n <= 2t`), for the same reason
-    /// [`Self::shamir_degree_recon`] is: honest-majority authenticated Shamir relies
-    /// on `<= t` corruptions both for the privacy of `[α]`/`[x]` and for the
-    /// degree-reduce/recombine, so an `Abort` claim there would over-claim. A genuine
-    /// dishonest-majority authenticated backend (SPDZ/MASCOT) is a different
-    /// construction and would build its descriptor directly. `[OPUS-5]`
-    pub fn authenticated_abort(n: usize, t: usize) -> Self {
-        let threshold = CorruptionThreshold::from_n_t(n, t);
-        if !threshold.is_honest_majority() {
-            return SecurityDescriptor::semi_honest_only(n, t);
-        }
-        SecurityDescriptor {
-            // NOT `Malicious`: unaudited (sq-qhy4) — see the doc comment above.
-            adversary: AdversaryModel::SemiHonest,
-            output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
-            threshold,
-            public_verifiability: PublicVerifiability(false),
-        }
-    }
-
     /// A no-redundancy descriptor: semi-honest-only, with no detection. Used for
     /// the degree-`2t` equality open at `n = 2t+1` (zero RS redundancy at degree
     /// `2t`) and for honest stub backends. `[OPUS-4.8]`
+    ///
+    /// [OPUS-5] sq-km34 — it is ALSO what
+    /// [`crate::auth_join::equality_join_security`] reports for the IT-MAC
+    /// authenticated equality/join path while `sq-qhy4` (external
+    /// accredited-cryptographer sign-off) is an unresolved release gate. There is
+    /// deliberately NO `authenticated_abort` constructor: an `Abort(Unanimous)`
+    /// descriptor projects (via [`Self::malicious_security`]) to
+    /// [`MaliciousSecurity::HonestMajorityAbort`], which
+    /// [`MaliciousSecurity::is_malicious_secure`] reports as active security — so
+    /// building one for an unaudited construction would publish the prohibited
+    /// claim through the back-compat projection no matter which axis it was
+    /// recorded on. Containment has to hold through EVERY public projection, not
+    /// just AXIS-1. `[OPUS-5]`
     pub fn semi_honest_only(n: usize, t: usize) -> Self {
         SecurityDescriptor {
             adversary: AdversaryModel::SemiHonest,

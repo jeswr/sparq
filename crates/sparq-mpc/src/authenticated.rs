@@ -65,9 +65,12 @@
 //!   it an authenticated share is not tamper-*evident*; this module builds the
 //!   carrier, not the check. It HAS landed, in `crate::shamir` as
 //!   [`MacSession::mac_check`](crate::shamir::MacSession::mac_check).
-//! - **Registry / per-operator** reporting (`new_malicious`,
-//!   `authenticated_abort` descriptor) — **sq-km34.7** (design §4), which has NOT
-//!   landed. This module does NOT touch [`crate::backend`], and the security tier
+//! - **Registry / per-operator** reporting (`new_malicious`, and any descriptor
+//!   that reports an active-security tier) — **sq-km34.7** (design §4), which has
+//!   NOT landed, and which is gated behind `sq-qhy4` external sign-off: no
+//!   descriptor may report a tier the back-compat `malicious_security` projection
+//!   would read back as active security until that gate closes. This module does
+//!   NOT touch [`crate::backend`], and the security tier
 //!   [`crate::backend`] reports to a federation is still the semi-honest one: a
 //!   caller only gets the authenticated guarantee by explicitly running the
 //!   `MacSession` path and calling `mac_check` before it acts on an opened value.

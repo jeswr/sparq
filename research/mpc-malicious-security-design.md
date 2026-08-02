@@ -478,20 +478,30 @@ dishonest majority** exactly as `shamir_degree_recon` does (`backend.rs:411–41
 axis*, so the old enum reads correctly without change (the richer truth — that the *adversary*
 is now malicious, not merely that the open is RS-checked — lives in `security.adversary`).
 
-> **[OPUS-5] AS BUILT, `authenticated_abort` sets `adversary: SemiHonest`, not `Malicious`
-> (sq-km34, review round 1).** The `AdversaryModel::Malicious` line above is what this
-> record specifies and what the construction targets; it is NOT what the code reports
-> today, because promoting AXIS-1 would publish an *unaudited* malicious-security claim
-> through the public API while `sq-qhy4` (external accredited-cryptographer sign-off) is
-> an unresolved release gate — in-process tamper tests evidence tamper-EVIDENCE on the
-> deviations they exercise, not the malicious-security theorem. The IT-MAC hardening is
-> therefore reported on the OUTPUT-GUARANTEE axis, exactly as `shamir_degree_recon`
-> reports its RS-checked hardening; the `malicious_security` projection noted above is
-> unaffected (`Abort(Unanimous)` → `HonestMajorityAbort` regardless of AXIS-1), so step
-> (5)'s `SemiHonestOnly → Abort` acceptance still holds. Restore the `Malicious` line
-> when `sq-qhy4` closes; until then the guard test
-> `auth_join::tests::the_adversary_axis_is_not_promoted_before_external_sign_off` fails
-> if it is restored early.
+> **[OPUS-5] AS BUILT there is NO `authenticated_abort` constructor at all, and the
+> reported tier is the `SemiHonestOnly` BASELINE (sq-km34, review rounds 1–2).** The
+> `AdversaryModel::Malicious` descriptor above is what this record specifies and what
+> the construction targets; it is NOT what the code reports, because publishing it
+> would put an *unaudited* malicious-security claim on the public API while `sq-qhy4`
+> (external accredited-cryptographer sign-off) is an unresolved release gate —
+> in-process tamper tests evidence tamper-EVIDENCE on the deviations they exercise,
+> not the malicious-security theorem.
+>
+> Round 1 tried to contain that by demoting AXIS-1 to `SemiHonest` while keeping
+> `Abort(Unanimous)` on AXIS-2. **That does not contain it**, and round 2 rejected it:
+> the back-compat projection noted just above reads the OUTPUT-GUARANTEE axis, so
+> `Abort(Unanimous)` → `MaliciousSecurity::HonestMajorityAbort` → `is_malicious_secure()
+> == true` regardless of AXIS-1. A consumer on the legacy API was still told the
+> unaudited path was malicious-secure. Moving a claim between descriptor axes is not
+> containment when a supported public projection reconstructs it.
+>
+> So `auth_join::equality_join_security` returns `SecurityDescriptor::semi_honest_only(n,
+> t)` — no upgrade on any axis, nothing any projection can read back as active security
+> — and the abort property is asserted as BEHAVIOUR by the module's tamper tests instead.
+> Build the descriptor this record specifies when `sq-qhy4` closes; until then the guard
+> test `auth_join::tests::no_public_surface_reports_active_security_before_external_sign_off`
+> (which checks the adversary axis, the legacy projection AND `is_malicious_secure`)
+> fails if any of it is restored early.
 
 **Fail-closed selection still refuses the impossible cells.** The `SecurityRequirement` +
 fail-closed registry (sq-a6p1, CLOSED) compares a federation's `min_adversary` /
@@ -582,9 +592,9 @@ sq-pwr — ids recorded in the report:
    > `experimental_tamper_evident_hidden_join` / `equality_join_security`),
    > not an edit to `join.rs`: it is an opt-in TWIN, mirroring how `auth_compare` twins
    > `compare`, so the semi-honest `HiddenValueJoin` is byte-for-byte unchanged and keeps
-   > its honest `SemiHonestOnly` reporting. Consequently **(a)** the promotion is reported
-   > per-PATH via `equality_join_security` (→ `SecurityDescriptor::authenticated_abort`),
-   > NOT by promoting `ShamirBackend::operator_descriptor(EqualityJoin)` — that arm
+   > its honest `SemiHonestOnly` reporting. Consequently **(a)** the tier is reported
+   > per-PATH via `equality_join_security`, NOT by promoting
+   > `ShamirBackend::operator_descriptor(EqualityJoin)` — that arm
    > describes the unauthenticated path, which no MAC covers, so promoting it would
    > relabel code that did not change. The registry-wide `new_malicious(n)` wiring stays
    > step (7)/sq-km34.7. **(b)** Two boundaries this record did not call out, found during
@@ -594,29 +604,34 @@ sq-pwr — ids recorded in the report:
    > reversed, a *matching* pair can be flipped to a non-match for free with `σ = 0` — and
    > **the MAC does not authenticate `r ≠ 0`**, so the `randomness.rs` `r = 0` threat is
    > untouched and mask integrity still rests on the trusted-dealer draw. Both are pinned
-   > by tests in that module. **(c)** The tier is reported as an **AXIS-2-only**
-   > promotion: `SecurityDescriptor::authenticated_abort` builds `SemiHonest +
-   > Abort(Unanimous)`, NOT the `Malicious + Abort(Unanimous)` this record specifies
-   > above. Reporting AXIS-1 `Malicious` would publish an unaudited
-   > malicious-security claim through the API while `sq-qhy4` — external
-   > accredited-cryptographer sign-off — is an UNRESOLVED release gate; the
-   > in-process tamper tests evidence tamper-EVIDENCE on the deviations they
-   > exercise, not the malicious-security theorem. The hardening is therefore
-   > reported on the output-guarantee axis exactly as `shamir_degree_recon` reports
-   > its RS-checked hardening, and the back-compat `malicious_security` projection is
-   > unchanged (`Abort(Unanimous)` → `HonestMajorityAbort`), so the `SemiHonestOnly →
-   > Abort` acceptance criterion still holds. The entry points carry the
+   > by tests in that module. **(c) The `SemiHonestOnly → Abort` acceptance criterion
+   > above is NOT met as a reported tier, and deliberately so.**
+   > `equality_join_security` returns `SecurityDescriptor::semi_honest_only(n, t)` —
+   > the same baseline the unauthenticated path reports, on every axis — because
+   > `sq-qhy4` (external accredited-cryptographer sign-off) is an UNRESOLVED release
+   > gate and the in-process tamper tests evidence tamper-EVIDENCE on the deviations
+   > they exercise, not the malicious-security theorem. Reporting the hardening on
+   > AXIS-2 only (the round-1 shape) does NOT contain the claim: `Abort(Unanimous)`
+   > projects through the back-compat `malicious_security` to `HonestMajorityAbort`,
+   > which `is_malicious_secure()` reports as active security, so the legacy public
+   > API would still classify this path as malicious-secure. What the module delivers
+   > against the acceptance criterion is therefore the BEHAVIOUR (`MacCheckFailed`
+   > aborts on tampering the semi-honest path cannot detect at `n = 2t+1`), pinned by
+   > tests, with no advertised tier attached. The entry points carry the
    > `experimental_tamper_evident_*` prefix for the same reason (the containment
-   > `auth_disclose` already applies to its own IT-MAC twin). AXIS-1 moves when
-   > `sq-qhy4` closes — the guard test
-   > `the_adversary_axis_is_not_promoted_before_external_sign_off` fails if it moves
-   > sooner.
+   > `auth_disclose` already applies to its own IT-MAC twin). The reported tier moves
+   > when `sq-qhy4` closes — the guard test
+   > `no_public_surface_reports_active_security_before_external_sign_off` fails if it
+   > moves sooner.
 6. **Malicious-secure comparison (depends on sq-rrz4 + this stack).** When the secure
    greater-than lands (sq-rrz4), build it on authenticated mul/reduce so the boolean verdict is
    MAC-checked. Acceptance: secure verdict == plaintext `(sum > threshold)`, tamper in any gate
    aborts. Depends on (1)–(4) and **sq-rrz4**.
-7. **Registry wiring + per-operator reporting.** `new_malicious(n)` / malicious mode;
-   `SecurityDescriptor::authenticated_abort(n,t)` (fail-closed under dishonest majority);
+7. **Registry wiring + per-operator reporting.** `new_malicious(n)` / malicious mode; the
+   authenticated descriptor constructor this record specifies in §4 (fail-closed under
+   dishonest majority) — **which cannot be built until `sq-qhy4` closes**, since any
+   descriptor whose `malicious_security` projection is not `SemiHonestOnly` publishes an
+   unaudited active-security claim (see the §4 and step-(5) notes);
    `operator_descriptor` (`shamir.rs:222`) returns `Malicious + Abort(Unanimous)` per operator;
    registry (sq-a6p1) satisfies a malicious-honest-majority request and still refuses
    malicious-dishonest-majority. Acceptance: registry select tests for both. Depends on (5)

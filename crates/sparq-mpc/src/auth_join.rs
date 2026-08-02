@@ -23,8 +23,9 @@
 //! `experimental_tamper_evident_*` (the same containment
 //! [`crate::auth_disclose`] applies to its own IT-MAC twin: a doc caveat under a
 //! `malicious_*` name is not containment), and [`equality_join_security`]
-//! deliberately does NOT report AXIS-1 [`crate::backend::AdversaryModel::Malicious`]
-//! — see that function. Treat this module as research scaffolding: do NOT deploy it
+//! deliberately reports the honest `SemiHonestOnly` BASELINE — no axis promoted,
+//! and nothing that any public projection can read back as active security — see
+//! that function. Treat this module as research scaffolding: do NOT deploy it
 //! as the integrity tier against a genuinely malicious party. `[OPUS-5]`
 //!
 //! ## The hole this closes
@@ -93,18 +94,25 @@
 //!   separate CONFIDENTIALITY axis (beads sq-jnkm / sq-xhaw —
 //!   [`crate::join::HiddenValueJoin::fully_oblivious_batched_join`] is the
 //!   never-opened-bit tier, and it is semi-honest).
-//! - **NOT identifiable abort, NOT GOD, NOT dishonest-majority.** The REPORTED
-//!   tier is AXIS-1 `SemiHonest` × AXIS-2 `Abort(Unanimous)` × AXIS-3
-//!   `HonestMajority` ([`equality_join_security`]) — the IT-MAC hardening is
-//!   reported on the OUTPUT-GUARANTEE axis, as
-//!   [`crate::backend::SecurityDescriptor::shamir_degree_recon`] already reports
-//!   its RS-checked hardening. A cheater can always force an abort,
-//!   no cheater is attributed, and `n ≤ 2t` is refused.
-//! - **NOT externally audited — and that is why AXIS-1 is not promoted.** Like every
+//! - **NOT identifiable abort, NOT GOD, NOT dishonest-majority.** A cheater can
+//!   always force an abort, no cheater is attributed, and `n ≤ 2t` is refused.
+//! - **NOT externally audited — and that is why NO axis is promoted.** Like every
 //!   soundness/privacy statement in this crate, the argument above is INTERNAL;
 //!   external accredited-cryptographer sign-off is PENDING (bead `sq-qhy4`), which
 //!   is an unresolved RELEASE GATE, not a formality the in-process tamper tests can
-//!   discharge. Research-grade.
+//!   discharge. Research-grade. So the REPORTED tier
+//!   ([`equality_join_security`]) is the `SemiHonestOnly` BASELINE — on every
+//!   axis, and at the minimal `n = 2t+1` this module is about, identical to what
+//!   the unauthenticated path reports. Reporting the hardening on AXIS-2
+//!   instead of AXIS-1 does NOT contain the claim: `Abort(Unanimous)` projects
+//!   through the back-compat
+//!   [`crate::backend::SecurityDescriptor::malicious_security`] to
+//!   `HonestMajorityAbort`, for which
+//!   [`crate::backend::MaliciousSecurity::is_malicious_secure`] answers `true`,
+//!   so the legacy public API would still report this path as ACTIVELY SECURE
+//!   against a deviating party. The
+//!   abort behaviour is evidenced where it belongs — in the tamper tests, as
+//!   behaviour — not in a machine-readable guarantee a federation might rely on.
 //!
 //! ## coZK-2025/1026 (opening on an inconsistent witness)
 //!
@@ -345,38 +353,45 @@ pub fn experimental_tamper_evident_hidden_join(
     })
 }
 
-/// The three-axis [`SecurityDescriptor`] this module's equality/join path delivers
-/// at `backend`'s `(n, t)` — **the sq-km34 promotion, reported rather than
-/// asserted in prose**.
+/// The three-axis [`SecurityDescriptor`] this module's equality/join path
+/// **reports** at `backend`'s `(n, t)`: the honest `SemiHonestOnly` baseline —
+/// [`SecurityDescriptor::semi_honest_only`], unconditionally, and at the minimal
+/// `n = 2t+1` this module is about, exactly what the unauthenticated path reports.
 ///
-/// It is deliberately a function on THIS module and not a change to
-/// [`ShamirBackend::operator_descriptor`]`(OperatorClass::EqualityJoin)`: that
-/// method describes the **semi-honest** [`crate::join::HiddenValueJoin`] path,
-/// which is still `SemiHonestOnly` at `n = 2t+1` and must keep saying so. The
-/// promotion belongs to the code that carries the MACs, so a federation reads the
-/// tier off the path it actually runs. The contrast is pinned by
-/// `equality_join_promotion_is_reported_only_for_the_authenticated_path`.
+/// **This module publishes NO security upgrade while `sq-qhy4` is open, and that
+/// is the whole point of the function.** The IT-MAC construction is built for
+/// detect-and-abort and the tamper tests below show it aborting on the deviations
+/// they exercise — but tamper-evidence on exercised deviations is not the
+/// malicious-security theorem, and the external accredited-cryptographer review
+/// that would license the stronger claim is an UNRESOLVED release gate
+/// (`sq-qhy4`). So the tier is reported as the baseline until that gate closes:
+/// a federation reading ANY public surface sees a path it must not rely on for
+/// integrity, which is the true statement.
 ///
-/// **The promotion is on AXIS-2 ONLY, and that is deliberate.** The descriptor
-/// reports `SemiHonest` + `Abort(Unanimous)`: detect-and-abort where the
-/// unauthenticated path detects nothing, WITHOUT asserting AXIS-1
-/// [`crate::backend::AdversaryModel::Malicious`]. Promoting the adversary axis
-/// would publish an unaudited malicious-security claim through the API, and the
-/// external accredited-cryptographer review that would license it is an unresolved
-/// release gate (`sq-qhy4`); the in-process tamper tests below evidence
-/// tamper-EVIDENCE on the deviations they exercise, not the theorem. This mirrors
-/// [`SecurityDescriptor::shamir_degree_recon`], which reports its RS-checked
-/// hardening the same way ("the active-security hardening is the guarantee axis").
-/// AXIS-1 moves when `sq-qhy4` closes, not before — pinned by
-/// `the_adversary_axis_is_not_promoted_before_external_sign_off`.
+/// **Why not report the hardening on AXIS-2 and leave AXIS-1 alone** (the
+/// review-round-1 shape): it does not contain the claim. An
+/// `Abort(Unanimous)` output guarantee projects, via the back-compat
+/// [`SecurityDescriptor::malicious_security`], to
+/// [`crate::backend::MaliciousSecurity::HonestMajorityAbort`], and
+/// [`crate::backend::MaliciousSecurity::is_malicious_secure`] answers `true` for
+/// that — so a consumer on the legacy API is told this unaudited path is
+/// malicious-secure. Moving a claim between descriptor axes does not contain it
+/// when a supported public projection reconstructs it. Containment therefore has
+/// to be a property of what EVERY public surface reports, which is what
+/// `no_public_surface_reports_active_security_before_external_sign_off` pins.
 ///
-/// Projects (via [`SecurityDescriptor::malicious_security`]) to
-/// [`crate::backend::MaliciousSecurity::HonestMajorityAbort`] under an honest
-/// majority — the `SemiHonestOnly → Abort` promotion the design record asks for —
-/// and fails closed to [`SecurityDescriptor::semi_honest_only`] when `n ≤ 2t`,
-/// where this module's entry points refuse to run at all. `[OPUS-5]`
+/// It remains a function on THIS module rather than a change to
+/// [`ShamirBackend::operator_descriptor`]`(OperatorClass::EqualityJoin)`, so that
+/// when `sq-qhy4` closes the promotion lands per-PATH — on the code that actually
+/// carries the MACs — and never relabels the unauthenticated
+/// [`crate::join::HiddenValueJoin`] path, which no MAC covers. Until then the two
+/// agree, as `the_authenticated_path_reports_no_upgrade_over_the_semi_honest_path`
+/// asserts. The abort behaviour itself is not doc-only: it is tested directly, as
+/// behaviour, by `tampered_product_open_aborts_instead_of_flipping_the_verdict_to_a_false_match`
+/// and its siblings. `[OPUS-5]`
 pub fn equality_join_security(backend: &ShamirBackend) -> SecurityDescriptor {
-    SecurityDescriptor::authenticated_abort(backend.parties(), backend.threshold())
+    // The baseline, NOT an `Abort(Unanimous)` promotion: see the doc comment.
+    SecurityDescriptor::semi_honest_only(backend.parties(), backend.threshold())
 }
 
 #[cfg(test)]
@@ -389,7 +404,9 @@ mod tests {
     //!   4. the two HONEST BOUNDARIES — the adopted-mask (`r = 0`) hole, and the
     //!      operand order that keeps the adoption harmless.
     use super::*;
-    use crate::backend::{AdversaryModel, MaliciousSecurity, OperatorClass, OutputGuarantee};
+    use crate::backend::{
+        AbortKind, AdversaryModel, MaliciousSecurity, OperatorClass, OutputGuarantee,
+    };
     use crate::join::HiddenValueJoin;
     use crate::shamir::{MacCarry, ShamirBackend, Share};
     use oxrdf::{Literal, Variable};
@@ -879,14 +896,14 @@ mod tests {
         );
     }
 
-    /// **ACCEPTANCE (design §6 step 5, the reporting half).** The promotion is
-    /// reported for the AUTHENTICATED path only: `SemiHonestOnly → Abort` at the
-    /// minimal `n = 2t+1`, while `ShamirBackend::operator_descriptor` keeps telling
-    /// the truth about the semi-honest `HiddenValueJoin` path it describes. The
-    /// promotion is on AXIS-2 only — see
-    /// `the_adversary_axis_is_not_promoted_before_external_sign_off`.
+    /// **ACCEPTANCE (design §6 step 5, the reporting half — as CONTAINED).** The
+    /// authenticated path reports the SAME descriptor as the semi-honest
+    /// `HiddenValueJoin` path `ShamirBackend::operator_descriptor` describes: while
+    /// `sq-qhy4` is open this module publishes no upgrade at all, so there is no
+    /// tier a federation can read off it and rely on. Reinstating the
+    /// `Abort(Unanimous)` promotion turns this RED at the first assertion.
     #[test]
-    fn equality_join_promotion_is_reported_only_for_the_authenticated_path() {
+    fn the_authenticated_path_reports_no_upgrade_over_the_semi_honest_path() {
         let backend = minimal_backend(0x5EC);
 
         // The semi-honest path at n = 2t+1: no RS redundancy at degree 2t, and it
@@ -899,45 +916,61 @@ mod tests {
             "the semi-honest hidden join is still SemiHonestOnly at n = 2t+1"
         );
 
-        // The authenticated path: the sq-km34 promotion, on AXIS-2.
+        // ...and the authenticated path reports the identical baseline — every
+        // axis, not just AXIS-1 — because `sq-qhy4` is pending.
         let auth = equality_join_security(&backend);
-        assert!(
-            matches!(auth.output_guarantee, OutputGuarantee::Abort(_)),
-            "AXIS-2 is detect-and-abort, never GOD"
+        assert_eq!(
+            auth, semi,
+            "sq-qhy4 is pending: the authenticated path must publish no security \
+             upgrade over the unauthenticated one"
         );
         assert!(
             auth.threshold.is_honest_majority(),
             "AXIS-3 unchanged: honest majority"
         );
-        assert_eq!(
-            auth.malicious_security(0),
-            MaliciousSecurity::HonestMajorityAbort,
-            "sq-km34: EqualityJoin promotes SemiHonestOnly -> Abort at the minimal n = 2t+1"
+        assert!(
+            !matches!(auth.output_guarantee, OutputGuarantee::Abort(AbortKind::Unanimous)),
+            "an Abort(Unanimous) guarantee would project to HonestMajorityAbort"
         );
-        assert!(auth.malicious_security(0).is_malicious_secure());
     }
 
     /// **The audit gate, pinned as a test.** `sq-qhy4` — external
-    /// accredited-cryptographer sign-off — is an UNRESOLVED release gate, so no
-    /// public surface of this module may report AXIS-1 `Malicious`: the in-process
-    /// tamper tests above establish tamper-evidence on the deviations they
-    /// exercise, not the malicious-security theorem. Flipping
-    /// `SecurityDescriptor::authenticated_abort` back to `AdversaryModel::Malicious`
-    /// turns this RED. Delete it only together with `sq-qhy4`.
+    /// accredited-cryptographer sign-off — is an UNRESOLVED release gate, so NO
+    /// public surface of this module may classify the path as active/malicious
+    /// secure: the in-process tamper tests above establish tamper-evidence on the
+    /// deviations they exercise, not the malicious-security theorem.
+    ///
+    /// It is deliberately not enough to check AXIS-1. The back-compat
+    /// `SecurityDescriptor::malicious_security` projection is a SUPPORTED public
+    /// surface that reads the OUTPUT-GUARANTEE axis, and `is_malicious_secure`
+    /// answers `true` for anything it maps off `SemiHonestOnly` — so an
+    /// `Abort(Unanimous)` descriptor reconstructs the prohibited claim with AXIS-1
+    /// untouched (review round 2). This asserts containment through every one of
+    /// those surfaces. Delete it only together with `sq-qhy4`.
     #[test]
-    fn the_adversary_axis_is_not_promoted_before_external_sign_off() {
+    fn no_public_surface_reports_active_security_before_external_sign_off() {
         for n in [3usize, 5, 7] {
             let backend = ShamirBackend::new(n).unwrap();
             let auth = equality_join_security(&backend);
             assert_eq!(
                 auth.adversary,
                 AdversaryModel::SemiHonest,
-                "sq-qhy4 is pending: the authenticated equality/join path must NOT \
-                 report AXIS-1 Malicious at n = {}",
+                "sq-qhy4 is pending: must NOT report AXIS-1 Malicious at n = {}",
                 n
             );
-            // ...while the AXIS-2 hardening it DOES evidence is still reported.
-            assert!(matches!(auth.output_guarantee, OutputGuarantee::Abort(_)));
+            // The back-compat projection — the surface that round 1 left open.
+            assert_eq!(
+                auth.malicious_security(0),
+                MaliciousSecurity::SemiHonestOnly,
+                "sq-qhy4 is pending: the legacy projection must NOT classify this \
+                 path as actively secure at n = {}",
+                n
+            );
+            assert!(
+                !auth.malicious_security(0).is_malicious_secure(),
+                "sq-qhy4 is pending: is_malicious_secure must stay false at n = {}",
+                n
+            );
         }
     }
 
