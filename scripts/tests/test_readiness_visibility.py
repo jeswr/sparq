@@ -1619,9 +1619,10 @@ class TestNonReservingCrossCuttingPartitions(unittest.TestCase):
     `candidates=376 frontier=3` — the two added rows declaring exactly `area:ci` and `area:docs`.
 
     The justification is a MEASURED conflict rate, not an argument (see NON_RESERVING_PARTITIONS
-    for the dated table): few open `area:ci` and `area:docs` holder pairs share a changed file,
-    against 100% for `area:deps` (all `Cargo.lock`) and 57.1% for crate areas. So the safety
-    half of this contract is as load-bearing as the throughput half, and both are pinned here.
+    for the dated table): on the 2026-07-31 snapshot, 9.2% of open `area:ci` holder pairs and
+    4.8% of `area:docs` pairs share a changed file, against 100% for `area:deps` (all `Cargo.lock`)
+    and 57.1% for crate areas. So the safety half of this contract is as load-bearing as the
+    throughput half, and both are pinned here.
 
     Every assertion runs END-TO-END through `compute_ready`. An assertion that only inspected
     `reserves_partition`'s shape would stay green with its call site in `_reserving_packages`
@@ -1760,8 +1761,9 @@ class TestNonReservingCrossCuttingPartitions(unittest.TestCase):
         head, _, rest = source.partition("NON_RESERVING_PARTITIONS = ")
         self.assertTrue(rest, "NON_RESERVING_PARTITIONS is no longer declared")
         basis = head[head.rindex("# ------"):]
-        for token in ("area:ci", "area:docs", "area:deps", "Cargo.lock",
-                      "5%", "3%", "100%", "57.1%", "crate-region-parallelism.md"):
+        for token in ("2026-07-31", "area:ci", "area:docs", "area:deps", "Cargo.lock",
+                      "30 ci / 36 docs / 7 deps", "9.2%", "4.8%", "100%", "57.1%",
+                      "crate-region-parallelism.md"):
             self.assertIn(token, basis,
                           f"the measured basis for the exemption no longer states {token}")
 
