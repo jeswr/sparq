@@ -419,6 +419,7 @@ pub struct RuleDischarge {
 ///     }],
 ///     prohibitions: vec![],
 ///     conflict: None,
+///     ..Policy::default()
 /// };
 ///
 /// let requirements = discharge_requirements(&policy);
@@ -606,6 +607,7 @@ mod tests {
             permissions: vec![rule],
             prohibitions: vec![],
             conflict: None,
+            ..Policy::default()
         }
     }
 
@@ -630,6 +632,7 @@ mod tests {
             )],
             prohibitions: vec![],
             conflict: None,
+            ..Policy::default()
         };
 
         let requirement = single_requirement(&policy);
@@ -685,6 +688,7 @@ mod tests {
             ],
             prohibitions: vec![],
             conflict: None,
+            ..Policy::default()
         };
         assert!(discharge_requirements(&policy).is_empty());
     }
@@ -705,6 +709,7 @@ mod tests {
                 vec![secprop_constraint(REQUIRES_SINGLE_USE, "Nullifier")],
             )],
             conflict: None,
+            ..Policy::default()
         };
 
         let requirements = discharge_requirements(&policy);
@@ -1032,6 +1037,7 @@ mod tests {
             permissions: vec![rule],
             prohibitions: vec![],
             conflict: None,
+            ..Policy::default()
         };
         assert!(
             discharge_requirements(&policy).is_empty(),
