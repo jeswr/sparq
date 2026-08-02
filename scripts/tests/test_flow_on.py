@@ -53,6 +53,12 @@ class RuleLoadingTest(unittest.TestCase):
             # [OPUS-4.8] ZK circuit gate-count follow-on (a PR-description
             # deliverable, present in the rules file) — enforce the contract.
             "new-zk-circuit-gatecount",
+            # [OPUS-5] (#5243) the npm-package half of new-package coverage —
+            # merge gate G1 is `crates/*/Cargo.toml`-only, so these reactive rules
+            # are the ONLY coverage a new published npm package gets.
+            "new-package-site-advertisement",
+            "new-package-guide-page",
+            "new-package-test-methods",
         ):
             self.assertIn(required, ids)
         # [OPUS-4.8] (bead sq-l0a0) The new-crate bench/SKILL follow-on rule was
@@ -314,6 +320,133 @@ class ZkCircuitGatecountTest(unittest.TestCase):
         self.assertEqual(self._zk_follow_ons(fos), [])
 
 
+class NewNpmPackageTest(unittest.TestCase):
+    """[OPUS-5] (#5243) The new-package follow-ons must fire for a genuinely-new
+    PUBLIC npm package under `packages/*` (or the legacy top-level `js/`), and
+    must stay silent for a `private: true` package — npm's own refusal-to-publish
+    marker, and the analogue of the `publish = false` crate-stub exemption gate G1
+    grants. The fixtures use REAL manifests from the checkout, because
+    `package_is_private` reads the file the merged PR added."""
+
+    PACKAGE_RULES = (
+        "new-package-site-advertisement",
+        "new-package-guide-page",
+        "new-package-test-methods",
+    )
+
+    def setUp(self):
+        self.rules = flow_on.load_rules(RULES)
+
+    def _pkg_follow_ons(self, fos):
+        return {fo.rule_id: fo for fo in fos if fo.rule_id in self.PACKAGE_RULES}
+
+    def _eval(self, changed, added, title="add a package"):
+        return flow_on.evaluate(self.rules, 7000, title, changed, added, [])
+
+    def test_public_package_fires_all_three(self):
+        # packages/solid-server/package.json is published (no `private` key).
+        added = ["packages/solid-server/package.json", "packages/solid-server/src/index.ts"]
+        got = self._pkg_follow_ons(self._eval(added, added))
+        self.assertEqual(set(got), set(self.PACKAGE_RULES))
+        self.assertEqual(
+            sorted(fo.dedup_key for fo in got.values()),
+            [
+                "new-package-guide-solid-server",
+                "new-package-site-solid-server",
+                "new-package-test-methods-solid-server",
+            ],
+        )
+        # {package_path} resolves to the repo-relative dir in every body.
+        for fo in got.values():
+            self.assertIn("packages/solid-server", fo.body)
+            self.assertNotIn("{package", fo.body)
+
+    def test_private_package_fires_nothing(self):
+        # packages/sparq-client/package.json carries `"private": true`.
+        added = ["packages/sparq-client/package.json"]
+        self.assertEqual(self._pkg_follow_ons(self._eval(added, added)), {})
+
+    def test_package_is_private_reads_the_manifest(self):
+        self.assertTrue(flow_on.package_is_private("packages/rdfjs-conformance"))
+        self.assertTrue(flow_on.package_is_private("packages/sparq-client"))
+        self.assertFalse(flow_on.package_is_private("packages/solid-server"))
+        self.assertFalse(flow_on.package_is_private("js"))
+        # A manifest that is not in the checkout is NOT private — the strict
+        # default, matching gate-new-crate.py's crate_is_stub.
+        self.assertFalse(flow_on.package_is_private("packages/does-not-exist"))
+
+    def test_legacy_top_level_js_package_is_covered(self):
+        added = ["js/package.json"]
+        got = self._pkg_follow_ons(self._eval(added, added))
+        self.assertEqual(set(got), set(self.PACKAGE_RULES))
+        # {package} and {package_path} coincide for the top-level package.
+        self.assertEqual(got["new-package-site-advertisement"].dedup_key, "new-package-site-js")
+
+    def test_modifying_an_existing_manifest_does_not_fire(self):
+        # A version bump to an existing package.json is CHANGED, not ADDED.
+        changed = ["packages/solid-server/package.json"]
+        self.assertEqual(self._pkg_follow_ons(self._eval(changed, [])), {})
+
+    def test_private_marker_only_exempts_the_added_package(self):
+        # A PR adding a public package alongside an unrelated private one still
+        # fires — resolution takes the FIRST added manifest, so assert on the
+        # public-first ordering the rules actually see.
+        added = ["packages/solid-server/package.json", "packages/sparq-client/package.json"]
+        got = self._pkg_follow_ons(self._eval(added, added))
+        self.assertEqual(set(got), set(self.PACKAGE_RULES))
+
+    def test_nested_manifest_fails_closed(self):
+        # `fnmatch`'s `*` crosses `/`, so `packages/*/package.json` also matches a
+        # nested manifest. NPM_PACKAGE_MANIFEST_RE cannot resolve one, and the
+        # rule must then mint NOTHING rather than a follow-on naming "".
+        added = ["packages/solid-server/vendor/dep/package.json"]
+        self.assertEqual(self._pkg_follow_ons(self._eval(added, added)), {})
+
+    def test_site_and_guide_suppressed_when_the_pr_did_the_work(self):
+        # `unless_paths`: the merged PR already added the site entry and the guide
+        # page, so only the test-methods follow-on remains.
+        added = ["packages/solid-server/package.json"]
+        changed = added + ["site/src/data/surfaces.ts", "book/src/solid-server.md"]
+        got = self._pkg_follow_ons(self._eval(changed, added))
+        self.assertEqual(set(got), {"new-package-test-methods"})
+
+    def test_unless_paths_suppresses_only_the_matching_rule(self):
+        added = ["packages/solid-server/package.json"]
+        changed = added + ["site/src/data/surfaces.ts"]
+        got = self._pkg_follow_ons(self._eval(changed, added))
+        self.assertEqual(
+            set(got), {"new-package-guide-page", "new-package-test-methods"}
+        )
+
+    def test_added_npm_package_resolves_only_publishable_locations(self):
+        self.assertEqual(
+            flow_on.added_npm_package(["packages/foo/package.json"]), "packages/foo"
+        )
+        self.assertEqual(flow_on.added_npm_package(["js/package.json"]), "js")
+        # Not a publishable location, or not a top-level manifest → unresolvable.
+        for path in (
+            "packages/foo/vendor/dep/package.json",
+            "gui/app/package.json",
+            "package.json",
+            "packages/foo/src/index.ts",
+        ):
+            self.assertIsNone(flow_on.added_npm_package([path]), path)
+
+    def test_package_placeholders_come_only_from_added_paths(self):
+        # {package}/{package_path} must not resolve off a merely-CHANGED manifest;
+        # they name the package the PR ADDED or nothing at all.
+        ctx = flow_on.build_context(1, "t", ["packages/solid-server/package.json"], [])
+        self.assertEqual(ctx["package"], "")
+        self.assertEqual(ctx["package_path"], "")
+        ctx = flow_on.build_context(1, "t", ["js/package.json"], ["js/package.json"])
+        self.assertEqual(ctx["package"], "js")
+        self.assertEqual(ctx["package_path"], "js")
+
+    def test_new_crate_does_not_fire_the_package_rules(self):
+        added = ["crates/sparq-foo/Cargo.toml", "crates/sparq-foo/src/lib.rs"]
+        self.assertEqual(self._pkg_follow_ons(self._eval(added, added)), {})
+
+
 class RoutingLabelsTest(unittest.TestCase):
     """[FABLE-5] (#2474) GITHUB_TOKEN-created issues fire no `issues: opened`
     event, so triage-issue.yml can never label a flow-on follow-up post-hoc.
@@ -341,6 +474,11 @@ class RoutingLabelsTest(unittest.TestCase):
             # new-zk-circuit-gatecount
             dict(changed=["zk/arith/Nargo.toml"], added=["zk/arith/Nargo.toml"],
                  labels=[], title="zk arith", pub_changed=None),
+            # [OPUS-5] (#5243) the three new-package rules (a public manifest, so
+            # none is exempted by the `private: true` predicate).
+            dict(changed=["packages/solid-server/package.json"],
+                 added=["packages/solid-server/package.json"],
+                 labels=[], title="add solid-server package", pub_changed=None),
         ]
         out = []
         for fx in fixtures:
@@ -369,6 +507,11 @@ class RoutingLabelsTest(unittest.TestCase):
         self.assertIn("role:docs", by_rule["new-bench-dashboard-row"].labels)
         self.assertIn("role:perf", by_rule["competitor-feature-gather"].labels)
         self.assertIn("role:soundness", by_rule["new-zk-circuit-gatecount"].labels)
+        # [OPUS-5] (#5243) kind:site → role:site; kind:docs → role:docs;
+        # kind:test → role:impl (scripts/triage.py ROLE_BY_KIND).
+        self.assertIn("role:site", by_rule["new-package-site-advertisement"].labels)
+        self.assertIn("role:docs", by_rule["new-package-guide-page"].labels)
+        self.assertIn("role:impl", by_rule["new-package-test-methods"].labels)
         for fo in by_rule.values():
             self.assertIn("priority:P3", fo.labels, fo.rule_id)
 

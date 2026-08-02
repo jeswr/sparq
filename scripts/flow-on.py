@@ -60,6 +60,37 @@ SKILL_PATHS = ("skills/",)
 DOCS_RULE_ID = "changed-public-feature-docs"
 BENCH_DASHBOARD_RULE_ID = "new-bench-dashboard-row"
 
+# [OPUS-5] (#5243) The new-npm-package follow-on rules. sparq ships publishable
+# NON-Rust packages too (`packages/*`, plus the legacy top-level `js/`), and they
+# carry the same un-gateable obligations a new crate does: a website entry, a
+# guide page, and a decision about which test METHODS apply. Unlike the crates
+# side there is NO proactive gate for them — merge gate G1 (gate-new-crate.py) is
+# `crates/*/Cargo.toml`-only — so nothing upstream guarantees any of this and the
+# reactive rules are the only coverage. All three share one extra predicate: fire
+# only for a genuinely-new PUBLIC package (see _new_public_package_added).
+#
+# The repo's one Python package lives at `crates/sparq-py/` (a pyo3 crate with a
+# `Cargo.toml`), so it is already inside the crates-side scope and needs no
+# separate trigger here.
+NEW_PACKAGE_RULE_IDS = frozenset(
+    {
+        "new-package-site-advertisement",
+        "new-package-guide-page",
+        "new-package-test-methods",
+    }
+)
+
+# [OPUS-5] (#5243) Where a PUBLISHABLE npm manifest can live. `packages/<name>/`
+# is the workspace home for new packages; `js/` is the single legacy top-level
+# package (`@jeswr/sparq`). Deliberately narrower than the root package.json
+# `workspaces` list, which also names `site/` and `gui/*` — workspaces that are
+# all `private: true` and so could never publish anyway.
+# Stricter than the rules' fnmatch globs on purpose: fnmatch's `*` crosses `/`,
+# so `packages/*/package.json` would also match a nested
+# `packages/a/b/package.json`. That yields no package name here, which fails the
+# rule CLOSED rather than minting a follow-on naming nothing.
+NPM_PACKAGE_MANIFEST_RE = re.compile(r"^(packages/[^/]+|js)/package\.json$")
+
 
 # Sibling scripts are loaded by path (the scripts dir is not an importable package).
 def _load_script_module(stem: str):
@@ -131,6 +162,15 @@ class Rule:
     # not mis-fire the "new top-level circuit" follow-on. Only filters the
     # `when_new_paths` check; other predicates are unaffected.
     exclude_new_paths: list[str] = field(default_factory=list)
+    # [OPUS-5] (#5243) SUPPRESSION predicate: the rule does NOT fire when any
+    # CHANGED path matches one of these globs — "the merged PR already did this
+    # follow-on's work, so filing it would be noise". It is the general form of
+    # the SKILL_PATHS suppression hard-coded for the docs rule below, and it is
+    # what keeps the new-package site/guide follow-ons from re-asking for an entry
+    # the same PR already added. Distinct from `exclude_new_paths`, which narrows
+    # the ADDED pool a `when_new_paths` glob matches against rather than vetoing
+    # the whole rule.
+    unless_paths: list[str] = field(default_factory=list)
     when_label: str | None = None
     when_title: str | None = None
     creates: list[CreateTemplate] = field(default_factory=list)
@@ -170,6 +210,7 @@ def load_rules(path: Path) -> list[Rule]:
             when_paths=list(raw.get("when_paths", [])),
             when_new_paths=list(raw.get("when_new_paths", [])),
             exclude_new_paths=list(raw.get("exclude_new_paths", [])),
+            unless_paths=list(raw.get("unless_paths", [])),
             when_label=raw.get("when_label"),
             when_title=raw.get("when_title"),
             creates=creates,
@@ -198,6 +239,44 @@ def _first_segment_after(prefix: str, paths: list[str]) -> str | None:
     return None
 
 
+def added_npm_package(added: list[str]) -> str | None:
+    """[OPUS-5] (#5243) Directory of the first ADDED publishable npm manifest
+    (e.g. `packages/solid-server/package.json` -> `packages/solid-server`), or
+    None if this diff adds no manifest in a publishable location.
+
+    The crates-side analogue is gate G1's `added_crates`; there is no gate to
+    single-source from on the npm side, so this is the one definition of "this PR
+    adds npm package <x>"."""
+    for p in added:
+        m = NPM_PACKAGE_MANIFEST_RE.match(p)
+        if m:
+            return m.group(1)
+    return None
+
+
+def package_is_private(pkg_dir: str) -> bool:
+    """[OPUS-5] (#5243) True iff `<pkg_dir>/package.json` declares
+    `"private": true` — the npm analogue of gate G1's `publish = false` crate
+    stub, and the public/private predicate these rules need.
+
+    npm REFUSES to publish a `private: true` package, so the flag is an exact,
+    tool-enforced statement that the package has no public surface: nothing to
+    advertise on the website, no guide page for a reader of the guide, and no
+    cross-method test obligation beyond its own unit tests. That is precisely the
+    exemption `publish = false` buys a stub crate.
+
+    Read from the checkout — the engine runs post-merge, so the added manifest is
+    on disk in CI. A missing or unparseable manifest is treated as NOT private,
+    the same strict default as `gate-new-crate.py`'s `crate_is_stub`: better to
+    mint a follow-on a human can close than to silently skip one."""
+    manifest = REPO_ROOT / pkg_dir / "package.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("private") is True
+
+
 def build_context(
     pr: int,
     pr_title: str,
@@ -223,6 +302,15 @@ def build_context(
     zk_circuit = _first_segment_after(
         "zk/", [p for p in pool_for_dir if not p.startswith("zk/compose/")]
     )
+    # [OPUS-5] (#5243) The npm package this PR ADDED. Derived from `added` ONLY,
+    # unlike the {crate}/{suite} pool above which falls back to all changed paths:
+    # the only rules using it are new-* rules, so a changed-path value would never
+    # be correct. The check that ACTUALLY keeps a wrong package out of a follow-on
+    # is _new_public_package_added(), which reads the same `added` list — this is
+    # the same-input restatement that keeps the two from disagreeing.
+    # `{package}` is the short name used in titles + dedup keys, `{package_path}`
+    # the repo-relative directory (they differ only for the top-level `js/`).
+    package_path = added_npm_package(added)
     return {
         "pr": str(pr),
         "pr_title": pr_title,
@@ -230,6 +318,8 @@ def build_context(
         "suite": suite or "",
         "surface": surface or "",
         "zk_circuit": zk_circuit or "",
+        "package": package_path.rsplit("/", 1)[-1] if package_path else "",
+        "package_path": package_path or "",
     }
 
 
@@ -279,6 +369,20 @@ def _bench_suite_needs_dashboard_follow_on(suite: str) -> bool:
     return False
 
 
+def _new_public_package_added(added: list[str]) -> bool:
+    """[OPUS-5] (#5243) True iff this diff adds a new PUBLIC npm package that the
+    new-package templates would name correctly.
+
+    Both halves are load-bearing. The manifest must sit in a publishable location
+    AND parse out to a package name, so a nested/odd path that the rules' looser
+    fnmatch glob happened to match mints nothing rather than a follow-on naming
+    the empty string. And the package must not be `private: true` — npm's own
+    refusal-to-publish marker, and the analogue of the `publish = false` stub
+    exemption gate G1 grants a crate."""
+    pkg = added_npm_package(added)
+    return pkg is not None and not package_is_private(pkg)
+
+
 def rule_matches(
     rule: Rule,
     changed: list[str],
@@ -299,9 +403,18 @@ def rule_matches(
             new_pool = [p for p in added if not _any_glob_match(rule.exclude_new_paths, [p])]
         if not _any_glob_match(rule.when_new_paths, new_pool):
             return False
+    # [OPUS-5] (#5243) The merged PR already did this follow-on's work → suppress.
+    if rule.unless_paths and _any_glob_match(rule.unless_paths, changed):
+        return False
     if rule.when_label is not None and rule.when_label not in labels:
         return False
     if rule.when_title is not None and not re.search(rule.when_title, title, re.IGNORECASE):
+        return False
+
+    # [OPUS-5] (#5243) The new-package follow-ons cover only a genuinely-new
+    # PUBLIC npm package: a `private: true` package is exempt, the same way a
+    # `publish = false` crate is exempt from gate G1's bench + SKILL legs.
+    if rule.id in NEW_PACKAGE_RULE_IDS and not _new_public_package_added(added):
         return False
 
     if rule.id == BENCH_DASHBOARD_RULE_ID:
