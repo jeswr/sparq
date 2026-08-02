@@ -1143,6 +1143,24 @@ jobs:
         run: python3 scripts/check-advisory-registry.py --self-test
       - name: "Enforce advisory-job registry + gate-intent placement (C2/C3/C4) — GATING"
         run: python3 scripts/check-advisory-registry.py
+      # [OPUS-5] #5371 — the STEP-level seam BETWEEN the two checks above and the python
+      # suites. The advisory registry protects the JOB level and the scripts/ suites
+      # protect the inside of a module; an individual workflow STEP was covered by
+      # neither. Deleting `.github/workflows/triage-area.yml`'s pre-apply self-test step,
+      # or adding `continue-on-error: true` to it, left the job green, the `gate` green
+      # and every python test passing while the classifier wrote unverified `area:`
+      # labels to live issues. #4567's reviewer measured exactly that asymmetry: 18/18
+      # python mutants died, and EVERY surviving mutant lived in a workflow `if:`, a step,
+      # or a call site. This checker reads .github/workflow-step-guards.json and enforces
+      # S1 (a pinned safety step still exists, is unconditional-or-pinned-conditional, is
+      # not swallowed, still invokes its suites, still runs before the write it guards),
+      # S2 (no undeclared step-level `continue-on-error` in a job that gates) and S3 (a
+      # new self-test-before-write lane must declare its guard, so the registry cannot go
+      # stale). Needs PyYAML — installed once in the shared setup above.
+      - name: Self-test the workflow step-guard checker (S1/S2/S3 mutation table — #5371)
+        run: python3 scripts/check-workflow-step-guards.py --self-test
+      - name: "Enforce pinned workflow safety steps (step-level seam, #5371) — GATING"
+        run: python3 scripts/check-workflow-step-guards.py
       # [OPUS-4.8] sparq-org/sparq#3475: the fast-fix ring's ONLY privileged
       # capability is the cross-repo REGISTRY_RING_TOKEN doorbell. Because a
       # `workflow_run` workflow is ALSO delivered for fork / cross-repo triggering

@@ -1,0 +1,57 @@
+{
+  "_doc": "Workflow STEP-guard registry. [OPUS-5] sparq-org/sparq#5371. The repo gates hard at the JOB level (`ci-summary / gate` + .github/advisory-registry.json) and hard INSIDE python modules (mutation-checked unit tests); the seam between them — an individual workflow STEP — was uncovered. Deleting a pre-write self-test step, or adding `continue-on-error: true` to it, left the job green, the gate green and every python test passing. scripts/check-workflow-step-guards.py reads this file and enforces three rules: S1 pins each declared safety step (it exists, is unconditional, is not swallowed, still invokes the commands that make it a guard, and still runs BEFORE the step it protects); S2 refuses any step-level `continue-on-error` inside a job that GATES unless it is waived here with a reason; S3 refuses a NEW self-test-before-write lane that is not pinned in `pinned_steps`, so this registry cannot silently go stale as workflows are added. LIMIT, stated honestly: S2 covers the declarative `continue-on-error` key only. A `run:` body that swallows its own failure with `|| true` or `set +e` is NOT detected — that idiom is used legitimately across the tree and banning it is a separate, larger piece of work.",
+  "pinned_steps": [
+    {
+      "id": "triage-area-selftest-before-apply",
+      "workflow": "triage-area.yml",
+      "job_id": "classify",
+      "step_name": "Self-test the classifier before it writes",
+      "requires_run": [
+        "triage-area.py --self-test",
+        "scripts/tests/test_triage_area.py"
+      ],
+      "must_precede_step": "Classify the needs:area backlog",
+      "why": "The half-hourly `--apply` sweep writes `area:` labels to LIVE issues, and a wrong area routes a worker at the wrong crate. These two hermetic suites are the only thing standing between a rule-table regression and mislabelled live issues. Delete the step, or let it continue-on-error, and the sweep applies unverified labels with nothing red anywhere.",
+      "owner_issue": 5371,
+      "registered": "2026-08-02"
+    },
+    {
+      "id": "verdict-bridge-selftest-before-label-writes",
+      "workflow": "verdict-bridge.yml",
+      "job_id": "bridge",
+      "step_name": "Self-test policy",
+      "requires_run": [
+        "scripts/gh_retry.py --self-test",
+        "scripts/verdict-bridge.py --self-test"
+      ],
+      "must_precede_step": "Reify the informational review:unreviewed label",
+      "expected_job_if": "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(github.event.comment.body, 'VERDICT')) || (github.event_name == 'pull_request_review' && github.event.pull_request.number != null) || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.pull_requests[0].number != null)",
+      "why": "The bridge translates review comments into `review:` labels that the arm path keys off, using an App token with write scope. Its policy self-test (plus its transient-retry dependency's) is the pre-write guard; without it a policy regression relabels PRs and can arm on a verdict that was never given.",
+      "owner_issue": 5371,
+      "registered": "2026-08-02"
+    }
+  ],
+  "swallow_waivers": [
+    {
+      "workflow": "ci.yml",
+      "job_id": "lint",
+      "step_name": "rustfmt (informational)",
+      "reason": "Deliberate and documented in ci.yml: `cargo fmt --all --check` stays non-blocking until the deferred workspace-wide reformat lands (see rustfmt.toml). The step's own status stays visible in the run.",
+      "registered": "2026-08-02"
+    },
+    {
+      "workflow": "fuzz.yml",
+      "job_id": "file-demoted-fuzz-finding",
+      "step_name": "Download the fuzz run log",
+      "reason": "The artifact is an ATTACHMENT to the auto-filed finding, not the finding. A run that failed before the upload has no artifact; the filer renders the absence as \"(no log captured …)\" and the issue is still worth filing. Swallowing this download is what keeps a missing attachment from suppressing the report.",
+      "registered": "2026-08-02"
+    },
+    {
+      "workflow": "vectorized-feature-off.yml",
+      "job_id": "artifact-exact-equality",
+      "step_name": "Derive the feature-OFF declaration (advisory — leg 2's result is unchanged)",
+      "reason": "Advisory by construction: it only PRINTS a declaration for a human to commit and cannot make leg 2 pass. Refusal (exit 2) is its normal outcome on an unprovable diff, and swallowing it keeps that refusal from adding a second red to a job leg 2 has already failed.",
+      "registered": "2026-08-02"
+    }
+  ]
+}
