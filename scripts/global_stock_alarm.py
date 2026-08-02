@@ -266,8 +266,11 @@ def load_state(path: Path, repo: str) -> dict | None:
     """-> the previous tick's state, or None when there is none. Corrupt state is FATAL.
 
     A corrupt file is an infrastructure error rather than a silent reset: a reset lowers
-    every streak to zero, which is indistinguishable from a healthy empty stock. The next
-    tick writes a fresh file, so the loud failure self-heals in one tick.
+    every streak to zero, which is indistinguishable from a healthy empty stock. Raising
+    is only half of it — `run` catches this and OVERWRITES the unusable file with the
+    tick's own validated observations before going red, because the workflow re-caches
+    whatever is left at this path; leaving the poison would make the next sweep restore
+    it and fail the same way forever instead of self-healing in one tick.
     """
     if not path.exists():
         return None
@@ -512,11 +515,24 @@ def run(args: argparse.Namespace) -> int:
 
     findings, census = sweep(prs, issues_by_number, links)
 
-    previous = load_state(state_path, repo)
-    if previous is None:
+    try:
+        previous, unusable_state = load_state(state_path, repo), None
+    except AlarmError as exc:
+        # A corrupt or foreign file must not SURVIVE this tick. The workflow's save step
+        # runs under `always()` and keys on the run id, so whatever sits at this path
+        # when the run ends becomes the NEWEST entry the next sweep's prefix restore
+        # picks up: returning here without writing would re-cache the poison, and every
+        # later sweep would restore it, fail identically, and re-cache it again — a
+        # permanent outage rather than the one-tick fail-loud this file promises. So the
+        # tick continues far enough to overwrite the file with validated state built
+        # from its own observations, and THEN goes red below.
+        previous, unusable_state = None, str(exc)
+    if previous is None and unusable_state is None:
         # Asked ONLY on a cold read, and only against this lane's own run history: a warm
         # tick needs no evidence, and one API call per sweep that answers nothing is a
-        # failure surface for free.
+        # failure surface for free. Skipped when the state was unusable rather than
+        # absent — that tick already has its fatal reason, and the memory demonstrably
+        # did survive.
         prior_completed_runs = (
             int(args.prior_runs or 0) if hermetic
             else (count_completed_runs(repo, args.workflow) if args.workflow else 0)
@@ -528,6 +544,14 @@ def run(args: argparse.Namespace) -> int:
     # Written BEFORE the verdict so a red tick — or one that fails to file its issue —
     # still advances the memory. Nothing below may return without this having happened.
     write_state(state_path, repo, streaks, now)
+    if unusable_state is not None:
+        # Loud, but no longer self-perpetuating: the streaks now on disk are this sweep's
+        # own observations, so the NEXT sweep restores state it can read.
+        raise AlarmError(
+            f"{unusable_state}. The unusable file has been REPLACED with this sweep's "
+            f"own observations, so the next sweep starts from validated state — but "
+            f"every streak before it was lost, so this tick is red."
+        )
 
     print(f"global-stock census over {len(prs)} open PR(s) in {repo}:")
     for state in CENSUS_STATES:
@@ -742,11 +766,28 @@ def self_test() -> int:  # noqa: C901 - a flat table of named assertions reads b
         check(json.loads(state.read_text())["streaks"] == {},
               "an issue-rescued PR is not even recorded as stock")
 
-        # Corrupt / foreign state is FATAL, not a silent reset to zero.
+        # Corrupt / foreign state is FATAL, not a silent reset to zero — but the tick
+        # must REPLACE it, because the workflow re-caches whatever is left at this path.
+        write_snapshot([_pr(1)])
         state.write_text("{not json")
         check(invoke() == 2, "corrupt state is a fail-loud exit 2")
+        # Read defensively: the whole point of this check is that the file MIGHT still be
+        # the poison, and an unhandled decode error would bury the label that says so.
+        try:
+            left_behind = json.loads(state.read_text()).get("streaks")
+        except (json.JSONDecodeError, AttributeError):
+            left_behind = None
+        check(left_behind == {"1": 1},
+              "a corrupt tick leaves VALIDATED state behind, not the poison it restored")
+        check(invoke() == 1,
+              "the tick after a corrupt restore recovers (alarms) instead of re-failing")
         state.write_text(json.dumps({"schema": 1, "repo": "other/repo", "streaks": {}}))
         check(invoke() == 2, "state written for another repository is a fail-loud exit 2")
+        try:
+            readable = load_state(state, REPO_FIXTURE) is not None
+        except AlarmError:  # still the foreign file => the poison survived the tick
+            readable = False
+        check(readable, "a foreign tick too leaves state THIS repo can read")
         state.unlink(missing_ok=True)
         check(invoke(["--prior-runs", "4"]) == 2,
               "a cold read on a lane with completed runs is a fail-loud exit 2")

@@ -16,7 +16,11 @@
 #      * a PR that leaves the stock LOSES its streak, so a flickering PR can never
 #        accumulate its way to an alarm,
 #      * the memory advances on a RED tick (state is written before the verdict), and a
-#        memory that silently stopped persisting is fail-LOUD rather than a clean board.
+#        memory that silently stopped persisting is fail-LOUD rather than a clean board,
+#      * an UNUSABLE restore (corrupt, or written for another repository) is fail-loud
+#        for ONE tick and no more: the save step re-caches whatever is left at the state
+#        path, so a tick that exited leaving the poison there would make every later
+#        sweep restore it and die identically — which is why that one is a TWO-tick test.
 #
 # 2. THE YAML SEAM — measured in this repo, every uncaught mutant of an 18-mutant run
 #    lived in a workflow `if:` / step / call-site, not in the Python. This lane's memory
@@ -306,6 +310,24 @@ class TestExitCodeCarriesTheVerdict(unittest.TestCase):
         self._snapshot([_pr(1)])
         self.state.write_text(json.dumps({"schema": 1, "repo": "other/repo", "streaks": {}}))
         self.assertEqual(self._invoke(), 2)
+
+    def test_an_unusable_restore_is_replaced_so_the_NEXT_tick_recovers(self):
+        """TWO ticks, because one tick cannot show this. The workflow saves whatever sits
+        at the state path under a newer cache key on `always()`, so a tick that exits 2
+        leaving the unusable file in place would re-cache it, the next sweep would
+        restore it and fail identically, and the detector would be dead permanently
+        rather than for one tick. Tick 1 must go red AND leave validated state; tick 2
+        must reach a verdict."""
+        for poison in ("{not json",
+                       json.dumps({"schema": 1, "repo": "other/repo", "streaks": {}})):
+            with self.subTest(poison=poison[:20]):
+                self._snapshot([_pr(1)])
+                self.state.write_text(poison)
+                self.assertEqual(self._invoke(), 2, "the unusable restore is still LOUD")
+                self.assertEqual(self._streaks(), {"1": 1},
+                                 "and the file left for the cache is this tick's own state")
+                self.assertEqual(self._invoke(), 1,
+                                 "so the following tick reaches a verdict, not exit 2")
 
     def test_a_cold_read_on_a_lane_with_completed_runs_is_fail_loud(self):
         self._snapshot([_pr(1)])

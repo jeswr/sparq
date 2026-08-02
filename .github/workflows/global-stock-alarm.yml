@@ -151,6 +151,16 @@ jobs:
       # detector itself breaks, and both of those ticks must still advance the memory.
       # `hashFiles` guards the case where the run died before the script wrote anything —
       # saving an absent path would warn, and saving a partial one would be worse.
+      #
+      # THE CONVERSE OBLIGATION, AND IT IS THE SCRIPT'S. Because this saves whatever is
+      # at that path under a NEWER key than the one it restored, a tick that exited
+      # leaving an unusable restored file in place would re-cache it, and every later
+      # sweep would restore the same poison and die the same way — a permanent outage
+      # rather than a one-tick one. So the script never exits leaving a restored file it
+      # could not read: it OVERWRITES it with this sweep's own observations first, and
+      # only then goes red. A corrupt or foreign restore still exits 2; the next tick
+      # starts from state this lane wrote. Pinned by the two-tick test in
+      # scripts/tests/test_global_stock_alarm.py and by the script's own --self-test.
       - name: Persist this sweep's streaks for the next one (main-scoped runs)
         if: always() && github.ref == 'refs/heads/main' && hashFiles('.global-stock-state/state.json') != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
