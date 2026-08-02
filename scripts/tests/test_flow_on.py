@@ -123,8 +123,10 @@ class NewCratePublicSurfaceFollowOnTest(unittest.TestCase):
     """[OPUS-5] (#2547) A new PUBLIC crate must mint the three UN-GATEABLE
     follow-ons — test methods, website entry, guide page — and nothing that gate G1
     already enforces in-PR. A `publish = false` stub mints none of them (G1's own
-    stub escape hatch), and a rule whose surface the PR already touched suppresses
-    itself rather than blindly minting (the sq-l0a0 lesson)."""
+    stub escape hatch), and the site/guide rules suppress themselves only on
+    EVIDENCE that the artifact already exists for that crate, never merely because
+    the PR touched the surface (don't blindly mint — the sq-l0a0 lesson — but don't
+    fail OPEN either)."""
 
     NEW_CRATE_RULES = {
         "new-crate-test-methods",
@@ -134,6 +136,16 @@ class NewCratePublicSurfaceFollowOnTest(unittest.TestCase):
 
     def setUp(self):
         self.rules = flow_on.load_rules(RULES)
+
+    def _patch(self, obj, name, value):
+        """Set an attribute for the duration of one test, then restore it."""
+        old = getattr(obj, name)
+        self.addCleanup(setattr, obj, name, old)
+        setattr(obj, name, value)
+
+    def _use_book(self, src: Path, summary: Path) -> None:
+        self._patch(flow_on, "BOOK_SRC", src)
+        self._patch(flow_on, "BOOK_SUMMARY", summary)
 
     def _ids(self, changed, added, title="feat: add sparq-foo crate"):
         fos = flow_on.evaluate(self.rules, 77, title, changed, added, [])
@@ -175,22 +187,109 @@ class NewCratePublicSurfaceFollowOnTest(unittest.TestCase):
         self.assertIn("role:site", by_rule["new-crate-site-advertisement"].labels)
         self.assertIn("role:docs", by_rule["new-crate-guide-page"].labels)
 
-    def test_site_rule_suppressed_when_pr_already_touched_the_site(self):
+    def test_unrelated_site_edit_does_not_suppress_the_site_follow_on(self):
+        # A site typo fix in the same PR does NOT advertise the crate. Vetoing on
+        # "some site/** path changed" would fail OPEN: the crate would never reach
+        # the website and no issue would remember it.
         added = ["crates/sparq-foo/Cargo.toml"]
-        changed = added + ["site/src/data/surfaces.ts"]
+        changed = added + ["site/src/app/page.tsx", "site/src/data/surfaces.ts"]
         ids, _ = self._ids(changed, added)
+        self.assertIn("new-crate-site-advertisement", ids)
+
+    def test_unrelated_book_edit_does_not_suppress_the_guide_follow_on(self):
+        # Likewise for the mdBook: editing SUMMARY.md (or any page) is not the same
+        # as registering a page for THIS crate.
+        added = ["crates/sparq-foo/Cargo.toml"]
+        changed = added + ["book/src/SUMMARY.md", "book/src/introduction.md"]
+        ids, _ = self._ids(changed, added)
+        self.assertIn("new-crate-guide-page", ids)
+
+    def test_site_rule_suppressed_when_surfaces_ts_names_the_crate(self):
+        # `sparq-algos` really is registered in site/src/data/surfaces.ts, so this
+        # exercises the EVIDENCE predicate against the canonical registry itself.
+        self.assertTrue(flow_on._crate_advertised_on_site("sparq-algos"))
+        added = ["crates/sparq-algos/Cargo.toml"]
+        ids, _ = self._ids(added, added, title="feat: add sparq-algos")
         self.assertNotIn("new-crate-site-advertisement", ids)
         # The other two are unaffected.
         self.assertIn("new-crate-guide-page", ids)
         self.assertIn("new-crate-test-methods", ids)
 
-    def test_guide_rule_suppressed_when_pr_already_touched_the_book(self):
-        added = ["crates/sparq-foo/Cargo.toml"]
-        changed = added + ["book/src/SUMMARY.md", "book/src/foo.md"]
-        ids, _ = self._ids(changed, added)
-        self.assertNotIn("new-crate-guide-page", ids)
+    def test_site_evidence_requires_the_whole_crate_name(self):
+        # A prefix of a registered crate is not that crate.
+        self.assertFalse(flow_on._crate_advertised_on_site("sparq-algo"))
+
+    def test_guide_rule_suppressed_only_by_a_registered_existing_page(self):
+        # Drive the book predicate against a fixture mdBook: a page must be BOTH
+        # present on disk AND registered in SUMMARY.md to count as a guide page.
+        with tempfile.TemporaryDirectory() as td:
+            book = Path(td)
+            (book / "sparq-foo.md").write_text("# sparq-foo\n", encoding="utf-8")
+            (book / "orphan.md").write_text(
+                "{{#include ../../crates/sparq-orphan/README.md}}\n", encoding="utf-8"
+            )
+            summary = book / "SUMMARY.md"
+            # sparq-foo: page + registration. sparq-orphan: page but no registration.
+            # sparq-ghost: registration but no page.
+            summary.write_text(
+                "- [Foo](./sparq-foo.md)\n- [Ghost](./sparq-ghost.md)\n",
+                encoding="utf-8",
+            )
+            self._use_book(book, summary)
+            self.assertTrue(flow_on._crate_has_guide_page("sparq-foo"))
+            self.assertFalse(flow_on._crate_has_guide_page("sparq-orphan"))
+            self.assertFalse(flow_on._crate_has_guide_page("sparq-ghost"))
+
+            added = ["crates/sparq-foo/Cargo.toml"]
+            ids, _ = self._ids(added, added)
+            self.assertNotIn("new-crate-guide-page", ids)
+            self.assertIn("new-crate-site-advertisement", ids)
+            self.assertIn("new-crate-test-methods", ids)
+
+    def test_missing_registry_mints_the_follow_on(self):
+        # Absent evidence must never suppress: an unreadable registry means we
+        # cannot show the work was done, so the follow-on is minted.
+        missing = Path("/nonexistent/surfaces.ts")
+        self._patch(flow_on, "SITE_SURFACES", missing)
+        self.assertFalse(flow_on._crate_advertised_on_site("sparq-algos"))
+        added = ["crates/sparq-algos/Cargo.toml"]
+        ids, _ = self._ids(added, added, title="feat: add sparq-algos")
         self.assertIn("new-crate-site-advertisement", ids)
-        self.assertIn("new-crate-test-methods", ids)
+
+    def test_every_added_public_crate_gets_its_own_follow_ons(self):
+        # A PR adding two crates owes a full, correctly-named set for BOTH — the
+        # rules are emitted per crate, not once for whichever crate came first.
+        added = ["crates/sparq-foo/Cargo.toml", "crates/sparq-bar/Cargo.toml"]
+        _, fos = self._ids(added, added, title="feat: add two crates")
+        for crate in ("sparq-foo", "sparq-bar"):
+            with self.subTest(crate=crate):
+                mine = [fo for fo in fos if f"area:{crate}" in fo.labels or crate in fo.dedup_key]
+                self.assertEqual(
+                    {
+                        f"new-crate-test-methods-{crate}",
+                        f"new-crate-site-{crate}",
+                        f"new-crate-guide-{crate}",
+                    },
+                    {fo.dedup_key for fo in mine},
+                )
+                for fo in mine:
+                    self.assertIn(f"crates/{crate}", fo.body)
+
+    def test_stub_listed_first_does_not_hide_a_later_public_crate(self):
+        # `sparq-canon` is a real `publish = false` stub; the public crate after it
+        # must still get its full set.
+        added = ["crates/sparq-canon/Cargo.toml", "crates/sparq-foo/Cargo.toml"]
+        ids, fos = self._ids(added, added, title="feat: add a stub and a crate")
+        self.assertEqual(self.NEW_CRATE_RULES, ids & self.NEW_CRATE_RULES)
+        keys = {fo.dedup_key for fo in fos if fo.rule_id in self.NEW_CRATE_RULES}
+        self.assertEqual(
+            {
+                "new-crate-test-methods-sparq-foo",
+                "new-crate-site-sparq-foo",
+                "new-crate-guide-sparq-foo",
+            },
+            keys,
+        )
 
     def test_publish_false_stub_mints_nothing(self):
         # `sparq-canon` really does carry `publish = false` on disk, so this
@@ -241,52 +340,6 @@ class NewCratePublicSurfaceFollowOnTest(unittest.TestCase):
         for key in keys(fos_a):
             self.assertNotIn("77", key)
             self.assertNotIn("78", key)
-
-
-class UnlessPathsPredicateTest(unittest.TestCase):
-    """[OPUS-5] (#2547) The generic `unless_paths` suppression predicate: a rule
-    does not fire when the merged PR already touched the surface the follow-on
-    would ask about."""
-
-    def _rule(self, **kw):
-        return flow_on.Rule(
-            id="r",
-            when_paths=["crates/**"],
-            creates=[flow_on.CreateTemplate("k", "t", "b")],
-            **kw,
-        )
-
-    def test_absent_predicate_does_not_suppress(self):
-        self.assertTrue(
-            flow_on.rule_matches(self._rule(), ["crates/a/x.rs"], [], [], "t")
-        )
-
-    def test_matching_changed_path_suppresses(self):
-        rule = self._rule(unless_paths=["site/**"])
-        self.assertFalse(
-            flow_on.rule_matches(
-                rule, ["crates/a/x.rs", "site/src/page.tsx"], [], [], "t"
-            )
-        )
-
-    def test_non_matching_changed_path_does_not_suppress(self):
-        rule = self._rule(unless_paths=["site/**"])
-        self.assertTrue(
-            flow_on.rule_matches(rule, ["crates/a/x.rs"], [], [], "t")
-        )
-
-    def test_unless_paths_alone_is_not_a_trigger(self):
-        # A rule with ONLY a suppression predicate has nothing to fire on; loading
-        # it must fail loudly rather than mint on every merge.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "rules.toml"
-            path.write_text(
-                '[[rule]]\nid = "bad"\nunless_paths = ["site/**"]\n'
-                '[[rule.create]]\ndedup_key = "k"\ntitle = "t"\nbody = "b"\n',
-                encoding="utf-8",
-            )
-            with self.assertRaises(ValueError):
-                flow_on.load_rules(path)
 
 
 class LabelExpansionTest(unittest.TestCase):

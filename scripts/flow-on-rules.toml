@@ -32,9 +32,6 @@
 #   when_new_paths    = ["glob", ...]  # like when_paths but only counts ADDED files (status "A")
 #   exclude_new_paths = ["glob", ...]  # added paths matching these are DROPPED from the
 #                                      #   when_new_paths pool (a sub-tree owned by another gate)
-#   unless_paths      = ["glob", ...]  # SUPPRESSION: the rule does NOT fire if any CHANGED
-#                                      #   path matches — "the merged PR already did this
-#                                      #   follow-on's work", so asking again would be noise
 #   when_label        = "label"        # PR must carry this label (opt-in rules)
 #   when_title        = "regex"        # case-insensitive regex over the PR title
 #
@@ -103,8 +100,15 @@
 # `added_crates` + `crate_is_stub`, so a `publish = false` stub — which has no
 # public surface to advertise, no guide page to write, and no cross-method test
 # obligation — mints NOTHING, exactly as it is exempt from G1's bench + SKILL legs.
-# The site/guide rules additionally suppress themselves via `unless_paths` when the
-# merged PR already touched that surface (don't blindly mint — the sq-l0a0 lesson).
+# They are emitted ONCE PER newly-added public crate, so a PR landing two crates
+# owes a full set for each.
+#
+# The site/guide rules suppress themselves only on EVIDENCE that the artifact
+# already exists FOR THAT CRATE — flow-on.py's NEW_CRATE_EVIDENCE reads
+# `site/src/data/surfaces.ts` and the `book/src/SUMMARY.md` page set and looks for
+# the crate itself. Suppressing merely because the PR touched `site/**` / `book/**`
+# would fail OPEN: an unrelated site typo fix in a new-crate PR would swallow the
+# follow-on without the crate ever being advertised. Absent evidence → mint.
 
 [[rule]]
 id = "new-crate-test-methods"
@@ -143,10 +147,10 @@ Close this with a note if unit tests genuinely are the whole appropriate set.
 
 [[rule]]
 id = "new-crate-site-advertisement"
-description = "A new public crate landed but the PR touched no site/ file; advertise it on the website."
+description = "A new public crate landed with no entry in the site IA; advertise it on the website."
 when_new_paths = ["crates/*/Cargo.toml"]
-# The merged PR already edited the website — assume it advertised the crate there.
-unless_paths = ["site/**"]
+# Suppressed (in flow-on.py) only when site/src/data/surfaces.ts already names the
+# crate — see NEW_CRATE_EVIDENCE.
 
 [[rule.create]]
 dedup_key = "new-crate-site-{crate}"
@@ -154,8 +158,9 @@ title = "site: advertise new crate {crate} on the website"
 # [OPUS-5] kind:site + area:site → role:site (scripts/triage.py UI_SURFACE_LABELS).
 labels = ["site", "kind:site", "area:site"]
 body = """
-Merged PR #{pr} ({pr_title}) added the new public crate `crates/{crate}`, and did
-not touch any `site/**` file — so the website does not know the surface exists.
+Merged PR #{pr} ({pr_title}) added the new public crate `crates/{crate}`, and
+`site/src/data/surfaces.ts` does not name it — so the website does not know the
+surface exists.
 
 Add it to the canonical site IA in `site/src/data/surfaces.ts` (the single source
 the sidebar nav, the landing surface grid and the command palette all derive from),
@@ -169,10 +174,10 @@ If the crate is deliberately not user-facing, say so here and close.
 
 [[rule]]
 id = "new-crate-guide-page"
-description = "A new public crate landed but the PR touched no book/ file; give it a guide page."
+description = "A new public crate landed with no registered guide page; give it one."
 when_new_paths = ["crates/*/Cargo.toml"]
-# The merged PR already edited the mdBook — assume it documented the crate there.
-unless_paths = ["book/**"]
+# Suppressed (in flow-on.py) only when book/src/SUMMARY.md registers an existing
+# page naming the crate — see NEW_CRATE_EVIDENCE.
 
 [[rule.create]]
 dedup_key = "new-crate-guide-{crate}"
@@ -180,8 +185,9 @@ title = "docs: add an mdBook guide page for new crate {crate}"
 # [OPUS-5] kind:docs → role:docs; area:guide is the mdBook surface.
 labels = ["docs", "kind:docs", "area:guide"]
 body = """
-Merged PR #{pr} ({pr_title}) added the new public crate `crates/{crate}`, and did
-not touch any `book/**` file — so the published guide does not cover it.
+Merged PR #{pr} ({pr_title}) added the new public crate `crates/{crate}`, and no
+page registered in `book/src/SUMMARY.md` names it — so the published guide does not
+cover it.
 
 Add a page under `book/src/` and list it in `book/src/SUMMARY.md`. Per the SUMMARY
 header, a content page should be a thin `{{#include}}` wrapper that single-sources
