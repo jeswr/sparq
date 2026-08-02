@@ -1169,10 +1169,17 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
+      # [OPUS-5] #5305: the version comes from .github/wasm-pack-version — the ONE
+      # place the repo decides which wasm-pack every lane installs, enforced by
+      # scripts/check-wasm-pack-pin.py. This lane used to pin v0.13.1 while js.yml
+      # pinned v0.15.0 and every `cargo install wasm-pack` lane floated to the current
+      # release, so these headless suites validated the #[wasm_bindgen] exports under a
+      # wasm-pack — and so a bundled wasm-bindgen CLI — two minor versions older than
+      # the one that builds the artifact publish.yml ships.
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
         with:
-          version: v0.13.1
+          version: v0.15.0
       - name: Headless wasm tests (wasm-pack test --node)
         working-directory: crates/sparq-wasm
         run: wasm-pack test --node

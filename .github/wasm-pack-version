@@ -1,0 +1,22 @@
+# The ONE place this repo decides which wasm-pack every CI lane uses (#5305).
+#
+# WHY: ci.yml's `wasm` job pinned wasm-pack v0.13.1 via jetli/wasm-pack-action, js.yml
+# pinned v0.15.0, and sixteen other lanes ran `cargo install wasm-pack --locked`
+# (floating: whatever the current release is). So the `wasm-pack test --node`
+# headless suites validated the #[wasm_bindgen] exports under a wasm-pack —
+# and therefore a wasm-bindgen CLI — two minor versions older than the one that
+# built the artifact we publish. That is a validation gap, not just untidiness.
+#
+# HOW IT IS ENFORCED: scripts/check-wasm-pack-pin.py reads the version below and
+# fails if ANY wasm-pack install site in .github/workflows disagrees with it —
+# both the `jetli/wasm-pack-action` `version: v<X>` inputs and the
+# `cargo install wasm-pack --version <X> --locked` commands. The literals stay in
+# the YAML (auditable at the SHA-pinned action, portable across the shells the
+# release matrix uses); the gate is what keeps them equal to this file.
+#
+# TO BUMP: change the line below, run `python3 scripts/check-wasm-pack-pin.py`,
+# and update every lane it names. Bump deliberately, in one PR, not implicitly.
+#
+# Format: one bare semver, no leading `v` (cargo's `--version` takes `0.15.0`;
+# jetli/wasm-pack-action's `version:` takes `v0.15.0`).
+0.15.0

@@ -129,7 +129,8 @@ jobs:
           npm install -g 'npm@^11.5.1'
           npm --version
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
       - name: Install npm dependencies
         run: npm ci
       # Publish guardrail (sq-bkag): refuse to publish a binding that would ship without its
@@ -216,7 +217,8 @@ jobs:
           npm install -g 'npm@^11.5.1'
           npm --version
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
       # Build tooling only (typescript, @rdfjs/types). --workspaces=false installs just this
       # package's devDeps without pulling the whole monorepo graph; the package has no lockfile.
       - name: Install build dependencies
@@ -293,7 +295,8 @@ jobs:
           npm install -g 'npm@^11.5.1'
           npm --version
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
       # Build the wasm bundle so the `files` allowlist packs a populated wasm/ tree. This package
       # has NO `prepack`/`build` script (unlike @jeswr/sparq / eyereasoner-compat), so the wasm is
       # NOT rebuilt automatically on `npm publish` — build it explicitly here, before publish.

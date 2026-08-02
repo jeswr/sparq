@@ -22,10 +22,14 @@
 #      `prepare` lifecycle (sq-bkag git-pin build) runs on `npm ci` and needs
 #      wasm-pack on PATH to compile the wasm engine.
 #
-# SCOPE — deliberately js.yml ONLY. gui.yml / pages.yml / publish.yml / release.yml /
-# nightly-full-sweep.yml / site-e2e-hero.yml / site-visual.yml still `cargo install`
-# wasm-pack; converting them is separate work and is NOT asserted here, so this file's
-# silence about them is not a claim that they are hardened.
+# SCOPE — deliberately js.yml ONLY, and only the install MECHANISM. gui.yml /
+# pages.yml / publish.yml / release.yml / nightly-full-sweep.yml / site-e2e-hero.yml /
+# site-visual.yml still `cargo install` wasm-pack; converting them is separate work and
+# is NOT asserted here, so this file's silence about them is not a claim that they are
+# hardened. Which VERSION every lane installs (including this one) is a different
+# property, owned by scripts/check-wasm-pack-pin.py against .github/wasm-pack-version
+# (#5305) — obligation (3) below is the mechanism-side half (an exact pin, never
+# `latest`); that gate is what makes the exact pin the SAME everywhere.
 #
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).

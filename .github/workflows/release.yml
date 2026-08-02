@@ -494,7 +494,8 @@ jobs:
       # (gui/app/scripts/sync-wasm.mjs) needs the lean shacl,jsonld wasm bundle present in js/wasm/.
       # Mirror gui.yml's proven-green `gui-app`/`tauri-e2e` jobs: build the wasm bundle FIRST.
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js

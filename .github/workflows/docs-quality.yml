@@ -672,6 +672,18 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [OPUS-5] #5305: every wasm-pack install site must pin the ONE version declared
+      # in .github/wasm-pack-version. Same invisible-failure shape as the lint above:
+      # ci.yml's headless `wasm-pack test --node` suites pinned v0.13.1 while js.yml
+      # pinned v0.15.0 and sixteen other lanes floated to the current release, so those
+      # suites validated the #[wasm_bindgen] exports under an older wasm-bindgen CLI
+      # than the one that builds the published artifact — green the whole time. The
+      # lint also fails if it finds NO install site, so a refactor cannot leave it
+      # passing vacuously. Stdlib-only, no compile, no deps.
+      - name: Self-test wasm-pack pin gate (pure logic)
+        run: python3 scripts/check-wasm-pack-pin.py --self-test
+      - name: "Enforce one wasm-pack version across every wasm lane — GATING"
+        run: python3 scripts/check-wasm-pack-pin.py
       # [SONNET-4.6] sq-6vshe.11: every cargo-llvm-cov job MUST set a job-level RUSTFLAGS,
       # and they must all set the SAME value. cargo picks ONE rustflags source (first match
       # wins, never merged) and cargo-llvm-cov sets RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS to

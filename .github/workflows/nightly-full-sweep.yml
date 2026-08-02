@@ -200,7 +200,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -310,7 +311,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -427,7 +429,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -542,7 +545,8 @@ jobs:
           key: gui-e2e-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
       - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
         if: needs.config.outputs.mode == 'full'
         working-directory: js

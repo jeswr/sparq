@@ -81,7 +81,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
 
       # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
       # the Swatinem/rust-cache above (shared-key: site-wasm) already caches

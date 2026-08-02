@@ -133,7 +133,8 @@ jobs:
       # the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        # wasm-pack pin: .github/wasm-pack-version (#5305) — bump there, not here.
+        run: cargo install wasm-pack --version 0.15.0 --locked
 
       # Build the lean wasm bundle (crates/sparq-wasm → js/wasm) that the live REPL loads.
       # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: `js/` is now a workspace member and the
