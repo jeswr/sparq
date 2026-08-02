@@ -481,8 +481,20 @@ export interface EngineContextValue {
 
 const EngineContext = React.createContext<EngineContextValue | null>(null);
 
-/** Heuristic SPARQL form classifier (the WASM Store has separate verbs per form). */
-function classifyQuery(q: string): "select" | "ask" | "construct" | "describe" | "update" {
+/** The forms {@link classifyQuery} distinguishes — one per WASM Store verb. */
+export type QueryForm = "select" | "ask" | "construct" | "describe" | "update";
+
+/**
+ * Heuristic SPARQL form classifier (the WASM Store has separate verbs per form).
+ *
+ * EXPORTED because it is also the pre-flight gate a caller must consult before handing UNTRUSTED
+ * query text to {@link EngineContextValue.run} — a graph LENS slot, which is imported/persisted
+ * data rather than something typed in this session (see `graph-view-tool.tsx`). `run` dispatches
+ * on exactly this classification, so a caller that refuses the text this function calls
+ * `"update"` refuses precisely the inputs `run` would have executed as a mutation: the guard
+ * cannot drift from the dispatch, because it IS the dispatch's own decision.
+ */
+export function classifyQuery(q: string): QueryForm {
   // Strip comments + leading PREFIX/BASE declarations to find the first significant keyword.
   const body = q
     .replace(/(^|\s)#[^\n]*/g, " ")

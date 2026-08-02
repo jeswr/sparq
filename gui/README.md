@@ -180,9 +180,12 @@ the workspace** (`Workspace.graphLenses` / `activeLensId`):
 | `nodeDetail` | `SELECT` | `?node` bound → `?key ?value` | the focused node's side panel |
 
 Every slot is a real query against the live store; a lens is configuration, never a second
-rendering path. `?node` is bound by substituting the focus term's N-Triples spelling — the
-substitution skips comments, IRIs and string literals, so a `?node` inside one is untouched. A
-lens leaving `start` or `expand` empty falls back to the tool's original behaviour (`Run` executes
+rendering path. A lens only ever **reads**: a shared lens is untrusted JSON, so each slot's query
+form is checked against the table above — with the same classification the runner dispatches on —
+*before* the engine sees it, and a slot carrying a SPARQL `UPDATE` is reported instead of run.
+`?node` is bound by substituting the focus term's N-Triples spelling — the substitution skips
+comments, IRIs and string literals, so a `?node` inside one is untouched. Any node the view draws
+can be the focus, literals included. A lens leaving `start` or `expand` empty falls back to the tool's original behaviour (`Run` executes
 the query in the editor). Lenses are shareable: **Copy JSON** exports one and the import box
 accepts a pasted lens, always under a fresh id so it can never overwrite one of your own.
 

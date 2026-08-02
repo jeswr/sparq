@@ -17,6 +17,11 @@
 // rendering path with its own idea of the data. With no start+expand pair the tool behaves
 // exactly as it did before: Run executes the query in the editor.
 //
+// A lens READS, it never WRITES. Lens text is untrusted data (a pasted "shared lens", a
+// hand-edited workspace record), so every slot run goes through `runSlot`, which classifies the
+// exact string with the SAME `classifyQuery` the engine dispatches on and refuses anything that
+// is not the slot's documented form — an UPDATE in any slot is reported, never executed.
+//
 // INVARIANT: renders REAL query results from the live store (never a canned figure). The
 // MAX_TRIPLES render cap is GraphView's own (and is labelled there — no perf claim here).
 //
@@ -27,7 +32,7 @@ import { Play, Loader2, Network, SlidersHorizontal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { useEngine, type QueryOutcome } from "@/lib/engine-context";
+import { classifyQuery, useEngine, type QueryOutcome } from "@/lib/engine-context";
 import { useWorkspace } from "@/lib/workspace-context";
 import {
   GraphView,
@@ -40,6 +45,7 @@ import { WorkbenchSparqlEditor } from "@/components/workbench/sparql-editor";
 import {
   bindFocusNode,
   edgeStyleIndex,
+  graphLensSlotFormError,
   mergeNTriples,
   nodeDetailRows,
   nodeKeyOfRdfTerm,
@@ -47,6 +53,7 @@ import {
   termToNTriples,
   type GraphEdgeStyle,
   type GraphLens,
+  type GraphLensSlot,
   type GraphNodeDetailRow,
   type GraphNodeStyle,
   type RdfTerm,
@@ -126,6 +133,32 @@ export function GraphViewTool() {
   );
 
   /**
+   * Run ONE lens slot — the single path by which lens text reaches the engine.
+   *
+   * FAIL-CLOSED ON QUERY FORM. A lens is DATA: imported from a pasted JSON blob and restored from
+   * a hand-editable workspace record, so its slot text is untrusted regardless of which slot it
+   * sits in. `run` dispatches on `classifyQuery`, so a slot carrying an UPDATE would MUTATE the
+   * live store, and the "that outcome was not a solution set / not a graph" checks below would
+   * notice only after the damage. Classifying here with the SAME function `run` dispatches on and
+   * refusing BEFORE the call closes that: what is refused is exactly what would have executed as
+   * a mutation. The refusal comes back as an ordinary error outcome, so every call site reports
+   * it through the status line it already has.
+   *
+   * The guard is at RUN time, not at import time, on purpose — a persisted or hand-edited lens
+   * record never passes through the import path, so run time is the only chokepoint that sees
+   * every slot. `text` is the FINAL string (focus already bound), so what is classified is
+   * character-for-character what would be executed.
+   */
+  const runSlot = React.useCallback(
+    async (slot: GraphLensSlot, text: string, signal: AbortSignal): Promise<QueryOutcome> => {
+      const refusal = graphLensSlotFormError(slot, classifyQuery(text));
+      if (refusal) return { kind: "error", message: refusal };
+      return runOne(text, signal);
+    },
+    [runOne],
+  );
+
+  /**
    * Re-resolve the lens's styling slots over the live store. Both are plain SELECTs with no focus
    * binding, so they run once per graph change rather than once per node. A slot that errors is
    * reported and skipped — a broken `edgeStyle` must not blank a working `nodeStyle`.
@@ -136,7 +169,7 @@ export function GraphViewTool() {
       let edges: ReadonlyMap<string, GraphEdgeStyle> = new Map();
       let resolved = false;
       if (lens.queries.nodeStyle) {
-        const res = await runOne(lens.queries.nodeStyle, signal);
+        const res = await runSlot("nodeStyle", lens.queries.nodeStyle, signal);
         if (res.kind === "select") {
           nodes = nodeStyleIndex(res.results);
           resolved = true;
@@ -145,7 +178,7 @@ export function GraphViewTool() {
         }
       }
       if (lens.queries.edgeStyle) {
-        const res = await runOne(lens.queries.edgeStyle, signal);
+        const res = await runSlot("edgeStyle", lens.queries.edgeStyle, signal);
         if (res.kind === "select") {
           edges = edgeStyleIndex(res.results);
           resolved = true;
@@ -155,7 +188,7 @@ export function GraphViewTool() {
       }
       setLensStyling(resolved ? { nodes, edges } : null);
     },
-    [runOne],
+    [runSlot],
   );
 
   /** Commit a merged N-Triples document as the drawn graph. */
@@ -207,7 +240,7 @@ export function GraphViewTool() {
     setFocus(null);
     setDetail(null);
     try {
-      const started = await runOne(start, controller.signal);
+      const started = await runSlot("start", start, controller.signal);
       if (started.kind !== "select") {
         // The start slot answered something other than a solution set. Show it honestly rather
         // than pretending the lens ran: a CONSTRUCT still draws, everything else explains itself.
@@ -234,7 +267,7 @@ export function GraphViewTool() {
       const expandedSeeds = seeds.slice(0, LENS_START_FANOUT);
       const docs: string[] = [];
       for (const nt of expandedSeeds) {
-        const res = await runOne(bindFocusNode(expand, nt), controller.signal);
+        const res = await runSlot("expand", bindFocusNode(expand, nt), controller.signal);
         if (res.kind === "graph") docs.push(res.ntriples);
         else if (res.kind === "error") {
           setLensStatus({ kind: "error", message: `Expand slot: ${res.message}` });
@@ -253,7 +286,7 @@ export function GraphViewTool() {
       abortRef.current = null;
       setRunning(false);
     }
-  }, [activeLens, refreshStyling, runOne, showGraph]);
+  }, [activeLens, refreshStyling, runSlot, showGraph]);
 
   /**
    * Click a node: run the lens's `expand` slot with `?node` bound to it and MERGE the result into
@@ -281,7 +314,7 @@ export function GraphViewTool() {
       setLensStatus(null);
       try {
         if (expand) {
-          const res = await runOne(bindFocusNode(expand, term.nt), controller.signal);
+          const res = await runSlot("expand", bindFocusNode(expand, term.nt), controller.signal);
           if (res.kind === "graph") {
             showGraph(mergeNTriples(graphDoc, res.ntriples));
             await refreshStyling(lens, controller.signal);
@@ -290,7 +323,8 @@ export function GraphViewTool() {
           }
         }
         if (nodeDetail) {
-          const res = await runOne(bindFocusNode(nodeDetail, term.nt), controller.signal);
+          const bound = bindFocusNode(nodeDetail, term.nt);
+          const res = await runSlot("nodeDetail", bound, controller.signal);
           if (res.kind === "select") setDetail(nodeDetailRows(res.results));
           else if (res.kind === "error") {
             setLensStatus({ kind: "error", message: `Node-panel slot: ${res.message}` });
@@ -301,7 +335,7 @@ export function GraphViewTool() {
         setRunning(false);
       }
     },
-    [activeLens, graphDoc, refreshStyling, runOne, showGraph],
+    [activeLens, graphDoc, refreshStyling, runSlot, showGraph],
   );
 
   // (sq-plqfs) [SONNET-4.6] ⌘/Ctrl-Enter fires Run from within the editor.

@@ -16,6 +16,7 @@ import {
   edgeKeyOfStatement,
   edgeStyleIndex,
   foldReifiedAnnotations,
+  graphLensSlotFormError,
   importGraphLens,
   mergeNTriples,
   newGraphLens,
@@ -91,6 +92,59 @@ test("a shared lens round-trips through JSON but always imports under a fresh id
   assert.notEqual(restored.id, lens.id, "an import must never overwrite a local lens by id");
   assert.equal(importGraphLens("{ not json"), null);
   assert.equal(importGraphLens('{"id":"x"}'), null);
+});
+
+// ---------------------------------------------------------------------------
+// The slot/form contract — a lens RENDERS, it never MODIFIES.
+// ---------------------------------------------------------------------------
+
+test("every slot refuses a SPARQL UPDATE, whichever slot it is smuggled into", () => {
+  // The shape a hostile "shared lens" takes: an UPDATE parked in a slot the UI describes as a
+  // read-only query. `parseGraphLens` accepts it (it validates shape, not SPARQL), so the form
+  // check is what stands between an imported lens and the store.
+  for (const { slot } of GRAPH_LENS_SLOTS) {
+    const message = graphLensSlotFormError(slot, "update");
+    assert.ok(message, `the ${slot} slot must refuse an UPDATE`);
+    assert.match(message, /UPDATE/);
+    assert.match(message, /not run/);
+  }
+});
+
+test("each slot accepts exactly its documented form", () => {
+  for (const spec of GRAPH_LENS_SLOTS) {
+    if (spec.form === "SELECT") {
+      assert.equal(graphLensSlotFormError(spec.slot, "select"), null);
+      // A graph form in a SELECT slot is a mismatch, not a mutation — refused all the same.
+      assert.ok(graphLensSlotFormError(spec.slot, "construct"));
+      assert.ok(graphLensSlotFormError(spec.slot, "describe"));
+    } else {
+      // Both graph forms answer with a graph, so both drive an expansion.
+      assert.equal(graphLensSlotFormError(spec.slot, "construct"), null);
+      assert.equal(graphLensSlotFormError(spec.slot, "describe"), null);
+      assert.ok(graphLensSlotFormError(spec.slot, "select"));
+    }
+    assert.ok(graphLensSlotFormError(spec.slot, "ask"), "no slot reads an ASK");
+  }
+});
+
+test("an unknown slot name is refused rather than defaulted", () => {
+  assert.ok(graphLensSlotFormError("notASlot", "select"));
+});
+
+test("the built-in lens satisfies its own slot/form contract", () => {
+  // Non-vacuous the other way: the contract the guard enforces is the one the shipped lens meets,
+  // so the guard cannot be passing only because nothing real is ever checked against it.
+  const forms = { select: "select", construct: "construct" };
+  for (const spec of GRAPH_LENS_SLOTS) {
+    const query = DEFAULT_LENS.queries[spec.slot];
+    if (!query) continue;
+    assert.equal(
+      graphLensSlotFormError(spec.slot, forms[spec.form.toLowerCase()]),
+      null,
+      `the built-in lens's ${spec.slot} slot is ${spec.form}`,
+    );
+    assert.match(query, new RegExp(spec.form, "i"));
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,11 @@
 // same code serves the Next.js host and the Tauri webview, and is unit-testable under
 // `node --test` (see `test/graph-lens.test.mjs`).
 //
+// BECAUSE a lens is data, its slot text is UNTRUSTED: parsing validates the lens's shape, not its
+// SPARQL. A lens describes how to DRAW the store and must never change it, so the slot/form
+// contract above is enforceable — `graphLensSlotFormError` is the check a host runs BEFORE
+// executing a slot, so an UPDATE smuggled into any slot is refused instead of run.
+//
 // WHY THE `?node` BINDING IS TEXTUAL. The wasm `Store.query` surface takes a query STRING and has
 // no initial-bindings parameter, so `bindFocusNode` substitutes the `?node` / `$node` variable
 // token with the focus term's exact N-Triples spelling. The substitution is escape-aware: it
@@ -259,6 +264,55 @@ export function importGraphLens(json: string): GraphLens | null {
   const lens = parseGraphLens(parsed);
   if (!lens) return null;
   return { ...lens, id: graphLensId(), updatedAt: Date.now() };
+}
+
+// ---------------------------------------------------------------------------
+// The slot/form contract — a lens RENDERS, it never MODIFIES.
+// ---------------------------------------------------------------------------
+
+/** The SPARQL forms a host distinguishes — the classification that picks its execution verb. */
+export type SparqlQueryForm = "select" | "ask" | "construct" | "describe" | "update";
+
+const FORM_LABEL: Record<SparqlQueryForm, string> = {
+  select: "a SELECT",
+  ask: "an ASK",
+  construct: "a CONSTRUCT",
+  describe: "a DESCRIBE",
+  update: "an UPDATE",
+};
+
+/**
+ * Check one slot's query FORM against that slot's contract: `null` when the form is allowed, a
+ * user-facing refusal message when it is not.
+ *
+ * WHY THIS EXISTS, AND WHY THE HOST MUST CALL IT BEFORE RUNNING THE SLOT. A lens is DATA — it
+ * arrives from a pasted "shared lens" JSON blob ({@link importGraphLens}) and from a hand-editable
+ * workspace record ({@link parseGraphLens}), and both validate the lens's SHAPE, not its SPARQL,
+ * so a slot can hold any string at all. A host that runs a slot through a general query entry
+ * point dispatches on the query's form, so a slot carrying `DELETE WHERE { ?s ?p ?o }` would
+ * MUTATE the store; noticing afterwards that the outcome was not a solution set or a graph is far
+ * too late. The host must therefore classify the slot text and consult this function BEFORE
+ * handing it to the engine — and must classify with the SAME function its runner dispatches on,
+ * so the guard cannot disagree with what would actually have executed.
+ *
+ * A `SELECT` slot takes only SELECT. The `CONSTRUCT` slot takes either graph form, since a
+ * DESCRIBE answers with a graph exactly as a CONSTRUCT does. ASK, UPDATE and an unknown slot name
+ * are refused.
+ */
+export function graphLensSlotFormError(
+  slot: GraphLensSlot,
+  form: SparqlQueryForm,
+): string | null {
+  const spec = GRAPH_LENS_SLOTS.find((s) => s.slot === slot);
+  if (!spec) return `“${slot}” is not a lens slot, so it was not run.`;
+  if (form === "update") {
+    return `The “${spec.label}” slot is a SPARQL UPDATE. A lens is rendering configuration and is never allowed to modify the store, so it was not run.`;
+  }
+  const allowed =
+    spec.form === "SELECT" ? form === "select" : form === "construct" || form === "describe";
+  if (allowed) return null;
+  const wanted = spec.form === "SELECT" ? "a SELECT" : "a CONSTRUCT or DESCRIBE";
+  return `The “${spec.label}” slot must be ${wanted} query — this one is ${FORM_LABEL[form]}, so it was not run.`;
 }
 
 // ---------------------------------------------------------------------------

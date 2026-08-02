@@ -456,7 +456,8 @@ export function GraphView({
             );
           })}
 
-          {/* Nodes. Literals render as rounded rects, resources as circles.
+          {/* Nodes. Literals render as rounded rects, resources as circles; both carry the same
+              focus affordance when `onFocusNode` is wired.
               [OPUS-5] sq-ixc3.22 — a lens's node basics restyle the resource circles: `?type`
               picks a deterministic colour, `?rank` the radius, `?label` the caption. Nothing
               here depends on a lens existing — an unconfigured view draws exactly as before. */}
@@ -465,9 +466,54 @@ export function GraphView({
             const style = lens?.nodes.get(nodeKey);
             const caption = style?.label ?? node.label;
             const focused = focusKey === nodeKey;
+            const focus = onFocusNode ? () => onFocusNode(node.term) : undefined;
+            // [OPUS-5] The interactive attributes are shared by BOTH node shapes: a literal is a
+            // perfectly good focus node (neither `GraphLens` nor the `start` slot restricts
+            // `?node` to resources, and an `expand` slot binding `?node` in object position
+            // expands one), so drawing literals without a click/keyboard path would silently
+            // strand them. The lens runtime reports a slot that cannot handle the term.
+            const interactive = focus
+              ? ({
+                  role: "button",
+                  tabIndex: 0,
+                  className: "cursor-pointer focus:outline-1 focus:outline-primary",
+                  onClick: focus,
+                  onKeyDown: (ev: React.KeyboardEvent) => {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                      ev.preventDefault();
+                      focus();
+                    }
+                  },
+                  "data-graph-node": true,
+                  "aria-label": `${caption} — press Enter to expand with the active lens`,
+                } as const)
+              : {};
             if (node.isLiteral) {
               return (
-                <g key={node.key}>
+                <g key={node.key} {...interactive}>
+                  <title>{nodeTooltip(node, style, Boolean(focus))}</title>
+                  {/* A hit rect a little larger than the box, matching the resource nodes'. */}
+                  {focus && (
+                    <rect
+                      x={node.x - 40}
+                      y={node.y - 14}
+                      width={80}
+                      height={28}
+                      fill="transparent"
+                    />
+                  )}
+                  {focused && (
+                    <rect
+                      x={node.x - 40}
+                      y={node.y - 14}
+                      width={80}
+                      height={28}
+                      rx={6}
+                      fill="none"
+                      stroke="var(--primary)"
+                      strokeWidth={1.5}
+                    />
+                  )}
                   <rect
                     x={node.x - 36}
                     y={node.y - 10}
@@ -493,27 +539,8 @@ export function GraphView({
             const r = rankRange
               ? rankRadius(style?.rank, rankRange.lo, rankRange.hi, NODE_R_MIN, NODE_R_MAX)
               : 6;
-            const focus = onFocusNode ? () => onFocusNode(node.term) : undefined;
             return (
-              <g
-                key={node.key}
-                {...(focus
-                  ? {
-                      role: "button",
-                      tabIndex: 0,
-                      className: "cursor-pointer focus:outline-1 focus:outline-primary",
-                      onClick: focus,
-                      onKeyDown: (ev: React.KeyboardEvent) => {
-                        if (ev.key === "Enter" || ev.key === " ") {
-                          ev.preventDefault();
-                          focus();
-                        }
-                      },
-                      "data-graph-node": true,
-                      "aria-label": `${caption} — press Enter to expand with the active lens`,
-                    }
-                  : {})}
-              >
+              <g key={node.key} {...interactive}>
                 <title>{nodeTooltip(node, style, Boolean(focus))}</title>
                 {/* A wide transparent hit circle so a small node is still clickable. */}
                 {focus && <circle cx={node.x} cy={node.y} r={12} fill="transparent" />}
