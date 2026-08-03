@@ -52,7 +52,11 @@
 # ESCAPE HATCH. scripts/check-package-test-execution.allowlist.json (optional; an
 # absent file means an empty allowlist) maps a package directory name to a written
 # reason. Use it only for a package that genuinely must not be CI-tested — the
-# reason is the reviewable artifact.
+# reason is the reviewable artifact, so it is ENFORCED, not merely documented: a
+# key must be a bare package directory name and a value must be a non-empty,
+# non-whitespace string. `{"x": ""}` / `{"x": null}` / `{"x": false}` would
+# otherwise disable the whole invariant for packages/x with nothing to review, so
+# a malformed entry exits 2 rather than granting a vacuous exemption.
 #
 # LIMITATIONS (honest):
 #   * A step's `if:` condition is NOT evaluated. A leg wired behind `if: false`
@@ -472,12 +476,18 @@ def evaluate(
     allowlist: dict[str, str] | None = None,
 ) -> list[tuple[str, list[str]]]:
     """Return [(package_dir, [reasons])] for every package violating the
-    invariant. An empty list means the guard PASSES."""
+    invariant. An empty list means the guard PASSES.
+
+    An allowlist entry exempts a package only when it carries a written reason —
+    a non-empty, non-whitespace string. load_allowlist rejects anything else
+    outright; honouring the reason here too means no caller can grant an
+    exemption by key membership alone."""
     allowlist = allowlist or {}
     violations: list[tuple[str, list[str]]] = []
 
     for pkg_dir, manifest in sorted(packages.items()):
-        if posixpath.basename(pkg_dir) in allowlist:
+        exemption = allowlist.get(posixpath.basename(pkg_dir))
+        if isinstance(exemption, str) and exemption.strip():
             continue
         reasons: list[str] = []
 
@@ -510,6 +520,33 @@ def evaluate(
     return violations
 
 
+def allowlist_entry_errors(data: dict) -> list[str]:
+    """Every reason an allowlist mapping is malformed, or [] when it is well formed.
+
+    An exemption is only reviewable if it carries a written reason, so the reason
+    is validated rather than coerced: `str(None)`/`str(False)` would turn a
+    vacuous entry into the string "None"/"False" and silently disable both
+    invariant clauses for that package."""
+    errors: list[str] = []
+    for key, value in data.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or key != key.strip()
+            or key in (".", "..")
+            or posixpath.basename(key) != key
+        ):
+            errors.append(
+                f"key {key!r} is not a bare package directory name (e.g. \"solid-server\")"
+            )
+        if not isinstance(value, str) or not value.strip():
+            errors.append(
+                f"entry {key!r} has no written reason ({value!r}); an exemption must "
+                "record WHY the package must not be CI-tested"
+            )
+    return errors
+
+
 def load_allowlist(path: Path) -> dict[str, str]:
     """Read the optional allowlist. An absent file means an empty allowlist."""
     try:
@@ -522,7 +559,12 @@ def load_allowlist(path: Path) -> dict[str, str]:
     if not isinstance(data, dict):
         sys.stderr.write(f"error: {path} must be an object of package -> reason\n")
         sys.exit(2)
-    return {k: str(v) for k, v in data.items()}
+    errors = allowlist_entry_errors(data)
+    if errors:
+        for e in errors:
+            sys.stderr.write(f"error: {path}: {e}\n")
+        sys.exit(2)
+    return dict(data)
 
 
 def main(argv: list[str] | None = None) -> int:
