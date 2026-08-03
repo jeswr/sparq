@@ -70,6 +70,9 @@
 #   git diff --name-status origin/<base>...HEAD        (to find ADDED files)
 # In tests / --dry-run it is read from a fixture file (one path per line, each
 # optionally prefixed with a git status letter + tab, e.g. "A\tcrates/x/...").
+# A `D` (deleted) path never counts as a PROVIDED artifact — see
+# parse_status_lines — so deleting a README/test in the same PR cannot satisfy
+# (b)/(c)/(d)/(e).
 #
 # EXIT: 0 when every newly-added crate and package satisfies G1 (or there are
 # none); 1 with a clear per-surface message naming exactly what is missing.
@@ -104,7 +107,14 @@ def parse_status_lines(lines: list[str]) -> tuple[list[str], list[str]]:
 
     Each line is either "<STATUS>\t<path>" (optionally "<STATUS>\t<old>\t<new>"
     for renames/copies) or a bare path (treated as a generic change, NOT added).
-    Returns (all_changed_paths, added_paths)."""
+
+    Returns (changed_paths_present_at_head, added_paths). `D` (deleted) paths are
+    deliberately EXCLUDED from `changed`: every consumer of `changed` in this
+    gate asks "did the PR PROVIDE artifact X?", so a path the PR removes must
+    never answer yes. Without this, a PR that converts an existing directory into
+    a package/crate could delete `README.md` and the test files in the same diff
+    and still be reported complete, even though neither artifact exists at HEAD.
+    """
     changed: list[str] = []
     added: list[str] = []
     for raw in lines:
@@ -116,6 +126,9 @@ def parse_status_lines(lines: list[str]) -> tuple[list[str], list[str]]:
             status, rest = m.group(1), m.group(2)
             # For renames/copies the destination path is the last tab field.
             path = rest.split("\t")[-1]
+            if status == "D":
+                # Removed at HEAD — cannot satisfy any artifact requirement.
+                continue
             changed.append(path)
             # [OPUS-4.8] `A` (added) and `C` (copied) both materialise a NEW
             # destination path. Git only emits `C` with copy-detection enabled

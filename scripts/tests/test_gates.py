@@ -45,10 +45,15 @@ g6 = _load("check_config_documented", "check-config-documented.py")
 resolve_mg = _load("resolve_merge_group_pr", "resolve-merge-group-pr.py")
 
 
-def _statused(added: list[str], modified: list[str] | None = None) -> list[str]:
+def _statused(
+    added: list[str],
+    modified: list[str] | None = None,
+    deleted: list[str] | None = None,
+) -> list[str]:
     """Build a `git diff --name-status`-style fixture listing."""
     lines = [f"A\t{p}" for p in added]
     lines += [f"M\t{p}" for p in (modified or [])]
+    lines += [f"D\t{p}" for p in (deleted or [])]
     return lines
 
 
@@ -132,6 +137,35 @@ class G1Test(unittest.TestCase):
         self.assertEqual(g1.added_crates(added), [])
         self.assertEqual(g1.evaluate(changed, added), [])
 
+    def test_deleted_readme_does_not_satisfy_the_crate_gate(self):
+        # A PR that converts an existing directory into a crate must not pass by
+        # DELETING crates/<x>/README.md (and skills/<x>/SKILL.md): neither exists
+        # at HEAD, so neither can count as provided.
+        changed, added = g1.parse_status_lines(
+            _statused(
+                ["crates/sparq-foo/Cargo.toml"],
+                deleted=["crates/sparq-foo/README.md", "skills/sparq-foo/SKILL.md"],
+            )
+        )
+        violations = g1.evaluate(
+            changed,
+            added,
+            stub_overrides={"sparq-foo": False},
+            bench_overrides={"sparq-foo": True},
+        )
+        self.assertEqual(len(violations), 1)
+        _, missing = violations[0]
+        joined = " ".join(missing)
+        self.assertIn("README", joined)
+        self.assertIn("SKILL.md", joined)
+
+    def test_deleted_paths_are_excluded_from_changed(self):
+        changed, added = g1.parse_status_lines(
+            _statused(["a/kept.txt"], deleted=["a/gone.txt"])
+        )
+        self.assertEqual(changed, ["a/kept.txt"])
+        self.assertEqual(added, ["a/kept.txt"])
+
     def test_copied_crate_counts_as_added(self):
         # [OPUS-4.8] `git diff -C` reports a newly-introduced path as a copy
         # (`C`/`C100`, "C<score>\t<old>\t<new>"); the destination must still be
@@ -147,8 +181,10 @@ class G1Test(unittest.TestCase):
 # [OPUS-5] G1-pkg — new-npm-package-completeness (#5742)
 # --------------------------------------------------------------------------- #
 class G1PackageTest(unittest.TestCase):
-    def _eval(self, added, modified=None, **kw):
-        changed, added_paths = g1.parse_status_lines(_statused(added, modified))
+    def _eval(self, added, modified=None, deleted=None, **kw):
+        changed, added_paths = g1.parse_status_lines(
+            _statused(added, modified, deleted)
+        )
         return g1.evaluate_packages(changed, added_paths, **kw)
 
     def test_new_public_package_with_nothing_else_fails(self):
@@ -251,6 +287,40 @@ class G1PackageTest(unittest.TestCase):
         self.assertFalse(g1.package_is_private("solid-server"))
         # A package that does not exist is NOT private (strict default).
         self.assertFalse(g1.package_is_private("no-such-package"))
+
+    def test_deleted_readme_and_test_do_not_satisfy_the_package_gate(self):
+        # Converting a non-package directory into a package while REMOVING its
+        # README and tests leaves neither artifact at HEAD — both requirements
+        # must still be reported as violated.
+        violations = self._eval(
+            ["packages/sparq-foo/package.json"],
+            deleted=[
+                "packages/sparq-foo/README.md",
+                "packages/sparq-foo/test/basic.ts",
+            ],
+            private_overrides={"sparq-foo": False},
+        )
+        self.assertEqual(len(violations), 1)
+        _, missing = violations[0]
+        self.assertEqual(len(missing), 2)
+        joined = " ".join(missing)
+        self.assertIn("README", joined)
+        self.assertIn("test file", joined)
+
+    def test_main_fails_when_the_readme_and_test_are_deleted(self):
+        # End-to-end through main(): the deletion form must exit 1, exactly as
+        # the "nothing else in the PR" form does.
+        with tempfile.TemporaryDirectory() as td:
+            f = _write(
+                Path(td),
+                "diff.txt",
+                [
+                    "A\tpackages/brand-new-public-pkg/package.json",
+                    "D\tpackages/brand-new-public-pkg/README.md",
+                    "D\tpackages/brand-new-public-pkg/test/basic.ts",
+                ],
+            )
+            self.assertEqual(g1.main(["--changed-files", f]), 1)
 
     def test_main_fails_on_an_incomplete_new_package(self):
         # End-to-end through main(): a new public package with no README/tests
