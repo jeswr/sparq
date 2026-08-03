@@ -4380,6 +4380,16 @@ jobs:
         # the artifact upload (if: always()) still runs, and the job exits success even when the
         # runner receives a shutdown signal. The ratchet regression is still reported in the step
         # summary; only the JOB conclusion changes from failure to success.
+        # [OPUS-5] #4820 — THAT SUPPRESSION IS TOTAL, so this step must record its own
+        # outcome. Between the `continue-on-error` above and the `|| …` on cargo-mutants
+        # below, a leg whose sweep DIED and a leg that swept cleanly both conclude
+        # `success`; the ratchet `--check` result reaches only $GITHUB_STEP_SUMMARY. So
+        # the Actions job list — which is all mutants-nightly-report can otherwise read —
+        # is blind to exactly the failures that motivated the report. This step therefore
+        # writes leg-status/leg-status.json (cargo-mutants' real exit, whether an
+        # outcomes.json landed, and the ratchet exit) and the step after it uploads that
+        # under `if: always()`, so the record SURVIVES the suppression. Do not "simplify"
+        # by dropping the exit-code capture: it is the only channel that carries this.
         id: run_mutants
         continue-on-error: true
         env:
@@ -4403,8 +4413,16 @@ jobs:
           feat=()
           [ -n "$FEATURES" ] && feat=(--features "$FEATURES")
           echo "::group::cargo-mutants $CRATE ${feat[*]}${SHARD:+ --shard $SHARD}"
+          # [OPUS-5] #4820: capture the exit status instead of discarding it. NOTE it is
+          # nonzero whenever mutants merely SURVIVE — the lane's normal advisory result —
+          # so it is recorded for diagnosis but is NOT on its own treated as a failure by
+          # scripts/nightly/mutants_leg_report.py. What proves this leg produced a verdict
+          # is whether an outcomes.json landed, captured below.
+          mutants_exit=0
           cargo mutants -p "$CRATE" "${feat[@]}" "${shard_args[@]}" -o "$output_dir" \
-            || echo "WARN: cargo-mutants $CRATE did not complete cleanly (advisory)"
+            || mutants_exit=$?
+          [ "$mutants_exit" -eq 0 ] \
+            || echo "WARN: cargo-mutants $CRATE exited $mutants_exit (advisory)"
           echo "::endgroup::"
           # Run the ratchet --check on THIS crate's outcomes. --check NEVER fails on an
           # UNSEEDED crate (it reports it for the next --seed); it exits 1 only if a SEEDED
@@ -4413,14 +4431,27 @@ jobs:
           # gating (sq-qcnn.27) drops continue-on-error + this job's "advisory" name token.
           OUTCOMES=$(find "$output_dir" -name outcomes.json)
           echo "outcomes: ${OUTCOMES:-<none>}"
+          ratchet_exit=0
+          outcomes_found=false
           if [ -n "$OUTCOMES" ]; then
+            outcomes_found=true
             # shellcheck disable=SC2086 # intentional word-split: each path is a separate arg
             python3 scripts/mutants-gate.py --check $OUTCOMES \
-              | tee -a "$GITHUB_STEP_SUMMARY"
+              | tee -a "$GITHUB_STEP_SUMMARY" || ratchet_exit=$?
           else
             echo "no outcomes produced for $CRATE${SHARD:+ shard=$SHARD} — nothing to check" \
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
+          # [OPUS-5] #4820: THE RECORD THAT SURVIVES `continue-on-error`. Written last so
+          # it reflects the whole step, and to a FIXED path (not $output_dir) so the
+          # upload below can find it even when the shard suffix output was never set.
+          # mutants-nightly-report reads these; a leg with no record is reported as having
+          # produced no verdict, which is the honest reading of "the step died early".
+          mkdir -p leg-status
+          printf '{"crate":"%s","shard":"%s","outcomes":%s,"mutants_exit":%d,"ratchet_exit":%d}\n' \
+            "$CRATE" "$SHARD" "$outcomes_found" "$mutants_exit" "$ratchet_exit" \
+            > leg-status/leg-status.json
+          cat leg-status/leg-status.json
       - name: Upload mutation outcomes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -4445,6 +4476,23 @@ jobs:
           path: |
             target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/outcomes.json
             target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/mutants.json
+      - name: Upload this leg's recorded outcome
+        # [OPUS-5] #4820: a SEPARATE, tiny artifact rather than another file in the one
+        # above, so mutants-nightly-report can `gh run download --pattern
+        # 'mutants-leg-status-*'` and pull 51 one-line records without dragging down the
+        # heavy outcomes.json/mutants.json payloads with them.
+        # if-no-files-found: ignore — a leg killed at its `timeout-minutes` never reaches
+        # the step that writes the record. That is not a gap: such a leg's JOB conclusion
+        # is already `failure`/`cancelled`, which the report reads directly. The two
+        # channels are complementary, which is why the report treats a missing record as
+        # a failure ONLY for a leg whose job claims `success`.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-leg-status-${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}
+          path: leg-status/leg-status.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   mutants-nightly-report:
     # [OPUS-5] sparq-org/sparq#4820 — MAKE THE MUTATION-RATCHET OUTCOME LEGIBLE.
@@ -4509,7 +4557,7 @@ jobs:
       - name: Self-test the report (hermetic fixtures)
         # A broken detector reds before it is trusted to watch anything (formal-alarm idiom).
         run: python3 scripts/nightly/mutants_leg_report.py --self-test
-      - name: Report every mutation-ratchet leg by conclusion
+      - name: Report every mutation-ratchet leg by conclusion + recorded outcome
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -4520,7 +4568,18 @@ jobs:
           # --jq '.jobs[]' emits one job object per line across every page.
           gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" \
             --jq '.jobs[]' > jobs.jsonl
-          python3 scripts/nightly/mutants_leg_report.py --jobs-file jobs.jsonl
+          # The job list ALONE cannot see a suppressed in-step failure: the lane's
+          # mutation step is `continue-on-error` and swallows cargo-mutants' exit status,
+          # so a dead sweep concludes `success`. Each leg's own record does survive that,
+          # so pull those too — mkdir first so an empty download still leaves a readable
+          # directory (the report then reports every unverified leg, rather than exiting
+          # 2 and losing the whole report).
+          mkdir -p leg-status
+          gh run download "$RUN_ID" --repo "$REPO" \
+            --pattern 'mutants-leg-status-*' --dir leg-status \
+            || echo "::warning::no per-leg outcome records on this run"
+          python3 scripts/nightly/mutants_leg_report.py \
+            --jobs-file jobs.jsonl --status-dir leg-status
 
   unsafe-register:
     # [OPUS-4.8] sq-toze.6 / cert gap GX-5: GATING `unsafe`-count RATCHET. This is the

@@ -4,15 +4,22 @@
 #
 # Two jobs, and the second is the one that can rot:
 #
-#   1. BEHAVIOUR. The report's whole reason to exist is that the run-level conclusion is
-#      a LOSSY aggregate: `continue-on-error` legs that FAIL cannot fail the run, so the
-#      badge is decided by the other jobs and says nothing about them. So the load-bearing
-#      assertion is that a job list which aggregates to `cancelled` still reports its
-#      failures distinctly — TestCancelledRunStillReportsFailures replays the SHAPE of
-#      the 2026-07-27 census reported in #4820 (a run carrying both failed and cancelled
-#      legs, which the run badge collapses to `cancelled`) for exactly that.
-#      Its own negative control is TestGreenRunIsQuiet: a clean list must exit 0 and say
-#      nothing alarming, so "call everything broken" cannot satisfy the positive test.
+#   1. BEHAVIOUR, in two halves, because the lane hides its failures in two ways:
+#      • the run-level conclusion is a LOSSY aggregate — `continue-on-error` legs that
+#        FAIL cannot fail the run, so the badge is decided by the other jobs and says
+#        nothing about them. TestCancelledRunStillReportsFailures replays the SHAPE of
+#        the 2026-07-27 census reported in #4820 (a run carrying both failed and
+#        cancelled legs, which the run badge collapses to `cancelled`) for exactly that.
+#      • the leg's OWN conclusion is lossy too, and this is the harder half: the mutation
+#        step is `continue-on-error` and runs cargo-mutants as `… || echo`, so a leg
+#        whose sweep DIED still concludes `success`. TestSuppressedInStepFailure builds
+#        every leg with `conclusion: success` — the real shape, not a manufactured
+#        `failure` — and asserts first that job conclusions alone see NOTHING, then that
+#        the per-leg records recover it. TestSkippedLegIsNotAVerdict covers the third
+#        way a leg can produce nothing: never having run.
+#      Their shared negative control is TestGreenRunIsQuiet: legs that actually ran and
+#      recorded complete outcomes must exit 0 and say nothing alarming, so "call
+#      everything broken" cannot satisfy the positive tests.
 #
 #   2. DRIFT PINS. The script matches legs by a NAME PREFIX and labels a leg "at cap"
 #      from the caps ci.yml actually configures. Both are copies of workflow facts, and a
@@ -145,12 +152,21 @@ class TestCancelledRunStillReportsFailures(unittest.TestCase):
 
 
 class TestGreenRunIsQuiet(unittest.TestCase):
-    """The negative control — "call everything broken" must not pass the suite."""
+    """The negative control — "call everything broken" must not pass the suite.
+
+    Both legs here ACTUALLY RAN and recorded a complete outcome. That is deliberate:
+    this control previously used a `skipped` leg, which made the control pass for the
+    wrong reason and pinned the bug in TestSkippedLegIsNotAVerdict below.
+    """
 
     def setUp(self) -> None:
         self.report = mlr.build_report(
-            [leg("sparq-canon", "success", 42), leg("sparq-parse", "skipped", 1)]
+            [leg("sparq-canon", "success", 42), leg("sparq-parse", "success", 51)]
         )
+        mlr.apply_leg_statuses(self.report, [
+            mlr.LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0),
+            mlr.LegStatus("sparq-parse", "", outcomes=True, mutants_exit=2, ratchet_exit=0),
+        ])
 
     def test_exits_zero(self) -> None:
         self.assertEqual(mlr.verdict(self.report), 0)
@@ -160,7 +176,146 @@ class TestGreenRunIsQuiet(unittest.TestCase):
         self.assertIn("All 2 legs produced a verdict.", text)
         self.assertNotIn("FAILED", text)
         self.assertNotIn("Crates this run cannot seed", text)
+        self.assertNotIn("Ratchet regressions", text)
         self.assertEqual(mlr.annotations(self.report), [])
+
+    def test_surviving_mutants_alone_are_not_a_failure(self) -> None:
+        # sparq-parse recorded cargo-mutants exit 2 — which is what cargo-mutants returns
+        # when mutants merely SURVIVE, i.e. the lane's normal advisory result. Reding on
+        # that would turn every unseeded crate permanently red.
+        self.assertEqual(len(self.report.of("ok")), 2)
+
+
+class TestSkippedLegIsNotAVerdict(unittest.TestCase):
+    """A skipped leg never executed, so it cannot be counted as a success.
+
+    It produces no outcomes.json, so it cannot contribute a shard to a seeding rollup —
+    `scripts/mutants-gate.py --seed` refuses an incomplete shard set exactly as it would
+    for a failed leg. Counting it under "produced a verdict" reported a sweep that never
+    happened as good news, and left its crate looking seedable.
+    """
+
+    def setUp(self) -> None:
+        self.report = mlr.build_report(
+            [leg("sparq-canon", "success", 42),
+             leg("sparq-engine", "success", 88, "1/24"),
+             leg("sparq-engine", "skipped", 0, "2/24")]
+        )
+        mlr.apply_leg_statuses(self.report, [
+            mlr.LegStatus("sparq-canon", "", outcomes=True, ratchet_exit=0),
+            mlr.LegStatus("sparq-engine", "1/24", outcomes=True, ratchet_exit=0),
+        ])
+
+    def test_skipped_is_not_counted_as_success(self) -> None:
+        self.assertEqual(len(self.report.of("ok")), 2)
+        self.assertEqual([x.label for x in self.report.of("skipped")], ["sparq-engine 2/24"])
+
+    def test_verdict_is_red(self) -> None:
+        self.assertEqual(mlr.verdict(self.report), 1)
+
+    def test_crate_with_a_skipped_shard_cannot_be_seeded(self) -> None:
+        self.assertIn("sparq-engine", self.report.unusable_crates)
+        self.assertNotIn("sparq-canon", self.report.unusable_crates)
+
+    def test_report_says_so(self) -> None:
+        text = mlr.render(self.report)
+        self.assertNotIn("All 3 legs produced a verdict.", text)
+        self.assertIn("1 was skipped", text)
+        self.assertIn("Crates this run cannot seed", text)
+        self.assertEqual("\n".join(mlr.annotations(self.report)).count("::warning"), 1)
+
+    def test_a_skipped_leg_missing_its_record_is_not_double_reported(self) -> None:
+        # A skipped leg records nothing, by construction. The missing-record rule must
+        # not also fire on it and reclassify it as a failure — its own state is correct.
+        self.assertEqual(len(self.report.of("failed")), 0)
+
+
+class TestSuppressedInStepFailure(unittest.TestCase):
+    """The failure class job conclusions CANNOT express — the one that motivated #4820.
+
+    The lane's mutation step carries `continue-on-error: true` and runs cargo-mutants as
+    `cargo mutants … || echo …`, so its exit status never reaches the job. Every leg here
+    therefore concludes `success` in the Actions job list — that is the real shape, not a
+    manufactured `conclusion: failure`. Only the per-leg records tell them apart.
+    """
+
+    def setUp(self) -> None:
+        self.jobs = [
+            leg("sparq-canon", "success", 42),        # swept cleanly
+            leg("sparq-mpc", "success", 214),         # sweep died: no outcomes.json
+            leg("sparq-parse", "success", 51),        # complete sweep, ceiling regressed
+            leg("sparq-reason", "success", 118, "1/3"),  # step died before recording
+        ]
+        self.report = mlr.build_report(self.jobs)
+
+    def test_job_conclusions_alone_see_nothing(self) -> None:
+        # The precise blindness being fixed: without the records, this run reads green.
+        self.assertEqual(len(self.report.of("ok")), 4)
+        self.assertEqual(mlr.verdict(self.report), 0)
+        text = mlr.render(self.report)
+        self.assertIn("All 4 legs produced a verdict.", text)
+        # ...and must SAY that it is blind rather than implying it looked. Claiming to
+        # have folded in the recorded outcomes when none were supplied would be the same
+        # overclaim the records exist to remove.
+        self.assertIn("These counts are job conclusions ALONE.", text)
+        self.assertNotIn("fold in each leg's recorded outcome", text)
+
+    def test_recorded_outcomes_reveal_them(self) -> None:
+        mlr.apply_leg_statuses(self.report, [
+            mlr.LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0),
+            mlr.LegStatus("sparq-mpc", "", outcomes=False, mutants_exit=1, ratchet_exit=0),
+            mlr.LegStatus("sparq-parse", "", outcomes=True, mutants_exit=2, ratchet_exit=1),
+        ])
+        by_label = {x.label: x for x in self.report.legs}
+        self.assertEqual(by_label["sparq-canon"].state, "ok")
+        self.assertEqual(by_label["sparq-mpc"].state, "failed")
+        self.assertEqual(by_label["sparq-reason 1/3"].state, "failed")
+        # A regression is red, but the sweep COMPLETED — the crate is still seedable.
+        self.assertEqual(by_label["sparq-parse"].state, "ok")
+        self.assertTrue(by_label["sparq-parse"].ratchet_regressed)
+        self.assertNotIn("sparq-parse", self.report.unusable_crates)
+        self.assertEqual(mlr.verdict(self.report), 1)
+        text = mlr.render(self.report)
+        self.assertIn("2 of 4 legs FAILED", text)
+        self.assertIn("Ratchet regressions", text)
+        self.assertEqual("\n".join(mlr.annotations(self.report)).count("::error"), 3)
+
+    def test_a_leg_already_red_at_job_level_is_left_alone(self) -> None:
+        # A leg killed at its `timeout-minutes` never reaches the recording step. Its job
+        # conclusion already tells the truth, so the missing record must not restate it
+        # (nor mask it): the two channels are complementary, not redundant.
+        report = mlr.build_report([leg("sparq-engine", "failure", 360, "9/24"),
+                                   leg("sparq-geo", "cancelled", 120)])
+        mlr.apply_leg_statuses(report, [])
+        self.assertEqual(len(report.of("failed")), 1)
+        self.assertEqual(len(report.of("cancelled")), 1)
+        self.assertTrue(report.legs[0].capped)
+
+    def test_records_are_read_from_disk(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # gh run download unpacks each artifact into its own subdirectory.
+            for crate, shard, outcomes in (("sparq-canon", "", True),
+                                           ("sparq-engine", "9/24", False)):
+                sub = root / f"mutants-leg-status-{crate}"
+                sub.mkdir()
+                (sub / "leg-status.json").write_text(json.dumps(
+                    {"crate": crate, "shard": shard, "outcomes": outcomes,
+                     "mutants_exit": 0, "ratchet_exit": 0}), encoding="utf-8")
+            statuses = mlr.load_leg_statuses(str(root))
+        self.assertEqual({s.key for s in statuses},
+                         {("sparq-canon", ""), ("sparq-engine", "9/24")})
+
+    def test_an_unreadable_record_is_a_detector_failure(self) -> None:
+        # Silently dropping it would restore the blindness this mechanism removes.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "leg-status.json").write_text("{not json", encoding="utf-8")
+            with self.assertRaises(mlr.ReportError):
+                mlr.load_leg_statuses(tmp)
+        with self.assertRaises(mlr.ReportError):
+            mlr.load_leg_statuses("/nonexistent/leg-status-dir")
 
 
 class TestFailsLoud(unittest.TestCase):
@@ -237,11 +392,42 @@ class TestPinnedToLiveWorkflow(unittest.TestCase):
         # The self-test must run BEFORE the live report (formal-alarm ordering: a broken
         # detector reds before it is trusted to watch anything).
         self_test = block.index("mutants_leg_report.py --self-test")
-        live = block.index("mutants_leg_report.py --jobs-file")
+        live = block.index("--jobs-file jobs.jsonl")
         self.assertLess(self_test, live)
         # Sparse checkout must actually fetch the script it then runs.
         self.assertIn("sparse-checkout: scripts/nightly/mutants_leg_report.py", block)
         self.assertIn("actions: read", block)
+
+    def test_report_consumes_the_recorded_leg_outcomes(self) -> None:
+        # Without --status-dir the report reads job conclusions ALONE, and the lane's
+        # step-level `continue-on-error` means those cannot express a failed sweep. Losing
+        # this argument would silently return the report to reporting only the failures
+        # that were never hidden — the exact defect #4820 is about.
+        text = CI_WORKFLOW.read_text(encoding="utf-8")
+        start = text.index("\n  mutants-nightly-report:")
+        block = text[start:text.index("\n  unsafe-register:", start)]
+        self.assertIn("--status-dir leg-status", block)
+        self.assertIn("--pattern 'mutants-leg-status-*'", block)
+
+    def test_the_lane_records_and_uploads_each_leg_outcome(self) -> None:
+        # The producing half of the same pin. The record must be WRITTEN (capturing both
+        # exit statuses the step otherwise swallows) and UPLOADED under `if: always()`,
+        # or --status-dir above has nothing to read.
+        block = self._lane_block()
+        self.assertIn("leg-status/leg-status.json", block)
+        self.assertIn("|| mutants_exit=$?", block)
+        self.assertIn("|| ratchet_exit=$?", block)
+        upload = block.index("name: mutants-leg-status-")
+        self.assertIn("if: always()", block[:upload])
+
+    def test_the_lane_step_is_still_continue_on_error(self) -> None:
+        # This is the PREMISE of the whole mechanism, not an incidental detail: the
+        # records exist because the step's failure cannot reach the job conclusion. If
+        # the lane is ever promoted to gating and this suppression is dropped, revisit
+        # apply_leg_statuses — a missing record would then be reachable another way.
+        block = self._lane_block()
+        step = block.index("id: run_mutants")
+        self.assertIn("continue-on-error: true", block[step:step + 200])
 
     def test_report_job_is_not_continue_on_error(self) -> None:
         text = CI_WORKFLOW.read_text(encoding="utf-8")
