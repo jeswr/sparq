@@ -30,9 +30,11 @@
 # One CROSS-WORKFLOW property is asserted, by WasmPackVersionUnified below:
 #
 #   5. ONE VERSION REPO-WIDE. Every workflow that installs wasm-pack through
-#      jetli/wasm-pack-action must request a `version:`, and they must all request the
-#      SAME one (a step with none takes the action's default, i.e. it is an unpinned
-#      lane, which is the same regression in a different shape). #5771: ci.yml's `wasm`
+#      jetli/wasm-pack-action must pass the action exactly one `with: version:` input
+#      (read indentation-aware, so a `version:` under a sibling mapping does not count
+#      as a pin), and they must all request the SAME one (a step with none takes the
+#      action's default, i.e. it is an unpinned lane, which is the same regression in
+#      a different shape). #5771: ci.yml's `wasm`
 #      job — the lane that RUNS the headless `wasm-pack test --node` suites — pinned
 #      v0.13.1 while js.yml — the lane that BUILDS the published artifact — pinned
 #      v0.15.0, so a wasm-pack/wasm-bindgen behaviour change between those releases was
@@ -90,6 +92,49 @@ def _code_lines(text: str) -> list[str]:
     return out
 
 
+def _with_versions(block: list[str]) -> list[str]:
+    """Every value of a `version:` key that is a DIRECT child of the step's `with:`
+    mapping, in order (so duplicates are visible to the caller).
+
+    Scoping matters: `with.version` is the ONLY key that reaches the action as an
+    input. A bare "any stripped line starting `version:`" scan would also read a
+    `version:` living under some sibling mapping (`env:`, a matrix entry, a nested
+    input object), so a step that dropped its `with.version` — and therefore silently
+    takes the action's default, the #5771 regression — could still look pinned. The
+    indentation-aware walk mirrors `check-install-action-tool.py`'s `_has_with_tool`.
+    """
+    versions: list[str] = []
+    with_indent: int | None = None
+    child_indent: int | None = None
+    for raw in block:
+        if not raw.strip() or raw.lstrip(" ").startswith("#"):
+            continue
+        # A key introduced on the dash line itself logically begins after the "- ".
+        ind = gate._indent(raw)
+        key = raw.lstrip(" ")
+        if key.startswith("- "):
+            ind += 2
+            key = key[2:]
+        if with_indent is None:
+            if key.startswith("with:"):
+                with_indent = ind
+                child_indent = None
+            continue
+        if ind <= with_indent:
+            # Dedented out of the `with:` mapping (e.g. into a sibling `env:`).
+            with_indent = ind if key.startswith("with:") else None
+            child_indent = None
+            continue
+        if child_indent is None:
+            child_indent = ind
+        if ind != child_indent:
+            # Nested deeper than the mapping's own keys — not a `with:` input.
+            continue
+        if key.startswith("version:"):
+            versions.append(key.split(":", 1)[1].strip())
+    return versions
+
+
 class JsLaneWasmPackInstall(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -142,15 +187,11 @@ class JsLaneWasmPackInstall(unittest.TestCase):
     def test_version_is_pinned_exactly_not_latest(self):
         """(3) An exact vX.Y.Z — `latest` re-adds a network lookup to resolve it."""
         block = self._wasm_pack_step()
-        versions = [
-            ln.strip().split(":", 1)[1].strip()
-            for ln in block
-            if ln.strip().startswith("version:")
-        ]
+        versions = _with_versions(block)
         self.assertEqual(
             len(versions),
             1,
-            "the wasm-pack step must carry exactly one `version:` input, found "
+            "the wasm-pack step must carry exactly one `with: version:` input, found "
             f"{versions!r}",
         )
         self.assertRegex(
@@ -184,7 +225,12 @@ class JsLaneWasmPackInstall(unittest.TestCase):
 
 def _step_version(block: list[str]) -> str:
     """The wasm-pack version one step requests, or a DESCRIPTIVE SENTINEL when the
-    step does not carry exactly one non-empty `version:` input.
+    step does not carry exactly one non-empty `with: version:` input.
+
+    Only a `version:` that is a direct child of the step's `with:` mapping counts
+    (see `_with_versions`): that is the one the action actually receives. A duplicate
+    `with.version` is a sentinel too — YAML last-key-wins makes the effective pin
+    ambiguous to a reader, and the repo-wide comparison should not have to guess.
 
     Returning a sentinel rather than nothing is what keeps the cross-workflow
     comparison honest. A step that LOST its `version:` installs whatever the action
@@ -194,14 +240,10 @@ def _step_version(block: list[str]) -> str:
     it reds `test_single_version_across_workflows` (and, being no `vX.Y.Z`,
     `test_every_step_pins_an_exact_version` too).
     """
-    versions = [
-        ln.strip().split(":", 1)[1].strip()
-        for ln in block
-        if ln.strip().startswith("version:")
-    ]
+    versions = _with_versions(block)
     exact = [v for v in versions if v]
-    if len(exact) != 1:
-        return f"<not exactly one `version:` input: {versions!r}>"
+    if len(exact) != 1 or len(versions) != 1:
+        return f"<not exactly one `with: version:` input: {versions!r}>"
     return exact[0]
 
 
@@ -311,6 +353,39 @@ jobs:
         run: wasm-pack test --node
 """
 
+    # The step has NO `with: version:` (so wasm-pack-action takes its default) but does
+    # carry an unrelated, correctly-named `version:` under a SIBLING mapping. A
+    # block-wide "any line starting `version:`" scan reads v0.15.0 here and calls the
+    # lane pinned; only the `with:`-scoped walk sees the omission.
+    _MUT_UNRELATED_VERSION = """\
+jobs:
+  wasm:
+    steps:
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          cache-key: wasm-pack
+        env:
+          version: v0.15.0
+      - name: Test
+        run: wasm-pack test --node
+"""
+
+    # Two direct `with: version:` keys: YAML last-key-wins, so which release the lane
+    # actually installs is not what a reader (or the first match) sees.
+    _MUT_DUPLICATE_VERSION = """\
+jobs:
+  wasm:
+    steps:
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
+          version: v0.13.1
+      - name: Test
+        run: wasm-pack test --node
+"""
+
     def test_mutation_dropping_a_lanes_version_is_caught(self):
         """Deleting one lane's `version:` must NOT leave both assertions green."""
         good = self._pins_from({"a.yml": self._MUT_GOOD, "b.yml": self._MUT_GOOD})
@@ -333,6 +408,30 @@ jobs:
             "single-version assertion goes red instead of comparing the one "
             "surviving lane against itself",
         )
+
+    def test_mutation_version_outside_with_is_not_a_pin(self):
+        """A `version:` that the action never receives must not read as a pin."""
+        for label, text in (
+            ("unrelated nested `version:`", self._MUT_UNRELATED_VERSION),
+            ("duplicate `with: version:`", self._MUT_DUPLICATE_VERSION),
+        ):
+            with self.subTest(mutation=label):
+                mutated = self._pins_from(
+                    {"a.yml": self._MUT_GOOD, "b.yml": text}
+                )
+                self.assertIn("b.yml", mutated)
+                self.assertNotRegex(
+                    mutated["b.yml"][0],
+                    VERSION_RE,
+                    f"{label}: the step does not unambiguously pass one `version:` "
+                    "input to the action, so it must not read as an exact pin",
+                )
+                self.assertEqual(
+                    len({v for vs in mutated.values() for v in vs}),
+                    2,
+                    f"{label}: must count as a DISTINCT pin so the single-version "
+                    "assertion goes red",
+                )
 
 
 if __name__ == "__main__":
