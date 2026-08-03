@@ -576,8 +576,17 @@ disappears. Fail the sweep outright on a duplicate id or an anchor that no longe
   of the dead ref, which is the real cost term and the watchdog's own effectiveness measure.
   Companion routing split in `merge-queue-feedback.yml`: a `CI_TIMEOUT` whose group ref had
   **zero suites** preserves `review:pass` instead of manufacturing a re-review for a platform
-  event drop, while a timeout that followed checks that genuinely ran keeps demoting — the two
-  are separated by the **suite count**, never by the reason alone. The same split makes an
+  event drop, while a timeout that followed checks that genuinely ran cannot make that claim —
+  the two are separated by the **suite count**, never by the reason alone. Since #4619 the
+  reason also decides **ownership**, and that decides the destination: a code-flavoured dequeue
+  (`CHECKS_FAILED`, `MERGE_CONFLICT`, …) is the author's and still goes to `review:changes`,
+  but a queue/runner-flavoured one (`CI_TIMEOUT`, `ROLL_BACK`) routes to `requeue` — verdict
+  kept, arm restored — because `review:changes` would otherwise name an exit condition the
+  author cannot satisfy (the case #4619 measured is #4331: head unmoved, verdict head-bound, `gate`
+  completed/success over 107 check-runs, and no machine exit). That lane is **bounded** by the
+  `added_to_merge_queue` count since the current grant and requires the head's own `gate` to be
+  green, so a PR that genuinely cannot clear the queue still reaches a human. `QUEUE_CLEARED`
+  is deliberately excluded: clearing the queue is a human act. The same split makes an
   INFRASTRUCTURE dequeue verdict-neutral: measured on #4709, `review:pass` was swapped for
   `review:changes` **17 seconds** after a `MANUAL` dequeue, so a watchdog without this would
   burn the verdict of every PR it rescued. `MANUAL` conflates "a reviewer withdrew this" with

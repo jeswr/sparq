@@ -70,7 +70,7 @@
 # a silent watchdog would convert a visible 73-minute outage into an invisible one.
 #
 # ── the dequeue-routing split (`classify-dequeue`) ────────────────────────────────
-# `.github/workflows/merge-queue-feedback.yml` routes every non-merge dequeue to
+# `.github/workflows/merge-queue-feedback.yml` routed every non-merge dequeue to
 # `review:changes` by design. For a zero-dispatch CI_TIMEOUT that is a
 # MACHINE-MANUFACTURED re-review: #4534 lost `review:pass` for a platform event drop,
 # with nothing whatsoever wrong in its diff. `classify-dequeue` splits the two cases by
@@ -78,6 +78,23 @@
 # workflow branches on. It also recognises the watchdog's OWN dequeue — our recovery is
 # implemented as dequeue+enqueue, which itself fires `pull_request.dequeued`, and
 # without this arm the watchdog would demote every PR it rescued.
+#
+# ── #4619: `review:changes` MUST NAME AN EXIT THE AUTHOR CAN SATISFY ──────────────
+# The zero-dispatch split above is narrow: it only rescues a CI_TIMEOUT whose group ref
+# had ZERO check-suites. #4331 is the other half — a CI_TIMEOUT after checks that really
+# did run, with the head unmoved, `review:pass` still head-bound, and `gate`
+# completed/success over 107 check-runs and zero non-passing. Routing THAT to
+# `review:changes` tells an author to change something when there is nothing to change,
+# and nothing re-queues it, so it is a hold with no machine exit.
+#
+# So the reason now decides OWNERSHIP first (`INFRA_DEQUEUE_REASONS`), and a
+# queue/runner-owned dequeue gets a third route, `requeue`: keep the verdict, re-arm,
+# comment — the same machine-owned shape as `preserve`, but BOUNDED by the queue-attempt
+# count read off the PR's own `added_to_merge_queue` timeline events. When that budget is
+# spent the route falls back to `demote`, so a PR that genuinely cannot clear the queue
+# still ends up on a human's desk — it just is not sent there on attempt one for a fault
+# it does not have. Code-flavoured reasons (CHECKS_FAILED, MERGE_CONFLICT, …) are decided
+# BEFORE any evidence is read and are unchanged.
 #
 # ── A DEFENSIVE CONTROL MUST NOT AMPLIFY WHAT IT REJECTS ──────────────────────────
 # Rejecting an untrusted marker emits ONE annotation per PR, never one per marker.
@@ -176,11 +193,11 @@ DEFAULT_GRACE_SECONDS = 120
 # all; the budget is per PR per wall-clock window.
 #
 # EXHAUSTION BEHAVIOUR, stated as it actually is: the entry is handed back to the
-# platform's own 60-minute CI_TIMEOUT, and that dequeue **DEMOTES to review:changes**
-# like any other. It does NOT preserve the verdict. The reason is mechanical and worth
-# knowing: recovery is marker -> dequeue -> enqueue, so the marker is always ~30 s OLDER
-# than the `added_to_merge_queue` it produces; on the next attempt the newest trusted
-# marker therefore predates that attempt and the queue-attempt binding refuses it.
+# platform's own 60-minute CI_TIMEOUT, and that dequeue does NOT preserve the verdict.
+# The reason is mechanical and worth knowing: recovery is marker -> dequeue -> enqueue,
+# so the marker is always ~30 s OLDER than the `added_to_merge_queue` it produces; on
+# the next attempt the newest trusted marker therefore predates that attempt and the
+# queue-attempt binding refuses it.
 #
 # That is the CORRECT outcome, not merely a tolerated one. By exhaustion the PR has
 # burned three consecutive zero-dispatch groups, the only trusted observation names a
@@ -188,6 +205,12 @@ DEFAULT_GRACE_SECONDS = 120
 # suite count would be unsound. A human look is warranted at that point. What exhaustion
 # does NOT do is stall: there is no `needs:user`, no permanent hold, and a CAP row is
 # emitted every tick for as long as it holds.
+#
+# [OPUS-5] #4619 amends where that refused dequeue LANDS, and only that. It falls to the
+# bounded re-queue lane, which is spent at the same moment by construction: each recovery
+# mints one `added_to_merge_queue`, so 1 original arm + 2 recoveries = 3 attempts, which
+# is exactly DEFAULT_MAX_QUEUE_ATTEMPTS. After that a CI_TIMEOUT demotes to
+# `review:changes` as it always did — the human look is still the terminal state.
 DEFAULT_MAX_RECOVERIES_PER_PR = 2
 DEFAULT_RECOVERY_WINDOW_SECONDS = 6 * 3600
 # Blast-radius bound: one tick may never churn the whole queue.
@@ -209,6 +232,34 @@ ACTIONABLE_STATES = frozenset({"AWAITING_CHECKS"})
 # MERGE_CONFLICT / CI_FAILURE dequeue is never attributed to the watchdog.
 SELF_DEQUEUE_REASONS = frozenset({"MANUAL", "UNKNOWN"})
 ZERO_DISPATCH_REASON = "CI_TIMEOUT"
+
+# ── DEQUEUE REASONS CARRY OWNERSHIP (#4619) ──────────────────────────────────────
+# A dequeue reason says WHO can act on it, and that is what decides the exit state.
+#   * CODE-flavoured (CHECKS_FAILED / CI_FAILURE / MERGE_CONFLICT / GIT_TREE_INVALID /
+#     INVALID_MERGE_COMMIT / BRANCH_PROTECTIONS …) — the DIFF must change. `review:changes`
+#     is exactly right: the author has an exit condition they can satisfy.
+#   * QUEUE/RUNNER-flavoured — nothing in the diff is at fault, so `review:changes` names
+#     an exit condition that DOES NOT EXIST. The case #4619 measured is PR #4331: a
+#     CI_TIMEOUT dequeue with the head unmoved, `review:pass` still head-bound, and
+#     `gate` completed/success over 107 check-runs with zero non-passing — latent at
+#     N=1 when it was found. The author could change nothing to clear it, and nothing
+#     else re-queued it, so it sat indefinitely — a hold with no machine exit.
+# These route to ROUTE_REQUEUE instead: the verdict stays, the arm is restored, and the
+# queue attempt itself is the re-verification. BOUNDED by the queue-attempt count so a PR
+# that genuinely cannot get through the queue lands on the author's desk after all.
+#
+# QUEUE_CLEARED is deliberately NOT here. Clearing the queue is a HUMAN act, and a bot
+# that re-queues what an operator just cleared fights its own operator; it keeps today's
+# demote. ROLL_BACK is here because it means a SIBLING entry failed — by construction not
+# this PR's diff.
+INFRA_DEQUEUE_REASONS = frozenset({"CI_TIMEOUT", "ROLL_BACK"})
+# How many times ONE tree may enter the merge queue under a single `review:pass` grant
+# before the machine stops re-queueing it. The current attempt is counted, so 3 permits at
+# most TWO machine re-queues; the third infra dequeue demotes to `review:changes`.
+# This is the bound that stops a genuinely-unmergeable PR looping: the attempt count is
+# read from the PR's own `added_to_merge_queue` timeline events, so every re-queue —
+# ours, the watchdog's, or a human's — consumes the same budget.
+DEFAULT_MAX_QUEUE_ATTEMPTS = 3
 # The only action a marker may claim. Checked on the self-dequeue arm so that no other
 # marker shape can ever be mistaken for a recovery in flight.
 MARKER_ACTION_REENQUEUE = "re-enqueue"
@@ -227,6 +278,31 @@ RECOVER = "RECOVER"
 
 ROUTE_PRESERVE = "preserve"
 ROUTE_DEMOTE = "demote"
+# The MACHINE-OWNED exit (#4619). Like `preserve` it leaves the labels alone and re-arms;
+# unlike `preserve` it does not claim the merge_group event was never dispatched, and it
+# is bounded by DEFAULT_MAX_QUEUE_ATTEMPTS.
+ROUTE_REQUEUE = "requeue"
+
+# ── the required gate, re-verified at the unchanged head (#4619) ─────────────────
+# A machine re-queue is only defensible when there is POSITIVE evidence that nothing needs
+# changing, and the required check is that evidence. The name is matched by EXACT EQUALITY
+# against the ready-tier name: sparq's ci-summary.yml publishes `gate` on a ready payload
+# and `gate, draft-tier` on a draft one, and `gate` is a strict PREFIX of the draft name,
+# so a prefix test would resolve the wrong tier. A draft cannot be in the merge queue at
+# all, so the ready-tier name is the only correct lookup here.
+GATE_CHECK_NAME = "gate"
+GATE_SUCCESS = "success"
+GATE_FAILURE = "failure"
+GATE_PENDING = "pending"
+GATE_MISSING = "missing"
+GATE_UNKNOWN = "unknown"
+# Mirrors scripts/rearm-sweeper.py's vocabulary so one operator reading both logs sees the
+# same words. Only GATE_SUCCESS permits a machine re-queue; every other value demotes, so
+# the cancelled/stale distinction that sweeper needs for its re-trigger is folded in here.
+_GATE_OK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_GATE_BAD_CONCLUSIONS = frozenset(
+    {"failure", "timed_out", "action_required", "startup_failure", "cancelled", "stale"}
+)
 
 # ── THE MARKER IS EVIDENCE, SO ITS AUTHOR IS PART OF THE PREDICATE ───────────────
 # sparq is a PUBLIC repo and anyone can comment on a pull request. A marker read from an
@@ -464,6 +540,10 @@ class VerdictState:
     # folding a label revocation into "the head moved" tells an operator a commit
     # landed when none did, and sends them looking for a push that does not exist.
     verdict_revoked_at: datetime | None = None
+    # #4619's loop bound: how many `added_to_merge_queue` events this tree has accrued
+    # since the CURRENT `review:pass` grant. `None` means "could not be established" —
+    # an unbounded lane is not a lane, so that demotes like every other unprovable case.
+    queue_attempts_since_verdict: int | None = None
 
 
 def decide_entry(
@@ -581,6 +661,65 @@ def verdict_is_still_for_this_tree(state: VerdictState) -> tuple[bool, str]:
     return True, f"review:pass granted {iso(state.review_pass_at)} and the head has not moved since"
 
 
+def _gate_run_order(run: dict) -> tuple:
+    """Newest-run ordering key: ISO-8601 Z sorts lexicographically, id breaks ties."""
+    started = run.get("started_at")
+    ident = run.get("id")
+    return (
+        started if isinstance(started, str) else "",
+        ident if isinstance(ident, int) else -1,
+    )
+
+
+def resolve_head_gate(payload: object) -> str:
+    """The newest `gate` check-run on a head, as one of the GATE_* values.
+
+    Reads a `commits/<sha>/check-runs?check_name=gate` response. The NAME FILTER IS
+    SERVER-SIDE, and that is the whole reason this is a handful of lines rather than the
+    paginated scan `scripts/rearm-sweeper.py:resolve_gate` needs: sparq heads carry
+    hundreds of check-runs (155 / 680 / 800 on the three stuck heads that sibling
+    records for 2026-07-27), so an unfiltered first page contains no `gate` row at all
+    and "short read" is indistinguishable from "no gate" unless the two are separate
+    values. Filtering by name server-side leaves single digits, and `total_count` is
+    still cross-checked against the returned array so a truncated response reads
+    UNKNOWN, never MISSING.
+
+    NEWEST RUN WINS, and nothing here relies on the endpoint's `filter` default having
+    de-duplicated for us: GitHub leaves the cancelled twin of a superseded run on the
+    head beside the run that replaced it, so "any cancelled row" would mask a green
+    newest.
+    """
+    if not isinstance(payload, dict):
+        return GATE_UNKNOWN
+    total = payload.get("total_count")
+    runs = payload.get("check_runs")
+    # `isinstance(False, int)` is True, so a bool must be rejected explicitly.
+    if isinstance(total, bool) or not isinstance(total, int):
+        return GATE_UNKNOWN
+    if not isinstance(runs, list):
+        return GATE_UNKNOWN
+    if len(runs) < total:
+        return GATE_UNKNOWN
+    # Belt-and-braces behind the server-side filter: match the tier's name EXACTLY, so
+    # `gate, draft-tier` can never stand in for `gate`.
+    rows = [
+        run
+        for run in runs
+        if isinstance(run, dict) and run.get("name") == GATE_CHECK_NAME
+    ]
+    if not rows:
+        return GATE_MISSING
+    newest = max(rows, key=_gate_run_order)
+    if newest.get("status") != "completed":
+        return GATE_PENDING
+    conclusion = newest.get("conclusion")
+    if conclusion in _GATE_OK_CONCLUSIONS:
+        return GATE_SUCCESS
+    if conclusion in _GATE_BAD_CONCLUSIONS:
+        return GATE_FAILURE
+    return GATE_UNKNOWN
+
+
 def classify_dequeue_route(
     *,
     reason: str,
@@ -588,14 +727,23 @@ def classify_dequeue_route(
     markers: Iterable[Marker],
     verdict: VerdictState,
     live_suites: Callable[[str], int | None],
+    head_gate: Callable[[], str],
     now: datetime,
     self_dequeue_window_seconds: int = DEFAULT_SELF_DEQUEUE_WINDOW_SECONDS,
     marker_staleness_seconds: int = DEFAULT_MARKER_STALENESS_SECONDS,
+    max_queue_attempts: int = DEFAULT_MAX_QUEUE_ATTEMPTS,
 ) -> Route:
-    """Split a dequeue into the preserve-the-verdict route and today's demote route.
+    """Route a dequeue to the author (`demote`) or to one of the two machine lanes.
 
-    FAIL-SAFE: every arm that cannot POSITIVELY establish zero-dispatch returns
-    `demote`, which is the pre-existing behaviour.
+    Three outcomes, keyed on OWNERSHIP first and evidence second:
+      * `demote`   — the author must change the diff (or the machine lanes declined).
+      * `preserve` — the merge_group event was never dispatched (#4652); zero suites.
+      * `requeue`  — queue/runner-owned, the head's `gate` is green, budget remains
+                     (#4619). The machine exit an infra dequeue previously lacked.
+
+    FAIL-SAFE throughout: every arm that cannot POSITIVELY establish its precondition
+    returns `demote`, which is the pre-existing behaviour. `head_gate` is a THUNK so the
+    extra API read is only paid on the arm that needs it.
     """
     # BIND TO THIS PR. A marker is evidence about ONE pull request; without this a
     # marker written for a different PR (or naming a foreign zero-suite head) carries a
@@ -611,46 +759,65 @@ def classify_dequeue_route(
     normalised = (reason or "UNKNOWN").strip().upper()
     last_enqueued_at = verdict.last_enqueued_at
 
-    if newest is None:
+    # (0) OWNERSHIP FIRST (#4619). A reason the author can act on is theirs, full stop —
+    # decided before any evidence is read, so no marker, gate or budget can ever carry a
+    # CHECKS_FAILED / MERGE_CONFLICT dequeue away from `review:changes`.
+    if normalised not in INFRA_DEQUEUE_REASONS and normalised not in SELF_DEQUEUE_REASONS:
         return Route(
             ROUTE_DEMOTE,
             False,
-            "no merge-group-watchdog observation recorded for this PR",
+            f"dequeue reason {normalised} is author-owned — the diff itself must change",
         )
 
-    # Applies to BOTH preserve arms, before either is considered.
+    # Applies to EVERY machine lane, before any of them is considered.
     keepable, why = verdict_is_still_for_this_tree(verdict)
     if not keepable:
         return Route(ROUTE_DEMOTE, False, f"verdict may not survive this dequeue: {why}")
 
-    marker_age = (now - newest.observed).total_seconds()
+    marker_age = (now - newest.observed).total_seconds() if newest is not None else None
 
     # (a) our OWN recovery. The watchdog's dequeue+enqueue fires pull_request.dequeued;
-    # without this arm the watchdog would demote every PR it just rescued.
-    if (
-        normalised in SELF_DEQUEUE_REASONS
-        and newest.action == MARKER_ACTION_REENQUEUE
-        and 0 <= marker_age <= self_dequeue_window_seconds
-    ):
+    # without this arm the watchdog would demote every PR it just rescued. MANUAL/UNKNOWN
+    # conflate "a reviewer withdrew this" with "infrastructure moved it", so this arm —
+    # and ONLY this arm — may act on them, and only on marker evidence.
+    if normalised in SELF_DEQUEUE_REASONS:
+        if newest is None:
+            return Route(
+                ROUTE_DEMOTE,
+                False,
+                "no merge-group-watchdog observation recorded for this PR",
+            )
+        if (
+            newest.action != MARKER_ACTION_REENQUEUE
+            or not 0 <= marker_age <= self_dequeue_window_seconds
+        ):
+            return Route(
+                ROUTE_DEMOTE,
+                False,
+                f"dequeue reason {normalised} is not attributable to a watchdog recovery "
+                f"(marker action {newest.action!r}, observed {int(marker_age)}s ago, "
+                f"window {self_dequeue_window_seconds}s) — treated as a human withdrawal",
+            )
         # DEFENCE IN DEPTH behind the author allow-list. This arm previously preserved on
         # the marker alone and compared its head to NOTHING, so "names that exact group
         # head" was not what the code implemented. Re-derive the count for the head the
         # marker names: a head that does not exist reads None, and one that was really
         # dispatched reads non-zero. Neither may carry a verdict through a dequeue.
-        own = live_suites(newest.head)
-        if own is None:
+        own_suites = live_suites(newest.head)
+        if own_suites is None:
             return Route(
                 ROUTE_DEMOTE,
                 False,
                 f"marker names head {newest.head[:8]} whose check-suite count cannot be "
                 "read — not provably the watchdog's own recovery",
             )
-        if own != 0:
+        if own_suites != 0:
             return Route(
                 ROUTE_DEMOTE,
                 False,
-                f"marker names head {newest.head[:8]}, which has {own} check-suite(s) — "
-                "that group WAS dispatched, so this is not a zero-dispatch recovery",
+                f"marker names head {newest.head[:8]}, which has {own_suites} "
+                "check-suite(s) — that group WAS dispatched, so this is not a "
+                "zero-dispatch recovery",
             )
         return Route(
             ROUTE_PRESERVE,
@@ -660,60 +827,96 @@ def classify_dequeue_route(
             "0 check-suites re-derived live) — the watchdog re-enqueues; verdict preserved",
         )
 
-    # (b) the platform timeout. Split by SUITE COUNT, never by the reason alone.
-    if normalised != ZERO_DISPATCH_REASON:
+    # (b) the ZERO-DISPATCH preserve (#4652). The strongest evidence available — the
+    # merge_group event was never dispatched at all — so it is tried first. Split by SUITE
+    # COUNT, never by the reason alone. Each failed precondition is RECORDED rather than
+    # returned: it is not a reason to demote, only a reason this stronger claim cannot be
+    # made, and the weaker (bounded) re-queue lane below may still apply.
+    decline = ""
+    if normalised == ZERO_DISPATCH_REASON:
+        if newest is None:
+            decline = "no merge-group-watchdog observation recorded for this PR"
+        elif last_enqueued_at is None:
+            decline = (
+                "no added_to_merge_queue timeline event found — the watchdog observation "
+                "cannot be bound to this queue attempt"
+            )
+        elif newest.observed < last_enqueued_at:
+            decline = (
+                f"newest watchdog observation {iso(newest.observed)} predates this queue "
+                f"attempt (enqueued {iso(last_enqueued_at)})"
+            )
+        elif marker_age < 0 or marker_age > marker_staleness_seconds:
+            decline = (
+                f"watchdog observation is {int(marker_age)}s old — outside the "
+                f"{marker_staleness_seconds}s freshness bound"
+            )
+        elif newest.action != MARKER_ACTION_REENQUEUE:
+            decline = f"marker action {newest.action!r} is not {MARKER_ACTION_REENQUEUE!r}"
+        else:
+            count = live_suites(newest.head)
+            if count is None:
+                decline = (
+                    "could not re-derive the check-suite count for head "
+                    f"{newest.head[:8]}"
+                )
+            elif count != 0:
+                decline = (
+                    f"head {newest.head[:8]} has {count} check-suite(s) — this timeout "
+                    "followed checks that genuinely ran"
+                )
+            else:
+                return Route(
+                    ROUTE_PRESERVE,
+                    True,
+                    f"{ZERO_DISPATCH_REASON} with 0 check-suites re-derived live on group "
+                    f"head {newest.head[:8]} — the merge_group event was never dispatched, "
+                    "so the diff is not at fault; verdict preserved and the PR re-armed",
+                )
+
+    # (c) the BOUNDED machine re-queue (#4619). The reason is queue/runner-owned, so
+    # `review:changes` would name an exit condition the author cannot satisfy. Two
+    # positive preconditions, both required:
+    #   * a BOUND, so a PR that genuinely cannot clear the queue stops looping and is
+    #     handed to a human after all;
+    #   * live proof there is nothing to change — the required `gate` green on the head,
+    #     which `verdict_is_still_for_this_tree` has already proven is the head the
+    #     verdict was granted for.
+    # NOTE, honestly: a green head gate proves the PR's OWN tree is sound. It does NOT
+    # predict the merge-group run, which composes this PR with the entries ahead of it.
+    # The attempt bound, not the gate, is what stops a repeatedly-failing group looping.
+    attempts = verdict.queue_attempts_since_verdict
+    suffix = f" (zero-dispatch preserve declined: {decline})" if decline else ""
+    if attempts is None:
         return Route(
             ROUTE_DEMOTE,
             False,
-            f"dequeue reason {normalised} is not {ZERO_DISPATCH_REASON}",
+            "the queue-attempt count for this verdict could not be established — an "
+            f"unbounded re-queue lane is not a lane, so this demotes{suffix}",
         )
-    if last_enqueued_at is None:
+    if attempts >= max_queue_attempts:
         return Route(
             ROUTE_DEMOTE,
             False,
-            "no added_to_merge_queue timeline event found — the watchdog observation "
-            "cannot be bound to this queue attempt",
+            f"this tree has entered the merge queue {attempts} time(s) since review:pass "
+            f"was granted (bound {max_queue_attempts}) — the machine re-queue budget is "
+            f"exhausted, so the PR is handed to the author{suffix}",
         )
-    if newest.observed < last_enqueued_at:
+    gate = head_gate()
+    if gate != GATE_SUCCESS:
         return Route(
             ROUTE_DEMOTE,
             False,
-            f"newest watchdog observation {iso(newest.observed)} predates this queue "
-            f"attempt (enqueued {iso(last_enqueued_at)})",
-        )
-    if marker_age < 0 or marker_age > marker_staleness_seconds:
-        return Route(
-            ROUTE_DEMOTE,
-            False,
-            f"watchdog observation is {int(marker_age)}s old — outside the "
-            f"{marker_staleness_seconds}s freshness bound",
-        )
-    if newest.action != MARKER_ACTION_REENQUEUE:
-        return Route(
-            ROUTE_DEMOTE,
-            False,
-            f"marker action {newest.action!r} is not {MARKER_ACTION_REENQUEUE!r}",
-        )
-    count = live_suites(newest.head)
-    if count is None:
-        return Route(
-            ROUTE_DEMOTE,
-            False,
-            f"could not re-derive the check-suite count for head {newest.head[:8]}",
-        )
-    if count != 0:
-        return Route(
-            ROUTE_DEMOTE,
-            False,
-            f"head {newest.head[:8]} has {count} check-suite(s) — this timeout "
-            "followed checks that genuinely ran",
+            f"the PR head's required `{GATE_CHECK_NAME}` check reads {gate}, not "
+            f"{GATE_SUCCESS} — no live proof that nothing needs changing{suffix}",
         )
     return Route(
-        ROUTE_PRESERVE,
+        ROUTE_REQUEUE,
         True,
-        f"{ZERO_DISPATCH_REASON} with 0 check-suites re-derived live on group head "
-        f"{newest.head[:8]} — the merge_group event was never dispatched, so the diff "
-        "is not at fault; verdict preserved and the PR re-armed",
+        f"dequeue reason {normalised} is queue/runner-owned and `{GATE_CHECK_NAME}` is "
+        f"{GATE_SUCCESS} on the unchanged head (queue attempt {attempts}/"
+        f"{max_queue_attempts}) — nothing for the author to change, so the verdict is "
+        f"kept and the PR re-queued rather than demoted to review:changes{suffix}",
     )
 
 
@@ -994,12 +1197,61 @@ class Watchdog:
                 ) or parse_iso((row.get("author") or {}).get("date"))
                 if committed:
                     moved.append(committed)
+        review_pass_at = max(granted) if granted else None
         return VerdictState(
-            review_pass_at=max(granted) if granted else None,
+            review_pass_at=review_pass_at,
             head_moved_at=max(moved) if moved else None,
             last_enqueued_at=max(enqueued) if enqueued else None,
             verdict_revoked_at=max(revoked) if revoked else None,
+            # #4619's bound. Counted from the CURRENT grant, so a re-review after a push
+            # legitimately resets the budget — the tree being queued is a different one.
+            # `None` when there is no grant to count from; that is not "zero attempts".
+            queue_attempts_since_verdict=(
+                sum(1 for stamp in enqueued if stamp >= review_pass_at)
+                if review_pass_at is not None
+                else None
+            ),
         )
+
+    def head_gate_state(self, pr_number: int) -> str:
+        """The required `gate` check on the PR's CURRENT head, as a GATE_* value.
+
+        Every failure is GATE_UNKNOWN, which denies the re-queue lane — this read may
+        only ever license an action, never excuse one.
+        """
+        try:
+            sha = self.gh_read(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--repo",
+                    self.repo,
+                    "--json",
+                    "headRefOid",
+                    "-q",
+                    ".headRefOid",
+                ]
+            ).strip()
+        except GhError:
+            return GATE_UNKNOWN
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return GATE_UNKNOWN
+        try:
+            payload = json.loads(
+                self.gh_read(
+                    [
+                        "api",
+                        "-X",
+                        "GET",
+                        f"repos/{self.repo}/commits/{sha}/check-runs"
+                        f"?check_name={GATE_CHECK_NAME}&per_page=100",
+                    ]
+                )
+            )
+        except (GhError, json.JSONDecodeError):
+            return GATE_UNKNOWN
+        return resolve_head_gate(payload)
 
     # -- mutations -----------------------------------------------------------
 
@@ -1212,6 +1464,8 @@ class Watchdog:
             markers=markers,
             verdict=self.verdict_state(pr_number),
             live_suites=self.check_suite_count,
+            # A THUNK: the extra two reads are only paid on the arm that needs them.
+            head_gate=lambda: self.head_gate_state(pr_number),
             now=now,
         )
 
@@ -1337,18 +1591,25 @@ def self_test() -> None:
     assert parse_marker("no marker here") is None
     assert parse_marker(f"<!-- {MARKER_KEY} pr=1 head=nothex suites=0 observed=x -->") is None
 
-    # Routing split — both arms.
+    # Routing split — all three arms.
+    def verdict_state(**overrides):
+        fields = dict(
+            review_pass_at=now - timedelta(hours=2),
+            head_moved_at=now - timedelta(hours=3),
+            last_enqueued_at=now - timedelta(hours=1),
+            queue_attempts_since_verdict=1,
+        )
+        fields.update(overrides)
+        return VerdictState(**fields)
+
     def route(**overrides):
         kwargs = dict(
             reason=ZERO_DISPATCH_REASON,
             pr_number=4534,
             markers=(parsed,),
-            verdict=VerdictState(
-                review_pass_at=now - timedelta(hours=2),
-                head_moved_at=now - timedelta(hours=3),
-                last_enqueued_at=now - timedelta(hours=1),
-            ),
+            verdict=verdict_state(),
             live_suites=lambda _sha: 0,
+            head_gate=lambda: GATE_SUCCESS,
             now=now + timedelta(minutes=40),
         )
         kwargs.update(overrides)
@@ -1356,36 +1617,75 @@ def self_test() -> None:
 
     assert route().route == ROUTE_PRESERVE, route()
     assert route().reenqueue is True
-    # The other arm: a CI_TIMEOUT that followed REAL checks still demotes.
-    assert route(live_suites=lambda _s: 8).route == ROUTE_DEMOTE, route(live_suites=lambda _s: 8)
-    # Unreadable count => demote (fail safe).
-    assert route(live_suites=lambda _s: None).route == ROUTE_DEMOTE
-    # No marker => demote.
-    assert route(markers=()).route == ROUTE_DEMOTE
-    # A marker predating the current attempt cannot steer the route.
-    assert route(verdict=VerdictState(now - timedelta(hours=2), None, now + timedelta(minutes=1))).route == ROUTE_DEMOTE
-    # No added_to_merge_queue event => demote.
-    assert route(verdict=VerdictState(now - timedelta(hours=2), None, None)).route == ROUTE_DEMOTE
-    # A head that moved AFTER the verdict was granted => the verdict may not survive.
-    assert route(verdict=VerdictState(now - timedelta(hours=2), now - timedelta(minutes=1), now - timedelta(hours=1))).route == ROUTE_DEMOTE
+    # #4619 — a CI_TIMEOUT that followed REAL checks is still not the AUTHOR's to fix.
+    # It leaves the zero-dispatch arm (that claim needs zero suites) and lands on the
+    # BOUNDED re-queue lane instead of `review:changes`.
+    ran = route(live_suites=lambda _s: 8)
+    assert ran.route == ROUTE_REQUEUE and ran.reenqueue is True, ran
+    assert "check-suite(s)" in ran.detail, ran
+    # ...and that lane is bounded: on the last permitted attempt it hands over.
+    assert (
+        route(
+            live_suites=lambda _s: 8,
+            verdict=verdict_state(queue_attempts_since_verdict=DEFAULT_MAX_QUEUE_ATTEMPTS),
+        ).route
+        == ROUTE_DEMOTE
+    )
+    # ...and it needs live proof there is nothing to change.
+    for gate in (GATE_FAILURE, GATE_PENDING, GATE_MISSING, GATE_UNKNOWN):
+        assert route(live_suites=lambda _s: 8, head_gate=lambda g=gate: g).route == ROUTE_DEMOTE, gate
+    # ...and an unestablishable attempt count is not "zero attempts".
+    assert (
+        route(
+            live_suites=lambda _s: 8,
+            verdict=verdict_state(queue_attempts_since_verdict=None),
+        ).route
+        == ROUTE_DEMOTE
+    )
+    # A head that moved AFTER the verdict was granted => the verdict may not survive,
+    # on EVERY machine lane.
+    assert route(verdict=verdict_state(head_moved_at=now - timedelta(minutes=1))).route == ROUTE_DEMOTE
     # No review:pass at all => nothing to preserve.
-    assert route(verdict=VerdictState(None, None, now - timedelta(hours=1))).route == ROUTE_DEMOTE
+    assert route(verdict=verdict_state(review_pass_at=None)).route == ROUTE_DEMOTE
     # An unreadable timeline => demote.
-    assert route(verdict=VerdictState(None, None, None, readable=False)).route == ROUTE_DEMOTE
-    # A stale marker => demote.
-    assert route(now=now + timedelta(hours=7)).route == ROUTE_DEMOTE
-    # A marker for a DIFFERENT PR is not evidence about this one.
-    assert route(pr_number=9999).route == ROUTE_DEMOTE, route(pr_number=9999)
-    # Reasons other than CI_TIMEOUT keep today's behaviour.
-    for other_reason in ("CI_FAILURE", "MERGE_CONFLICT", "QUEUE_CLEARED", "ROLL_BACK"):
+    assert route(verdict=verdict_state(review_pass_at=None, head_moved_at=None,
+                                       last_enqueued_at=None, readable=False)).route == ROUTE_DEMOTE
+    # CODE-flavoured reasons are the author's, decided before any evidence is read.
+    for other_reason in ("CI_FAILURE", "MERGE_CONFLICT", "CHECKS_FAILED", "QUEUE_CLEARED"):
         assert route(reason=other_reason).route == ROUTE_DEMOTE, other_reason
+    # ROLL_BACK is a SIBLING entry's failure — machine-owned, so it re-queues.
+    assert route(reason="ROLL_BACK").route == ROUTE_REQUEUE
     # The watchdog's OWN dequeue preserves without a second re-enqueue.
     own = route(reason="MANUAL", now=now + timedelta(seconds=30))
     assert own.route == ROUTE_PRESERVE and own.reenqueue is False, own
-    # ...but only inside the self-dequeue window.
+    # ...but only inside the self-dequeue window, and MANUAL never reaches the re-queue
+    # lane: a human withdrawal is a human decision.
     assert route(reason="MANUAL", now=now + timedelta(hours=2)).route == ROUTE_DEMOTE
+    assert route(reason="MANUAL", markers=()).route == ROUTE_DEMOTE
     # A conflict dequeue right after a recovery is NOT attributed to the watchdog.
     assert route(reason="MERGE_CONFLICT", now=now + timedelta(seconds=30)).route == ROUTE_DEMOTE
+
+    # The head-gate resolver: newest run wins, short reads are UNKNOWN not MISSING.
+    def _gate_payload(rows, total=None):
+        return {"total_count": len(rows) if total is None else total, "check_runs": rows}
+
+    assert resolve_head_gate(_gate_payload([
+        {"name": "gate", "status": "completed", "conclusion": "cancelled",
+         "started_at": "2026-07-27T22:00:00Z", "id": 1},
+        {"name": "gate", "status": "completed", "conclusion": "success",
+         "started_at": "2026-07-27T23:00:00Z", "id": 2},
+    ])) == GATE_SUCCESS
+    assert resolve_head_gate(_gate_payload([
+        {"name": "gate", "status": "completed", "conclusion": "failure",
+         "started_at": "2026-07-27T23:00:00Z", "id": 2},
+    ])) == GATE_FAILURE
+    assert resolve_head_gate(_gate_payload([{"name": "gate", "status": "in_progress"}])) == GATE_PENDING
+    assert resolve_head_gate(_gate_payload([])) == GATE_MISSING
+    assert resolve_head_gate(_gate_payload([{"name": "gate, draft-tier", "status": "completed",
+                                             "conclusion": "success"}])) == GATE_MISSING
+    assert resolve_head_gate(_gate_payload([], total=7)) == GATE_UNKNOWN
+    assert resolve_head_gate("not-a-payload") == GATE_UNKNOWN
+    assert resolve_head_gate({"total_count": True, "check_runs": []}) == GATE_UNKNOWN
 
     print(f"{PROGRAM} self-test: PASS")
 
