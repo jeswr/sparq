@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -20,6 +21,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+try:  # PyYAML is the ONE non-stdlib import in this file; see _yaml_seam_must_run.
+    import yaml
+except ImportError:  # pragma: no cover - exercised by running with PyYAML absent
+    yaml = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -37,6 +43,55 @@ pf = _load("preflight", "preflight.py")
 
 RUST = "crates/sparq-x/src/lib.rs"
 PY = "scripts/thing.py"
+
+
+# --------------------------------------------------------------------------- #
+# [OPUS-5] PyYAML availability (#5575).
+#
+# preflight.py is deliberately dependency-free so the pre-push path is usable on
+# a checkout with no `pip install`, and this file is otherwise stdlib-only. Only
+# TheYamlSeamIsGating needs a YAML parser. When PyYAML is absent those five tests
+# used to raise ModuleNotFoundError, so the suite reported `FAILED (errors=5)`
+# and an author could not tell that apart from a real regression in their diff.
+#
+# They now SKIP instead — but ONLY outside CI. A bare skip would be a hole: if
+# docs-quality.yml's `Install PyYAML` step were ever dropped, the seam tests
+# would silently vanish from the run and the very wiring this class defends
+# would go unchecked — the vacuous-gate shape its own docstring warns about. So
+# in CI the parser is MANDATORY: the skip never applies there, and a missing
+# PyYAML is a hard failure via test_pyyaml_is_installed_in_ci.
+#
+# CI markers match the repo convention in scripts/flow-on.py (GITHUB_ACTIONS or
+# a truthy CI); docs-quality.yml's `quick-gates` job hosts this suite AND the
+# pip install, so the two cannot drift apart across jobs.
+CI_ENV_VARS = ("GITHUB_ACTIONS", "CI")
+
+
+def _is_truthy(val: str | None) -> bool:
+    return val is not None and val.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _running_in_ci(env: dict[str, str]) -> bool:
+    """True iff a recognised CI marker is set (GITHUB_ACTIONS or CI)."""
+    return any(_is_truthy(env.get(v)) for v in CI_ENV_VARS)
+
+
+def _yaml_seam_must_run(env: dict[str, str], have_yaml: bool) -> bool:
+    """True iff the YAML seam tests must run rather than skip.
+
+    Skipping is permitted in exactly one case — PyYAML absent AND not in CI.
+    In CI the seam always runs, so a dropped install reds the suite.
+    """
+    return have_yaml or _running_in_ci(env)
+
+
+HAVE_YAML = yaml is not None
+_SEAM_MUST_RUN = _yaml_seam_must_run(os.environ, HAVE_YAML)
+_SKIP_REASON = (
+    "PyYAML is not installed — the workflow-seam tests need a YAML parser. "
+    "They are skipped locally (preflight.py itself is dependency-free) and are "
+    "MANDATORY in CI. `pip install pyyaml` to run them here."
+)
 
 
 class GuardShapeDetection(unittest.TestCase):
@@ -979,6 +1034,50 @@ class WorkerBriefsCarryThePresubmitBlock(unittest.TestCase):
         )
 
 
+class TheYamlSkipIsLocalOnly(unittest.TestCase):
+    """#5575: the seam tests may skip on a bare checkout, never in CI.
+
+    These run everywhere — they take no YAML parser — so the skip policy itself
+    stays pinned even on the checkout where the seam tests are skipped.
+    """
+
+    def test_seam_runs_whenever_pyyaml_is_present(self) -> None:
+        self.assertTrue(_yaml_seam_must_run({}, True))
+
+    def test_seam_skips_locally_when_pyyaml_is_absent(self) -> None:
+        # The actual bug: no parser + no CI must NOT be an error.
+        self.assertFalse(_yaml_seam_must_run({}, False))
+
+    def test_seam_still_runs_in_ci_without_pyyaml(self) -> None:
+        # The un-gating hole a bare skipUnless would open. Kills: dropping the
+        # `_running_in_ci(env)` term from _yaml_seam_must_run.
+        for env in ({"GITHUB_ACTIONS": "true"}, {"CI": "true"}, {"CI": "1"},
+                    {"CI": "yes"}, {"GITHUB_ACTIONS": "on"}):
+            with self.subTest(env=env):
+                self.assertTrue(
+                    _yaml_seam_must_run(env, False),
+                    f"{env} is CI — the seam must not be skippable there",
+                )
+
+    def test_a_falsy_ci_marker_is_not_ci(self) -> None:
+        # `CI=false`/empty is how a local shell often looks; it must not force
+        # the seam to run (and then error) on a checkout with no PyYAML.
+        for env in ({"CI": "false"}, {"CI": ""}, {"GITHUB_ACTIONS": "false"},
+                    {"CI": "0"}, {}):
+            with self.subTest(env=env):
+                self.assertFalse(_yaml_seam_must_run(env, False))
+
+    def test_the_seam_class_is_decorated_with_the_predicate(self) -> None:
+        # Pins the WIRING: computing the predicate but never applying it to the
+        # class would leave the ModuleNotFoundError bug in place.
+        # Kills: deleting the @unittest.skipUnless line.
+        self.assertEqual(
+            getattr(TheYamlSeamIsGating, "__unittest_skip__", False),
+            not _SEAM_MUST_RUN,
+        )
+
+
+@unittest.skipUnless(_SEAM_MUST_RUN, _SKIP_REASON)
 class TheYamlSeamIsGating(unittest.TestCase):
     """The wiring, not just the logic.
 
@@ -994,9 +1093,18 @@ class TheYamlSeamIsGating(unittest.TestCase):
         "python3 scripts/tests/test_preflight.py",
     )
 
-    def _job_hosting(self, run_cmd: str):
-        import yaml
+    def test_pyyaml_is_installed_in_ci(self) -> None:
+        # This class is never skipped in CI, so this leg is what reports a
+        # dropped `Install PyYAML` step as ONE clear failure rather than five
+        # ModuleNotFoundErrors. Outside CI it is skipped with its siblings.
+        self.assertTrue(
+            HAVE_YAML,
+            "PyYAML is missing in CI — docs-quality.yml's quick-gates job must "
+            "install it (.github/requirements/docs-quality.txt) or the "
+            "workflow-seam tests below stop checking the wiring entirely.",
+        )
 
+    def _job_hosting(self, run_cmd: str):
         doc = yaml.safe_load((REPO_ROOT / self.WORKFLOW).read_text())
         for jid, job in doc["jobs"].items():
             for step in job.get("steps", []):
