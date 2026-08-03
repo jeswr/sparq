@@ -172,12 +172,39 @@ decision 4 enumerates `workflows:` and the waiver becomes unnecessary.
    non-firing evaluator publishes nothing and blocks nothing.
 2. The stage-1 observation gets a **named criterion** rather than "look at the Actions
    tab", and it decides the combined invariant (registered **and** unfiltered-routing).
-   PASS: on a PR that touches no `.github/` file, `ci-summary-status` runs appear
-   on the head for events originating from **at least two distinct triggering
-   workflows** (distinct `github.event.workflow_run.name`). FAIL: no `ci-summary-status`
-   run appears at all on a head whose siblings demonstrably ran — which covers both
-   "the service never registered the trigger" and "it registered but matched nothing";
-   the fallback in 4 is the same either way, so the two need not be told apart.
+
+   *Qualifying head*: a PR that touches no `.github/` file and on which **at least two
+   sibling workflows demonstrably reached a terminal conclusion** (`gh run list
+   --commit <sha>` shows ≥2 distinct completed workflows other than
+   `ci-summary-status`). A head that never ran two siblings cannot decide the
+   invariant either way — it is *not observed*, and the next qualifying head is used
+   instead.
+
+   *Observation window*: the verdict is taken once the last qualifying sibling reaches
+   a terminal conclusion **plus a 15-minute settle window** for late-registering
+   `workflow_run` deliveries. The window is a deadline, not a poll budget: PASS may be
+   declared the moment the criterion is met, but FAIL is only declared after it expires.
+
+   **PASS** — `ci-summary-status` runs appear on that head for events originating from
+   **at least two distinct triggering workflows** (distinct
+   `github.event.workflow_run.name`).
+
+   **FAIL** — **every other outcome on a qualifying head once the window expires.**
+   This is the complement of PASS by construction, so no result falls between them.
+   It explicitly includes:
+   - zero `ci-summary-status` runs (the service never registered the trigger, or
+     registered it and matched nothing);
+   - runs attributable to exactly **one** distinct sibling (partial or otherwise
+     non-universal routing — the combined invariant is *not* demonstrated, since the
+     design needs the evaluator to fire for every sibling, not one);
+   - any other result that does not demonstrate multiple-sibling routing (e.g. runs
+     whose `workflow_run.name` cannot be attributed to a sibling).
+
+   The remediation is the same for all of them — decision 4's checked enumeration
+   makes the sibling set explicit and mechanically complete, which repairs partial
+   routing as directly as it repairs no routing — so the causes need not be told apart
+   to act. Record which sub-case was observed anyway: it is the only empirical datum
+   this experiment produces about the unfiltered construct.
 3. **Stage 2 — adding `ci-summary/status` to the ruleset's required contexts — is
    BLOCKED on a PASS.** A required context that is never reported blocks every merge,
    which is exactly the cost of getting this wrong, so the observation is a gate rather
