@@ -22,10 +22,14 @@
 #      `prepare` lifecycle (sq-bkag git-pin build) runs on `npm ci` and needs
 #      wasm-pack on PATH to compile the wasm engine.
 #
-# SCOPE — deliberately js.yml ONLY. gui.yml / pages.yml / publish.yml / release.yml /
+# SCOPE — deliberately js.yml ONLY. gui.yml / pages.yml / publish.yml /
 # nightly-full-sweep.yml / site-e2e-hero.yml / site-visual.yml still `cargo install`
 # wasm-pack; converting them is separate work and is NOT asserted here, so this file's
-# silence about them is not a claim that they are hardened.
+# silence about them is not a claim that they are hardened. release.yml's `gui-bundle`
+# job was converted separately (#5772) and carries its OWN posture test —
+# scripts/tests/test_release_wasm_pack_install.py — because that matrix has arm64 rows,
+# so it needs an ARCH-AWARE installer, which jetli/wasm-pack-action is not (it switches
+# on `process.platform` alone and always requests the x86_64 asset).
 #
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).

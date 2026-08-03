@@ -990,6 +990,15 @@ jobs:
       # (which red-gated PR #1131). Hermetic + stdlib-only (no PyYAML needed).
       - name: js lane wasm-pack install posture (prebuilt + pinned — sq-khm3f)
         run: python3 scripts/tests/test_js_wasm_pack_install.py
+      # [OPUS-5] #5772: the same posture for release.yml's `gui-bundle` job, plus the
+      # part that is specific to it — that matrix has arm64 rows (`ubuntu-24.04-arm` is
+      # BLOCKING), and jetli/wasm-pack-action, which the x86_64-only js/ci lanes use,
+      # ignores `process.arch` and always fetches the x86_64 asset. So this job needs an
+      # ARCH-AWARE prebuilt installer, and neither wrong answer (source compile, or an
+      # arch-blind download) is visible until a release actually runs on an arm64 runner.
+      # Hermetic + stdlib-only (no PyYAML needed).
+      - name: release gui-bundle wasm-pack install posture (arch-aware prebuilt — #5772)
+        run: python3 scripts/tests/test_release_wasm_pack_install.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
       # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;
