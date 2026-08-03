@@ -30,7 +30,9 @@
 # One CROSS-WORKFLOW property is asserted, by WasmPackVersionUnified below:
 #
 #   5. ONE VERSION REPO-WIDE. Every workflow that installs wasm-pack through
-#      jetli/wasm-pack-action must request the SAME `version:`. #5771: ci.yml's `wasm`
+#      jetli/wasm-pack-action must request a `version:`, and they must all request the
+#      SAME one (a step with none takes the action's default, i.e. it is an unpinned
+#      lane, which is the same regression in a different shape). #5771: ci.yml's `wasm`
 #      job — the lane that RUNS the headless `wasm-pack test --node` suites — pinned
 #      v0.13.1 while js.yml — the lane that BUILDS the published artifact — pinned
 #      v0.15.0, so a wasm-pack/wasm-bindgen behaviour change between those releases was
@@ -180,33 +182,68 @@ class JsLaneWasmPackInstall(unittest.TestCase):
         )
 
 
+def _step_version(block: list[str]) -> str:
+    """The wasm-pack version one step requests, or a DESCRIPTIVE SENTINEL when the
+    step does not carry exactly one non-empty `version:` input.
+
+    Returning a sentinel rather than nothing is what keeps the cross-workflow
+    comparison honest. A step that LOST its `version:` installs whatever the action
+    defaults to — the same unpinned-lane regression #5771 is about — but if such a
+    step simply contributed no entry, the remaining lanes would still agree and both
+    assertions below would pass. As a sentinel it reads as a pin unlike any other, so
+    it reds `test_single_version_across_workflows` (and, being no `vX.Y.Z`,
+    `test_every_step_pins_an_exact_version` too).
+    """
+    versions = [
+        ln.strip().split(":", 1)[1].strip()
+        for ln in block
+        if ln.strip().startswith("version:")
+    ]
+    exact = [v for v in versions if v]
+    if len(exact) != 1:
+        return f"<not exactly one `version:` input: {versions!r}>"
+    return exact[0]
+
+
 class WasmPackVersionUnified(unittest.TestCase):
-    """(5) Every jetli/wasm-pack-action step in the repo asks for the SAME version.
+    """(5) Every jetli/wasm-pack-action step in the repo asks for the SAME version,
+    and every such step actually asks for one.
 
     ci.yml's `wasm` job RUNS the headless suites; js.yml BUILDS + packs the npm
     package's wasm artifact. If they skew, a wasm-pack/wasm-bindgen behaviour change is
     only ever exercised in the build lane (#5771). This pins the EQUALITY, not the
-    value — bumping is fine, bumping one lane only is not.
+    value — bumping is fine, bumping one lane only is not. Dropping a lane's `version:`
+    altogether is the same regression wearing a different hat (that lane silently takes
+    the action's default), so it is caught too.
     """
 
     @staticmethod
-    def _pins() -> dict[str, list[str]]:
-        """{workflow filename: [version requested by each wasm-pack step]}."""
+    def _pins_from(sources: dict[str, str]) -> dict[str, list[str]]:
+        """{workflow filename: [one entry PER wasm-pack step]}.
+
+        Per-step, not flattened-over-values: a step with no `version:` must still
+        occupy a slot (as a `_step_version` sentinel) instead of disappearing.
+        Split out from `_pins` so the mutation guard below can feed it synthetic
+        workflows without touching the tree.
+        """
         found: dict[str, list[str]] = {}
-        for path in sorted(WORKFLOWS.glob("*.y*ml")):
-            text = path.read_text(encoding="utf-8")
+        for name, text in sorted(sources.items()):
             if WASM_PACK_ACTION not in text:
                 continue
             for block in gate.split_steps(text):
                 if (gate._step_uses(block) or (None,))[0] != WASM_PACK_ACTION:
                     continue
-                versions = [
-                    ln.strip().split(":", 1)[1].strip()
-                    for ln in block
-                    if ln.strip().startswith("version:")
-                ]
-                found.setdefault(path.name, []).extend(versions)
+                found.setdefault(name, []).append(_step_version(block))
         return found
+
+    @classmethod
+    def _pins(cls) -> dict[str, list[str]]:
+        return cls._pins_from(
+            {
+                path.name: path.read_text(encoding="utf-8")
+                for path in sorted(WORKFLOWS.glob("*.y*ml"))
+            }
+        )
 
     def test_both_wasm_lanes_use_the_action(self):
         """Anti-vacuity: the two lanes #5771 unified must still be in the sample."""
@@ -220,6 +257,21 @@ class WasmPackVersionUnified(unittest.TestCase):
                 "passes vacuously (#5771).",
             )
 
+    def test_every_step_pins_an_exact_version(self):
+        """Every wasm-pack step names an exact release — an omitted `version:` takes
+        the action's default, which is exactly the unpinned lane #5771 removed."""
+        for name, versions in sorted(self._pins().items()):
+            for i, version in enumerate(versions):
+                self.assertRegex(
+                    version,
+                    VERSION_RE,
+                    f"{name}: {WASM_PACK_ACTION} step #{i} must carry exactly one "
+                    f"exact `version:` (e.g. v0.15.0), got {version!r}. A step "
+                    "without one installs whatever the action defaults to, so the "
+                    "lane is unpinned and the repo-wide version agreement below "
+                    "means nothing for it (#5771).",
+                )
+
     def test_single_version_across_workflows(self):
         pins = self._pins()
         distinct = {v for versions in pins.values() for v in versions}
@@ -232,6 +284,54 @@ class WasmPackVersionUnified(unittest.TestCase):
             "published artifact: if they skew, a wasm-pack/wasm-bindgen behaviour "
             "change is only ever exercised in the build lane (#5771). Bump every "
             "lane together.",
+        )
+
+    # --- mutation guard for the two assertions above -------------------------
+    # Hermetic synthetic workflows (no tree mutation): `_MUT_BAD` is `_MUT_GOOD`
+    # with the `version:` line deleted, i.e. the exact regression the reviewer
+    # described.
+    _MUT_GOOD = """\
+jobs:
+  wasm:
+    steps:
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
+      - name: Test
+        run: wasm-pack test --node
+"""
+    _MUT_BAD = """\
+jobs:
+  wasm:
+    steps:
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+      - name: Test
+        run: wasm-pack test --node
+"""
+
+    def test_mutation_dropping_a_lanes_version_is_caught(self):
+        """Deleting one lane's `version:` must NOT leave both assertions green."""
+        good = self._pins_from({"a.yml": self._MUT_GOOD, "b.yml": self._MUT_GOOD})
+        self.assertEqual(good, {"a.yml": ["v0.15.0"], "b.yml": ["v0.15.0"]})
+        self.assertEqual(len({v for vs in good.values() for v in vs}), 1)
+
+        mutated = self._pins_from({"a.yml": self._MUT_GOOD, "b.yml": self._MUT_BAD})
+        # The unpinned lane is still IN the sample (so the anti-vacuity check keeps
+        # passing, as the reviewer noted) — it must therefore fail on its own terms.
+        self.assertIn("b.yml", mutated)
+        self.assertNotRegex(
+            mutated["b.yml"][0],
+            VERSION_RE,
+            "a step with no `version:` must not read as an exact pin",
+        )
+        self.assertEqual(
+            len({v for vs in mutated.values() for v in vs}),
+            2,
+            "a step with no `version:` must count as a DISTINCT pin, so the "
+            "single-version assertion goes red instead of comparing the one "
+            "surviving lane against itself",
         )
 
 
