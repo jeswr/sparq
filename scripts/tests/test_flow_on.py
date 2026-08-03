@@ -143,6 +143,22 @@ class PerCrateFanOutTest(unittest.TestCase):
             ],
         )
 
+    def _crate_labelled_rule(self):
+        """Same trigger, but `{crate}` also appears in a LABEL (which
+        validate_crate_identity permits once dedup_key names it)."""
+        return flow_on.Rule(
+            id="synthetic-labelled",
+            when_new_paths=["crates/*/Cargo.toml"],
+            creates=[
+                flow_on.CreateTemplate(
+                    dedup_key="follow-up-{crate}",
+                    title="chore: follow up on {crate}",
+                    body="PR #{pr}.",
+                    labels=["docs", "area:{crate}"],
+                )
+            ],
+        )
+
     def _crate_agnostic_rule(self):
         """Same trigger, but no `{crate}` anywhere — must stay single-minted."""
         return flow_on.Rule(
@@ -177,6 +193,28 @@ class PerCrateFanOutTest(unittest.TestCase):
         for fo in fos:
             crate = fo.dedup_key.removeprefix("synthetic-")
             self.assertIn(f"`crates/{crate}`", fo.body)
+
+    def test_per_crate_labels_are_expanded_not_left_literal(self):
+        # validate_crate_identity() ACCEPTS `{crate}` in a label, so evaluate()
+        # must expand it: an unexpanded label would put the literal (and invalid)
+        # `area:{crate}` on both issues instead of the per-crate label.
+        fos = flow_on.evaluate(
+            [self._crate_labelled_rule()], 42, "add two crates",
+            self.TWO_CRATES, self.TWO_CRATES, [],
+        )
+        by_key = {fo.dedup_key: fo for fo in fos}
+        self.assertEqual(
+            sorted(by_key), ["follow-up-sparq-alpha", "follow-up-sparq-beta"]
+        )
+        for key, fo in by_key.items():
+            crate = key.removeprefix("follow-up-")
+            self.assertIn(f"area:{crate}", fo.labels)
+            self.assertIn("docs", fo.labels)
+            self.assertEqual(
+                [lb for lb in fo.labels if "{" in lb],
+                [],
+                f"unexpanded placeholder label on {key}: {fo.labels}",
+            )
 
     def test_fan_out_covers_exactly_gate_g1s_added_crate_set(self):
         # The proactive (G1) and reactive (flow-on) halves must agree on WHICH
