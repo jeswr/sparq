@@ -269,6 +269,29 @@ wt_unpushed_count() {
   git -C "$wt" rev-list --count "$target..HEAD" 2>/dev/null || printf '999999'
 }
 
+# pr_page_count <page> / pr_page_blob <page> : split the open-PR page produced by
+# `gh pr list ... -q '"\(length)", (.[] | ...)'`. Line 1 is the RECORD count that jq's
+# `length` read off the JSON array; every later line is one PR's "<branch> <title>"
+# match text. Taking the count from `length` rather than from counting rendered lines is
+# load-bearing for the PR_LIST_CAP saturation check: a PR title can carry embedded
+# newlines, so rendered lines can exceed the record count and a line-count assertion
+# would `die` — denying frontier dispatch — on a page nowhere near the cap. The count
+# must be the page cardinality the truncation argument is about. pr_page_count emits
+# nothing (not 0) when line 1 is non-numeric, so the caller can tell "gh broke its
+# contract" apart from "no open PRs" instead of silently reading it as an empty page.
+# Pure (no gh), so both are hermetically self-tested.
+pr_page_count() {
+  local first="${1%%$'\n'*}"
+  case "$first" in
+    '')        printf '0\n' ;;   # gh failed / empty page -> zero records.
+    *[!0-9]*)  ;;                # not a count line -> caller dies.
+    *)         printf '%s\n' "$first" ;;
+  esac
+}
+pr_page_blob() {
+  case "$1" in *$'\n'*) printf '%s\n' "${1#*$'\n'}" ;; esac
+}
+
 # --- CPU ceiling ----------------------------------------------------------------------
 # The build farm cannot usefully parallelise more cargo builds than it has cores; the
 # orchestrator brief uses min(16, nproc-2). nproc-2 leaves headroom for the orchestrator
@@ -336,6 +359,33 @@ self_test() {
 
   got="$(inflight_wt_branch 'sq-squash-merged' 0)"
   _check "pushed/squash-merged branch NOT in-flight" "$got" ""
+
+  # --- open-PR page split / saturation count -------------------------------------------
+  # The saturation guard must assert on the number of PR RECORDS, not on the number of
+  # rendered lines: a PR title may contain embedded newlines, so one record can render
+  # across several lines and a line-count assertion would trip PR_LIST_CAP (and `die`,
+  # denying dispatch) on a page holding far fewer PRs than the cap.
+  local multiline_page
+  multiline_page=$'2\nbranch-a fix: first line of a title\nsecond line of that same title\nbranch-b ordinary title'
+  got="$(pr_page_count "$multiline_page")"
+  _check "multiline title counted once (2 recs, 4 lines)" "$got" "2"
+
+  got="$(pr_page_blob "$multiline_page")"
+  _check "blob drops count line, keeps every title line" "$got" \
+    $'branch-a fix: first line of a title\nsecond line of that same title\nbranch-b ordinary title'
+
+  got="$(pr_page_count '0')"
+  _check "zero open PRs -> 0"                      "$got" "0"
+  got="$(pr_page_blob '0')"
+  _check "zero open PRs -> empty blob"             "$got" ""
+
+  got="$(pr_page_count '')"
+  _check "gh failed (empty page) -> 0"             "$got" "0"
+
+  # A non-numeric first line is a broken contract, not "no PRs": emit nothing so the
+  # caller dies rather than proceeding on an in-flight set of unknown size.
+  got="$(pr_page_count $'oops\nbranch-a title')"
+  _check "non-numeric count line -> empty (caller dies)" "$got" ""
 
   # --- primary-code-crate probe (sq-6ip4) ---------------------------------------------
   # The code-crate is inferred from an explicit `crates/<crate>/.../*.rs` path in the bead's
@@ -454,12 +504,22 @@ fi
 # (blob empty, logged); this covers gh SUCCEEDING with a silently capped page.
 PR_LIST_CAP=1000
 if command -v gh >/dev/null 2>&1; then
-  # head-branch names + titles of every open PR, joined per-line for substring search.
-  PR_BLOB="$(gh pr list --state open --limit "$PR_LIST_CAP" --json headRefName,title \
-    -q '.[] | (.headRefName + " " + .title)' 2>/dev/null || true)"
-  PR_BLOB_LINES="$(printf '%s' "$PR_BLOB" | grep -c '' || true)"
-  [ "${PR_BLOB_LINES:-0}" -lt "$PR_LIST_CAP" ] || die \
-    "open-PR enumeration returned $PR_BLOB_LINES rows at its --limit $PR_LIST_CAP cap. gh
+  # One page: line 1 = the RECORD count (jq `length` over the JSON array), then one
+  # "<branch> <title>" line per open PR for substring search (title newlines flattened).
+  PR_PAGE="$(gh pr list --state open --limit "$PR_LIST_CAP" --json headRefName,title \
+    -q '"\(length)", (.[] | .headRefName + " " + (.title | gsub("[\r\n]+"; " ")))' 2>/dev/null || true)"
+  # A successful call ALWAYS emits at least the "0" count line, so an empty page means the
+  # call itself failed (auth, network, or a filter gh rejected). Say so: the silent path
+  # would leave the in-flight set empty and re-dispatch surfaces already being worked.
+  [ -n "$PR_PAGE" ] || log "WARNING: open-PR enumeration returned nothing (gh call failed) — in-flight subtraction will be EMPTY."
+  PR_COUNT="$(pr_page_count "$PR_PAGE")"
+  [ -n "$PR_COUNT" ] || die \
+    "open-PR enumeration returned a page whose first line is not the record count. The
+   saturation check below cannot be evaluated, so we refuse to hand out surfaces on an
+   in-flight set of unknown size."
+  PR_BLOB="$(pr_page_blob "$PR_PAGE")"
+  [ "$PR_COUNT" -lt "$PR_LIST_CAP" ] || die \
+    "open-PR enumeration returned $PR_COUNT records at its --limit $PR_LIST_CAP cap. gh
    TRUNCATES SILENTLY, so the in-flight set is probably partial and the frontier would
    hand out surfaces that are already being worked. Raise PR_LIST_CAP deliberately."
 else
