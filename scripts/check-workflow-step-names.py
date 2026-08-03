@@ -15,7 +15,10 @@
 #
 # RULE: scan .github/workflows/*.yml (+ *.yaml). Flag every `name:` / `run-name:`
 # mapping entry whose value is a plain (unquoted) scalar containing whitespace
-# followed by `#`. NOT flagged, because none of these truncate:
+# followed by `#`. A plain scalar may span several lines — it continues onto every
+# following line indented MORE than its key — and a ` #` on a CONTINUATION line
+# truncates exactly the same way, so those lines are scanned too. NOT flagged,
+# because none of these truncate:
 #   - a quoted value — `name: "... #3773)"` / `name: '... #3773)'` (this is the fix);
 #   - `#` with no preceding whitespace — `name: issue#1740` is one plain scalar;
 #   - a whole-line comment — `# name: ...`;
@@ -61,38 +64,99 @@ _NON_PLAIN_START = ('"', "'", "|", ">", "&", "*", "!")
 # Whitespace immediately before a `#` — the YAML comment trigger inside a plain scalar.
 _COMMENT_TRIGGER_RE = re.compile(r"[ \t]#")
 
+# A following line that CLOSES a multi-line plain scalar instead of continuing it: a
+# mapping entry (`key: value` or `key:`) or a block-sequence item. Neither is legal
+# inside a plain scalar, so meeting one means the scalar already ended above.
+_ENDS_SCALAR_RE = re.compile(r"^-(?:[ \t]|$)|:(?:[ \t]|$)")
+
 # Vacuity floor for the LIVE scan: the workflow tree has well over a thousand
 # name-carrying lines, so seeing fewer than this means the regex (or the file
 # discovery) broke and the gate would be passing on nothing.
 MIN_LIVE_NAME_LINES = 200
 
 
-def truncation_offence(line: str) -> tuple[str, str] | None:
-    """Return (full_intended_value, truncated_value) if `line` is a `name:`/`run-name:`
-    entry that YAML will silently truncate at a comment, else None."""
+def _plain_name_value(line: str) -> tuple[int, str] | None:
+    """If `line` opens a `name:`/`run-name:` entry whose value is a PLAIN scalar,
+    return (column the key starts at, raw value text); else None."""
     m = _NAME_RE.match(line.rstrip("\n"))
     if m is None:
         return None
     value = m.group(2)
     if value.startswith(_NON_PLAIN_START):
         return None
+    return m.start(1), value
+
+
+def truncation_offence(line: str) -> tuple[str, str] | None:
+    """Return (full_intended_value, truncated_value) if `line` is a `name:`/`run-name:`
+    entry that YAML will silently truncate at a comment ON THAT LINE, else None.
+
+    The multi-line continuation of the same scalar is handled by `scan_text`, which
+    has the following lines this function cannot see."""
+    opened = _plain_name_value(line)
+    if opened is None:
+        return None
+    value = opened[1]
     hit = _COMMENT_TRIGGER_RE.search(value)
     if hit is None:
         return None
     return value.rstrip(), value[: hit.start()].rstrip()
 
 
+def _multiline_truncation_offence(lines: list[str], idx: int) -> tuple[str, str] | None:
+    """Return (full_intended_value, truncated_value) if the `name:`/`run-name:` entry
+    opened at `lines[idx]` is a plain scalar that CONTINUES onto later lines and is
+    truncated by a ` #` on one of them, else None.
+
+    A plain scalar in a block mapping folds in every following line indented more than
+    its key, joining them with single spaces. The scalar is CLOSED — so scanning stops,
+    with no offence — by the first line that is indented no further than the key, a
+    whole-line comment, or structural (`key: value` / `- item`). Scanning also stops at
+    a BLANK line, which is a deliberate under-approximation: YAML folds a blank line
+    into the scalar as a newline, but a name written across a paragraph break is not a
+    shape we have, and stopping there keeps the gate free of false positives."""
+    opened = _plain_name_value(lines[idx])
+    if opened is None:
+        return None
+    key_indent, value = opened
+    if _COMMENT_TRIGGER_RE.search(value):
+        return None  # truncated on its own line; `truncation_offence` reports it
+    folded = [value.rstrip()]
+    for cont in lines[idx + 1 :]:
+        stripped = cont.strip()
+        if not stripped:
+            return None
+        if len(cont) - len(cont.lstrip()) <= key_indent:
+            return None
+        if stripped.startswith("#") or _ENDS_SCALAR_RE.search(stripped):
+            return None
+        hit = _COMMENT_TRIGGER_RE.search(stripped)
+        if hit is None:
+            folded.append(stripped)
+            continue
+        return (
+            " ".join(folded + [stripped]),
+            " ".join(folded + [stripped[: hit.start()].rstrip()]),
+        )
+    return None
+
+
 def scan_text(text: str) -> tuple[list[tuple[int, str, str]], int]:
     """Scan one workflow file's text.
 
-    Returns (offences, name_line_count) where each offence is
-    (1-based line number, full intended value, value as YAML will parse it)."""
+    Returns (offences, name_line_count) where each offence is (1-based line number of
+    the `name:` KEY — the line whose value must be quoted, even when the truncating
+    `#` sits on a continuation line — full intended value, value as YAML will parse
+    it)."""
+    lines = text.splitlines()
     offences: list[tuple[int, str, str]] = []
     name_lines = 0
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(lines, start=1):
         if _NAME_RE.match(line):
             name_lines += 1
-        found = truncation_offence(line)
+        found = truncation_offence(line) or _multiline_truncation_offence(
+            lines, lineno - 1
+        )
         if found is not None:
             offences.append((lineno, found[0], found[1]))
     return offences, name_lines
@@ -206,6 +270,48 @@ jobs:
         run: echo hi # a trailing comment here is fine
 """
 
+# A plain scalar continues onto more-indented following lines, so a ` #` down there
+# truncates exactly the same way — and the line-at-a-time scan used to miss it.
+_BAD_MULTILINE_CONTINUATION = """\
+jobs:
+  lint:
+    steps:
+      - name: Publish cadence
+          for issue #1135
+        run: true
+"""
+
+# The same multi-line shape with no comment trigger: folded, whole, not an offence.
+_GOOD_MULTILINE_CONTINUATION = """\
+jobs:
+  lint:
+    steps:
+      - name: Publish cadence
+          for issue 1135
+        run: true
+"""
+
+# A more-indented comment LINE after a plain name is a comment, not a continuation:
+# the scalar closed at the end of the `name:` line, so nothing is truncated.
+_GOOD_MULTILINE_COMMENT_LINE = """\
+jobs:
+  lint:
+    steps:
+      - name: Publish cadence
+          # tracked in #1135
+        run: true
+"""
+
+# The sibling key that closes the scalar carries an idiomatic trailing comment. It is
+# indented no further than `name:`, so it is a new mapping entry, not a continuation.
+_GOOD_SIBLING_KEY_WITH_COMMENT = """\
+jobs:
+  lint:
+    steps:
+      - name: Publish cadence
+        uses: actions/checkout@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef # v6
+"""
+
 # Two offences in one file — the scanner must report both, not stop at the first.
 # NB the `#` must follow WHITESPACE to truncate: `first (#1)` would be a comment-free
 # plain scalar, which is why the fixture spells the reference as ` #1)`.
@@ -231,6 +337,10 @@ def self_test() -> int:
         ("good: whole-line comment mentioning name:", _GOOD_COMMENT_LINE, 0),
         ("good: block-scalar name header", _GOOD_BLOCK_SCALAR, 0),
         ("good: run:/uses: trailing comments untouched", _GOOD_OTHER_KEYS_UNTOUCHED, 0),
+        ("bad: ` #` on a plain-scalar continuation line", _BAD_MULTILINE_CONTINUATION, 1),
+        ("good: multiline plain scalar with no ` #`", _GOOD_MULTILINE_CONTINUATION, 0),
+        ("good: indented comment line after a name", _GOOD_MULTILINE_COMMENT_LINE, 0),
+        ("good: sibling key's trailing comment", _GOOD_SIBLING_KEY_WITH_COMMENT, 0),
         ("bad: two offences in one file", _BAD_TWO_IN_ONE_FILE, 2),
     ]
     failures = 0
@@ -258,6 +368,17 @@ def self_test() -> int:
     if not ok:
         failures += 1
         print(f"        got {offence!r}\n        want {want!r}")
+
+    # Same assertion for the multi-line shape: YAML folds the continuation in with a
+    # single space, and the offence is reported against the `name:` KEY line (4) —
+    # that is the value that has to be quoted, not the continuation line below it.
+    multiline = scan_text(_BAD_MULTILINE_CONTINUATION)[0]
+    want_multiline = [(4, "Publish cadence for issue #1135", "Publish cadence for issue")]
+    ok = multiline == want_multiline
+    print(f"  [{'PASS' if ok else 'FAIL'}] reported truncation folds continuation lines")
+    if not ok:
+        failures += 1
+        print(f"        got {multiline!r}\n        want {want_multiline!r}")
 
     if failures:
         print(f"\nself-test: {failures} case(s) FAILED")
