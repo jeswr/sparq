@@ -44,11 +44,13 @@
 #       discard idiom proper. `… || rc=$?` is NOT this: it captures the status, and
 #       ci.yml's nextest shard relies on exactly that to re-raise a genuine failure.
 #   D2  The command sits in an errexit-OFF region (`set +e`, un-armed until the next
-#       `set -e`) and the next statement does not capture `$?`. Capturing is the
+#       `set -e`) and its status is not captured — neither by a following `rc=$?`
+#       statement nor by a `|| rc=$?` arm on its own statement. Capturing is the
 #       disciplined form — bench.yml wraps perf-gate.py in `set +e` precisely so it can
-#       read rc and re-raise on anything but the "unchanged" code. The `set +e` need not
-#       be on its own line: bash reads `set +e; cargo deny check advisories` left to
-#       right, so errexit is folded per SHELL STATEMENT, not per line.
+#       read rc and re-raise on anything but the "unchanged" code. Only the `=$?` arm
+#       counts: `cmd || echo oops` under `set +e` still drops the status. The `set +e`
+#       need not be on its own line: bash reads `set +e; cargo deny check advisories`
+#       left to right, so errexit is folded per SHELL STATEMENT, not per line.
 #   D3  The body's last top-level statement is a bare, unindented `exit 0`, which forces
 #       the whole step green whatever ran above it. A trailing comment does not save it
 #       — the exit syntax is matched against comment-stripped text, and only the
@@ -59,7 +61,11 @@
 # =====
 #   R1  NO UNDECLARED SWALLOW. A gate-classified command discarded by D1/D2/D3 inside a
 #       job that GATES needs an entry in .github/workflow-run-swallow-waivers.json. A
-#       job is exempt only if its `name:` is DECLARED in .github/advisory-registry.json
+#       waiver's `command` is matched against the offending SHELL STATEMENT, not the
+#       whole logical line, and each waiver is consumed by AT MOST ONE finding — so
+#       `cargo test || true; cargo clippy || true` needs two entries and a single
+#       `cargo test` waiver leaves the clippy swallow red.
+#       A job is exempt only if its `name:` is DECLARED in .github/advisory-registry.json
 #       — the same single source of truth ci_summary_gate.py uses — because a declared
 #       advisory job already carries an owner_bead and promotion_criteria.
 #   R2  NO STALE WAIVER. Every waiver must still bind to a live finding. A waiver that
@@ -68,11 +74,12 @@
 #
 # WHAT IT DOES NOT CHECK — read this before trusting it further than it goes
 # =========================================================================
-#   * A captured status is assumed to be propagated. `cmd; rc=$?` exempts the command,
-#     and whether the body then acts on `rc` is a dataflow question a line-oriented
-#     checker cannot answer. D3 is what catches the specific case where it demonstrably
-#     is not propagated *by this step* (dependency-monitoring.yml's audit, waived: a
-#     later step in the same job re-raises it from `steps.deny.outputs.exit_code`).
+#   * A captured status is assumed to be propagated. `cmd; rc=$?` and `cmd || rc=$?`
+#     both exempt the command, and whether the body then acts on `rc` is a dataflow
+#     question a line-oriented checker cannot answer. D3 is what catches the case where
+#     the status demonstrably is not propagated *by this step*
+#     (dependency-monitoring.yml's audit, waived: a later step in the same job re-raises
+#     it from `steps.deny.outputs.exit_code`).
 #   * The gate-command set is a list, so a verification binary nobody has used here yet
 #     is not classified. Widening it is a one-line edit; the classifier is deliberately
 #     precise because a false positive is an obligation imposed on an unrelated author.
@@ -153,6 +160,13 @@ DISCARD_RE = re.compile(r"\|\|\s*(?:true|:)\s*(?=$|[;&|)}])")
 SET_FLAGS_RE = re.compile(r"^set\s+((?:[-+][A-Za-z]+\s*)+)(?:$|[\w\s\"'-]*$)")
 # `rc=$?` / `CODE=$?` / `export rc=$?` — the disciplined capture that exempts D2.
 CAPTURE_RE = re.compile(r"^(?:export\s+|local\s+|declare\s+)?[A-Za-z_]\w*=\$\?\s*$")
+# The same capture spelled as a failure ARM of the gate's own statement — `cmd || rc=$?`.
+# `||` is not a statement separator here (D1 needs `cmd || true` whole), so this arm never
+# becomes a following statement CAPTURE_RE could see, and under `set +e` it would
+# otherwise read as D2 despite keeping the status for a later `exit "${rc:-0}"`. Only the
+# `=$?` arm qualifies, terminated so `|| rc=$(…)` or a longer arm is not mistaken for it.
+INLINE_CAPTURE_RE = re.compile(
+    r"\|\|\s*(?:export\s+|local\s+|declare\s+)?[A-Za-z_]\w*=\$\?\s*(?=$|[;&|)}])")
 # D3 — a bare, unindented, unconditional `exit 0`.
 BARE_EXIT0_RE = re.compile(r"^exit\s+0\s*(?:;\s*)?$")
 
@@ -292,7 +306,9 @@ def analyse_run_body(body: str, step: dict,
                      npm_scripts: dict[str, list[str]]) -> list[tuple[str, str, str]]:
     """Find every discarded gate-classified command in one `run:` body.
 
-    Returns (command_descriptor, rule, line_text) triples, where rule is D1/D2/D3.
+    Returns (command_descriptor, rule, statement) triples, where rule is D1/D2/D3 and
+    `statement` is the single shell statement that swallowed — NOT the whole logical
+    line. Reporting the line would let one waiver cover every swallow sharing it.
     """
     lines = logical_lines(body)
     effective = [(raw, text) for raw, text in lines if text.strip()]
@@ -311,16 +327,17 @@ def analyse_run_body(body: str, step: dict,
 
     # Flattened to statements, so errexit is folded at each command POSITION the way
     # bash folds it, rather than once per line.
-    flat = [(text, stmt) for _raw, text in effective for stmt in statements(text)]
+    flat = [stmt for _raw, text in effective for stmt in statements(text)]
 
-    for index, (text, stmt) in enumerate(flat):
+    for index, stmt in enumerate(flat):
         errexit_here = errexit
         errexit = apply_set(stmt, errexit)
         hits = gate_commands(stmt, npm_scripts)
         if not hits:
             continue
         discarded = DISCARD_RE.search(stmt)
-        captured = index + 1 < len(flat) and CAPTURE_RE.match(flat[index + 1][1])
+        captured = bool(INLINE_CAPTURE_RE.search(stmt)) or bool(
+            index + 1 < len(flat) and CAPTURE_RE.match(flat[index + 1]))
         for hit in hits:
             if discarded:
                 rule = "D1"
@@ -330,11 +347,11 @@ def analyse_run_body(body: str, step: dict,
                 rule = "D3"
             else:
                 continue
-            key = (hit, text)
+            key = (hit, stmt)
             if key in flagged:
                 continue
             flagged.add(key)
-            findings.append((hit, rule, text))
+            findings.append((hit, rule, stmt))
     return findings
 
 
@@ -415,47 +432,77 @@ def collect_findings(root: Path) -> list[dict]:
                 if not isinstance(run, str):
                     continue
                 step_name = step.get("name") or f"<step #{index}>"
-                for command, rule, line in analyse_run_body(run, step, npm_scripts):
+                for command, rule, stmt in analyse_run_body(run, step, npm_scripts):
                     found.append({
                         "workflow": path.name, "job_id": job_id, "step_name": step_name,
-                        "command": command, "rule": rule, "line": line,
+                        "command": command, "rule": rule, "statement": stmt,
                     })
     return found
+
+
+def waiver_covers(waiver: dict, finding: dict) -> bool:
+    """Does this waiver name this finding's site AND its offending statement?"""
+    return (waiver["workflow"] == finding["workflow"]
+            and waiver["job_id"] == finding["job_id"]
+            and waiver["step_name"] == finding["step_name"]
+            and str(waiver["command"]) in finding["statement"])
+
+
+def match_waivers(findings: list[dict], waivers: list[dict]) -> dict[int, int]:
+    """Assign findings to waivers ONE-TO-ONE; returns {waiver position: finding index}.
+
+    A waiver documents ONE swallow, so it must be consumed by at most one finding —
+    otherwise `cargo test || true; cargo clippy || true` is silenced wholesale by a
+    lone `cargo test` entry. Greedy first-fit would then red a finding whose only
+    candidate waiver had already been claimed by a finding that had alternatives, so
+    the assignment is a maximum bipartite matching (Kuhn's augmenting paths) instead.
+    """
+    candidates = [[p for p, w in enumerate(waivers) if waiver_covers(w, f)]
+                  for f in findings]
+    assigned: dict[int, int] = {}
+
+    def augment(index: int, seen: set[int]) -> bool:
+        for position in candidates[index]:
+            if position in seen:
+                continue
+            seen.add(position)
+            if position not in assigned or augment(assigned[position], seen):
+                assigned[position] = index
+                return True
+        return False
+
+    for index in range(len(findings)):
+        augment(index, set())
+    return assigned
 
 
 def check_tree(root: Path) -> list[str]:
     waivers, offences = load_waivers(root)
     findings = collect_findings(root)
 
-    used: set[int] = set()
-    for finding in findings:
-        match = None
-        for position, waiver in enumerate(waivers):
-            if (waiver["workflow"] == finding["workflow"]
-                    and waiver["job_id"] == finding["job_id"]
-                    and waiver["step_name"] == finding["step_name"]
-                    and str(waiver["command"]) in finding["line"]):
-                match = position
-                break
-        if match is not None:
-            used.add(match)
+    assigned = match_waivers(findings, waivers)
+    waived = set(assigned.values())
+    for index, finding in enumerate(findings):
+        if index in waived:
             continue
         offences.append(
             f"R1 {finding['workflow']} job `{finding['job_id']}` step "
             f"{finding['step_name']!r}: {finding['command']} runs inside a job that "
             f"GATES but {RULE_TEXT[finding['rule']]} ({finding['rule']}) — the step "
             f"reports success whatever it found.\n"
-            f"        line: {finding['line'][:160]}\n"
+            f"        statement: {finding['statement'][:160]}\n"
             f"        Fix the shell, or declare it in {WAIVER_REGISTRY} with a reason."
         )
 
     for position, waiver in enumerate(waivers):
-        if position in used:
+        if position in assigned:
             continue
         offences.append(
             f"R2 {WAIVER_REGISTRY} run_swallow_waivers[{position}]: stale — no live "
-            f"swallow matches {waiver['workflow']} job `{waiver['job_id']}` step "
-            f"{waiver['step_name']!r} command {waiver['command']!r}. Delete the entry; "
+            f"unwaived swallow is left for {waiver['workflow']} job "
+            f"`{waiver['job_id']}` step {waiver['step_name']!r} command "
+            f"{waiver['command']!r} (it matches nothing, or a duplicate entry already "
+            f"covers every swallow it names). Delete the entry; "
             "leaving it would silently pre-approve the next swallow added there."
         )
     return offences
@@ -550,6 +597,30 @@ _STEP_D2_SAME_LINE_CAPTURED = """      - name: Gate
           set -e
           exit "$rc"
 """
+# `|| rc=$?` is a capture, not a discard, and `||` is not a statement separator here —
+# so under `set +e` the capture never appears as a FOLLOWING statement and must be read
+# off the gate's own statement, or this disciplined form reds as D2.
+_STEP_D2_INLINE_CAPTURED = """      - name: Gate
+        run: |
+          set +e
+          cargo test --workspace || rc=$?
+          set -e
+          exit "${rc:-0}"
+"""
+# ...but only an `=$?` arm counts: this one drops the status entirely.
+_STEP_D2_INLINE_NOT_A_CAPTURE = """      - name: Gate
+        run: |
+          set +e
+          cargo test --workspace || echo "tests failed"
+          set -e
+"""
+# Two swallowed gates sharing ONE logical line. Each is its own offence, so each needs
+# its own waiver — a waiver naming only the first must leave the second red.
+_STEP_D1_TWO_ON_ONE_LINE = """      - name: Gate
+        run: |
+          set -euo pipefail
+          cargo test --workspace || true; cargo clippy --workspace || true
+"""
 _STEP_D3 = """      - name: Gate
         run: |
           set -euo pipefail
@@ -638,6 +709,9 @@ def self_test() -> int:
         ("D2 errexit off, status dropped", _workflow(_STEP_D2), "R1"),
         ("D2 `set +e;` on the gate's own line", _workflow(_STEP_D2_SAME_LINE), "R1"),
         ("D2 `set +e &&` on the gate's own line", _workflow(_STEP_D2_SAME_LINE_AND), "R1"),
+        ("D2 `|| echo` arm is not a capture",
+         _workflow(_STEP_D2_INLINE_NOT_A_CAPTURE), "R1"),
+        ("two swallowed gates on one line", _workflow(_STEP_D1_TWO_ON_ONE_LINE), "R1"),
         ("D3 trailing bare exit 0", _workflow(_STEP_D3), "R1"),
         ("D3 trailing exit 0 with a comment", _workflow(_STEP_D3_COMMENTED), "R1"),
         ("D3 trailing `exit 0;` with a comment", _workflow(_STEP_D3_COMMENTED_SEMI), "R1"),
@@ -655,6 +729,8 @@ def self_test() -> int:
         ("errexit re-armed before the gate", _workflow(_STEP_D2_REARMED)),
         ("errexit re-armed later on the SAME line", _workflow(_STEP_D2_SAME_LINE_REARMED)),
         ("`set +e; gate; rc=$?` captures on one line", _workflow(_STEP_D2_SAME_LINE_CAPTURED)),
+        ("`set +e` + `|| rc=$?` + re-arm + propagating exit",
+         _workflow(_STEP_D2_INLINE_CAPTURED)),
         ("indented exit 0 in an early-exit guard", _workflow(_STEP_D3_INDENTED_IS_CLEAN)),
         ("indented exit 0 as the LAST line", _workflow(_STEP_D3_INDENTED_LAST_IS_CLEAN)),
         ("`|| rc=$?` captures rather than discards", _workflow(_STEP_CAPTURE_NOT_DISCARD)),
@@ -688,6 +764,28 @@ def self_test() -> int:
 """), waiver)
     if not any(o.startswith("R1") and "cargo" in o for o in narrow):
         print("SELF-TEST FAIL: a waiver must not cover a different command in the step")
+        failures += 1
+    # ...nor a different command sharing the offending LINE. Waiving `cargo test` must
+    # leave the `cargo clippy` swallow next to it red, or one entry buys the whole line.
+    cargo_waiver = [{"workflow": "fixture.yml", "job_id": "build", "step_name": "Gate",
+                     "command": "cargo test", "why": "fixture", "registered": "2026-08-03"}]
+    shared = _run_fixture(_workflow(_STEP_D1_TWO_ON_ONE_LINE), cargo_waiver)
+    if not any(o.startswith("R1") and "clippy" in o for o in shared):
+        print("SELF-TEST FAIL: a waiver must not cover a second swallow on the same line")
+        failures += 1
+    if any(o.startswith("R1") and "clippy" not in o for o in shared):
+        print(f"SELF-TEST FAIL: the waived `cargo test` swallow should be silent, got: {shared}")
+        failures += 1
+    # One waiver is consumed by exactly ONE finding, so two swallows its `command`
+    # matches need two entries.
+    twice = _run_fixture(_workflow("""      - name: Gate
+        run: |
+          set -euo pipefail
+          cargo test --workspace || true
+          cargo test --lib || true
+"""), cargo_waiver)
+    if len([o for o in twice if o.startswith("R1")]) != 1:
+        print(f"SELF-TEST FAIL: one waiver must silence only one swallow, got: {twice}")
         failures += 1
     for bad, label in (
         ({"run_swallow_waivers": [{"workflow": "fixture.yml"}]}, "incomplete waiver"),

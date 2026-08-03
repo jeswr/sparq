@@ -6,8 +6,9 @@
     "R2 deletes the entry for you by REDDING once the underlying swallow is gone, so a",
     "stale waiver can never silently pre-approve the next one added to the same step.",
     "Required fields: workflow, job_id, step_name, command, why, registered.",
-    "`command` is matched as a SUBSTRING of the offending shell line, so a waiver covers",
-    "one command and not the whole step."
+    "`command` is matched as a SUBSTRING of the offending shell STATEMENT — not of the",
+    "whole logical line — and each entry is consumed by AT MOST ONE finding, so a waiver",
+    "covers one swallowed command: never the whole step, never its line-mates."
   ],
   "run_swallow_waivers": [
     {
