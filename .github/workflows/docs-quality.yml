@@ -1044,6 +1044,23 @@ jobs:
       # leave CI.
       - name: Self-test the CI execution-latency alarm (3 choke modes + YAML seam)
         run: python3 scripts/tests/test_ci_execution_latency_alarm.py
+      # [OPUS-5] sq-6vshe.7: the per-leg CI wall-time inventory — the STEERING-DATA
+      # instrument for the sq-6vshe structural-speedup program
+      # (scripts/ci_leg_walltime_inventory.py, research/ci-leg-walltime-inventory.md).
+      # It decomposes each job's wall-clock into constant tax vs compile vs test-run vs
+      # doctest from the per-step timings the Actions API returns, and its split is
+      # inferred from step NAMES — which decays QUIETLY as CI grows steps no rule knows.
+      # So the suite's load-bearing half is the CLASSIFIER-VS-REALITY seam: it classifies
+      # every REAL step name in the live ci.yml + feature-matrix.yml tree and bounds the
+      # unmatched share, with a non-vacuity control so the bound cannot be met by a rule
+      # that matches everything. It also pins the sq-piapk NON-OVERLAP (coverage jobs
+      # excluded unless opted in), that a skipped leg is never averaged in as a cheap
+      # sample, that unaccounted runner time stays visible rather than redistributed, and
+      # every fail-loud exit-2 path (an empty population must never render a table). The
+      # suite pins its OWN call site here, so it cannot silently leave CI.
+      # Hermetic: no gh, no network, no PyYAML.
+      - name: Self-test the per-leg CI wall-time inventory (classifier seam — sq-6vshe.7)
+        run: python3 scripts/tests/test_ci_leg_walltime_inventory.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
