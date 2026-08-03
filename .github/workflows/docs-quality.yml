@@ -473,7 +473,7 @@ jobs:
       # Rust-gated, so it is validated HERE rather than only when Rust changes).
       - name: shellcheck ci-free-disk.sh + its self-test
         run: shellcheck scripts/ci-free-disk.sh scripts/tests/test_ci_free_disk.sh
-      - name: Self-test ci-free-disk.sh (set -u safety + existence guards + #462 fold)
+      - name: "Self-test ci-free-disk.sh (set -u safety + existence guards + #462 fold)"
         run: bash scripts/tests/test_ci_free_disk.sh
       # [OPUS-5] sq-c9q4r: the vacuous-replay guard for fuzz.yml's per-PR corpus-replay
       # leg. That leg is BLOCKING, and `-runs=0` over an empty corpus exits 0 — so a
@@ -672,6 +672,21 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [OPUS-5] #5574: a `name:`/`run-name:` written as an UNQUOTED plain scalar is
+      # silently truncated at a ` #`, because YAML reads that as a comment. Our step
+      # names deliberately carry an issue reference for log greppability and blame
+      # attribution, so the truncation drops exactly the token the reference exists
+      # for — and nothing fails, which is how it accumulated to ELEVEN occurrences
+      # before anyone scanned for it. Detection must be LEXICAL: a YAML parser hands
+      # back the already-truncated value and cannot see the defect at all. The fix is
+      # always to quote the value. Self-test guards the lint's own logic (including
+      # that `foo#bar` and `run:`/`uses:` trailing comments are NOT flagged); the
+      # enforce step applies it over the live workflows and fails vacuously-empty
+      # scans. Stdlib-only, no deps.
+      - name: Self-test workflow step-name truncation gate (pure logic)
+        run: python3 scripts/check-workflow-step-names.py --self-test
+      - name: "Enforce quoted `name:` when it contains a ` #` — GATING"
+        run: python3 scripts/check-workflow-step-names.py
       # [SONNET-4.6] sq-6vshe.11: every cargo-llvm-cov job MUST set a job-level RUSTFLAGS,
       # and they must all set the SAME value. cargo picks ONE rustflags source (first match
       # wins, never merged) and cargo-llvm-cov sets RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS to
@@ -981,7 +996,7 @@ jobs:
       # CI stays green while silently re-coupling to a third party's uptime. This runs
       # the REAL bash `fetch_pinned_file` against a stub curl to prove the offline-on-hit
       # property, pins the ci.yml wiring, and pins that the ratchet was NOT weakened.
-      - name: Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)
+      - name: "Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)"
         run: python3 scripts/tests/test_inference_corpus_cache.py
       # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
       # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
@@ -1114,9 +1129,9 @@ jobs:
       # every `if:`, step and call site. The fail-closed direction matters most: the
       # demote guard is `route != 'preserve'`, so a classifier failure keeps the
       # pre-#4652 behaviour; inverting it to `== 'demote'` fails here.
-      - name: Self-test merge-group-watchdog.py (decision tables — #4652)
+      - name: "Self-test merge-group-watchdog.py (decision tables — #4652)"
         run: python3 scripts/merge-group-watchdog.py --self-test
-      - name: Zero-dispatch watchdog suite (policy + behaviour + YAML seam — #4652)
+      - name: "Zero-dispatch watchdog suite (policy + behaviour + YAML seam — #4652)"
         run: python3 scripts/tests/test_merge_group_watchdog.py
       # [SONNET-4.6] sq-qcnn.32 / [OPUS-5] #3773: the advisory-job registry + gate-intent
       # placement check. Since #3773 the registry is LOAD-BEARING (it is the ONLY thing
@@ -1139,7 +1154,7 @@ jobs:
       # it over the live workflows — including this PR's own consolidated advisory job
       # + registry edit (sq-6vshe.20), so the consolidation self-validates.
       # Stdlib-only, no deps — placed here with the other structural workflow-lint steps.
-      - name: Self-test the advisory-registry checker (C2/C3/C4 logic — sq-qcnn.32, #3773)
+      - name: "Self-test the advisory-registry checker (C2/C3/C4 logic — sq-qcnn.32, #3773)"
         run: python3 scripts/check-advisory-registry.py --self-test
       - name: "Enforce advisory-job registry + gate-intent placement (C2/C3/C4) — GATING"
         run: python3 scripts/check-advisory-registry.py
@@ -1217,9 +1232,9 @@ jobs:
       #     with a byte-identical GH_TOKEN expression, the remediation naming every
       #     flippable lever, and no drift between the two deliberately duplicated copies.
       # The wiring test needs PyYAML — installed once in the shared setup above.
-      - name: Self-test the re-arm sweeper policy (arm capability + failure isolation — #3760)
+      - name: "Self-test the re-arm sweeper policy (arm capability + failure isolation — #3760)"
         run: python3 scripts/rearm-sweeper.py --self-test
-      - name: Self-test the auto-arm policy (arm capability + failure isolation — #3760)
+      - name: "Self-test the auto-arm policy (arm capability + failure isolation — #3760)"
         run: python3 scripts/auto-arm.py --self-test
       - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
         run: python3 scripts/tests/test_arm_capability_wiring.py
