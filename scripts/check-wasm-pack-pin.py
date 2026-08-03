@@ -56,10 +56,23 @@ ACTION = "jetli/wasm-pack-action"
 VERSION_FILE = Path(".github") / "wasm-pack-version"
 # A bare semver, e.g. `0.15.0` — the form cargo's `--version` takes.
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-# `cargo install wasm-pack` with any flag order; we only need to spot the command.
-_CARGO_INSTALL_RE = re.compile(r"\bcargo\s+install\s+wasm-pack\b")
-# `--version 0.15.0` or `--version=0.15.0`.
-_CARGO_VERSION_RE = re.compile(r"--version[= ]\s*(\S+)")
+# Shell command separators: a `run:` line may chain several commands, and only the
+# `cargo install` ones are ours to read.
+_SHELL_SPLIT_RE = re.compile(r"&&|\|\||[;|]")
+# The options that pin the version cargo installs (`--vers` is the older spelling).
+_CARGO_VERSION_OPTS = frozenset({"--version", "--vers"})
+# Options whose value is the NEXT token when not written as `--opt=value`. Needed so
+# that value is never mistaken for the crate argument; the list only has to cover
+# what a `cargo install` line plausibly carries, and an unlisted option is simply
+# treated as taking no value (which can only make us see MORE candidate crates).
+_CARGO_VALUE_OPTS = frozenset(
+    {
+        "--git", "--branch", "--tag", "--rev", "--path", "--root", "--registry",
+        "--index", "--profile", "--target", "--target-dir", "--features", "-F",
+        "--bin", "--example", "--jobs", "-j", "--config", "-Z", "--color",
+        "--message-format", "--artifact-dir", "--manifest-path",
+    }
+)
 
 
 def _load(name: str, filename: str):
@@ -115,6 +128,56 @@ def _code_lines(text: str) -> list[tuple[int, str]]:
     ]
 
 
+def _cargo_install_args(line: str) -> list[list[str]]:
+    """The argument tokens of every `cargo install` invocation on `line`.
+
+    The line is split on shell separators first so that a chained command
+    (`cargo install a && cargo install b`) contributes its own argument list rather
+    than one merged blob."""
+    invocations: list[list[str]] = []
+    for chunk in _SHELL_SPLIT_RE.split(line):
+        toks = chunk.split()
+        for i, tok in enumerate(toks):
+            # `cargo`, `~/.cargo/bin/cargo`, ... optionally with a `+toolchain`.
+            if tok.rsplit("/", 1)[-1] != "cargo":
+                continue
+            j = i + 1
+            while j < len(toks) and toks[j].startswith("+"):
+                j += 1
+            if j < len(toks) and toks[j] == "install":
+                invocations.append(toks[j + 1 :])
+    return invocations
+
+
+def _wasm_pack_pin(args: list[str]) -> tuple[bool, str | None]:
+    """(is this a wasm-pack install, the version it pins) for one `cargo install`.
+
+    Cargo takes its options in ANY order, so `cargo install --locked wasm-pack` and
+    `cargo install wasm-pack --locked` are the same command — the crate argument is
+    therefore found by walking positionals, not by matching the token right after
+    `install`. Option VALUES are stepped over so `--version 0.15.0` never reads as a
+    crate name."""
+    crates: list[str] = []
+    version: str | None = None
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok.startswith("-"):
+            name, sep, inline = tok.partition("=")
+            if name in _CARGO_VERSION_OPTS:
+                if sep:
+                    version = inline
+                elif i + 1 < len(args):
+                    version = args[i + 1]
+                    i += 1
+            elif not sep and name in _CARGO_VALUE_OPTS:
+                i += 1
+        else:
+            crates.append(tok)
+        i += 1
+    return "wasm-pack" in crates, version
+
+
 def scan_text(text: str, canon: str) -> tuple[list[str], int]:
     """Check one workflow file's text against `canon`.
 
@@ -144,20 +207,21 @@ def scan_text(text: str, canon: str) -> tuple[list[str], int]:
             )
 
     for lineno, line in _code_lines(text):
-        if not _CARGO_INSTALL_RE.search(line):
-            continue
-        sites += 1
-        m = _CARGO_VERSION_RE.search(line)
-        if m is None:
-            offences.append(
-                f"{lineno}: `{line.strip()}` has no `--version` "
-                "(floats to the current release)"
-            )
-        elif m.group(1) != canon:
-            offences.append(
-                f"{lineno}: `{line.strip()}` pins --version {m.group(1)}, "
-                f"want {canon}"
-            )
+        for args in _cargo_install_args(line):
+            is_wasm_pack, version = _wasm_pack_pin(args)
+            if not is_wasm_pack:
+                continue
+            sites += 1
+            if version is None:
+                offences.append(
+                    f"{lineno}: `{line.strip()}` has no `--version` "
+                    "(floats to the current release)"
+                )
+            elif version != canon:
+                offences.append(
+                    f"{lineno}: `{line.strip()}` pins --version {version}, "
+                    f"want {canon}"
+                )
 
     return offences, sites
 
@@ -238,6 +302,29 @@ jobs:
       - run: cargo install wasm-pack --version=0.15.0 --locked
 """
 
+# Cargo accepts its options BEFORE the crate argument, so these are the same
+# commands as the three above with the tokens reordered, and must be judged the same.
+_BAD_CARGO_UNPINNED_FLAG_FIRST = """\
+jobs:
+  site:
+    steps:
+      - run: cargo install --locked wasm-pack
+"""
+
+_BAD_CARGO_WRONG_FLAG_FIRST = """\
+jobs:
+  site:
+    steps:
+      - run: cargo install --version 0.13.1 --locked wasm-pack
+"""
+
+_GOOD_CARGO_FLAG_FIRST = """\
+jobs:
+  site:
+    steps:
+      - run: cargo install --version 0.15.0 --locked wasm-pack
+"""
+
 # A COMMENTED mention of the old command (js.yml has one in its rationale block)
 # must not be read as a live install site.
 _GOOD_COMMENT_ONLY = """\
@@ -275,6 +362,19 @@ def self_test() -> int:
         ("bad (cargo install with no --version)", _BAD_CARGO_UNPINNED, 1, 1),
         ("bad (cargo install pinning another version)", _BAD_CARGO_WRONG, 1, 1),
         ("good (--version=X spelling)", _GOOD_CARGO_EQUALS, 0, 1),
+        (
+            "bad (options before the crate, no --version)",
+            _BAD_CARGO_UNPINNED_FLAG_FIRST,
+            1,
+            1,
+        ),
+        (
+            "bad (options before the crate, wrong --version)",
+            _BAD_CARGO_WRONG_FLAG_FIRST,
+            1,
+            1,
+        ),
+        ("good (options before the crate, at canon)", _GOOD_CARGO_FLAG_FIRST, 0, 1),
         ("good (commented mention is not a site)", _GOOD_COMMENT_ONLY, 0, 1),
         ("good (sibling action's version: does not leak)", _GOOD_NO_LEAK, 0, 1),
     ]
