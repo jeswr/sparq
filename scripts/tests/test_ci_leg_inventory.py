@@ -24,6 +24,13 @@ suite is organised around the three ways a measurement tool lies:
      empty table. Same failure class ci_execution_latency_alarm.py's empty-scan-set guard
      exists for.
 
+  4. IT EXITS 1.   The header promises exit 0 or exit 2 and no traceback, so every route
+     an unusable input takes is asserted end to end at the CLI — a payload collection of
+     the wrong SHAPE (`runs`, `jobs`, or a job's `steps`) and an unreadable or malformed
+     --fixture/--overrides FILE alike must exit 2 with empty stdout and ONE diagnostic
+     line. The shape primitives those checks are built from are pinned by name in their
+     own section, so a caller-level test cannot be the only thing holding them up.
+
 Plus the finding functions, where the easy bug is a one-sided predicate: `fold_candidates`
 requires BOTH short AND overhead-dominated, and `family_imbalance` must ignore a
 single-leg family. Each has a negative case that reds if the conjunction is loosened.
@@ -173,7 +180,42 @@ class TestClassify(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------
-# 2. Decomposition
+# 2. Shape guards — the primitives every payload check is built from
+# ---------------------------------------------------------------------------------
+class TestShapeGuards(unittest.TestCase):
+    """`_require_list`/`_require_object` are what turn a wrong SHAPE into the documented
+    exit 2 instead of a TypeError one frame later, so they are pinned by name as well as
+    through their callers: both directions here red if either is deleted or inverted."""
+
+    def test_require_list_passes_a_list_through_unchanged(self):
+        value = [1, 2]
+        self.assertIs(inv._require_list(value, "x"), value)
+
+    def test_require_list_rejects_every_non_list(self):
+        for value in ("nope", {"a": 1}, 5, None, ()):
+            with self.subTest(value=value), self.assertRaises(inv.InventoryError):
+                inv._require_list(value, "x")
+
+    def test_require_object_passes_a_dict_through_unchanged(self):
+        value = {"a": 1}
+        self.assertIs(inv._require_object(value, "x"), value)
+
+    def test_require_object_rejects_every_non_dict(self):
+        for value in ("nope", [1], 5, None):
+            with self.subTest(value=value), self.assertRaises(inv.InventoryError):
+                inv._require_object(value, "x")
+
+    def test_the_diagnostic_names_what_was_wrong_and_what_arrived(self):
+        # A shape complaint that does not say WHICH collection, or what came instead,
+        # sends the reader back to the payload to guess.
+        with self.assertRaises(inv.InventoryError) as caught:
+            inv._require_list("nope", "fixture `runs`")
+        self.assertIn("fixture `runs`", str(caught.exception))
+        self.assertIn("str", str(caught.exception))
+
+
+# ---------------------------------------------------------------------------------
+# 3. Decomposition
 # ---------------------------------------------------------------------------------
 class TestDecompose(unittest.TestCase):
     def test_step_time_lands_in_the_right_class(self):
@@ -229,6 +271,26 @@ class TestDecompose(unittest.TestCase):
         with self.assertRaises(inv.InventoryError):
             inv.decompose_job(job("leg", steps=["clippy"]))
 
+    def test_a_steps_collection_of_the_wrong_shape_fails_loud(self):
+        # `or []` used to swallow every falsy shape here, so `{"steps": {}}` produced a
+        # row of all-zero columns — a plausible table claiming the leg did nothing — and
+        # `{"steps": 5}` raised TypeError out of the loop header (exit 1, traceback).
+        for steps in ({}, {"name": "clippy"}, 5, "clippy", None):
+            with self.subTest(steps=steps), self.assertRaises(inv.InventoryError):
+                inv.decompose_job({**job("leg"), "steps": steps})
+
+    def test_a_job_carrying_no_steps_key_at_all_fails_loud(self):
+        payload = {k: v for k, v in job("leg").items() if k != "steps"}
+        with self.assertRaises(inv.InventoryError):
+            inv.decompose_job(payload)
+
+    def test_an_empty_steps_list_is_accepted_and_lands_in_ungrouped(self):
+        # The other side of that guard, decided explicitly: an empty LIST is a well-formed
+        # answer, unlike a missing or mis-shaped one, and the unattributed time is visible
+        # rather than silently absent.
+        entry = inv.decompose_job(job("leg", start=0, end=40, steps=[]))
+        self.assertEqual(entry["ungrouped_s"], 40.0)
+
     def test_leg_family_groups_matrix_siblings_and_leaves_solo_jobs_alone(self):
         self.assertEqual(inv.leg_family("test (load-aware shard bulk 1/3)"), "test")
         self.assertEqual(inv.leg_family("test (load-aware shard heavy-diskann)"), "test")
@@ -238,7 +300,7 @@ class TestDecompose(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------
-# 3. Aggregation
+# 4. Aggregation
 # ---------------------------------------------------------------------------------
 class TestAggregate(unittest.TestCase):
     def test_columns_are_medianed_not_meaned(self):
@@ -274,7 +336,7 @@ class TestAggregate(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------
-# 4. Findings
+# 5. Findings
 # ---------------------------------------------------------------------------------
 class TestFindings(unittest.TestCase):
     @staticmethod
@@ -358,7 +420,7 @@ class TestFindings(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------
-# 5. Fixture ingestion
+# 6. Fixture ingestion
 # ---------------------------------------------------------------------------------
 class TestFixture(unittest.TestCase):
     def test_the_runs_shape_is_accepted(self):
@@ -482,7 +544,7 @@ class TestPaging(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------
-# 6. CLI behaviour — the fail-loud contract
+# 7. CLI behaviour — the fail-loud contract
 # ---------------------------------------------------------------------------------
 def write_fixture(payload) -> str:
     handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
@@ -553,6 +615,15 @@ class TestCli(unittest.TestCase):
             "a non-list jobs collection": {"jobs": {"leg": 1}},
             "a non-iterable runs collection": {"runs": 5},
             "a non-iterable jobs collection": {"jobs": 5},
+            # The step corpus is the third collection the payload promises, and it reaches
+            # the same contract by two different routes: a falsy non-list was silently
+            # read as "no steps", a truthy non-iterable one raised TypeError.
+            "an empty-object steps collection": {"jobs": [{**job("leg"), "steps": {}}]},
+            "a string steps collection": {"jobs": [{**job("leg"), "steps": "none"}]},
+            "a non-iterable steps collection": {"jobs": [{**job("leg"), "steps": 5}]},
+            "a null steps value": {"jobs": [{**job("leg"), "steps": None}]},
+            "a job with no steps key": {
+                "jobs": [{k: v for k, v in job("leg").items() if k != "steps"}]},
         }
         for label, payload in cases.items():
             with self.subTest(case=label):
@@ -562,6 +633,37 @@ class TestCli(unittest.TestCase):
                 self.assertTrue(err.startswith("ci-leg-inventory: "), err)
                 self.assertNotIn("Traceback", err)
                 # One concise diagnostic line, not a dump of the payload.
+                self.assertEqual(len(err.strip().splitlines()), 1, err)
+
+    def test_an_unusable_input_file_exits_two_rather_than_tracing_back(self):
+        # The same contract for the INPUT PATHS, which run() used to open and decode
+        # outside any conversion to InventoryError: a missing file or malformed JSON
+        # escaped main()'s boundary as OSError/JSONDecodeError and exited 1 with a
+        # traceback — the one way the header promises this instrument will not fail.
+        missing = str(Path(tempfile.gettempdir()) / "ci-leg-inventory-no-such-file.json")
+        # A DIRECTORY is the portable stand-in for "unreadable": chmod 000 is ignored when
+        # the suite runs as root (it does, in CI containers), so it would not fail loud.
+        unreadable = tempfile.TemporaryDirectory()
+        self.addCleanup(unreadable.cleanup)
+        malformed = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        malformed.write("{not json")
+        malformed.close()
+        clean = write_fixture(self.CLEAN)
+        cases = {
+            "a nonexistent fixture": ["--fixture", missing],
+            "an unreadable fixture": ["--fixture", unreadable.name],
+            "a malformed fixture": ["--fixture", malformed.name],
+            "a nonexistent overrides file": ["--fixture", clean, "--overrides", missing],
+            "an unreadable overrides file": ["--fixture", clean, "--overrides", unreadable.name],
+            "a malformed overrides file": ["--fixture", clean, "--overrides", malformed.name],
+        }
+        for label, argv in cases.items():
+            with self.subTest(case=label):
+                code, out, err = invoke(argv)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertTrue(err.startswith("ci-leg-inventory: "), err)
+                self.assertNotIn("Traceback", err)
                 self.assertEqual(len(err.strip().splitlines()), 1, err)
 
     def test_json_output_is_parseable_and_carries_every_section(self):
@@ -584,7 +686,7 @@ class TestCli(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------
-# 7. Live corpus — the classifier must cover the workflow it defaults to
+# 8. Live corpus — the classifier must cover the workflow it defaults to
 # ---------------------------------------------------------------------------------
 _NAME_RE = re.compile(r"^(\s*)- name:\s*(.+?)\s*$")
 _CMD_RE = re.compile(r"^\s*(run|uses):")
@@ -636,7 +738,7 @@ class TestLiveCorpus(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------
-# 8. The suite pins its own call site, so it cannot silently leave CI
+# 9. The suite pins its own call site, so it cannot silently leave CI
 # ---------------------------------------------------------------------------------
 class TestWiring(unittest.TestCase):
     def test_this_suite_is_invoked_by_docs_quality(self):

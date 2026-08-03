@@ -14,9 +14,9 @@ folded together (e) — get answered from MEASUREMENT rather than from the leg n
 
 NOT A GATE, and deliberately not wired into any workflow. It reports; it decides nothing
 about a commit. Exit 0 = a report was produced, exit 2 = the instrument itself is broken
-(no data, unusable API payload, or a step corpus it can no longer classify). There is no
-exit 1: collapsing "broken instrument" into "bad finding" is exactly how a measurement
-tool starts lying.
+(no data, unusable API payload, an unreadable or malformed --fixture/--overrides file, or
+a step corpus it can no longer classify). There is no exit 1: collapsing "broken
+instrument" into "bad finding" is exactly how a measurement tool starts lying.
 
 =============================================================================
 WHAT THE DECOMPOSITION CAN AND CANNOT SEE — read before trusting a column
@@ -132,6 +132,23 @@ def _require_object(value, what: str) -> dict:
     if not isinstance(value, dict):
         raise InventoryError(f"{what} is not an object (got {type(value).__name__})")
     return value
+
+
+def _load_json(path: str, what: str):
+    """Read a JSON file under the same no-exit-1 contract as the payload checks above.
+
+    A missing --fixture, a path that is a directory, or a half-written --overrides is an
+    unusable INPUT, not a Python bug: without this the OSError/JSONDecodeError escapes
+    main()'s InventoryError boundary and the tool exits 1 with a traceback, which the
+    header explicitly promises it will not do. One concise line, then exit 2.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except OSError as exc:
+        raise InventoryError(f"{what} {path}: cannot read: {exc.strerror or exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise InventoryError(f"{what} {path}: unparseable JSON: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------------
@@ -279,7 +296,16 @@ def decompose_job(job: dict, run_started_at=None, overrides=None) -> dict:
 
     buckets: dict[str, float] = {}
     steps: list[dict] = []
-    for step in job.get("steps") or []:
+    # A job whose `steps` we cannot READ is not a job that ran no steps. `or []` would
+    # swallow a missing key, a null, and an empty object alike, and emit a row whose every
+    # column is zero with the whole wall-time in `ungrouped_s` — a plausible table saying
+    # the leg did nothing, which is the failure mode this module exists to refuse. The
+    # jobs API carries `steps` on every COMPLETED job (the only kind decompose_run sends
+    # here), so anything but a list is a broken payload. An EMPTY list is a well-formed
+    # answer and is kept: `ungrouped_s` then shows the whole total as unattributed.
+    if job.get("steps") is None:
+        raise InventoryError(f"{name}: job payload carries no steps")
+    for step in _require_list(job["steps"], f"{name}: `steps`"):
         if not isinstance(step, dict):
             raise InventoryError(f"{name}: a step entry is not an object")
         seconds = _span(step.get("started_at"), step.get("completed_at"))
@@ -674,14 +700,12 @@ def build_parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace) -> int:
     overrides = None
     if args.overrides:
-        with open(args.overrides, encoding="utf-8") as handle:
-            overrides = json.load(handle)
+        overrides = _load_json(args.overrides, "--overrides")
         if not isinstance(overrides, dict):
             raise InventoryError("--overrides must be a JSON object of name -> bucket")
 
     if args.fixture:
-        with open(args.fixture, encoding="utf-8") as handle:
-            decomposed = collect_fixture(json.load(handle), overrides)
+        decomposed = collect_fixture(_load_json(args.fixture, "--fixture"), overrides)
         source = f"fixture {args.fixture}"
     else:
         if not args.repo:
