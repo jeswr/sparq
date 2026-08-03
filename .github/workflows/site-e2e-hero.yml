@@ -27,6 +27,10 @@ on:
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/site-e2e-hero.yml"
+      # [OPUS-5] #5776: the wasm-pack install now lives in this shared composite, so a
+      # change to it changes what this lane builds. Before, the install command sat in
+      # this file and any edit re-triggered the lane; list it here so that stays true.
+      - ".github/actions/install-wasm-pack/**"
   push:
     branches: [main]
     paths:
@@ -34,6 +38,10 @@ on:
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/site-e2e-hero.yml"
+      # [OPUS-5] #5776: the wasm-pack install now lives in this shared composite, so a
+      # change to it changes what this lane builds. Before, the install command sat in
+      # this file and any edit re-triggered the lane; list it here so that stays true.
+      - ".github/actions/install-wasm-pack/**"
 
 # Least-privilege default (Scorecard TokenPermissions): read-only; this lane never writes.
 permissions:
@@ -81,7 +89,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: ./.github/actions/install-wasm-pack
 
       # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
       # the Swatinem/rust-cache above (shared-key: site-wasm) already caches

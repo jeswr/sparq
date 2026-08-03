@@ -97,6 +97,33 @@ updates:
           - "version-update:semver-minor"
           - "version-update:semver-major"
 
+  # ---- GitHub Actions: the repo's own composite actions ----
+  # [OPUS-5] #5776: the `directory: "/"` entry above covers `.github/workflows/*.yml`;
+  # it does NOT reach an `action.yml` nested under `.github/actions/`. That file holds a
+  # SHA-pinned third-party action (jetli/wasm-pack-action) that sixteen wasm lanes now
+  # install wasm-pack through (#5776). Dependabot would still bump the OTHER two copies
+  # of that same pin, in js.yml and ci.yml, so the gap is silent in the worst way: the
+  # action looks tracked, while this copy — the one most lanes depend on — drifts. An
+  # uncovered path produces no PRs, and "no PRs" is indistinguishable from "up to date".
+  # Same cadence/labels/grouping as the workflows entry so its bumps batch identically.
+  - package-ecosystem: github-actions
+    directory: "/.github/actions/install-wasm-pack"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
   # ---- npm (the whole workspace: js, site, gui/*, packages/*) ----
   # [SONNET-4.6] sq-bqjv: this entry pointed at "/js" — a WORKSPACE MEMBER, not a
   # resolvable npm tree. Per-member locks are deliberately gitignored as redundant

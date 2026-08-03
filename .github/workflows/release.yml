@@ -493,8 +493,18 @@ jobs:
       # (repointed off the marketing site by PR #1003 / sq-ixc3.8). Its `prebuild` hook
       # (gui/app/scripts/sync-wasm.mjs) needs the lean shacl,jsonld wasm bundle present in js/wasm/.
       # Mirror gui.yml's proven-green `gui-app`/`tauri-e2e` jobs: build the wasm bundle FIRST.
+      #
+      # [OPUS-5] #5776 — this is the ONE caller that is not plain `ubuntu-latest`, so read the
+      # composite before touching it. It downloads the prebuilt wasm-pack ONLY on x64 Linux (the
+      # `x64-linux` row, i.e. the configuration js.yml/ci.yml already prove) and keeps the previous
+      # `cargo install` on every other row. That is deliberate, not an oversight: jetli/wasm-pack-
+      # action v0.4.0 chooses its tarball from `process.platform` alone and ignores `process.arch`,
+      # so an unconditional prebuilt path would hand the `arm64-linux` row — BLOCKING (soft:false)
+      # — an x86_64 musl binary that installs fine and then dies with `Exec format error`. The
+      # macOS/Windows rows keep the source build for the reason the job header already gives:
+      # their path is not exercised here yet.
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: ./.github/actions/install-wasm-pack
 
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js

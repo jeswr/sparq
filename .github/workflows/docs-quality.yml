@@ -990,6 +990,16 @@ jobs:
       # (which red-gated PR #1131). Hermetic + stdlib-only (no PyYAML needed).
       - name: js lane wasm-pack install posture (prebuilt + pinned — sq-khm3f)
         run: python3 scripts/tests/test_js_wasm_pack_install.py
+      # [OPUS-5] #5776: the same posture, now across ALL lanes. The other sixteen call
+      # sites (gui/nightly-full-sweep/publish/pages/release/site-e2e-hero/site-visual)
+      # went through the shared .github/actions/install-wasm-pack composite. This pins
+      # both halves: no lane may go back to `cargo install wasm-pack`, AND the
+      # composite's prebuilt path stays gated on x64 Linux — jetli/wasm-pack-action
+      # ignores the runner ARCH and always downloads the x86_64 tarball, so dropping
+      # that clause would hand release.yml's BLOCKING ubuntu-24.04-arm row a binary it
+      # cannot exec. Hermetic + stdlib-only (no PyYAML needed).
+      - name: wasm-pack install posture, all lanes (prebuilt + arch gate — #5776)
+        run: python3 scripts/tests/test_wasm_pack_install_posture.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
       # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;

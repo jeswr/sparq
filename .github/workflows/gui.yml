@@ -65,6 +65,10 @@ on:
       - "js/**"
       - "package-lock.json"
       - ".github/workflows/gui.yml"
+      # [OPUS-5] #5776: the wasm-pack install now lives in this shared composite, so a
+      # change to it changes what this lane builds. Before, the install command sat in
+      # this file and any edit re-triggered the lane; list it here so that stays true.
+      - ".github/actions/install-wasm-pack/**"
   push:
     branches: [main]
     paths:
@@ -74,6 +78,10 @@ on:
       - "js/**"
       - "package-lock.json"
       - ".github/workflows/gui.yml"
+      # [OPUS-5] #5776: the wasm-pack install now lives in this shared composite, so a
+      # change to it changes what this lane builds. Before, the install command sat in
+      # this file and any edit re-triggered the lane; list it here so that stays true.
+      - ".github/actions/install-wasm-pack/**"
   # [SONNET-4.6] sq-ymr2e.6 — manual flake probe: run the tauri-driver smoke N times in sequence
   # to measure consecutive-green rate. Trigger via "Run workflow" in the GitHub Actions UI.
   # The `probe_runs` input defaults to 20 (the acceptance-criteria bar); the tauri-e2e-probe job
@@ -158,7 +166,7 @@ jobs:
       # the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: ./.github/actions/install-wasm-pack
 
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js
@@ -240,7 +248,7 @@ jobs:
       # the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: ./.github/actions/install-wasm-pack
 
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js
@@ -359,7 +367,7 @@ jobs:
       # churned the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: ./.github/actions/install-wasm-pack
 
       # The in-tab WASM engine (shacl,jsonld bundle) is required for queries to run in the browser.
       - name: Build WASM bundle (shacl,jsonld)
@@ -676,7 +684,7 @@ jobs:
           key: gui-e2e-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: ./.github/actions/install-wasm-pack
 
       # Build the frontend the Tauri webview embeds. The shell's `cargo build` embeds whatever
       # is in `gui/app/out` at COMPILE TIME (sq-ixc3.8 repointed `frontendDist` to the DISTINCT
@@ -819,7 +827,7 @@ jobs:
           key: gui-e2e-probe-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: ./.github/actions/install-wasm-pack
 
       - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
         working-directory: js

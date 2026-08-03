@@ -1,0 +1,83 @@
+# [OPUS-5] #5776 — the ONE place this repo decides how wasm-pack gets onto PATH.
+#
+# WHY THIS ACTION EXISTS. Sixteen lanes across gui.yml, nightly-full-sweep.yml,
+# publish.yml, pages.yml, release.yml, site-e2e-hero.yml and site-visual.yml each ran
+# `cargo install wasm-pack --locked`, which COMPILES wasm-pack and its whole
+# chrono/wasm-bindgen source tree from crates.io on every run. That is the flake
+# surface sq-khm3f/#3236 removed from the gating `js` lane after a transient crates.io
+# blip red-gated PR #1131 ("download of wa/sm/wasm-bindgen failed / curl failed: [16]
+# Error in the HTTP2 framing layer", cleared by a plain re-run). Downloading one static
+# release tarball instead collapses that network surface from wasm-pack's entire
+# dependency graph to a single file, and jetli/wasm-pack-action fetches it through
+# @actions/tool-cache, which retries a failed download — so the one remaining request is
+# itself flake-tolerant. It installs to ~/.cargo/bin, which is already on PATH and is
+# disjoint from the registry/git paths Swatinem/rust-cache owns, so the two never interact.
+#
+# WHY THE PREBUILT PATH IS NOT UNCONDITIONAL — the arm64 hole. jetli/wasm-pack-action
+# v0.4.0 picks its download target from `process.platform` ALONE and ignores
+# `process.arch` entirely (dist/index.js: win32 -> x86_64-pc-windows-msvc, darwin ->
+# x86_64-apple-darwin, linux -> x86_64-unknown-linux-musl). wasm-pack itself DOES publish
+# aarch64-unknown-linux-musl and aarch64-apple-darwin tarballs, but the action can never
+# request them. So on release.yml's `gui-bundle` matrix the action would hand an
+# `ubuntu-24.04-arm` runner an x86_64 binary — the linux-musl asset really is an x86-64
+# static-pie ELF, checked with `file` on the downloaded tarball — and because the action
+# only downloads, extracts and moves the file, that install REPORTS SUCCESS and the
+# failure lands later, on a row that is deliberately BLOCKING (soft:false). macos-14
+# (arm64) would likewise get the x86_64-apple-darwin asset. (Read off the action's
+# dist/index.js and the release asset list, not off an observed arm64 CI run — which is
+# precisely why the prebuilt path is not enabled there on a guess.)
+#
+# So the prebuilt path is scoped to Linux/X64 — the EXACT configuration already proven
+# green by the `js` lane (js.yml) and the `wasm` job (ci.yml), and the configuration all
+# fifteen `ubuntu-latest` callers run on. Everything else keeps today's source compile,
+# unchanged in mechanism. That is not a limitation being papered over: it converts 100%
+# of the lanes the issue is actually about while leaving zero regression risk on the
+# release matrix's arm64/macOS/Windows rows. Widening it (an arch-aware installer, or a
+# hand-rolled download of the aarch64 asset) needs a real release run to prove, and is
+# tracked separately rather than guessed at here.
+#
+# The posture above is invisible when broken — a lane reverted to `cargo install` stays
+# green on a good day — so it is pinned by scripts/tests/test_wasm_pack_install_posture.py.
+name: Install wasm-pack
+description: >-
+  Put a pinned wasm-pack on PATH, preferring the prebuilt release binary (no source
+  compile) wherever that download path is proven, with a from-source fallback elsewhere.
+
+inputs:
+  version:
+    description: >-
+      wasm-pack release to install, WITHOUT the leading `v` (e.g. `0.15.0`). Pinned
+      exactly rather than tracking `latest`: `latest` costs an unauthenticated
+      api.github.com release lookup on every run, i.e. a second rate-limit-flake source,
+      which is the thing this action removes. Bump deliberately, not implicitly.
+    required: false
+    default: "0.15.0"
+
+runs:
+  using: composite
+  steps:
+    # The proven-green path: one static musl tarball, SHA-pinned per the repo's
+    # action-pin policy, exact version (never `latest`).
+    - name: Install wasm-pack (prebuilt release binary)
+      if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
+      uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+      with:
+        version: v${{ inputs.version }}
+
+    # The complement — arm64 Linux, macOS, Windows. Same version, compiled from source,
+    # exactly as every caller did before #5776. The `${{ }}` wrapper is REQUIRED: a bare
+    # leading `!` is a YAML tag indicator, not a boolean negation.
+    #
+    # `version` is stored WITHOUT the `v` because this is the consumer that constrains
+    # the format: `cargo install --version v0.15.0` is rejected outright ("the version
+    # provided, `v0.15.0` is not a valid SemVer requirement"). The prebuilt step above
+    # adds the `v` back for the release-tag URL.
+    #
+    # `shell:` is mandatory on a composite `run:` step. `bash` is the repo's default
+    # everywhere else and is present on all three runner families (Git Bash on Windows);
+    # it replaces the Windows default of pwsh for this one step, and `cargo install`
+    # behaves the same under either.
+    - name: Install wasm-pack (build from source — prebuilt target unavailable)
+      if: ${{ !(runner.os == 'Linux' && runner.arch == 'X64') }}
+      shell: bash
+      run: cargo install wasm-pack --version ${{ inputs.version }} --locked

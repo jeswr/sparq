@@ -22,10 +22,13 @@
 #      `prepare` lifecycle (sq-bkag git-pin build) runs on `npm ci` and needs
 #      wasm-pack on PATH to compile the wasm engine.
 #
-# SCOPE — deliberately js.yml ONLY. gui.yml / pages.yml / publish.yml / release.yml /
-# nightly-full-sweep.yml / site-e2e-hero.yml / site-visual.yml still `cargo install`
-# wasm-pack; converting them is separate work and is NOT asserted here, so this file's
-# silence about them is not a claim that they are hardened.
+# SCOPE — deliberately js.yml ONLY, and this file keeps asserting the DIRECT `uses:`
+# because the gating `js` lane installs wasm-pack ahead of `npm ci` on its own, without
+# the shared composite. The other seven workflows (gui.yml / pages.yml / publish.yml /
+# release.yml / nightly-full-sweep.yml / site-e2e-hero.yml / site-visual.yml) no longer
+# `cargo install` wasm-pack either — #5776 moved all sixteen of their call sites onto
+# .github/actions/install-wasm-pack — but that is asserted by its own posture test,
+# scripts/tests/test_wasm_pack_install_posture.py, not here.
 #
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).
