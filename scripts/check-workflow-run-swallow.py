@@ -44,12 +44,16 @@
 #       discard idiom proper. `… || rc=$?` is NOT this: it captures the status, and
 #       ci.yml's nextest shard relies on exactly that to re-raise a genuine failure.
 #   D2  The command sits in an errexit-OFF region (`set +e`, un-armed until the next
-#       `set -e`) and the next effective line does not capture `$?`. Capturing is the
+#       `set -e`) and the next statement does not capture `$?`. Capturing is the
 #       disciplined form — bench.yml wraps perf-gate.py in `set +e` precisely so it can
-#       read rc and re-raise on anything but the "unchanged" code.
+#       read rc and re-raise on anything but the "unchanged" code. The `set +e` need not
+#       be on its own line: bash reads `set +e; cargo deny check advisories` left to
+#       right, so errexit is folded per SHELL STATEMENT, not per line.
 #   D3  The body's last top-level statement is a bare, unindented `exit 0`, which forces
-#       the whole step green whatever ran above it. Indented `exit 0`s are early-exit
-#       guards inside an `if`/`case` and are not this.
+#       the whole step green whatever ran above it. A trailing comment does not save it
+#       — the exit syntax is matched against comment-stripped text, and only the
+#       indentation comes from the raw line. Indented `exit 0`s are early-exit guards
+#       inside an `if`/`case` and are not this.
 #
 # RULES
 # =====
@@ -187,6 +191,57 @@ def logical_lines(body: str) -> list[tuple[str, str]]:
     return out
 
 
+def statements(text: str) -> list[str]:
+    """Split ONE logical line into the shell statements bash would run in order.
+
+    Needed because errexit is positional: in `set +e; cargo deny check advisories` the
+    gate runs with errexit already off, so a per-LINE errexit state reads it as armed
+    and misses the swallow entirely.
+
+    Separators are `;` and `&&` only. `||` is deliberately NOT one — it is the D1
+    discard idiom and `cmd || true` has to stay one unit — and neither is a lone `&`,
+    which would tear `cargo test 2>&1 || true` in half at the redirect. Splitting skips
+    quotes, `$(...)` and backticks, so a separator inside a string or a command
+    substitution does not split a statement that D1 has to see whole.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    depth = 0  # open `$(` … `)`; backticks count as one level via `quote`
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote is not None:
+            buf.append(char)
+            if char == quote:
+                quote = None
+            index += 1
+        elif char in "'\"`":
+            quote = char
+            buf.append(char)
+            index += 1
+        elif text.startswith("$(", index):
+            depth += 1
+            buf.append("$(")
+            index += 2
+        elif char == ")" and depth:
+            depth -= 1
+            buf.append(char)
+            index += 1
+        elif text.startswith("||", index):  # not a separator — keep D1 intact
+            buf.append("||")
+            index += 2
+        elif not depth and (char == ";" or text.startswith("&&", index)):
+            out.append("".join(buf))
+            buf = []
+            index += 2 if char == "&" else 1
+        else:
+            buf.append(char)
+            index += 1
+    out.append("".join(buf))
+    return [part.strip() for part in out if part.strip()]
+
+
 def initial_errexit(step: dict) -> bool:
     """Is errexit armed when the body starts?
 
@@ -246,17 +301,26 @@ def analyse_run_body(body: str, step: dict,
     flagged: set[tuple[str, str]] = set()
 
     # D3 is a property of the WHOLE body: an unindented trailing `exit 0` forces the
-    # step green regardless of what ran above it.
-    force_green = bool(effective and BARE_EXIT0_RE.match(effective[-1][0].rstrip()))
+    # step green regardless of what ran above it. The exit syntax comes from the
+    # comment-stripped text (`exit 0 # force success` is still a bare exit 0); only the
+    # indentation — which is what distinguishes it from an early-exit guard inside an
+    # `if`/`case` — comes from the raw line.
+    force_green = bool(effective
+                       and BARE_EXIT0_RE.match(effective[-1][1])
+                       and not effective[-1][0][:1].isspace())
 
-    for index, (_raw, text) in enumerate(effective):
+    # Flattened to statements, so errexit is folded at each command POSITION the way
+    # bash folds it, rather than once per line.
+    flat = [(text, stmt) for _raw, text in effective for stmt in statements(text)]
+
+    for index, (text, stmt) in enumerate(flat):
         errexit_here = errexit
-        errexit = apply_set(text, errexit)
-        hits = gate_commands(text, npm_scripts)
+        errexit = apply_set(stmt, errexit)
+        hits = gate_commands(stmt, npm_scripts)
         if not hits:
             continue
-        discarded = DISCARD_RE.search(text)
-        captured = index + 1 < len(effective) and CAPTURE_RE.match(effective[index + 1][1])
+        discarded = DISCARD_RE.search(stmt)
+        captured = index + 1 < len(flat) and CAPTURE_RE.match(flat[index + 1][1])
         for hit in hits:
             if discarded:
                 rule = "D1"
@@ -432,6 +496,13 @@ _STEP_D1_CONTINUATION = """      - name: Gate
           cargo clippy --workspace \\
             --all-targets || true
 """
+# A `;` inside `$(...)` must not split the statement, or the trailing `|| true` would
+# be attributed to a fragment with no command on it and D1 would silently stop firing.
+_STEP_D1_SUBSTITUTION = """      - name: Gate
+        run: |
+          set -euo pipefail
+          OUT=$(cargo test --workspace; echo done) || true
+"""
 _STEP_D2 = """      - name: Gate
         run: |
           set -euo pipefail
@@ -455,11 +526,47 @@ _STEP_D2_REARMED = """      - name: Gate
           set -e
           python3 scripts/coverage-gate.py
 """
+_STEP_D2_SAME_LINE = """      - name: Gate
+        run: |
+          set -euo pipefail
+          set +e; cargo test --workspace
+          echo done
+"""
+_STEP_D2_SAME_LINE_AND = """      - name: Gate
+        run: |
+          set -euo pipefail
+          set +e && python3 scripts/coverage-gate.py
+          echo done
+"""
+_STEP_D2_SAME_LINE_REARMED = """      - name: Gate
+        run: |
+          set +e; echo warming up; set -e
+          python3 scripts/coverage-gate.py
+"""
+_STEP_D2_SAME_LINE_CAPTURED = """      - name: Gate
+        run: |
+          set -euo pipefail
+          set +e; python3 scripts/coverage-gate.py; rc=$?
+          set -e
+          exit "$rc"
+"""
 _STEP_D3 = """      - name: Gate
         run: |
           set -euo pipefail
           cargo deny check advisories
           exit 0
+"""
+_STEP_D3_COMMENTED = """      - name: Gate
+        run: |
+          set -euo pipefail
+          cargo deny check advisories
+          exit 0 # force success
+"""
+_STEP_D3_COMMENTED_SEMI = """      - name: Gate
+        run: |
+          set -euo pipefail
+          cargo deny check advisories
+          exit 0; # force success
 """
 _STEP_D3_INDENTED_IS_CLEAN = """      - name: Gate
         run: |
@@ -469,6 +576,16 @@ _STEP_D3_INDENTED_IS_CLEAN = """      - name: Gate
             exit 0
           fi
           cargo deny check advisories
+"""
+# The body's last line IS an `exit 0`, but an indented one: it is the consequent of a
+# conditional wrapped after `&&`, so it fires only when SHA is empty and does not force
+# the step green. Indentation is the only thing distinguishing it from D3.
+_STEP_D3_INDENTED_LAST_IS_CLEAN = """      - name: Gate
+        run: |
+          set -euo pipefail
+          cargo deny check advisories
+          [ -z "${SHA:-}" ] &&
+            exit 0
 """
 _STEP_CAPTURE_NOT_DISCARD = """      - name: Gate
         run: |
@@ -517,8 +634,13 @@ def self_test() -> int:
         ("D1 script gate", _workflow(_STEP_D1), "R1"),
         ("D1 cargo nextest", _workflow(_STEP_D1_CARGO), "R1"),
         ("D1 across a line continuation", _workflow(_STEP_D1_CONTINUATION), "R1"),
+        ("D1 with a `;` inside $(...)", _workflow(_STEP_D1_SUBSTITUTION), "R1"),
         ("D2 errexit off, status dropped", _workflow(_STEP_D2), "R1"),
+        ("D2 `set +e;` on the gate's own line", _workflow(_STEP_D2_SAME_LINE), "R1"),
+        ("D2 `set +e &&` on the gate's own line", _workflow(_STEP_D2_SAME_LINE_AND), "R1"),
         ("D3 trailing bare exit 0", _workflow(_STEP_D3), "R1"),
+        ("D3 trailing exit 0 with a comment", _workflow(_STEP_D3_COMMENTED), "R1"),
+        ("D3 trailing `exit 0;` with a comment", _workflow(_STEP_D3_COMMENTED_SEMI), "R1"),
         ("shell: bash {0} never arms errexit", _workflow(_STEP_SHELL_NO_ERREXIT), "R1"),
     ]
     for label, text, prefix in must_fire:
@@ -531,7 +653,10 @@ def self_test() -> int:
         ("clean gate + benign grep swallow", _workflow(_STEP_CLEAN)),
         ("set +e with the status captured", _workflow(_STEP_D2_CAPTURED)),
         ("errexit re-armed before the gate", _workflow(_STEP_D2_REARMED)),
+        ("errexit re-armed later on the SAME line", _workflow(_STEP_D2_SAME_LINE_REARMED)),
+        ("`set +e; gate; rc=$?` captures on one line", _workflow(_STEP_D2_SAME_LINE_CAPTURED)),
         ("indented exit 0 in an early-exit guard", _workflow(_STEP_D3_INDENTED_IS_CLEAN)),
+        ("indented exit 0 as the LAST line", _workflow(_STEP_D3_INDENTED_LAST_IS_CLEAN)),
         ("`|| rc=$?` captures rather than discards", _workflow(_STEP_CAPTURE_NOT_DISCARD)),
         ("a gate NAMED in an echo is not an invocation", _workflow(_STEP_ECHO_MENTION)),
         ("swallowed non-gate housekeeping", _workflow(_STEP_NON_GATE_SWALLOW)),
