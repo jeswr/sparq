@@ -33,10 +33,16 @@
 #   S1  PINNED SAFETY STEPS. Every entry in `pinned_steps` must still bind to a live
 #       step: the workflow parses, the job id exists, the job carries no truthy
 #       `continue-on-error`, EXACTLY ONE step in it has the declared `name:`, that step
-#       carries no truthy `continue-on-error`, its `run:` still contains every string in
-#       `requires_run`, and — when `must_precede_step` is declared — the step it protects
-#       exists and comes AFTER it. Each of those is one of the mutations above, and none
-#       of them is observable anywhere else.
+#       still EXECUTES every string in `requires_run`, and — when `must_precede_step` is
+#       declared — the step it protects exists and comes AFTER it. Each of those is one
+#       of the mutations above, and none of them is observable anywhere else.
+#
+#       "Executes", not "contains": `requires_run` is matched against the reduction of
+#       the `run:` body to the text that actually runs (see `executable_run_text`), so
+#       commenting the invocation out, `echo`ing it, or moving it into a heredoc no
+#       longer satisfies the pin. A substring test over the raw scalar accepted all
+#       three, which made the pin assert the presence of the TEXT rather than of the
+#       guard.
 #
 #       An `if:` is PINNED, not banned. A lane can legitimately be conditional (which
 #       events verdict-bridge answers for, say), so an entry may declare
@@ -59,12 +65,20 @@
 #       undocumented swallow into a live hole.
 #
 #   S3  THE REGISTRY CANNOT GO STALE. A registry is only as good as its coverage, and a
-#       hand-maintained one drifts. So the checker DERIVES the shape S1 protects: a job
-#       in which a step that INVOKES a self-test or a scripts/tests/ suite is followed by
-#       a step that INVOKES a mutating command (`--apply`, `gh issue edit|close`,
-#       `gh pr merge`, `gh label create|delete`) is a self-test-before-write lane, and it
-#       MUST have a `pinned_steps` entry. A future workflow with this shape is forced to
-#       declare its guard instead of quietly relying on nobody deleting it.
+#       hand-maintained one drifts. So the checker DERIVES the shape S1 protects: a step
+#       that INVOKES a self-test or a scripts/tests/ suite, followed in the same job by a
+#       step that INVOKES a mutating command (`--apply`, `gh issue edit|close`,
+#       `gh pr merge`, `gh label create|delete`), is a self-test-before-write LANE, and
+#       every lane MUST have a `pinned_steps` entry naming that guard step and, as its
+#       `must_precede_step`, the first write it stands in front of. A future workflow
+#       with this shape is forced to declare its guard instead of quietly relying on
+#       nobody deleting it.
+#
+#       Coverage is keyed on the LANE, not on the job. Keying it on `(workflow, job_id)`
+#       — the first shape this file shipped — meant one registered lane vouched for the
+#       whole job, so a SECOND guard/write sequence added beside it needed no pin of its
+#       own and could then be deleted with nothing red: precisely the staleness S3 exists
+#       to prevent, reintroduced inside the rule meant to prevent it.
 #
 # WHAT IT DOES NOT CHECK — read this before trusting it further than it goes
 # =========================================================================
@@ -72,6 +86,13 @@
 #     swallows its own failure with `|| true` or `set +e` is NOT detected. That idiom has
 #     legitimate uses throughout the tree, so banning it is a separate and much larger
 #     piece of work, not a line in this script.
+#   * `executable_run_text` is a CONSERVATIVE shell reduction, not a shell parser. It
+#     drops comments, `echo`/`printf`/`:`/`true`/`false` arguments and heredoc bodies —
+#     the ways a required command survives as text without running — but it cannot see
+#     through indirection: a needle reached via `eval`, a variable, a function body, or a
+#     sourced script still reads as executed, and one guarded by `if false; then` reads
+#     as executed too. It closes the trivially-reachable bypasses; it does not decide
+#     reachability.
 #   * S3's markers are deliberately narrow (an invocation at the start of a line, not a
 #     mention anywhere in the body) because a false positive here is an obligation
 #     imposed on an unrelated author. A safety step that is neither a self-test nor
@@ -118,6 +139,124 @@ WRITE_INVOCATION_RE = re.compile(
     r"|gh[ \t]+label[ \t]+(?:create|delete)\b"
     r")"
 )
+
+
+# The `run:` reduction used by S1's `requires_run`. A command that survives only as
+# COMMENT text, as an `echo` argument or inside a heredoc body does not run, so none of
+# those may satisfy a pin.
+HEREDOC_RE = re.compile(r"<<-?[ \t]*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?")
+ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Builtins that consume their arguments as DATA rather than executing them.
+DATA_COMMANDS = frozenset({"echo", "printf", ":", "true", "false"})
+
+
+def strip_comment(line: str) -> str:
+    """Drop a `#` comment, honouring quotes so a `#` inside a string survives.
+
+    A `#` only opens a comment at the start of a word, so `area:core#x` is left alone.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    after_space = True
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and index + 1 < len(line) and quote != "'":
+            out.append(char)
+            out.append(line[index + 1])
+            index += 2
+            after_space = False
+            continue
+        if quote is not None:
+            out.append(char)
+            if char == quote:
+                quote = None
+            index += 1
+            after_space = False
+            continue
+        if char in "'\"":
+            quote = char
+            out.append(char)
+            index += 1
+            after_space = False
+            continue
+        if char == "#" and after_space:
+            break
+        out.append(char)
+        after_space = char.isspace()
+        index += 1
+    return "".join(out)
+
+
+def split_commands(line: str) -> list[str]:
+    """Split a line on unquoted `;`, `&&`, `||`, `|`, `&` into candidate commands."""
+    commands: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and index + 1 < len(line) and quote != "'":
+            current.append(char)
+            current.append(line[index + 1])
+            index += 2
+            continue
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char in ";&|":
+            commands.append("".join(current))
+            current = []
+            index += 2 if line[index : index + 2] in ("&&", "||") else 1
+            continue
+        current.append(char)
+        index += 1
+    commands.append("".join(current))
+    return commands
+
+
+def executable_run_text(run: object) -> str:
+    """Reduce a `run:` body to the text a shell would actually EXECUTE.
+
+    Conservative on purpose — see the module header's limits. It removes the three ways
+    a command survives in the body as inert text: a comment, an argument to a data
+    builtin (`echo foo`), and a heredoc body.
+
+    The one shape an author has to know about: the separators `;`, `&&`, `||`, `|` and
+    `&` are consumed by the split, so a `requires_run` needle must not span one. That
+    direction fails closed (an offence to fix, not a bypass), which is why the split is
+    written this way rather than trying to preserve them.
+    """
+    kept: list[str] = []
+    terminator: str | None = None
+    for raw in str(run).splitlines():
+        if terminator is not None:
+            # Inside a heredoc: data, not commands. `<<-` allows a tabbed terminator.
+            if raw.strip() == terminator:
+                terminator = None
+            continue
+        line = strip_comment(raw)
+        opened = HEREDOC_RE.search(line)
+        if opened:
+            terminator = opened.group(1)
+        for command in split_commands(line):
+            words = command.split()
+            while words and ASSIGNMENT_RE.match(words[0]):
+                words = words[1:]  # `FOO=1 echo bar` still echoes
+            if not words:
+                continue
+            if words[0].rsplit("/", 1)[-1] in DATA_COMMANDS:
+                continue
+            kept.append(command)
+    return "\n".join(kept)
 
 
 def swallows(value: object) -> bool:
@@ -314,12 +453,14 @@ def check_pinned_steps(root: Path, pinned: list[dict]) -> list[str]:
                 "failure is now invisible in the job's conclusion"
             )
 
-        run = step.get("run") or ""
+        run = executable_run_text(step.get("run") or "")
         for needle in entry.get("requires_run") or []:
             if needle not in run:
                 offences.append(
                     f"S1 {entry_id}: step {step_name!r} no longer runs {needle!r} — the "
-                    "step survives but has stopped being the guard it was pinned as"
+                    "step survives but has stopped being the guard it was pinned as "
+                    "(commenting the invocation out, echoing it, or moving it into a "
+                    "heredoc leaves the text but not the guard)"
                 )
 
         protected = entry.get("must_precede_step")
@@ -366,8 +507,18 @@ def check_swallows(root: Path, waivers: list[dict], advisory: set[str]) -> list[
 
 
 def check_undeclared_guard_lanes(root: Path, pinned: list[dict]) -> list[str]:
-    """S3 — a self-test-before-write lane that no `pinned_steps` entry covers."""
-    covered = {(e.get("workflow"), e.get("job_id")) for e in pinned}
+    """S3 — every self-test-before-write LANE has a `pinned_steps` entry.
+
+    A lane is a guard step plus the FIRST mutating step after it, and coverage is keyed
+    on that pair. Keying on `(workflow, job_id)` would let one registered lane vouch for
+    every other guard/write sequence in the same job, which is the staleness S3 exists to
+    catch.
+    """
+    covered = {
+        (e.get("workflow"), e.get("job_id"), e.get("step_name"), e.get("must_precede_step"))
+        for e in pinned
+    }
+    pinned_guards = {(e.get("workflow"), e.get("job_id"), e.get("step_name")) for e in pinned}
     offences: list[str] = []
     for path in sorted((root / WORKFLOW_DIR).glob("*.yml")):
         doc = load_yaml(path)
@@ -377,16 +528,36 @@ def check_undeclared_guard_lanes(root: Path, pinned: list[dict]) -> list[str]:
             steps = steps_of(job)
             guards = [i for i, s in enumerate(steps) if GUARD_INVOCATION_RE.search(s.get("run") or "")]
             writes = [i for i, s in enumerate(steps) if WRITE_INVOCATION_RE.search(s.get("run") or "")]
-            if not guards or not writes or min(guards) >= max(writes):
-                continue
-            if (path.name, job_id) in covered:
-                continue
-            offences.append(
-                f"S3 {path.name} job `{job_id}`: step "
-                f"{steps[min(guards)].get('name')!r} self-tests before step "
-                f"{steps[max(writes)].get('name')!r} mutates live state, but no "
-                "`pinned_steps` entry pins it — deleting the self-test would be silent"
-            )
+            for guard in guards:
+                after = [i for i in writes if i > guard]
+                if not after:
+                    continue
+                write = min(after)
+                guard_name = steps[guard].get("name")
+                write_name = steps[write].get("name")
+                if (path.name, job_id, guard_name, write_name) in covered:
+                    continue
+                lane = (
+                    f"S3 {path.name} job `{job_id}`: step {guard_name!r} self-tests "
+                    f"before step {write_name!r} mutates live state, but "
+                )
+                if guard_name is None:
+                    offences.append(
+                        lane + "the guard step has no `name:` — a pin binds by name, so "
+                        "name it and register it in `pinned_steps`"
+                    )
+                elif (path.name, job_id, guard_name) in pinned_guards:
+                    offences.append(
+                        lane + "no `pinned_steps` entry pins it with "
+                        f"`must_precede_step: {write_name!r}` — the guard is pinned in "
+                        "front of a different step, so it could be reordered behind this "
+                        "write with nothing red"
+                    )
+                else:
+                    offences.append(
+                        lane + "no `pinned_steps` entry pins it — deleting the self-test "
+                        "would be silent"
+                    )
     return offences
 
 
@@ -589,6 +760,56 @@ def self_test() -> int:
         CLEAN_REGISTRY,
         True,
     )
+    # Deleting the line is the EASY mutation. These three keep the pinned text in the
+    # body while removing the execution — the shape a substring test over the raw `run:`
+    # scalar accepted, which made the pin assert the text rather than the guard.
+    case(
+        "S1: the guard's invocation is COMMENTED OUT (text survives, execution does not)",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/sweeper.py --self-test\n",
+            "          # python3 scripts/sweeper.py --self-test\n",
+        ),
+        CLEAN_REGISTRY,
+        True,
+    )
+    case(
+        "S1: the guard's invocation survives only as ECHOED text",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/tests/test_sweeper.py\n",
+            "          echo python3 scripts/tests/test_sweeper.py\n",
+        ),
+        CLEAN_REGISTRY,
+        True,
+    )
+    case(
+        "S1: the guard's invocation survives only inside a HEREDOC body",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/tests/test_sweeper.py\n",
+            "          cat <<'EOF' > /tmp/note\n"
+            "          python3 scripts/tests/test_sweeper.py\n"
+            "          EOF\n",
+        ),
+        CLEAN_REGISTRY,
+        True,
+    )
+    case(
+        "control: a trailing `#` comment beside a live invocation is still a live invocation",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/sweeper.py --self-test\n",
+            "          python3 scripts/sweeper.py --self-test  # rule-table regressions\n",
+        ),
+        CLEAN_REGISTRY,
+        False,
+    )
+    case(
+        "control: an invocation piped into another command still runs",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/tests/test_sweeper.py\n",
+            "          python3 scripts/tests/test_sweeper.py | tee /tmp/log\n",
+        ),
+        CLEAN_REGISTRY,
+        False,
+    )
     case(
         "S1: the guard is moved AFTER the write it guards",
         CLEAN_WORKFLOW.replace(
@@ -641,7 +862,7 @@ def self_test() -> int:
     empty_pins = {"pinned_steps": [], "swallow_waivers": []}
     case("S3/schema: an empty pinned_steps list", CLEAN_WORKFLOW, empty_pins, True)
     case(
-        "S3: a SECOND self-test-before-write lane that nothing pins",
+        "S3: a SECOND self-test-before-write lane, in a second job, that nothing pins",
         CLEAN_WORKFLOW
         + """\
   second:
@@ -656,6 +877,52 @@ def self_test() -> int:
           gh issue edit 1 --add-label area:core
 """,
         CLEAN_REGISTRY,
+        True,
+    )
+    # The same hole INSIDE an already-pinned job. Job-granular coverage let the
+    # registered lane vouch for this one, so the second guard needed no pin of its own
+    # and could then be deleted with nothing red. The first lane is untouched, so only
+    # lane-granular coverage reds here.
+    two_lanes = CLEAN_WORKFLOW + """\
+      - name: Self-test the second sweep
+        run: |
+          python3 scripts/other.py --self-test
+      - name: Write labels
+        run: |
+          gh issue edit 1 --add-label area:core
+      - name: Post a summary
+        run: |
+          python3 scripts/other.py --summarise
+"""
+    case(
+        "S3: a SECOND lane in the ALREADY-PINNED job, with only the first registered",
+        two_lanes,
+        CLEAN_REGISTRY,
+        True,
+    )
+    second_pin = {
+        "id": "sweeper-selftest-2",
+        "workflow": "sweeper.yml",
+        "job_id": "classify",
+        "step_name": "Self-test the second sweep",
+        "requires_run": ["other.py --self-test"],
+        "must_precede_step": "Write labels",
+        "why": "fixture",
+        "registered": "2026-08-02",
+    }
+    both_lanes = copy.deepcopy(CLEAN_REGISTRY)
+    both_lanes["pinned_steps"].append(copy.deepcopy(second_pin))
+    case("control: both lanes in one job, each with its own pin", two_lanes, both_lanes, False)
+    wrong_protected = copy.deepcopy(CLEAN_REGISTRY)
+    # Pinned in front of a LATER step, so S1 is satisfied while the write this guard
+    # actually stands in front of is unprotected against a reorder.
+    wrong_protected["pinned_steps"].append(
+        {**copy.deepcopy(second_pin), "must_precede_step": "Post a summary"}
+    )
+    case(
+        "S3: a lane pinned in front of a step LATER than the write it precedes",
+        two_lanes,
+        wrong_protected,
         True,
     )
 
@@ -693,8 +960,9 @@ def self_test() -> int:
         return 1
     print(
         f"check-workflow-step-guards self-test: {len(cases)} cases OK "
-        "(S1 step/job deletion + conditional + swallow + reorder + de-guard, "
-        "S2 undeclared/expression swallow, S3 undeclared lane, schema)"
+        "(S1 step/job deletion + conditional + swallow + reorder + de-guard "
+        "incl. comment/echo/heredoc, S2 undeclared/expression swallow, "
+        "S3 undeclared lane incl. a second lane in an already-pinned job, schema)"
     )
     return 0
 
@@ -739,8 +1007,10 @@ def main(argv: list[str] | None = None) -> int:
         "reason (a job declared in .github/advisory-registry.json is already exempt)."
     )
     print(
-        "  S3: this job self-tests before it mutates live state. Add a `pinned_steps` "
-        "entry naming the guard step so a later deletion reds instead of passing silently."
+        "  S3: this lane self-tests before it mutates live state. Add a `pinned_steps` "
+        "entry naming the guard step, with the write it stands in front of as its "
+        "`must_precede_step`, so a later deletion or reorder reds instead of passing "
+        "silently. A pin covers the LANE it names, not the whole job."
     )
     return 1
 
