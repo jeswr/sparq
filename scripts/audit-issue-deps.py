@@ -275,6 +275,29 @@ def find_cycles(edges):
     return out
 
 
+# --- removal plan / write budget -----------------------------------------------------------------
+def removal_plan(have, have_mapped, want):
+    """Split native edges that have no bd counterpart into (removable, unowned).
+
+    ONLY an edge whose BOTH endpoints are authenticated bd-migration mappings (i.e. it lives in
+    `have_mapped`) is owned by this tool and therefore removable. A native edge with an unmapped
+    endpoint carries no bd identity: its absence from `want` is not evidence that the migration
+    created it, so it may be a legitimate dependency authored natively in GitHub. Those are reported
+    as `unowned` and NEVER deleted."""
+    return sorted(have_mapped - want), sorted(have - have_mapped)
+
+
+def budget_split(to_add, removable, limit):
+    """Apply ONE shared --limit budget across additions THEN removals, returning (adds, removes).
+
+    `--limit` caps the writes performed in a run; a small limit is used as a safety canary, so it
+    must bound the DELETE requests too, not just the POST requests."""
+    if not limit:
+        return list(to_add), list(removable)
+    adds = list(to_add)[:limit]
+    return adds, list(removable)[: max(0, limit - len(adds))]
+
+
 # --- direction proof ---------------------------------------------------------------------------
 def prove_direction(beads, edges, idmap, native):
     """Pick a live (blocked, blocker) pair that is mapped BOTH sides and re-derive the orientation
@@ -350,6 +373,30 @@ def _self_test():
     chk("lowest issue number wins a duplicate bd-id",
         bd_id_map({9: dict(base, author="j", assoc="MEMBER"),
                    5: dict(base, author="j", assoc="MEMBER")})[0], {"sq-abc": 5})
+
+    # --- removal plan: DELETE is restricted to the bd-managed graph.
+    # (1,2) is bd-managed with no bd counterpart -> removable. (3,4) has an unmapped endpoint, so it
+    # may be a native GitHub dependency this tool does not own -> reported unowned, NEVER removed.
+    have = {(1, 2), (3, 4), (5, 6)}
+    have_mapped = {(1, 2), (5, 6)}
+    want = {(5, 6)}
+    chk("unmapped native edge is excluded from the removal plan",
+        removal_plan(have, have_mapped, want)[0], [(1, 2)])
+    chk("unmapped native edge is reported as unowned",
+        removal_plan(have, have_mapped, want)[1], [(3, 4)])
+    chk("an edge bd still wants is never removable",
+        removal_plan({(5, 6)}, {(5, 6)}, {(5, 6)}), ([], []))
+
+    # --- --limit is ONE budget over additions AND removals, so total mutations never exceed it.
+    adds, removes = budget_split([("a", 1), ("a", 2), ("a", 3)], [("r", 1), ("r", 2)], 4)
+    chk("limit spills over into removals once additions are covered", (adds, removes),
+        ([("a", 1), ("a", 2), ("a", 3)], [("r", 1)]))
+    chk("total mutations under a mixed plan never exceed --limit", len(adds) + len(removes), 4)
+    a2, r2 = budget_split([("a", 1), ("a", 2), ("a", 3)], [("r", 1), ("r", 2)], 2)
+    chk("a limit consumed by additions leaves no removal budget", (a2, r2),
+        ([("a", 1), ("a", 2)], []))
+    chk("no limit means the whole plan runs",
+        budget_split([("a", 1)], [("r", 1)], None), ([("a", 1)], [("r", 1)]))
     print("audit-issue-deps self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -361,12 +408,15 @@ def main():
     ap.add_argument("--export-file", help="read `bd export` output from a file")
     ap.add_argument("--prove", action="store_true", help="print the direction-proof witness and exit")
     ap.add_argument("--remove-spurious", action="store_true",
-                    help="with --apply, also DELETE native edges with no bd counterpart")
+                    help="with --apply, also DELETE native edges with no bd counterpart whose BOTH "
+                         "endpoints are authenticated bd mappings; native edges with an unmapped "
+                         "endpoint are reported as unowned and never removed")
     ap.add_argument("--include-closed-blockers", action="store_true",
                     help="also mirror edges whose blocker issue is already CLOSED (inert for "
                          "readiness — GitHub's issueDependenciesSummary.blockedBy excludes them)")
     ap.add_argument("--json-out", help="write the full audit record here")
-    ap.add_argument("--limit", type=int, help="cap the number of writes this run")
+    ap.add_argument("--limit", type=int,
+                    help="cap the TOTAL writes this run, shared across additions and removals")
     args = ap.parse_args()
     if args.self_test:
         return _self_test()
@@ -389,7 +439,9 @@ def main():
     have_mapped = {(n, k) for (n, k) in have if n in rev and k in rev}
 
     absent = sorted(want - have)
-    spurious = sorted(have - want)          # native edge with no bd counterpart (incl. unmapped ends)
+    # removable = bd-managed (BOTH ends authenticated) native edge with no bd counterpart.
+    # unowned   = native edge with an unmapped end — outside this tool's graph, reported not removed.
+    spurious, unowned = removal_plan(have, have_mapped, want)
     present = sorted(want & have)
 
     # An absent edge whose BLOCKER ISSUE is already CLOSED is SATISFIED, not missing: MEASURED,
@@ -439,7 +491,8 @@ def main():
         "satisfied_blocker_closed_not_mirrored": len(satisfied),
         "satisfied_distinct_children": len({n for n, _ in satisfied}),
         "will_write": len(to_add),
-        "spurious": len(spurious),
+        "spurious_bd_managed_removable": len(spurious),
+        "unowned_native_edges_never_removed": len(unowned),
         "stale_native_open_issue_blocked_by_closed_issue": len(stale_native),
         "stale_bd_open_bead_blocked_by_closed_bead": len(stale_bd),
         "cycles_bd_open": cyc_bd,
@@ -450,8 +503,12 @@ def main():
             "satisfied_blocker_closed": [
                 {"blocked": f"#{n} ({rev.get(n)})", "closed_blocker": f"#{k} ({rev.get(k)})"}
                 for n, k in satisfied[:20]],
-            "spurious": [{"blocked": f"#{n} ({rev.get(n, '-')})", "blocker": f"#{k} ({rev.get(k, '-')})"}
-                         for n, k in spurious[:15]],
+            "spurious_bd_managed_removable": [
+                {"blocked": f"#{n} ({rev.get(n, '-')})", "blocker": f"#{k} ({rev.get(k, '-')})"}
+                for n, k in spurious[:15]],
+            "unowned_native_edges_never_removed": [
+                {"blocked": f"#{n} ({rev.get(n, '-')})", "blocker": f"#{k} ({rev.get(k, '-')})"}
+                for n, k in unowned[:15]],
             "stale_native": [{"blocked": f"#{n}", "closed_blocker": f"#{k}"} for n, k in stale_native[:15]],
             "stale_bd": [{"open_bead": a, "closed_blocker_bead": b} for a, b in stale_bd[:15]],
         },
@@ -469,7 +526,8 @@ def main():
                              and proof["bd_show_blocker_lists_blocked_under_BLOCKS"]):
             raise SystemExit("refusing --apply: direction proof did not verify against the live tree")
         added = noop = failed = 0
-        work = to_add[: args.limit] if args.limit else to_add
+        # ONE budget across additions AND removals, so a small --limit is a real safety canary.
+        work, rwork = budget_split(to_add, spurious if args.remove_spurious else [], args.limit)
         for i, (n, k) in enumerate(work, 1):
             ok, why = add_blocked_by(n, k, issues)
             if not ok:
@@ -488,7 +546,7 @@ def main():
         rep["applied_failed"] = failed
         if args.remove_spurious:
             removed = rnoop = rfail = 0
-            for n, k in spurious:
+            for n, k in rwork:
                 ok, why = remove_blocked_by(n, k, issues)
                 if not ok:
                     rfail += 1
@@ -497,13 +555,18 @@ def main():
                     rnoop += 1
                 else:
                     removed += 1
-            print(f"[apply] removed {removed} spurious edge(s); {rnoop} already absent; {rfail} failure(s)")
+            print(f"[apply] removed {removed} of {len(spurious)} bd-managed spurious edge(s); "
+                  f"{rnoop} already absent; {rfail} failure(s); "
+                  f"{len(unowned)} unowned native edge(s) left untouched")
             rep["applied_removed"] = removed
             rep["applied_remove_noop"] = rnoop
+            rep["applied_remove_deferred_by_limit"] = len(spurious) - len(rwork)
     else:
         print(f"\n[audit-only] would add {len(to_add)} native edge(s); "
               f"{len(satisfied)} not mirrored (blocker already closed — inert); "
-              f"{len(spurious)} spurious edge(s) present. Re-run with --apply.")
+              f"{len(spurious)} bd-managed spurious edge(s) removable; "
+              f"{len(unowned)} unowned native edge(s) reported only (never removed). "
+              f"Re-run with --apply.")
 
     if args.json_out:
         json.dump(rep, open(args.json_out, "w"), indent=2, default=list)
