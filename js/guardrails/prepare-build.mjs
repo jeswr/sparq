@@ -46,6 +46,12 @@ if (!existsSync(sourceCrate)) {
 
 const hasWasmPack = spawnSync('wasm-pack', ['--version'], { stdio: 'ignore' }).status === 0;
 if (!hasWasmPack) {
+  // [OPUS-5] #5777 — the install hint names an EXACT version. Unversioned, the install
+  // floats to whatever wasm-pack's current release is, so a contributor could build this
+  // bundle with a wasm-pack — and therefore a bundled wasm-bindgen CLI — that no lane ever
+  // validated. The literal below is the version the gating `js` lane installs
+  // (.github/workflows/js.yml, `jetli/wasm-pack-action`'s `version:` input), and is held
+  // equal to it by scripts/tests/test_js_wasm_pack_install.py. Bump both together.
   console.error(
     [
       'prepare: @jeswr/sparq is pinned from a git build but cannot build the wasm engine.',
@@ -53,7 +59,7 @@ if (!hasWasmPack) {
       '`wasm-pack` was not found on PATH. Install the toolchain, then reinstall:',
       '',
       '    rustup target add wasm32-unknown-unknown',
-      '    cargo install wasm-pack --locked',
+      '    cargo install wasm-pack --version 0.15.0 --locked',
       '',
       'Or depend on the published @jeswr/sparq registry tarball (ships prebuilt dist/ + wasm/).',
     ].join('\n'),

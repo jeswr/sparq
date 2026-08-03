@@ -27,6 +27,16 @@
 # wasm-pack; converting them is separate work and is NOT asserted here, so this file's
 # silence about them is not a claim that they are hardened.
 #
+# [OPUS-5] #5777 — plus a DOC-SIDE arm of (3). The contributor-facing hints that tell
+# someone whose PATH lacks wasm-pack what to install were unversioned (`cargo install
+# wasm-pack --locked`), so a local checkout could build the bundle — and bake in a
+# bundled wasm-bindgen CLI — that no lane validated. They now name an exact version, and
+# DocHintsMatchLanePin below single-sources that literal from the same js.yml step
+# asserted above — the version is EXTRACTED, never restated here — so any drift
+# between a hint and the lane reds this test.
+# The hint sites are prose and JS string literals, not shell steps, which is why this
+# lives here rather than in a workflow-scoped pin checker.
+#
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).
 # Run:  python3 scripts/tests/test_js_wasm_pack_install.py
@@ -47,6 +57,19 @@ WASM_PACK_ACTION = "jetli/wasm-pack-action"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # An exact release pin, e.g. `v0.15.0`. `latest` (and any floating ref) must fail.
 VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+
+# The contributor-facing "install wasm-pack" hints (#5777). Each must name the same
+# exact version the gating `js` lane installs — js.yml builds BOTH js/ and
+# packages/eyereasoner-compat, so one pin covers both packages.
+DOC_HINT_SITES = (
+    "js/guardrails/prepare-build.mjs",
+    "packages/eyereasoner-compat/guardrails/prepare-build.mjs",
+    "js/README.md",
+)
+# The hint is a JS string literal or inline markdown code, so the command text ends at
+# the enclosing quote/backtick — never run past it into surrounding prose.
+CARGO_INSTALL_RE = re.compile(r"cargo install wasm-pack(?P<flags>[^\n`'\"]*)")
+VERSION_FLAG_RE = re.compile(r"--version[= ]+(?P<version>\d+\.\d+\.\d+)")
 
 
 def _load(name: str, filename: str):
@@ -166,6 +189,58 @@ class JsLaneWasmPackInstall(unittest.TestCase):
             "lifecycle (sq-bkag) runs on `npm ci` and compiles the wasm engine with "
             "wasm-pack from PATH.",
         )
+
+
+class DocHintsMatchLanePin(unittest.TestCase):
+    """(#5777) The contributor-facing install hints name the lane's exact version.
+
+    The pin is EXTRACTED from js.yml, never restated here — so bumping the lane and
+    forgetting a hint reds this test instead of silently leaving contributors a
+    command that builds the wasm engine with a wasm-pack (and bundled wasm-bindgen
+    CLI) no lane validated.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        block = [
+            b
+            for b in gate.split_steps(JS_YML.read_text(encoding="utf-8"))
+            if (gate._step_uses(b) or (None,))[0] == WASM_PACK_ACTION
+        ][0]
+        pins = [
+            ln.strip().split(":", 1)[1].strip()
+            for ln in block
+            if ln.strip().startswith("version:")
+        ]
+        # `cargo install --version` takes a bare semver; the action input takes `vX.Y.Z`.
+        cls.pin = pins[0].lstrip("v")
+
+    def test_every_hint_pins_the_lane_version(self):
+        for site in DOC_HINT_SITES:
+            path = REPO_ROOT / site
+            with self.subTest(site=site):
+                hits = CARGO_INSTALL_RE.findall(path.read_text(encoding="utf-8"))
+                self.assertTrue(
+                    hits,
+                    f"{site} must still carry a `cargo install wasm-pack` hint — this "
+                    "test is the only thing keeping it equal to the lane pin (#5777).",
+                )
+                for flags in hits:
+                    found = VERSION_FLAG_RE.search(flags)
+                    self.assertIsNotNone(
+                        found,
+                        f"{site}: `cargo install wasm-pack{flags}` is UNVERSIONED, so it "
+                        f"floats to whatever wasm-pack's current release is. Pin it: "
+                        f"`cargo install wasm-pack --version {self.pin} --locked`.",
+                    )
+                    self.assertEqual(
+                        found.group("version"),
+                        self.pin,
+                        f"{site} pins wasm-pack {found.group('version')} but the gating "
+                        f"`js` lane (.github/workflows/js.yml) installs {self.pin}. A "
+                        "contributor following this hint would build the bundle with a "
+                        "wasm-pack — and wasm-bindgen CLI — no lane validated (#5777).",
+                    )
 
 
 if __name__ == "__main__":

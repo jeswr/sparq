@@ -18,13 +18,16 @@ if (!existsSync(sourceCrate)) process.exit(0); // not a source/git checkout — 
 
 const hasWasmPack = spawnSync('wasm-pack', ['--version'], { stdio: 'ignore' }).status === 0;
 if (!hasWasmPack) {
+  // [OPUS-5] #5777 — an exact version, not a floating install. This package is built by the
+  // same gating `js` lane as js/ (.github/workflows/js.yml), so it takes that lane's
+  // wasm-pack pin; scripts/tests/test_js_wasm_pack_install.py holds the two equal.
   console.error(
     [
       'prepare: @sparq-org/eyereasoner-compat is pinned from a git build but cannot build its',
       'wasm engine — `wasm-pack` was not found on PATH. Install the toolchain, then reinstall:',
       '',
       '    rustup target add wasm32-unknown-unknown',
-      '    cargo install wasm-pack --locked',
+      '    cargo install wasm-pack --version 0.15.0 --locked',
       '',
       'Or depend on the published @sparq-org/eyereasoner-compat registry tarball (ships prebuilt).',
     ].join('\n'),
