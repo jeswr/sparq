@@ -25,6 +25,18 @@
 # to this file: this lane's paths filter drives the ~60-minute `forge-suite`, so adding
 # `zk/xpath/**` would run the whole forge suite on a PR that only touched that harness.
 #
+# [SONNET-4.6] sq-yfhho: likewise, the constraint-pack reproducibility gate
+# (`bench/zk-compose/scripts/constraint_pack.py --check`) deliberately does NOT live here, and
+# `bench/zk-compose/**` deliberately is NOT in the paths filters below. That check is stdlib-only
+# — it joins the committed `crates/sparq-zk-compose/tests/gate_count_snapshot.json` and needs no
+# nargo/bb — and it ALREADY runs as a GATING step of the UNFILTERED `docs-quality quick-gates`
+# job (.github/workflows/docs-quality.yml, step `constraint-pack reproducibility
+# (bench/zk-compose, sq-gum8.5) — GATING`), which fires on EVERY pull_request / merge_group /
+# push-to-main. So re-running it here would add no coverage — this lane's triggers are a strict
+# subset of that one's — while adding `bench/zk-compose/**` to the paths filter would drag the
+# ~60-minute forge suite onto any bench JSON/README edit, the exact hazard the xpath note above
+# describes.
+#
 # TRIGGER (deliberately OFF the fast per-PR critical path — the toolchain install +
 # real proving is slow):
 #   • schedule (nightly 04:23 UTC)  — the standing safety net.
