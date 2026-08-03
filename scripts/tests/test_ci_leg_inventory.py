@@ -388,6 +388,25 @@ class TestFixture(unittest.TestCase):
         with self.assertRaises(inv.InventoryError):
             inv.collect_fixture([], None)
 
+    def test_a_non_list_runs_or_jobs_collection_fails_loud(self):
+        # A SHAPE the payload got wrong, not a key it omitted. Iterating a string yields
+        # characters and slicing a dict raises TypeError, so an unchecked collection turns
+        # into a traceback (exit 1) rather than the documented broken-instrument exit 2.
+        # A NON-ITERABLE collection is the case the per-element object check below cannot
+        # mask: iterating a str/dict yields elements that check rejects one at a time,
+        # but `enumerate(5)` raises TypeError straight out of the loop header.
+        for payload in ({"runs": "nope"}, {"jobs": "nope"}, {"runs": [{"jobs": "nope"}]},
+                        {"runs": 5}, {"jobs": 5}, {"runs": [{"jobs": 5}]}):
+            with self.subTest(payload=payload), self.assertRaises(inv.InventoryError):
+                inv.collect_fixture(payload, None)
+
+    def test_a_malformed_run_or_job_entry_fails_loud(self):
+        # `.get` on a null is the crash decompose_job's own object check is too late to
+        # catch: decompose_run reads `conclusion` off the item first.
+        for payload in ({"runs": [None]}, {"jobs": [None]}, {"jobs": ["leg"]}):
+            with self.subTest(payload=payload), self.assertRaises(inv.InventoryError):
+                inv.collect_fixture(payload, None)
+
 
 class TestPaging(unittest.TestCase):
     """The jobs endpoint is OBJECT-valued, so it is paged by hand rather than with
@@ -426,10 +445,33 @@ class TestPaging(unittest.TestCase):
         with self.assertRaises(inv.InventoryError):
             inv.fetch_jobs("o/r", 7)
 
+    def test_a_response_whose_jobs_is_not_a_list_fails_loud(self):
+        # Checked BEFORE the extend: a string would otherwise concatenate character by
+        # character into a plausible-looking short page.
+        self.stub_gh([{"jobs": "none"}])
+        with self.assertRaises(inv.InventoryError):
+            inv.fetch_jobs("o/r", 7)
+
     def test_a_run_listing_without_workflow_runs_fails_loud(self):
         self.stub_gh([{"total_count": 3}])
         with self.assertRaises(inv.InventoryError):
             inv.fetch_runs("o/r", "ci.yml", None, None, 5)
+
+    def test_a_run_listing_whose_workflow_runs_is_not_a_list_fails_loud(self):
+        # Checked BEFORE the slice, which on a dict raises TypeError, not InventoryError.
+        self.stub_gh([{"workflow_runs": {"id": 1}}])
+        with self.assertRaises(inv.InventoryError):
+            inv.fetch_runs("o/r", "ci.yml", None, None, 5)
+
+    def test_a_malformed_run_listing_entry_fails_loud(self):
+        self.stub_gh([{"workflow_runs": [None]}])
+        with self.assertRaises(inv.InventoryError):
+            inv.collect("o/r", "ci.yml", None, None, 5, None)
+
+    def test_a_run_listing_entry_without_an_id_fails_loud(self):
+        self.stub_gh([{"workflow_runs": [{"run_started_at": stamp(0)}]}])
+        with self.assertRaises(inv.InventoryError):
+            inv.collect("o/r", "ci.yml", None, None, 5, None)
 
     def test_the_run_listing_honours_event_branch_and_limit(self):
         self.stub_gh([{"workflow_runs": [{"id": n} for n in range(5)]}])
@@ -496,6 +538,31 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("no completed jobs", err)
+
+    def test_a_malformed_payload_shape_exits_two_rather_than_tracing_back(self):
+        # The header promises exit 0 or exit 2 and NO exit 1. An unchecked `.get` on a
+        # null run/job entry, or an iteration over a non-list collection, escapes as an
+        # AttributeError/TypeError that main() does not catch — which exits 1 with a
+        # traceback on stderr, i.e. the instrument failing in the one way it documents it
+        # will not. Each case here asserts the contract end to end.
+        cases = {
+            "a null run entry": {"runs": [None]},
+            "a null job entry": {"jobs": [None]},
+            "a string job entry": {"jobs": ["leg"]},
+            "a non-list runs collection": {"runs": "nope"},
+            "a non-list jobs collection": {"jobs": {"leg": 1}},
+            "a non-iterable runs collection": {"runs": 5},
+            "a non-iterable jobs collection": {"jobs": 5},
+        }
+        for label, payload in cases.items():
+            with self.subTest(case=label):
+                code, out, err = invoke(["--fixture", write_fixture(payload)])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertTrue(err.startswith("ci-leg-inventory: "), err)
+                self.assertNotIn("Traceback", err)
+                # One concise diagnostic line, not a dump of the payload.
+                self.assertEqual(len(err.strip().splitlines()), 1, err)
 
     def test_json_output_is_parseable_and_carries_every_section(self):
         code, out, _ = invoke(["--fixture", write_fixture(self.CLEAN), "--json"])

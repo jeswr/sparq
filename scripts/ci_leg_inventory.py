@@ -115,6 +115,25 @@ class InventoryError(RuntimeError):
     """The instrument is broken. Always exit 2 — never emit a table we cannot stand behind."""
 
 
+def _require_list(value, what: str) -> list:
+    """A collection the payload promised, checked BEFORE it is sliced or iterated.
+
+    The no-exit-1 contract in the header covers malformed SHAPES as much as missing keys:
+    an API or fixture that answers `{"jobs": "none"}` must exit 2 with a diagnostic, not
+    raise an AttributeError one frame later and exit 1 with a traceback.
+    """
+    if not isinstance(value, list):
+        raise InventoryError(f"{what} is not a list (got {type(value).__name__})")
+    return value
+
+
+def _require_object(value, what: str) -> dict:
+    """One element of such a collection, checked BEFORE any `.get` on it."""
+    if not isinstance(value, dict):
+        raise InventoryError(f"{what} is not an object (got {type(value).__name__})")
+    return value
+
+
 # ---------------------------------------------------------------------------------
 # Step classification
 # ---------------------------------------------------------------------------------
@@ -455,7 +474,7 @@ def fetch_runs(repo: str, workflow: str, event: str | None, branch: str | None,
     payload = _gh(["api", f"repos/{repo}/actions/workflows/{workflow}/runs?{query}"])
     if not isinstance(payload, dict) or payload.get("workflow_runs") is None:
         raise InventoryError(f"{workflow}: run listing carries no workflow_runs")
-    return payload["workflow_runs"][:limit]
+    return _require_list(payload["workflow_runs"], f"{workflow}: workflow_runs")[:limit]
 
 
 JOBS_PAGE_CAP = 20
@@ -478,7 +497,7 @@ def fetch_jobs(repo: str, run_id) -> list[dict]:
                        f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&page={page}"])
         if not isinstance(payload, dict) or payload.get("jobs") is None:
             raise InventoryError(f"run {run_id}: jobs response carries no jobs")
-        batch = payload["jobs"]
+        batch = _require_list(payload["jobs"], f"run {run_id}: jobs")
         jobs.extend(batch)
         if len(batch) < 100:
             return jobs
@@ -494,17 +513,25 @@ def decompose_run(jobs, run_started_at, overrides) -> list[dict]:
     duration to contribute and must never be medianed in as a fast one: that would
     understate exactly the legs this table exists to steer.
     """
-    return [decompose_job(job, run_started_at, overrides)
-            for job in (jobs or [])
-            if job.get("conclusion") not in (None, "cancelled", "skipped")]
+    rows = []
+    for index, job in enumerate(_require_list(jobs if jobs is not None else [], "`jobs`")):
+        _require_object(job, f"job #{index}")
+        if job.get("conclusion") in (None, "cancelled", "skipped"):
+            continue
+        rows.append(decompose_job(job, run_started_at, overrides))
+    return rows
 
 
 def collect(repo: str, workflow: str, event: str | None, branch: str | None,
             limit: int, overrides) -> list[dict]:
     decomposed = []
-    for run in fetch_runs(repo, workflow, event, branch, limit):
+    for index, run in enumerate(fetch_runs(repo, workflow, event, branch, limit)):
+        _require_object(run, f"{workflow}: run listing entry #{index}")
+        run_id = run.get("id")
+        if run_id is None:
+            raise InventoryError(f"{workflow}: run listing entry #{index} carries no id")
         started = run.get("run_started_at") or run.get("created_at")
-        decomposed.extend(decompose_run(fetch_jobs(repo, run["id"]), started, overrides))
+        decomposed.extend(decompose_run(fetch_jobs(repo, run_id), started, overrides))
     return decomposed
 
 
@@ -522,7 +549,8 @@ def collect_fixture(payload: dict, overrides) -> list[dict]:
             raise InventoryError("fixture carries neither `runs` nor `jobs`")
         runs = [payload]
     decomposed = []
-    for run in runs:
+    for index, run in enumerate(_require_list(runs, "fixture `runs`")):
+        _require_object(run, f"fixture run #{index}")
         started = run.get("run_started_at") or run.get("created_at")
         decomposed.extend(decompose_run(run.get("jobs"), started, overrides))
     return decomposed
