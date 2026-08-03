@@ -2,6 +2,10 @@
 # [OPUS-4.8] Gate G1 — new-crate-completeness (bead sq-ncvq.4, epic sq-ncvq).
 # Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable returns).
 #
+# [OPUS-5] (#5742) G1 now also covers a new **npm package** under `packages/*`.
+# The crate half and the package half are the same rule applied to the repo's two
+# publishable surfaces, so they live in one script and one CI leg.
+#
 # This is the PROACTIVE / merge-time half of the maintenance flow-on system
 # (research/maintenance-flow-on-automation-design.md §2.1, gate G1). It is the
 # COMPLEMENT of the reactive engine in scripts/flow-on.py (PR #220): that engine
@@ -35,14 +39,40 @@
 # requirements. The README (b) is still required (a stub still needs a one-line
 # "what/why" README).
 #
+# [OPUS-5] RULE (G1-pkg, #5742): when a PR ADDS a new `packages/<x>/package.json`,
+# fail unless the SAME PR also provides, for that package:
+#   (d) a README.md (packages/<x>/README.md) — required for EVERY new package,
+#       public or private, exactly as (b) is required even for a `publish = false`
+#       crate stub: an undocumented directory is the failure mode either way;
+#   (e) at least one test file inside the package — ONLY if the package is a
+#       PUBLIC (publishable) surface. A test file is a path under
+#       `packages/<x>/` that lives in a `test`/`tests`/`__tests__` directory or
+#       whose basename matches `*.test.*` / `*.spec.*`.
+#
+# ESCAPE HATCH (packages): `"private": true` in the new package.json marks it a
+# non-publishable internal package — exempt from (e), the way `publish = false`
+# exempts a crate stub from (a)/(c). `package_is_private` below is the ONLY
+# in-tree definition of "public package"; any reactive `packages/*` flow-on rule
+# MUST import it rather than re-derive the predicate, so the gate and the
+# post-merge reminders can never disagree about which packages are public.
+#
+# SCOPE: `packages/<x>/package.json` only — one level deep, so a vendored or
+# nested manifest is not mistaken for a new package. `js/package.json` is a
+# single fixed package that already exists on `main`, so it can never be an
+# ADDED manifest and needs no clause here.
+#
+# NOT covered by G1-pkg: whether a CI leg actually INVOKES the new package's
+# tests. That is a workflow-wiring question this gate cannot answer from the diff
+# alone.
+#
 # DIFF SOURCE: the PR's changed-file list. In CI this is
 #   git diff --name-only origin/<base>...HEAD          (changed files)
 #   git diff --name-status origin/<base>...HEAD        (to find ADDED files)
 # In tests / --dry-run it is read from a fixture file (one path per line, each
 # optionally prefixed with a git status letter + tab, e.g. "A\tcrates/x/...").
 #
-# EXIT: 0 when every newly-added crate satisfies G1 (or there are none); 1 with a
-# clear per-crate message naming exactly what is missing otherwise.
+# EXIT: 0 when every newly-added crate and package satisfies G1 (or there are
+# none); 1 with a clear per-surface message naming exactly what is missing.
 #
 # Usage:
 #   gate-new-crate.py                       # CI: derive diff from git vs origin/<base>
@@ -55,6 +85,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -178,6 +209,104 @@ def crate_has_registered_bench(crate: str) -> bool:
     return needle.search(text) is not None
 
 
+# --------------------------------------------------------------------------- #
+# [OPUS-5] (#5742) G1-pkg — the npm-package half.
+# --------------------------------------------------------------------------- #
+
+# A test file inside a package: any path segment named test/tests/__tests__, or a
+# `*.test.*` / `*.spec.*` basename (the two conventions in use under packages/).
+_TEST_DIR_RE = re.compile(r"(?:^|/)(?:tests?|__tests__)/")
+_TEST_FILE_RE = re.compile(r"(?:^|/)[^/]+\.(?:test|spec)\.[^/]+$")
+
+
+def added_packages(added: list[str]) -> list[str]:
+    """Package dir names whose package.json was ADDED (a brand-new npm package)."""
+    packages: list[str] = []
+    for p in added:
+        m = re.match(r"^packages/([^/]+)/package\.json$", p)
+        if m:
+            packages.append(m.group(1))
+    seen: set[str] = set()
+    out: list[str] = []
+    for pkg in packages:
+        if pkg not in seen:
+            seen.add(pkg)
+            out.append(pkg)
+    return out
+
+
+def package_is_private(package: str) -> bool:
+    """True iff `packages/<package>/package.json` declares `"private": true`.
+
+    The single in-tree definition of "public package": a package is public
+    (publishable to npm) iff this returns False. Any reactive `packages/*`
+    flow-on rule must call THIS function, so the proactive gate and the
+    post-merge reminders classify the same set of packages.
+
+    A missing or unparseable package.json is treated as NOT private — the strict
+    default, mirroring `crate_is_stub`: a package cannot dodge the gate by being
+    unreadable. Only a literal JSON `true` counts (npm itself ignores a string
+    `"true"`, and so must we, or the escape hatch would be wider than npm's)."""
+    manifest = REPO_ROOT / "packages" / package / "package.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("private") is True
+
+
+def package_has_test(package: str, changed: list[str]) -> bool:
+    """True iff the PR touches at least one test file inside the package."""
+    prefix = f"packages/{package}/"
+    for p in changed:
+        if not p.startswith(prefix):
+            continue
+        rest = p[len(prefix) :]
+        if _TEST_DIR_RE.search("/" + rest) or _TEST_FILE_RE.search("/" + rest):
+            return True
+    return False
+
+
+def evaluate_packages(
+    changed: list[str],
+    added: list[str],
+    *,
+    private_overrides: dict[str, bool] | None = None,
+) -> list[tuple[str, list[str]]]:
+    """Return [(package, [missing-reasons])] for every newly-added npm package
+    that violates G1-pkg. An empty list means the gate PASSES.
+
+    private_overrides lets hermetic tests inject the `"private": true` fact
+    without touching disk."""
+    private_overrides = private_overrides or {}
+    violations: list[tuple[str, list[str]]] = []
+
+    for pkg in added_packages(added):
+        is_private = private_overrides.get(pkg)
+        if is_private is None:
+            is_private = package_is_private(pkg)
+
+        missing: list[str] = []
+
+        # (d) README.md — always required (even for a private package).
+        readme = f"packages/{pkg}/README.md"
+        if readme not in changed:
+            missing.append(f"a README at {readme} (added in the same PR)")
+
+        # (e) tests — required because the package is published to npm.
+        if not is_private and not package_has_test(pkg, changed):
+            missing.append(
+                f"at least one test file under packages/{pkg}/ "
+                "(a tests?/ or __tests__/ directory, or a *.test.* / *.spec.* file) "
+                '— or mark the package `"private": true` if it is not published'
+            )
+
+        if missing:
+            violations.append((pkg, missing))
+
+    return violations
+
+
 def evaluate(
     changed: list[str],
     added: list[str],
@@ -237,7 +366,7 @@ def evaluate(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="G1 new-crate-completeness gate (sq-ncvq.4)."
+        description="G1 new-crate/new-npm-package completeness gate (sq-ncvq.4, #5742)."
     )
     ap.add_argument(
         "--base",
@@ -267,9 +396,13 @@ def main(argv: list[str] | None = None) -> int:
         changed, added = git_diff(args.base)
 
     violations = evaluate(changed, added)
+    package_violations = evaluate_packages(changed, added)
 
-    if not violations:
-        print("G1 new-crate-completeness: PASS — no new crate missing artifacts.")
+    if not violations and not package_violations:
+        print(
+            "G1 new-crate-completeness: PASS — no new crate or npm package "
+            "missing artifacts."
+        )
         return 0
 
     print("G1 new-crate-completeness: FAIL")
@@ -277,11 +410,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n  crates/{crate} is a new crate but is missing:")
         for m in missing:
             print(f"    - {m}")
+    for pkg, missing in package_violations:
+        print(f"\n  packages/{pkg} is a new npm package but is missing:")
+        for m in missing:
+            print(f"    - {m}")
     print(
-        "\nA new crate must ship its maintenance artifacts in the SAME PR "
-        "(research/maintenance-flow-on-automation-design.md §2.1, gate G1). "
+        "\nA new crate or npm package must ship its maintenance artifacts in the "
+        "SAME PR (research/maintenance-flow-on-automation-design.md §2.1, gate G1). "
         "Stub crates may set `publish = false` in Cargo.toml to opt out of the "
-        "bench + SKILL requirements (README still required)."
+        "bench + SKILL requirements, and a non-published package may set "
+        '`"private": true` to opt out of the test requirement (README still '
+        "required in both cases)."
     )
 
     if args.advisory or args.dry_run:

@@ -148,7 +148,10 @@ jobs:
           echo "have_labels=1" >> "$GITHUB_OUTPUT"
 
       # ---- former job: new-crate-completeness (G1) ----
-      - name: new-crate-completeness (G1) — new crate ships bench + README (+ SKILL if public)
+      # [OPUS-5] (#5742) G1 also covers a new npm package under `packages/*`:
+      # a README always, plus a test file when the package is publishable
+      # (`"private": true` is the opt-out).
+      - name: new-crate-completeness (G1) — new crate ships bench + README (+ SKILL if public); new npm package ships README (+ tests if published)
         env:
           # On pull_request github.base_ref is the bare target branch ('main'); on
           # merge_group it is empty, so fall back to merge_group.base_ref (a full

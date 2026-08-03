@@ -144,6 +144,125 @@ class G1Test(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# [OPUS-5] G1-pkg — new-npm-package-completeness (#5742)
+# --------------------------------------------------------------------------- #
+class G1PackageTest(unittest.TestCase):
+    def _eval(self, added, modified=None, **kw):
+        changed, added_paths = g1.parse_status_lines(_statused(added, modified))
+        return g1.evaluate_packages(changed, added_paths, **kw)
+
+    def test_new_public_package_with_nothing_else_fails(self):
+        violations = self._eval(
+            ["packages/sparq-foo/package.json"],
+            private_overrides={"sparq-foo": False},
+        )
+        self.assertEqual(len(violations), 1)
+        pkg, missing = violations[0]
+        self.assertEqual(pkg, "sparq-foo")
+        self.assertEqual(len(missing), 2)
+        joined = " ".join(missing)
+        self.assertIn("README", joined)
+        self.assertIn("test file", joined)
+
+    def test_new_public_package_with_readme_and_test_passes(self):
+        violations = self._eval(
+            [
+                "packages/sparq-foo/package.json",
+                "packages/sparq-foo/README.md",
+                "packages/sparq-foo/test/basic.ts",
+            ],
+            private_overrides={"sparq-foo": False},
+        )
+        self.assertEqual(violations, [])
+
+    def test_dot_test_suffix_counts_as_a_test(self):
+        # The other convention in use: a `*.test.ts` beside the source.
+        violations = self._eval(
+            [
+                "packages/sparq-foo/package.json",
+                "packages/sparq-foo/README.md",
+                "packages/sparq-foo/src/index.test.ts",
+            ],
+            private_overrides={"sparq-foo": False},
+        )
+        self.assertEqual(violations, [])
+
+    def test_a_test_in_a_DIFFERENT_package_does_not_satisfy_the_gate(self):
+        # Kills a prefix-free "any test file in the diff" implementation.
+        violations = self._eval(
+            [
+                "packages/sparq-foo/package.json",
+                "packages/sparq-foo/README.md",
+                "packages/sparq-bar/test/basic.ts",
+            ],
+            private_overrides={"sparq-foo": False},
+        )
+        self.assertEqual(len(violations), 1)
+        _, missing = violations[0]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("test file", missing[0])
+
+    def test_private_package_needs_only_readme(self):
+        # `"private": true` → the test requirement is waived; README still required.
+        violations = self._eval(
+            ["packages/sparq-foo/package.json", "packages/sparq-foo/README.md"],
+            private_overrides={"sparq-foo": True},
+        )
+        self.assertEqual(violations, [])
+
+    def test_private_package_missing_readme_still_fails(self):
+        violations = self._eval(
+            ["packages/sparq-foo/package.json"],
+            private_overrides={"sparq-foo": True},
+        )
+        self.assertEqual(len(violations), 1)
+        _, missing = violations[0]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("README", missing[0])
+
+    def test_no_new_package_passes(self):
+        violations = self._eval([], ["packages/sparq-client/src/index.ts"])
+        self.assertEqual(violations, [])
+
+    def test_changed_not_added_manifest_does_not_trigger(self):
+        changed, added = g1.parse_status_lines(
+            _statused([], ["packages/sparq-client/package.json"])
+        )
+        self.assertEqual(g1.added_packages(added), [])
+        self.assertEqual(g1.evaluate_packages(changed, added), [])
+
+    def test_nested_manifest_is_not_a_new_package(self):
+        # `packages/<x>/node_modules/dep/package.json` must not register as a package.
+        changed, added = g1.parse_status_lines(
+            _statused(["packages/sparq-foo/vendor/dep/package.json"])
+        )
+        self.assertEqual(g1.added_packages(added), [])
+
+    def test_copied_package_counts_as_added(self):
+        changed, added = g1.parse_status_lines(
+            ["C100\tpackages/old/package.json\tpackages/new/package.json"]
+        )
+        self.assertEqual(g1.added_packages(added), ["new"])
+
+    def test_package_is_private_reads_the_real_manifests(self):
+        # Pins the shared "public package" predicate against the checked-in tree:
+        # sparq-client declares `"private": true`; solid-server does not.
+        self.assertTrue(g1.package_is_private("sparq-client"))
+        self.assertFalse(g1.package_is_private("solid-server"))
+        # A package that does not exist is NOT private (strict default).
+        self.assertFalse(g1.package_is_private("no-such-package"))
+
+    def test_main_fails_on_an_incomplete_new_package(self):
+        # End-to-end through main(): a new public package with no README/tests
+        # must exit 1, not merely print.
+        with tempfile.TemporaryDirectory() as td:
+            f = _write(
+                Path(td), "diff.txt", ["A\tpackages/brand-new-public-pkg/package.json"]
+            )
+            self.assertEqual(g1.main(["--changed-files", f]), 1)
+
+
+# --------------------------------------------------------------------------- #
 # G2 — public-api → skill
 # --------------------------------------------------------------------------- #
 class G2Test(unittest.TestCase):
