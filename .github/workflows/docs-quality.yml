@@ -1044,6 +1044,27 @@ jobs:
       # leave CI.
       - name: Self-test the CI execution-latency alarm (3 choke modes + YAML seam)
         run: python3 scripts/tests/test_ci_execution_latency_alarm.py
+      # [OPUS-5] sq-6vshe.7(a): the per-leg wall-time INVENTORY
+      # (scripts/ci_leg_inventory.py) — the steering instrument for the non-coverage
+      # test-execution topology program (research/ci-structural-speedup.md §8). It is a
+      # REPORTER, not a gate, and is deliberately wired into no workflow; what gates here
+      # is its hermetic suite (no gh, no network, stdlib only). Three failure classes are
+      # pinned because a measurement tool lies in three ways: mis-attribution (every
+      # bucket rule has a named case, in BOTH directions — a compile step must not land in
+      # `constant`); silent staleness (the classifier keys on step NAMES, so the fail-loud
+      # `--max-unclassified` guard is asserted over AND under the limit, and a LIVE corpus
+      # check requires every real ci.yml step name to classify — with the step extractor
+      # itself pinned so that assertion cannot go vacuous); and reporting health over an
+      # empty population (an empty sample exits 2, it never prints a clean empty table).
+      # The suite pins its OWN call site here, so it cannot silently leave CI.
+      #
+      # MAINTENANCE NOTE: the live-corpus check means RENAMING OR ADDING A STEP IN ci.yml
+      # can red this leg. That is the intended trade — a name-based classifier that
+      # silently stops recognising the corpus emits a plausible WRONG steering table. The
+      # fix is one rule in `_RULES` plus one named case in the suite, never loosening the
+      # check.
+      - name: Self-test the per-leg CI wall-time inventory (classifier + fail-loud guards)
+        run: python3 scripts/tests/test_ci_leg_inventory.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
