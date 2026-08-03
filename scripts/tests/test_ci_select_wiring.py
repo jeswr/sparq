@@ -1438,9 +1438,10 @@ class TestConeEvidenceBase(unittest.TestCase):
     `coverage-measure`, so the sq-6vshe.17 merge_group demotion pinned above took the
     batch-diff cone samples with it — and the sq-3dr4t ENFORCE flip landed ~10 h later.
     That was decided rather than absorbed: docs/branch-protection.md §*Coverage
-    MEASUREMENT off the merge queue* records that the flip stands on the
-    `pull_request` + push-to-`main` window, and states the honest limit that NO
-    divergence corpus was ever retained for ANY event.
+    MEASUREMENT off the merge queue* records that the flip stands on the `pull_request`
+    cone window (push-to-`main` and nightly runs are `mode=full` by construction — they
+    select no cone and are the drift backstop, not narrowing samples), and states the
+    honest limit that NO divergence corpus was ever retained for ANY event.
 
     Both halves of that record are only true while the wiring below holds, so pin them:
     a silent return to shadow, or a silent start at retaining the divergence log, must
@@ -1477,24 +1478,105 @@ class TestConeEvidenceBase(unittest.TestCase):
                       "samples accrue on ANY event) becomes false — rewrite that note in "
                       "the same change that returns to shadow")
 
+    # ---- artifact retention: match upload PATHS, not just the literal name -----------
+    # A substring test over `path:`/`name:` is vacuous for the commonest broad-upload
+    # shapes — `path: .`, `path: '*.json'`, `path: '**'` all retain a runner-root file
+    # without ever naming it. So translate each upload glob and ask whether it COULD
+    # include the divergence log, which is where the guarantee actually lives.
+    @staticmethod
+    def _glob_to_re(pattern: str) -> re.Pattern:
+        """actions/upload-artifact glob → regex. `**` crosses `/`; `*`/`?` do not; a
+        leading `**/` segment matches ZERO or more directories, so `**/*.json` catches a
+        workspace-ROOT `x.json` the way the toolkit globber does. The trailing `(?:/.*)?`
+        makes a directory pattern match everything beneath it."""
+        out, i = [], 0
+        while i < len(pattern):
+            if pattern.startswith("**/", i):
+                out.append("(?:.*/)?")
+                i += 3
+                continue
+            if pattern.startswith("**", i):
+                out.append(".*")
+                i += 2
+                continue
+            ch = pattern[i]
+            out.append("[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch))
+            i += 1
+        return re.compile("".join(out) + r"(?:/.*)?$")
+
+    @classmethod
+    def _upload_could_include(cls, path_spec: str, target: str) -> bool:
+        """Could this (possibly multi-line) upload `path:` retain `target`? Lines are
+        applied in order, `!`-prefixed ones subtracting, exactly as the toolkit globber
+        does, so an upload that deliberately excludes the log reads as NOT retaining it."""
+        included = False
+        for raw in str(path_spec).splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            negate = line.startswith("!")
+            if negate:
+                line = line[1:].strip()
+            line = line.lstrip("/")
+            while line.startswith("./"):
+                line = line[2:]
+            line = line.rstrip("/")
+            # "" / "." is the whole workspace — which is exactly where the log is written.
+            if line in ("", ".") or cls._glob_to_re(line).match(target):
+                included = not negate
+        return included
+
+    def _divergence_log_path(self) -> str:
+        """The log path the report step actually writes, with the matrix expression
+        resolved to a concrete shard — so this test tracks a rename instead of pinning
+        a stale literal."""
+        # Resolve `${{ … }}` FIRST: the expression contains spaces, so a `\S+` capture
+        # would otherwise stop dead inside it.
+        run = re.sub(r"\$\{\{[^}]*\}\}", "1", str(self._cone_step("--mode report").get("run", "")))
+        m = re.search(r"--divergence-log\s+(\S+)", run)
+        self.assertIsNotNone(
+            m, "the report step no longer passes --divergence-log; if the log is gone, "
+               "delete this test with the #5148 note it pins")
+        return m.group(1).strip("'\"")
+
     def test_the_divergence_log_is_not_retained_as_an_artifact(self):
         """The record states plainly that `coverage-cone-divergence-shard-N.json` has
         never been uploaded, so no corpus exists to have been narrowed. Uploading it
         would be a fine way to REOPEN the question — but the note claiming no corpus
-        exists must not survive that change, so this REDs to force the pairing."""
-        log_name = "coverage-cone-divergence-shard-"
-        self.assertIn(log_name, str(self._cone_step("--mode report").get("run", "")),
+        exists must not survive that change, so this REDs to force the pairing.
+
+        Scope is the `coverage-measure` job because that is the only workspace the log
+        is written into; a wildcard upload elsewhere cannot pick up a file that is not
+        there."""
+        target = self._divergence_log_path()
+        self.assertIn("coverage-cone-divergence-shard-", target,
                       "the report step should still name the divergence log it writes")
         for step in self.steps:
-            uses = str(step.get("uses", ""))
-            if not uses.startswith("actions/upload-artifact@"):
+            if not str(step.get("uses", "")).startswith("actions/upload-artifact@"):
                 continue
-            with_ = step.get("with") or {}
-            self.assertNotIn(
-                log_name, f"{with_.get('path', '')}\n{with_.get('name', '')}",
-                "the cone divergence log is now UPLOADED — a corpus can accrue again, so "
-                "update the #5148 decision in docs/branch-protection.md, which currently "
-                "states that it never is")
+            path_spec = (step.get("with") or {}).get("path", "")
+            self.assertFalse(
+                self._upload_could_include(path_spec, target),
+                f"upload step {step.get('name')!r} (path={path_spec!r}) can retain the "
+                f"cone divergence log {target!r} — a corpus can accrue again, so update "
+                f"the #5148 decision in docs/branch-protection.md, which currently "
+                f"states that it never is")
+
+    def test_the_artifact_matcher_catches_wildcard_and_directory_uploads(self):
+        """The negative fixture for the check above: the shapes that a literal-substring
+        test waves through must all be DETECTED, or the guarantee is vacuous."""
+        target = "coverage-cone-divergence-shard-1.json"
+        for spec in (".", "./", "*.json", "**", "**/*.json", "coverage-cone-*",
+                     "./coverage-cone-divergence-shard-1.json",
+                     "target/coverage/coverage-summary.json\n."):
+            self.assertTrue(self._upload_could_include(spec, target),
+                            f"broad upload path {spec!r} must be detected as retaining "
+                            f"the divergence log")
+        for spec in ("target/coverage/coverage-summary.json", "target/**", "target/",
+                     "cone.json", "coverage-cone-divergence-shard-1.txt",
+                     ".\n!coverage-cone-divergence-*.json"):
+            self.assertFalse(self._upload_could_include(spec, target),
+                             f"upload path {spec!r} does not retain the divergence log")
 
     def test_the_decision_is_recorded_where_the_demotion_is_documented(self):
         """The issue asked for an explicit decision, not workflow-comment folklore: it

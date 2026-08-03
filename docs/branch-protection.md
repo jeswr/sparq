@@ -243,13 +243,25 @@ demotion (`3ab83df`, 2026-07-30T22:22Z) stopped the `coverage-measure` legs — 
 that shadow logging — from running on `merge_group`; the ENFORCE flip (sq-3dr4t, `83b0a445`)
 landed the next morning, 2026-07-31T08:14Z. So the last ~10 hours of shadow observation
 carried no batch-diff (`merge_group`) cones, and the ~26 days before it did. **Decision
-(option (a) of the issue): the flip stands on `pull_request` + push-to-`main` observation,
-and batch-diff cones are not required for it.** The cone is a function of the *diff's*
-reverse-dep closure, and a merge group's union diff over a batch covers every member PR's
-changed paths (save where two members' edits cancel to a net no-op) — so a batch cone is
-WIDER, and exercises *less* narrowing than the PR cones the flip is actually about. The
-property the flip turns on — can a crate outside the cone regress? — is a property of the
-closure, not of the diff's shape.
+(option (a) of the issue): the flip stands on the `pull_request` cone window — plus the
+`merge_group` cones up to the cutover — and batch-diff cones are not required for it.**
+
+Be precise about which runs are *evidence* and which are *backstop*, because only two event
+types ever select a cone at all. `ci_select.py` returns `mode=full` for every event other
+than `pull_request`/`merge_group` (`if args.full or args.event not in ("pull_request",
+"merge_group")`), and `cone_coverage.py` treats every crate as in-cone when `mode=full`
+(`in_cone = (mode == "full") or (crate in cone_crates)`), so a push-to-`main` or nightly run
+measures the **whole** shard and cannot express a divergence even under shadow. Those full
+runs are therefore the **drift backstop** — every crate re-measured against its floor after
+the merge, which is what catches a regression a cone would have skipped — and never a
+narrowing sample. The retained selection evidence is the `pull_request` cone runs.
+
+The reason batch cones are nonetheless dispensable is a separate, structural argument: the
+cone is a function of the *diff's* reverse-dep closure, and a merge group's union diff over
+a batch covers every member PR's changed paths (save where two members' edits cancel to a
+net no-op) — so a batch cone is WIDER, and exercises *less* narrowing than the PR cones the
+flip is actually about. The property the flip turns on — can a crate outside the cone
+regress? — is a property of the closure, not of the diff's shape.
 
 **What "evidenced" honestly means here, and what it does not.** No retained divergence
 corpus exists in this repository, for any event: the per-shard

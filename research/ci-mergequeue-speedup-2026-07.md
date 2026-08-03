@@ -325,9 +325,13 @@ This needs an explicit maintainer-visible design (proceed-and-document), not a q
 > the measure legs also took the sq-6vshe.8 changed-cone **shadow** logging off
 > `merge_group` — it lived inside `coverage-measure`, so the batch-diff cone samples
 > stopped with it. The sq-3dr4t ENFORCE flip then landed ~10 h later (`83b0a445`,
-> 2026-07-31T08:14Z, vs this cutover's 2026-07-30T22:22Z), so its shadow window is
-> `pull_request` + push-to-`main` throughout and `merge_group` only up to the cutover.
-> **Recorded decision: option (a) — the flip stands on the PR + push window; batch-diff
+> 2026-07-31T08:14Z, vs this cutover's 2026-07-30T22:22Z), so its cone-selecting shadow
+> window is `pull_request` throughout and `merge_group` only up to the cutover. Push-to-
+> `main` and nightly runs select no cone at all (`ci_select.py` returns `mode=full` for
+> every non-`pull_request`/`merge_group` event, and `cone_coverage.py` then counts every
+> crate as in-cone), so they measure the whole shard and serve as the post-merge **drift
+> backstop** rather than as changed-cone samples.
+> **Recorded decision: option (a) — the flip stands on the PR cone window; batch-diff
 > cones are not required for it**, because a merge group's union diff covers every member
 > PR's changed paths (save where two members cancel to a net no-op), so a batch cone is
 > WIDER and exercises *less* narrowing than the PR cones the flip is about. Option (b)
