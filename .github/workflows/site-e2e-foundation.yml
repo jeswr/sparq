@@ -56,6 +56,18 @@ jobs:
   # install, no browser, no toolchain, ~15 s. NOT declared in
   # `.github/advisory-registry.json`, so `ci-summary / gate` waits on it — which is what
   # `.github/E2E-GATING-POLICY.md` §1.1 always claimed and, until now, was not true.
+  #
+  # [OPUS-5] sq-6vshe.7 / issue #5692 — DO NOT FOLD THIS INTO `a11y-ratchet`. Weighed and
+  # DECLINED; full reasoning (including the two arguments that did NOT survive scrutiny) in
+  # `research/ci-runner-consolidation-2026-07.md` §8.1. In short: this job is hermetic
+  # (checkout + grep, no network past the clone) and `a11y-ratchet` is a browser lane
+  # (`npm ci` + `npx playwright install --with-deps`), so a fold would make THIS gate's
+  # verdict conditional on the npm registry and the Playwright CDN — a false red on a hard
+  # gate. It would also re-nest, days later, the gate #3773 deliberately un-nested, and
+  # coarsen two gating check-runs with unrelated failure meanings into one. The saving is
+  # one runner claim on this lane's path-filtered trigger. Fold LIKE-provisioned jobs
+  # instead (that record §3: "anything heavy, matrixed, differently-provisioned" stays
+  # standalone).
   determinism-gate:
     name: site e2e determinism gate (no waitForTimeout calls)
     runs-on: ubuntu-latest

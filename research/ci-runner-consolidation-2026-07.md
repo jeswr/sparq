@@ -288,4 +288,79 @@ Notes:
    and `gate` goes green. Then watch one merge_group pass and one main push.
 4. Follow-up candidates (out of scope here): the remaining multi-short-job
    workflows outside this batch, and the `if: ${{ !cancelled() }}` lint-step
-   refinement.
+   refinement. Candidates worked and **declined** are recorded in §8, so the
+   next sweep does not re-propose them.
+
+## 8. Declined folds (negative results)
+
+A fold candidate that is worked and rejected is as much a result as one that
+lands; recording it here is what stops the next sweep from re-deriving it. One
+row per declined candidate.
+
+### 8.1 `site-e2e-foundation.yml` · `determinism-gate` → `a11y-ratchet` — DECLINED (issue #5692, sq-6vshe.7)
+
+The candidate passes the shape test in `ci-structural-speedup.md` §8 — the job is
+checkout + `bash site/e2e/support/no-timeout-gate.sh`, so its per-job constant tax
+dominates its runtime — and its only same-trigger, unconditional, gating sibling
+is `a11y-ratchet` (`foundation-smoke`, the third job, is declared advisory).
+Declined anyway. The load-bearing reasons, strongest first:
+
+1. **Provisioning coupling on a hermetic gate.** `determinism-gate` is
+   checkout-then-grep over checked-in TypeScript: no npm, no browser, no network
+   past the clone. `a11y-ratchet` runs `npm ci` plus
+   `npx playwright install --with-deps chromium`. Folding makes the determinism
+   verdict conditional on the npm registry, the Playwright CDN and apt. Today a
+   fetch outage reds the a11y check and leaves a correct determinism verdict
+   standing; after a fold it yields one red check and *no* determinism verdict —
+   a false red on a hard gate, which is the mode §1 of this record exists to
+   reduce. Step ordering does not fix it: putting the grep first only shortens
+   the *failure* path, and the job's conclusion is job-wide either way. §3's own
+   rule points here ("Kept standalone: anything heavy, matrixed,
+   differently-provisioned"), as does §4.5's choice to keep `artifact-exact-equality`
+   standalone while *accepting* an extra claim on doc-only PRs.
+2. **Re-nesting a gate that was deliberately un-nested days earlier.** #3773
+   split this job out precisely because living inside a bigger job is what let it
+   gate nothing. Putting it back inside a bigger job for one claim is churn
+   against a fresh, correctness-motivated decision, and it makes
+   `.github/E2E-GATING-POLICY.md` §2's already-gating table — which keys checks by
+   workflow · job — name one job in two of its three rows.
+3. **Both check-runs gate, so the fold does coarsen a gating verdict.** #5221's
+   stated safety argument was that both of *its* folded jobs were already declared
+   advisory, so merging them "cannot coarsen a gating verdict". That argument is
+   unavailable here: a determinism-harness violation and an axe WCAG regression
+   are independent failure meanings and today are independent check-runs.
+
+Against that, the saving is one runner claim on this lane's path-filtered trigger
+(`site/**`, the root `package.json`/`package-lock.json`, and the workflow file) —
+the smallest unit of this program's benefit, on one of its rarer events.
+
+**Two arguments deliberately NOT relied on**, because working them showed they are
+weaker than they look:
+
+- *"A later demotion would silently carry the hard gate into advisory-land."*
+  Overstated: **C3 of `scripts/check-advisory-registry.py` catches exactly this**
+  since #3773 — gate classification is language-agnostic and
+  `no-timeout-gate.sh` is one of the filenames its docstring names. Demoting a
+  folded job would RED C3 unless the demoter also added a `gate_script_waiver`.
+  The residual risk is only that the waiver is a normal, already-used pattern in
+  the registry (the nightly lane carries one), so a demotion under flake pressure
+  could still take the gate with it — but as a reviewable diff, not silently.
+- *"Every §4 fold merged jobs of like provisioning."* False. §4.4 folds an
+  unconditional python VEX gate into the same job as a full Rust toolchain
+  install, which is the same coupling as hazard 1. It is a genuine counter-
+  precedent; the difference that decides this case is hazard 3 (there, everything
+  in the bucket already shared a failure domain and none of it was being coupled
+  to a browser download governed by a flake-quarantine policy) plus the size of
+  the prize.
+
+Nearest in-record precedent for declining: §4.2 rejected folding G3 into the
+gating bucket because it would mix gating classes "for no additional saving beyond
+one ~11s claim".
+
+Also considered and not taken: moving the grep into the `docs-quality quick-gates`
+bucket, which would save the claim outright (that bucket runs on every
+`pull_request`, `merge_group` and main push) and keep the gate hermetic, dodging
+hazard 1. Declined for discoverability — a site-e2e determinism gate living in a
+workflow named `docs-quality` is a gate hiding where nobody looks for it, the
+other half of what #3773 was about — and it would still need hazard 2's
+policy-table edit.
