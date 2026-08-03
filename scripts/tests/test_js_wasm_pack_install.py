@@ -22,10 +22,21 @@
 #      `prepare` lifecycle (sq-bkag git-pin build) runs on `npm ci` and needs
 #      wasm-pack on PATH to compile the wasm engine.
 #
-# SCOPE — deliberately js.yml ONLY. gui.yml / pages.yml / publish.yml / release.yml /
-# nightly-full-sweep.yml / site-e2e-hero.yml / site-visual.yml still `cargo install`
-# wasm-pack; converting them is separate work and is NOT asserted here, so this file's
-# silence about them is not a claim that they are hardened.
+# SCOPE — properties 1–4 are deliberately js.yml ONLY. gui.yml / site-e2e-hero.yml /
+# site-visual.yml still `cargo install` wasm-pack; converting them is separate work and
+# is NOT asserted here, so this file's silence about them is not a claim that they are
+# hardened.
+#
+# One CROSS-WORKFLOW property is asserted, by WasmPackVersionUnified below:
+#
+#   5. ONE VERSION REPO-WIDE. Every workflow that installs wasm-pack through
+#      jetli/wasm-pack-action must request the SAME `version:`. #5771: ci.yml's `wasm`
+#      job — the lane that RUNS the headless `wasm-pack test --node` suites — pinned
+#      v0.13.1 while js.yml — the lane that BUILDS the published artifact — pinned
+#      v0.15.0, so a wasm-pack/wasm-bindgen behaviour change between those releases was
+#      exercised in the build lane and never in the test lane. Nothing goes red when the
+#      two drift apart again, hence this assertion. It says nothing about WHICH version
+#      is right; bumping is fine, bumping one lane only is not.
 #
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).
@@ -40,7 +51,8 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-JS_YML = REPO_ROOT / ".github" / "workflows" / "js.yml"
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+JS_YML = WORKFLOWS / "js.yml"
 
 WASM_PACK_ACTION = "jetli/wasm-pack-action"
 # The repo's action-pin policy: a 40-char lowercase hex commit SHA, never a tag.
@@ -165,6 +177,61 @@ class JsLaneWasmPackInstall(unittest.TestCase):
             "wasm-pack must be installed BEFORE `npm ci`: the package's `prepare` "
             "lifecycle (sq-bkag) runs on `npm ci` and compiles the wasm engine with "
             "wasm-pack from PATH.",
+        )
+
+
+class WasmPackVersionUnified(unittest.TestCase):
+    """(5) Every jetli/wasm-pack-action step in the repo asks for the SAME version.
+
+    ci.yml's `wasm` job RUNS the headless suites; js.yml BUILDS + packs the npm
+    package's wasm artifact. If they skew, a wasm-pack/wasm-bindgen behaviour change is
+    only ever exercised in the build lane (#5771). This pins the EQUALITY, not the
+    value — bumping is fine, bumping one lane only is not.
+    """
+
+    @staticmethod
+    def _pins() -> dict[str, list[str]]:
+        """{workflow filename: [version requested by each wasm-pack step]}."""
+        found: dict[str, list[str]] = {}
+        for path in sorted(WORKFLOWS.glob("*.y*ml")):
+            text = path.read_text(encoding="utf-8")
+            if WASM_PACK_ACTION not in text:
+                continue
+            for block in gate.split_steps(text):
+                if (gate._step_uses(block) or (None,))[0] != WASM_PACK_ACTION:
+                    continue
+                versions = [
+                    ln.strip().split(":", 1)[1].strip()
+                    for ln in block
+                    if ln.strip().startswith("version:")
+                ]
+                found.setdefault(path.name, []).extend(versions)
+        return found
+
+    def test_both_wasm_lanes_use_the_action(self):
+        """Anti-vacuity: the two lanes #5771 unified must still be in the sample."""
+        pins = self._pins()
+        for expected in ("ci.yml", "js.yml"):
+            self.assertIn(
+                expected,
+                pins,
+                f"{expected} must install wasm-pack via {WASM_PACK_ACTION} — without "
+                "it the single-version assertion below has nothing to compare and "
+                "passes vacuously (#5771).",
+            )
+
+    def test_single_version_across_workflows(self):
+        pins = self._pins()
+        distinct = {v for versions in pins.values() for v in versions}
+        self.assertEqual(
+            len(distinct),
+            1,
+            "all workflows must install the SAME wasm-pack version, found "
+            f"{sorted(distinct)} across { {k: v for k, v in sorted(pins.items())} }. "
+            "ci.yml's `wasm` job RUNS the headless suites and js.yml BUILDS the "
+            "published artifact: if they skew, a wasm-pack/wasm-bindgen behaviour "
+            "change is only ever exercised in the build lane (#5771). Bump every "
+            "lane together.",
         )
 
 
