@@ -1504,11 +1504,39 @@ class TestConeEvidenceBase(unittest.TestCase):
             i += 1
         return re.compile("".join(out) + r"(?:/.*)?$")
 
+    # `${{ github.workspace }}` IS the directory the log is written into, so an upload
+    # naming it retains the log once Actions expands the expression — resolve that form
+    # (and the `$GITHUB_WORKSPACE` env spelling) back to the workspace-relative root.
+    # Anything ELSE dynamic, and any absolute path, cannot be resolved at inspection time,
+    # so it must not be silently compared as literal text against a relative target.
+    _WORKSPACE_REF = re.compile(
+        r"\$\{\{\s*github\.workspace\s*\}\}|\$\{\s*GITHUB_WORKSPACE\s*\}|\$GITHUB_WORKSPACE\b"
+    )
+
+    @classmethod
+    def _normalize_path_entry(cls, line: str) -> "str | None":
+        """One upload `path:` entry → a workspace-relative glob, or None when it cannot be
+        resolved statically (an unexpanded expression/env var, or an absolute path that is
+        not recognisably the workspace) and the caller must answer conservatively."""
+        resolved, subs = cls._WORKSPACE_REF.subn("", line)
+        line = resolved.strip()
+        if subs:
+            line = line.lstrip("/")  # `<workspace>/x` → workspace-relative `x`
+        if "$" in line or "{{" in line:
+            return None  # still dynamic: expands to who-knows-what
+        if line.startswith("/"):
+            return None  # absolute and not normalizable against the workspace
+        while line.startswith("./"):
+            line = line[2:]
+        return line.rstrip("/")
+
     @classmethod
     def _upload_could_include(cls, path_spec: str, target: str) -> bool:
         """Could this (possibly multi-line) upload `path:` retain `target`? Lines are
         applied in order, `!`-prefixed ones subtracting, exactly as the toolkit globber
-        does, so an upload that deliberately excludes the log reads as NOT retaining it."""
+        does, so an upload that deliberately excludes the log reads as NOT retaining it.
+        An entry that does not resolve statically answers CONSERVATIVELY: it counts as
+        including the log, and as an exclusion it earns no credit for removing it."""
         included = False
         for raw in str(path_spec).splitlines():
             line = raw.strip()
@@ -1517,12 +1545,13 @@ class TestConeEvidenceBase(unittest.TestCase):
             negate = line.startswith("!")
             if negate:
                 line = line[1:].strip()
-            line = line.lstrip("/")
-            while line.startswith("./"):
-                line = line[2:]
-            line = line.rstrip("/")
+            entry = cls._normalize_path_entry(line)
+            if entry is None:
+                if not negate:
+                    included = True
+                continue
             # "" / "." is the whole workspace — which is exactly where the log is written.
-            if line in ("", ".") or cls._glob_to_re(line).match(target):
+            if entry in ("", ".") or cls._glob_to_re(entry).match(target):
                 included = not negate
         return included
 
@@ -1568,13 +1597,29 @@ class TestConeEvidenceBase(unittest.TestCase):
         target = "coverage-cone-divergence-shard-1.json"
         for spec in (".", "./", "*.json", "**", "**/*.json", "coverage-cone-*",
                      "./coverage-cone-divergence-shard-1.json",
-                     "target/coverage/coverage-summary.json\n."):
+                     "target/coverage/coverage-summary.json\n.",
+                     # …and the shapes that only LOOK unrelated as literal text: an
+                     # unexpanded expression, or an absolute path, that lands on the
+                     # workspace the log is written into.
+                     "${{ github.workspace }}",
+                     "${{ github.workspace }}/coverage-cone-divergence-shard-1.json",
+                     "${{ github.workspace }}/coverage-cone-divergence-shard-${{ matrix.shard }}.json",
+                     "$GITHUB_WORKSPACE",
+                     "/home/runner/work/sparq/sparq",
+                     "coverage-${{ matrix.shard }}/../coverage-cone-divergence-shard-1.json",
+                     # an exclusion that cannot be resolved must not be credited with
+                     # removing the log from a broad include.
+                     ".\n!${{ env.SOME_DIR }}"):
             self.assertTrue(self._upload_could_include(spec, target),
                             f"broad upload path {spec!r} must be detected as retaining "
                             f"the divergence log")
         for spec in ("target/coverage/coverage-summary.json", "target/**", "target/",
                      "cone.json", "coverage-cone-divergence-shard-1.txt",
-                     ".\n!coverage-cone-divergence-*.json"):
+                     ".\n!coverage-cone-divergence-*.json",
+                     # a workspace expression IS resolvable, so normalizing it must not
+                     # over-report either: these two really do miss the log.
+                     "${{ github.workspace }}/target/coverage/coverage-summary.json",
+                     ".\n!${{ github.workspace }}/coverage-cone-divergence-*.json"):
             self.assertFalse(self._upload_could_include(spec, target),
                              f"upload path {spec!r} does not retain the divergence log")
 
