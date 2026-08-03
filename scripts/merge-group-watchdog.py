@@ -79,6 +79,13 @@
 # implemented as dequeue+enqueue, which itself fires `pull_request.dequeued`, and
 # without this arm the watchdog would demote every PR it rescued.
 #
+# A THIRD preserve arm (sq-fnr85) covers the QUEUE-LEVEL drop: an entry that leaves the
+# queue with no merge and a cleared arm because the QUEUE did something (QUEUE_CLEARED,
+# ROLL_BACK), not because anything is wrong with the diff — including after its group
+# went green. That arm consults no marker (this population never has one) and is bounded
+# by DEFAULT_MAX_PRESERVED_REQUEUES. See GREEN_DROP_REASONS for why those two reason
+# strings are admissible evidence when `MANUAL` is not.
+#
 # ── A DEFENSIVE CONTROL MUST NOT AMPLIFY WHAT IT REJECTS ──────────────────────────
 # Rejecting an untrusted marker emits ONE annotation per PR, never one per marker.
 # Measured the hard way: a per-marker warning against a PR carrying 567 markers
@@ -209,6 +216,35 @@ ACTIONABLE_STATES = frozenset({"AWAITING_CHECKS"})
 # MERGE_CONFLICT / CI_FAILURE dequeue is never attributed to the watchdog.
 SELF_DEQUEUE_REASONS = frozenset({"MANUAL", "UNKNOWN"})
 ZERO_DISPATCH_REASON = "CI_TIMEOUT"
+
+# ── sq-fnr85: the QUEUE-LEVEL drop ───────────────────────────────────────────────
+# Reasons that describe something the QUEUE did, and that therefore carry no verdict
+# whatsoever about the pull request's diff:
+#   * QUEUE_CLEARED — the queue was emptied out from under this entry.
+#   * ROLL_BACK     — the group was rolled back (an entry ahead changed the base).
+# In both, a group can have been built and gone green and the entry still leaves with
+# no merge and the arm cleared, which is exactly the sq-fnr85 report. Demoting those to
+# `review:changes` manufactures a full re-review plus a full CI re-run of code nobody
+# found fault with — the identical defect class #4652 fixed for zero-dispatch. This is
+# not a new judgement either: merge-queue-feedback.yml has been posting "reason
+# ${DEQUEUE_REASON} is queue/infra-flavoured (likely not a fault in this PR's diff)" on
+# these very dequeues while demoting them anyway.
+#
+# WHY THE REASON IS ADMISSIBLE EVIDENCE HERE, when the header says never to route on the
+# event name. That rule exists because `MANUAL` CONFLATES "a reviewer withdrew this"
+# (the verdict SHOULD fall) with "infrastructure moved it" (it should not), so the name
+# alone cannot separate them. QUEUE_CLEARED and ROLL_BACK conflate nothing — neither has
+# a reading in which the diff is at fault — and the string arrives in the trusted
+# webhook payload, not from a forgeable PR comment. `MANUAL` and `UNKNOWN` stay OUT for
+# precisely the original reason; `CI_FAILURE` and `MERGE_CONFLICT` are genuine statements
+# about the diff and stay out too; `CI_TIMEOUT` keeps its own suite-count split below.
+GREEN_DROP_REASONS = frozenset({"QUEUE_CLEARED", "ROLL_BACK"})
+# How many queue attempts ONE verdict may ride before a queue-level drop stops being
+# preserved. Every automated retry loop in this file is bounded, and this one is no
+# different: a tree that has been queued three times and landed none of them is worth a
+# human look, so the fourth drop demotes to the fix lane. The budget resets whenever the
+# head moves, because a new tree needs a new verdict anyway.
+DEFAULT_MAX_PRESERVED_REQUEUES = 3
 # The only action a marker may claim. Checked on the self-dequeue arm so that no other
 # marker shape can ever be mistaken for a recovery in flight.
 MARKER_ACTION_REENQUEUE = "re-enqueue"
@@ -464,6 +500,11 @@ class VerdictState:
     # folding a label revocation into "the head moved" tells an operator a commit
     # landed when none did, and sends them looking for a push that does not exist.
     verdict_revoked_at: datetime | None = None
+    # EVERY `added_to_merge_queue` stamp, not just the newest, because the queue-level
+    # drop arm has to COUNT the attempts one verdict has ridden. Defaults to empty, and
+    # an empty tuple is read as "the budget could not be evaluated" (=> demote), never
+    # as "zero attempts so far" — an unreadable history is not evidence of no history.
+    enqueued_at: tuple[datetime, ...] = ()
 
 
 def decide_entry(
@@ -591,10 +632,11 @@ def classify_dequeue_route(
     now: datetime,
     self_dequeue_window_seconds: int = DEFAULT_SELF_DEQUEUE_WINDOW_SECONDS,
     marker_staleness_seconds: int = DEFAULT_MARKER_STALENESS_SECONDS,
+    max_preserved_requeues: int = DEFAULT_MAX_PRESERVED_REQUEUES,
 ) -> Route:
     """Split a dequeue into the preserve-the-verdict route and today's demote route.
 
-    FAIL-SAFE: every arm that cannot POSITIVELY establish zero-dispatch returns
+    FAIL-SAFE: every arm that cannot POSITIVELY establish its own premise returns
     `demote`, which is the pre-existing behaviour.
     """
     # BIND TO THIS PR. A marker is evidence about ONE pull request; without this a
@@ -611,17 +653,62 @@ def classify_dequeue_route(
     normalised = (reason or "UNKNOWN").strip().upper()
     last_enqueued_at = verdict.last_enqueued_at
 
+    # Applies to EVERY preserve arm, before any of them is considered. It is deliberately
+    # ahead of the marker guard below: arm (c) needs no marker, so a precondition placed
+    # after that guard would not cover it, and a non-negotiable control that only some
+    # arms run is not a control at all.
+    keepable, why = verdict_is_still_for_this_tree(verdict)
+    if not keepable:
+        return Route(ROUTE_DEMOTE, False, f"verdict may not survive this dequeue: {why}")
+
+    # (c) the QUEUE-LEVEL drop (sq-fnr85). No marker is consulted, and none exists for
+    # this population: the watchdog only records observations for zero-suite groups it
+    # rescues, whereas these entries had a perfectly healthy group and were removed for
+    # a reason belonging to the QUEUE, not to the diff (see GREEN_DROP_REASONS).
+    if normalised in GREEN_DROP_REASONS:
+        if last_enqueued_at is None:
+            return Route(
+                ROUTE_DEMOTE,
+                False,
+                f"{normalised} drop, but no added_to_merge_queue timeline event was "
+                "found — this dequeue cannot be bound to a queue attempt",
+            )
+        # Non-None here: `verdict_is_still_for_this_tree` above refuses without a grant.
+        granted = verdict.review_pass_at
+        # Only attempts made on THIS verdict count. A queue attempt that predates the
+        # grant belongs to a tree whose verdict is already gone, and charging it here
+        # would spend the budget of a tree that has never been queued at all.
+        ridden = [stamp for stamp in verdict.enqueued_at if stamp >= granted]
+        if not ridden:
+            return Route(
+                ROUTE_DEMOTE,
+                False,
+                f"{normalised} drop, but no enqueue event is readable at or after the "
+                f"review:pass grant ({iso(granted)}) — the re-queue budget cannot be "
+                "evaluated, and an uncountable budget is not a spent one",
+            )
+        if len(ridden) >= max_preserved_requeues:
+            return Route(
+                ROUTE_DEMOTE,
+                False,
+                f"{normalised} drop, but this verdict has already ridden {len(ridden)} "
+                f"queue attempt(s) without landing (budget {max_preserved_requeues}) — "
+                "handing it to the fix lane so a human looks at why it never lands",
+            )
+        return Route(
+            ROUTE_PRESERVE,
+            True,
+            f"{normalised} is a QUEUE-LEVEL removal and carries no verdict about this "
+            f"diff (attempt {len(ridden)}/{max_preserved_requeues} on this tree) — "
+            "verdict preserved and the PR re-armed",
+        )
+
     if newest is None:
         return Route(
             ROUTE_DEMOTE,
             False,
             "no merge-group-watchdog observation recorded for this PR",
         )
-
-    # Applies to BOTH preserve arms, before either is considered.
-    keepable, why = verdict_is_still_for_this_tree(verdict)
-    if not keepable:
-        return Route(ROUTE_DEMOTE, False, f"verdict may not survive this dequeue: {why}")
 
     marker_age = (now - newest.observed).total_seconds()
 
@@ -998,6 +1085,7 @@ class Watchdog:
             review_pass_at=max(granted) if granted else None,
             head_moved_at=max(moved) if moved else None,
             last_enqueued_at=max(enqueued) if enqueued else None,
+            enqueued_at=tuple(sorted(enqueued)),
             verdict_revoked_at=max(revoked) if revoked else None,
         )
 
@@ -1376,9 +1464,48 @@ def self_test() -> None:
     assert route(now=now + timedelta(hours=7)).route == ROUTE_DEMOTE
     # A marker for a DIFFERENT PR is not evidence about this one.
     assert route(pr_number=9999).route == ROUTE_DEMOTE, route(pr_number=9999)
-    # Reasons other than CI_TIMEOUT keep today's behaviour.
-    for other_reason in ("CI_FAILURE", "MERGE_CONFLICT", "QUEUE_CLEARED", "ROLL_BACK"):
+    # Reasons that ARE a statement about the diff keep today's behaviour.
+    for other_reason in ("CI_FAILURE", "MERGE_CONFLICT"):
         assert route(reason=other_reason).route == ROUTE_DEMOTE, other_reason
+
+    # sq-fnr85 arm (c): a QUEUE-LEVEL drop preserves the verdict and re-arms.
+    def queue_level(**overrides):
+        attempts = overrides.pop("attempts", 1)
+        granted = now - timedelta(hours=2)
+        kwargs = dict(
+            reason="ROLL_BACK",
+            markers=(),  # this population never has a watchdog observation
+            verdict=VerdictState(
+                review_pass_at=granted,
+                head_moved_at=now - timedelta(hours=3),
+                last_enqueued_at=now - timedelta(hours=1),
+                enqueued_at=tuple(
+                    granted + timedelta(minutes=n + 1) for n in range(attempts)
+                ),
+            ),
+        )
+        kwargs.update(overrides)
+        return route(**kwargs)
+
+    for drop_reason in ("QUEUE_CLEARED", "ROLL_BACK"):
+        dropped = queue_level(reason=drop_reason)
+        assert dropped.route == ROUTE_PRESERVE, (drop_reason, dropped)
+        assert dropped.reenqueue is True, (drop_reason, dropped)
+    # The budget is real: one verdict may not ride the queue forever.
+    assert queue_level(attempts=DEFAULT_MAX_PRESERVED_REQUEUES).route == ROUTE_DEMOTE
+    assert queue_level(attempts=DEFAULT_MAX_PRESERVED_REQUEUES - 1).route == ROUTE_PRESERVE
+    # An uncountable budget is not a spent one — it is a refusal to preserve.
+    assert queue_level(attempts=0).route == ROUTE_DEMOTE
+    # The tree precondition binds this arm too, exactly as it binds the other two.
+    moved = VerdictState(
+        review_pass_at=now - timedelta(hours=2),
+        head_moved_at=now - timedelta(minutes=1),
+        last_enqueued_at=now - timedelta(hours=1),
+        enqueued_at=(now - timedelta(hours=1),),
+    )
+    assert queue_level(verdict=moved).route == ROUTE_DEMOTE
+    # ...and a MANUAL dequeue with no watchdog marker is still a human withdrawal.
+    assert queue_level(reason="MANUAL").route == ROUTE_DEMOTE
     # The watchdog's OWN dequeue preserves without a second re-enqueue.
     own = route(reason="MANUAL", now=now + timedelta(seconds=30))
     assert own.route == ROUTE_PRESERVE and own.reenqueue is False, own
