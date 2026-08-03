@@ -156,6 +156,28 @@ jobs:
           GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
         run: python3 scripts/gate-new-crate.py --base "$GATE_BASE_REF"
 
+      # ---- [OPUS-5] #5843: the repo-wide complement to G1's package clause ----
+      # G1 above is DIFF-scoped. Even once #5742 has it require a test FILE for a
+      # new packages/<x>, it cannot see whether anything ever EXECUTES that file —
+      # that is a workflow-wiring question, not a diff question, which is why this
+      # is a separate repo-wide guard rather than another G1 clause. A package
+      # whose `test` script no workflow invokes is the same false green that
+      # check-feature-test-execution.py exists to prevent on the Rust side — the
+      # tests are committed, reviewed, and never run. This guard is REPO-WIDE, so
+      # it also reds when an EXISTING package's CI leg is deleted, which no
+      # diff-scoped gate can catch. Stdlib-only (no PyYAML install needed): it
+      # reads the block-style workflow subset itself and attributes every
+      # `npm test` to a package by resolving the step's effective working
+      # directory. The self-test leads, mirroring the G1/G3 grouping below; its
+      # negative fixtures are what keep the live check from passing vacuously.
+      # Quoted: the ` #5843` would otherwise open a YAML comment mid-plain-scalar
+      # and truncate the step name (a `#` only starts a comment after whitespace,
+      # which is why the `(#5843)` on the next step needs no quoting).
+      - name: "Self-test the package-test-execution guard (detector + negative fixtures — #5843)"
+        run: python3 scripts/tests/test_check_package_test_execution.py
+      - name: package-test-execution — every packages/* `test` script is run by a CI leg (#5843)
+        run: python3 scripts/check-package-test-execution.py
+
       # ---- former job: public-api-skill (G2) ----
       - name: public-api-skill (G2) — public-surface change requires a SKILL.md edit
         env:
