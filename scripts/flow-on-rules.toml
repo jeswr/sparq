@@ -74,11 +74,16 @@
 # a post-merge follow-on issue would be pure noise (dogfooded: this rule minted the
 # redundant #245 / #246 / #264 / #265 bench+SKILL follow-ons — bead sq-l0a0).
 #
-# G1 is the single owner of new-crate completeness. The stub escape hatch
-# (`publish = false`) is likewise handled there. If G1 is ever relaxed to a
-# non-blocking advisory, restore a SAFETY-NET reactive rule here — but it must
+# G1 is the single owner of new-crate completeness. BOTH escape hatches are
+# likewise handled there: `publish = false` in Cargo.toml, and (since #5701)
+# `<!-- flow-on-exempt: reason -->` in the crate README. If G1 is ever relaxed to
+# a non-blocking advisory, restore a SAFETY-NET reactive rule here — but it must
 # CHECK that the crate genuinely lacks the bench/SKILL on `main` before creating
-# (don't blindly mint), not re-emit unconditionally as the old rule did.
+# (don't blindly mint), not re-emit unconditionally as the old rule did, AND it
+# must honour BOTH hatches (call gate_new_crate.crate_is_stub /
+# crate_flow_on_exempt_reason rather than re-deriving them) or it will re-mint
+# exactly the follow-ons the gate deliberately waived — the same failure mode
+# #5701 fixed in the periodic scanner (scripts/drift-scan.py).
 
 # --- Changed public feature → docs / SKILL.md update ---------------------------
 # Trigger: a change under a published crate's surface, the CLI, the HTTP server,

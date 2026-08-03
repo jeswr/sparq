@@ -28,12 +28,30 @@
 #       must have at least one skills/<surface>/SKILL.md touched in the same PR
 #       (the AGENTS.md public-API → SKILL.md rule applied to a brand-new surface).
 #       A `publish = false` stub is internal-only and exempt from (c) — and, via
-#       the same marker, exempt from (a) as well.
+#       the same marker, exempt from (a) as well. A README carrying
+#       `<!-- flow-on-exempt: reason -->` is likewise exempt from (a) and (c).
 #
-# ESCAPE HATCH (design §2.1): `publish = false` in the new crate's Cargo.toml
-# marks it an intentional stub — exempt from the bench (a) and SKILL (c)
-# requirements. The README (b) is still required (a stub still needs a one-line
-# "what/why" README).
+# ESCAPE HATCHES (design §2.1). TWO, and both waive exactly (a) + (c), never (b):
+#   1. `publish = false` in the new crate's Cargo.toml marks it an intentional
+#      stub — exempt from the bench (a) and SKILL (c) requirements.
+#   2. [OPUS-5] (#5701) `<!-- flow-on-exempt: reason -->` in the crate's README
+#      — the design's *named* G1 escape hatch, and the sibling of G2's
+#      `skill-not-needed` / G6's `config-internal` labels. It exists because
+#      hatch 1 is NOT general: `publish = false` has a real release-side effect,
+#      so a genuinely PUBLISHED crate that cannot ship its bench/SKILL in the
+#      same PR had no honest way out and was pushed toward lying in Cargo.toml
+#      to appease a gate. This marker is the reason-bearing waiver for that case.
+#      It was documented in AGENTS.md + the design record from the start but was
+#      never implemented (grep found it only in prose) — #5701 wires it up.
+# The README (b) is ALWAYS required — a stub still needs a one-line "what/why"
+# README, and hatch 2 is *stored in* the README, so waiving (b) would make the
+# marker unreadable. Net: G1 can be waived, never silently bypassed — every
+# exemption leaves a reviewable artifact in the diff.
+#
+# The marker is deliberately STRICT (cf. sq-ixsf, which showed a loose directive
+# match is a hole in a gate): the reason text must be NON-EMPTY. A bare
+# `<!-- flow-on-exempt: -->` or `<!-- flow-on-exempt -->` does NOT exempt — the
+# gate fail-closes, so an un-justified waiver blocks the merge as before.
 #
 # DIFF SOURCE: the PR's changed-file list. In CI this is
 #   git diff --name-only origin/<base>...HEAD          (changed files)
@@ -162,6 +180,40 @@ def crate_is_stub(crate: str, changed: list[str]) -> bool:
     return re.search(r"^\s*publish\s*=\s*false\b", text, re.MULTILINE) is not None
 
 
+# [OPUS-5] (#5701) The G1 escape-hatch directive, e.g.
+#   <!-- flow-on-exempt: bench lands with the fedplan harness in sq-abcd -->
+# STRICT by construction (cf. check-readme-template.py's sq-ixsf lesson: a loose
+# directive match is a hole in the gate it guards):
+#   * it must be an HTML COMMENT carrying the exact `flow-on-exempt` token, so it
+#     cannot appear by accident in rendered README prose;
+#   * `[^>]*?` keeps the capture inside ONE comment — a greedy/DOTALL capture
+#     would let an UNRELATED later `-->` supply the "reason" for an empty marker,
+#     turning the non-empty check below into a no-op;
+#   * the reason group is validated NON-EMPTY by the caller (fail-closed).
+FLOW_ON_EXEMPT_RE = re.compile(r"<!--\s*flow-on-exempt\s*:([^>]*?)-->", re.IGNORECASE)
+
+
+def crate_flow_on_exempt_reason(crate: str) -> str | None:
+    """The REASON from the crate README's `<!-- flow-on-exempt: reason -->`
+    directive, or None when the crate is not exempt.
+
+    Returns None (NOT exempt) when the README is absent/unreadable or the marker
+    carries an empty reason — the strict default, matching crate_is_stub()'s
+    fail-closed treatment of a missing Cargo.toml. Reads the on-disk README in
+    the worktree (the PR's checkout already contains the added file), exactly as
+    crate_is_stub() reads the on-disk Cargo.toml."""
+    readme = REPO_ROOT / "crates" / crate / "README.md"
+    try:
+        text = readme.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = FLOW_ON_EXEMPT_RE.search(text)
+    if not m:
+        return None
+    reason = m.group(1).strip()
+    return reason or None
+
+
 def crate_has_registered_bench(crate: str) -> bool:
     """True iff bench/benchmarks.toml has a `source` field referencing the crate.
 
@@ -184,14 +236,17 @@ def evaluate(
     *,
     stub_overrides: dict[str, bool] | None = None,
     bench_overrides: dict[str, bool] | None = None,
+    exempt_overrides: dict[str, bool] | None = None,
 ) -> list[tuple[str, list[str]]]:
     """Return [(crate, [missing-reasons])] for every newly-added crate that
     violates G1. An empty list means the gate PASSES.
 
-    stub_overrides / bench_overrides let hermetic tests inject the
-    publish-status and bench-registration facts without touching disk."""
+    stub_overrides / bench_overrides / exempt_overrides let hermetic tests inject
+    the publish-status, bench-registration and flow-on-exempt facts without
+    touching disk."""
     stub_overrides = stub_overrides or {}
     bench_overrides = bench_overrides or {}
+    exempt_overrides = exempt_overrides or {}
     violations: list[tuple[str, list[str]]] = []
 
     for crate in added_crates(added):
@@ -199,16 +254,25 @@ def evaluate(
         if is_stub is None:
             is_stub = crate_is_stub(crate, changed)
 
+        # [OPUS-5] (#5701) The second documented escape hatch — a
+        # `<!-- flow-on-exempt: reason -->` directive in the crate README waives
+        # the SAME two requirements as `publish = false` ((a) bench + (c) SKILL),
+        # and likewise never waives (b).
+        is_exempt = exempt_overrides.get(crate)
+        if is_exempt is None:
+            is_exempt = crate_flow_on_exempt_reason(crate) is not None
+
         missing: list[str] = []
 
-        # (b) README.md — always required (even for stubs).
+        # (b) README.md — always required (even for stubs / exempt crates; the
+        # exemption marker LIVES in the README, so it can never waive it).
         readme = f"crates/{crate}/README.md"
         if readme not in changed:
             missing.append(
                 f"a README at {readme} (added in the same PR)"
             )
 
-        if not is_stub:
+        if not is_stub and not is_exempt:
             # (a) registered benchmark.
             has_bench = bench_overrides.get(crate)
             if has_bench is None:
@@ -280,8 +344,12 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "\nA new crate must ship its maintenance artifacts in the SAME PR "
         "(research/maintenance-flow-on-automation-design.md §2.1, gate G1). "
-        "Stub crates may set `publish = false` in Cargo.toml to opt out of the "
-        "bench + SKILL requirements (README still required)."
+        "Two escape hatches waive the bench + SKILL requirements (the README is "
+        "required either way): set `publish = false` in Cargo.toml if the crate "
+        "is an intentional stub, or — for a crate that IS published but genuinely "
+        "cannot ship them in this PR — put a "
+        "`<!-- flow-on-exempt: <reason> -->` directive in its README. The reason "
+        "must be non-empty, and the follow-up should be recorded as a bead."
     )
 
     if args.advisory or args.dry_run:

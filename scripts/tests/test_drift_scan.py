@@ -39,6 +39,18 @@ def _load_module():
 drift_scan = _load_module()
 
 
+def _load_gate_new_crate():
+    """[OPUS-5] (#5701) Load gate-new-crate.py so a test can assert the merge-time
+    gate and this scanner share ONE definition of the flow-on-exempt hatch."""
+    spec = importlib.util.spec_from_file_location(
+        "gate_new_crate", REPO_ROOT / "scripts" / "gate-new-crate.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # --------------------------------------------------------------------------- #
 # Fixture-repo builder
 # --------------------------------------------------------------------------- #
@@ -162,6 +174,94 @@ class BenchMissingTest(unittest.TestCase):
         keys = {it.dedup_key for it in items}
         self.assertIn("bench-missing:sparq-pubcrate", keys)
         self.assertNotIn("bench-missing:sparq-fedstub", keys)
+
+    # [OPUS-5] (#5701) The SECOND G1 escape hatch — `<!-- flow-on-exempt: reason -->`
+    # in the crate README — must be mirrored here for exactly the sq-bif.5 reason:
+    # a crate the merge gate waived must not be re-minted as drift by the scanner.
+    def test_flow_on_exempt_crate_without_bench_not_flagged(self):
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-exempt", public=True)  # PUBLISHED, not a stub
+        _write(
+            root,
+            "crates/sparq-exempt/README.md",
+            "# sparq-exempt\n\n<!-- flow-on-exempt: bench lands with the harness in sq-abcd -->\n",
+        )
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])
+        keys = {it.dedup_key for it in drift_scan.scan_bench_missing(root)}
+        self.assertNotIn("bench-missing:sparq-exempt", keys)
+
+    def test_flow_on_exempt_crate_not_flagged_for_missing_skill(self):
+        # The hatch waives G1's SKILL requirement (c) too, so skill-missing drift
+        # must drop out as well.
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-exempt", public=True)
+        _write(
+            root,
+            "crates/sparq-exempt/README.md",
+            "# sparq-exempt\n\n<!-- flow-on-exempt: surface is pre-1.0, SKILL follows in sq-abcd -->\n",
+        )
+        keys = {it.dedup_key for it in drift_scan.scan_skill_missing(root)}
+        self.assertNotIn("skill-missing:sparq-exempt", keys)
+
+    def test_readme_without_marker_still_flagged(self):
+        # Control: the exemption comes from the MARKER, not from merely having a
+        # README. Without it the same crate is still flagged on both scanners.
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-plain", public=True)
+        _write(root, "crates/sparq-plain/README.md", "# sparq-plain\n\nA normal README.\n")
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])
+        self.assertIn(
+            "bench-missing:sparq-plain",
+            {it.dedup_key for it in drift_scan.scan_bench_missing(root)},
+        )
+        self.assertIn(
+            "skill-missing:sparq-plain",
+            {it.dedup_key for it in drift_scan.scan_skill_missing(root)},
+        )
+
+    def test_empty_reason_marker_does_not_exempt(self):
+        # Fail-closed, mirroring G1: a marker with no reason is not a waiver.
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-lazy", public=True)
+        _write(root, "crates/sparq-lazy/README.md", "# sparq-lazy\n\n<!-- flow-on-exempt: -->\n")
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])
+        self.assertIn(
+            "bench-missing:sparq-lazy",
+            {it.dedup_key for it in drift_scan.scan_bench_missing(root)},
+        )
+
+    def test_flow_on_exempt_predicate_matches_gate_g1(self):
+        # Single-source-of-truth guard (the #5701 sibling of the sq-bif.5 guard
+        # below): drift-scan's flow-on-exempt predicate and G1's must agree on the
+        # SAME README content, or the gate and the scanner diverge and the scanner
+        # re-mints what the gate waived. Drives BOTH real implementations.
+        g1 = _load_gate_new_crate()
+        root = Path(self._tmp.name)
+        crate_dir = root / "crates" / "sparq-probe"
+        crate_dir.mkdir(parents=True)
+        readmes = [
+            "<!-- flow-on-exempt: a good reason -->",
+            "<!--flow-on-exempt:terse-->",
+            "<!--  FLOW-ON-EXEMPT : cased and spaced -->",
+            "<!-- flow-on-exempt: -->",
+            "<!-- flow-on-exempt -->",
+            "flow-on-exempt: bare prose",
+            "<!-- flow-on-exempted: typo -->",
+            "<!-- flow-on-exempt: -->\n<!-- unrelated later comment -->",
+            "# sparq-probe\n\nnothing to see here\n",
+        ]
+        orig = g1.REPO_ROOT
+        try:
+            g1.REPO_ROOT = root
+            for text in readmes:
+                (crate_dir / "README.md").write_text(text, encoding="utf-8")
+                self.assertEqual(
+                    drift_scan.crate_is_flow_on_exempt(root, "sparq-probe"),
+                    g1.crate_flow_on_exempt_reason("sparq-probe") is not None,
+                    f"gate G1 and drift-scan disagree on README content: {text!r}",
+                )
+        finally:
+            g1.REPO_ROOT = orig
 
     def test_exemption_predicate_matches_gate_g1(self):
         # Single-source-of-truth guard: the stub predicate scan_bench_missing uses

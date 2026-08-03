@@ -178,6 +178,31 @@ def crate_is_public(root: Path, crate: str) -> bool:
     return re.search(r"^\s*publish\s*=\s*false\b", text, re.MULTILINE) is None
 
 
+# [OPUS-5] (#5701) The G1 escape-hatch directive. This regex MUST stay identical
+# to gate_new_crate.FLOW_ON_EXEMPT_RE — the merge-time gate and this reactive
+# scanner have to agree on what "exempt" means, or the scanner re-mints as drift
+# exactly what the gate just waived at merge. `test_drift_scan.py` asserts the two
+# predicates agree on the same README content (the same single-source-of-truth
+# guard sq-bif.5 added for the `publish = false` hatch).
+FLOW_ON_EXEMPT_RE = re.compile(r"<!--\s*flow-on-exempt\s*:([^>]*?)-->", re.IGNORECASE)
+
+
+def crate_is_flow_on_exempt(root: Path, crate: str) -> bool:
+    """True iff the crate README carries `<!-- flow-on-exempt: reason -->` with a
+    NON-EMPTY reason (gate G1's second escape hatch, design §2.1).
+
+    Mirrors gate-new-crate.py::crate_flow_on_exempt_reason exactly, including its
+    fail-closed defaults: an absent/unreadable README, or a marker with an empty
+    reason, is NOT an exemption."""
+    readme = root / "crates" / crate / "README.md"
+    try:
+        text = readme.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    m = FLOW_ON_EXEMPT_RE.search(text)
+    return bool(m and m.group(1).strip())
+
+
 def bench_registry_sources(root: Path) -> str:
     """The raw text of bench/benchmarks.toml (we match `source` lines textually,
     mirroring gate-new-crate.py — a full TOML parse of the array is unnecessary
@@ -300,6 +325,12 @@ def scan_bench_missing(root: Path) -> list[DriftItem]:
             # `publish = false` stub: exempt, mirroring gate-new-crate.py's G1
             # bench-requirement exemption (single source of truth: crate_is_public).
             continue
+        if crate_is_flow_on_exempt(root, crate):
+            # [OPUS-5] (#5701) G1's OTHER escape hatch, for the same reason: a
+            # crate whose README carries a reasoned `flow-on-exempt` directive was
+            # waived at merge, so re-minting bench-missing drift for it here would
+            # be precisely the spurious follow-on this mirroring exists to prevent.
+            continue
         if crate_has_registered_bench(registry, crate):
             continue
         key = f"bench-missing:{crate}"
@@ -330,6 +361,9 @@ def scan_skill_missing(root: Path) -> list[DriftItem]:
     for crate in list_crates(root):
         if not crate_is_public(root, crate):
             continue  # private crates are not a public surface; exempt
+        if crate_is_flow_on_exempt(root, crate):
+            continue  # [OPUS-5] (#5701) waived by G1's flow-on-exempt hatch, which
+            # covers the SKILL requirement (c) as well as the bench requirement (a).
         if crate in named:
             continue
         key = f"skill-missing:{crate}"

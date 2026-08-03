@@ -132,6 +132,99 @@ class G1Test(unittest.TestCase):
         self.assertEqual(g1.added_crates(added), [])
         self.assertEqual(g1.evaluate(changed, added), [])
 
+    # [OPUS-5] (#5701) The `<!-- flow-on-exempt: reason -->` README directive —
+    # G1's SECOND documented escape hatch (design §2.1), which was documented in
+    # AGENTS.md + the design record but never implemented until #5701. It waives
+    # exactly what `publish = false` waives: (a) bench + (c) SKILL, never (b).
+    def test_flow_on_exempt_readme_waives_bench_and_skill(self):
+        added = ["crates/sparq-foo/Cargo.toml", "crates/sparq-foo/README.md"]
+        changed, added_paths = g1.parse_status_lines(_statused(added))
+        violations = g1.evaluate(
+            changed,
+            added_paths,
+            stub_overrides={"sparq-foo": False},   # PUBLISHED crate, not a stub
+            bench_overrides={"sparq-foo": False},  # and genuinely unbenched
+            exempt_overrides={"sparq-foo": True},
+        )
+        self.assertEqual(violations, [])
+
+    def test_flow_on_exempt_crate_missing_readme_still_fails(self):
+        # The hatch can never waive (b): the marker LIVES in the README, so a
+        # crate with no README in the PR is still a G1 violation.
+        changed, added = g1.parse_status_lines(
+            _statused(["crates/sparq-foo/Cargo.toml"])
+        )
+        violations = g1.evaluate(
+            changed,
+            added,
+            stub_overrides={"sparq-foo": False},
+            bench_overrides={"sparq-foo": False},
+            exempt_overrides={"sparq-foo": True},
+        )
+        self.assertEqual(len(violations), 1)
+        _, missing = violations[0]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("README", missing[0])
+
+    def test_non_exempt_published_crate_still_fails(self):
+        # The exemption is NARROW: without the marker a published, benchless,
+        # SKILL-less new crate is still blocked (this is the control for the
+        # test above — if the hatch leaked, this would go green).
+        changed, added = g1.parse_status_lines(
+            _statused(["crates/sparq-foo/Cargo.toml", "crates/sparq-foo/README.md"])
+        )
+        violations = g1.evaluate(
+            changed,
+            added,
+            stub_overrides={"sparq-foo": False},
+            bench_overrides={"sparq-foo": False},
+            exempt_overrides={"sparq-foo": False},
+        )
+        self.assertEqual(len(violations), 1)
+        _, missing = violations[0]
+        joined = " ".join(missing)
+        self.assertIn("benchmark", joined)
+        self.assertIn("SKILL.md", joined)
+
+    def test_exempt_marker_parsing_requires_nonempty_reason(self):
+        # The directive is STRICT (cf. sq-ixsf: a loose directive match is a hole
+        # in the gate). Drive the REAL disk-reading predicate against a temp
+        # REPO_ROOT so the regex + fail-closed defaults are exercised, not mocked.
+        cases = [
+            ("<!-- flow-on-exempt: bench lands in sq-abcd -->", "bench lands in sq-abcd"),
+            ("<!--flow-on-exempt:terse-->", "terse"),
+            ("<!--   FLOW-ON-EXEMPT :   spaced out   -->", "spaced out"),
+            ("prose before <!-- flow-on-exempt: mid-README -->\nand after", "mid-README"),
+            # Fail-closed forms — NOT an exemption:
+            ("<!-- flow-on-exempt: -->", None),          # empty reason
+            ("<!-- flow-on-exempt:    -->", None),       # whitespace-only reason
+            ("<!-- flow-on-exempt -->", None),           # no colon, no reason
+            ("flow-on-exempt: not in a comment", None),  # bare prose mention
+            ("<!-- flow-on-exempted: typo -->", None),   # not the exact token
+            # An EMPTY marker must not borrow a reason from a LATER comment: a
+            # greedy/DOTALL capture would read "a real reason" here and exempt.
+            ("<!-- flow-on-exempt: -->\n<!-- a real reason -->", None),
+            ("# sparq-foo\n\nJust a normal README.\n", None),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            crate_dir = root / "crates" / "sparq-foo"
+            crate_dir.mkdir(parents=True)
+            orig = g1.REPO_ROOT
+            try:
+                g1.REPO_ROOT = root
+                # No README at all → fail-closed (not exempt).
+                self.assertIsNone(g1.crate_flow_on_exempt_reason("sparq-foo"))
+                for text, expected in cases:
+                    (crate_dir / "README.md").write_text(text, encoding="utf-8")
+                    self.assertEqual(
+                        g1.crate_flow_on_exempt_reason("sparq-foo"),
+                        expected,
+                        f"README content: {text!r}",
+                    )
+            finally:
+                g1.REPO_ROOT = orig
+
     def test_copied_crate_counts_as_added(self):
         # [OPUS-4.8] `git diff -C` reports a newly-introduced path as a copy
         # (`C`/`C100`, "C<score>\t<old>\t<new>"); the destination must still be
