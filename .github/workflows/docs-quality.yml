@@ -1027,6 +1027,21 @@ jobs:
       # the same false header reds on arrival.
       - name: Self-test the alarm/detector lanes are DECLARED non-gating (sq-huwr8)
         run: python3 scripts/tests/test_alarm_lanes_non_gating.py
+      # [OPUS-5] sparq-org/sparq#4820: the MUTATION-RATCHET LEG REPORT
+      # (scripts/nightly/mutants_leg_report.py, ci.yml `mutants-nightly-report`).
+      # Hermetic (no gh, no network). The behavioural half replays the shape of a
+      # nightly whose run-level conclusion is `cancelled` while ten of its legs actually
+      # FAILED — the exact aggregate that hid this lane's failures for weeks — and
+      # asserts the two counts stay distinct, with a green-run negative control so
+      # "call everything broken" cannot satisfy it. The DRIFT half is why this suite
+      # must not leave CI: the script copies two workflow facts (the lane's job NAME,
+      # which it prefix-matches legs by, and the `timeout-minutes` caps it labels a
+      # capped leg from), and each copy degrades SILENTLY when stale — to "no legs
+      # matched" and "nothing was capped", both of which read as good news. It also
+      # pins the report job's advisory declaration, because an undeclared advisory job
+      # GATES (fail-closed, #3773) and this one reds on another lane's failures.
+      - name: Self-test the mutation-ratchet leg report (counts + workflow drift pins)
+        run: python3 scripts/tests/test_mutants_leg_report.py
       # [OPUS-5] sq-1lc4i: the CI EXECUTION-LATENCY alarm
       # (scripts/ci_execution_latency_alarm.py, .github/workflows/ci-latency-alarm.yml).
       # Hermetic (no gh, no network). Three halves: the classifiers for all three choke

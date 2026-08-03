@@ -4446,6 +4446,82 @@ jobs:
             target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/outcomes.json
             target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/mutants.json
 
+  mutants-nightly-report:
+    # [OPUS-5] sparq-org/sparq#4820 — MAKE THE MUTATION-RATCHET OUTCOME LEGIBLE.
+    #
+    # THE DEFECT THIS CLOSES. #4820 measured a night on which the lane above had TEN
+    # genuinely-FAILING legs and the run still reported conclusion `cancelled` — the same
+    # status a run killed at startup reports. Three things composed:
+    #   • the lane is declared advisory, so nothing red reaches a PR (correct by design);
+    #   • every leg carries `continue-on-error: true`, so none of those failures can fail
+    #     the RUN. The run-level conclusion is therefore decided by the other jobs — that
+    #     run also carried six cancelled ones — and whatever it ends up saying, it is
+    #     provably not reporting the ten failures;
+    #   • the failures sit inside the 51-leg matrix above, invisible unless expanded.
+    # None of those is individually wrong; composed they meant the mutation signal — the
+    # one thing that catches vacuous tests — was dead for weeks with nothing red anywhere.
+    #
+    # THE FIX IS THE NARROW ONE: read the JOB LIST (the run-level conclusion is a lossy
+    # aggregate of it — the same reason scripts/ci_selection_alarm.py stopped trusting it
+    # in #4965) and render ONE verdict: how many legs failed, which crates can therefore
+    # not be seeded this run, and what the run cost. This job REDS when a leg produced no
+    # verdict, so "ten legs are broken" is one named red job rather than ten needles.
+    #
+    # IT STILL CANNOT GATE, deliberately: it is DECLARED in .github/advisory-registry.json
+    # (since #3773 the only thing that makes a check-run non-gating — the name token is
+    # diagnostic only). It also runs on the nightly tier ONLY: on a PR / merge_group,
+    # `nightly-gate` is skipped, its `fresh` output is empty and this job skips with it,
+    # and the aggregator counts `skipped` as satisfied.
+    #
+    # NOT continue-on-error, deliberately: this is the only job in the mutation lane that
+    # can put a red on the run at all. What that BUYS is verifiable here — one named red
+    # JOB plus an `::error` annotation per failing leg, instead of ten needles in the
+    # matrix. What it MIGHT additionally buy is a run-level conclusion that stops reading
+    # as "ignore me"; GitHub's precedence between a failed job and cancelled siblings is
+    # not something this comment can assert, so treat that as expected-not-verified and
+    # confirm it on the first nightly.
+    # Redding this run costs no other lane, checked rather than assumed: `nightly-gate`
+    # reads the previous nightly's head_sha, never its conclusion; no
+    # ci/formal-verification.toml `[[lane]]` names ci.yml; and selection-alarm.yml admits
+    # every conclusion by design (#4965) while ci_selection_alarm.py's `correlate` ignores
+    # a failed job that names no crate and is not a `test (load-aware shard ` lane — this
+    # job is both — so it cannot manufacture a spurious selection finding.
+    #
+    # DOES NOT FIX the underlying failures (sparq-mpc / sparq-fedplan / sparq-reason are
+    # crate test-quality work, and the capped sparq-engine shards are a sizing decision).
+    # It is the instrument those two need: the per-leg durations + at-cap flags it prints
+    # are the "evidence of record" the matrix's own sizing comments defer to and which
+    # nobody was collecting.
+    name: mutation ratchet leg report (advisory)
+    needs: [nightly-gate, mutants-nightly-advisory]
+    # always(): the point of this job is to report when the lane DIDN'T succeed.
+    if: always() && needs.nightly-gate.outputs.fresh == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # list this run's own jobs
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          sparse-checkout: scripts/nightly/mutants_leg_report.py
+          sparse-checkout-cone-mode: false
+      - name: Self-test the report (hermetic fixtures)
+        # A broken detector reds before it is trusted to watch anything (formal-alarm idiom).
+        run: python3 scripts/nightly/mutants_leg_report.py --self-test
+      - name: Report every mutation-ratchet leg by conclusion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # `runs/<id>/jobs` defaults to filter=latest, i.e. THIS attempt's jobs.
+          # --jq '.jobs[]' emits one job object per line across every page.
+          gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+            --jq '.jobs[]' > jobs.jsonl
+          python3 scripts/nightly/mutants_leg_report.py --jobs-file jobs.jsonl
+
   unsafe-register:
     # [OPUS-4.8] sq-toze.6 / cert gap GX-5: GATING `unsafe`-count RATCHET. This is the
     # promotion the `geiger` job's own comment anticipated ("Promote to a gate later

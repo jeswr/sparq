@@ -86,6 +86,13 @@
    "registered": "2026-07-06",
    "gate_script_waiver": "scripts/mutants-gate.py is the mutation ratchet checker itself, run advisory while the per-crate baseline is seeding (sq-qcnn.11); exits non-fatally until sq-qcnn.27 promotes it to gating"
   },
+  "mutation ratchet leg report (advisory)": {
+   "workflow": "ci.yml",
+   "job_id": "mutants-nightly-report",
+   "owner_bead": "sq-qcnn.27",
+   "promotion_criteria": "NOT promotable while it watches an advisory lane — it REDs on the leg conclusions of `mutation ratchet (cargo-mutants, advisory)`, which is itself declared here, so gating on this report would gate on the advisory lane by proxy and defeat that declaration. It is a REPORTER: it exists so a nightly with failing legs stops reporting the same run-level conclusion as a nightly killed at startup (sparq-org/sparq#4820 — ten failing legs hidden behind `cancelled` because every leg is continue-on-error while a capped leg's `cancelled` propagates). Promote it only together with the lane it reports on: when sq-qcnn.27 drops the lane's declaration, delete this entry in the same change so the report becomes the single gating verdict over the legs. It runs on the nightly tier only (nightly-gate skipped on PR/merge_group => this job skips), so its declaration guards the push-to-main ci-summary poll set, where a scheduled run's check-runs land on the same head SHA (the sq-huwr8 silent-gating lesson).",
+   "registered": "2026-08-03"
+  },
   "unsafe report (cargo-geiger, informational)": {
    "workflow": "ci.yml",
    "job_id": "geiger",
