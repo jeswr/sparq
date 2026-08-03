@@ -37,12 +37,15 @@
 #       declared — the step it protects exists and comes AFTER it. Each of those is one
 #       of the mutations above, and none of them is observable anywhere else.
 #
-#       "Executes", not "contains": `requires_run` is matched against the reduction of
-#       the `run:` body to the text that actually runs (see `executable_run_text`), so
-#       commenting the invocation out, `echo`ing it, or moving it into a heredoc no
-#       longer satisfies the pin. A substring test over the raw scalar accepted all
-#       three, which made the pin assert the presence of the TEXT rather than of the
-#       guard.
+#       "Runs", not "contains": the `run:` body is reduced to the commands a shell would
+#       execute (`executable_invocations`) and each needle must then land in a POSITION
+#       that runs it (`executes_needle`) — at the head of a command, or in the argv of a
+#       recognised interpreter. Commenting the invocation out, moving it into a heredoc,
+#       quoting it, or handing it to any other command as data (`echo …`, `test -n '…'`,
+#       `grep … `) no longer satisfies the pin. A substring test over the raw scalar
+#       accepted all of those, which made the pin assert the presence of the TEXT rather
+#       than of the guard; so did a substring test over the reduced body, because every
+#       command that takes a string argument is a place to park the text.
 #
 #       An `if:` is PINNED, not banned. A lane can legitimately be conditional (which
 #       events verdict-bridge answers for, say), so an entry may declare
@@ -86,13 +89,18 @@
 #     swallows its own failure with `|| true` or `set +e` is NOT detected. That idiom has
 #     legitimate uses throughout the tree, so banning it is a separate and much larger
 #     piece of work, not a line in this script.
-#   * `executable_run_text` is a CONSERVATIVE shell reduction, not a shell parser. It
-#     drops comments, `echo`/`printf`/`:`/`true`/`false` arguments and heredoc bodies —
-#     the ways a required command survives as text without running — but it cannot see
-#     through indirection: a needle reached via `eval`, a variable, a function body, or a
-#     sourced script still reads as executed, and one guarded by `if false; then` reads
-#     as executed too. It closes the trivially-reachable bypasses; it does not decide
-#     reachability.
+#   * The `requires_run` reduction is a CONSERVATIVE shell approximation, not a shell
+#     parser, and S1 does not PROVE the named command executes. It fails closed on an
+#     unrecognised command head — only the ALLOW-list in `INTERPRETERS` lets a needle
+#     count from an argument position — but two gaps remain above that line. Within a
+#     recognised interpreter's argv it does not work out which word is the script, so a
+#     needle handed unquoted to a different script under the same interpreter
+#     (`python3 other.py --note python3 guard.py --self-test`) reads as executed. And it
+#     cannot see through indirection: a needle reached via `eval`, a variable, a function
+#     body or a sourced script reads as executed, and one guarded by `if false; then`
+#     reads as executed too. What it buys is that keeping the text while deleting the
+#     guard now takes a shape a reviewer can see in the diff, not that the shape is
+#     impossible.
 #   * S3's markers are deliberately narrow (an invocation at the start of a line, not a
 #     mention anywhere in the body) because a false positive here is an obligation
 #     imposed on an unrelated author. A safety step that is neither a self-test nor
@@ -142,12 +150,23 @@ WRITE_INVOCATION_RE = re.compile(
 
 
 # The `run:` reduction used by S1's `requires_run`. A command that survives only as
-# COMMENT text, as an `echo` argument or inside a heredoc body does not run, so none of
-# those may satisfy a pin.
+# COMMENT text, as another command's DATA argument or inside a heredoc body does not run,
+# so none of those may satisfy a pin.
 HEREDOC_RE = re.compile(r"<<-?[ \t]*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?")
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# Builtins that consume their arguments as DATA rather than executing them.
-DATA_COMMANDS = frozenset({"echo", "printf", ":", "true", "false"})
+# Heads whose ARGUMENTS name the thing that runs. Deliberately an ALLOW-list, not a
+# deny-list of data builtins: `test -n 'python3 scripts/x.py --self-test'` consumes that
+# text as data and exits 0, and so does every other command that takes a string, so an
+# unrecognised head must NOT be able to satisfy a pin. Unrecognised => the needle has to
+# sit at the COMMAND position instead, which fails closed (an offence to fix by naming the
+# real invocation, never a bypass).
+INTERPRETERS = frozenset({"python", "python3", "bash", "sh", "dash", "zsh", "node", "ruby", "perl"})
+# `-c` hands an interpreter inline CODE rather than a path. Whether a needle inside that
+# code runs is not decidable here, so the whole invocation is dropped rather than trusted.
+# Just the one spelling on purpose: `-c` is what every head in INTERPRETERS uses, whereas
+# `-e` would collide with the shells' errexit flag and drop `sh -e script.sh` — and the
+# `-e`/`--eval` spellings carry a quoted body anyway, which `mask_quoted` already blanks.
+INLINE_CODE_FLAGS = frozenset({"-c"})
 
 
 def strip_comment(line: str) -> str:
@@ -223,19 +242,58 @@ def split_commands(line: str) -> list[str]:
     return commands
 
 
-def executable_run_text(run: object) -> str:
-    """Reduce a `run:` body to the text a shell would actually EXECUTE.
+def mask_quoted(text: str) -> str:
+    """Blank out quoted spans, so a needle can only match text the shell reads as CODE.
 
-    Conservative on purpose — see the module header's limits. It removes the three ways
-    a command survives in the body as inert text: a comment, an argument to a data
-    builtin (`echo foo`), and a heredoc body.
+    `python3 -m pytest 'python3 scripts/x.py --self-test'` passes the needle as a single
+    quoted word; blanking it means the pin sees the invocation, not the string.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text) and quote != "'":
+            out.append("\x00" if quote else char)
+            out.append("\x00" if quote else text[index + 1])
+            index += 2
+            continue
+        if quote is not None:
+            out.append("\x00")
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            out.append("\x00")
+            index += 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def executable_invocations(run: object) -> list[tuple[str, bool]]:
+    """Reduce a `run:` body to the COMMANDS a shell would actually execute.
+
+    Returns one `(text, argv_is_executed)` pair per surviving command: `text` is the
+    command with leading `VAR=` assignments dropped, whitespace collapsed to single
+    spaces and quoted spans blanked, and `argv_is_executed` says whether its head is a
+    recognised interpreter — i.e. whether its arguments NAME something that runs, or are
+    merely data it consumes. `executes_needle` is the only thing that reads either.
+
+    Conservative on purpose — see the module header's limits. It removes the ways a
+    command survives in the body as inert text: a comment, a heredoc body, an argument
+    to any head that is not a recognised interpreter, a quoted string, and the body of
+    an interpreter `-c`.
 
     The one shape an author has to know about: the separators `;`, `&&`, `||`, `|` and
     `&` are consumed by the split, so a `requires_run` needle must not span one. That
     direction fails closed (an offence to fix, not a bypass), which is why the split is
     written this way rather than trying to preserve them.
     """
-    kept: list[str] = []
+    kept: list[tuple[str, bool]] = []
     terminator: str | None = None
     for raw in str(run).splitlines():
         if terminator is not None:
@@ -250,13 +308,44 @@ def executable_run_text(run: object) -> str:
         for command in split_commands(line):
             words = command.split()
             while words and ASSIGNMENT_RE.match(words[0]):
-                words = words[1:]  # `FOO=1 echo bar` still echoes
+                words = words[1:]  # the head of `FOO=1 python3 x.py` is still python3
             if not words:
                 continue
-            if words[0].rsplit("/", 1)[-1] in DATA_COMMANDS:
-                continue
-            kept.append(command)
-    return "\n".join(kept)
+            argv_is_executed = words[0].rsplit("/", 1)[-1] in INTERPRETERS
+            if argv_is_executed and INLINE_CODE_FLAGS.intersection(words[1:]):
+                continue  # `bash -c '…'` — inline code, not a path this can read
+            kept.append((mask_quoted(" ".join(words)), argv_is_executed))
+    return kept
+
+
+def executes_needle(invocations: list[tuple[str, bool]], needle: str) -> bool:
+    """Does any surviving command RUN `needle`, rather than merely mention it?
+
+    Exactly two positions count:
+
+      * the COMMAND position — the command begins with the needle
+        (`scripts/guard.sh --check`); or
+      * inside the argv of a recognised interpreter
+        (`python3 scripts/guard.py --self-test`).
+
+    Anything else — `test -n '<needle>'`, `grep <needle> file`, an unrecognised head —
+    is a command consuming the text as DATA, and does not satisfy the pin. That is the
+    whole reason this is not a substring test over the reduced body: every command that
+    takes a string argument would otherwise be a way to keep the pinned text while
+    deleting the guard.
+
+    What it still cannot decide, stated plainly: within a recognised interpreter's argv
+    it does not work out WHICH word is the script, so a needle handed unquoted to a
+    *different* script under the same interpreter (`python3 other.py --note <needle>`)
+    reads as executed. Narrower than "any command's arguments count"; not a proof of
+    execution.
+    """
+    for text, argv_is_executed in invocations:
+        if text.startswith(needle):
+            return True
+        if argv_is_executed and needle in text:
+            return True
+    return False
 
 
 def swallows(value: object) -> bool:
@@ -453,14 +542,16 @@ def check_pinned_steps(root: Path, pinned: list[dict]) -> list[str]:
                 "failure is now invisible in the job's conclusion"
             )
 
-        run = executable_run_text(step.get("run") or "")
+        invocations = executable_invocations(step.get("run") or "")
         for needle in entry.get("requires_run") or []:
-            if needle not in run:
+            if not executes_needle(invocations, needle):
                 offences.append(
                     f"S1 {entry_id}: step {step_name!r} no longer runs {needle!r} — the "
-                    "step survives but has stopped being the guard it was pinned as "
-                    "(commenting the invocation out, echoing it, or moving it into a "
-                    "heredoc leaves the text but not the guard)"
+                    "step survives but has stopped being the guard it was pinned as. The "
+                    "needle must sit at a command position, or in the argv of a "
+                    "recognised interpreter; commenting it out, moving it into a heredoc "
+                    "or handing it to another command as data (`echo …`, `test -n '…'`) "
+                    "leaves the text but not the guard"
                 )
 
         protected = entry.get("must_precede_step")
@@ -792,6 +883,62 @@ def self_test() -> int:
         CLEAN_REGISTRY,
         True,
     )
+    # …and these three are the same bypass through a command the reduction KEEPS, which
+    # is the hole a substring test cannot close however good the reduction gets: the
+    # needle survives as an argument, the command exits 0, and the guard never runs. The
+    # pre-fix checker — a substring test over the reduced body, with no quote handling —
+    # accepted all three. Only a POSITION test reds here.
+    case(
+        "S1: the invocation is handed to `test -n` as a DATA argument",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/tests/test_sweeper.py\n",
+            "          test -n 'python3 scripts/tests/test_sweeper.py'\n",
+        ),
+        CLEAN_REGISTRY,
+        True,
+    )
+    case(
+        "S1: the invocation survives only as an UNQUOTED argument to a non-interpreter",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/tests/test_sweeper.py\n",
+            "          ls scripts/tests/test_sweeper.py\n",
+        ),
+        CLEAN_REGISTRY,
+        True,
+    )
+    case(
+        "S1: the invocation survives only as a QUOTED argument to the real guard",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/tests/test_sweeper.py\n",
+            "          python3 scripts/sweeper.py --note 'python3 scripts/tests/test_sweeper.py'\n",
+        ),
+        CLEAN_REGISTRY,
+        True,
+    )
+    # FAIL-CLOSED, not a bypass: `bash -c python3\ …` really does run the suite, but the
+    # checker will not credit an inline `-c` body — it cannot decide whether code inside
+    # one runs, and crediting it would re-open the hole for `-c "$MAYBE_EMPTY"`. The fix
+    # is to invoke the guard directly, which is what the pin is for. Written unquoted on
+    # purpose: the quoted spelling is already killed by `mask_quoted`, so a quoted fixture
+    # here would pass with the `-c` rule deleted and prove nothing.
+    case(
+        "fail-closed: an interpreter `-c` inline body is never credited as the guard",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/tests/test_sweeper.py\n",
+            "          bash -c python3\\ scripts/tests/test_sweeper.py\n",
+        ),
+        CLEAN_REGISTRY,
+        True,
+    )
+    case(
+        "control: an executable invoked directly, at the command position, still runs",
+        CLEAN_WORKFLOW.replace(
+            "          python3 scripts/tests/test_sweeper.py\n",
+            "          scripts/tests/test_sweeper.py --verbose\n",
+        ),
+        CLEAN_REGISTRY,
+        False,
+    )
     case(
         "control: a trailing `#` comment beside a live invocation is still a live invocation",
         CLEAN_WORKFLOW.replace(
@@ -961,7 +1108,9 @@ def self_test() -> int:
     print(
         f"check-workflow-step-guards self-test: {len(cases)} cases OK "
         "(S1 step/job deletion + conditional + swallow + reorder + de-guard "
-        "incl. comment/echo/heredoc, S2 undeclared/expression swallow, "
+        "incl. comment/echo/heredoc and the text-as-data bypasses "
+        "`test -n '…'`/unquoted-data-argument/`-c` body/quoted argument, "
+        "S2 undeclared/expression swallow, "
         "S3 undeclared lane incl. a second lane in an already-pinned job, schema)"
     )
     return 0
