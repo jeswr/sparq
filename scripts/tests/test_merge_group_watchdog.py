@@ -740,6 +740,80 @@ class TestQueueLevelDropEndToEnd(unittest.TestCase):
             mgw.ROUTE_DEMOTE,
         )
 
+    def test_a_backdated_commit_after_the_grant_still_forfeits_the_verdict(self):
+        # THE ARM'S SHARPEST EDGE: this arm consults no watchdog marker and binds to no
+        # group head, so the tree precondition is the ONLY thing standing between a
+        # queue-level drop and `gh pr merge --auto`. A `committed` row dates itself from
+        # `committer.date`/`author.date` — metadata the pusher picks — so a commit pushed
+        # after `review:pass` (a cherry-pick, `git commit --date`, `GIT_COMMITTER_DATE`)
+        # can claim 22:40 and slip under the 22:50 grant. Where the row LANDS is not the
+        # pusher's to write, and it lands after the grant, so the verdict must fall.
+        for drop_reason in ("QUEUE_CLEARED", "ROLL_BACK"):
+            with self.subTest(reason=drop_reason):
+                harness = FakeWatchdog.build(
+                    suites=8,
+                    comments=[],
+                    timeline=[
+                        {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                         "label": {"name": "review:pass"}},
+                        {"event": "added_to_merge_queue",
+                         "created_at": "2026-07-27T22:58:53Z"},
+                        # Pushed LAST, dated BEFORE the grant — both stamps, so neither
+                        # the committer nor the author fallback rescues the comparison.
+                        {"event": "committed",
+                         "committer": {"date": "2026-07-27T22:40:00Z"},
+                         "author": {"date": "2026-07-27T22:40:00Z"}},
+                    ],
+                )
+                route = harness.watchdog.classify_dequeue(99900001, drop_reason)
+                self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+                self.assertIn("timeline order decides", route.detail)
+
+    def test_a_commit_with_no_readable_date_after_the_grant_forfeits_it(self):
+        # A `committed` row whose dates are missing or unparseable contributes nothing to
+        # `head_moved_at`. Before the ordering signal it therefore vanished from the
+        # check entirely — an undated head move was indistinguishable from no head move.
+        harness = FakeWatchdog.build(
+            suites=8,
+            comments=[],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+                {"event": "committed", "committer": {"date": "not-a-date"}},
+            ],
+        )
+        state = harness.watchdog.verdict_state(99900001)
+        self.assertIsNone(state.head_moved_at)
+        self.assertTrue(state.head_moved_after_grant_in_order)
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(99900001, "ROLL_BACK").route,
+            mgw.ROUTE_DEMOTE,
+        )
+
+    def test_a_commit_before_the_newest_grant_keeps_the_verdict(self):
+        # The ordering signal must not fire on the re-grant shape, or every PR whose
+        # verdict was restored after a push would be demoted straight back again.
+        harness = FakeWatchdog.build(
+            suites=8,
+            comments=[],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "committed", "committer": {"date": "2026-07-27T22:45:00Z"}},
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
+        )
+        self.assertFalse(
+            harness.watchdog.verdict_state(99900001).head_moved_after_grant_in_order
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(99900001, "QUEUE_CLEARED").route,
+            mgw.ROUTE_PRESERVE,
+        )
+
     def test_classify_still_never_mutates_on_this_arm(self):
         harness = FakeWatchdog.build(
             suites=8,

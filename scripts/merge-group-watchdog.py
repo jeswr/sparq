@@ -505,6 +505,19 @@ class VerdictState:
     # an empty tuple is read as "the budget could not be evaluated" (=> demote), never
     # as "zero attempts so far" — an unreadable history is not evidence of no history.
     enqueued_at: tuple[datetime, ...] = ()
+    # TRUE when a head-moving row (`committed` / `head_ref_force_pushed`) sits AFTER the
+    # newest `review:pass` grant in TIMELINE ORDER. Tracked separately from
+    # `head_moved_at` because a `committed` row carries NO event timestamp — only the
+    # commit's own `committer.date`/`author.date`, which is metadata the pusher chooses
+    # (`git commit --date`, `GIT_COMMITTER_DATE`, a cherry-pick that preserves dates).
+    # A commit pushed AFTER the grant can therefore claim a date BEFORE it and slide
+    # under the `head_moved_at > review_pass_at` comparison, carrying a verdict across a
+    # tree nobody reviewed. Where the row LANDS in the timeline GitHub returns is not the
+    # pusher's to write, so the two signals are read as a UNION: either one saying the
+    # head moved is enough to refuse. That union only ever ADDS refusals — this field
+    # defaults to False ("no ordering evidence"), which leaves the date comparison
+    # exactly as it stands today and can never relax it.
+    head_moved_after_grant_in_order: bool = False
 
 
 def decide_entry(
@@ -618,6 +631,18 @@ def verdict_is_still_for_this_tree(state: VerdictState) -> tuple[bool, str]:
         return False, (
             f"the head moved at {iso(state.head_moved_at)}, after review:pass was "
             f"granted at {iso(state.review_pass_at)} — the verdict is not for this tree"
+        )
+    # Checked AFTER the date comparison so the more precise "moved at <time>" reason wins
+    # whenever the dates are honest. This arm is what catches the dishonest ones: a
+    # `committed` row dates ITSELF, so a commit pushed after the grant can claim any
+    # earlier date it likes and pass the comparison above. Where the row LANDS is not
+    # the pusher's to write, so a head-moving row recorded after the newest grant
+    # forfeits the verdict on ordering alone, whatever the commit says its date was.
+    if state.head_moved_after_grant_in_order:
+        return False, (
+            "a head-moving timeline event is recorded AFTER the review:pass grant at "
+            f"{iso(state.review_pass_at)} — the verdict is not for this tree (the "
+            "commit's self-reported date claims otherwise; timeline order decides)"
         )
     return True, f"review:pass granted {iso(state.review_pass_at)} and the head has not moved since"
 
@@ -1039,6 +1064,12 @@ class Watchdog:
         A `committed` timeline event carries no `created_at` — its time is the
         commit's own `committer.date`. `head_ref_force_pushed` is a normal event with
         `created_at`. Both move the head, so both count.
+
+        A commit's dates are written by whoever made it, so they are NOT evidence of when
+        it reached the pull request. The row's INDEX in the timeline is, so the position
+        of the last head-moving row relative to the newest `review:pass` grant is
+        recorded alongside the dates and both are handed to
+        `verdict_is_still_for_this_tree`.
         """
         try:
             raw = self.gh_read(
@@ -1060,7 +1091,12 @@ class Watchdog:
         granted: list[datetime] = []
         moved: list[datetime] = []
         revoked: list[datetime] = []
-        for row in rows:
+        # -1 = "never seen". A head-moving row is counted here even when its dates are
+        # missing or unparseable, so a commit that reports no date at all still forfeits
+        # the verdict instead of vanishing from the check entirely.
+        last_grant_index = -1
+        last_move_index = -1
+        for index, row in enumerate(rows):
             event = row.get("event")
             stamp = parse_iso(row.get("created_at"))
             if event == "added_to_merge_queue" and stamp:
@@ -1068,6 +1104,7 @@ class Watchdog:
             elif event == "labeled" and stamp:
                 if str((row.get("label") or {}).get("name", "")).lower() == REVIEW_PASS:
                     granted.append(stamp)
+                    last_grant_index = index
             elif event == "unlabeled" and stamp:
                 # A verdict that was REMOVED is not a verdict, and it is recorded as a
                 # revocation rather than a head move so the reason stays truthful.
@@ -1075,7 +1112,9 @@ class Watchdog:
                     revoked.append(stamp)
             elif event == "head_ref_force_pushed" and stamp:
                 moved.append(stamp)
+                last_move_index = index
             elif event == "committed":
+                last_move_index = index
                 committed = parse_iso(
                     (row.get("committer") or {}).get("date")
                 ) or parse_iso((row.get("author") or {}).get("date"))
@@ -1087,6 +1126,9 @@ class Watchdog:
             last_enqueued_at=max(enqueued) if enqueued else None,
             enqueued_at=tuple(sorted(enqueued)),
             verdict_revoked_at=max(revoked) if revoked else None,
+            head_moved_after_grant_in_order=(
+                last_grant_index >= 0 and last_move_index > last_grant_index
+            ),
         )
 
     # -- mutations -----------------------------------------------------------
@@ -1504,6 +1546,16 @@ def self_test() -> None:
         enqueued_at=(now - timedelta(hours=1),),
     )
     assert queue_level(verdict=moved).route == ROUTE_DEMOTE
+    # ...including when the commit's SELF-REPORTED date predates the grant and only the
+    # timeline ORDER gives the push away.
+    backdated = VerdictState(
+        review_pass_at=now - timedelta(hours=2),
+        head_moved_at=now - timedelta(hours=3),
+        last_enqueued_at=now - timedelta(hours=1),
+        enqueued_at=(now - timedelta(hours=1),),
+        head_moved_after_grant_in_order=True,
+    )
+    assert queue_level(verdict=backdated).route == ROUTE_DEMOTE
     # ...and a MANUAL dequeue with no watchdog marker is still a human withdrawal.
     assert queue_level(reason="MANUAL").route == ROUTE_DEMOTE
     # The watchdog's OWN dequeue preserves without a second re-enqueue.
