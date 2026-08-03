@@ -204,6 +204,7 @@ jobs:
             --count "${COUNT:-unknown}" \
             --out-dir "$RUNNER_TEMP/differential-update-repro" \
             --jsonl .beads/issues.jsonl \
+            --replay-template 'cargo run -p sparq-bench --release -- update-fuzz --seed-start {seed} --seed-count {count}' \
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
       - name: Commit the new bug bead back to main (best-effort; fail-soft on ruleset-blocked push)
         if: failure()

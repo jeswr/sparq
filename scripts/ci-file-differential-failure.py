@@ -34,6 +34,12 @@
 #       --category equality --mode baseline --seed-start N --count M \
 #       --out-dir repro/ --jsonl .beads/issues.jsonl --run-url URL
 #   scripts/ci-file-differential-failure.py --self-test   # hermetic; no gh, no writes
+#
+# The `Replay:` line is a TEMPLATE (--replay-template) because the script is shared
+# by lanes whose fuzzers have different CLI shapes: the query fuzzer's positional
+# `fuzz <start> <count> <category>` (the default) and the UPDATE lane's
+# `update-fuzz --seed-start N --seed-count M` (differential-update.yml). The
+# placeholders are {seed}, {count} and {category}.
 from __future__ import annotations
 
 import argparse
@@ -53,6 +59,10 @@ MARKER = "[differential-fuzz]"
 _MISMATCH_RE = re.compile(r"^MISMATCH seed=(\d+)\s*$", re.MULTILINE)
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
+# The query fuzzer's positional CLI — the historical hard-coded shape, kept as the
+# default so lanes that do not pass --replay-template are unchanged.
+DEFAULT_REPLAY_TEMPLATE = "cargo run -p sparq-bench --release -- fuzz {seed} {count} {category}"
+
 
 def log(msg: str) -> None:
     print(f"[{PROG}] {msg}", file=sys.stderr)
@@ -71,6 +81,23 @@ def parse_fuzz_log(text: str) -> dict:
         if line.startswith("fuzz["):
             summary = line.strip()
     return {"seeds": seeds, "first_case": first_case, "summary": summary}
+
+
+def render_replay(args, seed, count) -> str:
+    """The deterministic replay command for this lane's fuzzer.
+
+    Substitution is a literal token replace (not str.format) so a template
+    containing other braces cannot raise; unknown tokens are simply left alone.
+    The non-baseline mode prefix (`MODE=1 …`) is applied on top, as before."""
+    template = getattr(args, "replay_template", None) or DEFAULT_REPLAY_TEMPLATE
+    replay = (
+        template.replace("{seed}", str(seed))
+        .replace("{count}", str(count))
+        .replace("{category}", str(args.category))
+    )
+    if args.mode != "baseline":
+        replay = f"{args.mode}=1 {replay}"
+    return replay
 
 
 def derive_bead_id(shard: str, date: str, existing_ids: set, n: int = 5) -> str:
@@ -134,13 +161,13 @@ def build_bead_record(bead_id: str, shard: str, parsed: dict, args, now: str) ->
         f"[BUG] {MARKER} shard={shard}: {n} differential mismatch(es) vs Oxigraph, "
         f"first seed={first} (window {args.seed_start}+{args.count}, mode={args.mode})"
     )
+    # With failing seeds the tightest repro is the single first seed; without them
+    # (a panic, say) fall back to replaying the whole window.
     replay = (
-        f"cargo run -p sparq-bench --release -- fuzz {first} 1 {args.category}"
+        render_replay(args, first, 1)
         if parsed["seeds"]
-        else f"cargo run -p sparq-bench --release -- fuzz {args.seed_start} {args.count} {args.category}"
+        else render_replay(args, args.seed_start, args.count)
     )
-    if args.mode != "baseline":
-        replay = f"{args.mode}=1 {replay}"
     description = (
         f"Auto-filed by the nightly differential lane (sq-0iqzw). Run: {args.run_url}\n"
         f"Failing seeds: {parsed['seeds'][:50]}{' …' if n > 50 else ''}\n"
@@ -178,9 +205,7 @@ def append_bead(jsonl_path: Path, record: dict) -> None:
 def build_issue_body(bead_id: str, shard: str, parsed: dict, args) -> str:
     n = len(parsed["seeds"])
     first = parsed["seeds"][0] if parsed["seeds"] else "?"
-    replay = f"cargo run -p sparq-bench --release -- fuzz {first} 1 {args.category}"
-    if args.mode != "baseline":
-        replay = f"{args.mode}=1 {replay}"
+    replay = render_replay(args, first, 1)
     seeds_line = ", ".join(str(s) for s in parsed["seeds"][:50]) + (" …" if n > 50 else "")
     case = parsed["first_case"] or "(no FIRST FAILING CASE block captured — see the artifact log)"
     return f"""> 🤖 **SPARQ agent** — auto-filed by the nightly differential-fuzz lane (bead sq-0iqzw). [FABLE-5]
@@ -305,6 +330,7 @@ def self_test() -> int:
         class A:  # minimal args stand-in
             seed_start, count, mode, category = "4695", "2200", "baseline", "equality"
             run_url = "https://example.invalid/run/1"
+            replay_template = DEFAULT_REPLAY_TEMPLATE
         rec = build_bead_record(b1, "equality", parsed, A, "2026-07-07T00:00:00Z")
         assert rec["priority"] == 1 and rec["issue_type"] == "bug" and rec["status"] == "open"
         assert "sq-0iqzw" in rec["description"] and "🤖" in rec["description"]
@@ -319,6 +345,34 @@ def self_test() -> int:
         body = build_issue_body(b1, "equality", parsed, A)
         assert "🤖" in body and "SPARQ agent" in body
         assert "--- graph ---" in body and "4695" in body
+        # ── replay template: both lane shapes ────────────────────────────────────
+        # (a) default = the query fuzzer's positional CLI, tightened to the first
+        #     failing seed; a missing --replay-template (older caller) is the same.
+        assert "Replay: cargo run -p sparq-bench --release -- fuzz 4695 1 equality\n" in rec["description"]
+        assert "`cargo run -p sparq-bench --release -- fuzz 4695 1 equality`" in body
+        class NoTemplate(A):
+            replay_template = None
+        assert render_replay(NoTemplate, 4695, 1) == render_replay(A, 4695, 1)
+        # (b) the UPDATE lane's flag-shaped CLI (differential-update.yml).
+        upd = argparse.Namespace(
+            seed_start="900", count="300", mode="baseline", category="update",
+            run_url="https://example.invalid/run/2",
+            replay_template=("cargo run -p sparq-bench --release -- update-fuzz "
+                             "--seed-start {seed} --seed-count {count}"),
+        )
+        upd_rec = build_bead_record(b1, "update-core", parsed, upd, "2026-07-07T00:00:00Z")
+        expected = ("cargo run -p sparq-bench --release -- update-fuzz "
+                    "--seed-start 4695 --seed-count 1")
+        assert f"Replay: {expected}\n" in upd_rec["description"], upd_rec["description"]
+        assert f"`{expected}`" in build_issue_body(b1, "update-core", parsed, upd)
+        assert "fuzz 4695" not in upd_rec["description"].replace("update-fuzz", "")
+        # No failing seeds (e.g. a panic) → replay the whole window, either shape.
+        assert render_replay(upd, upd.seed_start, upd.count).endswith(
+            "--seed-start 900 --seed-count 300")
+        assert render_replay(A, A.seed_start, A.count).endswith("fuzz 4695 2200 equality")
+        # The non-baseline mode prefix still applies on top of a custom template.
+        upd.mode = "SPARQ_MMAP"
+        assert render_replay(upd, 7, 1).startswith("SPARQ_MMAP=1 cargo run ")
         # Artifact writer round-trip.
         out = Path(td) / "repro"
         write_repro_artifact(out, parsed, sample, argparse.Namespace(
@@ -340,6 +394,12 @@ def main() -> int:
     ap.add_argument("--out-dir", help="repro artifact directory")
     ap.add_argument("--jsonl", default=".beads/issues.jsonl")
     ap.add_argument("--run-url", default="")
+    ap.add_argument(
+        "--replay-template",
+        default=DEFAULT_REPLAY_TEMPLATE,
+        help="replay command emitted in the issue/bead; placeholders {seed} {count} "
+        f"{{category}} (default: the query fuzzer's shape, {DEFAULT_REPLAY_TEMPLATE!r})",
+    )
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
