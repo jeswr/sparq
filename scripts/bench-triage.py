@@ -409,6 +409,30 @@ def select_open_issue(items: list[dict], marker: str, key: str) -> str | None:
     return None
 
 
+def open_issues_with_label(label: str) -> list[dict]:
+    """EVERY open issue carrying `label`, via REAL cursor pagination.
+
+    [OPUS-5] review of #5804: a single `gh issue list --limit N` page SILENTLY TRUNCATES
+    — gh stops at the limit and reports nothing, no warning, no non-zero exit. "At most
+    one open issue per key" bounds the issues per KEY; it does not bound the number of
+    distinct keys under the label, so once this lane carries more than one page of open
+    issues the newest-first page drops the OLDEST ones and a real match becomes
+    invisible — re-filing an issue we already filed, which is the very dedupe miss this
+    listing exists to prevent. `gh api --paginate` follows the Link chain to exhaustion
+    instead (same idiom as ci_execution_latency_alarm.py::file_issue and
+    ready-issues.py::_fetch). `{owner}`/`{repo}` resolve from the same repo context
+    `gh issue list` used, so nothing about WHICH repo is listed changes.
+
+    The REST issues endpoint returns PRs as well; they are dropped, so the rows handed
+    back are the same shape `gh issue list --json number,title` produced."""
+    out = gh("api", "--paginate", "--slurp",
+             "repos/{owner}/{repo}/issues?state=open"
+             f"&labels={label}&per_page=100")
+    pages = json.loads(out or "[]")
+    return [i for page in pages if isinstance(page, list) for i in page
+            if isinstance(i, dict) and "pull_request" not in i]
+
+
 def find_open_issue(label: str, marker: str, key: str) -> str | None:
     """Number of an existing open issue carrying `label` whose title matches
     `marker` + `key`, if any.
@@ -419,22 +443,17 @@ def find_open_issue(label: str, marker: str, key: str) -> str | None:
     `+`, over names that already carry `-`, under a leading `key=`) — and the search
     INDEX LAGS, so an issue this lane filed minutes ago can be invisible on the next
     tick. Either one MISSES an existing issue, and a missed dedupe re-files an issue we
-    already filed: the non-spam invariant failing open, quietly. Instead we list by the
-    lane's own label — which both call sites pass to `_post_issue`, and which bounds
-    the listing to this lane's own issues (at most one open per key, so the 100 below
-    is not a real truncation risk) — and match the title in Python, where no tokeniser
-    is involved. Same LISTING shape as ci_selection_alarm.py::open_issue_exists (which
-    matches a body marker rather than a title; the mechanism it avoids is the same).
+    already filed: the non-spam invariant failing open, quietly. Instead we enumerate
+    the lane's own label EXHAUSTIVELY (open_issues_with_label — no page limit to fall
+    off) and match the title in Python, where no tokeniser is involved. Same LISTING
+    shape as ci_execution_latency_alarm.py::file_issue (which matches a body marker
+    rather than a title; the mechanism it avoids is the same).
 
-    Callers MUST have called ensure_label(label, ...) first: `gh issue list --label`
-    ERRORS on a label the repo has never seen (the fail-soft path below then reads
-    that as "no open issue" and files a duplicate)."""
+    Callers MUST have called ensure_label(label, ...) first: an unknown label makes the
+    listing empty, and the fail-soft path below then reads that as "no open issue" and
+    files a duplicate."""
     try:
-        out = gh(
-            "issue", "list", "--state", "open", "--label", label,
-            "--json", "number,title", "--limit", "100",
-        )
-        return select_open_issue(json.loads(out or "[]"), marker, key)
+        return select_open_issue(open_issues_with_label(label), marker, key)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
         log(f"warning: issue dedupe listing failed ({e})")
     return None
@@ -1058,6 +1077,38 @@ def self_test() -> int:
     # hard-zone regression issue (they are different findings, and both lists are read
     # from the same shape of payload).
     assert select_open_issue(listed, REGRESSION_MARKER, suite_key) is None
+
+    # [OPUS-5] review of #5804: the LISTING must not silently truncate. "One open issue
+    # per key" does not bound the number of KEYS under the label, so the label really can
+    # carry more than a page. The stub emulates BOTH gh shapes faithfully — `api
+    # --paginate` exhausts the page chain, `issue list --limit N` keeps only the NEWEST N
+    # — so reverting find_open_issue() to the single-page call is EXECUTABLE here and
+    # fails on the MISSING ROW rather than on an unrecognised command line.
+    real_gh = globals()["gh"]
+    total, wanted = 250, 3          # > one page; the match is the OLDEST issue of all
+    corpus = [{"number": n, "title": f"{FLAKE_MARKER} suite=filler{n}: soft zone"}
+              for n in range(1, total + 1)]
+    corpus[wanted - 1]["title"] = f"{FLAKE_MARKER} {suite_key}: benchmarks in the soft zone"
+    newest_first = sorted(corpus, key=lambda r: -r["number"])
+
+    def stub_gh(*argv):
+        if argv[0] == "api":
+            assert "--paginate" in argv, argv   # one page is not an exhaustive listing
+            return json.dumps([newest_first[i:i + 100]
+                               for i in range(0, len(newest_first), 100)])
+        if list(argv[:2]) == ["issue", "list"]:
+            limit = int(argv[argv.index("--limit") + 1])
+            return json.dumps(newest_first[:limit])
+        raise AssertionError(f"unexpected gh invocation: {argv}")
+
+    globals()["gh"] = stub_gh
+    try:
+        assert find_open_issue(FLAKE_LABEL, FLAKE_MARKER, suite_key) == str(wanted), (
+            "the dedupe listing must reach PAST the first page — a truncated listing "
+            "reports 'no open issue' and re-files one that is already open")
+        assert find_open_issue(FLAKE_LABEL, FLAKE_MARKER, "suite=absent") is None
+    finally:
+        globals()["gh"] = real_gh
 
     log("self-test OK")
     return 0

@@ -493,36 +493,46 @@ def advance_block_verdict(advances, alarm_open):
 # "[demoted-lane] lane=<lane>: full-form CI run failed".
 COVERAGE_ALARM_LANE = "coverage-ratchet-main"
 # The GitHub label that filer puts on every issue it opens
-# (scripts/ci-file-demoted-lane-failure.py ISSUE_LABEL). This probe bounds its listing
+# (scripts/ci-file-demoted-lane-failure.py ISSUE_LABEL). This probe scopes its listing
 # by the SAME label the filer dedupes by, so the two cannot disagree about which issues
 # are candidates.
 COVERAGE_ALARM_LABEL = "demoted-lane"
 
 
-def open_alarm_issue_state(lane=COVERAGE_ALARM_LANE, log=print):
+def open_alarm_issue_state(lane=COVERAGE_ALARM_LANE, log=print, run=None):
     """[SONNET-4.6] sq-6vshe.17: probe GitHub for an OPEN post-merge coverage alarm issue.
 
     Returns True (an open alarm exists), False (none), or None (the probe could not run —
     the caller FAILS OPEN). Matches the filer's own dedupe listing + title contract exactly
-    (scripts/ci-file-demoted-lane-failure.py find_open_issue), so the two cannot drift on
-    which issue counts as "the alarm".
+    (scripts/ci-file-demoted-lane-failure.py find_open_issue / open_issues_with_label), so
+    the two cannot drift on which issue counts as "the alarm".
 
     [OPUS-5] #5804: list by COVERAGE_ALARM_LABEL and match the title in Python rather than
     asking `--search` to do it. gh's search tokeniser handles `lane=<lane>` unreliably and
     its index lags, so the old query could MISS a just-filed alarm and report False — the
-    ratchet-advance pause failing OPEN on a red main. This probe never creates the label
-    (it runs read-only in the PR-time `coverage-floors` job): if the repo has never seen
-    it, `gh issue list --label` errors and we return None, which the caller already treats
-    as fail-OPEN — the same verdict the old query's empty result produced, so nothing that
-    used to block stops blocking."""
+    ratchet-advance pause failing OPEN on a red main.
+
+    [OPUS-5] review of #5804: the listing must also be EXHAUSTIVE. `gh issue list --limit
+    N` silently truncates newest-first, and one open issue per lane does not bound the
+    number of distinct LANES under `demoted-lane` — an alarm older than a page of other
+    demoted-lane issues would fall off and read as "no alarm", the pause failing open on
+    a red main. `gh api --paginate` follows the Link chain to exhaustion instead;
+    `{owner}`/`{repo}` resolve from the same repo context `gh issue list` used. `run` is
+    injectable so --self-test can exercise this without a network.
+
+    This probe never creates the label (it runs read-only in the PR-time
+    `coverage-floors` job); an unknown label simply lists nothing, which is the same
+    "no alarm" verdict the old empty search produced."""
     marker = "[demoted-lane]"
     try:
-        r = subprocess.run(
-            ["gh", "issue", "list", "--state", "open",
-             "--label", COVERAGE_ALARM_LABEL,
-             "--json", "number,title", "--limit", "100"],
+        r = (run or subprocess.run)(
+            ["gh", "api", "--paginate", "--slurp",
+             "repos/{owner}/{repo}/issues?state=open"
+             f"&labels={COVERAGE_ALARM_LABEL}&per_page=100"],
             capture_output=True, text=True, timeout=120, check=True)
-        items = json.loads(r.stdout or "[]")
+        pages = json.loads(r.stdout or "[]")
+        items = [i for page in pages if isinstance(page, list) for i in page
+                 if isinstance(i, dict) and "pull_request" not in i]
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as e:
         log(f"  note: could not probe the post-merge coverage alarm ({e}) — fail-OPEN")
         return None
@@ -1014,6 +1024,41 @@ def self_test():
     # governed lowering under --allow-lower raises nothing, so it is never paused).
     for st in (True, False, None):
         assert advance_block_verdict([], st) == 0, "no raise must never block"
+
+    # [OPUS-5] review of #5804: the alarm PROBE's listing must be exhaustive. One open
+    # issue per lane does not bound the number of distinct LANES under `demoted-lane`, so
+    # an alarm older than a page of other demoted-lane issues would fall off a
+    # `--limit N` page, read as "no alarm", and let the ratchet advance on a red main.
+    # The fake emulates BOTH gh shapes — `api --paginate` exhausts the page chain,
+    # `issue list --limit N` keeps only the NEWEST N — so a reverted probe is EXECUTABLE
+    # here and fails on the MISSING ROW, not on an unrecognised command line.
+    alarm_title = f"[demoted-lane] lane={COVERAGE_ALARM_LANE}: full-form CI run failed"
+    rows = [{"number": n, "title": f"[demoted-lane] lane=filler{n}: full-form CI run failed"}
+            for n in range(1, 251)]
+    rows[0]["title"] = alarm_title              # the OLDEST issue: last page, never page 1
+    newest_first = sorted(rows, key=lambda r: -r["number"])
+
+    class _FakeRun:
+        def __init__(self, stdout):
+            self.stdout, self.returncode = stdout, 0
+
+    def fake_gh(argv, **kw):
+        if argv[1] == "api":
+            assert "--paginate" in argv, argv   # one page is not an exhaustive listing
+            return _FakeRun(json.dumps([newest_first[i:i + 100]
+                                        for i in range(0, len(newest_first), 100)]))
+        if argv[1:3] == ["issue", "list"]:
+            return _FakeRun(json.dumps(newest_first[:int(argv[argv.index("--limit") + 1])]))
+        raise AssertionError(f"unexpected gh invocation: {argv}")
+
+    assert open_alarm_issue_state(log=quiet, run=fake_gh) is True, (
+        "the alarm probe must reach PAST the first page — a truncated listing reports "
+        "'no alarm' and lets the ratchet advance while main is RED")
+    assert open_alarm_issue_state(lane="never-filed", log=quiet, run=fake_gh) is False
+    # A probe that cannot run at all must FAIL-OPEN (None), not assert "no alarm".
+    def boom(argv, **kw):
+        raise OSError("gh not installed")
+    assert open_alarm_issue_state(log=quiet, run=boom) is None
 
     # check_advance_allowed end-to-end over the PURE seam (injected probe, no gh):
     # a raise + open alarm FAILS; the same tree with no alarm PASSES.
