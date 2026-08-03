@@ -1044,6 +1044,23 @@ jobs:
       # leave CI.
       - name: Self-test the CI execution-latency alarm (3 choke modes + YAML seam)
         run: python3 scripts/tests/test_ci_execution_latency_alarm.py
+      # [OPUS-5] sparq-org/sparq#5127: the `__global__` STOCK alarm
+      # (scripts/global_stock_alarm.py, .github/workflows/global-stock-alarm.yml) — the
+      # observability half of #4582, which the deriver's per-run status structurally
+      # cannot carry (`pr-area-label` reports `success` on every run in which a PR sits
+      # unattributed, because emitting no label IS its fail-closed contract). Hermetic
+      # (no gh, no network). Two halves: the sweep's classification and the source-issue
+      # cross-check that keeps an issue-rescued PR out of the stock, plus the
+      # consecutive-sweep persistence — one sighting quiet, two running loud, a PR that
+      # leaves the stock losing its streak, the memory advancing on the RED tick, and the
+      # fail-louds for corrupt / foreign / silently-lost state; and the YAML SEAM, where
+      # this lane's memory actually lives (restore and save agreeing on one cache path
+      # and one rolling key family, the save guarded by `always()`, the sparse-checkout
+      # carrying the readiness engine the detector imports, and permissions with
+      # `issues: write` but NO `pull-requests: write` so it can never label the PRs it
+      # reports on). The suite pins its OWN call site here, so it cannot silently leave CI.
+      - name: Self-test the __global__ stock alarm (sweep + cross-tick memory + YAML seam)
+        run: python3 scripts/tests/test_global_stock_alarm.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
