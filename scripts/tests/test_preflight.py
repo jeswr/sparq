@@ -22,7 +22,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-try:  # PyYAML is the ONE non-stdlib import in this file; see _yaml_seam_must_run.
+try:  # PyYAML is the ONE non-stdlib import in this file; see _missing_yaml_is_fatal.
     import yaml
 except ImportError:  # pragma: no cover - exercised by running with PyYAML absent
     yaml = None
@@ -54,12 +54,19 @@ PY = "scripts/thing.py"
 # used to raise ModuleNotFoundError, so the suite reported `FAILED (errors=5)`
 # and an author could not tell that apart from a real regression in their diff.
 #
-# They now SKIP instead — but ONLY outside CI. A bare skip would be a hole: if
+# They now SKIP instead, ALWAYS — a test that cannot parse YAML cannot check the
+# seam, in CI or out of it, and running it anyway just dereferences `yaml is
+# None` once per test. A bare skip on its own would be a hole, though: if
 # docs-quality.yml's `Install PyYAML` step were ever dropped, the seam tests
-# would silently vanish from the run and the very wiring this class defends
-# would go unchecked — the vacuous-gate shape its own docstring warns about. So
-# in CI the parser is MANDATORY: the skip never applies there, and a missing
-# PyYAML is a hard failure via test_pyyaml_is_installed_in_ci.
+# would silently vanish from the run and the very wiring they defend would go
+# unchecked — the vacuous-gate shape their own docstring warns about.
+#
+# So the two concerns are split, and that split is the point:
+#   - TheYamlSeamIsGating skips whenever PyYAML is absent, so it never touches
+#     `yaml`. That is what keeps the failure output to ONE line.
+#   - PyYAMLIsMandatoryInCI never skips, and reds when the parser is missing in
+#     CI. That is what keeps the skip from being an escape hatch.
+# Together: absent-in-CI == exactly one clear failure plus a run of skips.
 #
 # CI markers match the repo convention in scripts/flow-on.py (GITHUB_ACTIONS or
 # a truthy CI); docs-quality.yml's `quick-gates` job hosts this suite AND the
@@ -76,21 +83,27 @@ def _running_in_ci(env: dict[str, str]) -> bool:
     return any(_is_truthy(env.get(v)) for v in CI_ENV_VARS)
 
 
-def _yaml_seam_must_run(env: dict[str, str], have_yaml: bool) -> bool:
-    """True iff the YAML seam tests must run rather than skip.
+def _missing_yaml_is_fatal(env: dict[str, str], have_yaml: bool) -> bool:
+    """True iff an absent PyYAML must RED the suite rather than just skip it.
 
-    Skipping is permitted in exactly one case — PyYAML absent AND not in CI.
-    In CI the seam always runs, so a dropped install reds the suite.
+    Absent is tolerable in exactly one place — a bare local checkout, where
+    preflight.py itself is dependency-free. In CI it means the install step was
+    dropped and the seam tests stopped checking anything, so it is a failure.
     """
-    return have_yaml or _running_in_ci(env)
+    return not have_yaml and _running_in_ci(env)
 
 
 HAVE_YAML = yaml is not None
-_SEAM_MUST_RUN = _yaml_seam_must_run(os.environ, HAVE_YAML)
 _SKIP_REASON = (
     "PyYAML is not installed — the workflow-seam tests need a YAML parser. "
-    "They are skipped locally (preflight.py itself is dependency-free) and are "
-    "MANDATORY in CI. `pip install pyyaml` to run them here."
+    "They are skipped (preflight.py itself is dependency-free); in CI the "
+    "missing parser is reported once by PyYAMLIsMandatoryInCI instead. "
+    "`pip install pyyaml` to run them here."
+)
+_MISSING_IN_CI_MSG = (
+    "PyYAML is missing in CI — docs-quality.yml's quick-gates job must install "
+    "it (.github/requirements/docs-quality.txt) or the workflow-seam tests stop "
+    "checking the wiring entirely."
 )
 
 
@@ -1034,50 +1047,103 @@ class WorkerBriefsCarryThePresubmitBlock(unittest.TestCase):
         )
 
 
-class TheYamlSkipIsLocalOnly(unittest.TestCase):
-    """#5575: the seam tests may skip on a bare checkout, never in CI.
+class PyYAMLIsMandatoryInCI(unittest.TestCase):
+    """#5575: the seam tests may skip on a bare checkout, never silently in CI.
 
-    These run everywhere — they take no YAML parser — so the skip policy itself
-    stays pinned even on the checkout where the seam tests are skipped.
+    Deliberately its OWN class and deliberately never skipped: it is the single
+    leg that reports a dropped `Install PyYAML` step. Its siblings in
+    TheYamlSeamIsGating skip when the parser is absent, so this is the only
+    thing that reds — one clear failure, no `NoneType.safe_load` cascade.
     """
 
-    def test_seam_runs_whenever_pyyaml_is_present(self) -> None:
-        self.assertTrue(_yaml_seam_must_run({}, True))
+    def test_pyyaml_is_installed_in_ci(self) -> None:
+        self.assertFalse(
+            _missing_yaml_is_fatal(os.environ, HAVE_YAML), _MISSING_IN_CI_MSG
+        )
 
-    def test_seam_skips_locally_when_pyyaml_is_absent(self) -> None:
+
+class TheYamlSkipIsLocalOnly(unittest.TestCase):
+    """The skip POLICY, pinned.
+
+    These run everywhere — they take no YAML parser — so the policy stays
+    checked even on the checkout where the seam tests themselves are skipped.
+    """
+
+    def test_a_present_parser_is_never_fatal(self) -> None:
+        for env in ({}, {"CI": "true"}, {"GITHUB_ACTIONS": "true"}):
+            with self.subTest(env=env):
+                self.assertFalse(_missing_yaml_is_fatal(env, True))
+
+    def test_a_missing_parser_is_tolerated_locally(self) -> None:
         # The actual bug: no parser + no CI must NOT be an error.
-        self.assertFalse(_yaml_seam_must_run({}, False))
+        self.assertFalse(_missing_yaml_is_fatal({}, False))
 
-    def test_seam_still_runs_in_ci_without_pyyaml(self) -> None:
-        # The un-gating hole a bare skipUnless would open. Kills: dropping the
-        # `_running_in_ci(env)` term from _yaml_seam_must_run.
+    def test_a_missing_parser_is_fatal_in_ci(self) -> None:
+        # The un-gating hole a bare skip would open. Kills: dropping the
+        # `_running_in_ci(env)` term from _missing_yaml_is_fatal.
         for env in ({"GITHUB_ACTIONS": "true"}, {"CI": "true"}, {"CI": "1"},
                     {"CI": "yes"}, {"GITHUB_ACTIONS": "on"}):
             with self.subTest(env=env):
                 self.assertTrue(
-                    _yaml_seam_must_run(env, False),
-                    f"{env} is CI — the seam must not be skippable there",
+                    _missing_yaml_is_fatal(env, False),
+                    f"{env} is CI — a missing parser must not pass unreported",
                 )
 
     def test_a_falsy_ci_marker_is_not_ci(self) -> None:
-        # `CI=false`/empty is how a local shell often looks; it must not force
-        # the seam to run (and then error) on a checkout with no PyYAML.
+        # `CI=false`/empty is how a local shell often looks; it must not red a
+        # bare checkout that simply has no PyYAML.
         for env in ({"CI": "false"}, {"CI": ""}, {"GITHUB_ACTIONS": "false"},
                     {"CI": "0"}, {}):
             with self.subTest(env=env):
-                self.assertFalse(_yaml_seam_must_run(env, False))
+                self.assertFalse(_missing_yaml_is_fatal(env, False))
 
-    def test_the_seam_class_is_decorated_with_the_predicate(self) -> None:
+    def test_the_seam_class_skips_exactly_when_the_parser_is_absent(self) -> None:
         # Pins the WIRING: computing the predicate but never applying it to the
-        # class would leave the ModuleNotFoundError bug in place.
-        # Kills: deleting the @unittest.skipUnless line.
+        # class would leave the ModuleNotFoundError bug in place; gating it on
+        # anything but HAVE_YAML brings back the NoneType.safe_load cascade.
+        # Kills: deleting the @unittest.skipUnless line, or widening it.
         self.assertEqual(
             getattr(TheYamlSeamIsGating, "__unittest_skip__", False),
-            not _SEAM_MUST_RUN,
+            not HAVE_YAML,
         )
 
+    def test_the_ci_mandate_itself_is_never_skipped(self) -> None:
+        # If this class ever grew a skip decorator the mandate would evaporate
+        # in exactly the case it exists for. Kills: decorating it with skipUnless.
+        self.assertFalse(getattr(PyYAMLIsMandatoryInCI, "__unittest_skip__", False))
 
-@unittest.skipUnless(_SEAM_MUST_RUN, _SKIP_REASON)
+    def test_absent_pyyaml_in_ci_reds_once_without_a_cascade(self) -> None:
+        # End-to-end, in a subprocess: mask PyYAML with a module that raises on
+        # import, mark the env as CI, and run the two YAML-facing classes. The
+        # run must fail, name the missing dependency, and NOT dereference the
+        # None module. Kills: reverting the skip to `HAVE_YAML or in_ci`, which
+        # produced `FAILED (failures=1, errors=5)` here.
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "yaml.py").write_text(
+                'raise ImportError("PyYAML masked by '
+                'test_absent_pyyaml_in_ci_reds_once_without_a_cascade")\n'
+            )
+            env = dict(os.environ)
+            env["CI"] = "true"
+            env.pop("GITHUB_ACTIONS", None)
+            env["PYTHONPATH"] = td + os.pathsep + env.get("PYTHONPATH", "")
+            proc = subprocess.run(
+                [sys.executable, "-m", "unittest", "-v",
+                 "test_preflight.PyYAMLIsMandatoryInCI",
+                 "test_preflight.TheYamlSeamIsGating"],
+                cwd=str(Path(__file__).resolve().parent),
+                env=env, capture_output=True, text=True,
+            )
+            out = proc.stdout + proc.stderr
+            self.assertNotEqual(proc.returncode, 0, f"masked PyYAML in CI passed:\n{out}")
+            self.assertIn("PyYAML is missing in CI", out, out)
+            self.assertNotIn("AttributeError", out, f"cascade instead of one failure:\n{out}")
+            self.assertNotIn("safe_load", out, f"cascade instead of one failure:\n{out}")
+            self.assertIn("failures=1", out, f"expected exactly one failure:\n{out}")
+            self.assertNotIn("errors=", out, f"expected no errors at all:\n{out}")
+
+
+@unittest.skipUnless(HAVE_YAML, _SKIP_REASON)
 class TheYamlSeamIsGating(unittest.TestCase):
     """The wiring, not just the logic.
 
@@ -1092,17 +1158,6 @@ class TheYamlSeamIsGating(unittest.TestCase):
         "python3 scripts/preflight.py --self-test",
         "python3 scripts/tests/test_preflight.py",
     )
-
-    def test_pyyaml_is_installed_in_ci(self) -> None:
-        # This class is never skipped in CI, so this leg is what reports a
-        # dropped `Install PyYAML` step as ONE clear failure rather than five
-        # ModuleNotFoundErrors. Outside CI it is skipped with its siblings.
-        self.assertTrue(
-            HAVE_YAML,
-            "PyYAML is missing in CI — docs-quality.yml's quick-gates job must "
-            "install it (.github/requirements/docs-quality.txt) or the "
-            "workflow-seam tests below stop checking the wiring entirely.",
-        )
 
     def _job_hosting(self, run_cmd: str):
         doc = yaml.safe_load((REPO_ROOT / self.WORKFLOW).read_text())
