@@ -47,8 +47,11 @@
 #
 # WHAT COUNTS AS A LABEL WRITE. Direct `gh pr/issue edit --add-label`, `gh label create/delete/…`,
 # the github-script `addLabels`/`removeLabel`/`setLabels` calls, and a MUTATING `gh api` against a
-# `/labels` path — plus ONE HOP of indirection, because the dominant shape in this repo is a step
-# that shells out to a script (`pr-area-labels.py`, `rearm-sweeper.py`, `verdict-bridge.py`, …).
+# `/labels` path — INCLUDING the method-less form, since `gh api` auto-switches from GET to POST as
+# soon as a field flag is supplied, so `gh api repos/$R/issues/$N/labels -f 'labels[]=needs:user'`
+# mutates labels while naming no method at all — plus ONE HOP of indirection, because the dominant
+# shape in this repo is a step that shells out to a script (`pr-area-labels.py`, `rearm-sweeper.py`,
+# `verdict-bridge.py`, …).
 # The label-writing script set is COMPUTED from `scripts/` by the same patterns, not hard-coded, so
 # a new writer script is covered the moment it is added. Over-inclusion is the safe direction: it
 # only makes the guard stricter, and `--self-test` is what proves it is not merely permissive.
@@ -104,10 +107,27 @@ LABEL_WRITE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"--remove-label\b"),
     re.compile(r"\bgh\s+label\s+(?:create|delete|edit|clone)\b"),
     re.compile(r"\.(?:addLabels|removeLabel|setLabels|removeAllLabels)\s*\("),
-    # A MUTATING gh api / REST call against a labels collection, in either flag order.
+    # An explicitly-methodded REST call against a labels collection, in either flag order. This
+    # covers `curl`/`gh api` alike; the method-LESS `gh api` form is handled by
+    # gh_api_writes_labels(), which a bare pattern cannot express (it needs a NEGATIVE test on an
+    # explicit read method).
     re.compile(r"(?:-X|--method)\s+(?:POST|PUT|PATCH|DELETE)\b[^\n]*?/labels\b"),
     re.compile(r"/labels\b[^\n]*?(?:-X|--method)\s+(?:POST|PUT|PATCH|DELETE)\b"),
 )
+
+# `gh api` is GET by default but AUTO-SWITCHES TO POST the moment any field flag is supplied, so a
+# label write need not name a method at all:
+#     gh api repos/$R/issues/$N/labels -f 'labels[]=needs:user'
+# mutates labels, and a rule that demanded an explicit `-X/--method` would wave the foreign PAT in
+# that step straight through R1. Classification mirrors `scripts/gh_retry.py`'s mutation guard,
+# which refuses the identical shape for the identical reason: a method other than GET/HEAD is a
+# write, and with NO method, field params imply the POST. Only an explicit read method makes a
+# fielded call a genuine GET.
+GH_API_RE = re.compile(r"\bgh\s+api\b")
+LABELS_PATH_RE = re.compile(r"/labels\b")
+API_METHOD_RE = re.compile(r"(?:-X|--method)(?:\s+|=)([A-Za-z]+)")
+API_FIELD_FLAG_RE = re.compile(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?:\s|=)")
+API_READ_METHODS = ("GET", "HEAD")
 
 # An action whose name is a labeler applies labels itself.
 LABELER_ACTION_RE = re.compile(r"\blabeler\b")
@@ -116,8 +136,48 @@ SECRET_REF_RE = re.compile(r"\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)")
 STEP_OUTPUT_TOKEN_RE = re.compile(r"\bsteps\.([A-Za-z0-9_-]+)\.outputs\.token\b")
 
 
+def logical_lines(text: str) -> list[str]:
+    """`text` split into lines, with shell `\\`-continuations joined.
+
+    A `run: |` block routinely wraps one command over several lines, and the flags that decide
+    whether a `gh api` call mutates (the method, the field params) land on the continuation. Read
+    per physical line, such a call reads as method-less and field-less.
+    """
+    joined: list[str] = []
+    pending = ""
+    for line in text.splitlines():
+        stripped = line.rstrip()
+        if stripped.endswith("\\"):
+            pending += stripped[:-1] + " "
+            continue
+        joined.append(pending + stripped)
+        pending = ""
+    if pending:
+        joined.append(pending)
+    return joined
+
+
+def gh_api_writes_labels(text: str) -> bool:
+    """True if `text` contains a MUTATING `gh api` call against a labels collection.
+
+    Per-command rather than per-file: a job may both read and write labels, and the read must not
+    launder the write (nor the write be excused by the read).
+    """
+    for command in logical_lines(text):
+        if not GH_API_RE.search(command) or not LABELS_PATH_RE.search(command):
+            continue
+        method = API_METHOD_RE.search(command)
+        if method is not None:
+            if method.group(1).upper() not in API_READ_METHODS:
+                return True
+            continue  # an explicit GET/HEAD is a genuine read, fields or not
+        if API_FIELD_FLAG_RE.search(command):
+            return True  # no method + fields => gh sends POST
+    return False
+
+
 def text_writes_labels(text: str) -> bool:
-    return any(p.search(text) for p in LABEL_WRITE_PATTERNS)
+    return any(p.search(text) for p in LABEL_WRITE_PATTERNS) or gh_api_writes_labels(text)
 
 
 def strip_comment_lines(text: str) -> str:
@@ -410,6 +470,55 @@ jobs:
         run: gh pr edit "$N" --add-label needs:user
 """
 
+# The default-POST escape: `gh api` names no method, so a method-demanding rule reads this as a
+# GET and the PAT escapes R1 — while gh actually POSTs, and the label is written by a human.
+_FIXTURE_GH_API_IMPLICIT_POST = """
+name: f
+on: [push]
+jobs:
+  park:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Park the PR
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_RING_TOKEN }}
+        run: |
+          gh api "repos/$R/issues/$N/labels" \\
+            -f 'labels[]=needs:user'
+"""
+
+# The explicit-method form, in the `--method=DELETE` spelling the flag-order patterns miss.
+_FIXTURE_GH_API_EXPLICIT_METHOD = """
+name: f
+on: [push]
+jobs:
+  park:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unpark the PR
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_RING_TOKEN }}
+        run: gh api --method=DELETE "repos/$R/issues/$N/labels/needs:user"
+"""
+
+# The counterpart the widening must NOT swallow: reading labels is not writing them, so a genuine
+# GET keeps its own credential's business to itself — including the fielded explicit-GET form,
+# where the fields do NOT imply a POST.
+_FIXTURE_GH_API_GENUINE_GET_OK = """
+name: f
+on: [push]
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read the labels
+        env:
+          GH_TOKEN: ${{ secrets.KB_DUMP_TOKEN }}
+        run: |
+          gh api "repos/$R/issues/$N/labels" --jq '.[].name'
+          gh api --method GET "repos/$R/labels" -f per_page=100
+"""
+
 _FIXTURE_WORKFLOW_TOKEN_OK = """
 name: f
 on: [push]
@@ -515,6 +624,8 @@ _POSITIVES: tuple[tuple[str, str, str], ...] = (
     ("alias PAT laundered through job env", _FIXTURE_LAUNDERED_VIA_ENV, "label-write-foreign-credential"),
     ("PAT on a step shelling out to a writer script", _FIXTURE_INDIRECT_SCRIPT, "label-write-foreign-credential"),
     ("token output from a non-App step", _FIXTURE_UNMINTED_TOKEN, "label-write-unminted-token"),
+    ("PAT on a method-less `gh api` label write (gh POSTs)", _FIXTURE_GH_API_IMPLICIT_POST, "label-write-foreign-credential"),
+    ("PAT on an explicit-method `gh api` label write", _FIXTURE_GH_API_EXPLICIT_METHOD, "label-write-foreign-credential"),
 )
 
 _NEGATIVES: tuple[tuple[str, str], ...] = (
@@ -524,6 +635,7 @@ _NEGATIVES: tuple[tuple[str, str], ...] = (
     ("PAT on a step that only DISCUSSES a label write", _FIXTURE_PROSE_ONLY_OK),
     ("PAT confined to a sibling step", _FIXTURE_SIBLING_STEP_SCOPING),
     ("writer scripts named in a checkout manifest", _FIXTURE_CHECKOUT_MANIFEST_OK),
+    ("PAT on a genuine `gh api` label READ", _FIXTURE_GH_API_GENUINE_GET_OK),
 )
 
 
