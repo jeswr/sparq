@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Declared run-body failure swallows, enforced by scripts/check-workflow-run-swallow.py",
+    "(sparq-org/sparq#5799). An entry here means: this step deliberately discards the",
+    "failure of a gate-classified command, and something else in the same job re-raises it.",
+    "R2 deletes the entry for you by REDDING once the underlying swallow is gone, so a",
+    "stale waiver can never silently pre-approve the next one added to the same step.",
+    "Required fields: workflow, job_id, step_name, command, why, registered.",
+    "`command` is matched as a SUBSTRING of the offending shell line, so a waiver covers",
+    "one command and not the whole step."
+  ],
+  "run_swallow_waivers": [
+    {
+      "workflow": "dependency-monitoring.yml",
+      "job_id": "audit",
+      "step_name": "Run cargo-deny advisories",
+      "command": "cargo deny check advisories",
+      "why": "Two-step by design: this step captures cargo-deny's status into steps.deny.outputs.exit_code (hence the trailing `exit 0`) so the report can be published to the tracking issue, and the LAST step of the same job — 'Fail the job if advisories were found', gated on `steps.deny.outputs.exit_code != '0'` — re-raises it. Deleting that step is a job-level change, not an invisible shell one.",
+      "registered": "2026-08-03"
+    },
+    {
+      "workflow": "miri.yml",
+      "job_id": "miri",
+      "step_name": "cargo miri nextest run (shard ${{ matrix.shard }}/24)",
+      "command": "miri nextest run",
+      "why": "Miri's raw exit code cannot distinguish UB (fatal) from a shard timeout (known, tracked debt), so the run is captured to a libtest-json stream and the verdict is decided by the next step, 'Classify shard verdict', which runs scripts/miri_classify_verdict.py and fails the job on a UB event.",
+      "registered": "2026-08-03"
+    }
+  ]
+}

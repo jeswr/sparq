@@ -1155,6 +1155,28 @@ jobs:
         run: python3 scripts/check-advisory-registry.py --self-test
       - name: "Enforce advisory-job registry + gate-intent placement (C2/C3/C4) — GATING"
         run: python3 scripts/check-advisory-registry.py
+      # [OPUS-5] sparq-org/sparq#5799: the RUN-BODY half of the same seam. C3 above asks
+      # "is this gate in the right JOB?"; this asks "can this gate still fail?". A
+      # `run:` body that throws its own failure away (`|| true`, `set +e`, a trailing
+      # `exit 0`) leaves the step green, the job green and the gate green with nothing
+      # verified — and unlike `continue-on-error:` there is no YAML key to grep for.
+      # It is NOT a ban on the idiom: the #5799 inventory found ~36 such sites in
+      # gating jobs and every one is legitimate (`grep … || true`, best-effort
+      # `git rebase --abort`/`pkill` cleanups, diagnostic `ls`/`tail`, documented
+      # early-exit guards). So the rule keys on the COMMAND — it fires only when what
+      # is swallowed is gate-classified, reusing check-advisory-registry.py's own
+      # classifier (loaded by path, so the two cannot drift) widened by the
+      # verification binaries that carry no gate-ish filename (`cargo test|nextest|
+      # clippy|deny|miri|…`, pytest, actionlint, shellcheck, a scripts/tests/ suite,
+      # `--self-test`). Two live sites are declared in
+      # .github/workflow-run-swallow-waivers.json, both two-step lanes where a later
+      # step in the same job re-raises the captured status; R2 reds if a waiver stops
+      # matching, so it cannot outlive the swallow it documents. Needs PyYAML,
+      # installed once in the shared setup above.
+      - name: Self-test the run-body swallow checker (#5799 negative fixtures)
+        run: python3 scripts/check-workflow-run-swallow.py --self-test
+      - name: "Enforce run-body failure-swallow declarations (R1/R2) — GATING"
+        run: python3 scripts/check-workflow-run-swallow.py
       # [OPUS-4.8] sparq-org/sparq#3475: the fast-fix ring's ONLY privileged
       # capability is the cross-repo REGISTRY_RING_TOKEN doorbell. Because a
       # `workflow_run` workflow is ALSO delivered for fork / cross-repo triggering
