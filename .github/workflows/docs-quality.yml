@@ -983,13 +983,19 @@ jobs:
       # property, pins the ci.yml wiring, and pins that the ratchet was NOT weakened.
       - name: Inference corpus cache posture (offline-on-hit + ratchet intact — #4935)
         run: python3 scripts/tests/test_inference_corpus_cache.py
-      # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
-      # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
-      # versioned binary; reverting to `cargo install wasm-pack` would keep the lane
-      # green on a good day while re-exposing it to a transient crates.io blip
-      # (which red-gated PR #1131). Hermetic + stdlib-only (no PyYAML needed).
-      - name: js lane wasm-pack install posture (prebuilt + pinned — sq-khm3f)
-        run: python3 scripts/tests/test_js_wasm_pack_install.py
+      # [OPUS-5] sq-khm3f + #5849: same invisible-regression shape as the posture test
+      # above. The converted lanes (js.yml, release.yml) install wasm-pack as a
+      # PREBUILT, SHA-pinned, exactly-versioned binary; reverting one to `cargo install
+      # wasm-pack` would keep it green on a good day while re-exposing it to a transient
+      # crates.io blip (which red-gated PR #1131). The test is lane-PARAMETERISED — one
+      # LANES table, one step here — and additionally pins that release.yml's
+      # arm64-bearing `gui-bundle` matrix uses the ARCH-AWARE installer, since
+      # jetli/wasm-pack-action always fetches an x86_64 binary. Hermetic + stdlib-only
+      # (no PyYAML needed).
+      # (name QUOTED: an unquoted ` #5849` would start a YAML comment and silently
+      # truncate the step name.)
+      - name: "wasm-pack install posture, all converted lanes (prebuilt + arch-aware — #5849)"
+        run: python3 scripts/tests/test_wasm_pack_install.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
       # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;
