@@ -582,12 +582,23 @@ jobs:
     # than the prior 5×(131s build) and with the shards genuinely finishing together.
     #
     # GENERALISING (so a NEW heavy test cannot silently re-skew this): the known-heavy
-    # set is the single `HEAVY` filterset env below. When nextest's run output flags a
-    # NEW test SLOW (the `SLOW [> Ns]` markers), add `| test(=its_name)` to HEAVY and,
-    # if it is comparable to the existing heavies, give it its own matrix shard; the
+    # set is the single `HEAVY` filterset env below. To add one: `| test(=its_name)` in
+    # HEAVY and, if it is comparable to the existing heavies, its own matrix shard; the
     # bulk filter is the negation of HEAVY, so it stays correct automatically. This is
     # the pragmatic known-heavy-list + count-partition-the-rest design — deliberately
     # NOT a timing database (over-engineered for a 2-heavy tail).
+    #
+    # [OPUS-5] sq-6vshe.7 phase 4 (#5563) — WHO NOTICES. This upkeep used to depend on a
+    # human spotting a `SLOW [> Ns]` marker in a shard log, which is not a mechanism: a
+    # newly-slow test just rejoins a bulk shard and re-skews the split, and the only
+    # symptom is a slower merge queue that nobody attributes back to this env. That read
+    # is now MEASURED weekly by `.github/workflows/heavy-set-alarm.yml` +
+    # scripts/heavy_set_alarm.py, which times every test via nextest's libtest-json-plus
+    # stream and files an issue when HEAVY stops matching the measured heavy set — a test
+    # above the floor that HEAVY does not name, an atom left behind by a rename (whose
+    # shard then silently runs ZERO tests, since `test(=NAME)` is an exact match), or a
+    # declared heavy that got fast and is now wasting a shard. It is ADVISORY and reads
+    # this env; it never edits it, so the list below stays hand-owned.
     #
     # fail-fast: false so one shard's failure does not cancel the others (we want the
     # full failure picture across the suite, not just the first shard to break).
