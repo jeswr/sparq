@@ -269,7 +269,27 @@ jobs:
     # normal (unsaturated) case the gate converges exactly as fast as before —
     # the extension only ever activates at base-budget exhaustion under a
     # saturated/progressing queue.
-    timeout-minutes: 80
+    #
+    # [OPUS-5] #4586 — EVENT-TIERED, because 80 was wrong against the MERGE QUEUE.
+    # The queue's `check_response_timeout_minutes` (ruleset 17688455) is 60: a
+    # required check that has not reported by then is ASSUMED FAILED and the entry is
+    # dequeued — head-of-queue, so every entry behind it stalls too. An 80-minute
+    # budget therefore let the aggregator extend past the point where its answer could
+    # still be used (live: #4537). On merge_group the job budget is now 50 and the
+    # poll loop clamps ITSELF to ~40 min of wait (scripts/ci_summary_gate.py
+    # MERGE_GROUP_LOOP_BUDGET_MINUTES / merge_group_config), both strictly under 60,
+    # leaving ~10 min for the runner acquisition the queue's clock also counts. The
+    # cost — a queue gate that would have converged in the 40-60 min band now REDs —
+    # is stated in full in that script's header §MERGE-QUEUE BUDGET RECONCILIATION.
+    # The PR path is unchanged at 80: no queue patience applies there, so the full
+    # adaptive extension stays.
+    # The three constants and BOTH branches of this expression are pinned together by
+    # scripts/tests/test_ci_summary_gate.py::TestMergeQueueBudgetOrdering — if either
+    # side moves so the ordering inverts, that test REDs.
+    # (`fromJSON` over quoted numbers is ci.yml's existing idiom for an
+    # expression-valued `timeout-minutes` — it keeps the expression's static type a
+    # number for actionlint rather than the bool|number a bare `&&`/`||` infers.)
+    timeout-minutes: ${{ fromJSON(github.event_name == 'merge_group' && '50' || '80') }}
     steps:
       # Sparse checkout of ONLY the gate script + the advisory registry it reads: the
       # gate needs no sources. (No partial-clone filter is configured — this is sparse

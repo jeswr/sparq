@@ -117,6 +117,60 @@
 # base-budget GENUINE HANG stays a FAILURE, because nothing executing plus an idle
 # queue plus no completions really is a broken pipeline.
 #
+# MERGE-QUEUE BUDGET RECONCILIATION (#4586). [OPUS-5] Two individually-correct
+# settings were wrong TOGETHER. The merge queue's `check_response_timeout_minutes`
+# (ruleset 17688455) is 60; this loop's ABSOLUTE budget on the PR path is ~67 min of
+# polling under an 80-minute job timeout. Under saturation — the exact condition the
+# extension above exists for — the QUEUE gave up at 60 while the aggregator was still
+# legitimately extending toward 80, so the entry was dequeued for a check that was
+# going to report, and because the dequeue is HEAD-of-queue everything behind it
+# stalled too (live: #4537, 63 min+, seven terminal-green siblings, two MERGEABLE PRs
+# blocked). THE RULE NOW: on `merge_group` the loop's own budget is CLAMPED
+# (merge_group_config / merge_group_max_total_polls) to MERGE_GROUP_LOOP_BUDGET_MINUTES
+# and ci-summary.yml's `timeout-minutes` is event-tiered to
+# MERGE_GROUP_JOB_TIMEOUT_MINUTES, both STRICTLY below
+# MERGE_QUEUE_CHECK_RESPONSE_TIMEOUT_MINUTES, so the aggregator renders its own verdict
+# inside the window the queue will still accept. The ordering is pinned by
+# scripts/tests/test_ci_summary_gate.py::TestMergeQueueBudgetOrdering, which reads BOTH
+# values (this file's mirror of the live ruleset AND the workflow's two timeout
+# branches) — a comment would drift. The PR path keeps the full ~67-min budget: no
+# queue patience applies there.
+# WHAT THE CLAMP COSTS, stated rather than glossed. It is NOT free: a merge_group gate
+# that would have converged between ~40 and 60 minutes could previously still have
+# reported in time, and now REDs instead. That band is what buys never spending the
+# 60-67 minute band (which was pure waste — the entry is already gone) and always
+# leaving margin for the part of the clock we do not control: the queue starts counting
+# when the group ref is BUILT, not when our job is scheduled, so runner-acquisition
+# latency is spent before the loop's first poll. The band is priced against #4586's own
+# measurement — merge_group aggregator runs bracketing the incident completed in 23m55s
+# and 25m20s, so ~40 min is already well past a normal build. The 10 minutes between
+# MERGE_GROUP_JOB_TIMEOUT_MINUTES and the queue timeout is a JUDGEMENT about that
+# unobservable latency, not a proof: if acquisition exceeds it, the check still reports
+# late and is still reaped — no worse than today, but not fixed by this either.
+#
+# THE ZERO-PENDING HOLD (#4586 ask 2). [OPUS-5] The saturation/hang triage above was
+# reachable ONLY under `pending > 0`. But the loop has two STRUCTURAL HOLDS that keep
+# it polling with pending == 0 and `stable` pinned at 0 — awaiting_report (the
+# feature-matrix reporter verdict has not landed) and awaiting_full (a draft-tier
+# select with no full-tier successor, on a head that reads non-draft or unreadable, so
+# #3781's fast-fail deliberately does not fire). In EITHER state the loop fell through
+# every branch, slept the base interval, and burned the whole absolute budget before
+# rendering the verdict it would have rendered at the base budget — which is exactly
+# the #4537 signature: every sibling terminal, nothing pending, the gate `in_progress`
+# for 53+ minutes, and the header's claim that "an idle-queue/no-progress pending set
+# still REDs immediately" simply not applicable, because there was no pending set.
+# THE RULE NOW: a HOLD is subject to the SAME base-budget evidence test as pending
+# work. At the base budget the gate extends a hold only while the queue is saturated
+# (the reporter's own workflow could be starved for a runner); with an idle queue and
+# no progress it renders the verdict NOW via the identical render_verdict call the
+# exhaustion path would have made ~30 minutes later. This changes ARRIVAL TIME ONLY —
+# same function, same sibling set, same fail-closed belts (stale-draft-tier /
+# reporter-missing), so no verdict can flip. It is also not the circumstantial early
+# exit #4614 ask 2 refused: the licence here is that a successor or a reporter that is
+# actually coming must be dispatched as a workflow run, and a dispatched run puts a
+# NON-terminal check-run on the head — i.e. `pending > 0`, which is not this branch.
+# Zero pending with an idle queue means nothing is in flight to satisfy the hold.
+#
 # FETCH-FAILURE TOLERANCE: the bash `set -e` turned ONE transient `gh api` blip
 # into a gate RED. A failed poll is now skipped (state untouched) and only
 # MAX_CONSEC_FETCH_FAILURES consecutive failures fail the gate. No data => no
@@ -257,7 +311,7 @@ import subprocess
 import sys
 import time
 from contextlib import redirect_stdout
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 # [OPUS-5] #3773 — the DECLARED-advisory registry. See §ADVISORY MUST BE DECLARED.
 # Path is relative to the repo checkout the gate runs from (ci-summary.yml sparse-
@@ -420,6 +474,35 @@ RUNS_URL_RE = re.compile(r"/actions/runs/(\d+)(?:/|$)")
 ACTIONS_JOB_URL_RE = re.compile(r"/actions/runs/\d+/job/\d+(?:/|$)")
 
 
+# [OPUS-5] #4586 — MERGE-QUEUE BUDGET RECONCILIATION (header §MERGE-QUEUE BUDGET
+# RECONCILIATION). These three minute values are the ONLY place the relationship is
+# stated as data, and TestMergeQueueBudgetOrdering reads them together with
+# ci-summary.yml's own `timeout-minutes` branches, so neither half can drift alone.
+#
+# MIRROR of the LIVE merge-queue setting on branch-protection ruleset 17688455
+# (`gh api repos/sparq-org/sparq/rulesets/17688455` -> merge_queue.
+# check_response_timeout_minutes; also tabulated in docs/branch-protection.md). GitHub
+# assumes a required check that has not reported a conclusion within this window has
+# FAILED and dequeues the entry — head-of-queue, so everything behind it stalls too.
+# It is a REPO SETTING, not a repo file: this constant cannot enforce it, only pin what
+# every budget below is reconciled against. Raising it in the ruleset is the other
+# valid way to satisfy the ordering; if that happens, update this mirror in the same
+# change.
+MERGE_QUEUE_CHECK_RESPONSE_TIMEOUT_MINUTES = 60
+# The `timeout-minutes` ci-summary.yml gives the gate JOB, per event. The merge_group
+# value must stay strictly under the queue timeout with room for runner acquisition
+# (the queue's clock starts at group-ref creation, before our job is scheduled); the
+# PR value is unconstrained by the queue and keeps the full adaptive budget.
+MERGE_GROUP_JOB_TIMEOUT_MINUTES = 50
+PR_JOB_TIMEOUT_MINUTES = 80
+# The poll loop's own worst-case SLEEP budget on the merge_group path. Set under
+# MERGE_GROUP_JOB_TIMEOUT_MINUTES by roughly the same ~20% slack the PR path already
+# carries (67 min of sleep under an 80-minute job timeout) so per-poll API time cannot
+# push the job into a hard `timeout-minutes` kill, which would emit an unexplained RED
+# with no step summary instead of this loop's honest UNDETERMINED render.
+MERGE_GROUP_LOOP_BUDGET_MINUTES = 40
+
+
 @dataclass
 class Config:
     """Loop tunables. Prod values mirror the previous inline bash (INTERVAL /
@@ -442,6 +525,41 @@ class Config:
     unsat_confirm_polls: int = 3
     max_consec_fetch_failures: int = 5
     summary_path: str = field(default_factory=lambda: os.environ.get("GITHUB_STEP_SUMMARY", ""))
+
+
+def loop_budget_seconds(cfg: Config) -> int:
+    """[OPUS-5] #4586 — the loop's worst-case SLEEP wall-clock: every base poll at
+    `interval`, every extension poll at `sat_interval`. Deliberately excludes per-poll
+    API time (unbounded and unmeasurable here); the slack between this and the job's
+    `timeout-minutes` is what absorbs it."""
+    base = min(cfg.base_polls, cfg.max_total_polls) * cfg.interval
+    extension = max(0, cfg.max_total_polls - cfg.base_polls) * cfg.sat_interval
+    return base + extension
+
+
+def merge_group_max_total_polls(cfg: Config) -> int:
+    """[OPUS-5] #4586 — the largest `max_total_polls` whose loop_budget_seconds still
+    fits MERGE_GROUP_LOOP_BUDGET_MINUTES. Never returns MORE than the configured cap
+    (a clamp, never an extension) and never less than `base_polls` (the base budget is
+    the floor: a merge_group entry gets at least the wait a PR head gets before any
+    extension, even if the budget constant is later tightened below it)."""
+    budget = MERGE_GROUP_LOOP_BUDGET_MINUTES * 60
+    base_polls = min(cfg.base_polls, cfg.max_total_polls)
+    room = budget - base_polls * cfg.interval
+    extension = room // cfg.sat_interval if (cfg.sat_interval > 0 and room > 0) else 0
+    return max(base_polls, min(cfg.max_total_polls, base_polls + extension))
+
+
+def merge_group_config(cfg: Config, event_name: str) -> Config:
+    """[OPUS-5] #4586 — clamp the loop budget on the merge_group path so the gate
+    always renders before the queue's `check_response_timeout_minutes` reaps the
+    entry. A no-op on every other event."""
+    if event_name != "merge_group":
+        return cfg
+    capped = merge_group_max_total_polls(cfg)
+    if capped >= cfg.max_total_polls:
+        return cfg
+    return replace(cfg, max_total_polls=capped)
 
 
 class FetchError(RuntimeError):
@@ -1997,9 +2115,18 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             return render_verdict(runs, cfg.summary_path, tier_ctx)
 
         # ADAPTIVE SATURATION BUDGET (sq-90cv4): at/after the base budget with work
-        # still pending, extend ONLY while the evidence says throughput-starvation
+        # still outstanding, extend ONLY while the evidence says throughput-starvation
         # (deep queue) or live progress — otherwise it's a genuine hang: RED.
-        if attempt >= cfg.base_polls and pending > 0:
+        #
+        # [OPUS-5] #4586 (header §THE ZERO-PENDING HOLD): "outstanding" is pending work
+        # OR a structural HOLD (awaiting_report / awaiting_full). Before, this triage
+        # was `pending > 0` only, so a hold with EVERY sibling terminal fell through
+        # every branch and slept its way to the absolute cap — the #4537 signature
+        # (seven green siblings, zero pending, the gate `in_progress` past an hour).
+        # A hold now faces the same evidence test; with no evidence the zero-pending
+        # arm below renders the SAME verdict the exhaustion path would, ~30 min sooner.
+        holding = awaiting_full or awaiting_report
+        if attempt >= cfg.base_polls and (pending > 0 or holding):
             progressing = (
                 len(completed_hist) > cfg.progress_window
                 and completed_hist[-1] > completed_hist[-1 - cfg.progress_window]
@@ -2022,7 +2149,44 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             # only count toward "hang" when the awaited siblings are `queued` or
             # absent — i.e. genuinely NOT running.
             live = live_siblings(runs)
+            hold_note = ", ".join(
+                n for n, on in (("the feature-matrix reporter verdict", awaiting_report),
+                                ("the full-tier select successor", awaiting_full)) if on
+            )
             if not (saturated or progressing or live):
+                if pending == 0 and attempt < cfg.min_polls:
+                    # The startup-race floor guards EVERY verdict, including this one:
+                    # a check set that has barely begun registering must never be
+                    # concluded over. (Only reachable when base_polls < min_polls —
+                    # a test config; in prod the floor is 3 and the base budget 110.)
+                    print(
+                        f"  hold: base budget reached at poll {attempt} but the "
+                        f"min_polls={cfg.min_polls} startup floor is not — continuing to poll."
+                    )
+                    if attempt < cfg.max_total_polls:
+                        sleep_fn(cfg.interval)
+                    continue
+                if pending == 0:
+                    # [OPUS-5] #4586: a HOLD, not a hang — every sibling has CONCLUDED
+                    # and the thing being awaited is not a sibling at all. Nothing is
+                    # queued or executing that could satisfy it (a reporter or a
+                    # full-tier re-run that were actually coming would be a dispatched
+                    # workflow run, i.e. a NON-terminal check-run on this head, which
+                    # is the `pending > 0` arm). So render the verdict NOW — the SAME
+                    # render_verdict call the absolute-budget exhaustion path makes,
+                    # with the same fail-closed belts, just not ~30 minutes later.
+                    print(
+                        f"::notice::ci-summary base budget reached while awaiting "
+                        f"{hold_note} with EVERY sibling check-run terminal "
+                        f"({total} check-run(s), 0 pending), an idle Actions queue "
+                        f"(depth={depth if depth is not None else 'unknown'} < {cfg.sat_queue_min}) "
+                        f"and no completions in the last {cfg.progress_window} poll(s). "
+                        f"Nothing is in flight that could satisfy the hold, so the gate "
+                        f"renders its verdict now instead of burning the remaining "
+                        f"{cfg.max_total_polls - attempt} poll(s) on an already-decided "
+                        f"outcome (#4586)."
+                    )
+                    return render_verdict(runs, cfg.summary_path, tier_ctx)
                 print(
                     f"::error::ci-summary timed out — {pending} sibling check-run(s) never "
                     f"finished within the base budget, NO awaited sibling is `in_progress` "
@@ -2035,11 +2199,15 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             live_note = (
                 f", {len(live)} sibling(s) EXECUTING ({_name_list(live)})" if live else ""
             )
+            outstanding = (
+                f"{pending} sibling(s) still pending" if pending
+                else f"a structural hold on {hold_note} (0 pending)"
+            )
             if not extension_started:
                 extension_started = True
                 print(
-                    f"::notice::ci-summary base budget reached with {pending} sibling(s) still "
-                    f"pending, but the runner pool shows saturation/progress/liveness "
+                    f"::notice::ci-summary base budget reached with {outstanding}"
+                    f", but the runner pool shows saturation/progress/liveness "
                     f"(queued runs={depth if depth is not None else 'unknown'}, "
                     f"progressing={progressing}{live_note}) — this is a throughput/liveness "
                     f"signal, not a hang. "
@@ -2448,7 +2616,16 @@ def main() -> int:
         fetch_pr_draft=make_fetch_pr_draft(repo, pr_number) if pr_number else None,
     )
     print(f"ci-summary: evaluating tier={run_tier} (event={event_name or '<unset>'}).")
-    cfg = Config(self_run_id=self_run_id)
+    # [OPUS-5] #4586: on the merge_group path the loop must finish inside the merge
+    # queue's own patience (header §MERGE-QUEUE BUDGET RECONCILIATION), so the budget
+    # is clamped by event. A no-op on pull_request/push.
+    cfg = merge_group_config(Config(self_run_id=self_run_id), event_name)
+    print(
+        f"ci-summary: poll budget = {cfg.max_total_polls} poll(s) "
+        f"(~{loop_budget_seconds(cfg) // 60} min of wait) for event="
+        f"{event_name or '<unset>'}; the merge queue reaps an unreported required "
+        f"check after {MERGE_QUEUE_CHECK_RESPONSE_TIMEOUT_MINUTES} min."
+    )
     return run_gate(cfg, make_fetch_runs(repo, sha, self_run_id), make_fetch_queue_depth(repo),
                     tier_ctx=tier_ctx)
 

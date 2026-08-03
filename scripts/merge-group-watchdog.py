@@ -134,7 +134,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable
 
@@ -717,6 +717,72 @@ def classify_dequeue_route(
     )
 
 
+# ── head-of-queue age (#4586 ask 3) ──────────────────────────────────────────────
+# A merge-queue entry stuck at the HEAD is a fleet-wide stall — the queue merges
+# strictly in order, so nothing behind it can land — and it was INVISIBLE: on #4586's
+# live case every individual check reported success or in_progress and the only symptom
+# was zero merges for over an hour. Nothing was RED, so nothing alarmed.
+#
+# WHY HERE and not in a new lane: this workflow already enumerates the queue every
+# ~5 min (doorbell + cron), already holds each entry's position/state/enqueuedAt, and
+# already emits one row per entry per tick with the `stacked`/`stacked_green` cost
+# term. The stall signal is the same observation read for a different fault, so it is
+# a row and a `::warning::` here rather than a second sweeper of the same API.
+#
+# WHY enqueuedAt is the right anchor HERE, when this file's header rejects it for the
+# grace gate: those measure different things. The grace gate needs the group REF BUILD
+# time (enqueuedAt is far too early — an entry can sit outside `max_entries_to_build`
+# for minutes first), which is why it uses the activity API. This measures QUEUE
+# RESIDENCY, which is exactly what enqueuedAt dates. And the HEAD entry is by
+# construction inside the build window, so its residency is its build wait plus its
+# build — not an unbounded wait for a slot.
+#
+# THRESHOLD. Measured on #4586: sibling merge_group aggregator runs bracketing the
+# stall completed in 23m55s and 25m20s, so ~25 min is one normal build. 45 min is
+# comfortably past two of those and past the gate's own clamped merge_group budget
+# (ci_summary_gate.MERGE_GROUP_LOOP_BUDGET_MINUTES ~40 min under a 50-min job
+# timeout), while still landing BEFORE the ruleset's 60-minute CI_TIMEOUT discards the
+# group — i.e. inside the window where a human can still act on it.
+#
+# NOT A DECISION. This never feeds decide_entry and never gates a mutation: an aged
+# head is a symptom with many causes (a genuinely slow leg, a platform hiccup, a
+# rebuild), so acting on it automatically would thrash the queue. It is reported and
+# nothing else, and it is re-emitted every tick for as long as it holds — the same
+# posture as a held CAP/REFUSE row.
+HEAD_OF_QUEUE_STALL_SECONDS = 45 * 60
+
+
+def head_of_queue_stall(
+    entries: list[QueueEntry],
+    now: datetime,
+    threshold_seconds: int = HEAD_OF_QUEUE_STALL_SECONDS,
+) -> str | None:
+    """The stall row for a head-of-queue entry older than the threshold, else None.
+
+    Reports the head's own age plus how much is stranded behind it (`blocked`, and the
+    already-green `blocked_green` — the entries that would have merged already). An
+    entry with no readable `enqueuedAt` yields None: an un-anchored age is not evidence
+    of anything, and inventing one would alarm on every API gap."""
+    if not entries:
+        return None
+    head = min(entries, key=lambda entry: entry.position)
+    if head.enqueued_at is None:
+        return None
+    age = int((now - head.enqueued_at).total_seconds())
+    if age < threshold_seconds:
+        return None
+    blocked = [entry for entry in entries if entry.position > head.position]
+    blocked_green = [entry for entry in blocked if entry.state == "MERGEABLE"]
+    return (
+        f"HEAD-OF-QUEUE STALL: pr=#{head.pr_number} state={head.state} "
+        f"age={age // 60}m (threshold={threshold_seconds // 60}m) "
+        f"blocked={len(blocked)} blocked_green={len(blocked_green)} — the queue merges "
+        f"in order, so nothing behind this entry can land; it is reaped by the "
+        f"ruleset's CI_TIMEOUT at 60m and the whole chain rebuilds. Check the entry's "
+        f"required `gate` check-run before then"
+    )
+
+
 # ── I/O layer ────────────────────────────────────────────────────────────────────
 
 
@@ -761,6 +827,7 @@ class Watchdog:
         max_recoveries_per_pr: int = DEFAULT_MAX_RECOVERIES_PER_PR,
         recovery_window_seconds: int = DEFAULT_RECOVERY_WINDOW_SECONDS,
         max_recoveries_per_run: int = DEFAULT_MAX_RECOVERIES_PER_RUN,
+        head_stall_seconds: int = HEAD_OF_QUEUE_STALL_SECONDS,
         dry_run: bool = False,
         # LATE-BOUND ON PURPOSE. `gh: Callable = run_gh` binds the module function at
         # DEFINITION time, so a test that patches `merge_group_watchdog.run_gh` does not
@@ -788,6 +855,7 @@ class Watchdog:
         self.max_recoveries_per_pr = max_recoveries_per_pr
         self.recovery_window_seconds = recovery_window_seconds
         self.max_recoveries_per_run = max_recoveries_per_run
+        self.head_stall_seconds = head_stall_seconds
         self.dry_run = dry_run
         self.gh = gh if gh is not None else run_gh
         self.gh_read = gh_read if gh_read is not None else self.gh
@@ -1073,6 +1141,14 @@ class Watchdog:
                 f"(grace={self.grace_seconds}s)"
             )
             return 0
+
+        # [OPUS-5] #4586 ask 3: report a stalled HEAD before the per-entry decisions —
+        # the decisions are about ONE fault (zero dispatch) and every one of them can
+        # read SKIP/HOLD while the queue makes no progress at all.
+        stall = head_of_queue_stall(entries, now, self.head_stall_seconds)
+        if stall:
+            self.emit(stall)
+            self.log(f"::warning title={PROGRAM} head-of-queue stall::{stall}")
 
         counts: dict[str, int] = {}
         errors = 0
@@ -1386,6 +1462,30 @@ def self_test() -> None:
     assert route(reason="MANUAL", now=now + timedelta(hours=2)).route == ROUTE_DEMOTE
     # A conflict dequeue right after a recovery is NOT attributed to the watchdog.
     assert route(reason="MERGE_CONFLICT", now=now + timedelta(seconds=30)).route == ROUTE_DEMOTE
+
+    # [OPUS-5] #4586 ask 3 — head-of-queue age. Anchored on the entry's enqueuedAt
+    # (queue residency), reported only, and expressed against the constant so a
+    # retune cannot leave these stale.
+    enqueued = _entry().enqueued_at
+    assert enqueued is not None
+    stall_at = enqueued + timedelta(seconds=HEAD_OF_QUEUE_STALL_SECONDS)
+    head = _entry(position=1)
+    behind = [_entry(pr=3559, position=2, state="MERGEABLE"),
+              _entry(pr=4561, position=3)]
+    assert head_of_queue_stall([head, *behind], stall_at - timedelta(seconds=1)) is None
+    fired = head_of_queue_stall([head, *behind], stall_at)
+    assert fired is not None and "blocked=2 blocked_green=1" in fired, fired
+    # The head is chosen by POSITION, not by list order (entries arrive unsorted).
+    assert head_of_queue_stall([_entry(pr=1, position=2), head], stall_at) is not None
+    # No anchor => no alarm (an API gap must not manufacture one), and an empty
+    # queue is not a stall.
+    assert head_of_queue_stall([], stall_at) is None
+    assert head_of_queue_stall(
+        [replace(head, enqueued_at=None), *behind], stall_at) is None
+    # The alarm must land inside the window where it is still actionable: after one
+    # normal build (measured ~25 min on #4586) and before the ruleset's 60-minute
+    # CI_TIMEOUT discards the group.
+    assert 30 * 60 <= HEAD_OF_QUEUE_STALL_SECONDS < 60 * 60, HEAD_OF_QUEUE_STALL_SECONDS
 
     print(f"{PROGRAM} self-test: PASS")
 

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import io
 import json
 import re
@@ -2488,8 +2489,15 @@ class TestUnsatisfiableHoldFastFail(unittest.TestCase):
 
     def test_unreadable_draft_state_falls_back_to_the_budget_belt(self):
         """An API failure must not manufacture a NEW failure mode: the detector
-        stands down and the gate behaves exactly as it did pre-#3781 (hold, then RED
-        at budget exhaustion via render_verdict's stale-draft-tier belt)."""
+        stands down and the gate holds, then REDs via render_verdict's
+        stale-draft-tier belt — the same verdict, never a fast RED.
+
+        [OPUS-5] #4586 moved WHICH budget that fallback lands on. The hold is
+        all-terminal (pending == 0) with an idle queue, so nothing is in flight that
+        could satisfy it; the gate now renders at the BASE budget instead of burning
+        the saturation extension it can never use. The verdict, the belt and the
+        never-before-the-base-budget property are unchanged — only the ~30 minutes of
+        dead wait are gone, which is the whole point of #4586."""
         cfg = tiny_cfg()
         fetch = scripted(self._stuck())
         out = io.StringIO()
@@ -2502,9 +2510,12 @@ class TestUnsatisfiableHoldFastFail(unittest.TestCase):
         self.assertEqual(code, 1, text)
         self.assertNotIn("UNSATISFIABLE", text)
         self.assertIn("stale draft-tier run, full run pending", text)
-        self.assertEqual(fetch.state["calls"], cfg.max_total_polls,
-                         "an unreadable draft state must fall back to the full "
-                         "pre-#3781 budget, never to a fast RED")
+        self.assertEqual(fetch.state["calls"], cfg.base_polls,
+                         "an unreadable draft state must fall back to the BASE "
+                         "budget belt (#4586), never to a fast RED")
+        self.assertGreater(cfg.base_polls, cfg.min_polls,
+                           "non-vacuity: the fallback must be a real wait, not the "
+                           "startup floor")
 
     def test_no_hold_means_the_draft_api_is_never_touched(self):
         """Cost + blast-radius discipline: a full-tier run with no draft-tier hold
@@ -3032,6 +3043,208 @@ class TestLatestRunRelativePresence(unittest.TestCase):
         self.assertEqual(g.fm_report_status([FM_GROUP, _skel("222"), GREEN]), "pending")
         # With any legacy report present it degrades to any-report (never a false RED).
         self.assertEqual(g.fm_report_status([FM_GROUP, FM_REPORT_OK, GREEN]), "ok")
+
+
+# --- #4586: the merge queue's patience vs the aggregator's budget ----------------
+# Two individually-correct settings that were wrong TOGETHER. The merge queue reaps a
+# required check that has not reported within `check_response_timeout_minutes` (60,
+# ruleset 17688455) and dequeues the entry HEAD-of-queue, stalling everything behind
+# it; the aggregator's own absolute budget ran to ~67 min under an 80-minute job
+# timeout. Under saturation — the exact condition the extension exists for — the queue
+# gave up while the gate was still legitimately extending, so a PR was dequeued for a
+# check that was going to report (live: #4537).
+#
+# The relationship is now DATA, and this class reads BOTH sides of it — the mirror
+# constants in scripts/ci_summary_gate.py AND the two `timeout-minutes` branches
+# ci-summary.yml actually ships — so it fails if either half moves and inverts the
+# ordering. A comment would drift; this cannot.
+CI_SUMMARY_YML = REPO_ROOT / ".github" / "workflows" / "ci-summary.yml"
+BRANCH_PROTECTION_DOC = REPO_ROOT / "docs" / "branch-protection.md"
+# `timeout-minutes: ${{ fromJSON(github.event_name == 'merge_group' && '<A>' || '<B>') }}`
+# — parsed with a regex rather than PyYAML so the ordering pin carries no third-party
+# dependency (the gate itself is stdlib-only for the same reason).
+_TIMEOUT_RE = re.compile(
+    r"^\s*timeout-minutes:\s*\$\{\{\s*fromJSON\(\s*github\.event_name\s*==\s*"
+    r"'merge_group'\s*&&\s*'(?P<queue>\d+)'\s*\|\|\s*'(?P<pr>\d+)'\s*\)\s*\}\}\s*$",
+    re.MULTILINE,
+)
+
+
+class TestMergeQueueBudgetOrdering(unittest.TestCase):
+    """[OPUS-5] #4586 ask 1 — pin the ordering the stall came from."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.yml = CI_SUMMARY_YML.read_text(encoding="utf-8")
+        matches = _TIMEOUT_RE.findall(cls.yml)
+        assert len(matches) == 1, (
+            f"expected exactly one event-tiered `timeout-minutes:` in ci-summary.yml, "
+            f"found {len(matches)} — the #4586 ordering pin cannot read the job budget"
+        )
+        cls.queue_timeout, cls.pr_timeout = (int(v) for v in matches[0])
+
+    def test_workflow_job_timeouts_match_the_mirrored_constants(self):
+        """The YAML and the script must not drift apart: the gate clamps its own poll
+        budget from the constants, the job is killed by the YAML."""
+        self.assertEqual(self.queue_timeout, g.MERGE_GROUP_JOB_TIMEOUT_MINUTES)
+        self.assertEqual(self.pr_timeout, g.PR_JOB_TIMEOUT_MINUTES)
+
+    def test_merge_group_job_timeout_is_strictly_under_the_queue_patience(self):
+        """THE INVARIANT #4586 is about. If this inverts, the queue dequeues entries
+        for checks that were still going to report."""
+        self.assertLess(
+            self.queue_timeout, g.MERGE_QUEUE_CHECK_RESPONSE_TIMEOUT_MINUTES,
+            "the gate job's merge_group `timeout-minutes` must be STRICTLY under the "
+            "merge queue's check_response_timeout_minutes (ruleset 17688455), or the "
+            "queue reaps the entry head-of-queue while the gate is still running",
+        )
+
+    def test_merge_group_loop_budget_is_strictly_under_the_job_timeout(self):
+        """The loop must self-terminate and render an honest verdict; a hard
+        `timeout-minutes` kill emits a RED with no step summary at all."""
+        loop_minutes = g.MERGE_GROUP_LOOP_BUDGET_MINUTES
+        self.assertLess(loop_minutes, g.MERGE_GROUP_JOB_TIMEOUT_MINUTES)
+        self.assertLess(loop_minutes, g.MERGE_QUEUE_CHECK_RESPONSE_TIMEOUT_MINUTES)
+
+    def test_the_clamped_prod_config_actually_fits_that_budget(self):
+        """Not just the constants — the CLAMP computed from the real prod Config must
+        fit, and must still leave the base budget intact (a merge_group entry is not
+        given less wait than a PR head gets before any extension)."""
+        prod = g.Config(self_run_id="x")
+        capped = g.merge_group_config(prod, "merge_group")
+        self.assertLessEqual(
+            g.loop_budget_seconds(capped), g.MERGE_GROUP_LOOP_BUDGET_MINUTES * 60)
+        self.assertGreaterEqual(capped.max_total_polls, prod.base_polls)
+        self.assertLess(capped.max_total_polls, prod.max_total_polls,
+                        "non-vacuity: the prod merge_group budget really is clamped")
+
+    def test_the_clamp_is_merge_group_only(self):
+        """A PR head is not in a queue, so it keeps the full adaptive budget — and the
+        80-minute PR job timeout must still cover it."""
+        prod = g.Config(self_run_id="x")
+        for event in ("pull_request", "push", ""):
+            self.assertEqual(g.merge_group_config(prod, event), prod, event)
+        self.assertLess(g.loop_budget_seconds(prod) / 60, g.PR_JOB_TIMEOUT_MINUTES)
+
+    def test_main_applies_the_clamp_by_event(self):
+        """Wiring: the clamp only matters if main() applies it to the Config it hands
+        run_gate. main() needs a live token + env to execute, so this is a
+        source-level pin — the same posture as TestAdvisoryRegistryWiring's
+        sparse-checkout pin, and it fails if the call is dropped or stops being
+        event-driven."""
+        src = inspect.getsource(g.main)
+        self.assertIn("merge_group_config(Config(self_run_id=self_run_id), event_name)",
+                      src)
+
+    def test_the_documented_ruleset_value_matches_the_mirror(self):
+        """docs/branch-protection.md tabulates the live ruleset. The mirror constant is
+        the thing every budget is reconciled against, so a doc update that changes the
+        queue setting must move the constant too."""
+        doc = BRANCH_PROTECTION_DOC.read_text(encoding="utf-8")
+        # Both shapes the doc uses: `check_response_timeout_minutes: 60` in prose and
+        # a `| `check_response_timeout_minutes` | `60` |` table row.
+        rows = re.findall(
+            r"check_response_timeout_minutes`?(?::\s*|\s*\|\s*`)(\d+)", doc)
+        self.assertTrue(rows, "docs/branch-protection.md no longer tabulates "
+                              "check_response_timeout_minutes")
+        for value in rows:
+            self.assertEqual(
+                int(value), g.MERGE_QUEUE_CHECK_RESPONSE_TIMEOUT_MINUTES,
+                "docs/branch-protection.md and ci_summary_gate.py disagree about the "
+                "merge queue's check_response_timeout_minutes",
+            )
+
+
+# --- #4586 ask 2: the ZERO-PENDING HOLD ------------------------------------------
+# The live #4537 shape, reproduced: every sibling check-run TERMINAL and green, zero
+# pending, an idle Actions queue — and the gate still `in_progress` 53+ minutes later.
+# The saturation/hang triage was reachable only under `pending > 0`, so the loop's two
+# structural holds (the feature-matrix reporter await, and a draft-tier select with no
+# full-tier successor on a head that reads non-draft/unreadable) fell through every
+# branch and slept to the absolute cap before rendering the verdict they would have
+# rendered at the base budget. Deleting the `pending == 0` arm in run_gate REDs every
+# test below.
+def run_counting(cfg, polls, depth=0, tier_ctx=None):
+    """As run(), but also returns how many polls the loop actually spent."""
+    out = io.StringIO()
+    fetch = scripted(polls)
+    with redirect_stdout(out):
+        code = g.run_gate(cfg, fetch, lambda: depth, sleep_fn=lambda s: None,
+                          tier_ctx=tier_ctx)
+    return code, out.getvalue(), fetch.state["calls"]
+
+
+class TestZeroPendingHoldBudget(unittest.TestCase):
+    """[OPUS-5] #4586 ask 2 — a hold with nothing pending is not a slow run and not a
+    hang: it is a decided outcome, and the gate must say so at the base budget."""
+
+    def test_reporter_hold_with_an_idle_queue_renders_at_the_base_budget(self):
+        cfg = tiny_cfg()
+        code, out, calls = run_counting(cfg, [[FM_GROUP, GREEN]], depth=0)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(
+            calls, cfg.base_polls,
+            "an all-terminal reporter hold on an idle queue must render at the BASE "
+            "budget — burning the saturation extension it can never use is the #4537 "
+            "stall",
+        )
+        self.assertIn("renders its verdict now", out)
+        # The verdict itself is the SAME fail-closed reporter belt as before.
+        self.assertIn("reporter verdict never landed", out)
+        self.assertNotIn("genuine hang", out)
+
+    def test_a_saturated_queue_still_extends_the_hold(self):
+        """Non-vacuity in the other direction: the reporter's own workflow_run can be
+        starved for a runner, so under real saturation the hold keeps its extension —
+        and a reporter that lands during it still passes."""
+        cfg = tiny_cfg()
+        polls = [[FM_GROUP, GREEN]] * 6 + [[FM_GROUP, FM_REPORT_OK, GREEN]]
+        code, out, calls = run_counting(cfg, polls, depth=20)
+        self.assertEqual(code, 0, out)
+        self.assertGreater(calls, cfg.base_polls,
+                           "saturation must still buy the hold its extension")
+        self.assertIn("structural hold", out)
+        self.assertIn("PASSED", out)
+
+    def test_a_late_reporter_inside_the_base_budget_still_passes(self):
+        """The early render must not eat the ordinary reporter race — anything landing
+        before the base budget is unaffected."""
+        cfg = tiny_cfg()
+        polls = [[FM_GROUP, GREEN]] * 2 + [[FM_GROUP, FM_REPORT_OK, GREEN]]
+        code, out, _ = run_counting(cfg, polls, depth=0)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_a_draft_tier_hold_on_a_readied_pr_renders_at_the_base_budget(self):
+        """The other structural hold, and the one #4614 ask 2 deliberately left with
+        no early exit of its own: a full-tier run holding for a full-tier select
+        successor that is not coming. The verdict is unchanged (the stale-draft-tier
+        belt); only the 30 minutes of dead wait are gone."""
+        cfg = tiny_cfg()
+        stuck = [[R(SELECT_DRAFT, started="2026-07-25T07:29:23Z", rid=1), GREEN]]
+        code, out, calls = run_counting(
+            cfg, stuck, depth=0,
+            tier_ctx=draft_ctx(counting(False), run_tier="full"))
+        self.assertEqual(code, 1, out)
+        self.assertEqual(calls, cfg.base_polls)
+        self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_pending_work_on_an_idle_queue_is_still_a_genuine_hang(self):
+        """Guard the discrimination: this change must not turn the #3677 hang detector
+        into a verdict render. A NON-terminal sibling with an idle queue is still a
+        hang and still REDs with that diagnosis."""
+        code, out, _ = run_counting(tiny_cfg(), [[GREEN, PENDING]], depth=0)
+        self.assertEqual(code, 1)
+        self.assertIn("genuine hang", out)
+        self.assertNotIn("renders its verdict now", out)
+
+    def test_no_hold_and_nothing_pending_is_untouched(self):
+        """An ordinary all-green set converges through the settle window exactly as
+        before — the new arm is unreachable without a hold."""
+        code, out, calls = run_counting(tiny_cfg(), [[GREEN, GREEN2]], depth=0)
+        self.assertEqual(code, 0, out)
+        self.assertLess(calls, tiny_cfg().base_polls)
+        self.assertIn("PASSED", out)
 
 
 if __name__ == "__main__":

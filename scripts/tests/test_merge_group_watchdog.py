@@ -26,6 +26,7 @@ import json
 import re
 import sys
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2873,6 +2874,99 @@ class TestSuiteIsWiredIntoCI(unittest.TestCase):
                 )
                 return
         self.fail("no docs-quality job runs the watchdog suite")
+
+
+# [OPUS-5] #4586 ask 3 — HEAD-OF-QUEUE AGE.
+# The stall the issue is about was invisible: every individual check on #4537 reported
+# success or in_progress, and the only symptom was that sparq merged zero PRs for over
+# an hour while two MERGEABLE entries sat behind the head. Nothing was RED, so nothing
+# alarmed. The watchdog already enumerates the queue every ~5 min, so the signal is a
+# row + a `::warning::` here rather than a second sweeper of the same API.
+class TestHeadOfQueueStall(unittest.TestCase):
+    ENQUEUED = mgw.parse_iso("2026-07-27T22:58:53Z")
+
+    def _entries(self):
+        """The #4537 shape: a stuck head with two entries behind it, one already
+        green (MERGEABLE) and therefore provably only blocked by the head."""
+        return [
+            mgw.QueueEntry(pr_number=4537, pr_id="PR_1", entry_id="MQE_1", position=1,
+                           state="AWAITING_CHECKS", enqueued_at=self.ENQUEUED,
+                           base_oid=BASE, head_oid=HEAD),
+            mgw.QueueEntry(pr_number=3559, pr_id="PR_2", entry_id="MQE_2", position=2,
+                           state="MERGEABLE", enqueued_at=self.ENQUEUED,
+                           base_oid=BASE, head_oid=HEAD),
+            mgw.QueueEntry(pr_number=4561, pr_id="PR_3", entry_id="MQE_3", position=3,
+                           state="AWAITING_CHECKS", enqueued_at=self.ENQUEUED,
+                           base_oid=BASE, head_oid=HEAD),
+        ]
+
+    def _at(self, seconds: int) -> datetime:
+        return self.ENQUEUED + timedelta(seconds=seconds)
+
+    def test_the_threshold_boundary(self):
+        threshold = mgw.HEAD_OF_QUEUE_STALL_SECONDS
+        self.assertIsNone(
+            mgw.head_of_queue_stall(self._entries(), self._at(threshold - 1)))
+        self.assertIsNotNone(
+            mgw.head_of_queue_stall(self._entries(), self._at(threshold)))
+
+    def test_the_row_names_what_is_stranded_behind_the_head(self):
+        row = mgw.head_of_queue_stall(
+            self._entries(), self._at(mgw.HEAD_OF_QUEUE_STALL_SECONDS))
+        self.assertIn("pr=#4537", row)
+        self.assertIn("state=AWAITING_CHECKS", row)
+        self.assertIn("blocked=2", row)
+        self.assertIn("blocked_green=1", row)
+
+    def test_it_reads_the_head_by_position_not_by_age(self):
+        """The queue merges in order, so only the HEAD's age strands anything. An old
+        entry deeper in the queue is normal (it waits for its turn) and must not
+        alarm."""
+        entries = self._entries()
+        young_head = mgw.QueueEntry(
+            pr_number=9, pr_id="PR_9", entry_id="MQE_9", position=0,
+            state="AWAITING_CHECKS",
+            enqueued_at=self._at(mgw.HEAD_OF_QUEUE_STALL_SECONDS),
+            base_oid=BASE, head_oid=HEAD)
+        self.assertIsNone(mgw.head_of_queue_stall(
+            [young_head, *entries], self._at(mgw.HEAD_OF_QUEUE_STALL_SECONDS)))
+
+    def test_an_unanchored_or_empty_queue_never_alarms(self):
+        """An API gap must not manufacture an alarm — a missing enqueuedAt is not
+        evidence of age."""
+        entries = self._entries()
+        entries[0] = replace(entries[0], enqueued_at=None)
+        late = self._at(10 * mgw.HEAD_OF_QUEUE_STALL_SECONDS)
+        self.assertIsNone(mgw.head_of_queue_stall(entries, late))
+        self.assertIsNone(mgw.head_of_queue_stall([], late))
+
+    def test_the_threshold_is_actionable_against_the_measured_numbers(self):
+        """Between one normal merge_group build (#4586 measured 23m55s / 25m20s on the
+        runs bracketing the stall) and the ruleset's 60-minute CI_TIMEOUT, which
+        discards the group and rebuilds the chain."""
+        self.assertGreaterEqual(mgw.HEAD_OF_QUEUE_STALL_SECONDS, 30 * 60)
+        self.assertLess(mgw.HEAD_OF_QUEUE_STALL_SECONDS, 60 * 60)
+
+    # -- it is actually WIRED into the sweep, not just implemented ---------------
+    def test_the_sweep_emits_the_stall_row_and_a_warning(self):
+        """A sweep where every per-entry decision is HOLD (suites present — nothing
+        this watchdog acts on) must still report the stalled head: that combination
+        is exactly the #4537 blind spot."""
+        harness = FakeWatchdog.build(
+            suites=8, now=self._at(mgw.HEAD_OF_QUEUE_STALL_SECONDS + 60))
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [],
+                         "the stall report must never mutate the queue")
+        self.assertTrue([r for r in harness.rows if "HEAD-OF-QUEUE STALL" in r],
+                        harness.rows)
+        self.assertTrue([r for r in harness.rows if r.startswith("::warning")
+                         and "head-of-queue stall" in r], harness.rows)
+
+    def test_a_healthy_queue_emits_no_stall_row(self):
+        harness = FakeWatchdog.build(suites=8)
+        self.assertEqual(harness.run(), 0)
+        self.assertFalse([r for r in harness.rows if "HEAD-OF-QUEUE STALL" in r],
+                         harness.rows)
 
 
 if __name__ == "__main__":

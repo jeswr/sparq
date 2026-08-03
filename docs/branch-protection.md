@@ -494,7 +494,16 @@ un-draft moment.
   most 8 entries per merge, and gives required checks 60 minutes to report
   (`check_response_timeout_minutes: 60`). Its **throughput** parameters — how many
   entries the queue speculatively builds, and the minimum-group-size wait — are recorded
-  in *Merge-queue throughput settings* below.
+  in *Merge-queue throughput settings* below. That 60-minute deadline **binds the
+  aggregator's own budget** (issue #4586): the gate is a poller, so on `merge_group`
+  both its `timeout-minutes` and the poll loop's absolute budget are set strictly under
+  60 (`scripts/ci_summary_gate.py` `MERGE_GROUP_JOB_TIMEOUT_MINUTES` /
+  `MERGE_GROUP_LOOP_BUDGET_MINUTES`) so it always reports before the queue assumes it
+  failed and dequeues the entry — head-of-queue, which stalls every entry behind it.
+  The ordering is enforced by
+  `scripts/tests/test_ci_summary_gate.py::TestMergeQueueBudgetOrdering`, which reads
+  this document's tabulated value and the workflow's own timeouts together; if the
+  ruleset's deadline is changed, move the mirror constant in the same commit.
 - **Require conversation resolution before merging** (all PR review threads resolved —
   `required_review_thread_resolution: true`).
 
