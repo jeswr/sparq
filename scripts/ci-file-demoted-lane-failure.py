@@ -55,6 +55,11 @@ from pathlib import Path
 
 PROG = "ci-file-demoted-lane-failure"
 MARKER = "[demoted-lane]"
+# The GitHub label EVERY issue this filer opens carries. It is not decoration: it is
+# what BOUNDS the dedupe listing in find_open_issue() to a set small enough to scan
+# exhaustively, which is what lets that listing drop `--search` (#5804). Keep it equal
+# to the bead label in build_bead_record() so the two records stay greppable together.
+ISSUE_LABEL = "demoted-lane"
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 # How much of the captured log to inline in the issue (the tail is where the crash /
 # reproducer lines are).
@@ -220,24 +225,63 @@ def gh(*argv: str) -> str:
     return subprocess.run(["gh", *argv], check=True, capture_output=True, text=True).stdout.strip()
 
 
+def ensure_label() -> None:
+    """Upsert ISSUE_LABEL (idempotent via --force). Needed BEFORE find_open_issue():
+    `gh issue list --label` ERRORS on a label the repo has never seen, and that error
+    is indistinguishable here from "no open issue". Fail-soft — a labelling problem
+    must not sink a filing run; `issue create` below surfaces a genuine auth failure."""
+    try:
+        gh("label", "create", ISSUE_LABEL, "--color", "b60205",
+           "--description", "demoted CI lane: full-form run failed (auto-filed)", "--force")
+    except subprocess.CalledProcessError as e:
+        log(f"warning: label upsert failed (non-fatal): {e.stderr.strip() if e.stderr else e}")
+
+
+def select_open_issue(items: list[dict], lane: str) -> str | None:
+    """PURE: the number of the first issue in `items` whose TITLE carries this filer's
+    marker AND this lane's key, else None. Split out from the gh call so the dedupe
+    predicate is exercised hermetically by --self-test."""
+    for item in items:
+        title = item.get("title", "")
+        if MARKER in title and f"lane={lane}" in title:
+            return str(item["number"])
+    return None
+
+
 def find_open_issue(lane: str) -> str | None:
+    """Number of an existing open issue for this lane, if any.
+
+    [OPUS-5] #5804: we deliberately do NOT pass `--search`. Two mechanisms in it both
+    fail the same way — gh's search TOKENISER handles the query this used to build
+    unreliably (a bracketed marker plus a `lane=<name>` key, quoted as ONE multi-token
+    phrase), and the search INDEX LAGS, so an issue this
+    lane filed minutes ago can be invisible on the next tick. Either one MISSES an
+    existing issue, and a missed dedupe re-files an issue we already filed: the non-spam
+    invariant failing open, quietly. Instead we list by ISSUE_LABEL — which keeps the
+    open set tiny, so scanning 100 exhaustively is cheap — and match the title in
+    Python, where no tokeniser is involved. Same shape as ci_selection_alarm.py
+    ::open_issue_exists, heavy_set_alarm.py and formal_lane_alarm.py.
+
+    TRANSITION: issues filed BEFORE ISSUE_LABEL was introduced carry no label and are
+    invisible to this listing, so the first failure per lane after this change may mint
+    one duplicate. That cost is one-time and self-healing (the replacement carries the
+    label); an unbounded unlabelled listing would trade it for the silent-truncation
+    class instead."""
     try:
         out = gh(
-            "issue", "list", "--state", "open",
-            "--search", f'in:title "{MARKER} lane={lane}"',
-            "--json", "number,title", "--limit", "10",
+            "issue", "list", "--state", "open", "--label", ISSUE_LABEL,
+            "--json", "number,title", "--limit", "100",
         )
-        for item in json.loads(out or "[]"):
-            if MARKER in item.get("title", "") and f"lane={lane}" in item.get("title", ""):
-                return str(item["number"])
+        return select_open_issue(json.loads(out or "[]"), lane)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-        log(f"warning: issue dedupe search failed ({e}) — will attempt creation")
+        log(f"warning: issue dedupe listing failed ({e}) — will attempt creation")
     return None
 
 
 def file_github_issue(bead_id: str, lane: str, args, log_tail: str) -> None:
     body = build_issue_body(bead_id, lane, args, log_tail)
     title = f"{MARKER} lane={lane}: full-form CI run failed"
+    ensure_label()
     existing = find_open_issue(lane)
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as tf:
         tf.write(body)
@@ -247,7 +291,8 @@ def file_github_issue(bead_id: str, lane: str, args, log_tail: str) -> None:
             gh("issue", "comment", existing, "--body-file", body_file)
             log(f"commented the fresh failure on existing open issue #{existing} (deduped)")
         else:
-            url = gh("issue", "create", "--title", title, "--body-file", body_file)
+            url = gh("issue", "create", "--title", title, "--body-file", body_file,
+                     "--label", ISSUE_LABEL)
             log(f"filed GitHub issue: {url}")
     except subprocess.CalledProcessError as e:
         log(f"warning: gh issue filing failed (exit {e.returncode}): {e.stderr.strip() if e.stderr else e}")
@@ -330,6 +375,22 @@ def self_test() -> int:
         # A single/double backtick is NOT a fence and must be left alone (no over-strip).
         assert defuse_code_fences("a `b` c ``d``") == "a `b` c ``d``"
         assert defuse_code_fences(defuse_code_fences(hostile)) == defuse_code_fences(hostile)
+    # [OPUS-5] #5804: the dedupe PREDICATE, over the shape `gh issue list --label` returns.
+    listed = [
+        {"number": 7, "title": "[demoted-lane] lane=fuzz-randomized: full-form CI run failed"},
+        {"number": 42, "title": f"{MARKER} lane=coverage-ratchet-main: full-form CI run failed"},
+    ]
+    # The coverage ratchet-advance pause reads back exactly this lane (coverage-gate.py).
+    assert select_open_issue(listed, "coverage-ratchet-main") == "42"
+    assert select_open_issue(listed, "fuzz-randomized") == "7"
+    assert select_open_issue(listed, "heavy-recall-vectors") is None  # => file a new one
+    assert select_open_issue([], "coverage-ratchet-main") is None
+    # A same-lane title from a DIFFERENT filer must not be mistaken for ours.
+    assert select_open_issue([{"number": 9, "title": "[metamorph] lane=fuzz-randomized: x"}],
+                             "fuzz-randomized") is None
+    # A title missing the key is not a match even when the marker is present.
+    assert select_open_issue([{"number": 9, "title": f"{MARKER} no lane here"}],
+                             "fuzz-randomized") is None
     log("self-test OK")
     return 0
 

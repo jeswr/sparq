@@ -492,21 +492,35 @@ def advance_block_verdict(advances, alarm_open):
 # (scripts/ci-file-demoted-lane-failure.py --lane); the alarm issue title is
 # "[demoted-lane] lane=<lane>: full-form CI run failed".
 COVERAGE_ALARM_LANE = "coverage-ratchet-main"
+# The GitHub label that filer puts on every issue it opens
+# (scripts/ci-file-demoted-lane-failure.py ISSUE_LABEL). This probe bounds its listing
+# by the SAME label the filer dedupes by, so the two cannot disagree about which issues
+# are candidates.
+COVERAGE_ALARM_LABEL = "demoted-lane"
 
 
 def open_alarm_issue_state(lane=COVERAGE_ALARM_LANE, log=print):
     """[SONNET-4.6] sq-6vshe.17: probe GitHub for an OPEN post-merge coverage alarm issue.
 
     Returns True (an open alarm exists), False (none), or None (the probe could not run —
-    the caller FAILS OPEN). Matches the filer's own dedupe query + title contract exactly
+    the caller FAILS OPEN). Matches the filer's own dedupe listing + title contract exactly
     (scripts/ci-file-demoted-lane-failure.py find_open_issue), so the two cannot drift on
-    which issue counts as "the alarm"."""
+    which issue counts as "the alarm".
+
+    [OPUS-5] #5804: list by COVERAGE_ALARM_LABEL and match the title in Python rather than
+    asking `--search` to do it. gh's search tokeniser handles `lane=<lane>` unreliably and
+    its index lags, so the old query could MISS a just-filed alarm and report False — the
+    ratchet-advance pause failing OPEN on a red main. This probe never creates the label
+    (it runs read-only in the PR-time `coverage-floors` job): if the repo has never seen
+    it, `gh issue list --label` errors and we return None, which the caller already treats
+    as fail-OPEN — the same verdict the old query's empty result produced, so nothing that
+    used to block stops blocking."""
     marker = "[demoted-lane]"
     try:
         r = subprocess.run(
             ["gh", "issue", "list", "--state", "open",
-             "--search", f'in:title "{marker} lane={lane}"',
-             "--json", "number,title", "--limit", "10"],
+             "--label", COVERAGE_ALARM_LABEL,
+             "--json", "number,title", "--limit", "100"],
             capture_output=True, text=True, timeout=120, check=True)
         items = json.loads(r.stdout or "[]")
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as e:

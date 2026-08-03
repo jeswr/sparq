@@ -49,6 +49,11 @@ from pathlib import Path
 
 PROG = "ci-file-differential-failure"
 MARKER = "[differential-fuzz]"
+# The GitHub label EVERY issue this filer opens carries. It is what BOUNDS the dedupe
+# listing in find_open_issue() to a set small enough to scan exhaustively, which is what
+# lets that listing drop `--search` (#5804). Keep it equal to the bead label in
+# build_bead_record() so the two records stay greppable together.
+ISSUE_LABEL = "differential-fuzz"
 
 _MISMATCH_RE = re.compile(r"^MISMATCH seed=(\d+)\s*$", re.MULTILINE)
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -210,19 +215,56 @@ def gh(*argv: str) -> str:
     ).stdout.strip()
 
 
+def ensure_label() -> None:
+    """Upsert ISSUE_LABEL (idempotent via --force). Needed BEFORE find_open_issue():
+    `gh issue list --label` ERRORS on a label the repo has never seen, and that error
+    is indistinguishable here from "no open issue". Fail-soft — a labelling problem
+    must not sink a filing run; `issue create` below surfaces a genuine auth failure."""
+    try:
+        gh("label", "create", ISSUE_LABEL, "--color", "b60205",
+           "--description", "differential fuzz mismatch vs Oxigraph (auto-filed)", "--force")
+    except subprocess.CalledProcessError as e:
+        log(f"warning: label upsert failed (non-fatal): {e.stderr.strip() if e.stderr else e}")
+
+
+def select_open_issue(items: list[dict], shard: str) -> str | None:
+    """PURE: the number of the first issue in `items` whose TITLE carries this filer's
+    marker AND this shard's key, else None. Split out from the gh call so the dedupe
+    predicate is exercised hermetically by --self-test."""
+    for item in items:
+        title = item.get("title", "")
+        if MARKER in title and f"shard={shard}" in title:
+            return str(item["number"])
+    return None
+
+
 def find_open_issue(shard: str) -> str | None:
-    """Number of an existing open differential-fuzz issue for this shard, if any."""
+    """Number of an existing open differential-fuzz issue for this shard, if any.
+
+    [OPUS-5] #5804: we deliberately do NOT pass `--search`. Two mechanisms in it both
+    fail the same way — gh's search TOKENISER handles the query this used to build
+    unreliably (a bracketed marker plus a `shard=<name>` key, quoted as ONE multi-token
+    phrase), and the search INDEX LAGS, so an issue this
+    lane filed minutes ago can be invisible on the next tick. Either one MISSES an
+    existing issue, and a missed dedupe re-files an issue we already filed: the non-spam
+    invariant failing open, quietly. Instead we list by ISSUE_LABEL — which keeps the
+    open set tiny, so scanning 100 exhaustively is cheap — and match the title in
+    Python, where no tokeniser is involved. Same shape as ci_selection_alarm.py
+    ::open_issue_exists, heavy_set_alarm.py and formal_lane_alarm.py.
+
+    TRANSITION: issues filed BEFORE ISSUE_LABEL was introduced carry no label and are
+    invisible to this listing, so the first failure per shard after this change may mint
+    one duplicate. That cost is one-time and self-healing (the replacement carries the
+    label); an unbounded unlabelled listing would trade it for the silent-truncation
+    class instead."""
     try:
         out = gh(
-            "issue", "list", "--state", "open",
-            "--search", f'in:title "{MARKER} shard={shard}"',
-            "--json", "number,title", "--limit", "10",
+            "issue", "list", "--state", "open", "--label", ISSUE_LABEL,
+            "--json", "number,title", "--limit", "100",
         )
-        for item in json.loads(out or "[]"):
-            if MARKER in item.get("title", "") and f"shard={shard}" in item.get("title", ""):
-                return str(item["number"])
+        return select_open_issue(json.loads(out or "[]"), shard)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-        log(f"warning: issue dedupe search failed ({e}) — will attempt creation")
+        log(f"warning: issue dedupe listing failed ({e}) — will attempt creation")
     return None
 
 
@@ -234,6 +276,7 @@ def file_github_issue(bead_id: str, shard: str, parsed: dict, args) -> None:
         f"{MARKER} shard={shard}: {n} differential mismatch(es) vs Oxigraph "
         f"(first seed={first}, mode={args.mode})"
     )
+    ensure_label()
     existing = find_open_issue(shard)
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as tf:
         tf.write(body)
@@ -243,7 +286,8 @@ def file_github_issue(bead_id: str, shard: str, parsed: dict, args) -> None:
             gh("issue", "comment", existing, "--body-file", body_file)
             log(f"commented the fresh window on existing open issue #{existing} (deduped)")
         else:
-            url = gh("issue", "create", "--title", title, "--body-file", body_file)
+            url = gh("issue", "create", "--title", title, "--body-file", body_file,
+                     "--label", ISSUE_LABEL)
             log(f"filed GitHub issue: {url}")
     except subprocess.CalledProcessError as e:
         log(f"warning: gh issue filing failed (exit {e.returncode}): {e.stderr.strip() if e.stderr else e}")
@@ -325,6 +369,22 @@ def self_test() -> int:
             shard="equality", mode="baseline", seed_start="4695", count="2200",
             category="equality"))
         assert (out / "repro.md").exists() and (out / "fuzz-log.txt").exists()
+    # [OPUS-5] #5804: the dedupe PREDICATE, over the shape `gh issue list --label` returns.
+    title = f"{MARKER} shard=equality: 3 differential mismatch(es) vs Oxigraph (first seed=1, mode=baseline)"
+    listed = [
+        {"number": 7, "title": "[differential-fuzz] shard=bgp: 1 mismatch"},
+        {"number": 42, "title": title},
+    ]
+    assert select_open_issue(listed, "equality") == "42"     # matched => COMMENT, no duplicate
+    assert select_open_issue(listed, "bgp") == "7"
+    assert select_open_issue(listed, "optional") is None     # unmatched => file a new one
+    assert select_open_issue([], "equality") is None
+    # A same-shard title from a DIFFERENT filer must not be mistaken for ours.
+    assert select_open_issue([{"number": 9, "title": "[metamorph] shard=equality: x"}],
+                             "equality") is None
+    # A title missing the key is not a match even when the marker is present.
+    assert select_open_issue([{"number": 9, "title": f"{MARKER} no shard here"}],
+                             "equality") is None
     log("self-test OK")
     return 0
 

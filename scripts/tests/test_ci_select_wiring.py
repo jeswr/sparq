@@ -58,6 +58,8 @@ SELECT_YML = REPO_ROOT / ".github" / "workflows" / "ci-select.yml"
 GATE_PY = REPO_ROOT / "scripts" / "ci_summary_gate.py"
 CI_SELECT_PY = REPO_ROOT / "scripts" / "ci_select.py"  # [OPUS-4.8] sq-fmx4u.6
 COVERAGE_GATE_PY = REPO_ROOT / "scripts" / "coverage-gate.py"  # [SONNET-4.6] sq-6vshe.17
+# [OPUS-5] #5804: the demoted-lane filer, whose ISSUE_LABEL the coverage probe lists by.
+DEMOTED_FILER_PY = REPO_ROOT / "scripts" / "ci-file-demoted-lane-failure.py"
 OWNERSHIP_TOML = REPO_ROOT / "ci" / "path-ownership.toml"  # [OPUS-4.8] sq-fmx4u.6
 # [OPUS-4.8] path-aware CI audit: the merge_group changed-files gates.
 CONTAINER_SCAN_YML = REPO_ROOT / ".github" / "workflows" / "container-scan.yml"
@@ -1402,6 +1404,36 @@ class TestCoverageMergeGroupDemotion(unittest.TestCase):
         self.assertIn(f'--lane "{lane}"', body,
                       f"the filer must file the alarm under the lane token "
                       f"coverage-gate.py reads ({lane!r})")
+
+    def test_filer_issue_label_matches_the_coverage_gate_probe(self):
+        """[OPUS-5] #5804. Both sides now bound their issue listing by a LABEL instead of
+        asking `gh --search` to match the title (an unreliable tokeniser over a lagging
+        index). That only works while the label the filer PUTS on the issue is the label
+        the probe LISTS by: if they drift, the probe lists a set that can never contain
+        the alarm, silently reports "no alarm", and the ratchet-advance pause stops
+        firing on a red main — the same silent half-protocol the lane-token pin guards.
+
+        Read the filer's constant from source: the filename is hyphenated, and this pins
+        the declaration rather than a re-derivation of it."""
+        src = DEMOTED_FILER_PY.read_text(encoding="utf-8")
+        m = re.search(r'^ISSUE_LABEL = "([^"]+)"', src, re.MULTILINE)
+        self.assertIsNotNone(
+            m, "ci-file-demoted-lane-failure.py must declare ISSUE_LABEL — it is what "
+               "bounds its own dedupe listing and the coverage probe's")
+        self.assertEqual(
+            m.group(1), self.cov_gate.COVERAGE_ALARM_LABEL,
+            "the label the demoted-lane filer puts on the alarm issue must equal the "
+            "label coverage-gate.py lists by, or the advance pause can never see it")
+        # And the filer must actually APPLY it on the CREATE path — a label only ever
+        # passed to `issue list` leaves every future issue unlabelled, hence invisible to
+        # both listings, which is the very dedupe miss this change removes. Scope the
+        # assertion to the `gh("issue", "create", ...)` call: asserting the flag appears
+        # anywhere in the file is satisfied by the `issue list` call alone (vacuous).
+        create = re.search(r'gh\(\s*"issue",\s*"create",[^)]*\)', src, re.DOTALL)
+        self.assertIsNotNone(create, "the filer must call `gh issue create`")
+        self.assertIn('"--label", ISSUE_LABEL', create.group(0),
+                      "`gh issue create` must be passed ISSUE_LABEL, or the issue it "
+                      "opens is invisible to the label-scoped dedupe listing")
 
     def test_filer_leg_detection_regex_matches_the_real_demoted_job_names(self):
         """The safety-net detects a failed DEMOTED leg by matching its JOB NAME. If a leg

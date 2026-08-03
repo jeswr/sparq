@@ -398,19 +398,45 @@ def ensure_label(name: str, color: str, desc: str) -> None:
         log(f"warning: label create {name} failed (non-fatal): {e.stderr.strip() if e.stderr else e}")
 
 
-def find_open_issue(marker: str, key: str) -> str | None:
+def select_open_issue(items: list[dict], marker: str, key: str) -> str | None:
+    """PURE: the number of the first issue in `items` whose TITLE carries both `marker`
+    and `key`, else None. Split out from the gh call so the dedupe predicate is
+    exercised hermetically by --self-test."""
+    for item in items:
+        title = item.get("title", "")
+        if marker in title and key in title:
+            return str(item["number"])
+    return None
+
+
+def find_open_issue(label: str, marker: str, key: str) -> str | None:
+    """Number of an existing open issue carrying `label` whose title matches
+    `marker` + `key`, if any.
+
+    [OPUS-5] #5804: we deliberately do NOT pass `--search`. Two mechanisms in it both
+    fail the same way — gh's search TOKENISER handles these keys unreliably (both are
+    exactly the awkward shape: `suite_of` and the cluster key join crate names with
+    `+`, over names that already carry `-`, under a leading `key=`) — and the search
+    INDEX LAGS, so an issue this lane filed minutes ago can be invisible on the next
+    tick. Either one MISSES an existing issue, and a missed dedupe re-files an issue we
+    already filed: the non-spam invariant failing open, quietly. Instead we list by the
+    lane's own label — which both call sites pass to `_post_issue`, and which bounds
+    the listing to this lane's own issues (at most one open per key, so the 100 below
+    is not a real truncation risk) — and match the title in Python, where no tokeniser
+    is involved. Same LISTING shape as ci_selection_alarm.py::open_issue_exists (which
+    matches a body marker rather than a title; the mechanism it avoids is the same).
+
+    Callers MUST have called ensure_label(label, ...) first: `gh issue list --label`
+    ERRORS on a label the repo has never seen (the fail-soft path below then reads
+    that as "no open issue" and files a duplicate)."""
     try:
         out = gh(
-            "issue", "list", "--state", "open",
-            "--search", f'in:title "{marker} {key}"',
-            "--json", "number,title", "--limit", "10",
+            "issue", "list", "--state", "open", "--label", label,
+            "--json", "number,title", "--limit", "100",
         )
-        for item in json.loads(out or "[]"):
-            title = item.get("title", "")
-            if marker in title and key in title:
-                return str(item["number"])
+        return select_open_issue(json.loads(out or "[]"), marker, key)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-        log(f"warning: issue dedupe search failed ({e})")
+        log(f"warning: issue dedupe listing failed ({e})")
     return None
 
 
@@ -588,7 +614,7 @@ def file_flake_issues(part: dict, soft: float, hard: float, run_url: str) -> lis
     for suite, rows in sorted(by_suite.items()):
         key = f"suite={suite}"
         title = f"{FLAKE_MARKER} {key}: benchmarks in the soft zone (possible runner noise)"
-        existing = find_open_issue(FLAKE_MARKER, key)
+        existing = find_open_issue(FLAKE_LABEL, FLAKE_MARKER, key)
         body = build_flake_body(suite, rows, soft, hard, run_url)
         res = _post_issue(title, body, [FLAKE_LABEL], existing)
         if res:
@@ -737,7 +763,7 @@ def file_regression_issues(part: dict, soft: float, hard: float, baseline_sha: s
         area = ranked[0]["overlap"][0] if (ranked and ranked[0]["overlap"]) else cluster_crates[0]
         key = f"cluster={'+'.join(cluster_crates)}"
         title = f"{REGRESSION_MARKER} {key}: nightly benchmark regression (P1)"
-        existing = find_open_issue(REGRESSION_MARKER, key)
+        existing = find_open_issue(REGRESSION_LABEL, REGRESSION_MARKER, key)
         body = build_regression_body(cluster_crates, rows, ranked, hard, run_url, repo,
                                      baseline_sha, head_sha)
         labels = [REGRESSION_LABEL, "priority:P1", "role:impl", f"area:{area}"]
@@ -1012,6 +1038,26 @@ def self_test() -> int:
                                        "d" * 40, "e" * 40)
         assert "<h1>" not in rbody2 and "</table>" not in rbody2, rbody2
         assert "&lt;h1&gt;forged&lt;/h1&gt;" in rbody2 and "#104" in rbody2, rbody2
+
+    # [OPUS-5] #5804: the dedupe PREDICATE, over the shape `gh issue list --label` returns.
+    # The keys are REAL ones: suite_of() joins mapped crates with `+`, and the regression
+    # key clusters the same way — punctuation under a leading `key=`, exactly the shape
+    # gh's search tokeniser mangles. Matched here in Python instead, where there is none.
+    suite_key = f"suite={suite_of('watdiv_q1')}"
+    assert "+" in suite_key or "-" in suite_key, suite_key  # the awkward shape, from real code
+    listed = [
+        {"number": 7, "title": f"{FLAKE_MARKER} {suite_key}: benchmarks in the soft zone"},
+        {"number": 42, "title": f"{REGRESSION_MARKER} cluster=sparq-engine+sparq-core: nightly benchmark regression (P1)"},
+    ]
+    assert select_open_issue(listed, FLAKE_MARKER, suite_key) == "7"
+    assert select_open_issue(listed, REGRESSION_MARKER,
+                             "cluster=sparq-engine+sparq-core") == "42"
+    assert select_open_issue(listed, FLAKE_MARKER, "suite=nonesuch") is None
+    assert select_open_issue([], FLAKE_MARKER, suite_key) is None
+    # The two markers do not cross-match: a soft-zone flake must never be deduped onto a
+    # hard-zone regression issue (they are different findings, and both lists are read
+    # from the same shape of payload).
+    assert select_open_issue(listed, REGRESSION_MARKER, suite_key) is None
 
     log("self-test OK")
     return 0
