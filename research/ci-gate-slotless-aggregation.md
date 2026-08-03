@@ -75,9 +75,10 @@ Why this shape and not the alternatives:
    *expected* workflow for the trigger set has not yet registered — reuse the
    path-filter outputs or require a minimum sibling count seen before a green status.
 7. **Trigger subscription.** The evaluator wants to fire for *every* sibling workflow,
-   which means a `workflow_run` trigger with no `workflows:` filter — a construct whose
-   routing behaviour GitHub does not document. Resolved as far as static evidence
-   allows in §6; the residue is a named stage-1 observation that stage 2 is blocked on.
+   which means a `workflow_run` trigger with no `workflows:` filter — a construct GitHub
+   neither documents nor demonstrates. §6 surveys the static evidence and finds it
+   settles neither service acceptance nor routing; both are decided together by a named
+   stage-1 observation that stage 2 is blocked on.
 
 ## 4. Verdict-function reuse
 
@@ -108,18 +109,26 @@ is that decision and the evidence behind it.
 
 ### What the static evidence settles, and what it does not
 
-- **GitHub's own parser accepts it.** `actions/languageservices`
+- **The schemas GitHub ships permit the syntax.** `actions/languageservices`
   (`workflow-parser/src/workflow-v1.0.json`, the schema behind GitHub's workflow
   editor validation) defines `workflow-run` as `one-of: [null, workflow-run-mapping]`,
   and `workflow-run-mapping` declares `types` / `workflows` / `branches` /
   `branches-ignore` with **no required property**. Omitting `workflows:` — indeed
-  writing a bare `workflow_run:` with no mapping at all — is valid to the parser GitHub
-  itself ships. SchemaStore's `github-workflow.json` agrees: `workflows` carries
-  `minItems: 1` *if present* and appears in no `required` list.
-- **actionlint is stricter than GitHub, not a witness against it.** The error is
-  actionlint's own rule, not a schema violation: `rule_events.go` errors whenever
-  `len(event.Workflows) == 0` for `workflow_run`, unconditionally. It is a lint-level
-  opinion about a construct GitHub's parser permits.
+  writing a bare `workflow_run:` with no mapping at all — is valid to that parser.
+  SchemaStore's `github-workflow.json` agrees: `workflows` carries `minItems: 1`
+  *if present* and appears in no `required` list. **This is weaker than acceptance.**
+  Both are permissive editor/validator schemas; neither is the workflow *ingestion*
+  service, and a schema that declines to require a property is not evidence that the
+  service registers a subscription when it is absent. Ingestion could equally reject
+  the file or register a trigger that never matches — and the docs' asymmetry below is
+  as consistent with those outcomes as with the permissive reading.
+- **actionlint's rejection is a lint opinion, not a schema violation — but it is the
+  only executable evidence either way.** `rule_events.go` errors whenever
+  `len(event.Workflows) == 0` for `workflow_run`, unconditionally; that is actionlint's
+  own rule, stricter than the schemas above. It does not establish that the service
+  rejects the construct, but it is weak evidence *against*, and nothing cited here is
+  executable evidence *for* — which is why the question stays open rather than
+  resolving in the permissive direction.
 - **The docs neither bless nor forbid the omission.** The syntax reference has an
   `on.workflow_run.<branches|branches-ignore>` entry but **no**
   `on.workflow_run.workflows` entry, and every documented example specifies
@@ -131,22 +140,44 @@ is that decision and the evidence behind it.
   `pr-backlog`, `selection-alarm`, `verdict-bridge` — name `workflows:`. Nothing here
   has ever exercised the unfiltered form.
 
-So **validity is settled** (GitHub accepts the file; actionlint's finding warrants no
-change to it, and no lane may be added that turns that opinion into a red without an
-explicit waiver for this file), and **routing is not**: whether an absent `workflows:`
-means *every* workflow or *no* workflow is not answerable from any artifact reachable
-without running it, and the failure mode stays silent.
+So the static evidence settles **neither** of the two questions that matter, and they
+fail the same silent way:
+
+1. **Service acceptance.** Does GitHub's workflow-ingestion service register a
+   `workflow_run` subscription for a file with no `workflows:` filter? The schemas
+   permit the syntax; they are not the service, and no reachable artifact reports what
+   the service did.
+2. **Routing.** *If* registered, does an absent `workflows:` mean *every* sibling
+   workflow or *none*?
+
+A rejection at (1) and a no-match at (2) are indistinguishable from outside: in both
+cases no `ci-summary-status` run appears and nothing announces why. So the stage-1
+observation below is scoped to decide the **combined operational invariant** — the
+workflow is registered *and* fires for multiple distinct siblings — rather than
+either question separately.
+
+On actionlint: its finding is a lint-level opinion about a construct GitHub's own
+schemas permit, so it warrants no change to the file *while stage 1 is the
+experiment*. That is a scoped, temporary waiver for this one file, not a standing
+rule: if a lane adopts actionlint, waive this file explicitly and **retire the waiver
+when the stage-1 observation resolves** — on PASS the construct is empirically
+justified and the waiver can be argued on its merits; on FAIL the fallback in
+decision 4 enumerates `workflows:` and the waiver becomes unnecessary.
 
 ### The decision
 
-1. Ship stage 1 with the unfiltered trigger. It is valid, and the cost of being wrong
-   at stage 1 is bounded — `ci-summary / gate` is still the only required context, so a
+1. Ship stage 1 with the unfiltered trigger — as the **experiment that answers both
+   open questions**, not because they are answered. The cost of being wrong is bounded:
+   `ci-summary / gate` is still the only required context, so an unregistered or
    non-firing evaluator publishes nothing and blocks nothing.
 2. The stage-1 observation gets a **named criterion** rather than "look at the Actions
-   tab". PASS: on a PR that touches no `.github/` file, `ci-summary-status` runs appear
+   tab", and it decides the combined invariant (registered **and** unfiltered-routing).
+   PASS: on a PR that touches no `.github/` file, `ci-summary-status` runs appear
    on the head for events originating from **at least two distinct triggering
    workflows** (distinct `github.event.workflow_run.name`). FAIL: no `ci-summary-status`
-   run appears at all on a head whose siblings demonstrably ran.
+   run appears at all on a head whose siblings demonstrably ran — which covers both
+   "the service never registered the trigger" and "it registered but matched nothing";
+   the fallback in 4 is the same either way, so the two need not be told apart.
 3. **Stage 2 — adding `ci-summary/status` to the ruleset's required contexts — is
    BLOCKED on a PASS.** A required context that is never reported blocks every merge,
    which is exactly the cost of getting this wrong, so the observation is a gate rather
