@@ -100,6 +100,19 @@ def render_replay(args, seed, count) -> str:
     return replay
 
 
+def select_replay(parsed: dict, args) -> str:
+    """The replay command to advertise for this run — ONE definition, shared by the
+    bead and the GitHub issue so the two can never disagree.
+
+    With failing seeds the tightest repro is the single first seed; without them
+    (a panic, say) there is no seed to name, so fall back to replaying the whole
+    `--seed-start`+`--count` window. Never emits a placeholder seed: an
+    unrunnable `--seed-start ?` command would be worse than no command."""
+    if parsed["seeds"]:
+        return render_replay(args, parsed["seeds"][0], 1)
+    return render_replay(args, args.seed_start, args.count)
+
+
 def derive_bead_id(shard: str, date: str, existing_ids: set, n: int = 5) -> str:
     """Deterministic, collision-checked bead id: sq-df + hash(date+shard).
     Deterministic so a re-run of the same night's failure derives the SAME id
@@ -161,13 +174,7 @@ def build_bead_record(bead_id: str, shard: str, parsed: dict, args, now: str) ->
         f"[BUG] {MARKER} shard={shard}: {n} differential mismatch(es) vs Oxigraph, "
         f"first seed={first} (window {args.seed_start}+{args.count}, mode={args.mode})"
     )
-    # With failing seeds the tightest repro is the single first seed; without them
-    # (a panic, say) fall back to replaying the whole window.
-    replay = (
-        render_replay(args, first, 1)
-        if parsed["seeds"]
-        else render_replay(args, args.seed_start, args.count)
-    )
+    replay = select_replay(parsed, args)
     description = (
         f"Auto-filed by the nightly differential lane (sq-0iqzw). Run: {args.run_url}\n"
         f"Failing seeds: {parsed['seeds'][:50]}{' …' if n > 50 else ''}\n"
@@ -204,8 +211,7 @@ def append_bead(jsonl_path: Path, record: dict) -> None:
 
 def build_issue_body(bead_id: str, shard: str, parsed: dict, args) -> str:
     n = len(parsed["seeds"])
-    first = parsed["seeds"][0] if parsed["seeds"] else "?"
-    replay = render_replay(args, first, 1)
+    replay = select_replay(parsed, args)
     seeds_line = ", ".join(str(s) for s in parsed["seeds"][:50]) + (" …" if n > 50 else "")
     case = parsed["first_case"] or "(no FIRST FAILING CASE block captured — see the artifact log)"
     return f"""> 🤖 **SPARQ agent** — auto-filed by the nightly differential-fuzz lane (bead sq-0iqzw). [FABLE-5]
@@ -370,6 +376,18 @@ def self_test() -> int:
         assert render_replay(upd, upd.seed_start, upd.count).endswith(
             "--seed-start 900 --seed-count 300")
         assert render_replay(A, A.seed_start, A.count).endswith("fuzz 4695 2200 equality")
+        # …and the whole-window fallback must reach BOTH channels, not just the bead:
+        # a seedless red run once advertised `--seed-start ? --seed-count 1` in the
+        # GitHub issue — the channel the workflow treats as reliable.
+        upd_empty_rec = build_bead_record(b1, "update-core", empty, upd, "2026-07-07T00:00:00Z")
+        upd_empty_body = build_issue_body(b1, "update-core", empty, upd)
+        window = ("cargo run -p sparq-bench --release -- update-fuzz "
+                  "--seed-start 900 --seed-count 300")
+        assert f"Replay: {window}\n" in upd_empty_rec["description"], upd_empty_rec["description"]
+        assert f"`{window}`" in upd_empty_body, upd_empty_body
+        assert "--seed-start ?" not in upd_empty_body and "?" not in upd_empty_rec["description"]
+        empty_body = build_issue_body(b1, "equality", empty, A)
+        assert "`cargo run -p sparq-bench --release -- fuzz 4695 2200 equality`" in empty_body
         # The non-baseline mode prefix still applies on top of a custom template.
         upd.mode = "SPARQ_MMAP"
         assert render_replay(upd, 7, 1).startswith("SPARQ_MMAP=1 cargo run ")
