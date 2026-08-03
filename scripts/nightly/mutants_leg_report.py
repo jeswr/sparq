@@ -26,13 +26,29 @@
 #   • the RECORDED PER-LEG OUTCOMES (`--status-dir`), because layer 2 means a job
 #     conclusion of `success` proves nothing about the sweep. The mutation step now
 #     writes a `leg-status.json` — cargo-mutants' real exit status, whether an
-#     outcomes.json was produced, and the ratchet `--check` exit — and uploads it as its
-#     own small artifact under `if: always()`, so the record SURVIVES the suppression
-#     that hides it from the job conclusion. A leg claiming `success` with no recorded
-#     outcome is treated as having produced NO verdict: fail-closed, because "we cannot
-#     see it" and "it was fine" must never render the same.
+#     outcomes.json was produced, WHETHER THAT OUTCOMES.JSON IS COMPLETE, and the ratchet
+#     `--check` exit — and uploads it as its own small artifact under `if: always()`, so
+#     the record SURVIVES the suppression that hides it from the job conclusion. A leg
+#     claiming `success` with no recorded outcome is treated as having produced NO
+#     verdict: fail-closed, because "we cannot see it" and "it was fine" must never
+#     render the same.
 # From those two it renders ONE legible verdict: how many legs failed, which crates
 # they belong to, which ceilings regressed, and what the lane cost.
+#
+# WHY COMPLETENESS IS RECORDED SEPARATELY, and not inferred from the other two fields:
+# cargo-mutants writes mutants.out/outcomes.json INCREMENTALLY, so a sweep killed at its
+# `timeout-minutes` (the normal outcome for the heavy crates) leaves a well-formed but
+# PARTIAL file. Existence therefore proves the sweep STARTED, not that it finished. Nor
+# does a zero ratchet exit rescue it: `scripts/mutants-gate.py --check` is deliberately
+# tolerant of truncation and of an unseeded crate — an under-measured run can only
+# under-report survivors, never spuriously fail, so it prints a marker and exits 0. Both
+# signals green, the leg would be reported as having produced a verdict and its crate
+# would stay seedable off a fraction of its mutants. So the RECORDING side compares
+# mutants.out/mutants.json (the full planned list, written up-front and shard-aware)
+# against the finished-outcome count and records the answer; this side REQUIRES it.
+# Missing or unestablished completeness reads as incomplete — the same fail-closed rule
+# `--seed` already applies (mutants-gate.py `completeness()` is the source of truth for
+# that comparison, and scripts/tests/test_mutants_leg_report.py pins the two together).
 #
 # WHAT IT IS NOT: a gate. It runs inside the nightly tier only and its job is declared
 # in .github/advisory-registry.json, so its red can never block a merge. Its red is a
@@ -55,6 +71,9 @@
 #   mutants_leg_report.py --jobs-file jobs.jsonl --status-dir leg-status/
 #   mutants_leg_report.py --jobs-file - < jobs.jsonl    # jobs on stdin
 #   mutants_leg_report.py --self-test                   # hermetic fixtures, no I/O
+#   mutants_leg_report.py --record leg-status/leg-status.json --crate sparq-engine \
+#       --shard 9/24 --outcomes-dir target/mutants/sparq-engine-shard-9-24 \
+#       --mutants-exit 2 --ratchet-exit 0     # the PRODUCING half, run by each leg
 #
 # --jobs-file is whatever `gh api repos/{owner}/{repo}/actions/runs/{id}/jobs` yields:
 # a JSON object with a `jobs` array, a bare JSON array, or the JSONL that
@@ -66,8 +85,9 @@
 #
 # Exit codes:
 #   0  every leg produced a verdict and no seeded ceiling regressed
-#   1  at least one leg FAILED, was cancelled, was SKIPPED, is still running, or has no
-#      recorded outcome — the lane's signal is incomplete; or a ratchet ceiling regressed
+#   1  at least one leg FAILED, was cancelled, was SKIPPED, is still running, or recorded
+#      no outcome / an INCOMPLETE one — the lane's signal is incomplete; or a ratchet
+#      ceiling regressed
 #   2  the detector itself is broken (unparseable input, an unreadable leg-status record,
 #      or the lane name no longer matches any job) — fail-LOUD, because masking a dead
 #      lane is the one thing a report like this must never do
@@ -117,6 +137,18 @@ FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required"})
 _CRATE_RE = re.compile(r"^sparq-[a-z0-9-]+$")
 _SHARD_RE = re.compile(r"^\d+/\d+$")
 
+# What a leg-status record that predates — or never reached — the completeness
+# measurement reads as. Absent evidence is NOT evidence of a whole sweep, so this is a
+# reason for calling the leg incomplete, never a reason to wave it through.
+NO_COMPLETENESS_EVIDENCE = "this leg recorded no planned-vs-finished mutant counts"
+
+# The per-mutant `summary` values cargo-mutants writes for a mutant it FINISHED. Mirrors
+# scripts/mutants-gate.py summarise(): "Success" (the unmutated baseline build) is not a
+# mutant and is excluded, `Unviable` counts as finished (it was attempted and did not
+# compile) even though the ratchet excludes it from the survivor denominator.
+_FINISHED_SUMMARIES = frozenset({"MissedMutant", "CaughtMutant", "Timeout", "Unviable"})
+_ROLLUP_KEYS = ("missed", "caught", "timeout", "unviable")
+
 
 class ReportError(Exception):
     """Detector-infrastructure failure — always exits 2, never silently exit 0."""
@@ -134,8 +166,13 @@ class LegStatus:
     `mutants_exit` is recorded but NOT treated as failure on its own: cargo-mutants
     exits nonzero when mutants merely SURVIVE, which is the lane's normal advisory
     result and the very thing it is measuring. What proves a leg produced a verdict is
-    `outcomes` — an outcomes.json actually landed — and what proves the verdict was
-    clean is `ratchet_exit`.
+    `outcomes` AND `complete` — an outcomes.json landed AND it finished every mutant its
+    mutants.json planned — and what proves the verdict was clean is `ratchet_exit`.
+
+    `complete` defaults to FALSE, so a record that carries no completeness evidence at
+    all (an older artifact, or a recorder that died before it could measure) reads as
+    incomplete rather than as a whole sweep. `completeness_reason` says which of those it
+    was, and is rendered into the leg's conclusion so the report names the shard to re-run.
     """
 
     crate: str
@@ -143,6 +180,8 @@ class LegStatus:
     outcomes: bool
     mutants_exit: int | None = None
     ratchet_exit: int | None = None
+    complete: bool = False
+    completeness_reason: str = NO_COMPLETENESS_EVIDENCE
 
     @property
     def key(self) -> tuple[str, str]:
@@ -221,6 +260,101 @@ class Report:
             crate for crate, legs in self.crates.items()
             if any(leg.state != "ok" for leg in legs)
         )
+
+
+# ---------------------------------------------------------------------------
+# Completeness — the RECORDING half, run inside each matrix leg
+# ---------------------------------------------------------------------------
+
+def finished_outcomes(doc: dict) -> int:
+    """How many mutants an outcomes.json reports as FINISHED.
+
+    Prefers cargo-mutants' top-level rollup counts and falls back to tallying per-mutant
+    `summary` strings, exactly as scripts/mutants-gate.py summarise() does — the two must
+    agree, or a leg could be called complete by one and truncated by the other.
+    """
+    if all(key in doc for key in _ROLLUP_KEYS):
+        try:
+            return sum(int(doc[key]) for key in _ROLLUP_KEYS)
+        except (TypeError, ValueError):
+            pass  # a malformed rollup falls through to the per-outcome tally
+    outcomes = doc.get("outcomes")
+    if not isinstance(outcomes, list):
+        return 0
+    return sum(1 for entry in outcomes
+               if isinstance(entry, dict) and entry.get("summary") in _FINISHED_SUMMARIES)
+
+
+def measure_completeness(outcomes_paths: list[str]) -> dict:
+    """Did this leg's sweep FINISH? -> the `completeness` block of its leg-status record.
+
+    cargo-mutants writes outcomes.json incrementally, so its mere existence proves the
+    sweep started; mutants.out/mutants.json is the FULL planned mutant list for the run
+    (written up-front and already restricted to this `--shard k/n` slice), so comparing
+    the two is what distinguishes a whole sweep from one the job timeout cut short. Same
+    comparison scripts/mutants-gate.py `completeness()` makes before it will `--seed`.
+
+    Fails CLOSED on every uncertainty — an unreadable artifact, a missing or malformed
+    planned list — because a truncated run whose sidecar never landed is indistinguishable
+    from a whole one, and "we could not tell" must not render as "it finished".
+    """
+    if not outcomes_paths:
+        return {"complete": False, "planned": None, "completed": None,
+                "reason": "no outcomes.json was produced"}
+    planned_total = completed_total = 0
+    for path in sorted(outcomes_paths):
+        try:
+            doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"complete": False, "planned": None, "completed": None,
+                    "reason": f"outcomes.json could not be read ({exc})"}
+        if not isinstance(doc, dict):
+            return {"complete": False, "planned": None, "completed": None,
+                    "reason": "outcomes.json is not a cargo-mutants outcomes document"}
+        completed = finished_outcomes(doc)
+        planned_path = Path(path).parent / "mutants.json"
+        try:
+            planned = json.loads(planned_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"complete": False, "planned": None, "completed": completed,
+                    "reason": "no mutants.json beside outcomes.json, so completeness "
+                              "cannot be established"}
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"complete": False, "planned": None, "completed": completed,
+                    "reason": f"mutants.json could not be read ({exc}), so completeness "
+                              "cannot be established"}
+        if not isinstance(planned, list):
+            return {"complete": False, "planned": None, "completed": completed,
+                    "reason": "mutants.json is not the expected list of planned mutants, "
+                              "so completeness cannot be established"}
+        if completed < len(planned):
+            return {"complete": False, "planned": len(planned), "completed": completed,
+                    "reason": f"only {completed} of {len(planned)} planned mutants "
+                              "finished — the sweep was cut short"}
+        planned_total += len(planned)
+        completed_total += completed
+    return {"complete": True, "planned": planned_total, "completed": completed_total,
+            "reason": ""}
+
+
+def record_leg_status(crate: str, shard: str, outcomes_dir: str,
+                      mutants_exit: int, ratchet_exit: int) -> dict:
+    """Build the leg-status record this leg's mutation step writes.
+
+    Note it is written even when everything went wrong: the report treats a MISSING record
+    as "no verdict", so a recorder that refused to write one would be reporting the same
+    thing less precisely. Any failure to measure lands in `completeness.reason` instead.
+    """
+    root = Path(outcomes_dir)
+    found = sorted(str(path) for path in root.rglob("outcomes.json")) if root.is_dir() else []
+    return {
+        "crate": crate,
+        "shard": shard,
+        "outcomes": bool(found),
+        "mutants_exit": mutants_exit,
+        "ratchet_exit": ratchet_exit,
+        "completeness": measure_completeness(found),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -338,12 +472,21 @@ def load_leg_statuses(directory: str) -> list[LegStatus]:
             raise ReportError(f"{path}: recorded leg outcome is unreadable: {exc}") from exc
         if not isinstance(data, dict) or "crate" not in data:
             raise ReportError(f"{path}: not a leg-status record (no 'crate' key)")
+        # A record with no `completeness` block reads as INCOMPLETE, not as complete: it
+        # is the "we cannot tell" case, and the whole point of the block is that a partial
+        # outcomes.json is well-formed and otherwise indistinguishable from a whole one.
+        completeness = data.get("completeness")
+        if not isinstance(completeness, dict):
+            completeness = {}
         statuses.append(LegStatus(
             crate=str(data.get("crate", "")),
             shard=str(data.get("shard", "")),
             outcomes=bool(data.get("outcomes", False)),
             mutants_exit=data.get("mutants_exit"),
             ratchet_exit=data.get("ratchet_exit"),
+            complete=bool(completeness.get("complete", False)),
+            completeness_reason=str(completeness.get("reason", ""))
+                                or NO_COMPLETENESS_EVIDENCE,
         ))
     return statuses
 
@@ -357,9 +500,16 @@ def apply_leg_statuses(report: Report, statuses: list[LegStatus]) -> None:
     (a runner killed at `timeout-minutes` never reaches the step that writes the record).
 
     The rule for an `ok` leg is fail-closed — it keeps that state only if it recorded an
-    outcomes.json. No record at all means the mutation step did not reach its end, which
-    `continue-on-error` then reported as `success`; that is the precise failure class the
-    job list cannot see, so treating it as a pass would defeat the whole mechanism.
+    outcomes.json AND that outcomes.json is COMPLETE. No record at all means the mutation
+    step did not reach its end, which `continue-on-error` then reported as `success`; that
+    is the precise failure class the job list cannot see, so treating it as a pass would
+    defeat the whole mechanism. A recorded-but-PARTIAL outcomes.json is the same class one
+    step further in: cargo-mutants writes it incrementally, so a sweep the timeout cut
+    short leaves a well-formed file, and the ratchet `--check` that ran over it cannot
+    reject it either (it is deliberately tolerant of an under-measured run, which can only
+    under-report survivors). Both signals are green and the sweep still did not happen —
+    so completeness is REQUIRED, and the crate is unseedable without it, exactly as
+    `mutants-gate.py --seed` would refuse the same artifact.
     """
     report.statuses_applied = True
     by_key = {status.key: status for status in statuses}
@@ -378,6 +528,13 @@ def apply_leg_statuses(report: Report, statuses: list[LegStatus]) -> None:
                 leg, state="failed",
                 conclusion=f"{leg.conclusion} (no outcomes.json; cargo-mutants exit "
                            f"{status.mutants_exit} — suppressed by `continue-on-error`)")
+        elif not status.complete:
+            report.legs[index] = replace(
+                leg, state="failed",
+                conclusion=f"{leg.conclusion} (INCOMPLETE sweep: {status.completeness_reason}; "
+                           f"cargo-mutants exit {status.mutants_exit}. The partial "
+                           "outcomes.json is well-formed, so the ratchet `--check` over it "
+                           "cannot reject it — re-run this leg before seeding)")
         elif status.ratchet_exit:
             report.legs[index] = replace(leg, ratchet_regressed=True)
 
@@ -627,12 +784,14 @@ def _self_test() -> int:
     check("blind report says it is blind",
           "These counts are job conclusions ALONE." in render(suppressed), True)
     apply_leg_statuses(suppressed, [
-        LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0),
+        LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0,
+                  complete=True),
         # cargo-mutants exit 1 and no outcomes.json: nothing to check, nothing to seed.
         LegStatus("sparq-mpc", "", outcomes=False, mutants_exit=1, ratchet_exit=0),
         # A COMPLETE sweep whose ratchet --check exited 1 — more survivors than the
         # committed ceiling. The verdict exists, so the crate stays seedable.
-        LegStatus("sparq-parse", "", outcomes=True, mutants_exit=2, ratchet_exit=1),
+        LegStatus("sparq-parse", "", outcomes=True, mutants_exit=2, ratchet_exit=1,
+                  complete=True),
         # sparq-reason 1/3 deliberately absent — the step never reached the record.
     ])
     by_label = {leg.label: leg for leg in suppressed.legs}
@@ -652,11 +811,66 @@ def _self_test() -> int:
             failures.append(f"suppressed-failure report is missing {needle!r}")
     # cargo-mutants exiting nonzero is NOT itself a failure — it exits nonzero whenever
     # mutants merely survive, which is the lane's normal result. Only a missing
-    # outcomes.json or a failed ratchet check reds a leg.
+    # outcomes.json, an INCOMPLETE one, or a failed ratchet check reds a leg.
     survivors = build_report([_job(f"{LANE_NAME} (sparq-canon)", "success", 40)])
     apply_leg_statuses(survivors, [
-        LegStatus("sparq-canon", "", outcomes=True, mutants_exit=2, ratchet_exit=0)])
+        LegStatus("sparq-canon", "", outcomes=True, mutants_exit=2, ratchet_exit=0,
+                  complete=True)])
     check("survivors are not a failure", verdict(survivors), 0)
+
+    # THE PARTIAL-ARTIFACT CASE. cargo-mutants writes outcomes.json incrementally, so a
+    # leg killed mid-sweep leaves one behind; `mutants-gate.py --check` over it exits 0
+    # (it is deliberately tolerant of an under-measured run). outcomes=True and
+    # ratchet_exit=0 therefore both read green, and only the planned-vs-finished counts
+    # separate this from a whole sweep.
+    partial = build_report([_job(f"{LANE_NAME} (sparq-engine, 9/24, 360)", "success", 360)])
+    apply_leg_statuses(partial, [
+        LegStatus("sparq-engine", "9/24", outcomes=True, mutants_exit=4, ratchet_exit=0,
+                  complete=False,
+                  completeness_reason="only 37 of 412 planned mutants finished — the "
+                                      "sweep was cut short")])
+    check("partial leg is not a verdict", partial.legs[0].state, "failed")
+    check("partial crate is unseedable", partial.unusable_crates, ["sparq-engine"])
+    check("partial verdict", verdict(partial), 1)
+    partial_text = render(partial)
+    for needle in ("INCOMPLETE sweep", "only 37 of 412 planned mutants",
+                   "Crates this run cannot seed"):
+        if needle not in partial_text:
+            failures.append(f"partial-artifact report is missing {needle!r}")
+    # ...and a record that carries no completeness evidence at all reads the same way,
+    # rather than defaulting to "it finished".
+    unmeasured = build_report([_job(f"{LANE_NAME} (sparq-canon)", "success", 40)])
+    apply_leg_statuses(unmeasured, [
+        LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0)])
+    check("unmeasured completeness is not a verdict", unmeasured.legs[0].state, "failed")
+
+    # measure_completeness on real files: whole, truncated, and unverifiable.
+    import tempfile
+    def _outcomes_doc(finished: int) -> dict:
+        return {"outcomes": [{"summary": "CaughtMutant"} for _ in range(finished)]
+                            + [{"summary": "Success"}]}  # the unmutated baseline build
+    with tempfile.TemporaryDirectory() as tmp:
+        out_dir = Path(tmp) / "mutants.out"
+        out_dir.mkdir(parents=True)
+        (out_dir / "outcomes.json").write_text(json.dumps(_outcomes_doc(3)), encoding="utf-8")
+        check("completeness unverifiable without mutants.json",
+              measure_completeness([str(out_dir / "outcomes.json")])["complete"], False)
+        (out_dir / "mutants.json").write_text(json.dumps([{}] * 8), encoding="utf-8")
+        truncated = measure_completeness([str(out_dir / "outcomes.json")])
+        check("completeness truncated", (truncated["complete"], truncated["completed"],
+                                         truncated["planned"]), (False, 3, 8))
+        (out_dir / "mutants.json").write_text(json.dumps([{}] * 3), encoding="utf-8")
+        check("completeness whole",
+              measure_completeness([str(out_dir / "outcomes.json")])["complete"], True)
+        # The RECORD the lane writes carries all of it, and is written even for a leg
+        # that produced nothing at all.
+        record = record_leg_status("sparq-engine", "9/24", str(Path(tmp)), 4, 0)
+        check("record outcomes", record["outcomes"], True)
+        check("record complete", record["completeness"]["complete"], True)
+        empty = record_leg_status("sparq-engine", "9/24", str(Path(tmp) / "nope"), 4, 0)
+        check("record with no sweep", (empty["outcomes"], empty["completeness"]["complete"]),
+              (False, False))
+    check("completeness of nothing", measure_completeness([])["complete"], False)
 
     # Every accepted input shape must parse to the same jobs.
     envelope = json.dumps({"jobs": _FIXTURE})
@@ -701,6 +915,30 @@ def verdict(report: Report) -> int:
     return 1 if incomplete or report.regressed else 0
 
 
+def _write_record(args) -> int:
+    """`--record`: write this leg's leg-status.json, and never take the leg down with it.
+
+    Returns 0 even when the measurement failed — the failure is already carried inside the
+    record as an incomplete `completeness`, which the report reds on. Exiting nonzero here
+    would abort the (`continue-on-error`) step before the record is written, replacing a
+    precise "this sweep was truncated" with a bare "no record".
+    """
+    record = record_leg_status(args.crate, args.shard, args.outcomes_dir,
+                               args.mutants_exit, args.ratchet_exit)
+    text = json.dumps(record)
+    try:
+        path = Path(args.record)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n", encoding="utf-8")
+    except OSError as exc:
+        # No record at all is still fail-closed downstream (the leg reads as "no verdict"),
+        # so say so loudly and let the sweep's own result stand.
+        print(f"::warning title=leg-status not written::{exc}")
+        return 0
+    print(text)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jobs-file", help="job list from the Actions API ('-' for stdin)")
@@ -714,12 +952,26 @@ def main(argv: list[str] | None = None) -> int:
                         help="append the markdown report here (default: $GITHUB_STEP_SUMMARY)")
     parser.add_argument("--self-test", action="store_true",
                         help="run the hermetic fixtures and exit")
+    parser.add_argument("--record", metavar="PATH",
+                        help="RECORDING half: write this leg's leg-status.json to PATH "
+                             "(run by the mutation step itself, not by the report)")
+    parser.add_argument("--crate", default="", help="--record: the leg's crate")
+    parser.add_argument("--shard", default="", help="--record: the leg's `k/n` shard, if any")
+    parser.add_argument("--outcomes-dir", default="",
+                        help="--record: cargo-mutants' -o directory, searched recursively "
+                             "for outcomes.json + its mutants.json planned list")
+    parser.add_argument("--mutants-exit", type=int, default=0,
+                        help="--record: cargo-mutants' real exit status")
+    parser.add_argument("--ratchet-exit", type=int, default=0,
+                        help="--record: `mutants-gate.py --check`'s exit status")
     args = parser.parse_args(argv)
 
     if args.self_test:
         return _self_test()
+    if args.record:
+        return _write_record(args)
     if not args.jobs_file:
-        parser.error("--jobs-file is required (or use --self-test)")
+        parser.error("--jobs-file is required (or use --record / --self-test)")
 
     try:
         if args.jobs_file == "-":

@@ -164,8 +164,10 @@ class TestGreenRunIsQuiet(unittest.TestCase):
             [leg("sparq-canon", "success", 42), leg("sparq-parse", "success", 51)]
         )
         mlr.apply_leg_statuses(self.report, [
-            mlr.LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0),
-            mlr.LegStatus("sparq-parse", "", outcomes=True, mutants_exit=2, ratchet_exit=0),
+            mlr.LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0,
+                          complete=True),
+            mlr.LegStatus("sparq-parse", "", outcomes=True, mutants_exit=2, ratchet_exit=0,
+                          complete=True),
         ])
 
     def test_exits_zero(self) -> None:
@@ -202,8 +204,9 @@ class TestSkippedLegIsNotAVerdict(unittest.TestCase):
              leg("sparq-engine", "skipped", 0, "2/24")]
         )
         mlr.apply_leg_statuses(self.report, [
-            mlr.LegStatus("sparq-canon", "", outcomes=True, ratchet_exit=0),
-            mlr.LegStatus("sparq-engine", "1/24", outcomes=True, ratchet_exit=0),
+            mlr.LegStatus("sparq-canon", "", outcomes=True, ratchet_exit=0, complete=True),
+            mlr.LegStatus("sparq-engine", "1/24", outcomes=True, ratchet_exit=0,
+                          complete=True),
         ])
 
     def test_skipped_is_not_counted_as_success(self) -> None:
@@ -262,9 +265,11 @@ class TestSuppressedInStepFailure(unittest.TestCase):
 
     def test_recorded_outcomes_reveal_them(self) -> None:
         mlr.apply_leg_statuses(self.report, [
-            mlr.LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0),
+            mlr.LegStatus("sparq-canon", "", outcomes=True, mutants_exit=0, ratchet_exit=0,
+                          complete=True),
             mlr.LegStatus("sparq-mpc", "", outcomes=False, mutants_exit=1, ratchet_exit=0),
-            mlr.LegStatus("sparq-parse", "", outcomes=True, mutants_exit=2, ratchet_exit=1),
+            mlr.LegStatus("sparq-parse", "", outcomes=True, mutants_exit=2, ratchet_exit=1,
+                          complete=True),
         ])
         by_label = {x.label: x for x in self.report.legs}
         self.assertEqual(by_label["sparq-canon"].state, "ok")
@@ -302,10 +307,14 @@ class TestSuppressedInStepFailure(unittest.TestCase):
                 sub.mkdir()
                 (sub / "leg-status.json").write_text(json.dumps(
                     {"crate": crate, "shard": shard, "outcomes": outcomes,
-                     "mutants_exit": 0, "ratchet_exit": 0}), encoding="utf-8")
+                     "mutants_exit": 0, "ratchet_exit": 0,
+                     "completeness": {"complete": outcomes, "planned": 8, "completed": 8,
+                                      "reason": ""}}), encoding="utf-8")
             statuses = mlr.load_leg_statuses(str(root))
         self.assertEqual({s.key for s in statuses},
                          {("sparq-canon", ""), ("sparq-engine", "9/24")})
+        self.assertEqual({s.key: s.complete for s in statuses},
+                         {("sparq-canon", ""): True, ("sparq-engine", "9/24"): False})
 
     def test_an_unreadable_record_is_a_detector_failure(self) -> None:
         # Silently dropping it would restore the blindness this mechanism removes.
@@ -316,6 +325,155 @@ class TestSuppressedInStepFailure(unittest.TestCase):
                 mlr.load_leg_statuses(tmp)
         with self.assertRaises(mlr.ReportError):
             mlr.load_leg_statuses("/nonexistent/leg-status-dir")
+
+
+class TestPartialOutcomesIsNotAVerdict(unittest.TestCase):
+    """A sweep cut short leaves a WELL-FORMED outcomes.json — and it is not a verdict.
+
+    This is the fourth way a leg can produce nothing, and the hardest to see, because the
+    two signals the record already carried both read GREEN for it:
+
+      • an outcomes.json EXISTS — cargo-mutants writes it incrementally, so a leg killed
+        at its `timeout-minutes` (the normal outcome for the heavy crates, which is why
+        sparq-engine is still unseeded) leaves one behind mid-sweep;
+      • the ratchet `--check` over that file EXITS 0 — deliberately, since an
+        under-measured run can only under-report survivors and never spuriously fail
+        (scripts/mutants-gate.py), and it never fails on an unseeded crate at all.
+
+    So the leg would be reported as having produced a verdict and its crate would stay
+    seedable from a fraction of its mutants. Only mutants.out/mutants.json — the FULL
+    planned list — distinguishes it, which is what the recorder now measures. Built end to
+    end on real files (recorder writes the record, reporter reads it back) because the
+    defect lived in the seam between the two halves, not in either alone.
+    """
+
+    PLANNED, FINISHED = 412, 37
+
+    def setUp(self) -> None:
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        # The shape the lane produces: target/mutants/<crate>-shard-k-n/mutants.out/…
+        self.output_dir = root / "target" / "mutants" / "sparq-engine-shard-9-24"
+        out = self.output_dir / "mutants.out"
+        out.mkdir(parents=True)
+        self.outcomes_path = out / "outcomes.json"
+        self.outcomes_path.write_text(json.dumps({"outcomes": [
+            {"scenario": {"Mutant": {"package": "sparq-engine"}}, "summary": "CaughtMutant"}
+            for _ in range(self.FINISHED)
+        ]}), encoding="utf-8")
+        (out / "mutants.json").write_text(json.dumps([{}] * self.PLANNED), encoding="utf-8")
+        self.baseline = root / "baseline.json"
+        self.baseline.write_text(json.dumps(
+            {"crates": {"sparq-engine": {"ceiling": 10}}}), encoding="utf-8")
+
+    def _record(self) -> Path:
+        """Run the RECORDING half exactly as the lane's step does."""
+        path = Path(self._tmp.name) / "leg-status" / "leg-status.json"
+        # cargo-mutants exit 4: the sweep died. The lane suppresses it (`|| …` +
+        # `continue-on-error`), so it reaches nothing but this record.
+        self.assertEqual(mlr.main(["--record", str(path), "--crate", "sparq-engine",
+                                   "--shard", "9/24", "--outcomes-dir", str(self.output_dir),
+                                   "--mutants-exit", "4", "--ratchet-exit", "0"]), 0)
+        return path
+
+    def test_the_ratchet_check_does_not_reject_the_partial_artifact(self) -> None:
+        # The PREMISE. If this ever starts failing, the leg report is no longer the only
+        # thing standing between a truncated sweep and a seeded ceiling — but until then,
+        # a zero ratchet exit is not evidence that the sweep finished.
+        import subprocess
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "mutants-gate.py"), "--check",
+             str(self.outcomes_path), "--baseline", str(self.baseline)],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_the_recorder_measures_the_truncation(self) -> None:
+        record = json.loads(self._record().read_text(encoding="utf-8"))
+        # Everything the old record carried still reads green...
+        self.assertTrue(record["outcomes"])
+        self.assertEqual(record["ratchet_exit"], 0)
+        # ...and the new field is the one that tells the truth.
+        self.assertEqual(record["completeness"]["complete"], False)
+        self.assertEqual(record["completeness"]["planned"], self.PLANNED)
+        self.assertEqual(record["completeness"]["completed"], self.FINISHED)
+
+    def test_the_report_marks_the_leg_incomplete_and_the_crate_unseedable(self) -> None:
+        statuses = mlr.load_leg_statuses(str(self._record().parent))
+        report = mlr.build_report([leg("sparq-canon", "success", 42),
+                                   leg("sparq-engine", "success", 360, "9/24")])
+        mlr.apply_leg_statuses(report, statuses + [
+            mlr.LegStatus("sparq-canon", "", outcomes=True, ratchet_exit=0, complete=True)])
+        by_label = {x.label: x for x in report.legs}
+        self.assertEqual(by_label["sparq-engine 9/24"].state, "failed")
+        self.assertEqual(by_label["sparq-canon"].state, "ok")
+        self.assertIn("sparq-engine", report.unusable_crates)
+        self.assertNotIn("sparq-canon", report.unusable_crates)
+        self.assertEqual(mlr.verdict(report), 1)
+        text = mlr.render(report)
+        self.assertIn("INCOMPLETE sweep", text)
+        self.assertIn(f"only {self.FINISHED} of {self.PLANNED} planned mutants", text)
+        self.assertIn("Crates this run cannot seed", text)
+        # It is a MISSING verdict, not a ratchet regression: nothing was measured to
+        # regress. Reporting it under "Ratchet regressions" would send someone to write
+        # tests for a sweep that never ran.
+        self.assertNotIn("Ratchet regressions", text)
+
+    def test_a_complete_sweep_is_still_a_verdict(self) -> None:
+        # The negative control: same fixture, planned list matching what finished. Without
+        # it, "call every leg incomplete" would satisfy the tests above.
+        (self.output_dir / "mutants.out" / "mutants.json").write_text(
+            json.dumps([{}] * self.FINISHED), encoding="utf-8")
+        statuses = mlr.load_leg_statuses(str(self._record().parent))
+        self.assertTrue(statuses[0].complete)
+        report = mlr.build_report([leg("sparq-engine", "success", 88, "9/24")])
+        mlr.apply_leg_statuses(report, statuses)
+        self.assertEqual(report.legs[0].state, "ok")
+        self.assertEqual(mlr.verdict(report), 0)
+
+    def test_completeness_cannot_be_established_without_the_planned_list(self) -> None:
+        # Absent evidence is not evidence of a whole run — the same fail-closed rule
+        # `mutants-gate.py --seed` applies (--allow-unverified-completeness is its
+        # deliberate, loudly-named escape hatch; the report has none).
+        (self.output_dir / "mutants.out" / "mutants.json").unlink()
+        record = json.loads(self._record().read_text(encoding="utf-8"))
+        self.assertEqual(record["completeness"]["complete"], False)
+        self.assertIn("mutants.json", record["completeness"]["reason"])
+
+    def test_a_record_with_no_completeness_block_reads_as_incomplete(self) -> None:
+        # An artifact written before the recorder measured completeness, or by a recorder
+        # that died first. Defaulting it to "complete" would reopen the hole silently.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "leg-status.json").write_text(json.dumps(
+                {"crate": "sparq-engine", "shard": "9/24", "outcomes": True,
+                 "mutants_exit": 0, "ratchet_exit": 0}), encoding="utf-8")
+            statuses = mlr.load_leg_statuses(tmp)
+        self.assertFalse(statuses[0].complete)
+        report = mlr.build_report([leg("sparq-engine", "success", 88, "9/24")])
+        mlr.apply_leg_statuses(report, statuses)
+        self.assertEqual(report.legs[0].state, "failed")
+
+    def test_agrees_with_the_ratchet_gate_on_the_same_artifact(self) -> None:
+        # DRIFT PIN. scripts/mutants-gate.py `completeness()` is the source of truth for
+        # planned-vs-finished, and its `--seed` refuses exactly what this report must call
+        # incomplete. Two copies of that comparison that disagreed would let a leg be
+        # reported as a verdict while --seed refused it (or the reverse), so pin them to
+        # the same answer on the same file.
+        spec = importlib.util.spec_from_file_location(
+            "mutants_gate", REPO_ROOT / "scripts" / "mutants-gate.py")
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        doc = json.loads(self.outcomes_path.read_text(encoding="utf-8"))
+        surviving, caught, unviable, timeout, _ = gate.summarise(doc)
+        finished = surviving + caught + timeout + unviable
+        self.assertEqual(mlr.finished_outcomes(doc), finished)
+        planned, done, unverifiable = gate.completeness(str(self.outcomes_path), finished)
+        self.assertIsNone(unverifiable)
+        mine = mlr.measure_completeness([str(self.outcomes_path)])
+        self.assertEqual((mine["planned"], mine["completed"]), (planned, done))
+        self.assertEqual(mine["complete"], done >= planned)
 
 
 class TestFailsLoud(unittest.TestCase):
@@ -419,6 +577,16 @@ class TestPinnedToLiveWorkflow(unittest.TestCase):
         self.assertIn("|| ratchet_exit=$?", block)
         upload = block.index("name: mutants-leg-status-")
         self.assertIn("if: always()", block[:upload])
+
+    def test_the_lane_records_completeness_not_just_existence(self) -> None:
+        # The record must be written by THIS script's --record mode, pointed at the sweep's
+        # output dir, so the planned-vs-finished comparison actually happens. Hand-rolling
+        # the JSON in shell again (the shape this replaced) could only report that an
+        # outcomes.json exists — which a sweep cut short also satisfies.
+        block = self._lane_block()
+        self.assertIn("scripts/nightly/mutants_leg_report.py", block)
+        self.assertIn("--record leg-status/leg-status.json", block)
+        self.assertIn('--outcomes-dir "$output_dir"', block)
 
     def test_the_lane_step_is_still_continue_on_error(self) -> None:
         # This is the PREMISE of the whole mechanism, not an incidental detail: the

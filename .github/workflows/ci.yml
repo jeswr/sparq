@@ -4417,7 +4417,9 @@ jobs:
           # nonzero whenever mutants merely SURVIVE — the lane's normal advisory result —
           # so it is recorded for diagnosis but is NOT on its own treated as a failure by
           # scripts/nightly/mutants_leg_report.py. What proves this leg produced a verdict
-          # is whether an outcomes.json landed, captured below.
+          # is that a COMPLETE outcomes.json landed — an outcomes.json that finished every
+          # mutant its mutants.json planned — which the recorder at the end of this step
+          # measures.
           mutants_exit=0
           cargo mutants -p "$CRATE" "${feat[@]}" "${shard_args[@]}" -o "$output_dir" \
             || mutants_exit=$?
@@ -4432,9 +4434,7 @@ jobs:
           OUTCOMES=$(find "$output_dir" -name outcomes.json)
           echo "outcomes: ${OUTCOMES:-<none>}"
           ratchet_exit=0
-          outcomes_found=false
           if [ -n "$OUTCOMES" ]; then
-            outcomes_found=true
             # shellcheck disable=SC2086 # intentional word-split: each path is a separate arg
             python3 scripts/mutants-gate.py --check $OUTCOMES \
               | tee -a "$GITHUB_STEP_SUMMARY" || ratchet_exit=$?
@@ -4447,11 +4447,20 @@ jobs:
           # upload below can find it even when the shard suffix output was never set.
           # mutants-nightly-report reads these; a leg with no record is reported as having
           # produced no verdict, which is the honest reading of "the step died early".
-          mkdir -p leg-status
-          printf '{"crate":"%s","shard":"%s","outcomes":%s,"mutants_exit":%d,"ratchet_exit":%d}\n' \
-            "$CRATE" "$SHARD" "$outcomes_found" "$mutants_exit" "$ratchet_exit" \
-            > leg-status/leg-status.json
-          cat leg-status/leg-status.json
+          # [OPUS-5] #4820 review-2: the recorder ALSO measures COMPLETENESS — this crate's
+          # mutants.out/mutants.json (the full planned list) against the finished-outcome
+          # count. Neither the existence of an outcomes.json nor $ratchet_exit can stand in
+          # for it: cargo-mutants writes outcomes.json INCREMENTALLY, so a sweep the timeout
+          # cut short leaves a well-formed partial file, and `mutants-gate.py --check` over
+          # that file exits 0 because an under-measured run can only under-report survivors
+          # (and never fails on an unseeded crate at all). Both green, sweep truncated — so
+          # the planned-vs-finished counts are recorded and the report REQUIRES them before
+          # it will call the leg a verdict or the crate seedable. Same comparison --seed
+          # already makes.
+          python3 scripts/nightly/mutants_leg_report.py \
+            --record leg-status/leg-status.json \
+            --crate "$CRATE" --shard "$SHARD" --outcomes-dir "$output_dir" \
+            --mutants-exit "$mutants_exit" --ratchet-exit "$ratchet_exit"
       - name: Upload mutation outcomes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
