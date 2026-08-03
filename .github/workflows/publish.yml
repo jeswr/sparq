@@ -497,7 +497,7 @@ jobs:
       # the default) generates + uploads a PEP-740 attestation per file. No static API token.
       # `print-hash` echoes the uploaded digests into the log for audit.
       - name: Publish to PyPI with provenance attestations
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           attestations: true
           print-hash: true
