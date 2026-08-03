@@ -234,6 +234,72 @@ class PerCrateFanOutTest(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)), f"duplicate follow-ons minted: {keys}")
 
 
+class CrateIdentityRuleTest(unittest.TestCase):
+    """[OPUS-5] (#5242) `{crate}` outside a crate-agnostic `dedup_key` is rejected.
+
+    The fan-out expands per crate but evaluate() de-duplicates on the expanded
+    dedup_key, so a template with `{crate}` in title/body and a crate-agnostic key
+    collapses to the FIRST crate — silently dropping the rest. Minting them anyway
+    is not an option: the key is the `flow-on-key` marker open_issue_exists()
+    searches, so two issues sharing one key are indistinguishable across runs.
+    Hence the identity rule, enforced at load time."""
+
+    def _tmpl(self, **kw):
+        base = dict(dedup_key="k-{pr}", title="t", body="b", labels=[])
+        base.update(kw)
+        return flow_on.CreateTemplate(**base)
+
+    def test_crate_in_title_without_crate_in_key_is_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            flow_on.validate_crate_identity("r", self._tmpl(title="Follow up {crate}"))
+        self.assertIn("title", str(cm.exception))
+        self.assertIn("dedup_key", str(cm.exception))
+
+    def test_crate_in_body_without_crate_in_key_is_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            flow_on.validate_crate_identity("r", self._tmpl(body="see crates/{crate}"))
+        self.assertIn("body", str(cm.exception))
+
+    def test_crate_in_a_label_without_crate_in_key_is_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            flow_on.validate_crate_identity("r", self._tmpl(labels=["docs", "area:{crate}"]))
+        self.assertIn("labels[1]", str(cm.exception))
+
+    def test_crate_in_key_permits_it_everywhere(self):
+        flow_on.validate_crate_identity(
+            "r",
+            self._tmpl(
+                dedup_key="k-{crate}", title="{crate}", body="{crate}", labels=["area:{crate}"]
+            ),
+        )
+
+    def test_crate_agnostic_template_is_permitted(self):
+        flow_on.validate_crate_identity("r", self._tmpl())
+
+    def test_load_rules_rejects_an_incoherent_template(self):
+        # End-to-end through the only production entry point for rules: a rule file
+        # carrying the gap must fail to load rather than mint a partial fan-out.
+        toml = """
+[[rule]]
+id = "bad-per-crate"
+when_new_paths = ["crates/*/Cargo.toml"]
+[[rule.create]]
+dedup_key = "follow-up-{pr}"
+title = "Follow up {crate}"
+body = "PR #{pr}."
+"""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rules.toml"
+            path.write_text(toml)
+            with self.assertRaises(ValueError) as cm:
+                flow_on.load_rules(path)
+        self.assertIn("bad-per-crate", str(cm.exception))
+
+    def test_shipped_rules_satisfy_the_identity_rule(self):
+        # load_rules() validates, so this passing IS the assertion for the live table.
+        self.assertTrue(flow_on.load_rules(RULES))
+
+
 class ChangedSurfaceTest(unittest.TestCase):
     def setUp(self):
         self.rules = flow_on.load_rules(RULES)

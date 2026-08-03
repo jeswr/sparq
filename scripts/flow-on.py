@@ -158,6 +158,40 @@ class FollowOn:
 # --------------------------------------------------------------------------- #
 # Rule loading
 # --------------------------------------------------------------------------- #
+CRATE_PLACEHOLDER = "{crate}"
+
+
+def validate_crate_identity(rule_id: str, tmpl: CreateTemplate) -> None:
+    """Reject a template that names `{crate}` outside its `dedup_key`.
+
+    [OPUS-5] (#5242) `{crate}` fans a template out over every crate the PR adds
+    (build_contexts), but `dedup_key` IS the follow-on's identity: evaluate()
+    de-duplicates on it within a run, and it becomes the `<!-- flow-on-key: … -->`
+    marker open_issue_exists() searches for across runs. So a template naming
+    `{crate}` in a presentation field but NOT in its key expands once per crate and
+    then collapses back to the FIRST crate's issue — silent, incomplete fan-out. It
+    cannot be fixed by minting them anyway: two issues sharing one key would be
+    indistinguishable to the cross-run idempotency search. So the identity rule is
+    "name `{crate}` anywhere ⇒ name it in `dedup_key`", enforced at load time where
+    the author sees it, rather than discovered as a missing issue after a merge."""
+    if CRATE_PLACEHOLDER in tmpl.dedup_key:
+        return
+    where = [
+        field_name
+        for field_name, value in (("title", tmpl.title), ("body", tmpl.body))
+        if CRATE_PLACEHOLDER in value
+    ]
+    where += [f"labels[{i}]" for i, lab in enumerate(tmpl.labels) if CRATE_PLACEHOLDER in lab]
+    if where:
+        raise ValueError(
+            "rule {!r} template {!r} uses {{crate}} in {} but not in dedup_key, so it "
+            "would be minted for only the FIRST added crate; add {{crate}} to "
+            "dedup_key (or drop it from those fields)".format(
+                rule_id, tmpl.dedup_key, ", ".join(where)
+            )
+        )
+
+
 def load_rules(path: Path) -> list[Rule]:
     with path.open("rb") as fh:
         data = tomllib.load(fh)
@@ -186,6 +220,8 @@ def load_rules(path: Path) -> list[Rule]:
             raise ValueError(f"rule {rule.id!r} has no trigger predicate")
         if not rule.creates:
             raise ValueError(f"rule {rule.id!r} has no create templates")
+        for tmpl in rule.creates:
+            validate_crate_identity(rule.id, tmpl)
         rules.append(rule)
     return rules
 

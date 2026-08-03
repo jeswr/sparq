@@ -46,6 +46,12 @@
 #   #                 dir the diff touched, as before. A template WITHOUT {crate} is
 #   #                 still minted once: its dedup_key is identical in every context,
 #   #                 so the existing de-duplication collapses it.
+#   #                 IDENTITY RULE (enforced at load time by
+#   #                 flow-on.py::validate_crate_identity — a violation raises): if a
+#   #                 template names {crate} in title/body/labels it MUST name it in
+#   #                 dedup_key too. dedup_key IS the issue identity, so a crate-
+#   #                 agnostic key would collapse the per-crate expansions back to
+#   #                 the first crate and silently drop the rest.
 #   #   {suite}       bench suite dir name, when a bench/<suite>/... path matched
 #   #   {surface}     skill surface dir name, when a skills/<surface>/... path matched
 #   #   {zk_circuit}  top-level zk/ circuit family dir (excludes zk/compose/; never bench/)
