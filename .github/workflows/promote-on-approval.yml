@@ -25,30 +25,33 @@ jobs:
       - name: Poll quarantined issues for maintainer approval
         run: |
           python3 - <<'PY'
-          import json, os, subprocess, datetime, sys
+          import json, os, subprocess, sys
           sys.path.insert(0, "scripts")
-          from promote import should_promote
+          from promote import epoch, fetch_reactions, should_promote
           from triage import triage
           REPO = os.environ["REPO"]
 
           def gh(*a):
               return subprocess.run(["gh", *a], capture_output=True, text=True)
 
-          def epoch(ts):
-              return int(datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()) if ts else 0
+          # memoized: the paginated read (#5802) lifts the per-issue reaction rows off a 30-row
+          # cap, and `maints` calls perm() once PER ROW — repeat 👍-ers would otherwise cost one
+          # API call each. Cache lives for one tick only (same shape as retriage.py's).
+          _perm = {}
 
           def perm(user):
-              r = gh("api", f"repos/{REPO}/collaborators/{user}/permission", "--jq", ".permission")
-              return r.stdout.strip() if r.returncode == 0 else "none"
+              if user not in _perm:
+                  r = gh("api", f"repos/{REPO}/collaborators/{user}/permission", "--jq", ".permission")
+                  _perm[user] = r.stdout.strip() if r.returncode == 0 else "none"
+              return _perm[user]
 
           issues = json.loads(gh("issue", "list", "-R", REPO, "--label", "trust:untrusted",
                                  "--state", "open", "--limit", "200",
                                  "--json", "number,updatedAt,labels").stdout or "[]")
           for it in issues:
               n = it["number"]
-              rx = json.loads(gh("api", f"repos/{REPO}/issues/{n}/reactions").stdout or "[]")
-              reactions = [{"content": r["content"], "user": r["user"]["login"],
-                            "created_at": epoch(r["created_at"])} for r in rx]
+              # paginated + normalized in promote.py (#5802: the single-page read hid a 👍 on page 2)
+              reactions = fetch_reactions(REPO, n, gh)
               maints = {r["user"] for r in reactions if r["content"] == "+1" and perm(r["user"]) in ("admin", "maintain", "write")}
               if should_promote(reactions, epoch(it["updatedAt"]), maints):
                   gh("issue", "edit", str(n), "-R", REPO, "--remove-label", "trust:untrusted")

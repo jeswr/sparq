@@ -602,12 +602,17 @@ jobs:
       # self-tested ONLY inside the retriage cron (retriage.yml), so a PR that changed
       # triage.py's promotion behavior (#2898: park no-area issues) broke retriage's fixture
       # expectations on main SILENTLY — the KeyError surfaced a day later, out-of-band.
-      # Running both hermetic self-tests HERE (stdlib-only, no gh/network: pure label-delta
+      # Running those hermetic self-tests HERE (stdlib-only, no gh/network: pure label-delta
       # fixtures) reds the offending PR instead of the next cron run.
-      - name: Self-test triage.py + retriage.py (static-triage + retriage-plan fixtures)
+      # [OPUS-5] #5802: scripts/promote.py joins them for the same reason. Its self-test was wired
+      # NOWHERE — the trust-promotion cron never runs it — so the fixture pinning the paginated
+      # reaction read (a 👍 on page 2 of a quarantined issue's reactions) would have guarded
+      # nothing. Hermetic like its siblings: the injected `gh` stub means no gh/network.
+      - name: Self-test triage.py + retriage.py + promote.py (static-triage, retriage-plan, promotion fixtures)
         run: |
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
+          python3 scripts/promote.py --self-test
       # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
       # family — it CLEARS the `needs:area` park triage.py sets. As of #3816 it also
       # runs unattended every half hour (.github/workflows/triage-area.yml), which
