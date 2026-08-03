@@ -160,7 +160,11 @@ async fn decide_denies_on_unparseable_dataset() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400, "an unparseable dataset must fail closed, not allow");
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unparseable dataset must fail closed, not allow"
+    );
 }
 
 /// FAIL-CLOSED: an unknown mode is a `403` deny — the HTTP layer never grants an unrecognised mode.
@@ -284,7 +288,11 @@ async fn query_is_access_controlled_per_session() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     let rows = body["results"]["bindings"].as_array().unwrap();
-    assert_eq!(rows.len(), 0, "an anonymous session sees ZERO rows (fail-closed view)");
+    assert_eq!(
+        rows.len(),
+        0,
+        "an anonymous session sees ZERO rows (fail-closed view)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -319,8 +327,7 @@ async fn decide_emits_link_header_when_governing_acl_known() {
         .to_str()
         .unwrap();
     assert_eq!(
-        link,
-        r#"<https://pod.ex/.acl>; rel="acl""#,
+        link, r#"<https://pod.ex/.acl>; rel="acl""#,
         "Link header must be the RFC-8288 link-value for the governing ACL"
     );
 }
@@ -372,8 +379,7 @@ async fn wac_allow_emits_link_header_when_governing_acl_known() {
         .to_str()
         .unwrap();
     assert_eq!(
-        link,
-        r#"<https://pod.ex/.acl>; rel="acl""#,
+        link, r#"<https://pod.ex/.acl>; rel="acl""#,
         "Link header must be the RFC-8288 link-value for the governing ACL"
     );
 }
@@ -500,7 +506,11 @@ async fn stateful_decide_reads_the_servers_own_store() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "alice's grant lives in the server's own store");
+    assert_eq!(
+        resp.status(),
+        200,
+        "alice's grant lives in the server's own store"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["allow"], serde_json::Value::Bool(true));
     assert_eq!(body["governingAcl"], "https://pod.ex/.acl");
@@ -541,7 +551,12 @@ async fn stateful_view_rematerialises_after_an_acl_write() {
     };
 
     // 1. Bob has no grant yet — a definitive deny, which also WARMS the generation-0 cache.
-    let resp = decide(server_decide_body(Some(bob), "https://pod.ex/notes/n1", "read")).await;
+    let resp = decide(server_decide_body(
+        Some(bob),
+        "https://pod.ex/notes/n1",
+        "read",
+    ))
+    .await;
     assert_eq!(resp.status(), 403, "bob starts with no grant");
 
     // 2. Write a Read authorization for bob into the pod's `.acl` graph.
@@ -566,7 +581,12 @@ async fn stateful_view_rematerialises_after_an_acl_write() {
     assert_eq!(resp.status(), 204, "the ACL write must commit");
 
     // 3. The next stateful decision must see the NEW grant (a new generation => a re-materialise).
-    let resp = decide(server_decide_body(Some(bob), "https://pod.ex/notes/n1", "read")).await;
+    let resp = decide(server_decide_body(
+        Some(bob),
+        "https://pod.ex/notes/n1",
+        "read",
+    ))
+    .await;
     assert_eq!(
         resp.status(),
         200,
@@ -577,7 +597,11 @@ async fn stateful_view_rematerialises_after_an_acl_write() {
 
     // 4. And the write did not widen anything else: an anonymous session is still denied.
     let resp = decide(server_decide_body(None, "https://pod.ex/notes/n1", "read")).await;
-    assert_eq!(resp.status(), 403, "the re-materialised view stays fail-closed");
+    assert_eq!(
+        resp.status(),
+        403,
+        "the re-materialised view stays fail-closed"
+    );
 }
 
 /// `/authz/query` over the server's own store is access-controlled per session, exactly as the
@@ -641,7 +665,9 @@ async fn stateful_wac_allow_advertises_over_the_servers_own_store() {
 
     let resp = client()
         .post(format!("{base}/authz/wac-allow"))
-        .json(&body(serde_json::json!({ "agent": "https://alice.ex/card#me" })))
+        .json(&body(
+            serde_json::json!({ "agent": "https://alice.ex/card#me" }),
+        ))
         .send()
         .await
         .unwrap();

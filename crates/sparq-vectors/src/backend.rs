@@ -211,7 +211,10 @@ mod tests {
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("sparq_vec_backend_{}_{name}.spqv", std::process::id()));
+        p.push(format!(
+            "sparq_vec_backend_{}_{name}.spqv",
+            std::process::id()
+        ));
         p
     }
 
@@ -220,7 +223,9 @@ mod tests {
         let mut store = VectorStore::create(tmp(name), 2).unwrap();
         for i in 0..n {
             let theta = std::f32::consts::TAU * (i as f32) / (n as f32);
-            store.put((i as u32) + 1, &[theta.cos(), theta.sin()]).unwrap();
+            store
+                .put((i as u32) + 1, &[theta.cos(), theta.sin()])
+                .unwrap();
         }
         store.finalize().unwrap();
         store
@@ -263,7 +268,11 @@ mod tests {
         let k = 10;
         let query = [1.0f32, 0.0];
         let got = nearest_filtered_overfetch_default(&backend, &query, &mask, k);
-        assert_eq!(got.len(), k, "iterative over-fetch must fill k from the far-side mask");
+        assert_eq!(
+            got.len(),
+            k,
+            "iterative over-fetch must fill k from the far-side mask"
+        );
         // Every returned id is admitted, and the result equals the exact ground truth (exact
         // backend) — so the grow-and-retry recovered the true filtered top-k.
         for &(id, _) in &got {
@@ -280,8 +289,15 @@ mod tests {
         let backend = ExactBackend::new(&store);
         let mask: IdMask = vec![10u32, 20, 30].into_iter().collect();
         let got = nearest_filtered_overfetch_default(&backend, &[1.0f32, 0.0], &mask, 10);
-        assert_eq!(got.len(), 3, "only 3 admitted vectors exist → short list, no padding");
-        assert_eq!(got, nearest_exact_filtered(&store, &[1.0f32, 0.0], &mask, 10));
+        assert_eq!(
+            got.len(),
+            3,
+            "only 3 admitted vectors exist → short list, no padding"
+        );
+        assert_eq!(
+            got,
+            nearest_exact_filtered(&store, &[1.0f32, 0.0], &mask, 10)
+        );
     }
 
     /// Degenerate contracts: empty mask, all-zero query, k=0 → no results.
@@ -290,7 +306,9 @@ mod tests {
         let store = ring_store("degen", 16);
         let backend = ExactBackend::new(&store);
         let mask: IdMask = (1u32..=16).collect();
-        assert!(nearest_filtered_overfetch_default(&backend, &[1.0, 0.0], &IdMask::new(), 5).is_empty());
+        assert!(
+            nearest_filtered_overfetch_default(&backend, &[1.0, 0.0], &IdMask::new(), 5).is_empty()
+        );
         assert!(nearest_filtered_overfetch_default(&backend, &[0.0, 0.0], &mask, 5).is_empty());
         assert!(nearest_filtered_overfetch_default(&backend, &[1.0, 0.0], &mask, 0).is_empty());
     }

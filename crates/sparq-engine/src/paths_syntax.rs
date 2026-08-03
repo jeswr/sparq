@@ -129,7 +129,10 @@ fn parse_paths(src: &str) -> Result<ParsedPaths, String> {
         Via::Pattern(canonical_pattern(
             &prologue,
             via_token,
-            &[Variable::new_unchecked("from"), Variable::new_unchecked("to")],
+            &[
+                Variable::new_unchecked("from"),
+                Variable::new_unchecked("to"),
+            ],
             "VIA",
         )?)
     } else {
@@ -202,7 +205,10 @@ fn canonical_pattern(
         unreachable!()
     };
     let GraphPattern::Project { inner, .. } = pattern else {
-        return Err(format!("invalid SELECT projection for PATHS {} pattern", clause));
+        return Err(format!(
+            "invalid SELECT projection for PATHS {} pattern",
+            clause
+        ));
     };
     Ok(inner.to_string())
 }

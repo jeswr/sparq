@@ -236,7 +236,10 @@ pub fn encode_message(record: &ChangeRecord, config: &SinkConfig) -> BrokerMessa
         subject: config.subject.clone(),
         key: config.partition_key.clone(),
         headers: vec![
-            (HEADER_CONTENT_TYPE.to_string(), CONTENT_TYPE_JSON.to_string()),
+            (
+                HEADER_CONTENT_TYPE.to_string(),
+                CONTENT_TYPE_JSON.to_string(),
+            ),
             (HEADER_SEQ.to_string(), record.seq.to_string()),
             (HEADER_GENERATION.to_string(), record.generation.to_string()),
             (HEADER_REBASE.to_string(), record.rebase.to_string()),
@@ -1018,7 +1021,11 @@ mod tests {
         // Commit 0 inserted one triple whose literal contains a `"` and a `\` — the JSON must
         // escape both (this crate hand-rolls its JSON; the escaping is load-bearing).
         let first = payload_of(&messages[0]);
-        assert!(first.starts_with("{\"sequenceNumber\":0,\"generation\":1,"), "{}", first);
+        assert!(
+            first.starts_with("{\"sequenceNumber\":0,\"generation\":1,"),
+            "{}",
+            first
+        );
         assert!(first.contains("\"rebase\":false"), "{}", first);
         assert!(
             first.contains("{\"eventId\":{\"commitNum\":0,\"opNum\":1},\"op\":\"ADD\""),
@@ -1097,7 +1104,10 @@ mod tests {
             .expect("reopen relay");
         assert_eq!(relay.delivered_through_seq(), Some(2));
         let report = relay.pump().expect("pump after restart");
-        assert_eq!(report.delivered, 0, "already-delivered records are not replayed");
+        assert_eq!(
+            report.delivered, 0,
+            "already-delivered records are not replayed"
+        );
         assert!(relay.sink().messages().is_empty());
 
         // A DIFFERENT consumer name keeps its own watermark and sees the whole stream.
@@ -1131,7 +1141,10 @@ mod tests {
             )
             .expect("open relay");
             assert_eq!(relay.pump().expect("pump 1").delivered_through_seq, Some(0));
-            assert!(offset_path.is_file(), "the first pump creates the watermark");
+            assert!(
+                offset_path.is_file(),
+                "the first pump creates the watermark"
+            );
             assert_eq!(relay.pump().expect("pump 2").delivered_through_seq, Some(1));
             assert_eq!(relay.pump().expect("pump 3").delivered_through_seq, Some(2));
         } // drop == process restart
@@ -1518,20 +1531,35 @@ mod tests {
         let io = MockIo::new("INFO {}\r\nPING\r\nPONG\r\n");
         let sink = NatsSink::handshake(io, &NatsOptions::default()).expect("handshake");
         let written = String::from_utf8(sink.stream().writes.clone()).expect("utf8");
-        assert!(written.contains("PONG\r\n"), "answered the server ping: {}", written);
+        assert!(
+            written.contains("PONG\r\n"),
+            "answered the server ping: {}",
+            written
+        );
     }
 
     /// A subject that is a wildcard, empty, or carries whitespace/control characters is
     /// rejected BEFORE anything is written — a `\r\n` in a subject would forge a protocol line.
     #[test]
     fn nats_sink_rejects_unpublishable_subjects() {
-        for bad in ["", "sparq.*", "sparq.>", "sparq changes", "sparq\r\nPUB x 0"] {
+        for bad in [
+            "",
+            "sparq.*",
+            "sparq.>",
+            "sparq changes",
+            "sparq\r\nPUB x 0",
+        ] {
             let io = MockIo::new("INFO {}\r\nPONG\r\n");
             let mut sink = NatsSink::handshake(io, &NatsOptions::default()).expect("handshake");
             let mut msg = message("{}");
             msg.subject = bad.to_string();
             let err = sink.deliver(&msg).expect_err("unpublishable subject");
-            assert!(matches!(err, SinkError::Config(_)), "{:?} for {:?}", err, bad);
+            assert!(
+                matches!(err, SinkError::Config(_)),
+                "{:?} for {:?}",
+                err,
+                bad
+            );
             let written = String::from_utf8_lossy(&sink.stream().writes).to_string();
             assert!(!written.contains("PUB"), "nothing was written: {}", written);
         }

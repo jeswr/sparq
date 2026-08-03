@@ -19,8 +19,14 @@ use std::process::Command;
 /// Driver / proving error.
 #[derive(Debug)]
 pub enum DriverError {
-    Spawn { tool: String, source: std::io::Error },
-    Tool { tool: String, stderr: String },
+    Spawn {
+        tool: String,
+        source: std::io::Error,
+    },
+    Tool {
+        tool: String,
+        stderr: String,
+    },
     Io(std::io::Error),
 }
 
@@ -162,7 +168,10 @@ impl CircuitProver {
             .arg(&prover_name)
             .current_dir(&self.compose_dir)
             .output()
-            .map_err(|source| DriverError::Spawn { tool: "nargo".into(), source })?;
+            .map_err(|source| DriverError::Spawn {
+                tool: "nargo".into(),
+                source,
+            })?;
         if !witness_path.exists() {
             return Err(DriverError::Tool {
                 tool: "nargo execute".into(),
@@ -227,7 +236,11 @@ impl CircuitProver {
         let proof = std::fs::read(out_dir.join("proof"))?;
         let public_inputs = std::fs::read(out_dir.join("public_inputs"))?;
         let vk = std::fs::read(out_dir.join("vk"))?;
-        Ok(ProofArtifacts { proof, public_inputs, vk })
+        Ok(ProofArtifacts {
+            proof,
+            public_inputs,
+            vk,
+        })
     }
 
     /// Recompute the CANONICAL verification key for a circuit-family member,
@@ -286,7 +299,10 @@ impl CircuitProver {
             .arg("-t")
             .arg(&self.target)
             .output()
-            .map_err(|source| DriverError::Spawn { tool: "bb".into(), source })?;
+            .map_err(|source| DriverError::Spawn {
+                tool: "bb".into(),
+                source,
+            })?;
         Ok(out.status.success())
     }
 
@@ -303,9 +319,10 @@ impl CircuitProver {
 }
 
 fn run(tool: &str, cmd: &mut Command) -> Result<(), DriverError> {
-    let out = cmd
-        .output()
-        .map_err(|source| DriverError::Spawn { tool: tool.into(), source })?;
+    let out = cmd.output().map_err(|source| DriverError::Spawn {
+        tool: tool.into(),
+        source,
+    })?;
     if !out.status.success() {
         return Err(DriverError::Tool {
             tool: tool.into(),
@@ -394,8 +411,14 @@ mod driver_glue_tests {
         let s_msg = spawn.to_string();
         let t_msg = tool.to_string();
         let io_msg = io.to_string();
-        assert!(s_msg.contains("spawn") && s_msg.contains("nargo"), "Spawn names the tool");
-        assert!(t_msg.contains("bb") && t_msg.contains("boom"), "Tool carries name + stderr");
+        assert!(
+            s_msg.contains("spawn") && s_msg.contains("nargo"),
+            "Spawn names the tool"
+        );
+        assert!(
+            t_msg.contains("bb") && t_msg.contains("boom"),
+            "Tool carries name + stderr"
+        );
         assert!(io_msg.contains("io error") && io_msg.contains("disk full"));
         // The three renderings are mutually distinct (no two variants collide).
         assert_ne!(s_msg, t_msg);
@@ -408,9 +431,12 @@ mod driver_glue_tests {
     /// rely on this conversion).
     #[test]
     fn io_error_converts_into_io_variant() {
-        let e: DriverError = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope").into();
+        let e: DriverError =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope").into();
         match e {
-            DriverError::Io(inner) => assert_eq!(inner.kind(), std::io::ErrorKind::PermissionDenied),
+            DriverError::Io(inner) => {
+                assert_eq!(inner.kind(), std::io::ErrorKind::PermissionDenied)
+            }
             other => panic!("io::Error must convert to DriverError::Io, got {:?}", other),
         }
     }
@@ -442,7 +468,10 @@ mod driver_glue_tests {
         // written first, which is the isolation behaviour we assert.
         let r_a = prover.gen_witness_tagged(&id, "challenge = \"0x1\"\n", "taga");
         let r_b = prover.gen_witness_tagged(&id, "challenge = \"0x2\"\n", "tagb");
-        assert!(r_a.is_err() && r_b.is_err(), "no real witness without the toolchain");
+        assert!(
+            r_a.is_err() && r_b.is_err(),
+            "no real witness without the toolchain"
+        );
 
         let toml_a = tmp.join(&pkg).join("Prover_taga.toml");
         let toml_b = tmp.join(&pkg).join("Prover_tagb.toml");
@@ -451,15 +480,27 @@ mod driver_glue_tests {
         assert_ne!(toml_a, toml_b, "the two tags use distinct toml paths");
         // The two inputs coexist with their original, non-clobbered contents — the
         // collision the tag isolation prevents.
-        assert_eq!(std::fs::read_to_string(&toml_a).unwrap(), "challenge = \"0x1\"\n");
-        assert_eq!(std::fs::read_to_string(&toml_b).unwrap(), "challenge = \"0x2\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&toml_a).unwrap(),
+            "challenge = \"0x1\"\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&toml_b).unwrap(),
+            "challenge = \"0x2\"\n"
+        );
 
         // The empty tag uses the LEGACY shared `Prover.toml` name (distinct from any
         // tagged name), so a tagged call never overwrites the untagged one.
         let _ = prover.gen_witness_tagged(&id, "challenge = \"0x3\"\n", "");
         let toml_shared = tmp.join(&pkg).join("Prover.toml");
-        assert!(toml_shared.exists(), "empty tag uses the shared Prover.toml name");
-        assert_ne!(toml_shared, toml_a, "shared name differs from a tagged name");
+        assert!(
+            toml_shared.exists(),
+            "empty tag uses the shared Prover.toml name"
+        );
+        assert_ne!(
+            toml_shared, toml_a,
+            "shared name differs from a tagged name"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -198,10 +198,9 @@ fn check_differential_with(
                     format!("{reference_name}={} rows, {name}={} rows", a.len(), b.len()),
                 )
             }
-            (QueryResults::Boolean(a), QueryResults::Boolean(b)) => (
-                a == b,
-                format!("{reference_name}={a}, {name}={b}"),
-            ),
+            (QueryResults::Boolean(a), QueryResults::Boolean(b)) => {
+                (a == b, format!("{reference_name}={a}, {name}={b}"))
+            }
             _ => {
                 return Verdict::EngineFailure(EngineFailure {
                     engine: (*name).to_string(),

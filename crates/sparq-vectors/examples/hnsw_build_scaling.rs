@@ -107,7 +107,13 @@ fn config_for(efc: usize) -> (HnswConfig, &'static str) {
         40 => (HnswConfig::fast_build(), "fast_build"),
         100 => (HnswConfig::default(), "default"),
         200 => (HnswConfig::high_recall(), "high_recall"),
-        _ => (HnswConfig { ef_construction: efc, ..HnswConfig::default() }, "custom"),
+        _ => (
+            HnswConfig {
+                ef_construction: efc,
+                ..HnswConfig::default()
+            },
+            "custom",
+        ),
     }
 }
 
@@ -127,7 +133,8 @@ fn store_from_file(path: &str, n_max: usize, store_path: &Path) -> (VectorStore,
     let mut r = BufReader::with_capacity(1 << 20, f);
 
     let mut hdr = [0u8; 8];
-    r.read_exact(&mut hdr).unwrap_or_else(|e| panic!("read header of {}: {}", path, e));
+    r.read_exact(&mut hdr)
+        .unwrap_or_else(|e| panic!("read header of {}: {}", path, e));
     let n_total = u32::from_le_bytes(hdr[0..4].try_into().unwrap()) as usize;
     let dim = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
     assert!(dim > 0, "{} declares dim=0", path);
@@ -144,7 +151,8 @@ fn store_from_file(path: &str, n_max: usize, store_path: &Path) -> (VectorStore,
     let mut written = 0usize;
     let mut skipped = 0usize;
     for i in 0..n {
-        r.read_exact(&mut raw).unwrap_or_else(|e| panic!("read vector {} of {}: {}", i, path, e));
+        r.read_exact(&mut raw)
+            .unwrap_or_else(|e| panic!("read vector {} of {}: {}", i, path, e));
         for (dst, src) in vec.iter_mut().zip(raw.chunks_exact(4)) {
             *dst = f32::from_le_bytes(src.try_into().unwrap());
         }
@@ -152,7 +160,9 @@ fn store_from_file(path: &str, n_max: usize, store_path: &Path) -> (VectorStore,
             skipped += 1;
             continue;
         }
-        store.put(i as u32, &vec).unwrap_or_else(|e| panic!("put vector {}: {}", i, e));
+        store
+            .put(i as u32, &vec)
+            .unwrap_or_else(|e| panic!("put vector {}: {}", i, e));
         written += 1;
     }
     if skipped > 0 {
@@ -161,7 +171,9 @@ fn store_from_file(path: &str, n_max: usize, store_path: &Path) -> (VectorStore,
             skipped
         );
     }
-    store.finalize().unwrap_or_else(|e| panic!("finalize store: {}", e));
+    store
+        .finalize()
+        .unwrap_or_else(|e| panic!("finalize store: {}", e));
     (store, written, dim)
 }
 
@@ -176,9 +188,13 @@ fn store_synthetic(n: usize, dim: usize, store_path: &Path) -> VectorStore {
         let v: Vec<f32> = (0..dim)
             .map(|_| ((splitmix64(&mut state) >> 40) as f32 / (1u64 << 23) as f32) * 2.0 - 0.5)
             .collect();
-        store.put(i as u32, &v).unwrap_or_else(|e| panic!("put vector {}: {}", i, e));
+        store
+            .put(i as u32, &v)
+            .unwrap_or_else(|e| panic!("put vector {}: {}", i, e));
     }
-    store.finalize().unwrap_or_else(|e| panic!("finalize store: {}", e));
+    store
+        .finalize()
+        .unwrap_or_else(|e| panic!("finalize store: {}", e));
     store
 }
 
@@ -206,14 +222,23 @@ fn main() {
     let smoke = first == Some("--smoke");
     if !smoke && !matches!(first, Some(a) if !a.starts_with('-')) {
         // No corpus, or a flag we do not recognise (`--help` included).
-        eprintln!("usage: hnsw_build_scaling <base.bin|--smoke> [n[,n...]] [ef_construction[,...]]");
+        eprintln!(
+            "usage: hnsw_build_scaling <base.bin|--smoke> [n[,n...]] [ef_construction[,...]]"
+        );
         eprintln!("  base.bin  raw f32 corpus — u32 LE n, u32 LE dim, then n*dim f32 LE");
         eprintln!("  --smoke   tiny synthetic corpus (self-test; NOT a SIFT measurement)");
         eprintln!("  $SPARQ_VECTORS_TMP  directory for the temporary .spqv store");
         std::process::exit(2);
     }
-    let base_path = if smoke { String::new() } else { args[0].clone() };
-    let n_list = parse_list(args.get(1).cloned(), if smoke { &[SMOKE_N] } else { &[DEFAULT_N] });
+    let base_path = if smoke {
+        String::new()
+    } else {
+        args[0].clone()
+    };
+    let n_list = parse_list(
+        args.get(1).cloned(),
+        if smoke { &[SMOKE_N] } else { &[DEFAULT_N] },
+    );
     let efc_list = parse_list(args.get(2).cloned(), &DEFAULT_EFC);
 
     let dir = store_dir();
@@ -223,10 +248,18 @@ fn main() {
     let _ = out.flush();
 
     for &n in &n_list {
-        let store_path = dir.join(format!("hnsw-build-scaling-{}-{}.spqv", n, std::process::id()));
+        let store_path = dir.join(format!(
+            "hnsw-build-scaling-{}-{}.spqv",
+            n,
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&store_path);
 
-        eprintln!("[build-scaling] n={}: writing store to {}", n, store_path.display());
+        eprintln!(
+            "[build-scaling] n={}: writing store to {}",
+            n,
+            store_path.display()
+        );
         let t_store = Instant::now();
         let (store, n_actual, dim) = if smoke {
             (store_synthetic(n, SMOKE_DIM, &store_path), n, SMOKE_DIM)
@@ -241,7 +274,10 @@ fn main() {
 
         for &efc in &efc_list {
             let (cfg, preset) = config_for(efc);
-            eprintln!("[build-scaling] n={} efc={} ({}): building HNSW...", n_actual, efc, preset);
+            eprintln!(
+                "[build-scaling] n={} efc={} ({}): building HNSW...",
+                n_actual, efc, preset
+            );
             let t_build = Instant::now();
             let index = VectorIndex::build_with(&store, cfg);
             let build_s = t_build.elapsed().as_secs_f64();
@@ -249,7 +285,11 @@ fn main() {
             // next level's build (peak RSS is ~one graph, not the whole sweep's worth).
             drop(std::hint::black_box(index));
 
-            let vec_per_s = if build_s > 0.0 { n_actual as f64 / build_s } else { 0.0 };
+            let vec_per_s = if build_s > 0.0 {
+                n_actual as f64 / build_s
+            } else {
+                0.0
+            };
             println!(
                 "{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{:.0}",
                 n_actual, dim, efc, preset, store_s, build_s, vec_per_s
@@ -265,7 +305,11 @@ fn main() {
         let _ = std::fs::remove_file(&store_path);
     }
 
-    let corpus = if smoke { "synthetic-splitmix64".to_string() } else { base_path };
+    let corpus = if smoke {
+        "synthetic-splitmix64".to_string()
+    } else {
+        base_path
+    };
     println!(
         "# corpus={} threads={} metric=build_time_only recall=NOT_MEASURED \
          note=NON-CANONICAL unless run on the dedicated quiet bench box",

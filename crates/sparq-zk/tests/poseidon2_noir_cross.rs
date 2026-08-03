@@ -21,10 +21,22 @@ const NOIR_PERMUTATION_11_22_33_44: [&str; 4] = [
 ];
 
 const NOIR_HASHES: [(&[u64], &str); 5] = [
-    (&[1], "0x168758332d5b3e2d13be8048c8011b454590e06c44bce7f702f09103eef5a373"),
-    (&[1, 2], "0x038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383"),
-    (&[1, 2, 3], "0x23864adb160dddf590f1d3303683ebcb914f828e2635f6e85a32f0a1aecd3dd8"),
-    (&[1, 2, 3, 4], "0x130bf204a32cac1f0ace56c78b731aa3809f06df2731ebcf6b3464a15788b1b9"),
+    (
+        &[1],
+        "0x168758332d5b3e2d13be8048c8011b454590e06c44bce7f702f09103eef5a373",
+    ),
+    (
+        &[1, 2],
+        "0x038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383",
+    ),
+    (
+        &[1, 2, 3],
+        "0x23864adb160dddf590f1d3303683ebcb914f828e2635f6e85a32f0a1aecd3dd8",
+    ),
+    (
+        &[1, 2, 3, 4],
+        "0x130bf204a32cac1f0ace56c78b731aa3809f06df2731ebcf6b3464a15788b1b9",
+    ),
     (
         &[5, 6, 7, 8, 9, 10, 11],
         "0x0ceb49bb97a406f119fcceb666e68b0acb48c286d9e011a4fa9427cd49989db5",
@@ -36,7 +48,12 @@ const NOIR_HASH_40_LEAVES: &str =
 
 #[test]
 fn permutation_matches_noir_blackbox() {
-    let input = [Fr::from(11u64), Fr::from(22u64), Fr::from(33u64), Fr::from(44u64)];
+    let input = [
+        Fr::from(11u64),
+        Fr::from(22u64),
+        Fr::from(33u64),
+        Fr::from(44u64),
+    ];
     let out = poseidon2::permutation(&input);
     for (got, expected) in out.iter().zip(NOIR_PERMUTATION_11_22_33_44) {
         assert_eq!(field_to_hex(got), expected);
@@ -64,8 +81,8 @@ fn sponge_hash_matches_noir_poseidon_library() {
 /// only when nargo is absent (e.g. minimal CI).
 #[test]
 fn nargo_live_cross_check() {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/noir_poseidon2");
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/noir_poseidon2");
     let out = match std::process::Command::new("nargo")
         .arg("execute")
         .current_dir(&fixture)
@@ -84,12 +101,18 @@ fn nargo_live_cross_check() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut lines = stdout.lines().filter(|l| l.starts_with("0x") || l.starts_with('['));
+    let mut lines = stdout
+        .lines()
+        .filter(|l| l.starts_with("0x") || l.starts_with('['));
 
     // Permutation line: `[0x…, 0x…, 0x…, 0x…]`.
     let perm_line = lines.next().expect("permutation output line");
     let perm: Vec<&str> = perm_line.trim_matches(['[', ']']).split(", ").collect();
-    assert_eq!(perm, NOIR_PERMUTATION_11_22_33_44.to_vec(), "permutation drifted");
+    assert_eq!(
+        perm,
+        NOIR_PERMUTATION_11_22_33_44.to_vec(),
+        "permutation drifted"
+    );
 
     for (input, expected) in NOIR_HASHES {
         let line = lines.next().expect("hash output line");

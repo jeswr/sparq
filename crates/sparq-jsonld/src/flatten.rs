@@ -156,7 +156,9 @@ mod tests {
     /// id, and sorts the two blank nodes by @id.
     #[test]
     fn flatten_expanded_nests_out() {
-        let expanded = parse(r#"[{"@id":"_:b0","http://ex/p":[{"@id":"_:b1","http://ex/q":[{"@value":"v"}]}]}]"#);
+        let expanded = parse(
+            r#"[{"@id":"_:b0","http://ex/p":[{"@id":"_:b1","http://ex/q":[{"@value":"v"}]}]}]"#,
+        );
         let out = flatten_expanded(&expanded);
         // Two top-level nodes, sorted by @id (_:b0 before _:b1).
         assert_eq!(

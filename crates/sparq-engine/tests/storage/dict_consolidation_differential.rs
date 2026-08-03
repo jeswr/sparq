@@ -22,7 +22,9 @@ fn synthetic_nt(n: u32) -> String {
     let n_cities = (n / 10).max(1);
     let mut seed = 0x9E3779B97F4A7C15u64;
     let mut rng = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (seed >> 33) as u32
     };
     let mut s = String::new();
@@ -30,21 +32,31 @@ fn synthetic_nt(n: u32) -> String {
         s.push_str(&format!(
             "<http://ex/n{i}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Person> .\n"
         ));
-        s.push_str(&format!("<http://ex/n{i}> <http://ex/name> \"name{i}\" .\n"));
+        s.push_str(&format!(
+            "<http://ex/n{i}> <http://ex/name> \"name{i}\" .\n"
+        ));
         s.push_str(&format!(
             "<http://ex/n{i}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
             20 + i % 80
         ));
-        s.push_str(&format!("<http://ex/n{i}> <http://ex/city> <http://ex/c{}> .\n", i % n_cities));
+        s.push_str(&format!(
+            "<http://ex/n{i}> <http://ex/city> <http://ex/c{}> .\n",
+            i % n_cities
+        ));
         for _ in 0..4 {
-            s.push_str(&format!("<http://ex/n{i}> <http://ex/follows> <http://ex/n{}> .\n", rng() % n));
+            s.push_str(&format!(
+                "<http://ex/n{i}> <http://ex/follows> <http://ex/n{}> .\n",
+                rng() % n
+            ));
         }
     }
     // Term-kind edge cases + an exact duplicate line (must dedup identically).
     s.push_str("<http://ex/n0> <http://ex/name> \"name0\" .\n");
     s.push_str("<http://ex/n0> <http://other.org/p> \"a \\\"q\\\" b\\nc \\\\ d \\u00e9\" .\n");
     s.push_str("<http://ex/n0> <http://ex/label> \"caf\\u00e9\"@fr .\n");
-    s.push_str("<http://ex/n0> <http://ex/v> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n");
+    s.push_str(
+        "<http://ex/n0> <http://ex/v> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n",
+    );
     s.push_str("_:b0 <http://ex/follows> <http://ex/n0> .\n");
     s.push_str("_:b0 <http://ex/name> \"blank zero\" .\n");
     s
@@ -52,13 +64,17 @@ fn synthetic_nt(n: u32) -> String {
 
 /// The real bench suite (bench/qlever-synthetic/queries/*.rq), read from the repo.
 fn bench_queries() -> Vec<(String, String)> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/qlever-synthetic/queries");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bench/qlever-synthetic/queries");
     let mut qs: Vec<(String, String)> = std::fs::read_dir(&dir)
         .expect("bench query dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().map(|x| x == "rq").unwrap_or(false))
         .map(|p| {
-            (p.file_stem().unwrap().to_string_lossy().into_owned(), std::fs::read_to_string(&p).unwrap())
+            (
+                p.file_stem().unwrap().to_string_lossy().into_owned(),
+                std::fs::read_to_string(&p).unwrap(),
+            )
         })
         .collect();
     qs.sort();
@@ -92,7 +108,10 @@ fn canon_triples(g: &Graph) -> Vec<String> {
 }
 
 fn pool(n: usize) -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new().num_threads(n).build().expect("rayon pool")
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build()
+        .expect("rayon pool")
 }
 
 #[test]
@@ -102,14 +121,20 @@ fn all_dict_build_paths_agree_on_bench_suite() {
     // 1. Serial streaming reference.
     let serial = Graph::load_reader(nt.as_bytes(), "ntriples").expect("serial load");
     // 2. Sharded parallel in-memory (4 threads → the sharded consolidation path).
-    let sharded_mem = pool(4).install(|| Graph::load_str(&nt, "ntriples")).expect("sharded load");
+    let sharded_mem = pool(4)
+        .install(|| Graph::load_str(&nt, "ntriples"))
+        .expect("sharded load");
     // 3. 1-thread in-memory (the serial-merge fallback inside the parallel loader).
-    let one_thread = pool(1).install(|| Graph::load_str(&nt, "ntriples")).expect("1-thread load");
+    let one_thread = pool(1)
+        .install(|| Graph::load_str(&nt, "ntriples"))
+        .expect("1-thread load");
     // 4 + 5. External (out-of-core) builds, sharded and serial dict.
     let base = std::env::temp_dir().join(format!("sparq_dictpar_diff_{}", std::process::id()));
     let (ext_sharded_dir, ext_serial_dir) = (base.join("sharded"), base.join("serial"));
-    Graph::build_external_opts(nt.as_bytes(), "ntriples", &ext_sharded_dir, 4096, true).expect("ext sharded");
-    Graph::build_external_opts(nt.as_bytes(), "ntriples", &ext_serial_dir, 4096, false).expect("ext serial");
+    Graph::build_external_opts(nt.as_bytes(), "ntriples", &ext_sharded_dir, 4096, true)
+        .expect("ext sharded");
+    Graph::build_external_opts(nt.as_bytes(), "ntriples", &ext_serial_dir, 4096, false)
+        .expect("ext serial");
     let ext_sharded = Graph::open(&ext_sharded_dir).expect("open ext sharded");
     let ext_serial = Graph::open(&ext_serial_dir).expect("open ext serial");
 
@@ -123,19 +148,35 @@ fn all_dict_build_paths_agree_on_bench_suite() {
 
     // Identical sizes (same dedup, same distinct-term count) ...
     for (name, g) in &stores[1..] {
-        assert_eq!(g.len(), serial.len(), "{name}: triple count differs from serial reference");
-        assert_eq!(g.dict.len(), serial.dict.len(), "{name}: dict size differs from serial reference");
+        assert_eq!(
+            g.len(),
+            serial.len(),
+            "{name}: triple count differs from serial reference"
+        );
+        assert_eq!(
+            g.dict.len(),
+            serial.dict.len(),
+            "{name}: dict size differs from serial reference"
+        );
     }
     // ... identical term-level content ...
     let reference = canon_triples(&serial);
     for (name, g) in &stores[1..] {
-        assert_eq!(canon_triples(g), reference, "{name}: term-level triples differ from serial reference");
+        assert_eq!(
+            canon_triples(g),
+            reference,
+            "{name}: term-level triples differ from serial reference"
+        );
     }
     // ... and identical results across the whole bench query suite.
     for (qname, sparql) in bench_queries() {
         let want = canon_rows(&serial, &sparql);
         for (name, g) in &stores[1..] {
-            assert_eq!(canon_rows(g, &sparql), want, "{name}: query {qname} differs from serial reference");
+            assert_eq!(
+                canon_rows(g, &sparql),
+                want,
+                "{name}: query {qname} differs from serial reference"
+            );
         }
     }
 
@@ -148,10 +189,15 @@ fn sharded_in_memory_dict_supports_lookup_after_load() {
     // constant in a WHERE pattern must still resolve (this is `lookup`, exercised via a
     // query with bound terms), and the count must match the serial path.
     let nt = synthetic_nt(500);
-    let sharded = pool(4).install(|| Graph::load_str(&nt, "ntriples")).expect("sharded load");
+    let sharded = pool(4)
+        .install(|| Graph::load_str(&nt, "ntriples"))
+        .expect("sharded load");
     let serial = Graph::load_reader(nt.as_bytes(), "ntriples").expect("serial load");
     let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s a ex:Person . ?s ex:name \"name42\" }";
     let (a, b) = (canon_rows(&sharded, q), canon_rows(&serial, q));
-    assert!(!a.is_empty(), "bound-constant query must match (lookup table present)");
+    assert!(
+        !a.is_empty(),
+        "bound-constant query must match (lookup table present)"
+    );
     assert_eq!(a, b);
 }

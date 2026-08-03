@@ -21,8 +21,8 @@
 
 use oxrdf::{Literal, NamedNode, Term};
 use sparq_zk::dual_leaf::{
-    canonical_f64_bits, decimal_datatype_const, encode_decimal, encode_double,
-    encode_literal, DualLeafError, F64_CANONICAL_NAN, XSD_DECIMAL, XSD_DOUBLE, XSD_INTEGER,
+    canonical_f64_bits, decimal_datatype_const, encode_decimal, encode_double, encode_literal,
+    DualLeafError, F64_CANONICAL_NAN, XSD_DECIMAL, XSD_DOUBLE, XSD_INTEGER,
 };
 use sparq_zk::encode::{encode_term, TYPE_CODE_LITERAL};
 use sparq_zk::poseidon2;
@@ -124,16 +124,33 @@ fn identity_lane_is_exactly_the_string_canonical_encoder() {
     // breaks, dual-leaf graphs and string-canonical graphs disagree on term
     // identity and every identity op is desynced.
     let fixtures: Vec<(Literal, sparq_zk::dual_leaf::DualLeafComponents)> = vec![
-        (lit("18", XSD_INTEGER), encode_literal(&lit("18", XSD_INTEGER)).unwrap()),
-        (lit("0", XSD_INTEGER), encode_literal(&lit("0", XSD_INTEGER)).unwrap()),
-        (lit("-2.50", XSD_DECIMAL), encode_decimal(&lit("-2.50", XSD_DECIMAL)).unwrap()),
-        (lit("5.00", XSD_DECIMAL), encode_decimal(&lit("5.00", XSD_DECIMAL)).unwrap()),
-        (lit("-0.0E0", XSD_DOUBLE), encode_double(&lit("-0.0E0", XSD_DOUBLE)).unwrap()),
-        (lit("NaN", XSD_DOUBLE), encode_double(&lit("NaN", XSD_DOUBLE)).unwrap()),
+        (
+            lit("18", XSD_INTEGER),
+            encode_literal(&lit("18", XSD_INTEGER)).unwrap(),
+        ),
+        (
+            lit("0", XSD_INTEGER),
+            encode_literal(&lit("0", XSD_INTEGER)).unwrap(),
+        ),
+        (
+            lit("-2.50", XSD_DECIMAL),
+            encode_decimal(&lit("-2.50", XSD_DECIMAL)).unwrap(),
+        ),
+        (
+            lit("5.00", XSD_DECIMAL),
+            encode_decimal(&lit("5.00", XSD_DECIMAL)).unwrap(),
+        ),
+        (
+            lit("-0.0E0", XSD_DOUBLE),
+            encode_double(&lit("-0.0E0", XSD_DOUBLE)).unwrap(),
+        ),
+        (
+            lit("NaN", XSD_DOUBLE),
+            encode_double(&lit("NaN", XSD_DOUBLE)).unwrap(),
+        ),
     ];
     for (l, c) in fixtures {
-        let reconstructed =
-            poseidon2::hash(&[Fr::from(TYPE_CODE_LITERAL), c.lexical_component]);
+        let reconstructed = poseidon2::hash(&[Fr::from(TYPE_CODE_LITERAL), c.lexical_component]);
         assert_eq!(
             reconstructed,
             identity(&l),

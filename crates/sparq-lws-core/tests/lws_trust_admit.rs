@@ -458,7 +458,10 @@ fn adversarial_a_derived_denial_refuses_the_whole_verdict() {
         &iri(RESOURCE_X),
         RULE_WITH_DENY,
     );
-    assert!(verdict.is_none(), "a derived denial must refuse the verdict");
+    assert!(
+        verdict.is_none(),
+        "a derived denial must refuse the verdict"
+    );
     assert_eq!(
         union_trust_grants(
             Decision::Forbidden,
@@ -514,7 +517,12 @@ fn adversarial_an_issued_grant_cannot_be_replayed_onto_another_resource_or_reque
     ] {
         let replayed = verdict.clone();
         assert_eq!(
-            union_trust_grants(Decision::Forbidden, Some(&replayed), agent.as_ref(), &target),
+            union_trust_grants(
+                Decision::Forbidden,
+                Some(&replayed),
+                agent.as_ref(),
+                &target
+            ),
             Decision::Forbidden,
             "{}: the 403 must stand",
             why

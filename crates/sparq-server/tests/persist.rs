@@ -41,7 +41,10 @@ impl ScratchDir {
             "sparq-persist-test-{}-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         ));
         ScratchDir(p)
     }
@@ -85,7 +88,11 @@ impl Server {
                 .await
                 .unwrap();
         });
-        Server { base: format!("http://{addr}"), shutdown: Some(tx), task: Some(task) }
+        Server {
+            base: format!("http://{addr}"),
+            shutdown: Some(tx),
+            task: Some(task),
+        }
     }
 
     /// Signals graceful shutdown and waits for the serve task to finish, so the `AppState`
@@ -164,7 +171,10 @@ async fn single_value(cl: &reqwest::Client, base: &str, query: &str, var: &str) 
 }
 
 fn persist_config(dir: &Path) -> ServerConfig {
-    ServerConfig { persist_dir: Some(dir.to_path_buf()), ..ServerConfig::default() }
+    ServerConfig {
+        persist_dir: Some(dir.to_path_buf()),
+        ..ServerConfig::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +193,11 @@ async fn restart_preserves_all_updates_no_rebuild() {
     let s1 = Server::start(persist_config(scratch.path())).await;
     for i in 0..5 {
         let ins = format!("INSERT DATA {{ <http://ex/d{i}> <http://ex/p> <http://ex/v> }}");
-        assert_eq!(post_update(&cl, &s1.base, &ins).await, 204, "default insert {i}");
+        assert_eq!(
+            post_update(&cl, &s1.base, &ins).await,
+            204,
+            "default insert {i}"
+        );
     }
     // A GRAPH-scoped INSERT that first creates a brand-new named graph (the durability gap
     // this work closed: the new named graph must be born directory-backed / WAL'd).
@@ -191,18 +205,35 @@ async fn restart_preserves_all_updates_no_rebuild() {
         let ins = format!(
             "INSERT DATA {{ GRAPH <http://ex/g1> {{ <http://ex/n{i}> <http://ex/q> <http://ex/w> }} }}"
         );
-        assert_eq!(post_update(&cl, &s1.base, &ins).await, 204, "named insert {i}");
+        assert_eq!(
+            post_update(&cl, &s1.base, &ins).await,
+            204,
+            "named insert {i}"
+        );
     }
     // Delete one default-graph triple — the retraction must persist too (not resurrect on reopen).
     assert_eq!(
-        post_update(&cl, &s1.base, "DELETE DATA { <http://ex/d0> <http://ex/p> <http://ex/v> }").await,
+        post_update(
+            &cl,
+            &s1.base,
+            "DELETE DATA { <http://ex/d0> <http://ex/p> <http://ex/v> }"
+        )
+        .await,
         204
     );
 
     // Sanity in-process before restart: 4 default + 3 named.
-    assert_eq!(count_rows(&cl, &s1.base, "SELECT * WHERE { ?s <http://ex/p> ?o }").await, 4);
     assert_eq!(
-        count_rows(&cl, &s1.base, "SELECT * WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }").await,
+        count_rows(&cl, &s1.base, "SELECT * WHERE { ?s <http://ex/p> ?o }").await,
+        4
+    );
+    assert_eq!(
+        count_rows(
+            &cl,
+            &s1.base,
+            "SELECT * WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }"
+        )
+        .await,
         3
     );
 
@@ -218,20 +249,35 @@ async fn restart_preserves_all_updates_no_rebuild() {
     );
     // The deleted triple must STAY deleted across the restart (the retraction was WAL'd).
     assert_eq!(
-        count_rows(&cl, &s2.base, "SELECT * WHERE { <http://ex/d0> <http://ex/p> ?o }").await,
+        count_rows(
+            &cl,
+            &s2.base,
+            "SELECT * WHERE { <http://ex/d0> <http://ex/p> ?o }"
+        )
+        .await,
         0,
         "the deletion must persist (not resurrect on reopen)"
     );
     // Named-graph triples must survive too — the showstopper-within-the-showstopper.
     assert_eq!(
-        count_rows(&cl, &s2.base, "SELECT * WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }").await,
+        count_rows(
+            &cl,
+            &s2.base,
+            "SELECT * WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }"
+        )
+        .await,
         3,
         "named-graph inserts must survive the restart"
     );
 
     // And the reopened server is still WRITABLE and durable: one more update, restart again.
     assert_eq!(
-        post_update(&cl, &s2.base, "INSERT DATA { <http://ex/d9> <http://ex/p> <http://ex/v> }").await,
+        post_update(
+            &cl,
+            &s2.base,
+            "INSERT DATA { <http://ex/d9> <http://ex/p> <http://ex/v> }"
+        )
+        .await,
         204
     );
     s2.stop().await;
@@ -265,7 +311,12 @@ async fn nondeterministic_update_persists_committed_value_not_a_reroll() {
     let s1 = Server::start(persist_config(scratch.path())).await;
     // Seed a subject, then tag it with a freshly-generated STRUUID via DELETE/INSERT … WHERE.
     assert_eq!(
-        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }").await,
+        post_update(
+            &cl,
+            &s1.base,
+            "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }"
+        )
+        .await,
         204
     );
     assert_eq!(
@@ -279,14 +330,25 @@ async fn nondeterministic_update_persists_committed_value_not_a_reroll() {
     );
 
     // The value the LIVE (in-memory, already-acked) server holds.
-    let live = single_value(&cl, &s1.base, "SELECT ?u WHERE { <http://ex/s> <http://ex/tag> ?u }", "u").await;
+    let live = single_value(
+        &cl,
+        &s1.base,
+        "SELECT ?u WHERE { <http://ex/s> <http://ex/tag> ?u }",
+        "u",
+    )
+    .await;
     assert!(!live.is_empty(), "STRUUID() must have produced a value");
 
     // RESTART and read the persisted value: it MUST be the identical literal (not a re-roll).
     s1.stop().await;
     let s2 = Server::start(persist_config(scratch.path())).await;
-    let persisted =
-        single_value(&cl, &s2.base, "SELECT ?u WHERE { <http://ex/s> <http://ex/tag> ?u }", "u").await;
+    let persisted = single_value(
+        &cl,
+        &s2.base,
+        "SELECT ?u WHERE { <http://ex/s> <http://ex/tag> ?u }",
+        "u",
+    )
+    .await;
     assert_eq!(
         persisted, live,
         "the persisted STRUUID() value must equal the value the live server acked — \
@@ -332,20 +394,39 @@ async fn pss_combined_multiop_body_accepted_and_atomic() {
     );
 
     // (a) ACCEPTED: the `;`-separated multi-op body is one update request → a SINGLE 204.
-    assert_eq!(post_update(&cl, &s1.base, &body).await, 204, "the combined multi-op body must be accepted as ONE update (single 204)");
+    assert_eq!(
+        post_update(&cl, &s1.base, &body).await,
+        204,
+        "the combined multi-op body must be accepted as ONE update (single 204)"
+    );
 
     // (b) FULLY APPLIED: both halves of the body are present — the child graph content AND the
     // parent containment triple. (No partial write: containment without the resource, or vice versa.)
     let child = format!("SELECT * WHERE {{ GRAPH <{R}> {{ ?s ?p ?o }} }}");
-    let containment = format!("ASK WHERE {{ GRAPH <{PARENT}> {{ <{PARENT}> <{LDP_CONTAINS}> <{R}> }} }}");
-    assert_eq!(count_rows(&cl, &s1.base, &child).await, 2, "the child resource graph must be fully written");
-    assert!(ask(&cl, &s1.base, &containment).await, "the parent ldp:contains triple must be present");
+    let containment =
+        format!("ASK WHERE {{ GRAPH <{PARENT}> {{ <{PARENT}> <{LDP_CONTAINS}> <{R}> }} }}");
+    assert_eq!(
+        count_rows(&cl, &s1.base, &child).await,
+        2,
+        "the child resource graph must be fully written"
+    );
+    assert!(
+        ask(&cl, &s1.base, &containment).await,
+        "the parent ldp:contains triple must be present"
+    );
 
     // The whole body is ONE atomic durable commit: a restart re-opens both halves together.
     s1.stop().await;
     let s2 = Server::start(persist_config(scratch.path())).await;
-    assert_eq!(count_rows(&cl, &s2.base, &child).await, 2, "the child graph must survive the restart (durable)");
-    assert!(ask(&cl, &s2.base, &containment).await, "the parent containment must survive the restart, in lockstep with the child graph");
+    assert_eq!(
+        count_rows(&cl, &s2.base, &child).await,
+        2,
+        "the child graph must survive the restart (durable)"
+    );
+    assert!(
+        ask(&cl, &s2.base, &containment).await,
+        "the parent containment must survive the restart, in lockstep with the child graph"
+    );
 
     // A second putDocument-shaped body REPLACES the resource graph atomically and is durable too.
     let body2 = format!(
@@ -356,10 +437,18 @@ async fn pss_combined_multiop_body_accepted_and_atomic() {
          }}"
     );
     assert_eq!(post_update(&cl, &s2.base, &body2).await, 204);
-    assert_eq!(count_rows(&cl, &s2.base, &child).await, 1, "the DROP+re-INSERT replaced the resource graph atomically (old content gone)");
+    assert_eq!(
+        count_rows(&cl, &s2.base, &child).await,
+        1,
+        "the DROP+re-INSERT replaced the resource graph atomically (old content gone)"
+    );
     s2.stop().await;
     let s3 = Server::start(persist_config(scratch.path())).await;
-    assert_eq!(count_rows(&cl, &s3.base, &child).await, 1, "the replacement survives a second restart");
+    assert_eq!(
+        count_rows(&cl, &s3.base, &child).await,
+        1,
+        "the replacement survives a second restart"
+    );
     assert!(ask(&cl, &s3.base, &containment).await);
     s3.stop().await;
 }
@@ -377,9 +466,13 @@ async fn invalid_second_op_leaves_no_partial_write() {
     let s1 = Server::start(persist_config(scratch.path())).await;
 
     // op 1 (valid INSERT DATA) ; op 2 (a non-SILENT LOAD that the engine refuses → request error).
-    let failing = "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> } ; LOAD <http://ex/nope.ttl>";
+    let failing =
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> } ; LOAD <http://ex/nope.ttl>";
     let status = post_update(&cl, &s1.base, failing).await;
-    assert!(!status.is_success(), "a multi-op body with an invalid op must be rejected (non-2xx), got {status}");
+    assert!(
+        !status.is_success(),
+        "a multi-op body with an invalid op must be rejected (non-2xx), got {status}"
+    );
 
     // The valid prefix must NOT have committed in memory (all-or-nothing).
     assert_eq!(
@@ -412,10 +505,18 @@ async fn no_persist_dir_is_in_memory_and_lost_on_restart() {
 
     let s1 = Server::start(ServerConfig::default()).await;
     assert_eq!(
-        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }").await,
+        post_update(
+            &cl,
+            &s1.base,
+            "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }"
+        )
+        .await,
         204
     );
-    assert_eq!(count_rows(&cl, &s1.base, "SELECT * WHERE { ?s ?p ?o }").await, 1);
+    assert_eq!(
+        count_rows(&cl, &s1.base, "SELECT * WHERE { ?s ?p ?o }").await,
+        1
+    );
     s1.stop().await;
 
     // A new in-memory server shares nothing with the old one — it starts empty.
@@ -444,20 +545,31 @@ async fn existing_store_wins_over_seed() {
     // Establish a persisted store with exactly one triple.
     let s1 = Server::start(persist_config(scratch.path())).await;
     assert_eq!(
-        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/keep> <http://ex/p> <http://ex/v> }").await,
+        post_update(
+            &cl,
+            &s1.base,
+            "INSERT DATA { <http://ex/keep> <http://ex/p> <http://ex/v> }"
+        )
+        .await,
         204
     );
     s1.stop().await;
 
     // Reopen with a NON-empty seed graph; the existing store must win (seed ignored).
-    let seed = Graph::load_str("<http://ex/seed> <http://ex/p> <http://ex/v> .", "ntriples").unwrap();
+    let seed =
+        Graph::load_str("<http://ex/seed> <http://ex/p> <http://ex/v> .", "ntriples").unwrap();
     let state = AppState::try_with_config(seed, persist_config(scratch.path())).expect("reopen");
     let app = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
-        axum::serve(listener, app).with_graceful_shutdown(async { let _ = rx.await; }).await.unwrap();
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
     });
     let base = format!("http://{addr}");
 
@@ -523,7 +635,11 @@ async fn start_with_transient_failures(config: ServerConfig, n_fail: usize) -> S
             .await
             .unwrap();
     });
-    Server { base: format!("http://{addr}"), shutdown: Some(tx), task: Some(task) }
+    Server {
+        base: format!("http://{addr}"),
+        shutdown: Some(tx),
+        task: Some(task),
+    }
 }
 
 /// A TRANSIENT durable-write error → the in-flight write gets HTTP 503, the writer thread
@@ -539,7 +655,12 @@ async fn transient_durable_write_error_503_then_recovers() {
     let s = start_with_transient_failures(persist_config(scratch.path()), 1).await;
 
     // The FIRST update hits the injected failure → 503 (the write is refused).
-    let refused = post_update(&cl, &s.base, "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/v> }").await;
+    let refused = post_update(
+        &cl,
+        &s.base,
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/v> }",
+    )
+    .await;
     assert_eq!(
         refused, 503,
         "a transient durable-write error must refuse the in-flight write with 503 (retryable)",
@@ -554,9 +675,20 @@ async fn transient_durable_write_error_503_then_recovers() {
 
     // The writer SURVIVED: reads still work (server alive), and the SAME write retried now
     // succeeds (durability recovered) — 204 + queryable.
-    let retried = post_update(&cl, &s.base, "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/v> }").await;
-    assert_eq!(retried, 204, "after recovery the retried write must succeed (writer survived)");
-    assert_eq!(count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await, 1);
+    let retried = post_update(
+        &cl,
+        &s.base,
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/v> }",
+    )
+    .await;
+    assert_eq!(
+        retried, 204,
+        "after recovery the retried write must succeed (writer survived)"
+    );
+    assert_eq!(
+        count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await,
+        1
+    );
 
     // The recovered write is genuinely DURABLE: restart on the same dir and it's still there.
     s.stop().await;
@@ -589,7 +721,10 @@ async fn persistent_durable_write_error_repeated_503_reads_survive() {
             &format!("INSERT DATA {{ <http://ex/x{n}> <http://ex/p> <http://ex/v> }}"),
         )
         .await;
-        assert_eq!(status, 503, "write #{n} under persistent durability failure must be 503");
+        assert_eq!(
+            status, 503,
+            "write #{n} under persistent durability failure must be 503"
+        );
         // Reads keep being served (the server is alive, degraded read-only).
         assert_eq!(
             count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await,
@@ -650,7 +785,11 @@ async fn start_with_failures_at(config: ServerConfig, fail_on: &'static [usize])
             .await
             .unwrap();
     });
-    Server { base: format!("http://{}", addr), shutdown: Some(tx), task: Some(task) }
+    Server {
+        base: format!("http://{}", addr),
+        shutdown: Some(tx),
+        task: Some(task),
+    }
 }
 
 /// A SEQUENCED outage: durable writes succeed, then a seal fails, then writes recover, then a seal
@@ -677,7 +816,10 @@ async fn sequenced_durable_failures_recover_and_refail_fail_closed() {
         let status = post_update(
             &cl,
             &s.base,
-            &format!("INSERT DATA {{ <http://ex/w{}> <http://ex/p> <http://ex/v> }}", i),
+            &format!(
+                "INSERT DATA {{ <http://ex/w{}> <http://ex/p> <http://ex/v> }}",
+                i
+            ),
         )
         .await;
 
@@ -718,7 +860,10 @@ async fn sequenced_durable_failures_recover_and_refail_fail_closed() {
         );
     }
 
-    assert_eq!(expected_live, 3, "plan sanity: w0, w2, w4 should have committed");
+    assert_eq!(
+        expected_live, 3,
+        "plan sanity: w0, w2, w4 should have committed"
+    );
 
     // The surviving live set is durable across a clean restart: exactly the successful writes,
     // and NONE of the refused ones ever resurrect.
@@ -731,14 +876,24 @@ async fn sequenced_durable_failures_recover_and_refail_fail_closed() {
     );
     for i in [0usize, 2, 4] {
         assert!(
-            ask(&cl, &s2.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+            ask(
+                &cl,
+                &s2.base,
+                &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)
+            )
+            .await,
             "committed write w{} must survive the restart",
             i
         );
     }
     for i in [1usize, 3] {
         assert!(
-            !ask(&cl, &s2.base, &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)).await,
+            !ask(
+                &cl,
+                &s2.base,
+                &format!("ASK {{ <http://ex/w{}> ?p ?o }}", i)
+            )
+            .await,
             "refused write w{} must NEVER resurrect after a restart",
             i
         );
@@ -751,7 +906,11 @@ async fn sequenced_durable_failures_recover_and_refail_fail_closed() {
 // ---------------------------------------------------------------------------
 
 /// POSTs to `/admin/compact` (optionally with a Bearer token) and returns the status.
-async fn post_compact(cl: &reqwest::Client, base: &str, token: Option<&str>) -> reqwest::StatusCode {
+async fn post_compact(
+    cl: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+) -> reqwest::StatusCode {
     let mut req = cl.post(format!("{base}/admin/compact"));
     if let Some(t) = token {
         req = req.header("authorization", format!("Bearer {}", t));
@@ -792,41 +951,89 @@ async fn admin_compact_physically_erases_deleted_data() {
     {
         let s = Server::start(persist_config(scratch.path())).await;
         assert_eq!(
-            post_update(&cl, &s.base, "INSERT DATA { <http://ex/keep> <http://ex/p> \"KEEP-LIVE-9f3a\" }").await,
+            post_update(
+                &cl,
+                &s.base,
+                "INSERT DATA { <http://ex/keep> <http://ex/p> \"KEEP-LIVE-9f3a\" }"
+            )
+            .await,
             204,
         );
         assert_eq!(
-            post_update(&cl, &s.base, "INSERT DATA { <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-7b21\" }").await,
+            post_update(
+                &cl,
+                &s.base,
+                "INSERT DATA { <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-7b21\" }"
+            )
+            .await,
             204,
         );
         // Logical erasure: the secret is gone from the live view…
         assert_eq!(
-            post_update(&cl, &s.base, "DELETE DATA { <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-7b21\" }").await,
+            post_update(
+                &cl,
+                &s.base,
+                "DELETE DATA { <http://ex/alice> <http://ex/ssn> \"SECRET-SSN-7b21\" }"
+            )
+            .await,
             204,
         );
-        assert_eq!(count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await, 1, "only KEEP remains live");
+        assert_eq!(
+            count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await,
+            1,
+            "only KEEP remains live"
+        );
         // …but its bytes still linger in the on-disk WAL/dict history until compaction.
-        assert!(dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "pre-compaction: secret still on disk");
+        assert!(
+            dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"),
+            "pre-compaction: secret still on disk"
+        );
 
         // Operator-invoked compaction (no auth token configured here → ungated).
-        assert_eq!(post_compact(&cl, &s.base, None).await, 200, "compaction must succeed");
+        assert_eq!(
+            post_compact(&cl, &s.base, None).await,
+            200,
+            "compaction must succeed"
+        );
 
         // Live data preserved; deleted secret physically erased; server still serving.
-        assert_eq!(count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await, 1, "live data survives compaction");
-        assert!(dir_contains_bytes(scratch.path(), b"KEEP-LIVE-9f3a"), "live data must remain on disk");
-        assert!(!dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "deleted secret bytes must be physically erased");
+        assert_eq!(
+            count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await,
+            1,
+            "live data survives compaction"
+        );
+        assert!(
+            dir_contains_bytes(scratch.path(), b"KEEP-LIVE-9f3a"),
+            "live data must remain on disk"
+        );
+        assert!(
+            !dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"),
+            "deleted secret bytes must be physically erased"
+        );
 
         // Writes still work after compaction (fresh WAL).
         assert_eq!(
-            post_update(&cl, &s.base, "INSERT DATA { <http://ex/after> <http://ex/p> <http://ex/v> }").await,
+            post_update(
+                &cl,
+                &s.base,
+                "INSERT DATA { <http://ex/after> <http://ex/p> <http://ex/v> }"
+            )
+            .await,
             204,
         );
         s.stop().await;
     }
     // Durability: restart sees the post-compaction state; the secret never resurrects.
     let s2 = Server::start(persist_config(scratch.path())).await;
-    assert_eq!(count_rows(&cl, &s2.base, "SELECT * WHERE { ?s ?p ?o }").await, 2, "KEEP + after survive restart");
-    assert!(!dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"), "erasure must survive the restart");
+    assert_eq!(
+        count_rows(&cl, &s2.base, "SELECT * WHERE { ?s ?p ?o }").await,
+        2,
+        "KEEP + after survive restart"
+    );
+    assert!(
+        !dir_contains_bytes(scratch.path(), b"SECRET-SSN-7b21"),
+        "erasure must survive the restart"
+    );
     s2.stop().await;
 }
 
@@ -836,12 +1043,27 @@ async fn admin_compact_physically_erases_deleted_data() {
 async fn admin_compact_requires_write_auth() {
     let scratch = ScratchDir::new();
     let cl = reqwest::Client::new();
-    let config = ServerConfig { auth_token: Some("s3cr3t".to_string()), ..persist_config(scratch.path()) };
+    let config = ServerConfig {
+        auth_token: Some("s3cr3t".to_string()),
+        ..persist_config(scratch.path())
+    };
     let s = Server::start(config).await;
 
-    assert_eq!(post_compact(&cl, &s.base, None).await, 401, "no token must be refused");
-    assert_eq!(post_compact(&cl, &s.base, Some("wrong")).await, 401, "wrong token must be refused");
-    assert_eq!(post_compact(&cl, &s.base, Some("s3cr3t")).await, 200, "correct write token compacts");
+    assert_eq!(
+        post_compact(&cl, &s.base, None).await,
+        401,
+        "no token must be refused"
+    );
+    assert_eq!(
+        post_compact(&cl, &s.base, Some("wrong")).await,
+        401,
+        "wrong token must be refused"
+    );
+    assert_eq!(
+        post_compact(&cl, &s.base, Some("s3cr3t")).await,
+        200,
+        "correct write token compacts"
+    );
     s.stop().await;
 }
 
@@ -853,6 +1075,10 @@ async fn admin_compact_on_in_memory_server_is_409() {
     let cl = reqwest::Client::new();
     // Default config = no persist dir = in-memory.
     let s = Server::start(ServerConfig::default()).await;
-    assert_eq!(post_compact(&cl, &s.base, None).await, 409, "in-memory server has nothing to compact");
+    assert_eq!(
+        post_compact(&cl, &s.base, None).await,
+        409,
+        "in-memory server has nothing to compact"
+    );
     s.stop().await;
 }

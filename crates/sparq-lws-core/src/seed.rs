@@ -1125,10 +1125,7 @@ mod tests {
             Decision::Unauthenticated
         );
         // Belt-and-braces: the serialized playground ACL carries NO acl:Control grant at all.
-        let acl = s
-            .read(&format!("{}.acl", fx.playground))
-            .await
-            .unwrap();
+        let acl = s.read(&format!("{}.acl", fx.playground)).await.unwrap();
         let acl_body = String::from_utf8(acl.body.to_vec()).unwrap();
         assert!(
             !acl_body.contains("acl#Control"),

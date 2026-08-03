@@ -10,14 +10,14 @@
 
 use std::time::Duration;
 
+use serde_json::{json, Value};
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 use sparq_introspect::Introspection;
-use serde_json::{json, Value};
 
 use crate::jsonrpc::{
-    Request, Response, RpcError, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
-    METHOD_NOT_FOUND, RESOURCE_NOT_FOUND,
+    Request, Response, RpcError, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
+    RESOURCE_NOT_FOUND,
 };
 use crate::prompts;
 use crate::resources::{self, ReadError};
@@ -236,7 +236,10 @@ impl McpServer {
     /// The `tools/list` result: every advertised tool's `name`/`description`/
     /// `inputSchema`. `update` appears here only when update is enabled.
     fn tools_list_result(&self) -> Value {
-        let tools: Vec<Value> = tools::advertised(self).iter().map(|t| t.to_json()).collect();
+        let tools: Vec<Value> = tools::advertised(self)
+            .iter()
+            .map(|t| t.to_json())
+            .collect();
         json!({ "tools": tools })
     }
 
@@ -288,7 +291,10 @@ impl McpServer {
             .ok_or_else(|| RpcError::new(INVALID_PARAMS, "prompts/get requires a string `name`"))?;
         let spec = prompts::find(name)
             .ok_or_else(|| RpcError::new(INVALID_PARAMS, format!("unknown prompt: {}", name)))?;
-        let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         let text = (spec.render)(&args).map_err(|m| RpcError::new(INVALID_PARAMS, m))?;
         Ok(json!({
             "description": spec.description,
@@ -387,7 +393,10 @@ impl McpServer {
                     .unwrap_or(4000);
                 Ok(ix.to_text_summary(budget))
             }
-            other => Err(format!("unknown format `{}` (expected \"json\" or \"text\")", other)),
+            other => Err(format!(
+                "unknown format `{}` (expected \"json\" or \"text\")",
+                other
+            )),
         }
     }
 

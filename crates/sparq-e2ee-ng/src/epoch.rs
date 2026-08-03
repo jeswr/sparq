@@ -10,7 +10,9 @@
 //! It does **not** carry the new read secret or new capabilities — those travel
 //! recipient-wrapped, out of band (§4.2).
 
-use crate::cbor::{enc_array, enc_bytes, enc_map, enc_text, enc_uint, read_struct_map, Limits, Reader};
+use crate::cbor::{
+    enc_array, enc_bytes, enc_map, enc_text, enc_uint, read_struct_map, Limits, Reader,
+};
 use crate::error::{Error, Result};
 use crate::ids::{BranchId, Epoch, RepoId, TopicId};
 use crate::sign::{PublicVerifyingKey, SecretSigningKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
@@ -92,7 +94,13 @@ impl EpochTransition {
             (T_NEW_TOPIC, enc_bytes(self.new_topic.as_bytes())),
             (
                 T_PUBLISHERS,
-                enc_array(&self.new_publishers.iter().map(|p| enc_bytes(p)).collect::<Vec<_>>()),
+                enc_array(
+                    &self
+                        .new_publishers
+                        .iter()
+                        .map(|p| enc_bytes(p))
+                        .collect::<Vec<_>>(),
+                ),
             ),
             (T_HISTORY, enc_text(self.history_policy.as_str())),
         ]
@@ -122,7 +130,9 @@ impl EpochTransition {
     /// Verify the admin signature and the monotonicity invariant.
     pub fn verify(&self, admin_pub: &PublicVerifyingKey) -> Result<()> {
         self.check_monotonic()?;
-        let sig = self.admin_sig.ok_or(Error::Schema("missing admin signature"))?;
+        let sig = self
+            .admin_sig
+            .ok_or(Error::Schema("missing admin signature"))?;
         admin_pub.verify(&self.signing_bytes(), &sig)
     }
 

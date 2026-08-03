@@ -154,9 +154,7 @@ fn materialize(spec: &[QuadSpec], label: &dyn Fn(usize) -> String) -> Vec<Quad> 
             let graph_name = match q.graph {
                 GraphSpec::Default => GraphName::DefaultGraph,
                 GraphSpec::Iri(i) => GraphName::NamedNode(iri(i)),
-                GraphSpec::Bnode(i) => {
-                    GraphName::BlankNode(BlankNode::new_unchecked(label(i)))
-                }
+                GraphSpec::Bnode(i) => GraphName::BlankNode(BlankNode::new_unchecked(label(i))),
             };
             Quad::new(subject, predicate(q.predicate), object, graph_name)
         })
@@ -198,14 +196,18 @@ fn arb_graph() -> impl Strategy<Value = GraphSpec> {
 }
 
 fn arb_quad() -> impl Strategy<Value = QuadSpec> {
-    (arb_subject(), 0..PREDICATES.len(), arb_object(), arb_graph()).prop_map(
-        |(subject, predicate, object, graph)| QuadSpec {
+    (
+        arb_subject(),
+        0..PREDICATES.len(),
+        arb_object(),
+        arb_graph(),
+    )
+        .prop_map(|(subject, predicate, object, graph)| QuadSpec {
             subject,
             predicate,
             object,
             graph,
-        },
-    )
+        })
 }
 
 /// Unstructured random datasets: 1..=10 quads over the small pools.
@@ -321,10 +323,7 @@ fn quad_base_string(q: &Quad, map: &HashMap<String, String>) -> String {
 /// Independent canonical-document reconstruction from input quads + issued map.
 fn reconstruct_canonical(quads: &[Quad], map: &HashMap<String, String>) -> String {
     let lines: BTreeSet<String> = quads.iter().map(|q| quad_base_string(q, map)).collect();
-    lines
-        .iter()
-        .map(|base| format!("{} .\n", base))
-        .collect()
+    lines.iter().map(|base| format!("{} .\n", base)).collect()
 }
 
 /// N-Quads document for the quads verbatim (input order, original labels) —
@@ -501,7 +500,9 @@ fn generator_produces_the_claimed_structures() {
         if bnode_labels(&d).len() >= 2 {
             saw_multi_bnode = true;
         }
-        if d.iter().any(|q| matches!(q.graph_name, GraphName::BlankNode(_))) {
+        if d.iter()
+            .any(|q| matches!(q.graph_name, GraphName::BlankNode(_)))
+        {
             saw_bnode_graph_name = true;
         }
         let mut fwd = HashSet::new();
@@ -521,11 +522,26 @@ fn generator_produces_the_claimed_structures() {
         }
     }
 
-    assert!(saw_multi_bnode, "generator never produced >=2 blank nodes — relabeling property is VACUOUS");
-    assert!(saw_bnode_graph_name, "generator never produced a blank-node graph name — graph-position relabeling untested");
-    assert!(saw_symmetric_pair, "generator never produced a symmetric edge pair — HNDQ symmetry untested");
-    assert!(saw_cycle, "generator never produced a blank-node cycle — HNDQ recursion untested");
-    assert!(saw_multi_quad, "generator never produced >=4 quads — permutation property is near-VACUOUS");
+    assert!(
+        saw_multi_bnode,
+        "generator never produced >=2 blank nodes — relabeling property is VACUOUS"
+    );
+    assert!(
+        saw_bnode_graph_name,
+        "generator never produced a blank-node graph name — graph-position relabeling untested"
+    );
+    assert!(
+        saw_symmetric_pair,
+        "generator never produced a symmetric edge pair — HNDQ symmetry untested"
+    );
+    assert!(
+        saw_cycle,
+        "generator never produced a blank-node cycle — HNDQ recursion untested"
+    );
+    assert!(
+        saw_multi_quad,
+        "generator never produced >=4 quads — permutation property is near-VACUOUS"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -566,8 +582,15 @@ fn symmetric_cycle_relabeling_unit() {
     );
     let c1 = canonicalize_quads(&d1).unwrap();
     let c2 = canonicalize_quads(&d2).unwrap();
-    assert_eq!(c1, c2, "relabelled symmetric cycle must canonicalize identically");
-    assert!(c1.contains("_:c14n"), "blank nodes must be relabelled to c14nN: {}", c1);
+    assert_eq!(
+        c1, c2,
+        "relabelled symmetric cycle must canonicalize identically"
+    );
+    assert!(
+        c1.contains("_:c14n"),
+        "blank nodes must be relabelled to c14nN: {}",
+        c1
+    );
 }
 
 /// NEGATIVE control: non-isomorphic datasets (3-cycle vs 4-cycle) must NOT
@@ -587,7 +610,10 @@ fn non_isomorphic_datasets_differ_unit() {
     };
     let c3 = canonicalize_quads(&cycle(3)).unwrap();
     let c4 = canonicalize_quads(&cycle(4)).unwrap();
-    assert_ne!(c3, c4, "non-isomorphic cycles must canonicalize differently");
+    assert_ne!(
+        c3, c4,
+        "non-isomorphic cycles must canonicalize differently"
+    );
 }
 
 /// Deterministic instance of property (c): idempotence on the symmetric cycle.
@@ -635,9 +661,17 @@ fn issued_map_agreement_unit() {
     let d = materialize(&spec, &base_label);
     let canon = canonicalize_quads_with::<Sha256>(&d).unwrap();
     let map = issue_quads_with::<Sha256>(&d).unwrap();
-    assert_eq!(map.len(), 3, "three distinct blank nodes must be issued: {:?}", map);
+    assert_eq!(
+        map.len(),
+        3,
+        "three distinct blank nodes must be issued: {:?}",
+        map
+    );
     let reconstructed = reconstruct_canonical(&d, &map);
-    assert_eq!(canon, reconstructed, "issued-map reconstruction must be byte-identical");
+    assert_eq!(
+        canon, reconstructed,
+        "issued-map reconstruction must be byte-identical"
+    );
     assert_eq!(
         canon.lines().count(),
         3,

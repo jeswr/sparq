@@ -189,13 +189,18 @@ fn covered_circuit_sizes_match_snapshot() {
         // headline against, so an unjoined one would be the easiest place to drift.
         for (what, name, size) in [
             ("floor", &q.floor_member, q.floor_circuit_size),
-            ("value_lane", &q.value_lane_member, q.value_lane_circuit_size),
+            (
+                "value_lane",
+                &q.value_lane_member,
+                q.value_lane_circuit_size,
+            ),
         ] {
             match (name, size) {
                 (Some(m), Some(sz)) => {
                     if let Some(&snap) = snapshot.members.get(m) {
                         if snap != sz {
-                            errors.push(format!("{id}: {what} {m} catalog={sz} != snapshot={snap}"));
+                            errors
+                                .push(format!("{id}: {what} {m} catalog={sz} != snapshot={snap}"));
                         }
                     }
                 }
@@ -386,8 +391,7 @@ fn catalog_spans_required_features() {
              never read as an unbounded-closure claim"
         );
         assert!(
-            !q.zk_members.is_empty()
-                && q.zk_members.iter().all(|m| m.starts_with("path_reach_")),
+            !q.zk_members.is_empty() && q.zk_members.iter().all(|m| m.starts_with("path_reach_")),
             "{id}: bounded path closure must name only path_reach_* members, found {:?}",
             q.zk_members
         );
@@ -427,9 +431,9 @@ fn catalog_spans_required_features() {
     // The constructs the gate REJECTS fail-closed (OUT-by-design or not-yet-built)
     // must stay honest GAPs — never fabricated as covered/partial.
     for id in [
-        "Q10_optional",              // non-monotone (closed-world) — OUT
-        "Q19_aggregate_group_by",    // pattern-level completeness — OUT
-        "Q21_bind_expression",       // expression estate — phase 3
+        "Q10_optional",                 // non-monotone (closed-world) — OUT
+        "Q19_aggregate_group_by",       // pattern-level completeness — OUT
+        "Q21_bind_expression",          // expression estate — phase 3
         "Q23_negation_minus_notexists", // closed-world negation — OUT
     ] {
         assert!(
@@ -484,8 +488,14 @@ fn bounded_paths_are_not_labelled_covered() {
     let (snapshot, catalog) = load();
     for id in ["Q17_path_one_or_more", "Q18_path_zero_or_more"] {
         let q = &catalog.queries[id];
-        assert!(!q.is_covered(), "{id}: a BOUNDED statement must not be labelled `covered`");
-        assert!(!q.is_gap(), "{id}: the path_reach family HAS landed — not a gap");
+        assert!(
+            !q.is_covered(),
+            "{id}: a BOUNDED statement must not be labelled `covered`"
+        );
+        assert!(
+            !q.is_gap(),
+            "{id}: the path_reach family HAS landed — not a gap"
+        );
         assert_eq!(
             q.flag.as_deref(),
             Some("BOUNDED_DEPTH_EXISTENCE_ONLY"),
@@ -573,7 +583,10 @@ fn design_exclusions_say_why() {
         "Q23_negation_minus_notexists",
     ] {
         let q = &catalog.queries[id];
-        assert!(q.is_gap(), "{id}: a design exclusion is still a gap (null, no members)");
+        assert!(
+            q.is_gap(),
+            "{id}: a design exclusion is still a gap (null, no members)"
+        );
         assert!(
             q.status.contains("EXCLUDED BY DESIGN"),
             "{id}: status must distinguish 'not admissible' from 'not built yet', found {:?}",

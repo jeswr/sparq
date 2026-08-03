@@ -23,8 +23,7 @@ use sparq_e2ee_ng::wrap::{wrap_with, RecipientSecretKey, WrappedSecret};
 const OBJECT_KEY: &str = "f047a88d13eceb6c4ae04aab8c60097a9550a1f53a817a711bfd3482c04b2da8";
 const BLOCK_KEY: &str = "285777cd44c36e35570b889f786fd170ff8571d0fab1cd2ae7c379c70b422942";
 const CAP_ID: &str = "e915b3796456da74d18ca059c6e07b7711fdb37d3a26b50638f030a8348066f6";
-const COMMIT_ID_OF_BLOCK: &str =
-    "814a9a0164fe1573dd301684ebd319a980f817681a107463a5f58d6d23b53392";
+const COMMIT_ID_OF_BLOCK: &str = "814a9a0164fe1573dd301684ebd319a980f817681a107463a5f58d6d23b53392";
 
 fn common() -> (Secret32, RepoId, BranchId, ObjectId, SecretSigningKey) {
     (
@@ -53,7 +52,10 @@ fn vector_capability_public_grant() {
         branch,
         Epoch(7),
         TopicId::from_bytes([3u8; 32]),
-        Validity { not_before: 100, not_after: 200 },
+        Validity {
+            not_before: 100,
+            not_after: 200,
+        },
         vec!["wss://broker.example".to_string()],
     );
     grant.authority = vec![Authority::Read];
@@ -73,7 +75,12 @@ fn vector_capability_public_grant() {
 #[test]
 fn vector_block_envelope_commit_id() {
     let (k, repo, branch, object, _admin) = common();
-    let ctx = BlockContext { repo, branch, epoch: Epoch(7), kind: ObjectKind::Operation };
+    let ctx = BlockContext {
+        repo,
+        branch,
+        epoch: Epoch(7),
+        kind: ObjectKind::Operation,
+    };
     let env = seal_block(
         &k,
         &ctx,
@@ -169,7 +176,10 @@ fn vector_secret_capability_roundtrips() {
             branch,
             Epoch(7),
             TopicId::from_bytes([3u8; 32]),
-            Validity { not_before: 100, not_after: 200 },
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
         ),
         Secret32([9u8; 32]),

@@ -49,8 +49,8 @@ fn main() {
     }
 
     // ---- load the data graph once (timed: the ADVISORY load metric) -------------------
-    let data_text = std::fs::read_to_string(data_path)
-        .unwrap_or_else(|e| panic!("read data {data_path}: {e}"));
+    let data_text =
+        std::fs::read_to_string(data_path).unwrap_or_else(|e| panic!("read data {data_path}: {e}"));
     // Best-of-iters load so the advisory load_us is the least-noisy sample.
     let mut load_us = f64::INFINITY;
     let mut data = None;

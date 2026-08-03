@@ -288,9 +288,8 @@ pub fn forbidden_constructs(query: &Query, config: &GuardConfig) -> Vec<Forbidde
 /// An empty `forbidden` yields the bare header.
 #[must_use]
 pub fn forbidden_repair_message(forbidden: &[Forbidden]) -> String {
-    let mut msg = String::from(
-        "the query parses, but it uses constructs this loop refuses to execute:",
-    );
+    let mut msg =
+        String::from("the query parses, but it uses constructs this loop refuses to execute:");
     for f in forbidden {
         msg.push_str("\n- ");
         msg.push_str(&f.message());
@@ -515,7 +514,10 @@ mod tests {
             Err(GuardError::QuestionTooLong { chars: 9, max: 8 })
         );
         // At the cap: accepted.
-        assert_eq!(check_question("12345678", &cfg), Ok(Cow::Borrowed("12345678")));
+        assert_eq!(
+            check_question("12345678", &cfg),
+            Ok(Cow::Borrowed("12345678"))
+        );
         // Accepted questions come back sanitized.
         assert_eq!(
             check_question("a\nb", &cfg).expect("within cap"),
@@ -588,18 +590,18 @@ mod tests {
     fn expression_walk_reaches_every_operator_arm() {
         const SVC: &str = "EXISTS { SERVICE <http://e.example/> { ?s ?p2 ?o2 } }";
         for filter in [
-            format!("?x IN (1, 2) || {SVC}"),                    // In
-            format!("COALESCE({SVC}, false)"),                   // Coalesce
-            format!("IF({SVC}, true, false)"),                   // If
-            format!("STRLEN(STR(?s)) > 0 && {SVC}"),             // FunctionCall
-            format!("(- ?x) < 0 || {SVC}"),                      // UnaryMinus
-            format!("(+ ?x) < 0 || {SVC}"),                      // UnaryPlus
-            format!("!({SVC})"),                                 // Not
-            format!("sameTerm(?s, ?s) && {SVC}"),                // SameTerm
-            format!("?x != 1 || {SVC}"),                         // Equal under Not
-            format!("?x >= 1 || {SVC}"),                         // GreaterOrEqual
-            format!("?x <= 1 || {SVC}"),                         // LessOrEqual
-            format!("(?x + 1) * (?x - 1) / 2 = 0 || {SVC}"),      // Add/Subtract/Multiply/Divide
+            format!("?x IN (1, 2) || {SVC}"),                // In
+            format!("COALESCE({SVC}, false)"),               // Coalesce
+            format!("IF({SVC}, true, false)"),               // If
+            format!("STRLEN(STR(?s)) > 0 && {SVC}"),         // FunctionCall
+            format!("(- ?x) < 0 || {SVC}"),                  // UnaryMinus
+            format!("(+ ?x) < 0 || {SVC}"),                  // UnaryPlus
+            format!("!({SVC})"),                             // Not
+            format!("sameTerm(?s, ?s) && {SVC}"),            // SameTerm
+            format!("?x != 1 || {SVC}"),                     // Equal under Not
+            format!("?x >= 1 || {SVC}"),                     // GreaterOrEqual
+            format!("?x <= 1 || {SVC}"),                     // LessOrEqual
+            format!("(?x + 1) * (?x - 1) / 2 = 0 || {SVC}"), // Add/Subtract/Multiply/Divide
         ] {
             let q = format!("SELECT ?s WHERE {{ ?s ?p ?o BIND(1 AS ?x) FILTER({filter}) }}");
             assert_eq!(

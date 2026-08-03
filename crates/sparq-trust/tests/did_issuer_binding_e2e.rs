@@ -179,7 +179,10 @@ fn did_key_bound_issuer_grants_read_identically_to_operator_asserted_key() {
     // And the end-to-end grant is IDENTICAL (result-equivalence).
     let grants_key = run(&rules_key);
     let grants_did = run(&rules_did);
-    assert!(read_granted(&grants_key, JESSE), "operator-asserted path grants read");
+    assert!(
+        read_granted(&grants_key, JESSE),
+        "operator-asserted path grants read"
+    );
     assert!(
         read_granted(&grants_did, JESSE),
         "did:key-bound path grants read end-to-end — identical to the operator path"
@@ -195,8 +198,12 @@ fn did_key_bound_to_the_wrong_key_does_not_admit() {
     let wrong = SecretKey::from_seed(0xDECAF).public_key();
     let did = did_key_for(&wrong);
     let policy = gov_age_policy_graph(GOV_ISSUER, (vocab::ISSUER_DID, &did), RESOURCE_X);
-    let rules =
-        resolve_rule_keys(&policy, &DidKeyResolver, ControlGate::assert_control_gated()).unwrap();
+    let rules = resolve_rule_keys(
+        &policy,
+        &DidKeyResolver,
+        ControlGate::assert_control_gated(),
+    )
+    .unwrap();
     let grants = run(&rules);
     assert!(
         !read_granted(&grants, JESSE),
@@ -208,11 +215,21 @@ fn did_key_bound_to_the_wrong_key_does_not_admit() {
 fn unresolvable_did_rejects_the_policy_fail_closed() {
     // A syntactically valid but undecodable did:key id ⇒ resolve_rule_keys errors
     // (fail-closed): the policy is rejected, nothing is admitted.
-    let policy =
-        gov_age_policy_graph(GOV_ISSUER, (vocab::ISSUER_DID, "did:key:zNOTAKEY"), RESOURCE_X);
-    let err = resolve_rule_keys(&policy, &DidKeyResolver, ControlGate::assert_control_gated());
+    let policy = gov_age_policy_graph(
+        GOV_ISSUER,
+        (vocab::ISSUER_DID, "did:key:zNOTAKEY"),
+        RESOURCE_X,
+    );
+    let err = resolve_rule_keys(
+        &policy,
+        &DidKeyResolver,
+        ControlGate::assert_control_gated(),
+    );
     assert!(
-        matches!(err, Err(sparq_trust::policy::PolicyError::BadIssuerDid { .. })),
+        matches!(
+            err,
+            Err(sparq_trust::policy::PolicyError::BadIssuerDid { .. })
+        ),
         "an unresolvable issuer DID is a fail-closed BadIssuerDid, not a silent admit: {err:?}"
     );
 }
@@ -225,9 +242,16 @@ fn unsupported_did_method_rejects_the_policy() {
         (vocab::ISSUER_DID, "did:web:gov.example"),
         RESOURCE_X,
     );
-    let err = resolve_rule_keys(&policy, &DidKeyResolver, ControlGate::assert_control_gated());
+    let err = resolve_rule_keys(
+        &policy,
+        &DidKeyResolver,
+        ControlGate::assert_control_gated(),
+    );
     assert!(
-        matches!(err, Err(sparq_trust::policy::PolicyError::BadIssuerDid { .. })),
+        matches!(
+            err,
+            Err(sparq_trust::policy::PolicyError::BadIssuerDid { .. })
+        ),
         "an unsupported DID method is rejected fail-closed: {err:?}"
     );
 }
@@ -248,7 +272,10 @@ impl DidDocumentFetcher for MapFetcher {
 fn did_web_bound_issuer_grants_read_through_an_in_memory_document() {
     let (_sk, pk) = gov_key();
     // The DID document carries the SAME key as publicKeyMultibase (the did:key encoding).
-    let mb = did_key_for(&pk).strip_prefix("did:key:").unwrap().to_string();
+    let mb = did_key_for(&pk)
+        .strip_prefix("did:key:")
+        .unwrap()
+        .to_string();
     let did = "did:web:gov.example";
     let url = DidWebResolver::<MapFetcher>::document_url("gov.example").unwrap();
     let doc = format!(
@@ -339,7 +366,10 @@ fn did_web_with_no_usable_key_rejects_the_policy() {
     let policy = gov_age_policy_graph(GOV_ISSUER, (vocab::ISSUER_DID, did), RESOURCE_X);
     let err = resolve_rule_keys(&policy, &resolver, ControlGate::assert_control_gated());
     assert!(
-        matches!(err, Err(sparq_trust::policy::PolicyError::BadIssuerDid { .. })),
+        matches!(
+            err,
+            Err(sparq_trust::policy::PolicyError::BadIssuerDid { .. })
+        ),
         "a did:web document with no usable issuer key rejects the policy fail-closed: {err:?}"
     );
 }

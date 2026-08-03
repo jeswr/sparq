@@ -85,8 +85,14 @@ fn main() {
 ///   sparq-cli bench-remap n_triples dict_size iters
 /// Run twice — once normally, once with SPARQ_NO_PREFETCH=1 — to get the prefetch delta.
 fn cmd_bench_remap(args: &[String]) {
-    let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20_000_000);
-    let dict: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(50_000_000);
+    let n: usize = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20_000_000);
+    let dict: usize = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50_000_000);
     let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
     let pf = std::env::var("SPARQ_NO_PREFETCH").as_deref() != Ok("1");
     let ms = sparq_core::bench_remap(n, dict, iters);
@@ -111,12 +117,18 @@ fn cmd_scaling(args: &[String]) {
     };
     let threads: Vec<usize> = match args.get(5) {
         Some(s) => {
-            let mut v: Vec<usize> = s.split(',').filter_map(|t| t.trim().parse().ok()).filter(|&n| n >= 1).collect();
+            let mut v: Vec<usize> = s
+                .split(',')
+                .filter_map(|t| t.trim().parse().ok())
+                .filter(|&n| n >= 1)
+                .collect();
             v.dedup();
             v
         }
         None => {
-            let max = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+            let max = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(8);
             let mut v = vec![1usize];
             let mut n = 2;
             while n < max {
@@ -138,7 +150,12 @@ fn cmd_scaling(args: &[String]) {
     eprintln!(
         "scaling sweep: threads={threads:?} iters={iters}  (efficiency = speedup ÷ (threads/{base}); 1.0 = linear)"
     );
-    let pool = |n: usize| rayon::ThreadPoolBuilder::new().num_threads(n).build().expect("rayon pool");
+    let pool = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .expect("rayon pool")
+    };
 
     println!("subsystem\tthreads\tbest_ms\tspeedup\tefficiency");
 
@@ -225,12 +242,18 @@ fn cmd_ingest(args: &[String]) {
     let path = match args.get(2) {
         Some(p) => p.clone(),
         None => {
-            eprintln!("usage: sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]");
+            eprintln!(
+                "usage: sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]"
+            );
             std::process::exit(2);
         }
     };
     let mode = args.get(3).map(String::as_str).unwrap_or("parse");
-    let cap: u64 = args.get(4).and_then(|s| s.parse::<u64>().ok()).map(|m| m * 1_000_000).unwrap_or(u64::MAX);
+    let cap: u64 = args
+        .get(4)
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|m| m * 1_000_000)
+        .unwrap_or(u64::MAX);
 
     let file = std::fs::File::open(&path).unwrap_or_else(|e| {
         eprintln!("open {path}: {e}");
@@ -266,7 +289,14 @@ fn cmd_ingest(args: &[String]) {
     let mut last = 0u64;
     let mut last_t = Instant::now();
 
-    eprintln!("ingest mode={mode} cap={} from {path}", if cap == u64::MAX { "none".into() } else { format!("{}M", cap / 1_000_000) });
+    eprintln!(
+        "ingest mode={mode} cap={} from {path}",
+        if cap == u64::MAX {
+            "none".into()
+        } else {
+            format!("{}M", cap / 1_000_000)
+        }
+    );
 
     for triple in oxttl::NTriplesParser::new().for_reader(reader) {
         let t = match triple {
@@ -328,7 +358,11 @@ fn cmd_ingest(args: &[String]) {
     println!("throughput       : {:.2} M triples/s", rate / 1e6);
     // Extrapolate to full Wikidata truthy (~8.0B triples).
     let wikidata = 8.0e9;
-    println!("extrapolated full Wikidata truthy (~8.0B triples): {:.0} min ({:.1} h) at this rate", wikidata / rate / 60.0, wikidata / rate / 3600.0);
+    println!(
+        "extrapolated full Wikidata truthy (~8.0B triples): {:.0} min ({:.1} h) at this rate",
+        wikidata / rate / 60.0,
+        wikidata / rate / 3600.0
+    );
 }
 
 fn subject_to_term(s: &oxrdf::NamedOrBlankNode) -> oxrdf::Term {
@@ -357,7 +391,8 @@ fn subject_to_term(s: &oxrdf::NamedOrBlankNode) -> oxrdf::Term {
 /// Usage line for `save` (also the too-few-arguments error).
 const SAVE_USAGE: &str = "sparq-cli save <data-file> <format> <dir> [compressed] [--format-v2]";
 /// Usage line for `recompress`.
-const RECOMPRESS_USAGE: &str = "sparq-cli recompress <src-dir> <dst-dir> [--v2]   (dirs must differ)";
+const RECOMPRESS_USAGE: &str =
+    "sparq-cli recompress <src-dir> <dst-dir> [--v2]   (dirs must differ)";
 
 /// [SONNET-4.6] (sq-kmve2) Splits `args` into positionals and the V2-emit flag. `--format-v2`
 /// (the `save` spelling) and `--v2` (the `recompress` spelling) are accepted interchangeably;
@@ -399,7 +434,11 @@ fn check_emit_v2(v2: bool) {
 /// `SPQCPRM2` when `v2`; otherwise runs it untouched, so the default path stays bit-identical.
 #[cfg(feature = "spqcprm2")]
 fn with_emit_v2<R>(v2: bool, f: impl FnOnce() -> R) -> R {
-    if v2 { sparq_core::compress::with_emit_format(sparq_core::compress::EmitFormat::V2, f) } else { f() }
+    if v2 {
+        sparq_core::compress::with_emit_format(sparq_core::compress::EmitFormat::V2, f)
+    } else {
+        f()
+    }
 }
 
 /// [SONNET-4.6] (sq-kmve2) Feature-OFF twin: `check_emit_v2` has already exited on `v2`, so this
@@ -654,7 +693,11 @@ fn cmd_build(args: &[String]) {
     if !is_known_format(format) || format == "hdt" {
         die_unknown_format(format);
     }
-    let chunk = args.get(5).and_then(|s| s.parse::<usize>().ok()).unwrap_or(16) * 1_000_000;
+    let chunk = args
+        .get(5)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(16)
+        * 1_000_000;
 
     let file = std::fs::File::open(path).unwrap_or_else(|e| {
         eprintln!("open {path}: {e}");
@@ -691,7 +734,12 @@ fn cmd_build(args: &[String]) {
     // shape). Triple formats keep the existing single-graph external path unchanged.
     let build_result = match format {
         "nquads" | "n-quads" | "trig" | "application/trig" => {
-            sparq_core::Graph::build_external_quads(reader, format, std::path::Path::new(dir), chunk)
+            sparq_core::Graph::build_external_quads(
+                reader,
+                format,
+                std::path::Path::new(dir),
+                chunk,
+            )
         }
         _ => sparq_core::Graph::build_external(reader, format, std::path::Path::new(dir), chunk),
     };
@@ -726,7 +774,8 @@ fn cmd_probe_compress(args: &[String]) {
     let map = unsafe { memmap2::Mmap::map(&file) }.unwrap();
     let n = map.len() / 12;
     // SAFETY: a permutation file is a whole number of [u32;3] rows.
-    let rows: &[[u32; 3]] = unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[u32; 3]>(), n) };
+    let rows: &[[u32; 3]] =
+        unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[u32; 3]>(), n) };
     if n == 0 {
         eprintln!("empty permutation");
         return;
@@ -766,7 +815,11 @@ fn cmd_probe_compress(args: &[String]) {
 
     println!("permutation: {path}");
     println!("  triples           : {n}");
-    println!("  raw               : {:>6.2} B/triple ({:.2} GB)", 12.0, map.len() as f64 / 1e9);
+    println!(
+        "  raw               : {:>6.2} B/triple ({:.2} GB)",
+        12.0,
+        map.len() as f64 / 1e9
+    );
     println!(
         "  delta+varint      : {:>6.2} B/triple ({:.2} GB, {:.0}% of raw)  [{:.2} M/s decode-cost scan]",
         delta_bytes as f64 / n as f64,
@@ -824,7 +877,11 @@ fn cmd_compare_compress(args: &[String]) {
 
     println!("=== index footprint (in-RAM) ===");
     println!("  triples            : {}", cmp.len());
-    println!("  raw   perms        : {:>7.2} MB ({:.1} B/triple)", raw_store as f64 / 1e6, raw_store as f64 / cmp.len().max(1) as f64);
+    println!(
+        "  raw   perms        : {:>7.2} MB ({:.1} B/triple)",
+        raw_store as f64 / 1e6,
+        raw_store as f64 / cmp.len().max(1) as f64
+    );
     println!(
         "  compressed perms   : {:>7.2} MB ({:.1} B/triple, {:.0}% of raw)  [encoded in {:.2}s]",
         cmp_store as f64 / 1e6,
@@ -855,7 +912,10 @@ fn cmd_compare_compress(args: &[String]) {
         let (rn, rt) = bench(&raw_reload(path, format));
         let (cn, ct) = bench(&cmp);
         println!("  raw        : {rn} bytes of JSON in {rt:.3} ms");
-        println!("  compressed : {cn} bytes of JSON in {ct:.3} ms  ({:.2}x raw)", ct / rt);
+        println!(
+            "  compressed : {cn} bytes of JSON in {ct:.3} ms  ({:.2}x raw)",
+            ct / rt
+        );
         assert_eq!(rn, cn, "compressed returned different JSON length!");
     }
 }
@@ -875,10 +935,11 @@ fn load_reasoned(path: &str, format: &str, profile: sparq_reason::Profile) -> sp
         eprintln!("error reading {path}: {e}");
         std::process::exit(1);
     });
-    let (mut dict, mut triples) = sparq_core::Graph::parse_to_triples(&text, format).unwrap_or_else(|e| {
-        eprintln!("parse error: {e}");
-        std::process::exit(1);
-    });
+    let (mut dict, mut triples) = sparq_core::Graph::parse_to_triples(&text, format)
+        .unwrap_or_else(|e| {
+            eprintln!("parse error: {e}");
+            std::process::exit(1);
+        });
     let base = triples.len();
     let t = Instant::now();
     let added = sparq_reason::materialize(profile, &mut dict, &mut triples);
@@ -900,7 +961,10 @@ fn load_reasoned(path: &str, format: &str, profile: sparq_reason::Profile) -> sp
     }
     // [FABLE-5] (sq-7d3dj.32.2.1) The reasoned load path also honours `SPARQ_STORE_PROFILE`, so
     // `reason` / `query --reason` inherit the store profile uniformly with the non-reasoned path.
-    apply_store_profile(sparq_core::Graph::from_parts(dict, triples), store_profile_from_env())
+    apply_store_profile(
+        sparq_core::Graph::from_parts(dict, triples),
+        store_profile_from_env(),
+    )
 }
 
 /// Pull an optional `--reason <profile>` flag (`rdfs` | `owl` | `n3` | `el` |
@@ -1020,10 +1084,11 @@ fn load_datalog(path: &str, format: &str, rules_path: &str) -> sparq_core::Graph
         eprintln!("error reading datalog rules {}: {}", rules_path, e);
         std::process::exit(1);
     });
-    let (mut dict, triples) = sparq_core::Graph::parse_to_triples(&text, format).unwrap_or_else(|e| {
-        eprintln!("parse error: {}", e);
-        std::process::exit(1);
-    });
+    let (mut dict, triples) =
+        sparq_core::Graph::parse_to_triples(&text, format).unwrap_or_else(|e| {
+            eprintln!("parse error: {}", e);
+            std::process::exit(1);
+        });
     let program = datalog::parse_program(&mut dict, &rules_src).unwrap_or_else(|e| {
         eprintln!("datalog rule error in {}: {}", rules_path, e);
         std::process::exit(1);
@@ -1040,7 +1105,8 @@ fn load_datalog(path: &str, format: &str, rules_path: &str) -> sparq_core::Graph
     // the DISTINCT input (and the subtraction below cannot underflow) — `triples` may carry
     // duplicates the closure collapses, and subtracting the raw parsed length would under-report
     // the derivations by that many.
-    let distinct_in: std::collections::HashSet<[sparq_core::dict::Id; 3]> = triples.iter().copied().collect();
+    let distinct_in: std::collections::HashSet<[sparq_core::dict::Id; 3]> =
+        triples.iter().copied().collect();
     let base = distinct_in.len();
     let t = Instant::now();
     let closure = datalog::eval(&mut dict, &triples, &program).unwrap_or_else(|e| {
@@ -1058,7 +1124,10 @@ fn load_datalog(path: &str, format: &str, rules_path: &str) -> sparq_core::Graph
         t.elapsed().as_secs_f64()
     );
     // Honour `SPARQ_STORE_PROFILE` on the datalog path too (see `load_reasoned`).
-    apply_store_profile(sparq_core::Graph::from_parts(dict, closure), store_profile_from_env())
+    apply_store_profile(
+        sparq_core::Graph::from_parts(dict, closure),
+        store_profile_from_env(),
+    )
 }
 
 /// Parse a Notation3 document (facts + `{…}=>{…}` rules), run the rule closure, build a graph.
@@ -1073,9 +1142,16 @@ fn load_n3(path: &str) -> sparq_core::Graph {
         eprintln!("n3 reasoning error: {e}");
         std::process::exit(1);
     });
-    eprintln!("reasoned [N3]: {} ground triples in closure in {:.3}s", triples.len(), t.elapsed().as_secs_f64());
+    eprintln!(
+        "reasoned [N3]: {} ground triples in closure in {:.3}s",
+        triples.len(),
+        t.elapsed().as_secs_f64()
+    );
     // [FABLE-5] (sq-7d3dj.32.2.1) Honour `SPARQ_STORE_PROFILE` on the N3 path too (see `load_reasoned`).
-    apply_store_profile(sparq_core::Graph::from_parts(dict, triples), store_profile_from_env())
+    apply_store_profile(
+        sparq_core::Graph::from_parts(dict, triples),
+        store_profile_from_env(),
+    )
 }
 
 /// [OPUS-5] (sq-2ch27, Phase E6) Parse `path` and materialize the OWL 2 EL subsumption lattice
@@ -1094,15 +1170,20 @@ fn load_n3(path: &str) -> sparq_core::Graph {
 fn el_classify_parts(
     path: &str,
     format: &str,
-) -> (sparq_core::dict::Dict, Vec<[sparq_core::dict::Id; 3]>, sparq_reason_el::Report) {
+) -> (
+    sparq_core::dict::Dict,
+    Vec<[sparq_core::dict::Id; 3]>,
+    sparq_reason_el::Report,
+) {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("error reading {path}: {e}");
         std::process::exit(1);
     });
-    let (mut dict, mut triples) = sparq_core::Graph::parse_to_triples(&text, format).unwrap_or_else(|e| {
-        eprintln!("parse error: {e}");
-        std::process::exit(1);
-    });
+    let (mut dict, mut triples) = sparq_core::Graph::parse_to_triples(&text, format)
+        .unwrap_or_else(|e| {
+            eprintln!("parse error: {e}");
+            std::process::exit(1);
+        });
     let base = triples.len();
     let t = Instant::now();
     let report = sparq_reason_el::classify_graph(&mut dict, &mut triples);
@@ -1152,7 +1233,10 @@ fn el_classify_parts(
 fn load_el_classified(path: &str, format: &str) -> sparq_core::Graph {
     let (dict, triples, _) = el_classify_parts(path, format);
     // Honour `SPARQ_STORE_PROFILE` on the EL path too (see `load_reasoned`).
-    apply_store_profile(sparq_core::Graph::from_parts(dict, triples), store_profile_from_env())
+    apply_store_profile(
+        sparq_core::Graph::from_parts(dict, triples),
+        store_profile_from_env(),
+    )
 }
 
 /// [OPUS-5] (sq-2ch27, Phase E6) `classify <data-file> <format> [out.nt]` — run the OWL 2 EL
@@ -1176,7 +1260,10 @@ fn cmd_classify(args: &[String]) {
     println!("triples\t{}", triples.len());
     println!("named_classes\t{}", report.named_classes);
     println!("emitted_subclassof\t{}", report.emitted_subsumptions);
-    println!("emitted_subpropertyof\t{}", report.emitted_role_subsumptions);
+    println!(
+        "emitted_subpropertyof\t{}",
+        report.emitted_role_subsumptions
+    );
     println!("skipped_axioms\t{}", report.skipped_axioms);
     println!("unsatisfiable_classes\t{}", report.unsatisfiable_classes);
     println!("thing_unsatisfiable\t{}", report.thing_unsatisfiable);
@@ -1188,7 +1275,14 @@ fn cmd_classify(args: &[String]) {
             std::process::exit(1);
         }));
         for t in &triples {
-            writeln!(w, "{} {} {} .", dict.term(t[0]), dict.term(t[1]), dict.term(t[2])).unwrap();
+            writeln!(
+                w,
+                "{} {} {} .",
+                dict.term(t[0]),
+                dict.term(t[1]),
+                dict.term(t[2])
+            )
+            .unwrap();
         }
         w.flush().unwrap();
         eprintln!("wrote classified graph to {out}");
@@ -1214,12 +1308,17 @@ fn cmd_reason(args: &[String]) {
             std::process::exit(1);
         });
         let mut dict = sparq_core::dict::Dict::new();
-        let (closure, proof) = sparq_reason::reason_n3_proof(&mut dict, &text).unwrap_or_else(|e| {
-            eprintln!("n3 reasoning error: {e}");
-            std::process::exit(1);
-        });
+        let (closure, proof) =
+            sparq_reason::reason_n3_proof(&mut dict, &text).unwrap_or_else(|e| {
+                eprintln!("n3 reasoning error: {e}");
+                std::process::exit(1);
+            });
         let t = |id| dict.term(id).to_string();
-        println!("{} triples in closure; {} derivation step(s):", closure.len(), proof.len());
+        println!(
+            "{} triples in closure; {} derivation step(s):",
+            closure.len(),
+            proof.len()
+        );
         for (i, step) in proof.iter().enumerate() {
             let c = step.conclusion;
             println!("  [{}] {} {} {} .", i + 1, t(c[0]), t(c[1]), t(c[2]));
@@ -1241,7 +1340,14 @@ fn cmd_reason(args: &[String]) {
         let scan = g.store.scan(&[None, None, None]);
         for r in scan.rows.iter() {
             let spo = scan.to_spo(r);
-            writeln!(w, "{} {} {} .", g.dict.term(spo[0]), g.dict.term(spo[1]), g.dict.term(spo[2])).unwrap();
+            writeln!(
+                w,
+                "{} {} {} .",
+                g.dict.term(spo[0]),
+                g.dict.term(spo[1]),
+                g.dict.term(spo[2])
+            )
+            .unwrap();
         }
         w.flush().unwrap();
         eprintln!("wrote closure to {out}");
@@ -1329,7 +1435,11 @@ fn die_unknown_format(format: &str) -> ! {
     eprintln!(
         "unknown format '{}' (known: turtle | ntriples | nquads | trig{}{})",
         format,
-        if cfg!(feature = "jsonld") { " | jsonld" } else { "" },
+        if cfg!(feature = "jsonld") {
+            " | jsonld"
+        } else {
+            ""
+        },
         if cfg!(feature = "hdt") { " | hdt" } else { "" }
     );
     std::process::exit(2);
@@ -1477,15 +1587,22 @@ fn load_quiet_raw(path: &str, format: &str) -> sparq_core::Graph {
     } else {
         use std::io::Read;
         let mut text = String::new();
-        open_reader(path).and_then(|mut r| r.read_to_string(&mut text)).unwrap_or_else(|e| die(e.to_string()));
+        open_reader(path)
+            .and_then(|mut r| r.read_to_string(&mut text))
+            .unwrap_or_else(|e| die(e.to_string()));
         // N-Quads / TriG (and — [OPUS-4.8] sq-oy1f.4 — JSON-LD, whose `@graph` carries named
         // graphs) load as a DATASET so GRAPH queries and full-dataset re-serialisation (`dump …
         // jsonld`) see the named graphs instead of folding them into the default graph.
         #[cfg(feature = "jsonld")]
         let dataset = matches!(
             format,
-            "nquads" | "n-quads" | "trig" | "application/trig"
-                | "jsonld" | "json-ld" | "application/ld+json"
+            "nquads"
+                | "n-quads"
+                | "trig"
+                | "application/trig"
+                | "jsonld"
+                | "json-ld"
+                | "application/ld+json"
         );
         #[cfg(not(feature = "jsonld"))]
         let dataset = matches!(format, "nquads" | "n-quads" | "trig" | "application/trig");
@@ -1574,10 +1691,22 @@ fn cmd_memstat(args: &[String]) {
     println!("heap_dict_bytes\t{}", heap_dict);
     println!("heap_store_bytes\t{}", heap_store);
     println!("heap_caches_bytes\t{}", heap_caches);
-    println!("heap_b_per_triple\t{:.2}", heap_total as f64 / triples as f64);
-    println!("store_b_per_triple\t{:.2}", heap_store as f64 / triples as f64);
-    println!("dict_b_per_triple\t{:.2}", heap_dict as f64 / triples as f64);
-    println!("caches_b_per_triple\t{:.2}", heap_caches as f64 / triples as f64);
+    println!(
+        "heap_b_per_triple\t{:.2}",
+        heap_total as f64 / triples as f64
+    );
+    println!(
+        "store_b_per_triple\t{:.2}",
+        heap_store as f64 / triples as f64
+    );
+    println!(
+        "dict_b_per_triple\t{:.2}",
+        heap_dict as f64 / triples as f64
+    );
+    println!(
+        "caches_b_per_triple\t{:.2}",
+        heap_caches as f64 / triples as f64
+    );
     println!("dict_b_per_term\t{:.2}", heap_dict as f64 / terms as f64);
     println!("vm_rss_bytes\t{}", vm_rss);
     println!("vm_hwm_bytes\t{}", vm_hwm);
@@ -1638,9 +1767,14 @@ fn cmd_dump(args: &[String]) {
     use sparq_engine::serialize::JsonLdForm;
     let serialized = match out_fmt {
         // [OPUS-4.8] (sq-oy1f.5) FULL W3C JSON-LD 1.1 Compaction against the `--context` file.
-        "jsonld-compact" | "json-ld-compact" | "jsonld-compact-pretty" | "json-ld-compact-pretty" => {
+        "jsonld-compact"
+        | "json-ld-compact"
+        | "jsonld-compact-pretty"
+        | "json-ld-compact-pretty" => {
             let ctx_path = context_path.unwrap_or_else(|| {
-                eprintln!("out-format '{out_fmt}' needs a `@context`: pass --context <file.jsonld>");
+                eprintln!(
+                    "out-format '{out_fmt}' needs a `@context`: pass --context <file.jsonld>"
+                );
                 std::process::exit(2);
             });
             let ctx_text = std::fs::read_to_string(ctx_path).unwrap_or_else(|e| {
@@ -1700,7 +1834,11 @@ fn cmd_dump(args: &[String]) {
                             std::process::exit(1);
                         }
                     };
-                    oxrdf::Triple { subject, predicate, object: g.dict.term(o) }
+                    oxrdf::Triple {
+                        subject,
+                        predicate,
+                        object: g.dict.term(o),
+                    }
                 })
                 .collect();
             sparq_engine::triples_to_ntriples(&triples)
@@ -1757,7 +1895,11 @@ fn cmd_to_hdt(args: &[String]) {
         eprintln!("error writing {out}: {e}");
         std::process::exit(1);
     });
-    eprintln!("wrote {} triples to {out} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
+    eprintln!(
+        "wrote {} triples to {out} in {:.3}s",
+        g.len(),
+        t.elapsed().as_secs_f64()
+    );
 }
 
 /// [OPUS-4.8] (sq-vczh2, epic sq-2m6zm) `terse <terse-query>` — transpile a *terse* query into
@@ -1925,7 +2067,9 @@ fn out_format_flag(args: &[String]) -> OutFormat {
                 std::process::exit(2);
             });
             OutFormat::parse(val).unwrap_or_else(|| {
-                eprintln!("unknown --format '{val}' (known: table | tsv | csv | xml | json | ntriples)");
+                eprintln!(
+                    "unknown --format '{val}' (known: table | tsv | csv | xml | json | ntriples)"
+                );
                 std::process::exit(2);
             })
         }
@@ -1946,7 +2090,11 @@ fn select_to_table(r: &sparq_engine::QueryResult) -> String {
     let cells: Vec<Vec<String>> = r
         .rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default())
+                .collect()
+        })
         .collect();
     let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
     for row in &cells {
@@ -2032,12 +2180,20 @@ fn emit_query_results(g: &sparq_core::Graph, sparql: &str, count_only: bool, out
     if count_only {
         if prepared.is_graph_form() {
             match sparq_engine::construct_or_describe(g, sparql) {
-                Ok(ts) => println!("{} triples in {:.3}ms", ts.len(), t.elapsed().as_secs_f64() * 1e3),
+                Ok(ts) => println!(
+                    "{} triples in {:.3}ms",
+                    ts.len(),
+                    t.elapsed().as_secs_f64() * 1e3
+                ),
                 Err(e) => die_query(e),
             }
         } else {
             match sparq_engine::query(g, sparql) {
-                Ok(r) => println!("{} solutions in {:.3}ms", r.len(), t.elapsed().as_secs_f64() * 1e3),
+                Ok(r) => println!(
+                    "{} solutions in {:.3}ms",
+                    r.len(),
+                    t.elapsed().as_secs_f64() * 1e3
+                ),
                 Err(e) => die_query(e),
             }
         }
@@ -2170,12 +2326,21 @@ fn cmd_bench_mmap(args: &[String]) {
         eprintln!("open error: {e}");
         std::process::exit(1);
     });
-    eprintln!("opened {} triples (mmap) in {:.3}s | committed heap ~{:.3} GB", g.len(), t.elapsed().as_secs_f64(), g.heap_bytes() as f64 / 1e9);
+    eprintln!(
+        "opened {} triples (mmap) in {:.3}s | committed heap ~{:.3} GB",
+        g.len(),
+        t.elapsed().as_secs_f64(),
+        g.heap_bytes() as f64 / 1e9
+    );
     // Load-time decompression mode: decode compressed perms to raw RAM before querying.
     if args.get(6).map(String::as_str) == Some("decompress") {
         let t = Instant::now();
         g.decompress_indexes();
-        eprintln!("decompressed indexes to RAM in {:.3}s | committed heap ~{:.3} GB", t.elapsed().as_secs_f64(), g.heap_bytes() as f64 / 1e9);
+        eprintln!(
+            "decompressed indexes to RAM in {:.3}s | committed heap ~{:.3} GB",
+            t.elapsed().as_secs_f64(),
+            g.heap_bytes() as f64 / 1e9
+        );
     }
     run_query_suite(&g, qdir, iters, mode, json_path.as_deref());
 }
@@ -2196,7 +2361,13 @@ struct SuiteRow {
 /// to that path as a machine-readable JSON document (the structured-benchmark-catalog pattern,
 /// mirroring `bench/memtier` / `mpc_net_bench`'s dependency-free emit). STDOUT is byte-for-byte
 /// unchanged whether or not the flag is present — JSON is strictly additive.
-fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str, json_path: Option<&str>) {
+fn run_query_suite(
+    g: &sparq_core::Graph,
+    dir: &str,
+    iters: usize,
+    mode: &str,
+    json_path: Option<&str>,
+) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| {
             eprintln!("error reading {dir}: {e}");
@@ -2216,7 +2387,9 @@ fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str, j
         // construct/describe executor — count()/query()/query_json() only handle SELECT/ASK.
         // This lets the operator-coverage suite (bench/operators/queries) exercise every
         // SPARQL query form through the same `bench` runner; "rows" = produced triples.
-        let graph_form = sparq_engine::PreparedQuery::parse(&sparql).map(|p| p.is_graph_form()).unwrap_or(false);
+        let graph_form = sparq_engine::PreparedQuery::parse(&sparql)
+            .map(|p| p.is_graph_form())
+            .unwrap_or(false);
         let mut best = f64::INFINITY;
         let mut rows = 0;
         let mut err = None;

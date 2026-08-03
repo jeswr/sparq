@@ -98,7 +98,11 @@ fn asserted_point_shares_the_tbox_point_concept() {
     let (dict, triples) = parse(&ttl);
     let r = realize(&dict, &triples);
     assert!(!r.is_inconsistent());
-    assert_eq!(r.report().skipped_assertions, 0, "`:f :v 5.0` is a rescued point");
+    assert_eq!(
+        r.report().skipped_assertions,
+        0,
+        "`:f :v 5.0` is a rescued point"
+    );
     let f = iri(&dict, "f");
     for sup in ["ViaFacets", "ViaHasValue", "ViaOneOf"] {
         assert!(
@@ -129,7 +133,10 @@ fn distinct_asserted_points_do_not_merge() {
         "h v 6 ⊭ h : Five — {{6}} ⊄ {{5}}"
     );
     // Nor does a shared data property make the two individuals equal.
-    assert!(r.same_as().is_empty(), "no owl:sameAs may be fabricated from data values");
+    assert!(
+        r.same_as().is_empty(),
+        "no owl:sameAs may be fabricated from data values"
+    );
 }
 
 // --- An ABox-only clash the TBox classifier cannot see, reached through the rescue. ---------
@@ -157,7 +164,10 @@ fn asserted_values_in_disjoint_data_ranges_are_inconsistent() {
     // so the (assertion-agnostic) TBox classifier flags NO unsatisfiable class.
     let h = Classifier::classify(&dict, &triples);
     assert!(h.unsatisfiable_classes().is_empty());
-    assert!(!h.is_inconsistent(), "the TBox path never decides whole-ontology consistency");
+    assert!(
+        !h.is_inconsistent(),
+        "the TBox path never decides whole-ontology consistency"
+    );
 }
 
 // --- The fail-closed boundary: an out-of-tier literal keeps its counted skip. ---------------
@@ -195,7 +205,10 @@ fn tbox_classification_is_unchanged_by_the_rescue() {
     let with_abox = format!("{tbox}\n:alice :age 42 .");
     let (d1, t1) = parse(&tbox);
     let (d2, t2) = parse(&with_abox);
-    let (h1, h2) = (Classifier::classify(&d1, &t1), Classifier::classify(&d2, &t2));
+    let (h1, h2) = (
+        Classifier::classify(&d1, &t1),
+        Classifier::classify(&d2, &t2),
+    );
     assert_eq!(h1.report().skipped_axioms, h2.report().skipped_axioms);
     assert_eq!(h1.report().unsatisfiable_classes, 0);
     assert_eq!(h2.report().unsatisfiable_classes, 0);

@@ -19,7 +19,7 @@ pub use aggregate::{window_aggregate, Agg};
 pub use eval::EvalMode;
 pub use multi::ContinuousMultiQuery;
 pub use query::{
-    AskResult, ContinuousAsk, ContinuousConstruct, ContinuousQuery, GraphResult, R2S, WindowResult,
+    AskResult, ContinuousAsk, ContinuousConstruct, ContinuousQuery, GraphResult, WindowResult, R2S,
 };
 pub use rspql::{RspqlQuery, WindowDecl};
 // [SONNET-4.6] sq-xqu: re-exported so embedders can build per-registered-query

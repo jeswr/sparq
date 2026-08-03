@@ -36,7 +36,10 @@ fn min_of_3_us(mut f: impl FnMut() -> u64) -> (f64, u64) {
 }
 
 fn main() {
-    let shapes: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(2000);
+    let shapes: usize = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2000);
     let doc = corpus(shapes);
     println!("corpus: {} shapes, {} bytes", shapes, doc.len());
 
@@ -50,8 +53,13 @@ fn main() {
 
     let (triples, outcome) = parse(&doc, DEFAULT_BASE, Profile::Strict).expect("parse");
     let (us, n) = min_of_3_us(|| {
-        let text = write(&triples, Some(DEFAULT_BASE), &outcome.prefixes, Profile::Strict)
-            .expect("write");
+        let text = write(
+            &triples,
+            Some(DEFAULT_BASE),
+            &outcome.prefixes,
+            Profile::Strict,
+        )
+        .expect("write");
         text.len() as u64
     });
     println!("metric_us write_strict {us:.0} bytes {n}");

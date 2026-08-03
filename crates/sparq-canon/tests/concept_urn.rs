@@ -107,7 +107,12 @@ fn an_isomorphic_record_verifies_against_the_same_name() {
     // Relabelled blank nodes and reordered quads: the same concept.
     verify_concept_urn(URN_SHA256_BASE58, &isomorphic_record()).unwrap();
     assert_eq!(
-        concept_urn(&isomorphic_record(), ConceptHash::Sha256, Multibase::Base58Btc).unwrap(),
+        concept_urn(
+            &isomorphic_record(),
+            ConceptHash::Sha256,
+            Multibase::Base58Btc
+        )
+        .unwrap(),
         URN_SHA256_BASE58
     );
 }
@@ -218,7 +223,10 @@ fn every_envelope_malformation_fails_closed() {
             "unknown multibase prefix",
         ),
         ("urn:concept:f1220zz", "character outside the alphabet"),
-        ("urn:concept:f1220ff", "declared length exceeds the digest present"),
+        (
+            "urn:concept:f1220ff",
+            "declared length exceeds the digest present",
+        ),
         (
             "urn:concept:f12206ff69f76d733563c99f833c20c396155b91599bdcca39afcd05ed59d5e121d5fff",
             "trailing bytes after the digest",

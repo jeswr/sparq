@@ -627,7 +627,11 @@ mod tests {
                 Term::NamedNode(NamedNode::new_unchecked("http://ex/o")),
             ))))
         };
-        assert_eq!(quote(&d), NO_ID, "strict mode must never mint a triple term");
+        assert_eq!(
+            quote(&d),
+            NO_ID,
+            "strict mode must never mint a triple term"
+        );
         // Idempotent: the fixpoint is a pure function of (dict, triples, mode).
         assert_eq!(step(&mut d, &mut strict, ReifyMode::DestructureOnly), 0);
         // Non-vacuity: Bridge mode DOES mint the depth-1 quotation on this fixture.

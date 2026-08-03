@@ -67,7 +67,9 @@ const MAX_NEST_DEPTH: usize = 128;
 /// the serial per-chunk worker AND `parse_to_triples_with_base` through.
 pub fn parse(bytes: &[u8], base: Option<&str>, dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
     let base = match base {
-        Some(b) => Some(Iri::parse(b.to_string()).map_err(|e| format!("Turtle: invalid base IRI: {}", e))?),
+        Some(b) => Some(
+            Iri::parse(b.to_string()).map_err(|e| format!("Turtle: invalid base IRI: {}", e))?,
+        ),
         None => None,
     };
     let mut p = Parser {
@@ -149,7 +151,10 @@ impl Parser<'_, '_> {
         let end = self.i + kw.len();
         end <= self.b.len()
             && self.b[self.i..end].eq_ignore_ascii_case(kw)
-            && matches!(self.b.get(end), Some(b' ' | b'\t' | b'\r' | b'\n' | b'<' | b'#'))
+            && matches!(
+                self.b.get(end),
+                Some(b' ' | b'\t' | b'\r' | b'\n' | b'<' | b'#')
+            )
     }
 
     /// Exact-case (NOT case-insensitive) keyword match at the cursor, not followed by a name char.
@@ -210,7 +215,9 @@ impl Parser<'_, '_> {
         // A relative BASE resolves against the current base (Turtle allows this). With no current
         // base, BASE must be absolute.
         let resolved = match &self.base {
-            Some(b) => b.resolve(raw).map_err(|e| self.errmsg(&format!("invalid base IRI: {}", e)))?,
+            Some(b) => b
+                .resolve(raw)
+                .map_err(|e| self.errmsg(&format!("invalid base IRI: {}", e)))?,
             None => Iri::parse(raw.to_string())
                 .map_err(|e| self.errmsg(&format!("invalid base IRI: {}", e)))?,
         };
@@ -380,7 +387,9 @@ impl Parser<'_, '_> {
 
     /// `verb ::= predicate | 'a'`
     fn verb(&mut self) -> Result<Id, String> {
-        if self.peek() == Some(b'a') && !matches!(self.b.get(self.i + 1), Some(c) if is_pn_chars(*c) || *c == b':') {
+        if self.peek() == Some(b'a')
+            && !matches!(self.b.get(self.i + 1), Some(c) if is_pn_chars(*c) || *c == b':')
+        {
             self.i += 1;
             return Ok(self.dict.intern_iri(RDF_TYPE));
         }
@@ -393,13 +402,17 @@ impl Parser<'_, '_> {
     /// Does the cursor sit on `<<(` (an RDF 1.2 triple term)?
     #[inline]
     fn at_triple_term(&self) -> bool {
-        self.peek() == Some(b'<') && self.b.get(self.i + 1) == Some(&b'<') && self.b.get(self.i + 2) == Some(&b'(')
+        self.peek() == Some(b'<')
+            && self.b.get(self.i + 1) == Some(&b'<')
+            && self.b.get(self.i + 2) == Some(&b'(')
     }
 
     /// Does the cursor sit on `<<` NOT followed by `(` (an RDF 1.2 reifier term)?
     #[inline]
     fn at_reifier(&self) -> bool {
-        self.peek() == Some(b'<') && self.b.get(self.i + 1) == Some(&b'<') && self.b.get(self.i + 2) != Some(&b'(')
+        self.peek() == Some(b'<')
+            && self.b.get(self.i + 1) == Some(&b'<')
+            && self.b.get(self.i + 2) != Some(&b'(')
     }
 
     /// `subject ::= iri | BlankNode | collection | reifiedTriple` (RDF 1.2 adds `<< … >>`).
@@ -439,8 +452,12 @@ impl Parser<'_, '_> {
             Some(b'[') => Ok(self.blank_node_property_list(depth)?.0),
             Some(b'(') => self.collection(depth),
             Some(b'"') | Some(b'\'') => self.string_literal(),
-            Some(c) if c == b'+' || c == b'-' || c.is_ascii_digit() || c == b'.' => self.numeric_literal(),
-            Some(b't') | Some(b'f') | Some(b'T') | Some(b'F') if self.at_boolean() => self.boolean_literal(),
+            Some(c) if c == b'+' || c == b'-' || c.is_ascii_digit() || c == b'.' => {
+                self.numeric_literal()
+            }
+            Some(b't') | Some(b'f') | Some(b'T') | Some(b'F') if self.at_boolean() => {
+                self.boolean_literal()
+            }
             Some(_) => self.prefixed_name(),
             None => Err(self.err("unexpected end of input, expected an object")),
         }
@@ -533,7 +550,9 @@ impl Parser<'_, '_> {
                 // oxttl requires — a relative reference with no base is a parse error).
                 Iri::parse(raw.to_string())
                     .map(|i| i.into_inner())
-                    .map_err(|e| self.errmsg(&format!("relative IRI <{}> with no base: {}", raw, e)))
+                    .map_err(|e| {
+                        self.errmsg(&format!("relative IRI <{}> with no base: {}", raw, e))
+                    })
             }
         }
     }
@@ -956,7 +975,10 @@ impl Parser<'_, '_> {
             return Err(self.err("invalid integer literal"));
         }
         // Guard: a DECIMAL like `.` alone is invalid; require a fraction digit if it started with '.'
-        if dt == XSD_DECIMAL && digits_before == 0 && !lex.trim_start_matches(['+', '-']).starts_with('.') {
+        if dt == XSD_DECIMAL
+            && digits_before == 0
+            && !lex.trim_start_matches(['+', '-']).starts_with('.')
+        {
             return Err(self.err("invalid decimal literal"));
         }
         let _ = n;
@@ -998,10 +1020,9 @@ impl Parser<'_, '_> {
             Some(_) => {
                 let ns = self.pname_ns()?;
                 let local = self.pn_local()?;
-                let namespace = self
-                    .prefixes
-                    .get(&ns)
-                    .ok_or_else(|| self.errmsg(&format!("the prefix {}: has not been declared", ns)))?;
+                let namespace = self.prefixes.get(&ns).ok_or_else(|| {
+                    self.errmsg(&format!("the prefix {}: has not been declared", ns))
+                })?;
                 Ok(format!("{}{}", namespace, local))
             }
             None => Err(self.err("expected a datatype IRI after '^^'")),
@@ -1050,7 +1071,11 @@ impl Parser<'_, '_> {
                 match self.peek() {
                     None => return Err(self.err("unterminated triple-quoted string")),
                     Some(b'\\') => out.push(self.read_echar_or_uchar()?),
-                    Some(c) if c == q && self.b.get(self.i + 1) == Some(&q) && self.b.get(self.i + 2) == Some(&q) => {
+                    Some(c)
+                        if c == q
+                            && self.b.get(self.i + 1) == Some(&q)
+                            && self.b.get(self.i + 2) == Some(&q) =>
+                    {
                         self.i += 3;
                         return Ok(out);
                     }
@@ -1069,7 +1094,9 @@ impl Parser<'_, '_> {
                         self.i += 1;
                         return Ok(out);
                     }
-                    b'\n' | b'\r' => return Err(self.err("unescaped newline in a single-quoted string")),
+                    b'\n' | b'\r' => {
+                        return Err(self.err("unescaped newline in a single-quoted string"))
+                    }
                     _ => {
                         self.copy_char(&mut out)?;
                     }
@@ -1092,7 +1119,8 @@ impl Parser<'_, '_> {
             if end > self.b.len() {
                 return Err(self.err("invalid UTF-8"));
             }
-            let s = std::str::from_utf8(&self.b[self.i..end]).map_err(|_| self.err("invalid UTF-8"))?;
+            let s =
+                std::str::from_utf8(&self.b[self.i..end]).map_err(|_| self.err("invalid UTF-8"))?;
             let ch = s.chars().next().unwrap();
             out.push_str(s);
             self.i = end;
@@ -1104,14 +1132,38 @@ impl Parser<'_, '_> {
     fn read_echar_or_uchar(&mut self) -> Result<char, String> {
         // cursor at '\'
         match self.b.get(self.i + 1).copied() {
-            Some(b't') => { self.i += 2; Ok('\t') }
-            Some(b'b') => { self.i += 2; Ok('\u{8}') }
-            Some(b'n') => { self.i += 2; Ok('\n') }
-            Some(b'r') => { self.i += 2; Ok('\r') }
-            Some(b'f') => { self.i += 2; Ok('\u{C}') }
-            Some(b'"') => { self.i += 2; Ok('"') }
-            Some(b'\'') => { self.i += 2; Ok('\'') }
-            Some(b'\\') => { self.i += 2; Ok('\\') }
+            Some(b't') => {
+                self.i += 2;
+                Ok('\t')
+            }
+            Some(b'b') => {
+                self.i += 2;
+                Ok('\u{8}')
+            }
+            Some(b'n') => {
+                self.i += 2;
+                Ok('\n')
+            }
+            Some(b'r') => {
+                self.i += 2;
+                Ok('\r')
+            }
+            Some(b'f') => {
+                self.i += 2;
+                Ok('\u{C}')
+            }
+            Some(b'"') => {
+                self.i += 2;
+                Ok('"')
+            }
+            Some(b'\'') => {
+                self.i += 2;
+                Ok('\'')
+            }
+            Some(b'\\') => {
+                self.i += 2;
+                Ok('\\')
+            }
             // `read_uchar` expects the cursor AT the `\`, so do not pre-advance here.
             Some(b'u') | Some(b'U') => self.read_uchar(),
             _ => Err(self.err("invalid string escape")),
@@ -1132,7 +1184,8 @@ impl Parser<'_, '_> {
         if he > self.b.len() {
             return Err(self.err("truncated \\u escape"));
         }
-        let hex = std::str::from_utf8(&self.b[hs..he]).map_err(|_| self.err("invalid \\u escape"))?;
+        let hex =
+            std::str::from_utf8(&self.b[hs..he]).map_err(|_| self.err("invalid \\u escape"))?;
         let cp = u32::from_str_radix(hex, 16).map_err(|_| self.err("invalid \\u escape digits"))?;
         let ch = char::from_u32(cp).ok_or_else(|| self.err("invalid code point in \\u escape"))?;
         self.i = he;
@@ -1145,7 +1198,11 @@ impl Parser<'_, '_> {
 /// Normalise a raw language tag: ASCII-lowercase, and pick the RDF datatype (`rdf:langString`, or
 /// `rdf:dirLangString` when a `--dir` suffix is present) — identical to [`crate::nt`]/oxttl.
 fn normalize_lang(raw: &str) -> (&'static str, Cow<'_, str>) {
-    let dt = if raw.contains("--") { RDF_DIR_LANG_STRING } else { RDF_LANG_STRING };
+    let dt = if raw.contains("--") {
+        RDF_DIR_LANG_STRING
+    } else {
+        RDF_LANG_STRING
+    };
     let lang = if raw.bytes().any(|c| c.is_ascii_uppercase()) {
         Cow::Owned(raw.to_ascii_lowercase())
     } else {
@@ -1174,8 +1231,25 @@ fn is_pn_chars(c: u8) -> bool {
 fn is_pn_local_esc(c: u8) -> bool {
     matches!(
         c,
-        b'_' | b'~' | b'.' | b'-' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';'
-            | b'=' | b'/' | b'?' | b'#' | b'@' | b'%'
+        b'_' | b'~'
+            | b'.'
+            | b'-'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'='
+            | b'/'
+            | b'?'
+            | b'#'
+            | b'@'
+            | b'%'
     )
 }
 
@@ -1183,8 +1257,7 @@ fn is_pn_local_esc(c: u8) -> bool {
 #[inline]
 fn is_iri_forbidden(ch: char) -> bool {
     let c = ch as u32;
-    c <= 0x20
-        || matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')
+    c <= 0x20 || matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')
 }
 
 /// Length in bytes of the UTF-8 sequence whose leading byte is `c`.

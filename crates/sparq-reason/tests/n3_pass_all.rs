@@ -23,8 +23,14 @@ const SOCRATES: &str = r#"@prefix : <http://example.org/socrates#>.
 fn pass_all_emits_the_closure_and_the_rule() {
     let doc = reason_n3_pass_all(SOCRATES, RuleVars::N3).expect("pass-all");
     // The `--pass` half: base fact AND entailed fact.
-    assert!(doc.contains(&format!("<{S}Socrates> <{TYPE}> <{S}Human> .")), "{doc}");
-    assert!(doc.contains(&format!("<{S}Socrates> <{TYPE}> <{S}Mortal> .")), "{doc}");
+    assert!(
+        doc.contains(&format!("<{S}Socrates> <{TYPE}> <{S}Human> .")),
+        "{doc}"
+    );
+    assert!(
+        doc.contains(&format!("<{S}Socrates> <{TYPE}> <{S}Mortal> .")),
+        "{doc}"
+    );
     // The `-all` half: the rule itself, which plain `--pass` output loses.
     let rule = format!("{{ ?x <{TYPE}> <{S}Human> . }} => {{ ?x <{TYPE}> <{S}Mortal> . }} .");
     assert!(doc.contains(&rule), "{doc}");
@@ -62,17 +68,32 @@ fn pass_only_the_closure_differs_from_pass_all() {
     let closure = sparq_reason::reason_n3(&mut dict, SOCRATES).expect("closure");
     assert_eq!(closure.len(), 2, "base + entailed typing");
     let doc = reason_n3_pass_all(SOCRATES, RuleVars::N3).expect("pass-all");
-    assert_eq!(doc.matches("=>").count(), 1, "exactly one echoed rule: {doc}");
+    assert_eq!(
+        doc.matches("=>").count(),
+        1,
+        "exactly one echoed rule: {doc}"
+    );
 }
 
 #[test]
 fn grounded_mode_leaves_no_syntactic_variable() {
     let doc = reason_n3_pass_all(SOCRATES, RuleVars::VarIris).expect("pass-all-ground");
-    assert!(!doc.contains('?'), "the grounded form carries no `?x`: {doc}");
-    assert!(doc.contains("<http://www.w3.org/2000/10/swap/var#x>"), "{doc}");
+    assert!(
+        !doc.contains('?'),
+        "the grounded form carries no `?x`: {doc}"
+    );
+    assert!(
+        doc.contains("<http://www.w3.org/2000/10/swap/var#x>"),
+        "{doc}"
+    );
     // The closure half is identical to the un-grounded form — only the rules change.
     let plain = reason_n3_pass_all(SOCRATES, RuleVars::N3).expect("pass-all");
-    let facts = |d: &str| d.lines().filter(|l| !l.contains("=>")).collect::<Vec<_>>().join("\n");
+    let facts = |d: &str| {
+        d.lines()
+            .filter(|l| !l.contains("=>"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     assert_eq!(facts(&doc), facts(&plain));
 }
 
@@ -84,12 +105,23 @@ fn backward_rules_are_echoed_with_their_arrow() {
 { ?x a :Mortal } => { ?x a :Doomed }.
 "#;
     let doc = reason_n3_pass_all(src, RuleVars::N3).expect("pass-all");
-    assert_eq!(doc.matches("<=").count(), 1, "the backward rule survives: {doc}");
-    assert_eq!(doc.matches("=>").count(), 1, "the forward rule survives: {doc}");
+    assert_eq!(
+        doc.matches("<=").count(),
+        1,
+        "the backward rule survives: {doc}"
+    );
+    assert_eq!(
+        doc.matches("=>").count(),
+        1,
+        "the forward rule survives: {doc}"
+    );
     // Backward rules are goal-directed, so the closure still contains the derived fact.
     assert!(doc.contains("<http://ex/Doomed>"), "{doc}");
     // ... and the echoed document re-derives it identically.
-    assert_eq!(doc, reason_n3_pass_all(&doc, RuleVars::N3).expect("round two"));
+    assert_eq!(
+        doc,
+        reason_n3_pass_all(&doc, RuleVars::N3).expect("round two")
+    );
 }
 
 #[test]
@@ -101,9 +133,15 @@ fn a_premise_blank_node_is_echoed_as_a_blank_node() {
 :a a :Human.
 "#;
     let doc = reason_n3_pass_all(src, RuleVars::N3).expect("pass-all");
-    assert!(!doc.contains("__bn"), "no engine-internal variable name: {doc}");
+    assert!(
+        !doc.contains("__bn"),
+        "no engine-internal variable name: {doc}"
+    );
     assert!(doc.contains("_:s"), "{doc}");
-    assert_eq!(doc, reason_n3_pass_all(&doc, RuleVars::N3).expect("round two"));
+    assert_eq!(
+        doc,
+        reason_n3_pass_all(&doc, RuleVars::N3).expect("round two")
+    );
 }
 
 /// GH #5372 review round 1: `--pass-all-ground` must ground a rule variable that sits
@@ -116,9 +154,18 @@ fn grounded_mode_grounds_variables_inside_a_quoted_formula() {
 { ?s :says { ?x a :Good } } => { ?s a :Trusted }.
 "#;
     let doc = reason_n3_pass_all(src, RuleVars::VarIris).expect("pass-all-ground");
-    assert!(!doc.contains('?'), "no syntactic variable at any depth: {doc}");
-    assert!(doc.contains("<http://www.w3.org/2000/10/swap/var#x>"), "the nested one: {doc}");
-    assert!(doc.contains("<http://www.w3.org/2000/10/swap/var#s>"), "{doc}");
+    assert!(
+        !doc.contains('?'),
+        "no syntactic variable at any depth: {doc}"
+    );
+    assert!(
+        doc.contains("<http://www.w3.org/2000/10/swap/var#x>"),
+        "the nested one: {doc}"
+    );
+    assert!(
+        doc.contains("<http://www.w3.org/2000/10/swap/var#s>"),
+        "{doc}"
+    );
     // The un-grounded form still writes that nested variable as `?x`.
     let plain = reason_n3_pass_all(src, RuleVars::N3).expect("pass-all");
     assert!(plain.contains("{ ?x "), "{plain}");
@@ -128,7 +175,10 @@ fn grounded_mode_grounds_variables_inside_a_quoted_formula() {
     // a claim about rule documents, not about every input.
     let with_a_formula_fact = ":a <http://ex/p> { ?x <http://ex/q> :b }.\n";
     let doc = reason_n3_pass_all(with_a_formula_fact, RuleVars::VarIris).expect("pass-all");
-    assert!(doc.contains("{ ?x "), "a formula-valued fact keeps its variable: {doc}");
+    assert!(
+        doc.contains("{ ?x "),
+        "a formula-valued fact keeps its variable: {doc}"
+    );
 }
 
 /// GH #5372 review round 1: `?__bn0_x` is a LEGAL N3 variable (a variable name is letters,
@@ -144,11 +194,23 @@ fn a_source_variable_spelled_like_the_rewrite_stays_a_variable() {
 :a a :Human.
 "#;
     let doc = reason_n3_pass_all(src, RuleVars::N3).expect("pass-all");
-    assert!(doc.contains("?__bn0_x"), "the author's variable survives verbatim: {doc}");
-    assert!(!doc.contains("_:"), "and is never demoted to a blank node: {doc}");
+    assert!(
+        doc.contains("?__bn0_x"),
+        "the author's variable survives verbatim: {doc}"
+    );
+    assert!(
+        !doc.contains("_:"),
+        "and is never demoted to a blank node: {doc}"
+    );
     // Still a live rule over the same closure, and re-emitting is a fixpoint.
-    assert!(doc.contains(&format!("<http://ex/a> <{TYPE}> <http://ex/Mortal> .")), "{doc}");
-    assert_eq!(doc, reason_n3_pass_all(&doc, RuleVars::N3).expect("round two"));
+    assert!(
+        doc.contains(&format!("<http://ex/a> <{TYPE}> <http://ex/Mortal> .")),
+        "{doc}"
+    );
+    assert_eq!(
+        doc,
+        reason_n3_pass_all(&doc, RuleVars::N3).expect("round two")
+    );
 
     // The conclusion-only occurrence is where the old decode actually changed meaning.
     let concl_only = r#"@prefix : <http://ex/>.
@@ -164,7 +226,10 @@ fn a_source_variable_spelled_like_the_rewrite_stays_a_variable() {
     // which stops at one. So the engine-internal name is UNFORGEABLE — a document that
     // tries to write it does not parse, and no legal `?…` can ever decode to a blank node.
     let forged = "@prefix : <http://ex/>.\n{ ?__bn.0.x a :Human } => { :a a :Mortal }.\n";
-    assert!(reason_n3_pass_all(forged, RuleVars::N3).is_err(), "{forged}");
+    assert!(
+        reason_n3_pass_all(forged, RuleVars::N3).is_err(),
+        "{forged}"
+    );
 }
 
 #[test]

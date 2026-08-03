@@ -80,7 +80,10 @@ async fn unsupported_method_allow_lists_patch() {
         .unwrap();
     assert_eq!(resp.status(), 405);
     let allow = resp.headers()["allow"].to_str().unwrap().to_string();
-    assert!(allow.contains("PATCH"), "Allow header must list PATCH: {allow}");
+    assert!(
+        allow.contains("PATCH"),
+        "Allow header must list PATCH: {allow}"
+    );
     assert!(allow.contains("PUT") && allow.contains("DELETE"));
 }
 
@@ -167,9 +170,7 @@ async fn sparql_update_patch_named_graph_where_dataset_scoped() {
         .unwrap();
     // PATCH: DELETE { GRAPH g { ?s ?p ?o } } WHERE { ?s ?p ?o } — WHERE reads the addressed graph
     // (the using-graph-uri override), so it matches the seeded triple and removes it.
-    let body = format!(
-        "DELETE {{ GRAPH <{g}> {{ ?s ?p ?o }} }} WHERE {{ ?s ?p ?o }}"
-    );
+    let body = format!("DELETE {{ GRAPH <{g}> {{ ?s ?p ?o }} }} WHERE {{ ?s ?p ?o }}");
     let resp = client()
         .patch(format!("{base}/sparql/graph?graph={g}"))
         .header("content-type", "application/sparql-update")
@@ -208,9 +209,7 @@ async fn sparql_update_patch_malformed_is_400() {
 async fn sparql_update_patch_named_with_in_body_using_conflicts() {
     let base = spawn().await;
     let g = "http://ex/gc";
-    let body = format!(
-        "WITH <{g}> DELETE {{ ?s ?p ?o }} USING <{g}> WHERE {{ ?s ?p ?o }}"
-    );
+    let body = format!("WITH <{g}> DELETE {{ ?s ?p ?o }} USING <{g}> WHERE {{ ?s ?p ?o }}");
     let resp = client()
         .patch(format!("{base}/sparql/graph?graph={g}"))
         .header("content-type", "application/sparql-update")
@@ -394,13 +393,12 @@ _:p a solid:InsertDeletePatch;
         &format!("SELECT ?o WHERE {{ GRAPH <{g}> {{ <http://ex/s> <http://ex/p> ?o }} }}"),
     )
     .await;
-    assert!(in_g.contains("http://ex/o"), "must be in named graph: {in_g}");
+    assert!(
+        in_g.contains("http://ex/o"),
+        "must be in named graph: {in_g}"
+    );
     // ...and NOT in the default graph (scoping held).
-    let in_default = select(
-        &base,
-        "SELECT ?o WHERE { <http://ex/s> <http://ex/p> ?o }",
-    )
-    .await;
+    let in_default = select(&base, "SELECT ?o WHERE { <http://ex/s> <http://ex/p> ?o }").await;
     assert!(
         !in_default.contains("http://ex/o"),
         "named-graph PATCH must not leak into the default graph: {in_default}"

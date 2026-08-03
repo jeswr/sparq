@@ -72,7 +72,10 @@ fn corpus() -> String {
             "<http://ex/s{i}> <http://ex/knows> <http://ex/s{}> .\n",
             (i + 1) % 4000
         ));
-        nt.push_str(&format!("<http://ex/s{i}> <http://ex/age> \"{}\" .\n", 20 + (i % 60)));
+        nt.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/age> \"{}\" .\n",
+            20 + (i % 60)
+        ));
     }
     nt
 }
@@ -107,7 +110,10 @@ fn compressed_profile_yields_identical_solutions() {
         "compressed profile changed the query solutions — result-equivalence violated"
     );
     // Sanity: the query actually returned rows (guards against both-empty vacuity).
-    assert!(out_raw.contains("row(s)") && out_raw.contains("<http://ex/s0>"), "stdout: {out_raw}");
+    assert!(
+        out_raw.contains("row(s)") && out_raw.contains("<http://ex/s0>"),
+        "stdout: {out_raw}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -123,8 +129,14 @@ fn explicit_raw_equals_unset_default() {
     let (_, out_raw, _) = run3(Some("raw"), &["query", s(&data), "ntriples", q]);
     let (_, out_raw_case, _) = run3(Some("RAW"), &["query", s(&data), "ntriples", q]);
 
-    assert_eq!(out_unset, out_raw, "explicit `raw` diverged from the unset default");
-    assert_eq!(out_unset, out_raw_case, "`RAW` (case) diverged from the unset default");
+    assert_eq!(
+        out_unset, out_raw,
+        "explicit `raw` diverged from the unset default"
+    );
+    assert_eq!(
+        out_unset, out_raw_case,
+        "`RAW` (case) diverged from the unset default"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -141,12 +153,18 @@ fn unknown_profile_fails_closed() {
     // A plausible typo must NOT silently fall through to raw — it exits 2 with a message.
     for bogus in ["compresed", "compress", "gzip", "1", "true", "raw-ish"] {
         let (code, stdout, stderr) = run3(Some(bogus), &["query", s(&data), "ntriples", q]);
-        assert_eq!(code, 2, "profile `{bogus}` should exit 2 (fail-closed), got {code}\nstderr: {stderr}");
+        assert_eq!(
+            code, 2,
+            "profile `{bogus}` should exit 2 (fail-closed), got {code}\nstderr: {stderr}"
+        );
         assert!(
             stderr.contains("SPARQ_STORE_PROFILE"),
             "the error should name the env var for `{bogus}`; stderr: {stderr}"
         );
-        assert!(!stdout.contains("row(s)"), "no results should be emitted for `{bogus}`; stdout: {stdout}");
+        assert!(
+            !stdout.contains("row(s)"),
+            "no results should be emitted for `{bogus}`; stdout: {stdout}"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -167,11 +185,23 @@ fn compressed_profile_reports_lower_store_heap() {
     assert_eq!(c_cmp, 0, "compressed memstat failed: {e_cmp}");
 
     // The `mode` line reflects the applied profile.
-    assert_eq!(memstat_field(&raw_out, "mode"), "raw", "raw memstat mode line");
-    assert_eq!(memstat_field(&cmp_out, "mode"), "compressed", "compressed memstat mode line");
+    assert_eq!(
+        memstat_field(&raw_out, "mode"),
+        "raw",
+        "raw memstat mode line"
+    );
+    assert_eq!(
+        memstat_field(&cmp_out, "mode"),
+        "compressed",
+        "compressed memstat mode line"
+    );
 
-    let raw_bpt: f64 = memstat_field(&raw_out, "store_b_per_triple").parse().expect("raw B/triple");
-    let cmp_bpt: f64 = memstat_field(&cmp_out, "store_b_per_triple").parse().expect("compressed B/triple");
+    let raw_bpt: f64 = memstat_field(&raw_out, "store_b_per_triple")
+        .parse()
+        .expect("raw B/triple");
+    let cmp_bpt: f64 = memstat_field(&cmp_out, "store_b_per_triple")
+        .parse()
+        .expect("compressed B/triple");
     assert!(
         cmp_bpt < raw_bpt,
         "compressed store_b_per_triple ({cmp_bpt}) should be lower than raw ({raw_bpt})"
@@ -218,7 +248,10 @@ fn memstat_raw_emits_the_composition_breakdown() {
         "store_b_per_triple",
         "dict_b_per_term",
     ] {
-        assert!(stdout.contains(&format!("{key}\t")), "memstat missing `{key}`:\n{stdout}");
+        assert!(
+            stdout.contains(&format!("{key}\t")),
+            "memstat missing `{key}`:\n{stdout}"
+        );
     }
     assert_eq!(memstat_field(&stdout, "memstat_version"), "1");
     let _ = std::fs::remove_dir_all(&dir);

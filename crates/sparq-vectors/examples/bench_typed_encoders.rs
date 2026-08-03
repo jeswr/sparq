@@ -92,7 +92,9 @@ fn corpus(n: usize, seed: u64) -> Vec<f64> {
 /// as the P1 block so the comparison is like-for-like on dimensionality.
 fn baseline_vec(entity: usize, dim: usize) -> Vec<f32> {
     let mut st = (entity as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x1234_5678;
-    (0..dim).map(|_| (unit(&mut st) * 2.0 - 1.0) as f32).collect()
+    (0..dim)
+        .map(|_| (unit(&mut st) * 2.0 - 1.0) as f32)
+        .collect()
 }
 
 /// Recall@k of the true value-nearest neighbours, averaged over the query set, plus the Spearman
@@ -125,7 +127,9 @@ fn evaluate(
         // Encoded-distance order.
         let mut by_code: Vec<usize> = (0..n).filter(|&i| i != q).collect();
         by_code.sort_by(|&a, &b| {
-            l2(&codes[a], &codes[q]).partial_cmp(&l2(&codes[b], &codes[q])).unwrap()
+            l2(&codes[a], &codes[q])
+                .partial_cmp(&l2(&codes[b], &codes[q]))
+                .unwrap()
         });
 
         // Recall@k: fraction of the true top-k present in the encoded top-k.
@@ -155,7 +159,10 @@ fn evaluate(
         spearman_sum += 1.0 - 6.0 * d2 / (mf * (mf * mf - 1.0));
     }
     let q = queries.len() as f64;
-    Quality { recall_at_k: recall_sum / q, spearman: spearman_sum / q }
+    Quality {
+        recall_at_k: recall_sum / q,
+        spearman: spearman_sum / q,
+    }
 }
 
 fn main() {
@@ -182,11 +189,28 @@ fn main() {
     let off_tail = evaluate(&values, |e| baseline_vec(e, dim), &tail_queries, k);
 
     // NON-CANONICAL, work-box, encoder-quality sanity check — NOT a KGE benchmark.
-    println!("# P1 typed-encoder ablation (NON-CANONICAL, work-box). N={} seed={} k={} dim={}", n, seed, k, dim);
-    println!("# tail slice = top value-decile (>= {:.1}), {} of {} entities", tail_threshold, tail_queries.len(), n);
+    println!(
+        "# P1 typed-encoder ablation (NON-CANONICAL, work-box). N={} seed={} k={} dim={}",
+        n, seed, k, dim
+    );
+    println!(
+        "# tail slice = top value-decile (>= {:.1}), {} of {} entities",
+        tail_threshold,
+        tail_queries.len(),
+        n
+    );
     println!("slice\tarm\trecall_at_k\tspearman");
     println!("overall\tP1_ON\t{:.4}\t{:.4}", on.recall_at_k, on.spearman);
-    println!("overall\tP1_OFF\t{:.4}\t{:.4}", off.recall_at_k, off.spearman);
-    println!("long_tail\tP1_ON\t{:.4}\t{:.4}", on_tail.recall_at_k, on_tail.spearman);
-    println!("long_tail\tP1_OFF\t{:.4}\t{:.4}", off_tail.recall_at_k, off_tail.spearman);
+    println!(
+        "overall\tP1_OFF\t{:.4}\t{:.4}",
+        off.recall_at_k, off.spearman
+    );
+    println!(
+        "long_tail\tP1_ON\t{:.4}\t{:.4}",
+        on_tail.recall_at_k, on_tail.spearman
+    );
+    println!(
+        "long_tail\tP1_OFF\t{:.4}\t{:.4}",
+        off_tail.recall_at_k, off_tail.spearman
+    );
 }

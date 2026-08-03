@@ -20,7 +20,12 @@ fn tmp(name: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("spqv-v3-{}-{}-{}.spqv", name, std::process::id(), nanos))
+    std::env::temp_dir().join(format!(
+        "spqv-v3-{}-{}-{}.spqv",
+        name,
+        std::process::id(),
+        nanos
+    ))
 }
 
 /// The store's embedding provenance (what it was built with).
@@ -34,7 +39,9 @@ fn store_prov() -> EmbeddingProvenance {
 
 /// Build a real v3 `.spqv` file with `store_prov()` and 3 vectors, reopen it from disk.
 fn build_v3(path: &std::path::Path, dim: usize) -> VectorStore {
-    let mut store = VectorStore::create(path, dim).unwrap().with_provenance(store_prov());
+    let mut store = VectorStore::create(path, dim)
+        .unwrap()
+        .with_provenance(store_prov());
     store.put(1, &vec![1.0; dim]).unwrap();
     store.put(2, &vec![0.5; dim]).unwrap();
     store.put(3, &vec![-1.0; dim]).unwrap();
@@ -53,7 +60,10 @@ fn v3_store_round_trips_provenance_through_the_file() {
     // And it is the v3 format on disk.
     let bytes = std::fs::read(&path).unwrap();
     let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    assert_eq!(version, SPQV_VERSION_V3, "a provenance-bound store must be written v3");
+    assert_eq!(
+        version, SPQV_VERSION_V3,
+        "a provenance-bound store must be written v3"
+    );
     // Vectors still read correctly (the provenance block did not perturb the data offset).
     assert_eq!(store.get(1).unwrap(), &vec![1.0; 8][..]);
     assert_eq!(store.len(), 3);
@@ -65,7 +75,9 @@ fn compatible_query_is_accepted() {
     let path = tmp("compat");
     let store = build_v3(&path, 8);
     // The SAME provenance is compatible — the positive control for the negative tests below.
-    assert!(store.check_provenance(&store_prov(), LegacyMode::Reject).is_ok());
+    assert!(store
+        .check_provenance(&store_prov(), LegacyMode::Reject)
+        .is_ok());
     std::fs::remove_file(&path).ok();
 }
 
@@ -80,7 +92,11 @@ fn rejects_wrong_model_id() {
     let err = store
         .check_provenance(&q, LegacyMode::Reject)
         .expect_err("a different model id must be rejected");
-    assert!(err.contains("model id"), "the error must name the axis: {}", err);
+    assert!(
+        err.contains("model id"),
+        "the error must name the axis: {}",
+        err
+    );
     // MUTATION NOTE: if `compatible_with` stopped comparing `model_id`, this expect_err would fail
     // (the check would wrongly pass) — verified below in `mutation_verification_hint`.
     std::fs::remove_file(&path).ok();
@@ -95,7 +111,11 @@ fn rejects_wrong_metric() {
     let err = store
         .check_provenance(&q, LegacyMode::Reject)
         .expect_err("a different metric must be rejected");
-    assert!(err.contains("metric"), "the error must name the axis: {}", err);
+    assert!(
+        err.contains("metric"),
+        "the error must name the axis: {}",
+        err
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -108,7 +128,11 @@ fn rejects_wrong_normalization() {
     let err = store
         .check_provenance(&q, LegacyMode::Reject)
         .expect_err("a different normalization must be rejected");
-    assert!(err.contains("normalization"), "the error must name the axis: {}", err);
+    assert!(
+        err.contains("normalization"),
+        "the error must name the axis: {}",
+        err
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -123,9 +147,17 @@ fn rejects_wrong_dimension() {
     assert_eq!(store8.dim(), 8);
     // A query vector of the wrong width against the exact searcher yields no meaningful match; the
     // build path rejects a wrong-width `put` outright.
-    let mut wrong = VectorStore::create(tmp("dimw"), 8).unwrap().with_provenance(store_prov());
-    let put_err = wrong.put(1, &[1.0; 16]).expect_err("a wrong-width vector must be rejected");
-    assert!(put_err.contains("dim"), "wrong-width put must name dim: {}", put_err);
+    let mut wrong = VectorStore::create(tmp("dimw"), 8)
+        .unwrap()
+        .with_provenance(store_prov());
+    let put_err = wrong
+        .put(1, &[1.0; 16])
+        .expect_err("a wrong-width vector must be rejected");
+    assert!(
+        put_err.contains("dim"),
+        "wrong-width put must name dim: {}",
+        put_err
+    );
     std::fs::remove_file(&path8).ok();
 }
 
@@ -136,10 +168,16 @@ fn rejects_wrong_content_and_verbalization_axes() {
     let store = build_v3(&path, 8);
     let mut q1 = store_prov();
     q1.content_version = "verb-v3".into();
-    assert!(store.check_provenance(&q1, LegacyMode::Reject).is_err(), "content version must gate");
+    assert!(
+        store.check_provenance(&q1, LegacyMode::Reject).is_err(),
+        "content version must gate"
+    );
     let mut q2 = store_prov();
     q2.verbalization = "label-only".into();
-    assert!(store.check_provenance(&q2, LegacyMode::Reject).is_err(), "verbalization must gate");
+    assert!(
+        store.check_provenance(&q2, LegacyMode::Reject).is_err(),
+        "verbalization must gate"
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -153,16 +191,26 @@ fn v2_store_has_no_provenance_and_rejects_by_default() {
     store.put(1, &[1.0; 8]).unwrap();
     store.finalize().unwrap();
     let store = VectorStore::open(&path).unwrap();
-    assert!(store.provenance().is_none(), "a v2 store carries no embedding provenance");
+    assert!(
+        store.provenance().is_none(),
+        "a v2 store carries no embedding provenance"
+    );
     let bytes = std::fs::read(&path).unwrap();
     let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    assert_eq!(version, 2, "a provenance-less store must stay v2 (default format unchanged)");
+    assert_eq!(
+        version, 2,
+        "a provenance-less store must stay v2 (default format unchanged)"
+    );
 
     // FAIL-CLOSED default: a provenance-demanding query REJECTS a legacy store.
     let err = store
         .check_provenance(&store_prov(), LegacyMode::Reject)
         .expect_err("a legacy store must fail closed by default");
-    assert!(err.contains("no embedding provenance"), "clear legacy error: {}", err);
+    assert!(
+        err.contains("no embedding provenance"),
+        "clear legacy error: {}",
+        err
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -175,7 +223,9 @@ fn legacy_allow_opts_into_a_provenance_less_store() {
     store.finalize().unwrap();
     let store = VectorStore::open(&path).unwrap();
     assert!(
-        store.check_provenance(&store_prov(), LegacyMode::Allow).is_ok(),
+        store
+            .check_provenance(&store_prov(), LegacyMode::Allow)
+            .is_ok(),
         "LegacyMode::Allow bypasses the check for a legacy store"
     );
     std::fs::remove_file(&path).ok();
@@ -206,16 +256,23 @@ fn reserved_extension_area_round_trips_and_does_not_gate() {
     let path = tmp("reserved");
     let mut prov = store_prov();
     prov.reserved = vec![0x01, 0x02, 0x03, 0xFF];
-    let mut store = VectorStore::create(&path, 8).unwrap().with_provenance(prov.clone());
+    let mut store = VectorStore::create(&path, 8)
+        .unwrap()
+        .with_provenance(prov.clone());
     store.put(1, &[1.0; 8]).unwrap();
     store.finalize().unwrap();
     let store = VectorStore::open(&path).unwrap();
     // The reserved bytes survive the round trip.
-    assert_eq!(store.provenance().unwrap().reserved, vec![0x01, 0x02, 0x03, 0xFF]);
+    assert_eq!(
+        store.provenance().unwrap().reserved,
+        vec![0x01, 0x02, 0x03, 0xFF]
+    );
     // …and a query with the same defined axes but NO reserved area is still compatible (the reserved
     // area is excluded from the compatibility decision — it carries no defined semantics yet).
     assert!(
-        store.check_provenance(&store_prov(), LegacyMode::Reject).is_ok(),
+        store
+            .check_provenance(&store_prov(), LegacyMode::Reject)
+            .is_ok(),
         "the reserved extension area must NOT gate compatibility"
     );
     std::fs::remove_file(&path).ok();
@@ -240,5 +297,8 @@ fn mutation_verification_hint() {
     assert!(a.compatible_with(&a).is_ok());
     let mut b = a.clone();
     b.model_id = "different".into();
-    assert!(a.compatible_with(&b).is_err(), "distinct model ids must be incompatible");
+    assert!(
+        a.compatible_with(&b).is_err(),
+        "distinct model ids must be incompatible"
+    );
 }

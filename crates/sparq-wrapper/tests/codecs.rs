@@ -156,7 +156,10 @@ fn decode_after_encode_is_the_identity_across_the_full_i128_range() {
         assert_eq!(decode_i128(&readback), Ok(value), "round trip of {}", value);
         // Re-encoding the decoded value must reproduce the identical literal; without
         // this the codec could round trip the number while drifting its lexical form.
-        assert_eq!(encode_i128(decode_i128(&readback).expect("decoded")), readback);
+        assert_eq!(
+            encode_i128(decode_i128(&readback).expect("decoded")),
+            readback
+        );
     }
 }
 

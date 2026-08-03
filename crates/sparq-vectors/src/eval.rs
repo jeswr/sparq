@@ -1132,7 +1132,10 @@ pub fn run_pooling_ablation(
 ) -> Result<PoolingAblation, String> {
     assert!(!seeds.is_empty(), "need at least one seed");
     if !blend.is_finite() || blend < 0.0 {
-        return Err(format!("run_pooling_ablation: blend must be finite and >= 0 (got {})", blend));
+        return Err(format!(
+            "run_pooling_ablation: blend must be finite and >= 0 (got {})",
+            blend
+        ));
     }
     let (base_dict, base_triples) = Graph::parse_to_triples(text, format)?;
 
@@ -1145,7 +1148,12 @@ pub fn run_pooling_ablation(
         let closed: ClosedGraph =
             materialise_closure(base_dict.clone(), base_triples.clone(), template.profile);
         let graph = &closed.graph;
-        let splits = Splits::split(graph, template.train_frac, template.valid_frac, seed ^ 0xF00D);
+        let splits = Splits::split(
+            graph,
+            template.train_frac,
+            template.valid_frac,
+            seed ^ 0xF00D,
+        );
         let train_graph = restrict_to_train(graph, &splits);
         let train_tc = TypeConstraints::mine(&train_graph);
 
@@ -1158,8 +1166,7 @@ pub fn run_pooling_ablation(
 
         let prov = crate::provenance::ProvenanceWeights::mine(&train_graph);
         let metric_for = |mode: WeightMode| -> Result<Metrics, String> {
-            let sketched =
-                sketch_augmented(&model, &train_graph, &splits, &prov, mode, blend)?;
+            let sketched = sketch_augmented(&model, &train_graph, &splits, &prov, mode, blend)?;
             let (metrics, _long_tail) =
                 evaluate(&sketched, &splits, template.long_tail_threshold, None);
             Ok(metrics)

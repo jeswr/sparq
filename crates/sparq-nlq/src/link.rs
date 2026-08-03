@@ -1312,7 +1312,10 @@ mod tests {
         assert!(
             l.entities.is_empty(),
             "the dictionary probe must stay off by default, got {:?}",
-            l.entities.iter().map(|e| e.iri.as_str()).collect::<Vec<_>>()
+            l.entities
+                .iter()
+                .map(|e| e.iri.as_str())
+                .collect::<Vec<_>>()
         );
         assert!(l.is_empty(), "and nothing else links either");
     }
@@ -1414,7 +1417,9 @@ mod tests {
             "turtle",
         )
         .expect("graph parses");
-        let l = EntityLinker::build(&g, 0, 8).with_values().link("about 1994");
+        let l = EntityLinker::build(&g, 0, 8)
+            .with_values()
+            .link("about 1994");
         let forms: Vec<String> = l.values.iter().map(|v| v.literal.to_string()).collect();
         assert_eq!(
             forms,

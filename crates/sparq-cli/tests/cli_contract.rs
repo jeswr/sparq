@@ -101,14 +101,31 @@ fn query_select_emits_rows_nt() {
     // row per solution carrying the actual terms.
     let dir = scratch("select-nt");
     let data = write(&dir, "data.nt", NT);
-    let (code, stdout, stderr) = run3(&["query", s(&data), "ntriples", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    let (code, stdout, stderr) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+    ]);
     assert_eq!(code, 0, "stderr: {stderr}");
     // Header carries the projected variables (with the SPARQL `?` sigil).
-    assert!(stdout.contains("?s") && stdout.contains("?p") && stdout.contains("?o"), "header: {stdout}");
+    assert!(
+        stdout.contains("?s") && stdout.contains("?p") && stdout.contains("?o"),
+        "header: {stdout}"
+    );
     // Rows carry actual bound terms — not just a count.
-    assert!(stdout.contains("<http://ex/alice>"), "rows should contain alice: {stdout}");
-    assert!(stdout.contains("<http://ex/knows>"), "rows should contain knows: {stdout}");
-    assert!(stdout.contains("\"30\""), "rows should contain the age literal: {stdout}");
+    assert!(
+        stdout.contains("<http://ex/alice>"),
+        "rows should contain alice: {stdout}"
+    );
+    assert!(
+        stdout.contains("<http://ex/knows>"),
+        "rows should contain knows: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"30\""),
+        "rows should contain the age literal: {stdout}"
+    );
     // Three solutions => the table reports three rows.
     assert!(stdout.contains("3 row(s)"), "row count footer: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -119,13 +136,29 @@ fn query_select_turtle_and_ttl_alias_load_identically() {
     let dir = scratch("select-ttl");
     let data = write(&dir, "data.ttl", TTL);
     // canonical name — emits bindings (rows), not a count.
-    let (c1, o1, e1) = run3(&["query", s(&data), "turtle", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    let (c1, o1, e1) = run3(&[
+        "query",
+        s(&data),
+        "turtle",
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+    ]);
     assert_eq!(c1, 0, "stderr: {e1}");
-    assert!(o1.contains("3 row(s)") && o1.contains("<http://ex/alice>"), "stdout: {o1}");
+    assert!(
+        o1.contains("3 row(s)") && o1.contains("<http://ex/alice>"),
+        "stdout: {o1}"
+    );
     // alias loads identically.
-    let (c2, o2, _) = run3(&["query", s(&data), "ttl", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    let (c2, o2, _) = run3(&[
+        "query",
+        s(&data),
+        "ttl",
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+    ]);
     assert_eq!(c2, 0);
-    assert!(o2.contains("3 row(s)") && o2.contains("<http://ex/alice>"), "stdout: {o2}");
+    assert!(
+        o2.contains("3 row(s)") && o2.contains("<http://ex/alice>"),
+        "stdout: {o2}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -135,11 +168,21 @@ fn query_ask_prints_boolean() {
     // count. The two must be unambiguously distinguishable as booleans.
     let dir = scratch("ask");
     let data = write(&dir, "data.nt", NT);
-    let (ct, ot, et) = run3(&["query", s(&data), "ntriples", "ASK { ?s <http://ex/knows> ?o }"]);
+    let (ct, ot, et) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "ASK { ?s <http://ex/knows> ?o }",
+    ]);
     assert_eq!(ct, 0, "stderr: {et}");
     assert_eq!(ot.trim(), "true", "ASK-true stdout: {ot}");
 
-    let (cf, of, _) = run3(&["query", s(&data), "ntriples", "ASK { <http://ex/nobody> ?p ?o }"]);
+    let (cf, of, _) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "ASK { <http://ex/nobody> ?p ?o }",
+    ]);
     assert_eq!(cf, 0);
     assert_eq!(of.trim(), "false", "ASK-false stdout: {of}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -170,13 +213,28 @@ fn query_count_flag_preserves_legacy_count_output() {
     // the historical count-only line for both SELECT (solutions) and the graph forms (triples).
     let dir = scratch("count-flag");
     let data = write(&dir, "data.nt", NT);
-    let (cs, os, es) = run3(&["query", s(&data), "ntriples", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
+    let (cs, os, es) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+        "--count",
+    ]);
     assert_eq!(cs, 0, "stderr: {es}");
     assert!(os.contains("3 solutions"), "SELECT --count stdout: {os}");
     // No table border / row terms when counting.
-    assert!(!os.contains("<http://ex/alice>"), "count mode must not emit rows: {os}");
+    assert!(
+        !os.contains("<http://ex/alice>"),
+        "count mode must not emit rows: {os}"
+    );
 
-    let (cc, oc, _) = run3(&["query", s(&data), "ntriples", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", "--count"]);
+    let (cc, oc, _) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+        "--count",
+    ]);
     assert_eq!(cc, 0);
     assert!(oc.contains("3 triples"), "CONSTRUCT --count stdout: {oc}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -204,14 +262,26 @@ fn query_select_format_shapes() {
     // JSON: SPARQL 1.1 Results JSON object with head.vars + results.bindings.
     let (cj, oj, _) = run3(&["query", s(&data), "ntriples", q, "--format", "json"]);
     assert_eq!(cj, 0);
-    assert!(oj.contains("\"head\"") && oj.contains("\"vars\"") && oj.contains("\"bindings\""), "json: {oj}");
-    assert!(oj.contains("\"value\":\"http://ex/alice\""), "json binding: {oj}");
+    assert!(
+        oj.contains("\"head\"") && oj.contains("\"vars\"") && oj.contains("\"bindings\""),
+        "json: {oj}"
+    );
+    assert!(
+        oj.contains("\"value\":\"http://ex/alice\""),
+        "json binding: {oj}"
+    );
 
     // XML: SPARQL Results XML with the sparql-results namespace + <binding> elements.
     let (cx, ox, _) = run3(&["query", s(&data), "ntriples", q, "--format", "xml"]);
     assert_eq!(cx, 0);
-    assert!(ox.contains("xmlns=\"http://www.w3.org/2005/sparql-results#\""), "xml ns: {ox}");
-    assert!(ox.contains("<uri>http://ex/alice</uri>"), "xml binding: {ox}");
+    assert!(
+        ox.contains("xmlns=\"http://www.w3.org/2005/sparql-results#\""),
+        "xml ns: {ox}"
+    );
+    assert!(
+        ox.contains("<uri>http://ex/alice</uri>"),
+        "xml binding: {ox}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -220,11 +290,25 @@ fn query_ask_format_json_xml() {
     // [OPUS-4.8] (sq-l4ki) ASK under `--format json|xml` emits the W3C boolean documents.
     let dir = scratch("ask-formats");
     let data = write(&dir, "data.nt", NT);
-    let (cj, oj, _) = run3(&["query", s(&data), "ntriples", "ASK { ?s <http://ex/knows> ?o }", "--format", "json"]);
+    let (cj, oj, _) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "ASK { ?s <http://ex/knows> ?o }",
+        "--format",
+        "json",
+    ]);
     assert_eq!(cj, 0);
     assert!(oj.contains("\"boolean\":true"), "ask json: {oj}");
 
-    let (cx, ox, _) = run3(&["query", s(&data), "ntriples", "ASK { <http://ex/nobody> ?p ?o }", "--format", "xml"]);
+    let (cx, ox, _) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "ASK { <http://ex/nobody> ?p ?o }",
+        "--format",
+        "xml",
+    ]);
     assert_eq!(cx, 0);
     assert!(ox.contains("<boolean>false</boolean>"), "ask xml: {ox}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -236,7 +320,14 @@ fn query_unknown_format_exits_2() {
     // the CLI's flag-validation contract.
     let dir = scratch("err-outformat");
     let data = write(&dir, "data.nt", NT);
-    let (code, _o, stderr) = run3(&["query", s(&data), "ntriples", "SELECT ?s WHERE { ?s ?p ?o }", "--format", "bogus"]);
+    let (code, _o, stderr) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "SELECT ?s WHERE { ?s ?p ?o }",
+        "--format",
+        "bogus",
+    ]);
     assert_eq!(code, 2, "unknown --format must exit 2; stderr: {stderr}");
     assert!(stderr.contains("unknown --format"), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -284,15 +375,13 @@ fn compressed_input_autodetect_gzip_zstd_bzip2_load_identically() {
         // (codec-equivalence is about how many triples decoded, not the table rendering).
         let (code, stdout, stderr) = run3(&["query", s(f), "ntriples", q, "--count"]);
         assert_eq!(code, 0, "{}: stderr {stderr}", f.display());
-        assert!(stdout.contains("3 solutions"), "{}: stdout {stdout}", f.display());
-        // capture the solution count token to assert byte-identical results across codecs
-        counts.push(
-            stdout
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string(),
+        assert!(
+            stdout.contains("3 solutions"),
+            "{}: stdout {stdout}",
+            f.display()
         );
+        // capture the solution count token to assert byte-identical results across codecs
+        counts.push(stdout.split_whitespace().next().unwrap_or("").to_string());
     }
     assert!(
         counts.iter().all(|c| c == "3"),
@@ -320,7 +409,12 @@ fn save_then_query_mmap_round_trip() {
     // `--count` to keep the assertion on the solution COUNT (now that a bare SELECT emits a
     // table). The default-format SELECT rendering is exercised by the dedicated parity tests
     // below.
-    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
+    let (qc, qo, qe) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+        "--count",
+    ]);
     assert_eq!(qc, 0, "query-mmap stderr: {qe}");
     assert!(qo.contains("3 solutions"), "query-mmap stdout: {qo}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -335,7 +429,12 @@ fn save_compressed_then_query_mmap_round_trip() {
     let (sc, _so, se) = run3(&["save", s(&data), "ntriples", s(&idx), "compressed"]);
     assert_eq!(sc, 0, "save stderr: {se}");
 
-    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
+    let (qc, qo, qe) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+        "--count",
+    ]);
     assert_eq!(qc, 0, "query-mmap stderr: {qe}");
     assert!(qo.contains("3 solutions"), "query-mmap stdout: {qo}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -351,7 +450,12 @@ fn build_external_then_query_mmap_round_trip() {
     assert_eq!(bc, 0, "build stderr: {be}");
     assert!(idx.is_dir(), "build did not create the index dir");
 
-    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
+    let (qc, qo, qe) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+        "--count",
+    ]);
     assert_eq!(qc, 0, "query-mmap stderr: {qe}");
     assert!(qo.contains("3 solutions"), "query-mmap stdout: {qo}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -376,7 +480,10 @@ fn build_external_nquads_named_graph_round_trip() {
 
     let (bc, _bo, be) = run3(&["build", s(&data), "nquads", s(&idx)]);
     assert_eq!(bc, 0, "build stderr: {be}");
-    assert!(idx.join("named.bin").is_file(), "named manifest not written by quad build");
+    assert!(
+        idx.join("named.bin").is_file(),
+        "named manifest not written by quad build"
+    );
 
     // g1 has two quads; the GRAPH query must see exactly them (not a flattened default graph).
     let (qc, qo, qe) = run3(&[
@@ -401,7 +508,12 @@ fn recompress_raw_index_then_query() {
     let (rc, _ro, re) = run3(&["recompress", s(&raw), s(&cmp)]);
     assert_eq!(rc, 0, "recompress stderr: {re}");
 
-    let (qc, qo, _) = run3(&["query-mmap", s(&cmp), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
+    let (qc, qo, _) = run3(&[
+        "query-mmap",
+        s(&cmp),
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+        "--count",
+    ]);
     assert_eq!(qc, 0);
     assert!(qo.contains("3 solutions"), "stdout: {qo}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -434,15 +546,31 @@ fn query_mmap_select_emits_rows_default_table() {
     // readable table (header with ?-sigil vars, one row per solution, `(K row(s))` footer) —
     // identical to `query`, not a count.
     let (dir, idx) = mmap_index("mmap-select-table");
-    let (code, stdout, stderr) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    let (code, stdout, stderr) =
+        run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("?s") && stdout.contains("?p") && stdout.contains("?o"), "header: {stdout}");
-    assert!(stdout.contains("<http://ex/alice>"), "rows should contain alice: {stdout}");
-    assert!(stdout.contains("<http://ex/knows>"), "rows should contain knows: {stdout}");
-    assert!(stdout.contains("\"30\""), "rows should contain the age literal: {stdout}");
+    assert!(
+        stdout.contains("?s") && stdout.contains("?p") && stdout.contains("?o"),
+        "header: {stdout}"
+    );
+    assert!(
+        stdout.contains("<http://ex/alice>"),
+        "rows should contain alice: {stdout}"
+    );
+    assert!(
+        stdout.contains("<http://ex/knows>"),
+        "rows should contain knows: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"30\""),
+        "rows should contain the age literal: {stdout}"
+    );
     assert!(stdout.contains("3 row(s)"), "row count footer: {stdout}");
     // Crucially NOT the legacy count line (that is what parity fixed).
-    assert!(!stdout.contains("3 solutions"), "default SELECT must not be a count: {stdout}");
+    assert!(
+        !stdout.contains("3 solutions"),
+        "default SELECT must not be a count: {stdout}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -465,9 +593,16 @@ fn query_mmap_construct_and_describe_emit_triples() {
     // [OPUS-4.8] (sq-iwyy) The graph forms via query-mmap emit the resulting triples as
     // N-Triples (previously query-mmap could only count).
     let (dir, idx) = mmap_index("mmap-construct");
-    let (cc, oc, ec) = run3(&["query-mmap", s(&idx), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"]);
+    let (cc, oc, ec) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+    ]);
     assert_eq!(cc, 0, "CONSTRUCT stderr: {ec}");
-    let lines: Vec<&str> = oc.lines().filter(|l| l.trim_end().ends_with(" .")).collect();
+    let lines: Vec<&str> = oc
+        .lines()
+        .filter(|l| l.trim_end().ends_with(" ."))
+        .collect();
     assert_eq!(lines.len(), 3, "expected 3 N-Triples lines; stdout: {oc}");
     assert!(
         oc.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."),
@@ -476,8 +611,14 @@ fn query_mmap_construct_and_describe_emit_triples() {
 
     let (cd, od, ed) = run3(&["query-mmap", s(&idx), "DESCRIBE <http://ex/alice>"]);
     assert_eq!(cd, 0, "DESCRIBE stderr: {ed}");
-    assert!(od.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."), "DESCRIBE stdout: {od}");
-    assert!(od.contains("<http://ex/alice> <http://ex/age> \"30\" ."), "DESCRIBE stdout: {od}");
+    assert!(
+        od.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."),
+        "DESCRIBE stdout: {od}"
+    );
+    assert!(
+        od.contains("<http://ex/alice> <http://ex/age> \"30\" ."),
+        "DESCRIBE stdout: {od}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -500,13 +641,25 @@ fn query_mmap_select_format_shapes() {
 
     let (cj, oj, _) = run3(&["query-mmap", s(&idx), q, "--format", "json"]);
     assert_eq!(cj, 0);
-    assert!(oj.contains("\"head\"") && oj.contains("\"vars\"") && oj.contains("\"bindings\""), "json: {oj}");
-    assert!(oj.contains("\"value\":\"http://ex/alice\""), "json binding: {oj}");
+    assert!(
+        oj.contains("\"head\"") && oj.contains("\"vars\"") && oj.contains("\"bindings\""),
+        "json: {oj}"
+    );
+    assert!(
+        oj.contains("\"value\":\"http://ex/alice\""),
+        "json binding: {oj}"
+    );
 
     let (cx, ox, _) = run3(&["query-mmap", s(&idx), q, "--format", "xml"]);
     assert_eq!(cx, 0);
-    assert!(ox.contains("xmlns=\"http://www.w3.org/2005/sparql-results#\""), "xml ns: {ox}");
-    assert!(ox.contains("<uri>http://ex/alice</uri>"), "xml binding: {ox}");
+    assert!(
+        ox.contains("xmlns=\"http://www.w3.org/2005/sparql-results#\""),
+        "xml ns: {ox}"
+    );
+    assert!(
+        ox.contains("<uri>http://ex/alice</uri>"),
+        "xml binding: {ox}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -515,11 +668,23 @@ fn query_mmap_ask_format_json_xml() {
     // [OPUS-4.8] (sq-iwyy) ASK under `--format json|xml` via query-mmap emits the W3C boolean
     // documents — mirrors `query_ask_format_json_xml`.
     let (dir, idx) = mmap_index("mmap-ask-formats");
-    let (cj, oj, _) = run3(&["query-mmap", s(&idx), "ASK { ?s <http://ex/knows> ?o }", "--format", "json"]);
+    let (cj, oj, _) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "ASK { ?s <http://ex/knows> ?o }",
+        "--format",
+        "json",
+    ]);
     assert_eq!(cj, 0);
     assert!(oj.contains("\"boolean\":true"), "ask json: {oj}");
 
-    let (cx, ox, _) = run3(&["query-mmap", s(&idx), "ASK { <http://ex/nobody> ?p ?o }", "--format", "xml"]);
+    let (cx, ox, _) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "ASK { <http://ex/nobody> ?p ?o }",
+        "--format",
+        "xml",
+    ]);
     assert_eq!(cx, 0);
     assert!(ox.contains("<boolean>false</boolean>"), "ask xml: {ox}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -530,12 +695,25 @@ fn query_mmap_count_flag_preserves_legacy_count_output() {
     // [OPUS-4.8] (sq-iwyy) `--count` restores the historical count-only line for both SELECT
     // (solutions) and the graph forms (triples) via the mmap path.
     let (dir, idx) = mmap_index("mmap-count");
-    let (cs, os, es) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
+    let (cs, os, es) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+        "--count",
+    ]);
     assert_eq!(cs, 0, "stderr: {es}");
     assert!(os.contains("3 solutions"), "SELECT --count stdout: {os}");
-    assert!(!os.contains("<http://ex/alice>"), "count mode must not emit rows: {os}");
+    assert!(
+        !os.contains("<http://ex/alice>"),
+        "count mode must not emit rows: {os}"
+    );
 
-    let (cc, oc, _) = run3(&["query-mmap", s(&idx), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", "--count"]);
+    let (cc, oc, _) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+        "--count",
+    ]);
     assert_eq!(cc, 0);
     assert!(oc.contains("3 triples"), "CONSTRUCT --count stdout: {oc}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -546,7 +724,13 @@ fn query_mmap_unknown_format_exits_2() {
     // [OPUS-4.8] (sq-iwyy) An unknown `--format` value is a usage error (exit 2) on query-mmap
     // too — it shares `query`'s `out_format_flag` validation.
     let (dir, idx) = mmap_index("mmap-err-outformat");
-    let (code, _o, stderr) = run3(&["query-mmap", s(&idx), "SELECT ?s WHERE { ?s ?p ?o }", "--format", "bogus"]);
+    let (code, _o, stderr) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "SELECT ?s WHERE { ?s ?p ?o }",
+        "--format",
+        "bogus",
+    ]);
     assert_eq!(code, 2, "unknown --format must exit 2; stderr: {stderr}");
     assert!(stderr.contains("unknown --format"), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -557,9 +741,19 @@ fn query_mmap_malformed_query_exits_1() {
     // [OPUS-4.8] (sq-iwyy) A malformed query via query-mmap is a runtime error (exit 1) with a
     // useful stderr — same contract as `query`.
     let (dir, idx) = mmap_index("mmap-err-badquery");
-    let (code, _o, stderr) = run3(&["query-mmap", s(&idx), "SELECT ?s WHERE { this is not sparql"]);
-    assert_eq!(code, 1, "parse failure is a runtime error (exit 1); stderr: {stderr}");
-    assert!(stderr.to_lowercase().contains("error"), "stderr should explain the failure: {stderr}");
+    let (code, _o, stderr) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "SELECT ?s WHERE { this is not sparql",
+    ]);
+    assert_eq!(
+        code, 1,
+        "parse failure is a runtime error (exit 1); stderr: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("error"),
+        "stderr should explain the failure: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -584,7 +778,10 @@ fn reason_rdfs_reports_triple_count() {
     let data = write(&dir, "data.nt", NT);
     let (code, stdout, stderr) = run3(&["reason", s(&data), "ntriples", "rdfs"]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("triples after rdfs reasoning"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("triples after rdfs reasoning"),
+        "stdout: {stdout}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -607,7 +804,11 @@ fn bench_emits_one_tsv_line_per_query_including_construct() {
     assert_eq!(lines.len(), 3, "expected 3 TSV lines, got: {stdout}");
     assert!(lines[0].starts_with("a_all\t3\t"), "line0: {}", lines[0]);
     assert!(lines[1].starts_with("b_ask\t1\t"), "line1: {}", lines[1]);
-    assert!(lines[2].starts_with("c_con\t3\t"), "line2 (CONSTRUCT): {}", lines[2]);
+    assert!(
+        lines[2].starts_with("c_con\t3\t"),
+        "line2 (CONSTRUCT): {}",
+        lines[2]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -626,19 +827,32 @@ fn bench_json_flag_writes_parseable_results_with_expected_keys() {
     write(&qd, "b_ask.rq", "ASK { ?s <http://ex/knows> ?o }");
     let out = dir.join("results.json");
 
-    let (code, stdout, stderr) =
-        run3(&["bench", s(&data), "ntriples", s(&qd), "1", "count", "--json", s(&out)]);
+    let (code, stdout, stderr) = run3(&[
+        "bench",
+        s(&data),
+        "ntriples",
+        s(&qd),
+        "1",
+        "count",
+        "--json",
+        s(&out),
+    ]);
     assert_eq!(code, 0, "stderr: {stderr}");
 
     // (a) STDOUT TSV is unchanged — still one line per query, byte-for-byte the historical shape.
     let lines: Vec<&str> = stdout.lines().filter(|l| l.contains('\t')).collect();
-    assert_eq!(lines.len(), 2, "expected 2 TSV lines on STDOUT, got: {stdout}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected 2 TSV lines on STDOUT, got: {stdout}"
+    );
     assert!(lines[0].starts_with("a_all\t3\t"), "line0: {}", lines[0]);
     assert!(lines[1].starts_with("b_ask\t1\t"), "line1: {}", lines[1]);
 
     // (b) The file exists and is VALID, parseable JSON.
     let raw = std::fs::read_to_string(&out).expect("--json results file should exist");
-    let doc: serde_json::Value = serde_json::from_str(&raw).expect("results file must be valid JSON");
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).expect("results file must be valid JSON");
 
     // (c) Expected top-level keys + run parameters.
     assert_eq!(doc["harness"], "sparq-cli bench", "harness key: {raw}");
@@ -652,7 +866,10 @@ fn bench_json_flag_writes_parseable_results_with_expected_keys() {
     assert_eq!(queries.len(), 2, "one entry per query: {raw}");
     assert_eq!(queries[0]["name"], "a_all", "first query name: {raw}");
     assert_eq!(queries[0]["rows"], 3, "first query rows: {raw}");
-    assert!(queries[0]["min_micros"].is_number(), "min_micros numeric: {raw}");
+    assert!(
+        queries[0]["min_micros"].is_number(),
+        "min_micros numeric: {raw}"
+    );
     assert_eq!(queries[1]["name"], "b_ask", "second query name: {raw}");
     assert_eq!(queries[1]["rows"], 1, "second query rows (ASK): {raw}");
 
@@ -694,9 +911,17 @@ fn compare_compress_reports_footprint() {
 fn malformed_query_exits_nonzero_with_useful_stderr() {
     let dir = scratch("err-badquery");
     let data = write(&dir, "data.nt", NT);
-    let (code, _stdout, stderr) = run3(&["query", s(&data), "ntriples", "SELECT ?s WHERE { this is not sparql"]);
+    let (code, _stdout, stderr) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "SELECT ?s WHERE { this is not sparql",
+    ]);
     assert_ne!(code, 0, "a malformed query must NOT exit 0");
-    assert_eq!(code, 1, "parse failure is a runtime error (exit 1); stderr: {stderr}");
+    assert_eq!(
+        code, 1,
+        "parse failure is a runtime error (exit 1); stderr: {stderr}"
+    );
     assert!(
         stderr.to_lowercase().contains("error"),
         "stderr should explain the failure: {stderr}"
@@ -708,9 +933,17 @@ fn malformed_query_exits_nonzero_with_useful_stderr() {
 fn missing_input_file_exits_nonzero() {
     let dir = scratch("err-missing");
     let missing = dir.join("does-not-exist.nt");
-    let (code, _stdout, stderr) = run3(&["query", s(&missing), "ntriples", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    let (code, _stdout, stderr) = run3(&[
+        "query",
+        s(&missing),
+        "ntriples",
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+    ]);
     assert_ne!(code, 0, "a missing input file must NOT exit 0");
-    assert_eq!(code, 1, "missing file is a runtime error (exit 1); stderr: {stderr}");
+    assert_eq!(
+        code, 1,
+        "missing file is a runtime error (exit 1); stderr: {stderr}"
+    );
     assert!(!stderr.is_empty(), "stderr should report the missing file");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -721,9 +954,20 @@ fn unsupported_format_exits_nonzero() {
     // guard, an unknown format silently parsed the input as Turtle and exited 0.
     let dir = scratch("err-format");
     let data = write(&dir, "data.nt", NT);
-    let (code, _stdout, stderr) = run3(&["query", s(&data), "bogusfmt", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
-    assert_ne!(code, 0, "an unsupported format must NOT exit 0 (it silently parsed as Turtle before the fix)");
-    assert_eq!(code, 2, "unsupported format is a usage error (exit 2); stderr: {stderr}");
+    let (code, _stdout, stderr) = run3(&[
+        "query",
+        s(&data),
+        "bogusfmt",
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+    ]);
+    assert_ne!(
+        code, 0,
+        "an unsupported format must NOT exit 0 (it silently parsed as Turtle before the fix)"
+    );
+    assert_eq!(
+        code, 2,
+        "unsupported format is a usage error (exit 2); stderr: {stderr}"
+    );
     assert!(
         stderr.contains("unknown format"),
         "stderr should name the unknown format: {stderr}"
@@ -739,7 +983,10 @@ fn build_unsupported_format_exits_nonzero() {
     let data = write(&dir, "data.nt", NT);
     let idx = dir.join("idx");
     let (code, _stdout, stderr) = run3(&["build", s(&data), "bogusfmt", s(&idx)]);
-    assert_eq!(code, 2, "build with unsupported format must exit 2; stderr: {stderr}");
+    assert_eq!(
+        code, 2,
+        "build with unsupported format must exit 2; stderr: {stderr}"
+    );
     assert!(stderr.contains("unknown format"), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -750,11 +997,26 @@ fn construct_via_query_subcommand_emits_triples() {
     // N-Triples (it used to error with "only SELECT and ASK queries are supported", exit 1).
     let dir = scratch("construct");
     let data = write(&dir, "data.nt", NT);
-    let (code, stdout, stderr) = run3(&["query", s(&data), "ntriples", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"]);
-    assert_eq!(code, 0, "CONSTRUCT via `query` should succeed; stderr: {stderr}");
+    let (code, stdout, stderr) = run3(&[
+        "query",
+        s(&data),
+        "ntriples",
+        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+    ]);
+    assert_eq!(
+        code, 0,
+        "CONSTRUCT via `query` should succeed; stderr: {stderr}"
+    );
     // The three source triples come back as canonical N-Triples lines (`s p o .`).
-    let lines: Vec<&str> = stdout.lines().filter(|l| l.trim_end().ends_with(" .")).collect();
-    assert_eq!(lines.len(), 3, "expected 3 N-Triples lines; stdout: {stdout}");
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.trim_end().ends_with(" ."))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "expected 3 N-Triples lines; stdout: {stdout}"
+    );
     assert!(
         stdout.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."),
         "stdout should contain the constructed triple: {stdout}"
@@ -768,11 +1030,21 @@ fn describe_via_query_subcommand_emits_triples() {
     // concise bounded description as N-Triples (also previously a runtime error).
     let dir = scratch("describe");
     let data = write(&dir, "data.nt", NT);
-    let (code, stdout, stderr) = run3(&["query", s(&data), "ntriples", "DESCRIBE <http://ex/alice>"]);
-    assert_eq!(code, 0, "DESCRIBE via `query` should succeed; stderr: {stderr}");
+    let (code, stdout, stderr) =
+        run3(&["query", s(&data), "ntriples", "DESCRIBE <http://ex/alice>"]);
+    assert_eq!(
+        code, 0,
+        "DESCRIBE via `query` should succeed; stderr: {stderr}"
+    );
     // alice has two outgoing triples (knows bob, age 30).
-    assert!(stdout.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."), "stdout: {stdout}");
-    assert!(stdout.contains("<http://ex/alice> <http://ex/age> \"30\" ."), "stdout: {stdout}");
+    assert!(
+        stdout.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("<http://ex/alice> <http://ex/age> \"30\" ."),
+        "stdout: {stdout}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -796,7 +1068,10 @@ fn query_too_few_args_exits_2() {
     let data = write(&dir, "data.nt", NT);
     let (code, _stdout, stderr) = run3(&["query", s(&data)]); // missing format + sparql
     assert_eq!(code, 2, "too few args is a usage error (exit 2)");
-    assert!(stderr.contains("usage: sparq-cli query"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("usage: sparq-cli query"),
+        "stderr: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -804,8 +1079,15 @@ fn query_too_few_args_exits_2() {
 fn query_mmap_missing_dir_exits_1() {
     let dir = scratch("err-mmapdir");
     let missing = dir.join("no-such-index");
-    let (code, _stdout, stderr) = run3(&["query-mmap", s(&missing), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
-    assert_eq!(code, 1, "opening a non-existent index dir is a runtime error (exit 1)");
+    let (code, _stdout, stderr) = run3(&[
+        "query-mmap",
+        s(&missing),
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+    ]);
+    assert_eq!(
+        code, 1,
+        "opening a non-existent index dir is a runtime error (exit 1)"
+    );
     assert!(stderr.contains("open error"), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -818,7 +1100,10 @@ fn bench_unknown_mode_exits_2() {
     std::fs::create_dir_all(&qd).unwrap();
     write(&qd, "a.rq", "ASK { ?s ?p ?o }");
     let (code, _stdout, stderr) = run3(&["bench", s(&data), "ntriples", s(&qd), "1", "badmode"]);
-    assert_eq!(code, 2, "an unknown bench mode is a usage error (exit 2); stderr: {stderr}");
+    assert_eq!(
+        code, 2,
+        "an unknown bench mode is a usage error (exit 2); stderr: {stderr}"
+    );
     assert!(stderr.contains("unknown mode"), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -828,7 +1113,10 @@ fn reason_unknown_profile_exits_2() {
     let dir = scratch("err-profile");
     let data = write(&dir, "data.nt", NT);
     let (code, _stdout, stderr) = run3(&["reason", s(&data), "ntriples", "bogusprofile"]);
-    assert_eq!(code, 2, "an unknown reasoning profile is a usage error (exit 2); stderr: {stderr}");
+    assert_eq!(
+        code, 2,
+        "an unknown reasoning profile is a usage error (exit 2); stderr: {stderr}"
+    );
     assert!(
         stderr.to_lowercase().contains("unknown reasoning profile"),
         "stderr: {stderr}"
@@ -906,7 +1194,10 @@ fn query_iri_equality_filter_rows_correct_through_rewrite() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("<http://ex/a>"), "row a expected: {stdout}");
     assert!(stdout.contains("<http://ex/c>"), "row c expected: {stdout}");
-    assert!(!stdout.contains("<http://ex/b>"), "row b must be filtered out: {stdout}");
+    assert!(
+        !stdout.contains("<http://ex/b>"),
+        "row b must be filtered out: {stdout}"
+    );
     assert!(stdout.contains("2 row(s)"), "exactly two rows: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }

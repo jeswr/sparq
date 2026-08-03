@@ -62,9 +62,7 @@
 use oxrdf::{Literal, NamedNode, Term};
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
-use sparq_rsp::{
-    ContinuousMultiQuery, ContinuousQuery, EvalMode, WindowResult, WindowSpec, R2S,
-};
+use sparq_rsp::{ContinuousMultiQuery, ContinuousQuery, EvalMode, WindowResult, WindowSpec, R2S};
 
 /// The MINIMUM number of deterministic per-window CORRECTNESS assertions the
 /// fixed SRBench-shaped battery below makes against the independent oracle. It is
@@ -176,7 +174,13 @@ fn batch_graph(script: &[([Term; 3], u64)], start: u64, end: u64) -> Graph {
     let ids: Vec<[sparq_core::dict::Id; 3]> = script
         .iter()
         .filter(|(_, ts)| *ts >= start && *ts < end)
-        .map(|(tr, _)| [dict.intern(&tr[0]), dict.intern(&tr[1]), dict.intern(&tr[2])])
+        .map(|(tr, _)| {
+            [
+                dict.intern(&tr[0]),
+                dict.intern(&tr[1]),
+                dict.intern(&tr[2]),
+            ]
+        })
         .collect();
     Graph::from_parts(dict, ids)
 }
@@ -324,7 +328,11 @@ fn spec_time_params(spec: WindowSpec) -> (u64, u64) {
         .expect("eval");
     q.flush(|r| wins.push((r.start, r.end))).expect("eval");
     let range = wins[0].1 - wins[0].0;
-    let step = if wins.len() > 1 { wins[1].0 - wins[0].0 } else { range };
+    let step = if wins.len() > 1 {
+        wins[1].0 - wins[0].0
+    } else {
+        range
+    };
     (range, step)
 }
 
@@ -381,14 +389,30 @@ fn axis_r2s_operators(tally: &mut Tally) {
     let expected = active_expected();
 
     // --- RSTREAM: every window emits its FULL subject set.
-    let r = run_single(sparql, spec, EvalMode::PersistentDict, R2S::RStream, &script);
+    let r = run_single(
+        sparql,
+        spec,
+        EvalMode::PersistentDict,
+        R2S::RStream,
+        &script,
+    );
     tally.eq(r.len(), expected.len(), "rstream: window count");
     for (i, want) in expected.iter().enumerate() {
-        tally.eq(subjects(&r[i]), want.clone(), &format!("rstream w{i}: full set"));
+        tally.eq(
+            subjects(&r[i]),
+            want.clone(),
+            &format!("rstream w{i}: full set"),
+        );
     }
 
     // --- ISTREAM: rows that APPEARED vs the previous window (cur ∖ prev).
-    let r = run_single(sparql, spec, EvalMode::PersistentDict, R2S::IStream, &script);
+    let r = run_single(
+        sparql,
+        spec,
+        EvalMode::PersistentDict,
+        R2S::IStream,
+        &script,
+    );
     let istream_expected: Vec<Vec<&str>> = vec![
         vec!["a", "b"], // [0,10): everything new (prev empty)
         vec!["c"],      // [10,20): c appeared (b carried over)
@@ -398,11 +422,21 @@ fn axis_r2s_operators(tally: &mut Tally) {
     ];
     tally.eq(r.len(), istream_expected.len(), "istream: window count");
     for (i, want) in istream_expected.iter().enumerate() {
-        tally.eq(subjects(&r[i]), want.clone(), &format!("istream w{i}: added"));
+        tally.eq(
+            subjects(&r[i]),
+            want.clone(),
+            &format!("istream w{i}: added"),
+        );
     }
 
     // --- DSTREAM: rows that DISAPPEARED vs the previous window (prev ∖ cur).
-    let r = run_single(sparql, spec, EvalMode::PersistentDict, R2S::DStream, &script);
+    let r = run_single(
+        sparql,
+        spec,
+        EvalMode::PersistentDict,
+        R2S::DStream,
+        &script,
+    );
     let dstream_expected: Vec<Vec<&str>> = vec![
         vec![],    // [0,10): first window, nothing disappears
         vec!["a"], // [10,20): a left
@@ -412,7 +446,11 @@ fn axis_r2s_operators(tally: &mut Tally) {
     ];
     tally.eq(r.len(), dstream_expected.len(), "dstream: window count");
     for (i, want) in dstream_expected.iter().enumerate() {
-        tally.eq(subjects(&r[i]), want.clone(), &format!("dstream w{i}: removed"));
+        tally.eq(
+            subjects(&r[i]),
+            want.clone(),
+            &format!("dstream w{i}: removed"),
+        );
     }
 }
 
@@ -458,8 +496,7 @@ fn axis_r2s_evalmode_crosscheck(tally: &mut Tally) {
 
     for r2s in [R2S::RStream, R2S::IStream, R2S::DStream] {
         // PersistentDict is the reference (already fully checked in axis_r2s_operators).
-        let reference =
-            run_single(sparql, spec, EvalMode::PersistentDict, r2s, &script);
+        let reference = run_single(sparql, spec, EvalMode::PersistentDict, r2s, &script);
         for mode in [EvalMode::Rebuild, EvalMode::Delta, EvalMode::Snapshot] {
             let result = run_single(sparql, spec, mode, r2s, &script);
             tally.eq(
@@ -503,12 +540,23 @@ fn axis_count_windows(tally: &mut Tally) {
         (val("s4", 4), 3),
         (val("s5", 5), 4),
     ];
-    let r = run_single(sparql, spec, EvalMode::PersistentDict, R2S::RStream, &script);
+    let r = run_single(
+        sparql,
+        spec,
+        EvalMode::PersistentDict,
+        R2S::RStream,
+        &script,
+    );
     tally.ok(!r.is_empty(), "count window: at least one report");
     // Every report once the window is full holds COUNT(*) = 3 (the trailing 3).
     let full_counts: Vec<i64> = r
         .iter()
-        .filter_map(|w| w.rows.first().and_then(|row| row.first()).and_then(count_val))
+        .filter_map(|w| {
+            w.rows
+                .first()
+                .and_then(|row| row.first())
+                .and_then(count_val)
+        })
         .filter(|&c| c == 3)
         .collect();
     tally.ok(
@@ -559,7 +607,11 @@ fn axis_count_window_evalmode_crosscheck(tally: &mut Tally) {
         tally.eq(
             r.len(),
             expected_counts.len(),
-            &format!("count window/{:?}: exactly {} slots reported", mode, expected_counts.len()),
+            &format!(
+                "count window/{:?}: exactly {} slots reported",
+                mode,
+                expected_counts.len()
+            ),
         );
         // Use get() so a short `r` (regression with fewer slots) records -1 vs
         // want through tally rather than panicking on index.
@@ -623,7 +675,8 @@ fn run_multi(rspql: &str, script: &[(NamedNode, [Term; 3], u64)]) -> Vec<WindowR
     let mut q = ContinuousMultiQuery::register(rspql).expect("valid RSP-QL");
     let mut out = Vec::new();
     for (stream, tr, ts) in script {
-        q.push(stream, tr.clone(), *ts, |r| out.push(r)).expect("eval");
+        q.push(stream, tr.clone(), *ts, |r| out.push(r))
+            .expect("eval");
     }
     q.flush(|r| out.push(r)).expect("eval");
     out
@@ -646,7 +699,11 @@ FROM NAMED WINDOW <http://ex/wm> ON <http://ex/meta> RANGE 10 STEP 10";
     // empty [30,40) the obs heartbeat at ts 35 opens then flush closes (empty
     // windows ARE reported — see the crate's window docs; the empty join here
     // also proves a no-content window yields no joined rows).
-    tally.eq(r.len(), 4, "srbench join Q1: four synchronized ticks (incl. trailing empty)");
+    tally.eq(
+        r.len(),
+        4,
+        "srbench join Q1: four synchronized ticks (incl. trailing empty)",
+    );
     let expected_q1: Vec<Vec<(&str, &str, i32)>> = vec![
         vec![("stA", "NY", 12), ("stB", "NY", 15), ("stC", "CA", 20)],
         vec![("stA", "NY", 11), ("stC", "CA", 25)],
@@ -675,7 +732,11 @@ GROUP BY ?state ORDER BY ?state
 FROM NAMED WINDOW <http://ex/wo> ON <http://ex/obs> RANGE 10 STEP 10
 FROM NAMED WINDOW <http://ex/wm> ON <http://ex/meta> RANGE 10 STEP 10";
     let r = run_multi(q2, &script);
-    tally.eq(r.len(), 4, "srbench join Q2: four synchronized ticks (incl. trailing empty)");
+    tally.eq(
+        r.len(),
+        4,
+        "srbench join Q2: four synchronized ticks (incl. trailing empty)",
+    );
     // w0: CA=1 (C), NY=2 (A,B). w1: CA=1 (C), NY=1 (A). w2: CA=1 (C@30),
     // NY=1 (A@9 — the duplicate collapses by set semantics, so COUNT(?v)=1).
     // w3 [30,40): empty join → no groups.
@@ -742,9 +803,12 @@ fn state_counts(r: &WindowResult) -> Vec<(&'static str, i64)> {
 /// The `http://ex/`-stripped local name of an IRI-bound cell.
 fn local(cell: Option<&Option<Term>>) -> Option<String> {
     match cell {
-        Some(Some(Term::NamedNode(n))) => {
-            Some(n.as_str().strip_prefix("http://ex/").unwrap_or(n.as_str()).to_string())
-        }
+        Some(Some(Term::NamedNode(n))) => Some(
+            n.as_str()
+                .strip_prefix("http://ex/")
+                .unwrap_or(n.as_str())
+                .to_string(),
+        ),
         _ => None,
     }
 }
@@ -833,15 +897,35 @@ FROM NAMED WINDOW <http://ex/wo> ON <http://ex/obs>  RANGE 10 STEP 10
 FROM NAMED WINDOW <http://ex/wm> ON <http://ex/meta> RANGE 10 STEP 10";
     let r_i = run_multi(q_istream, &script);
     // [SONNET-4.6] sq-2n1q3.3 — positional format args (CodeQL guard).
-    tally.eq(r_i.len(), 4, "multi-window ISTREAM: four synchronized ticks");
+    tally.eq(
+        r_i.len(),
+        4,
+        "multi-window ISTREAM: four synchronized ticks",
+    );
     // w0: first tick — prev empty, so cur ∖ prev = all 3 joined rows.
-    tally.eq(r_i[0].rows.len(), 3, "multi-window ISTREAM w0: 3 new rows (prev empty)");
+    tally.eq(
+        r_i[0].rows.len(),
+        3,
+        "multi-window ISTREAM w0: 3 new rows (prev empty)",
+    );
     // w1: every row has a different value than w0, so all are "new".
-    tally.eq(r_i[1].rows.len(), 2, "multi-window ISTREAM w1: 2 new rows (values changed)");
+    tally.eq(
+        r_i[1].rows.len(),
+        2,
+        "multi-window ISTREAM w1: 2 new rows (values changed)",
+    );
     // w2: same — every row differs from w1.
-    tally.eq(r_i[2].rows.len(), 2, "multi-window ISTREAM w2: 2 new rows (values changed)");
+    tally.eq(
+        r_i[2].rows.len(),
+        2,
+        "multi-window ISTREAM w2: 2 new rows (values changed)",
+    );
     // w3: cur={} → nothing new.
-    tally.eq(r_i[3].rows.len(), 0, "multi-window ISTREAM w3: 0 new rows (empty tick)");
+    tally.eq(
+        r_i[3].rows.len(),
+        0,
+        "multi-window ISTREAM w3: 0 new rows (empty tick)",
+    );
 
     // --- DSTREAM ---
     let q_dstream = "\
@@ -853,15 +937,35 @@ SELECT ?st ?state ?v WHERE {
 FROM NAMED WINDOW <http://ex/wo> ON <http://ex/obs>  RANGE 10 STEP 10
 FROM NAMED WINDOW <http://ex/wm> ON <http://ex/meta> RANGE 10 STEP 10";
     let r_d = run_multi(q_dstream, &script);
-    tally.eq(r_d.len(), 4, "multi-window DSTREAM: four synchronized ticks");
+    tally.eq(
+        r_d.len(),
+        4,
+        "multi-window DSTREAM: four synchronized ticks",
+    );
     // w0: prev={} → nothing disappears.
-    tally.eq(r_d[0].rows.len(), 0, "multi-window DSTREAM w0: 0 removed (prev empty)");
+    tally.eq(
+        r_d[0].rows.len(),
+        0,
+        "multi-window DSTREAM w0: 0 removed (prev empty)",
+    );
     // w1: prev=w0's 3 rows; none of them appear in w1's 2 rows (values all changed).
-    tally.eq(r_d[1].rows.len(), 3, "multi-window DSTREAM w1: all 3 of w0 disappeared");
+    tally.eq(
+        r_d[1].rows.len(),
+        3,
+        "multi-window DSTREAM w1: all 3 of w0 disappeared",
+    );
     // w2: prev=w1's 2 rows; none appear in w2's 2 rows (values changed again).
-    tally.eq(r_d[2].rows.len(), 2, "multi-window DSTREAM w2: both of w1 disappeared");
+    tally.eq(
+        r_d[2].rows.len(),
+        2,
+        "multi-window DSTREAM w2: both of w1 disappeared",
+    );
     // w3: cur={}; prev=w2's 2 rows → both disappeared.
-    tally.eq(r_d[3].rows.len(), 2, "multi-window DSTREAM w3: both of w2 disappeared (empty tick)");
+    tally.eq(
+        r_d[3].rows.len(),
+        2,
+        "multi-window DSTREAM w3: both of w2 disappeared (empty tick)",
+    );
 }
 
 // ======================== AXIS 7: 3-window join correctness
@@ -883,36 +987,44 @@ FROM NAMED WINDOW <http://ex/w1> ON <http://ex/obs>   RANGE 10 STEP 10
 FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta1> RANGE 10 STEP 10
 FROM NAMED WINDOW <http://ex/w3> ON <http://ex/meta2> RANGE 10 STEP 10";
 
-    let obs   = nn("obs");
+    let obs = nn("obs");
     let meta1 = nn("meta1");
     let meta2 = nn("meta2");
 
     // --- All three windows populated: 2 sensors, one row each. ---
     let script_full: Vec<(NamedNode, [Term; 3], u64)> = vec![
-        (obs.clone(),   t("stA", "value", "v12"), 1),
-        (obs.clone(),   t("stB", "value", "v99"), 2),
-        (meta1.clone(), t("stA", "type",  "cat"), 3),
-        (meta1.clone(), t("stB", "type",  "dog"), 4),
-        (meta2.clone(), t("stA", "loc",   "NY"),  5),
-        (meta2.clone(), t("stB", "loc",   "CA"),  6),
+        (obs.clone(), t("stA", "value", "v12"), 1),
+        (obs.clone(), t("stB", "value", "v99"), 2),
+        (meta1.clone(), t("stA", "type", "cat"), 3),
+        (meta1.clone(), t("stB", "type", "dog"), 4),
+        (meta2.clone(), t("stA", "loc", "NY"), 5),
+        (meta2.clone(), t("stB", "loc", "CA"), 6),
         // Heartbeat advancing the shared clock to 12, closing [0,10).
-        (obs.clone(),   t("stA", "value", "v0"),  12),
+        (obs.clone(), t("stA", "value", "v0"), 12),
     ];
     let r = run_multi(q_three, &script_full);
     // Two ticks: [0,10) with 2 joined rows, then [10,20) with 0 rows (flush
     // closes [10,20) but w2/w3 have no content there — same invariant).
-    tally.eq(r.len(), 2, "3-window join: two ticks ([0,10) populated + [10,20) empty via flush)");
-    tally.eq(r[0].rows.len(), 2, "3-window join: 2 joined rows in [0,10) (one per sensor)");
+    tally.eq(
+        r.len(),
+        2,
+        "3-window join: two ticks ([0,10) populated + [10,20) empty via flush)",
+    );
+    tally.eq(
+        r[0].rows.len(),
+        2,
+        "3-window join: 2 joined rows in [0,10) (one per sensor)",
+    );
 
     // --- Only w1 and w2 populated (no meta2 push): the join must be empty. ---
     // NON-VACUOUS: if the empty w3 were treated as "unconstrained" (no GRAPH
     // restriction), stA and stB would still join with their type and the result
     // would be 2 rows.  The 0 assertion below would then fail.
     let script_no_w3: Vec<(NamedNode, [Term; 3], u64)> = vec![
-        (obs.clone(),   t("stA", "value", "v12"), 1),
-        (meta1.clone(), t("stA", "type",  "cat"), 2),
+        (obs.clone(), t("stA", "value", "v12"), 1),
+        (meta1.clone(), t("stA", "type", "cat"), 2),
         // Heartbeat from obs advances the shared clock, closing [0,10).
-        (obs.clone(),   t("stA", "value", "v0"),  12),
+        (obs.clone(), t("stA", "value", "v0"), 12),
     ];
     let r_nw3 = run_multi(q_three, &script_no_w3);
     // Two ticks: the [0,10) window close plus a [10,20) flush-close; w3 is
@@ -944,8 +1056,8 @@ fn rsp_srbench_expressivity_ratchet() {
     axis_count_windows(&mut tally);
     axis_count_window_evalmode_crosscheck(&mut tally); // [SONNET-4.6] sq-2n1q3.1
     axis_multi_window_joins(&mut tally);
-    axis_multi_window_r2s(&mut tally);       // [SONNET-4.6] sq-2n1q3.3
-    axis_three_window_joins(&mut tally);     // [SONNET-4.6] sq-2n1q3.3
+    axis_multi_window_r2s(&mut tally); // [SONNET-4.6] sq-2n1q3.3
+    axis_three_window_joins(&mut tally); // [SONNET-4.6] sq-2n1q3.3
     axis_documented_gaps(&mut tally);
 
     // The line CI re-checks (mirrors the BM25 oracle's `assertions N (floor F)`).
@@ -970,9 +1082,15 @@ fn rsp_srbench_expressivity_ratchet() {
 #[test]
 fn time_windows_helper_is_correct() {
     // Tumbling RANGE 10 STEP 10 over ts {0, 9, 21}: windows [0,10) [10,20) [20,30).
-    assert_eq!(time_windows(10, 10, &[0, 9, 21]), vec![(0, 10), (10, 20), (20, 30)]);
+    assert_eq!(
+        time_windows(10, 10, &[0, 9, 21]),
+        vec![(0, 10), (10, 20), (20, 30)]
+    );
     // Sliding RANGE 20 STEP 10 over ts {0, 25}: [0,20) [10,30) [20,40).
-    assert_eq!(time_windows(20, 10, &[0, 25]), vec![(0, 20), (10, 30), (20, 40)]);
+    assert_eq!(
+        time_windows(20, 10, &[0, 25]),
+        vec![(0, 20), (10, 30), (20, 40)]
+    );
     // Empty axis → one window at the origin.
     assert_eq!(time_windows(10, 10, &[]), vec![(0, 10)]);
 }

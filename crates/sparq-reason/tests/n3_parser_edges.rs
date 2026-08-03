@@ -408,8 +408,10 @@ fn type_keyword_a_expands_to_rdf_type() {
 fn pname_prefix_with_multibyte_char_containing_0xa0_continuation_byte_does_not_panic() {
     // U+0460 'Ѡ' encodes as D1 A0 — the A0 continuation byte used to read as NBSP
     // whitespace and split the prefix scan mid-character (the fuzz crash).
-    let p = parse("@prefix p\u{0460}x: <http://example.org/> . p\u{0460}x:s p\u{0460}x:p p\u{0460}x:o .")
-        .expect("a pname prefix containing U+0460 is legal PN_CHARS");
+    let p = parse(
+        "@prefix p\u{0460}x: <http://example.org/> . p\u{0460}x:s p\u{0460}x:p p\u{0460}x:o .",
+    )
+    .expect("a pname prefix containing U+0460 is legal PN_CHARS");
     assert_eq!(p.facts.len(), 1);
     assert_eq!(p.facts[0][0], iri("http://example.org/s"));
 }
@@ -418,7 +420,8 @@ fn pname_prefix_with_multibyte_char_containing_0xa0_continuation_byte_does_not_p
 fn pname_with_char_containing_0x85_continuation_byte_does_not_panic() {
     // U+0085 NEL encodes as C2 85 — the 85 continuation byte used to split the scan.
     // Whether this parses or errors is secondary; it must not panic.
-    let _ = parse("@prefix p\u{0085}: <http://example.org/> . p\u{0085}:s p\u{0085}:p p\u{0085}:o .");
+    let _ =
+        parse("@prefix p\u{0085}: <http://example.org/> . p\u{0085}:s p\u{0085}:p p\u{0085}:o .");
     // And in subject position via a prefixed-name token.
     let _ = parse("@prefix e: <http://example.org/> . e:a\u{0460}b e:p e:o .");
 }

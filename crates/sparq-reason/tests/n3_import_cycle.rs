@@ -37,7 +37,9 @@ fn with_watchdog<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 's
 
 fn has(facts: &[[Term; 3]], s: &str, p: &str, o: &str) -> bool {
     let iri = |ns: &str, l: &str| Term::Iri(format!("{ns}{l}"));
-    facts.iter().any(|t| *t == [iri(EX, s), iri(EX, p), iri(EX, o)])
+    facts
+        .iter()
+        .any(|t| *t == [iri(EX, s), iri(EX, p), iri(EX, o)])
 }
 
 const PRE: &str = "@prefix : <http://ex/> .\n\
@@ -47,10 +49,11 @@ const PRE: &str = "@prefix : <http://ex/> .\n\
 /// Reason `src` with a `(iri, text)` resolver, on a watchdog. Returns the closure facts.
 fn reason_with_docs(src: &'static str, docs: Vec<(String, String)>) -> Vec<[Term; 3]> {
     with_watchdog(30, move || {
-        let resolver =
-            move |iri: &str| docs.iter().find(|(d, _)| d == iri).map(|(_, t)| t.clone());
+        let resolver = move |iri: &str| docs.iter().find(|(d, _)| d == iri).map(|(_, t)| t.clone());
         let r = &resolver;
-        reason_n3_terms_with_resolver(src, None, Some(r as &Resolver)).expect("reasoning").facts
+        reason_n3_terms_with_resolver(src, None, Some(r as &Resolver))
+            .expect("reasoning")
+            .facts
     })
 }
 
@@ -84,7 +87,10 @@ fn indirect_import_cycle_terminates() {
                { doc:a log:semantics ?g . ?g log:supports {:x :y :z} } => { :top :saw :a } .";
     let f = reason_with_docs(
         src,
-        vec![(format!("{DOC}a"), importer("b")), (format!("{DOC}b"), importer("a"))],
+        vec![
+            (format!("{DOC}a"), importer("b")),
+            (format!("{DOC}b"), importer("a")),
+        ],
     );
     assert!(f.iter().all(|t| t.len() == 3), "terminated; facts: {:?}", f);
 }

@@ -185,8 +185,7 @@ fn reparse_trap_passes_the_check_but_serves_the_wrong_vector() {
         // The term's OWN vector (what a correct serving must return).
         let correct = vec_for(id_build);
         assert_ne!(
-            served_via_reparse,
-            &correct,
+            served_via_reparse, &correct,
             "term {t:?} permuted (build id {id_build} != reparse id {id_reparsed}); querying the \
              id-keyed store through the re-parsed graph serves the WRONG vector even though \
              check_graph passed — the trap sq-wlzi documents. Reopen the persisted graph instead."

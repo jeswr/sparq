@@ -57,7 +57,10 @@ fn big_graph() -> Graph {
 }
 
 fn capped_config() -> ServerConfig {
-    ServerConfig { max_results: Some(MAX_RESULTS), ..ServerConfig::default() }
+    ServerConfig {
+        max_results: Some(MAX_RESULTS),
+        ..ServerConfig::default()
+    }
 }
 
 /// A drained streamed response body.
@@ -71,7 +74,11 @@ struct Drained {
 
 async fn drain(body: axum::body::Body) -> Drained {
     let mut body = Box::pin(body);
-    let mut out = Drained { bytes: Vec::new(), trailers: None, failed: false };
+    let mut out = Drained {
+        bytes: Vec::new(),
+        trailers: None,
+        failed: false,
+    };
     loop {
         let frame = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx)).await;
         match frame {
@@ -96,7 +103,10 @@ async fn truncated_response(te_trailers: bool) -> (axum::http::response::Parts, 
         .method(axum::http::Method::POST)
         .uri("/sparql")
         .header(axum::http::header::CONTENT_TYPE, "application/sparql-query")
-        .header(axum::http::header::ACCEPT, "application/sparql-results+json");
+        .header(
+            axum::http::header::ACCEPT,
+            "application/sparql-results+json",
+        );
     if te_trailers {
         request = request.header(axum::http::header::TE, "trailers");
     }
@@ -118,7 +128,10 @@ async fn a_mid_stream_row_cap_abort_truncates_and_says_so() {
     assert_eq!(parts.status, axum::http::StatusCode::OK);
     // Streamed, so the length is unknown up front.
     assert!(
-        parts.headers.get(axum::http::header::CONTENT_LENGTH).is_none(),
+        parts
+            .headers
+            .get(axum::http::header::CONTENT_LENGTH)
+            .is_none(),
         "a streamed body must not declare a Content-Length"
     );
     // RFC 9110 §6.6.1: the trailer fields that may follow are announced.
@@ -129,10 +142,17 @@ async fn a_mid_stream_row_cap_abort_truncates_and_says_so() {
         .to_str()
         .unwrap()
         .to_ascii_lowercase();
-    assert!(announced.contains("x-sparq-truncated"), "announced: {}", announced);
+    assert!(
+        announced.contains("x-sparq-truncated"),
+        "announced: {}",
+        announced
+    );
 
     // Mechanism 1 — the document is NEVER closed on a truncation.
-    assert!(!out.bytes.is_empty(), "the truncation must land mid-stream, not pre-first-byte");
+    assert!(
+        !out.bytes.is_empty(),
+        "the truncation must land mid-stream, not pre-first-byte"
+    );
     assert!(
         out.bytes.len() > 64 * 1024,
         "expected a genuinely multi-chunk stream before the cap, got {} bytes",
@@ -146,9 +166,13 @@ async fn a_mid_stream_row_cap_abort_truncates_and_says_so() {
         .expect_err("FORBIDDEN: a truncated stream must not parse as a complete result");
 
     // Mechanism 2 — the reason is reported, and completeness is never claimed.
-    let trailers = out.trailers.expect("a truncated stream must carry a trailer");
+    let trailers = out
+        .trailers
+        .expect("a truncated stream must carry a trailer");
     assert_eq!(
-        trailers.get("x-sparq-truncated").map(|v| v.to_str().unwrap()),
+        trailers
+            .get("x-sparq-truncated")
+            .map(|v| v.to_str().unwrap()),
         Some("max-rows")
     );
     assert!(
@@ -169,7 +193,10 @@ async fn a_client_without_te_trailers_gets_an_aborted_framing() {
         parts.headers.get(axum::http::header::TRAILER).is_none(),
         "trailers must not be announced to a client that cannot read them"
     );
-    assert!(out.failed, "the aborted framing IS the truncation signal here");
+    assert!(
+        out.failed,
+        "the aborted framing IS the truncation signal here"
+    );
     assert!(out.trailers.is_none());
     assert!(!out.bytes.ends_with(b"]}}"));
     serde_json::from_slice::<serde_json::Value>(&out.bytes)
@@ -186,7 +213,10 @@ async fn an_uncapped_stream_completes_and_claims_completeness() {
         .method(axum::http::Method::POST)
         .uri("/sparql")
         .header(axum::http::header::CONTENT_TYPE, "application/sparql-query")
-        .header(axum::http::header::ACCEPT, "application/sparql-results+json")
+        .header(
+            axum::http::header::ACCEPT,
+            "application/sparql-results+json",
+        )
         .header(axum::http::header::TE, "trailers")
         .body(axum::body::Body::from(QUERY))
         .unwrap();
@@ -198,16 +228,23 @@ async fn an_uncapped_stream_completes_and_claims_completeness() {
 
     assert_eq!(parts.status, axum::http::StatusCode::OK);
     assert!(!out.failed);
-    assert!(out.bytes.ends_with(b"]}}"), "a complete stream must close the document");
+    assert!(
+        out.bytes.ends_with(b"]}}"),
+        "a complete stream must close the document"
+    );
     let parsed: serde_json::Value = serde_json::from_slice(&out.bytes).expect("valid JSON");
     assert_eq!(
         parsed["results"]["bindings"].as_array().map(Vec::len),
         Some(TRIPLES),
         "the complete stream must carry every row"
     );
-    let trailers = out.trailers.expect("a complete stream carries the completeness trailer");
+    let trailers = out
+        .trailers
+        .expect("a complete stream carries the completeness trailer");
     assert_eq!(
-        trailers.get("x-sparq-complete").map(|v| v.to_str().unwrap()),
+        trailers
+            .get("x-sparq-complete")
+            .map(|v| v.to_str().unwrap()),
         Some("true")
     );
     assert!(trailers.get("x-sparq-truncated").is_none());
@@ -235,7 +272,10 @@ async fn over_a_real_socket_a_truncated_stream_is_never_a_usable_result() {
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert!(response.content_length().is_none(), "streamed: no Content-Length");
+    assert!(
+        response.content_length().is_none(),
+        "streamed: no Content-Length"
+    );
 
     match response.bytes().await {
         // The chunked stream aborted — the client sees a transport error. Correct.

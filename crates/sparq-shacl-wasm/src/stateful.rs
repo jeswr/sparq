@@ -135,7 +135,10 @@ mod tests {
             &Graph::load_str(SHAPES, "turtle").unwrap(),
         ));
         assert_eq!(json, one_shot, "{json}");
-        assert!(json.contains("\"message\":\"age must be an integer\""), "{json}");
+        assert!(
+            json.contains("\"message\":\"age must be an integer\""),
+            "{json}"
+        );
     }
 
     /// One data handle validates repeatedly — against the same and a different
@@ -148,7 +151,10 @@ mod tests {
         let second = data.validate(&shapes);
         assert_eq!(first, second);
         let empty_shapes = handle("@prefix ex: <http://example.org/> .");
-        assert_eq!(data.validate(&empty_shapes), "{\"conforms\":true,\"results\":[]}");
+        assert_eq!(
+            data.validate(&empty_shapes),
+            "{\"conforms\":true,\"results\":[]}"
+        );
     }
 
     /// The Turtle and text renderings match the stateless surface's renderings.
@@ -170,7 +176,10 @@ mod tests {
     fn conforms_severity_toggle() {
         let data = handle(DATA);
         let shapes = handle(SHAPES);
-        assert!(!data.conforms(&shapes, false), "sh:conforms counts every result");
+        assert!(
+            !data.conforms(&shapes, false),
+            "sh:conforms counts every result"
+        );
         assert!(data.conforms(&shapes, true), "the only result is a Warning");
     }
 }

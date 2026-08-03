@@ -246,8 +246,7 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
                     health = Some(response);
                     break;
                 } else {
-                    last_probe_failure =
-                        Some(format!("status {}, alt-svc {:?}", status, alt_svc));
+                    last_probe_failure = Some(format!("status {}, alt-svc {:?}", status, alt_svc));
                 }
             }
             Err(error) => last_probe_failure = Some(error.to_string()),
@@ -263,7 +262,9 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
         let _ = server.0.wait();
         return Err(format!(
             "server did not become ready (last probe failure: {}): {}",
-            last_probe_failure.as_deref().unwrap_or("no probe completed"),
+            last_probe_failure
+                .as_deref()
+                .unwrap_or("no probe completed"),
             stderr
         )
         .into());

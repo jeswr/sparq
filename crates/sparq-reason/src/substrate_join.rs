@@ -102,7 +102,10 @@ fn schema_rows(map: &rustc_hash::FxHashMap<Id, Vec<Id>>) -> Vec<Row> {
 /// predicate-only (col 1) form so the rdfs9 sweep can key on the object column (col 2) —
 /// the key orientation is plain index data to the kernel.
 fn keys_probing(probe_col: usize) -> JoinKeys {
-    JoinKeys { key_cols: vec![(0, probe_col)], right_only: Vec::new() }
+    JoinKeys {
+        key_cols: vec![(0, probe_col)],
+        right_only: Vec::new(),
+    }
 }
 
 /// The substrate-driven equivalent of the rdfs2/3/7 portion of
@@ -131,17 +134,23 @@ pub(crate) fn sweep_predicate_join(
     // rdfs7 — emit `(s, q, o)` for each super-property `q` of the asserted predicate.
     let sp_rows = schema_rows(sp_closure);
     let sp_tables = vec![sjoin::build_table(&sp_rows, &keys)];
-    probe_into(&probe, &keys, &sp_rows, &sp_tables, out, |b, p| [p[0], b[1], p[2]]);
+    probe_into(&probe, &keys, &sp_rows, &sp_tables, out, |b, p| {
+        [p[0], b[1], p[2]]
+    });
 
     // rdfs2 — domain typing: emit `(s, type, c)` for each domain class `c` of the predicate.
     let dom_rows = schema_rows(dom_full);
     let dom_tables = vec![sjoin::build_table(&dom_rows, &keys)];
-    probe_into(&probe, &keys, &dom_rows, &dom_tables, out, |b, p| [p[0], ty, b[1]]);
+    probe_into(&probe, &keys, &dom_rows, &dom_tables, out, |b, p| {
+        [p[0], ty, b[1]]
+    });
 
     // rdfs3 — range typing: emit `(o, type, c)` for each range class `c` of the predicate.
     let rng_rows = schema_rows(rng_full);
     let rng_tables = vec![sjoin::build_table(&rng_rows, &keys)];
-    probe_into(&probe, &keys, &rng_rows, &rng_tables, out, |b, p| [p[2], ty, b[1]]);
+    probe_into(&probe, &keys, &rng_rows, &rng_tables, out, |b, p| {
+        [p[2], ty, b[1]]
+    });
 }
 
 /// [FABLE-5] sq-pbz04.1.1 — the substrate-driven equivalent of the `rdf:type`/rdfs9 branch
@@ -168,7 +177,9 @@ pub(crate) fn sweep_type_join(
     let sc_tables = vec![sjoin::build_table(&sc_rows, &keys)];
     // Emit `(s, type, d)`: probe row `[s, type, o]`, matched build row `[o, d]`. `p[1]` IS
     // `rdf:type` for every probe row (the caller's partition), so the conclusion reuses it.
-    probe_into(&probe, &keys, &sc_rows, &sc_tables, out, |b, p| [p[0], p[1], b[1]]);
+    probe_into(&probe, &keys, &sc_rows, &sc_tables, out, |b, p| {
+        [p[0], p[1], b[1]]
+    });
 }
 
 /// Drive [`sjoin::hash_probe_serial`] (the shared probe loop + [`ReasonBudget`] poll) over the
@@ -194,7 +205,15 @@ fn probe_into(
     // constructor is `NoBudget`, monomorphising `exhausted` to a constant `false` the optimiser
     // deletes — byte-identical to the hand-rolled loop with no budget poll.
     let budget: ReasonBudget = NoBudget;
-    sjoin::hash_probe_serial(probe, keys, build, tables, &probe_only, &budget, &mut combined);
+    sjoin::hash_probe_serial(
+        probe,
+        keys,
+        build,
+        tables,
+        &probe_only,
+        &budget,
+        &mut combined,
+    );
     for row in &combined {
         // Combined row layout: build columns `[0..build_width)` then the probe columns. Build
         // width is 2 (`[p, target]`); the probe row follows at offset 2 (`[s, p, o]`).

@@ -39,7 +39,10 @@ const QUERY: &str = "SELECT ?o WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?
 
 async fn spawn() -> String {
     let graph = Graph::load_str(BOOT, "turtle").unwrap();
-    let config = ServerConfig { solid_authz: true, ..ServerConfig::default() };
+    let config = ServerConfig {
+        solid_authz: true,
+        ..ServerConfig::default()
+    };
     let app = router(AppState::with_config(graph, config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -89,7 +92,10 @@ async fn query_as(
 async fn row_count(resp: reqwest::Response) -> usize {
     assert_eq!(resp.status(), 200, "query lane must succeed for this row");
     let v: serde_json::Value = resp.json().await.unwrap();
-    v["results"]["bindings"].as_array().map(|a| a.len()).unwrap_or(0)
+    v["results"]["bindings"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -278,8 +284,16 @@ async fn two_requesters_same_query_get_different_result_sets() {
     assert_eq!(bob_resp.status(), 200);
     let bob_rows = titles(bob_resp.json().await.unwrap());
     // The SAME query, two sessions: disjoint, non-empty, policy-scoped results.
-    assert_eq!(alice_rows, vec!["alpha".to_owned()], "alice sees exactly her granted graph");
-    assert_eq!(bob_rows, vec!["beta".to_owned()], "bob sees exactly his granted graph");
+    assert_eq!(
+        alice_rows,
+        vec!["alpha".to_owned()],
+        "alice sees exactly her granted graph"
+    );
+    assert_eq!(
+        bob_rows,
+        vec!["beta".to_owned()],
+        "bob sees exactly his granted graph"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +328,11 @@ async fn lane_refusals_are_4xx_fail_closed() {
         permit(ALICE, "")
     );
     let resp = query_as(&base, &perm_strategy, Some(ALICE), None, None).await;
-    assert_eq!(resp.status(), 400, "odrl:perm conflict strategy must refuse");
+    assert_eq!(
+        resp.status(),
+        400,
+        "odrl:perm conflict strategy must refuse"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +370,12 @@ fn extra_write_and_public_read() -> String {
 }
 
 /// POST /authz/decide as `agent` (anonymous when `None`) for `(N1, mode)`.
-async fn decide_as(base: &str, dataset: &str, agent: Option<&str>, mode: &str) -> reqwest::Response {
+async fn decide_as(
+    base: &str,
+    dataset: &str,
+    agent: Option<&str>,
+    mode: &str,
+) -> reqwest::Response {
     let mut session = serde_json::Map::new();
     if let Some(a) = agent {
         session.insert("agent".into(), a.into());
@@ -364,7 +387,12 @@ async fn decide_as(base: &str, dataset: &str, agent: Option<&str>, mode: &str) -
         "mode": mode,
         "view": "wac",
     });
-    client().post(format!("{base}/authz/decide")).json(&body).send().await.unwrap()
+    client()
+        .post(format!("{base}/authz/decide"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
 }
 
 /// POST /authz/wac-allow as `agent` (anonymous when `None`) for N1.
@@ -379,7 +407,12 @@ async fn wac_allow_as(base: &str, dataset: &str, agent: Option<&str>) -> reqwest
         "resource": N1,
         "view": "wac",
     });
-    client().post(format!("{base}/authz/wac-allow")).json(&body).send().await.unwrap()
+    client()
+        .post(format!("{base}/authz/wac-allow"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
 }
 
 /// THE sq-3mu76 inconsistency, witnessed then fixed: a dataset-carried ODRL prohibition used to
@@ -398,7 +431,11 @@ async fn decide_prohibition_deny_overrides_static_wac_allow() {
     // `/authz/query` enforces (403 = an authoritative resolved deny).
     let prohibited = format!("{}{}", wac_dataset(""), prohibit(ALICE));
     let resp = decide_as(&base, &prohibited, Some(ALICE), "read").await;
-    assert_eq!(resp.status(), 403, "an ODRL prohibition must deny the advisory decision");
+    assert_eq!(
+        resp.status(),
+        403,
+        "an ODRL prohibition must deny the advisory decision"
+    );
     let v: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(v["allow"], serde_json::Value::Bool(false));
     assert!(
@@ -418,7 +455,11 @@ async fn decide_odrl_permit_grants_read_through_the_bridge() {
     assert_eq!(resp.status(), 403);
     // With the ODRL permit the bridge materialises bob's read grant.
     let resp = decide_as(&base, &dataset, Some(BOB), "read").await;
-    assert_eq!(resp.status(), 200, "a bridged ODRL permit must decide allow");
+    assert_eq!(
+        resp.status(),
+        200,
+        "a bridged ODRL permit must decide allow"
+    );
     let v: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(v["allow"], serde_json::Value::Bool(true));
     assert_eq!(
@@ -439,13 +480,22 @@ async fn decide_masks_advertised_modes_to_read_when_lane_fires() {
     let resp = decide_as(&base, &wac, Some(ALICE), "read").await;
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = resp.json().await.unwrap();
-    let modes: Vec<&str> =
-        v["grantedModes"].as_array().unwrap().iter().map(|m| m.as_str().unwrap()).collect();
+    let modes: Vec<&str> = v["grantedModes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
     assert!(modes.contains(&"read") && modes.contains(&"write"));
     // Lane fired (a permit alice already holds statically): the decision is unchanged,
     // the advertisement is scoped to the evidenced read.
-    let resp =
-        decide_as(&base, &format!("{}{}", wac, permit(ALICE, "")), Some(ALICE), "read").await;
+    let resp = decide_as(
+        &base,
+        &format!("{}{}", wac, permit(ALICE, "")),
+        Some(ALICE),
+        "read",
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(v["allow"], serde_json::Value::Bool(true));
@@ -457,15 +507,24 @@ async fn decide_masks_advertised_modes_to_read_when_lane_fires() {
 #[tokio::test]
 async fn decide_refusals_match_the_query_lane() {
     let base = spawn().await;
-    let dataset = format!("{}{}", wac_dataset(&extra_write_and_public_read()), permit(ALICE, ""));
+    let dataset = format!(
+        "{}{}",
+        wac_dataset(&extra_write_and_public_read()),
+        permit(ALICE, "")
+    );
     let resp = decide_as(&base, &dataset, Some(ALICE), "write").await;
     assert_eq!(resp.status(), 400, "non-read mode + ODRL must refuse");
     let resp = decide_as(&base, &dataset, None, "read").await;
     assert_eq!(resp.status(), 403, "anonymous + ODRL must refuse");
     // Dormant control: WITHOUT ODRL the same write-mode decide is an ordinary decision
     // (alice holds Write => allow), proving the 400 above is the lane, not the endpoint.
-    let resp =
-        decide_as(&base, &wac_dataset(&extra_write_and_public_read()), Some(ALICE), "write").await;
+    let resp = decide_as(
+        &base,
+        &wac_dataset(&extra_write_and_public_read()),
+        Some(ALICE),
+        "write",
+    )
+    .await;
     assert_eq!(resp.status(), 200);
     let v: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(v["allow"], serde_json::Value::Bool(true));
@@ -526,8 +585,17 @@ async fn decide_refuses_trust_block_combined_with_odrl() {
         "view": "wac",
         "trust": {"rules": [], "credentials": [], "certifications": []},
     });
-    let resp = client().post(format!("{base}/authz/decide")).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 400, "trust + ODRL composition must refuse (fail-closed)");
+    let resp = client()
+        .post(format!("{base}/authz/decide"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "trust + ODRL composition must refuse (fail-closed)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -545,10 +613,18 @@ async fn lane_is_dormant_without_odrl_in_the_dataset() {
 <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .\n";
     // Anonymous is NOT refused (no ODRL => the lane never fires) — it just sees nothing.
     let resp = query_as(&base, wac, None, None, None).await;
-    assert_eq!(row_count(resp).await, 0, "anonymous WAC-only session sees nothing");
+    assert_eq!(
+        row_count(resp).await,
+        0,
+        "anonymous WAC-only session sees nothing"
+    );
     // And the static WAC grant still works untouched.
     let resp = query_as(&base, wac, Some(ALICE), None, None).await;
-    assert_eq!(row_count(resp).await, 1, "static WAC grant admits alice as before");
+    assert_eq!(
+        row_count(resp).await,
+        1,
+        "static WAC grant admits alice as before"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +638,10 @@ async fn lane_is_dormant_without_odrl_in_the_dataset() {
 /// Boots a server whose own loaded store IS `dataset`.
 async fn spawn_pod(dataset: &str) -> String {
     let graph = Graph::load_dataset(dataset, "nquads").unwrap();
-    let config = ServerConfig { solid_authz: true, ..ServerConfig::default() };
+    let config = ServerConfig {
+        solid_authz: true,
+        ..ServerConfig::default()
+    };
     let app = router(AppState::with_config(graph, config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -615,6 +694,14 @@ async fn stateful_lane_still_serves_a_plain_server_store_under_odrl_authz() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "a plain WAC server store is not refused");
-    assert_eq!(row_count(resp).await, 1, "alice's static WAC grant still admits her");
+    assert_eq!(
+        resp.status(),
+        200,
+        "a plain WAC server store is not refused"
+    );
+    assert_eq!(
+        row_count(resp).await,
+        1,
+        "alice's static WAC grant still admits her"
+    );
 }

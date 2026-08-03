@@ -452,8 +452,14 @@ mod tests {
                 .expect("a verbatim prefLabel must resolve, not loud-fail");
             assert_eq!(res.iri, "https://sparq.dev/ns/pkg/kb#topic-zk-discipline");
             assert_eq!(res.method, Method::Lexical);
-            assert_eq!(res.score, 1.0, "an exact full-label hit is the strongest signal");
-            assert!(res.runner_up.is_none(), "the verbatim hit is the sole candidate");
+            assert_eq!(
+                res.score, 1.0,
+                "an exact full-label hit is the strongest signal"
+            );
+            assert!(
+                res.runner_up.is_none(),
+                "the verbatim hit is the sole candidate"
+            );
             assert_eq!(res.confidence, 1.0, "no runner-up => full confidence");
         }
 
@@ -463,7 +469,10 @@ mod tests {
             let g = graph();
             let ctx = ResolveCtx::lexical(&g);
             let res = ctx.resolve("Merge discipline", None).expect("resolves");
-            assert_eq!(res.iri, "https://sparq.dev/ns/pkg/kb#topic-merge-discipline");
+            assert_eq!(
+                res.iri,
+                "https://sparq.dev/ns/pkg/kb#topic-merge-discipline"
+            );
             assert_eq!(res.score, 1.0);
             assert!(res.runner_up.is_none());
         }

@@ -136,7 +136,11 @@ mod stateful {
             Validator::validate(DATA, SHAPES, "turtle").expect("one-shot"),
             "pre-parsed and one-shot reports must agree"
         );
-        assert_eq!(first, data.validate(&shapes), "repeat validation must be stable");
+        assert_eq!(
+            first,
+            data.validate(&shapes),
+            "repeat validation must be stable"
+        );
         assert!(!data.conforms(&shapes, false));
     }
 
@@ -145,7 +149,9 @@ mod stateful {
     fn parsed_handle_full_report_surface() {
         let data = ParsedGraph::parse(DATA, "turtle").expect("parse data");
         let shapes = ParsedGraph::parse(SHAPES, "turtle").expect("parse shapes");
-        assert!(data.validate_turtle(&shapes).contains("sh:ValidationReport"));
+        assert!(data
+            .validate_turtle(&shapes)
+            .contains("sh:ValidationReport"));
         assert!(data.validate_text(&shapes).starts_with("Does not conform"));
     }
 

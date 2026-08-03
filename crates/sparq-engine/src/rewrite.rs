@@ -48,18 +48,44 @@ use spargebra::Query;
 /// remains to consume).
 pub fn rewrite_query(query: Query) -> Query {
     match query {
-        Query::Select { dataset, pattern, base_iri } => {
-            Query::Select { dataset, pattern: rewrite_pattern(pattern), base_iri }
-        }
-        Query::Ask { dataset, pattern, base_iri } => {
-            Query::Ask { dataset, pattern: rewrite_pattern(pattern), base_iri }
-        }
-        Query::Construct { template, dataset, pattern, base_iri } => {
-            Query::Construct { template, dataset, pattern: rewrite_pattern(pattern), base_iri }
-        }
-        Query::Describe { dataset, pattern, base_iri } => {
-            Query::Describe { dataset, pattern: rewrite_pattern(pattern), base_iri }
-        }
+        Query::Select {
+            dataset,
+            pattern,
+            base_iri,
+        } => Query::Select {
+            dataset,
+            pattern: rewrite_pattern(pattern),
+            base_iri,
+        },
+        Query::Ask {
+            dataset,
+            pattern,
+            base_iri,
+        } => Query::Ask {
+            dataset,
+            pattern: rewrite_pattern(pattern),
+            base_iri,
+        },
+        Query::Construct {
+            template,
+            dataset,
+            pattern,
+            base_iri,
+        } => Query::Construct {
+            template,
+            dataset,
+            pattern: rewrite_pattern(pattern),
+            base_iri,
+        },
+        Query::Describe {
+            dataset,
+            pattern,
+            base_iri,
+        } => Query::Describe {
+            dataset,
+            pattern: rewrite_pattern(pattern),
+            base_iri,
+        },
     }
 }
 
@@ -82,28 +108,86 @@ fn map_children(p: GraphPattern) -> GraphPattern {
     let r = |b: Box<G>| Box::new(rewrite_pattern(*b));
     match p {
         G::Bgp { .. } | G::Path { .. } | G::Values { .. } => p,
-        G::Join { left, right } => G::Join { left: r(left), right: r(right) },
-        G::LeftJoin { left, right, expression } => {
-            G::LeftJoin { left: r(left), right: r(right), expression }
-        }
+        G::Join { left, right } => G::Join {
+            left: r(left),
+            right: r(right),
+        },
+        G::LeftJoin {
+            left,
+            right,
+            expression,
+        } => G::LeftJoin {
+            left: r(left),
+            right: r(right),
+            expression,
+        },
         // `Lateral` (SEP-0006) is unconditionally present in the workspace build.
-        G::Lateral { left, right } => G::Lateral { left: r(left), right: r(right) },
-        G::Filter { expr, inner } => G::Filter { expr, inner: r(inner) },
-        G::Union { left, right } => G::Union { left: r(left), right: r(right) },
-        G::Graph { name, inner } => G::Graph { name, inner: r(inner) },
-        G::Extend { inner, variable, expression } => {
-            G::Extend { inner: r(inner), variable, expression }
-        }
-        G::Minus { left, right } => G::Minus { left: r(left), right: r(right) },
-        G::OrderBy { inner, expression } => G::OrderBy { inner: r(inner), expression },
-        G::Project { inner, variables } => G::Project { inner: r(inner), variables },
+        G::Lateral { left, right } => G::Lateral {
+            left: r(left),
+            right: r(right),
+        },
+        G::Filter { expr, inner } => G::Filter {
+            expr,
+            inner: r(inner),
+        },
+        G::Union { left, right } => G::Union {
+            left: r(left),
+            right: r(right),
+        },
+        G::Graph { name, inner } => G::Graph {
+            name,
+            inner: r(inner),
+        },
+        G::Extend {
+            inner,
+            variable,
+            expression,
+        } => G::Extend {
+            inner: r(inner),
+            variable,
+            expression,
+        },
+        G::Minus { left, right } => G::Minus {
+            left: r(left),
+            right: r(right),
+        },
+        G::OrderBy { inner, expression } => G::OrderBy {
+            inner: r(inner),
+            expression,
+        },
+        G::Project { inner, variables } => G::Project {
+            inner: r(inner),
+            variables,
+        },
         G::Distinct { inner } => G::Distinct { inner: r(inner) },
         G::Reduced { inner } => G::Reduced { inner: r(inner) },
-        G::Slice { inner, start, length } => G::Slice { inner: r(inner), start, length },
-        G::Group { inner, variables, aggregates } => {
-            G::Group { inner: r(inner), variables, aggregates }
-        }
-        G::Service { name, inner, silent } => G::Service { name, inner: r(inner), silent },
+        G::Slice {
+            inner,
+            start,
+            length,
+        } => G::Slice {
+            inner: r(inner),
+            start,
+            length,
+        },
+        G::Group {
+            inner,
+            variables,
+            aggregates,
+        } => G::Group {
+            inner: r(inner),
+            variables,
+            aggregates,
+        },
+        G::Service {
+            name,
+            inner,
+            silent,
+        } => G::Service {
+            name,
+            inner: r(inner),
+            silent,
+        },
     }
 }
 
@@ -114,9 +198,17 @@ fn map_children(p: GraphPattern) -> GraphPattern {
 fn rewrite_filter(expr: Expression, inner: GraphPattern) -> GraphPattern {
     // (b) Anti-join: the ENTIRE filter is `!bound(?v)` over `LeftJoin(A, B)`.
     if let Some(v) = as_not_bound(&expr) {
-        if let GraphPattern::LeftJoin { left, right, expression: None } = &inner {
+        if let GraphPattern::LeftJoin {
+            left,
+            right,
+            expression: None,
+        } = &inner
+        {
             if antijoin_ok(&v, left, right) {
-                return GraphPattern::Minus { left: left.clone(), right: right.clone() };
+                return GraphPattern::Minus {
+                    left: left.clone(),
+                    right: right.clone(),
+                };
             }
         }
     }
@@ -184,7 +276,10 @@ fn equality_substitute(expr: Expression, inner: GraphPattern) -> GraphPattern {
 
     if applied.is_empty() {
         // Nothing fired — return the original FILTER verbatim (exact expr).
-        return GraphPattern::Filter { expr, inner: Box::new(inner) };
+        return GraphPattern::Filter {
+            expr,
+            inner: Box::new(inner),
+        };
     }
 
     // Re-bind each substituted variable to its constant so it stays in scope.
@@ -197,10 +292,17 @@ fn equality_substitute(expr: Expression, inner: GraphPattern) -> GraphPattern {
     }
 
     // Rebuild the residual FILTER from the non-consumed conjuncts (in order).
-    let residual: Vec<Expression> =
-        conjuncts.into_iter().enumerate().filter(|(i, _)| !consumed.contains(i)).map(|(_, c)| c).collect();
+    let residual: Vec<Expression> = conjuncts
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !consumed.contains(i))
+        .map(|(_, c)| c)
+        .collect();
     match fold_and(residual) {
-        Some(residual_expr) => GraphPattern::Filter { expr: residual_expr, inner: Box::new(inner) },
+        Some(residual_expr) => GraphPattern::Filter {
+            expr: residual_expr,
+            inner: Box::new(inner),
+        },
         None => inner,
     }
 }
@@ -260,7 +362,9 @@ fn scan_var_inner(p: &GraphPattern, var: &Variable, in_spine: &mut bool, in_opaq
                 *in_spine = true;
             }
         }
-        GraphPattern::Path { subject, object, .. } => {
+        GraphPattern::Path {
+            subject, object, ..
+        } => {
             if term_has_var(subject, var) || term_has_var(object, var) {
                 *in_spine = true;
             }
@@ -287,7 +391,9 @@ fn apply_sub_spine(p: &mut GraphPattern, var: &Variable, iri: &NamedNode) {
                 subst_triple(t, var, iri);
             }
         }
-        GraphPattern::Path { subject, object, .. } => {
+        GraphPattern::Path {
+            subject, object, ..
+        } => {
             subst_term(subject, var, iri);
             subst_term(object, var, iri);
         }
@@ -348,16 +454,20 @@ fn nnp_has_var(nnp: &NamedNodePattern, var: &Variable) -> bool {
 fn pattern_contains_var(p: &GraphPattern, var: &Variable) -> bool {
     match p {
         GraphPattern::Bgp { patterns } => patterns.iter().any(|t| triple_has_var(t, var)),
-        GraphPattern::Path { subject, object, .. } => {
-            term_has_var(subject, var) || term_has_var(object, var)
-        }
+        GraphPattern::Path {
+            subject, object, ..
+        } => term_has_var(subject, var) || term_has_var(object, var),
         GraphPattern::Join { left, right }
         | GraphPattern::Union { left, right }
         | GraphPattern::Minus { left, right }
         | GraphPattern::Lateral { left, right } => {
             pattern_contains_var(left, var) || pattern_contains_var(right, var)
         }
-        GraphPattern::LeftJoin { left, right, expression } => {
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
             pattern_contains_var(left, var)
                 || pattern_contains_var(right, var)
                 || expression.as_ref().is_some_and(|e| expr_has_var(e, var))
@@ -368,9 +478,11 @@ fn pattern_contains_var(p: &GraphPattern, var: &Variable) -> bool {
         GraphPattern::Graph { name, inner } => {
             nnp_has_var(name, var) || pattern_contains_var(inner, var)
         }
-        GraphPattern::Extend { inner, variable, expression } => {
-            variable == var || expr_has_var(expression, var) || pattern_contains_var(inner, var)
-        }
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => variable == var || expr_has_var(expression, var) || pattern_contains_var(inner, var),
         GraphPattern::Values { variables, .. } => variables.iter().any(|v| v == var),
         GraphPattern::OrderBy { inner, expression } => {
             pattern_contains_var(inner, var)
@@ -384,9 +496,15 @@ fn pattern_contains_var(p: &GraphPattern, var: &Variable) -> bool {
         GraphPattern::Distinct { inner }
         | GraphPattern::Reduced { inner }
         | GraphPattern::Slice { inner, .. } => pattern_contains_var(inner, var),
-        GraphPattern::Group { inner, variables, aggregates } => {
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
             variables.iter().any(|v| v == var)
-                || aggregates.iter().any(|(o, agg)| o == var || agg_has_var(agg, var))
+                || aggregates
+                    .iter()
+                    .any(|(o, agg)| o == var || agg_has_var(agg, var))
                 || pattern_contains_var(inner, var)
         }
         GraphPattern::Service { name, inner, .. } => {
@@ -418,7 +536,9 @@ fn expr_has_var(e: &Expression, var: &Variable) -> bool {
         | Expression::Subtract(a, b)
         | Expression::Multiply(a, b)
         | Expression::Divide(a, b) => expr_has_var(a, var) || expr_has_var(b, var),
-        Expression::In(a, list) => expr_has_var(a, var) || list.iter().any(|x| expr_has_var(x, var)),
+        Expression::In(a, list) => {
+            expr_has_var(a, var) || list.iter().any(|x| expr_has_var(x, var))
+        }
         Expression::UnaryPlus(i) | Expression::UnaryMinus(i) | Expression::Not(i) => {
             expr_has_var(i, var)
         }
@@ -444,7 +564,9 @@ fn certain_vars(p: &GraphPattern) -> FxHashSet<Variable> {
                 collect_triple_vars(t, &mut s);
             }
         }
-        GraphPattern::Path { subject, object, .. } => {
+        GraphPattern::Path {
+            subject, object, ..
+        } => {
             collect_term_vars(subject, &mut s);
             collect_term_vars(object, &mut s);
         }
@@ -476,16 +598,30 @@ fn certain_vars(p: &GraphPattern) -> FxHashSet<Variable> {
         GraphPattern::Extend { inner, .. } => s = certain_vars(inner),
         GraphPattern::Project { inner, variables } => {
             let c = certain_vars(inner);
-            s = variables.iter().filter(|v| c.contains(v)).cloned().collect();
+            s = variables
+                .iter()
+                .filter(|v| c.contains(v))
+                .cloned()
+                .collect();
         }
-        GraphPattern::Values { variables, bindings } => {
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => {
             for (i, v) in variables.iter().enumerate() {
-                if bindings.iter().all(|row| row.get(i).is_some_and(|cell| cell.is_some())) {
+                if bindings
+                    .iter()
+                    .all(|row| row.get(i).is_some_and(|cell| cell.is_some()))
+                {
                     s.insert(v.clone());
                 }
             }
         }
-        GraphPattern::Group { inner, variables, aggregates: _ } => {
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates: _,
+        } => {
             // GROUP BY keys that are certain in `inner` stay certain. Aggregate
             // OUTPUTS are intentionally EXCLUDED: an aggregate (e.g. SUM/AVG over a
             // non-numeric term) can error and leave its output variable UNBOUND, so
@@ -557,16 +693,34 @@ mod tests {
         let rw = rewrite_query(raw.clone());
         assert_ne!(rw, raw, "IRI-equality FILTER must be rewritten");
         let dbg = format!("{:?}", pattern_of(&rw));
-        assert!(!dbg.contains("Filter"), "the equality FILTER must be consumed: {}", dbg);
-        assert!(dbg.contains("Extend"), "?p must be re-bound via Extend: {}", dbg);
-        assert!(dbg.contains("http://ex/target"), "the IRI must be folded in: {}", dbg);
+        assert!(
+            !dbg.contains("Filter"),
+            "the equality FILTER must be consumed: {}",
+            dbg
+        );
+        assert!(
+            dbg.contains("Extend"),
+            "?p must be re-bound via Extend: {}",
+            dbg
+        );
+        assert!(
+            dbg.contains("http://ex/target"),
+            "the IRI must be folded in: {}",
+            dbg
+        );
     }
 
     // ---- rewrite_query: literal equality is NEVER rewritten (sq-lr2ii) ----
     #[test]
     fn integer_literal_equality_not_rewritten() {
-        let raw = parse(&format!("{PFX} SELECT ?s ?v WHERE {{ ?s ex:num ?v . FILTER(?v = 1) }}"));
-        assert_eq!(rewrite_query(raw.clone()), raw, "numeric-literal FILTER must not be rewritten");
+        let raw = parse(&format!(
+            "{PFX} SELECT ?s ?v WHERE {{ ?s ex:num ?v . FILTER(?v = 1) }}"
+        ));
+        assert_eq!(
+            rewrite_query(raw.clone()),
+            raw,
+            "numeric-literal FILTER must not be rewritten"
+        );
     }
 
     #[test]
@@ -574,14 +728,23 @@ mod tests {
         let raw = parse(&format!(
             "{PFX} SELECT ?s ?v WHERE {{ ?s ex:num ?v . FILTER(?v = \"1\"^^xsd:decimal) }}"
         ));
-        assert_eq!(rewrite_query(raw.clone()), raw, "decimal-literal FILTER must not be rewritten");
+        assert_eq!(
+            rewrite_query(raw.clone()),
+            raw,
+            "decimal-literal FILTER must not be rewritten"
+        );
     }
 
     #[test]
     fn plain_literal_equality_not_rewritten() {
-        let raw =
-            parse(&format!("{PFX} SELECT ?s ?v WHERE {{ ?s ex:name ?v . FILTER(?v = \"x\") }}"));
-        assert_eq!(rewrite_query(raw.clone()), raw, "plain-literal FILTER must not be rewritten");
+        let raw = parse(&format!(
+            "{PFX} SELECT ?s ?v WHERE {{ ?s ex:name ?v . FILTER(?v = \"x\") }}"
+        ));
+        assert_eq!(
+            rewrite_query(raw.clone()),
+            raw,
+            "plain-literal FILTER must not be rewritten"
+        );
     }
 
     // ---- as_iri_equality direct unit coverage ----
@@ -591,12 +754,21 @@ mod tests {
         let n = NamedNode::new("http://ex/target").unwrap();
         let ev = Expression::Variable(v.clone());
         let en = Expression::NamedNode(n.clone());
-        assert!(as_iri_equality(&Expression::Equal(Box::new(ev.clone()), Box::new(en.clone())))
-            .is_some());
-        assert!(as_iri_equality(&Expression::Equal(Box::new(en.clone()), Box::new(ev.clone())))
-            .is_some());
-        assert!(as_iri_equality(&Expression::SameTerm(Box::new(ev.clone()), Box::new(en.clone())))
-            .is_some());
+        assert!(as_iri_equality(&Expression::Equal(
+            Box::new(ev.clone()),
+            Box::new(en.clone())
+        ))
+        .is_some());
+        assert!(as_iri_equality(&Expression::Equal(
+            Box::new(en.clone()),
+            Box::new(ev.clone())
+        ))
+        .is_some());
+        assert!(as_iri_equality(&Expression::SameTerm(
+            Box::new(ev.clone()),
+            Box::new(en.clone())
+        ))
+        .is_some());
         // Literal operand → None.
         let lit = Expression::Literal(oxrdf::Literal::new_simple_literal("x"));
         assert!(as_iri_equality(&Expression::Equal(Box::new(ev), Box::new(lit))).is_none());
@@ -619,7 +791,11 @@ mod tests {
         assert_eq!(cs[0], a);
         assert_eq!(cs[1], b);
         assert_eq!(cs[2], c);
-        assert_eq!(fold_and(cs), Some(e), "fold_and is the left-assoc inverse of into_conjuncts");
+        assert_eq!(
+            fold_and(cs),
+            Some(e),
+            "fold_and is the left-assoc inverse of into_conjuncts"
+        );
     }
 
     // ---- residual conjunct is preserved when only part of the AND is IRI-eq ----
@@ -633,7 +809,11 @@ mod tests {
         assert_ne!(rw, raw);
         // The `?p = ex:target` conjunct is consumed; the `?v != ex:skip` residual
         // FILTER stays (over the Extend that re-binds ?p).
-        assert!(dbg.contains("Filter"), "residual FILTER must remain: {}", dbg);
+        assert!(
+            dbg.contains("Filter"),
+            "residual FILTER must remain: {}",
+            dbg
+        );
         assert!(dbg.contains("Extend"), "?p re-bound: {}", dbg);
         assert!(dbg.contains("http://ex/target"));
     }
@@ -646,7 +826,11 @@ mod tests {
         let raw = parse(&format!(
             "{PFX} SELECT ?s WHERE {{ ?s ex:has ?p . OPTIONAL {{ ?z ?p ?w }} FILTER(?p = ex:target) }}"
         ));
-        assert_eq!(rewrite_query(raw.clone()), raw, "must decline when ?p spans an opaque scope");
+        assert_eq!(
+            rewrite_query(raw.clone()),
+            raw,
+            "must decline when ?p spans an opaque scope"
+        );
     }
 
     // ---- anti-join rewrite fires ----
@@ -658,9 +842,17 @@ mod tests {
         let rw = rewrite_query(raw.clone());
         let dbg = format!("{:?}", pattern_of(&rw));
         assert_ne!(rw, raw);
-        assert!(dbg.contains("Minus"), "OPTIONAL+!bound must become Minus: {}", dbg);
+        assert!(
+            dbg.contains("Minus"),
+            "OPTIONAL+!bound must become Minus: {}",
+            dbg
+        );
         assert!(!dbg.contains("LeftJoin"), "LeftJoin must be gone: {}", dbg);
-        assert!(!dbg.contains("Bound"), "the !bound FILTER must be gone: {}", dbg);
+        assert!(
+            !dbg.contains("Bound"),
+            "the !bound FILTER must be gone: {}",
+            dbg
+        );
     }
 
     // ---- anti-join declines with no shared variable ----
@@ -743,8 +935,16 @@ mod tests {
         // Sanity: the baseline algebra really has the anti-join candidate shape (a
         // LeftJoin whose right is a Project over a Group) — else the test is vacuous.
         let raw_dbg = format!("{:?}", pattern_of(&raw));
-        assert!(raw_dbg.contains("LeftJoin"), "baseline must have a LeftJoin: {}", raw_dbg);
-        assert!(raw_dbg.contains("Group"), "baseline OPTIONAL body must be a Group: {}", raw_dbg);
+        assert!(
+            raw_dbg.contains("LeftJoin"),
+            "baseline must have a LeftJoin: {}",
+            raw_dbg
+        );
+        assert!(
+            raw_dbg.contains("Group"),
+            "baseline OPTIONAL body must be a Group: {}",
+            raw_dbg
+        );
         assert_eq!(
             rewrite_query(raw.clone()),
             raw,
@@ -760,11 +960,15 @@ mod tests {
         assert!(cv.contains(&Variable::new("a").unwrap()));
         assert!(cv.contains(&Variable::new("b").unwrap()));
 
-        let q_lj =
-            parse(&format!("{PFX} SELECT * WHERE {{ ?a ex:p ?b OPTIONAL {{ ?a ex:q ?c }} }}"));
+        let q_lj = parse(&format!(
+            "{PFX} SELECT * WHERE {{ ?a ex:p ?b OPTIONAL {{ ?a ex:q ?c }} }}"
+        ));
         let cv = certain_vars(pattern_of(&q_lj));
         assert!(cv.contains(&Variable::new("a").unwrap()));
         assert!(cv.contains(&Variable::new("b").unwrap()));
-        assert!(!cv.contains(&Variable::new("c").unwrap()), "optional ?c is not certain");
+        assert!(
+            !cv.contains(&Variable::new("c").unwrap()),
+            "optional ?c is not certain"
+        );
     }
 }

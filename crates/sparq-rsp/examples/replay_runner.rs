@@ -58,7 +58,9 @@ struct Event {
 /// nothing else, and anything else is a hard error rather than a silent guess.
 fn parse_term(t: &str) -> Result<Term, String> {
     if let Some(iri) = t.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
-        return Ok(NamedNode::new(iri).map_err(|e| format!("bad IRI {t}: {e}"))?.into());
+        return Ok(NamedNode::new(iri)
+            .map_err(|e| format!("bad IRI {t}: {e}"))?
+            .into());
     }
     if let Some(rest) = t.strip_prefix('"') {
         if let Some((lex, dt)) = rest.rsplit_once("\"^^<") {
@@ -73,7 +75,10 @@ fn parse_term(t: &str) -> Result<Term, String> {
 }
 
 fn parse_iri(t: &str) -> Result<NamedNode, String> {
-    let iri = t.strip_prefix('<').and_then(|s| s.strip_suffix('>')).unwrap_or(t);
+    let iri = t
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(t);
     NamedNode::new(iri).map_err(|e| format!("bad IRI {t}: {e}"))
 }
 
@@ -99,7 +104,10 @@ fn parse_replay(path: &str) -> Result<Vec<Event>, String> {
             .parse()
             .map_err(|e| format!("{path}:{}: bad ts {:?}: {e}", lineno + 1, c[0]))?;
         if events.last().is_some_and(|p| p.ts > ts) {
-            return Err(format!("{path}:{}: events are not sorted by ts", lineno + 1));
+            return Err(format!(
+                "{path}:{}: events are not sorted by ts",
+                lineno + 1
+            ));
         }
         events.push(Event {
             ts,
@@ -255,7 +263,10 @@ fn run() -> Result<(), String> {
     } else {
         0
     };
-    out.push_str(&format!("timing\trsp_replay_push_wall_us\t{}\tus\n", wall_ns / 1_000));
+    out.push_str(&format!(
+        "timing\trsp_replay_push_wall_us\t{}\tus\n",
+        wall_ns / 1_000
+    ));
     out.push_str(&format!(
         "timing\trsp_replay_push_triples_per_s\t{tps}\ttriples_per_s\n"
     ));

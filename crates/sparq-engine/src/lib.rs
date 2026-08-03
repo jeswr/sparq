@@ -97,7 +97,9 @@ pub use sparq_engine_service::service::with_service_bound_join_block_size;
 // evaluation may dial, enforced PRE-HTTP (a typed refusal, not post-hoc cancellation).
 // DEFAULT is uncapped, so normal SERVICE queries are unchanged. [OPUS-4.8] (sq-b93pv)
 #[cfg(feature = "service")]
-pub use sparq_engine_service::service::{with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER};
+pub use sparq_engine_service::service::{
+    with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER,
+};
 // [OPUS-4.8] (sq-678h, sq-6vshe.4) RDF serializer matrix (Turtle / TriG / N-Quads / JSON-LD
 // writers). NON-DEFAULT `serialize-rdf` feature — when off, zero serializer code compiles and
 // the default build's dependency graph is unchanged. Seam 1 of the facade split (RFC
@@ -257,8 +259,8 @@ pub mod theta_antijoin_testing {
 }
 
 use oxrdf::{Term, Variable};
-use sparq_core::Graph;
 use spargebra::{Query, SparqlParser};
+use sparq_core::Graph;
 
 /// A cooperative resource budget for one query evaluation (T15 server hardening).
 ///
@@ -554,7 +556,12 @@ pub enum SpatialQuery<'a> {
     /// form (a `geo:wktLiteral` value), `radius`/`unit_iri` the bound.
     /// `inclusive` distinguishes `<=` (true) from `<` (false); the provider may
     /// ignore it and return a (still-correct) superset.
-    DistanceWithin { point_wkt: &'a str, radius: f64, unit_iri: &'a str, inclusive: bool },
+    DistanceWithin {
+        point_wkt: &'a str,
+        radius: f64,
+        unit_iri: &'a str,
+        inclusive: bool,
+    },
     /// `geof:sfWithin(?g, box)` / `geof:sfIntersects(?g, box)` — a window/range
     /// scan. `arg_wkt` is the constant geometry's lexical form.
     BboxIntersects { arg_wkt: &'a str },
@@ -691,7 +698,11 @@ pub fn with_spatial_index<T>(idx: std::sync::Arc<dyn SpatialProvider>, f: impl F
 /// not XSD constructor casts are dispatched to `fns` (SPARQL 17.6). An IRI absent
 /// from the registry remains the same hard error the registry-free entry points
 /// raise.
-pub fn query_with_functions(graph: &Graph, sparql: &str, fns: &FunctionRegistry) -> Result<QueryResult, String> {
+pub fn query_with_functions(
+    graph: &Graph,
+    sparql: &str,
+    fns: &FunctionRegistry,
+) -> Result<QueryResult, String> {
     query_with_functions_and_budget(graph, sparql, fns, &QueryBudget::unlimited())
 }
 
@@ -770,7 +781,11 @@ pub fn query_view(v: &DatasetView, sparql: &str) -> Result<QueryResult, String> 
 }
 
 /// [`query_view`] under a cooperative [`QueryBudget`].
-pub fn query_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget) -> Result<QueryResult, String> {
+pub fn query_view_with_budget(
+    v: &DatasetView,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<QueryResult, String> {
     with_view(v, || query_with_budget(v.base, sparql, budget))
 }
 
@@ -780,7 +795,11 @@ pub fn query_json_view(v: &DatasetView, sparql: &str) -> Result<String, String> 
 }
 
 /// [`query_json_view`] under a cooperative [`QueryBudget`].
-pub fn query_json_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
+pub fn query_json_view_with_budget(
+    v: &DatasetView,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<String, String> {
     with_view(v, || query_json_with_budget(v.base, sparql, budget))
 }
 
@@ -790,7 +809,11 @@ pub fn count_view(v: &DatasetView, sparql: &str) -> Result<usize, String> {
 }
 
 /// [`count_view`] under a cooperative [`QueryBudget`].
-pub fn count_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget) -> Result<usize, String> {
+pub fn count_view_with_budget(
+    v: &DatasetView,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<usize, String> {
     with_view(v, || count_with_budget(v.base, sparql, budget))
 }
 
@@ -800,7 +823,11 @@ pub fn ask_view(v: &DatasetView, sparql: &str) -> Result<bool, String> {
 }
 
 /// [`ask_view`] under a cooperative [`QueryBudget`].
-pub fn ask_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget) -> Result<bool, String> {
+pub fn ask_view_with_budget(
+    v: &DatasetView,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<bool, String> {
     with_view(v, || ask_with_budget(v.base, sparql, budget))
 }
 
@@ -854,11 +881,19 @@ impl PreparedQuery {
         // gate). Only the feature-ON arm introduces the rewrite call. [OPUS-4.8]
         #[cfg(not(feature = "algebra-rewrite"))]
         {
-            Ok(PreparedQuery { query: SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())? })
+            Ok(PreparedQuery {
+                query: SparqlParser::new()
+                    .parse_query(sparql)
+                    .map_err(|e| e.to_string())?,
+            })
         }
         #[cfg(feature = "algebra-rewrite")]
         {
-            let query = rewrite::rewrite_query(SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?);
+            let query = rewrite::rewrite_query(
+                SparqlParser::new()
+                    .parse_query(sparql)
+                    .map_err(|e| e.to_string())?,
+            );
             Ok(PreparedQuery { query })
         }
     }
@@ -944,7 +979,9 @@ impl PreparedUpdate {
     /// Parses a SPARQL UPDATE string into its reusable algebra form.
     pub fn parse(sparql: &str) -> Result<PreparedUpdate, String> {
         Ok(PreparedUpdate {
-            update: SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?,
+            update: SparqlParser::new()
+                .parse_update(sparql)
+                .map_err(|e| e.to_string())?,
         })
     }
 
@@ -994,7 +1031,10 @@ pub fn update_prepared(graph: &Graph, prepared: &PreparedUpdate) -> Result<Graph
 /// delta overlay (the [`update_in_place`] path over the bound algebra). Only with the
 /// opt-in `params` feature.
 #[cfg(feature = "params")]
-pub fn update_in_place_prepared(graph: &mut Graph, prepared: &PreparedUpdate) -> Result<(), String> {
+pub fn update_in_place_prepared(
+    graph: &mut Graph,
+    prepared: &PreparedUpdate,
+) -> Result<(), String> {
     update_in_place_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
 }
 
@@ -1014,7 +1054,11 @@ pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
 }
 
 /// [`query`] under a cooperative [`QueryBudget`] (deadline / max result rows).
-pub fn query_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<QueryResult, String> {
+pub fn query_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<QueryResult, String> {
     query_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
 }
 
@@ -1041,7 +1085,11 @@ pub fn query_prepared_with_budget(
         // is satisfiable — the standard "unit row" encoding of a boolean result.
         Query::Ask { pattern, .. } => Ok(QueryResult {
             vars: Vec::new(),
-            rows: if exec::eval_ask(graph, pattern)? { vec![Vec::new()] } else { Vec::new() },
+            rows: if exec::eval_ask(graph, pattern)? {
+                vec![Vec::new()]
+            } else {
+                Vec::new()
+            },
         }),
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
@@ -1065,7 +1113,11 @@ pub fn ask_prepared(graph: &Graph, prepared: &PreparedQuery) -> Result<bool, Str
 }
 
 /// [`ask_prepared`] under a cooperative [`QueryBudget`] (deadline / max result rows).
-pub fn ask_prepared_with_budget(graph: &Graph, prepared: &PreparedQuery, budget: &QueryBudget) -> Result<bool, String> {
+pub fn ask_prepared_with_budget(
+    graph: &Graph,
+    prepared: &PreparedQuery,
+    budget: &QueryBudget,
+) -> Result<bool, String> {
     let q = &prepared.query;
     let active = active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
@@ -1087,7 +1139,11 @@ pub fn query_json(graph: &Graph, sparql: &str) -> Result<String, String> {
 }
 
 /// [`query_json`] under a cooperative [`QueryBudget`] (deadline / max result rows).
-pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
+pub fn query_json_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<String, String> {
     query_json_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
 }
 
@@ -1111,7 +1167,10 @@ pub fn query_json_prepared_with_budget(
     match q {
         Query::Select { pattern, .. } => exec::eval_select_json(graph, pattern),
         // The SPARQL 1.1 JSON results boolean form.
-        Query::Ask { pattern, .. } => Ok(format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?)),
+        Query::Ask { pattern, .. } => Ok(format!(
+            "{{\"head\":{{}},\"boolean\":{}}}",
+            exec::eval_ask(graph, pattern)?
+        )),
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
@@ -1125,7 +1184,11 @@ const JSON_CHUNK_BYTES: usize = 64 * 1024;
 /// **byte-identical** to the single-string result — the server streams these as one
 /// HTTP body instead of concatenating a giant `String` (T16), which removes the
 /// second whole-result copy from peak memory on large SELECTs.
-pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<String>, String> {
+pub fn query_json_chunks_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<Vec<String>, String> {
     let prepared = PreparedQuery::parse(sparql)?;
     let q = &prepared.query;
     let active = active_dataset(graph, q);
@@ -1134,10 +1197,13 @@ pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &Query
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
-        Query::Select { pattern, .. } => exec::eval_select_json_chunks(graph, pattern, Some(JSON_CHUNK_BYTES)),
-        Query::Ask { pattern, .. } => {
-            Ok(vec![format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?)])
+        Query::Select { pattern, .. } => {
+            exec::eval_select_json_chunks(graph, pattern, Some(JSON_CHUNK_BYTES))
         }
+        Query::Ask { pattern, .. } => Ok(vec![format!(
+            "{{\"head\":{{}},\"boolean\":{}}}",
+            exec::eval_ask(graph, pattern)?
+        )]),
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
@@ -1193,7 +1259,10 @@ pub fn query_json_stream_prepared_with_budget(
             exec::eval_select_json_emit(graph, pattern, Some(JSON_CHUNK_BYTES), &mut sink)
         }
         Query::Ask { pattern, .. } => {
-            let doc = format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?);
+            let doc = format!(
+                "{{\"head\":{{}},\"boolean\":{}}}",
+                exec::eval_ask(graph, pattern)?
+            );
             let _ = sink(doc);
             Ok(())
         }
@@ -1209,7 +1278,11 @@ pub fn count(graph: &Graph, sparql: &str) -> Result<usize, String> {
 }
 
 /// [`count`] under a cooperative [`QueryBudget`] (the server's budgeted ASK path).
-pub fn count_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<usize, String> {
+pub fn count_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<usize, String> {
     count_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
 }
 
@@ -1219,7 +1292,11 @@ pub fn count_prepared(graph: &Graph, prepared: &PreparedQuery) -> Result<usize, 
 }
 
 /// [`count_prepared`] under a cooperative [`QueryBudget`].
-pub fn count_prepared_with_budget(graph: &Graph, prepared: &PreparedQuery, budget: &QueryBudget) -> Result<usize, String> {
+pub fn count_prepared_with_budget(
+    graph: &Graph,
+    prepared: &PreparedQuery,
+    budget: &QueryBudget,
+) -> Result<usize, String> {
     let q = &prepared.query;
     let active = active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
@@ -1301,9 +1378,16 @@ mod temporal_cache_tests {
     fn equality_across_timezones() {
         let g = tg();
         // Pushed-down (single pattern + sargable temporal filter).
-        let mut r = names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15T08:00:00-05:00"^^xsd:dateTime) }"#);
+        let mut r = names(
+            &g,
+            r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15T08:00:00-05:00"^^xsd:dateTime) }"#,
+        );
         r.sort();
-        assert_eq!(r, ["minus5", "plus1", "utc"], "equal instants across offsets must all match");
+        assert_eq!(
+            r,
+            ["minus5", "plus1", "utc"],
+            "equal instants across offsets must all match"
+        );
         // General path (the residual-filter shape: arithmetic-free but two patterns).
         let mut r2 = names(
             &g,
@@ -1322,15 +1406,24 @@ mod temporal_cache_tests {
         // ?d > 13:00Z: plus1/minus5 equal -> excluded; later/subsec greater -> included;
         // floating is INSIDE the window -> indeterminate -> excluded; farpast outside
         // the window (decidably less) -> excluded.
-        let mut r = names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d > "2024-03-15T13:00:00Z"^^xsd:dateTime) }"#);
+        let mut r = names(
+            &g,
+            r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d > "2024-03-15T13:00:00Z"^^xsd:dateTime) }"#,
+        );
         r.sort();
         assert_eq!(r, ["later", "subsec"]);
         // ?d < 13:00Z: only farpast is DECIDABLY less (floating is indeterminate).
-        let r = names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d < "2024-03-15T13:00:00Z"^^xsd:dateTime) }"#);
+        let r = names(
+            &g,
+            r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d < "2024-03-15T13:00:00Z"^^xsd:dateTime) }"#,
+        );
         assert_eq!(r, ["farpast"]);
         // A floating constant: zoned values inside the window are indeterminate; only
         // the exact floating term itself passes `=`.
-        let r = names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15T13:00:00"^^xsd:dateTime) }"#);
+        let r = names(
+            &g,
+            r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15T13:00:00"^^xsd:dateTime) }"#,
+        );
         assert_eq!(r, ["floating"]);
     }
 
@@ -1351,9 +1444,23 @@ mod temporal_cache_tests {
     #[test]
     fn date_datetime_disjoint() {
         let g = tg();
-        assert!(names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15"^^xsd:date) }"#).is_empty());
-        assert!(names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d >= "2024-03-15"^^xsd:date) }"#).is_empty());
-        assert_eq!(names(&g, r#"SELECT ?s WHERE { ?s ex:on ?d . FILTER(?d = "2024-03-15"^^xsd:date) }"#), ["aday"]);
+        assert!(names(
+            &g,
+            r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15"^^xsd:date) }"#
+        )
+        .is_empty());
+        assert!(names(
+            &g,
+            r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d >= "2024-03-15"^^xsd:date) }"#
+        )
+        .is_empty());
+        assert_eq!(
+            names(
+                &g,
+                r#"SELECT ?s WHERE { ?s ex:on ?d . FILTER(?d = "2024-03-15"^^xsd:date) }"#
+            ),
+            ["aday"]
+        );
         // BIND makes the known-false vs error distinction observable: != of disjoint
         // families is TRUE (not unbound/error).
         let r = query(
@@ -1362,7 +1469,10 @@ mod temporal_cache_tests {
                SELECT ?x WHERE { ex:utc ex:at ?d . BIND((?d != "2024-03-15"^^xsd:date) AS ?x) }"#,
         )
         .unwrap();
-        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap().to_string(),
+            "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+        );
     }
 
     /// ORDER BY over temporals: every pair orders by INSTANT (across offsets), with
@@ -1377,8 +1487,13 @@ mod temporal_cache_tests {
     fn order_by_mixed_timezones_matches_lenient_order() {
         let g = tg();
         let got = names(&g, "SELECT ?s WHERE { ?s ex:at ?d } ORDER BY ?d");
-        let want = ["farpast", "floating", "utc", "plus1", "minus5", "subsec", "later"];
-        assert_eq!(got, want, "ORDER BY dateTime must match the total temporal order");
+        let want = [
+            "farpast", "floating", "utc", "plus1", "minus5", "subsec", "later",
+        ];
+        assert_eq!(
+            got, want,
+            "ORDER BY dateTime must match the total temporal order"
+        );
     }
 
     /// The GENERAL comparison path (`compare_values` → `CompareTerm::strict_cmp` →
@@ -1405,8 +1520,15 @@ mod temporal_cache_tests {
         let dt = |lex: &str| format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime>", lex);
         // tz-less FIRST (same instant, floating < zoned), then the equal-instant zoned
         // pair in input order. The lexical fallback would give 12:00 / 13:00 / 14:00.
-        let want = [dt("2024-03-15T13:00:00.000"), dt("2024-03-15T12:00:00-01:00"), dt("2024-03-15T14:00:00+01:00")];
-        assert_eq!(got, want, "the general path must order the indeterminate window by instant, then presence");
+        let want = [
+            dt("2024-03-15T13:00:00.000"),
+            dt("2024-03-15T12:00:00-01:00"),
+            dt("2024-03-15T14:00:00+01:00"),
+        ];
+        assert_eq!(
+            got, want,
+            "the general path must order the indeterminate window by instant, then presence"
+        );
     }
 
     /// MIN/MAX over temporals through the id-level fold: value semantics across
@@ -1420,8 +1542,11 @@ mod temporal_cache_tests {
             r.rows[0][0].as_ref().unwrap().to_string()
         };
         assert!(one("SELECT (MIN(?d) AS ?m) WHERE { ?s ex:at ?d }").contains("1999-01-01T00:00:00"));
-        assert!(one("SELECT (MAX(?d) AS ?m) WHERE { ?s ex:at ?d }").contains("2024-03-16T09:00:00Z"));
-        assert!(one("SELECT (MIN(DISTINCT ?d) AS ?m) WHERE { ?s ex:at ?d }").contains("1999-01-01T00:00:00"));
+        assert!(
+            one("SELECT (MAX(?d) AS ?m) WHERE { ?s ex:at ?d }").contains("2024-03-16T09:00:00Z")
+        );
+        assert!(one("SELECT (MIN(DISTINCT ?d) AS ?m) WHERE { ?s ex:at ?d }")
+            .contains("1999-01-01T00:00:00"));
         // Mixed temporal/non-temporal group falls back to the general path (no wrong
         // fast-path answer).
         let r = query(
@@ -1429,7 +1554,10 @@ mod temporal_cache_tests {
             &format!("{pfx}SELECT (MAX(?v) AS ?m) WHERE {{ {{ ?s ex:at ?v }} UNION {{ BIND(5 AS ?v) }} }}"),
         )
         .unwrap();
-        assert!(r.rows[0][0].is_some(), "mixed group MAX must still produce a value");
+        assert!(
+            r.rows[0][0].is_some(),
+            "mixed group MAX must still produce a value"
+        );
     }
 
     /// MIN/MAX over the INDETERMINATE mixed-timezone window: the id-level fold
@@ -1455,14 +1583,18 @@ mod temporal_cache_tests {
         };
         // The id-level fold (every member is a cached graph temporal).
         let fast = one("SELECT (MIN(?d) AS ?m) WHERE { ?s ex:at ?d }");
-        assert!(fast.contains("\"2024-03-15T13:00:00\""), "MIN must be the tz-less value, got {fast}");
+        assert!(
+            fast.contains("\"2024-03-15T13:00:00\""),
+            "MIN must be the tz-less value, got {fast}"
+        );
         // The GENERAL path: the local-vocab BIND member aborts the fast fold, and its own
         // value is later, so the answer must be identical.
-        let general = one(
-            r#"SELECT (MIN(?d) AS ?m) WHERE
-               { { ?s ex:at ?d } UNION { BIND("2024-03-15T20:00:00Z"^^xsd:dateTime AS ?d) } }"#,
+        let general = one(r#"SELECT (MIN(?d) AS ?m) WHERE
+               { { ?s ex:at ?d } UNION { BIND("2024-03-15T20:00:00Z"^^xsd:dateTime AS ?d) } }"#);
+        assert_eq!(
+            general, fast,
+            "the general MIN path must agree with the id-level fold"
         );
-        assert_eq!(general, fast, "the general MIN path must agree with the id-level fold");
     }
 
     /// MAX tie semantics: equal instants in different offsets are equal-comparing
@@ -1484,8 +1616,14 @@ mod temporal_cache_tests {
         // Scan order of `?s ex:at ?d` is subject order a, b, c (SPO index).
         let min = one("SELECT (MIN(?d) AS ?m) WHERE { ?s ex:at ?d }");
         let max = one("SELECT (MAX(?d) AS ?m) WHERE { ?s ex:at ?d }");
-        assert!(min.contains("13:00:00Z"), "MIN must keep the first of equal members, got {min}");
-        assert!(max.contains("08:00:00-05:00"), "MAX must keep the last of equal members, got {max}");
+        assert!(
+            min.contains("13:00:00Z"),
+            "MIN must keep the first of equal members, got {min}"
+        );
+        assert!(
+            max.contains("08:00:00-05:00"),
+            "MAX must keep the last of equal members, got {max}"
+        );
     }
 
     /// xsd:time must stay on the lexical (OtherXsd) comparison path — the cache must
@@ -1521,9 +1659,17 @@ mod temporal_cache_tests {
         assert_eq!(r.rows[0][1].as_ref().unwrap().to_string(), "\"42\"");
         // Negative / out-of-inline-range integers and decimals still resolve correctly
         // (dictionary probe or local vocab) — DISTINCT dedupes equal computed values.
-        let r = query(&g, &format!("{pfx}SELECT DISTINCT ?w WHERE {{ ?s ex:v ?v . BIND(?v - 100 AS ?w) }}")).unwrap();
+        let r = query(
+            &g,
+            &format!("{pfx}SELECT DISTINCT ?w WHERE {{ ?s ex:v ?v . BIND(?v - 100 AS ?w) }}"),
+        )
+        .unwrap();
         assert_eq!(r.rows.len(), 2);
-        let r = query(&g, &format!("{pfx}SELECT DISTINCT ?w WHERE {{ ?s ex:v ?v . BIND(?v + 0.5 AS ?w) }}")).unwrap();
+        let r = query(
+            &g,
+            &format!("{pfx}SELECT DISTINCT ?w WHERE {{ ?s ex:v ?v . BIND(?v + 0.5 AS ?w) }}"),
+        )
+        .unwrap();
         assert_eq!(r.rows.len(), 2);
     }
 
@@ -1532,10 +1678,22 @@ mod temporal_cache_tests {
     #[test]
     fn delta_appended_datetimes_are_cached() {
         let mut g = tg();
-        let dt = |s: &str| Term::Literal(oxrdf::Literal::new_typed_literal(s, oxrdf::vocab::xsd::DATE_TIME));
+        let dt = |s: &str| {
+            Term::Literal(oxrdf::Literal::new_typed_literal(
+                s,
+                oxrdf::vocab::xsd::DATE_TIME,
+            ))
+        };
         let nn = |s: &str| Term::NamedNode(oxrdf::NamedNode::new(s).unwrap());
-        g.apply_delta(&[[nn("http://ex/newer"), nn("http://ex/at"), dt("2030-01-01T00:00:00Z")]], &[])
-            .unwrap();
+        g.apply_delta(
+            &[[
+                nn("http://ex/newer"),
+                nn("http://ex/at"),
+                dt("2030-01-01T00:00:00Z"),
+            ]],
+            &[],
+        )
+        .unwrap();
         let r = query(
             &g,
             r#"PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
@@ -1543,7 +1701,10 @@ mod temporal_cache_tests {
         )
         .unwrap();
         assert_eq!(r.rows.len(), 1);
-        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/newer>");
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap().to_string(),
+            "<http://ex/newer>"
+        );
     }
 
     /// The compressed (sparse-cache) storage mode must answer temporal filters
@@ -1587,7 +1748,9 @@ mod tests {
         let gf = |q: &str| PreparedQuery::parse(q).unwrap().is_graph_form();
         assert!(!gf("SELECT ?s WHERE { ?s <http://ex/age> ?a }"));
         assert!(!gf("ASK { ?s <http://ex/age> ?a }"));
-        assert!(gf("CONSTRUCT { ?s <http://ex/a> ?a } WHERE { ?s <http://ex/age> ?a }"));
+        assert!(gf(
+            "CONSTRUCT { ?s <http://ex/a> ?a } WHERE { ?s <http://ex/age> ?a }"
+        ));
         assert!(gf("DESCRIBE <http://ex/alice>"));
     }
 
@@ -1621,7 +1784,12 @@ mod tests {
         // 0.3 - 0.1 = 0.2 exactly.
         assert_eq!(n(&format!("{pfx}SELECT ?s WHERE {{ ?s ex:v ?v FILTER((?v - \"0.1\"^^xsd:decimal) = \"0.2\"^^xsd:decimal) }}")), 1);
         // 0.1 * 0.1 = 0.01 (none equal, but ordering exact): values < 0.25 are a,b (0.1,0.2).
-        assert_eq!(n(&format!("{pfx}SELECT ?s WHERE {{ ?s ex:v ?v FILTER((?v + ?v) <= \"0.4\"^^xsd:decimal) }}")), 2);
+        assert_eq!(
+            n(&format!(
+                "{pfx}SELECT ?s WHERE {{ ?s ex:v ?v FILTER((?v + ?v) <= \"0.4\"^^xsd:decimal) }}"
+            )),
+            2
+        );
         // Integer arithmetic beyond 2^53 stays exact: (n - 1) = 2^53+2 is false for n=2^53+3.
         assert_eq!(n(&format!("{pfx}SELECT ?s WHERE {{ ?s ex:v ?v FILTER((?v - 1) = \"9007199254740992\"^^xsd:integer) }}")), 1);
     }
@@ -1654,7 +1822,7 @@ mod tests {
         let r = query(&g(), "SELECT * WHERE { _:x <http://ex/age> ?a }").unwrap();
         assert_eq!(r.len(), 3);
         assert_eq!(r.vars.len(), 1); // only ?a, not _:x
-        // repeated blank label behaves like a repeated variable (no self-knows here)
+                                     // repeated blank label behaves like a repeated variable (no self-knows here)
         assert_eq!(
             count("PREFIX ex: <http://ex/> SELECT * WHERE { _:x ex:knows _:x }"),
             0
@@ -1699,7 +1867,10 @@ mod tests {
     #[test]
     fn filter_ebv_boolean_and_string() {
         // FILTER(true) keeps all; numeric/string EBV
-        assert_eq!(count("SELECT ?s WHERE { ?s <http://ex/age> ?a . FILTER(true) }"), 3);
+        assert_eq!(
+            count("SELECT ?s WHERE { ?s <http://ex/age> ?a . FILTER(true) }"),
+            3
+        );
         // string EBV: ?n is a non-empty string for all
         assert_eq!(
             count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:name ?n . FILTER(?n) }"),
@@ -1756,7 +1927,10 @@ mod tests {
         // total count
         let r = query(&g(), "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }").unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"8\"^^<http://www.w3.org/2001/XMLSchema#integer>");
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap().to_string(),
+            "\"8\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        );
 
         // group by predicate, count
         let r = query(
@@ -1798,10 +1972,18 @@ mod tests {
             r.rows[0][0].as_ref().unwrap().to_string()
         };
         // SUM/AVG over the OPTIONAL ?score: two bound rows (10, 30) out of four solutions.
-        let s = one("SELECT (SUM(?score) AS ?v) WHERE { ?s ex:t ?t OPTIONAL { ?s ex:score ?score } }");
-        assert!(s.contains("40"), "SUM over OPTIONAL must sum bound rows only, got {s}");
-        let a = one("SELECT (AVG(?score) AS ?v) WHERE { ?s ex:t ?t OPTIONAL { ?s ex:score ?score } }");
-        assert!(a.contains("20"), "AVG over OPTIONAL must average bound rows only, got {a}");
+        let s =
+            one("SELECT (SUM(?score) AS ?v) WHERE { ?s ex:t ?t OPTIONAL { ?s ex:score ?score } }");
+        assert!(
+            s.contains("40"),
+            "SUM over OPTIONAL must sum bound rows only, got {s}"
+        );
+        let a =
+            one("SELECT (AVG(?score) AS ?v) WHERE { ?s ex:t ?t OPTIONAL { ?s ex:score ?score } }");
+        assert!(
+            a.contains("20"),
+            "AVG over OPTIONAL must average bound rows only, got {a}"
+        );
     }
 
     /// [OPUS-4.8] roborev 1610 (High/Med): CEIL/FLOOR/ROUND on a decimal with a very
@@ -1820,13 +2002,31 @@ mod tests {
         let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
         let n = |q: &str| query(&gg, &format!("{pfx}{q}")).unwrap().len();
         // CEIL(+1e-40)=1, FLOOR(+1e-40)=0, ROUND(+1e-40)=0  (decimal-typed).
-        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(CEIL(?v) = \"1\"^^xsd:decimal) }"), 1);
-        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(FLOOR(?v) = \"0\"^^xsd:decimal) }"), 1);
-        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(CEIL(?v) = \"1\"^^xsd:decimal) }"),
+            1
+        );
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(FLOOR(?v) = \"0\"^^xsd:decimal) }"),
+            1
+        );
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"),
+            1
+        );
         // CEIL(-1e-40)=0, FLOOR(-1e-40)=-1, ROUND(-1e-40)=0.
-        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(CEIL(?v) = \"0\"^^xsd:decimal) }"), 1);
-        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(FLOOR(?v) = \"-1\"^^xsd:decimal) }"), 1);
-        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(CEIL(?v) = \"0\"^^xsd:decimal) }"),
+            1
+        );
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(FLOOR(?v) = \"-1\"^^xsd:decimal) }"),
+            1
+        );
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"),
+            1
+        );
     }
 
     /// [OPUS-4.8] sq-l11x2: fn:round at the FLOAT tiers must not double-round. The xsd:double
@@ -1842,10 +2042,19 @@ mod tests {
         let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
         let n = |q: &str| query(&gg, &format!("{pfx}{q}")).unwrap().len();
         // xsd:double just below 1/2 rounds DOWN to 0, and NOT up to 1.
-        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = 0.0) }"), 1);
-        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = 1.0) }"), 0);
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = 0.0) }"),
+            1
+        );
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = 1.0) }"),
+            0
+        );
         // xsd:float predecessor of 1/2 likewise rounds to 0.
-        assert_eq!(n("SELECT ?s WHERE { ex:f ex:v ?v FILTER(ROUND(?v) = 0.0) }"), 1);
+        assert_eq!(
+            n("SELECT ?s WHERE { ex:f ex:v ?v FILTER(ROUND(?v) = 0.0) }"),
+            1
+        );
     }
 
     /// [OPUS-4.8] roborev 1429 (Med): GROUP BY aggregate over a >PAR_THRESHOLD (50k) input
@@ -1873,12 +2082,22 @@ mod tests {
         let sums: HashMap<String, String> = r
             .rows
             .iter()
-            .map(|row| (row[0].as_ref().unwrap().to_string(), row[1].as_ref().unwrap().to_string()))
+            .map(|row| {
+                (
+                    row[0].as_ref().unwrap().to_string(),
+                    row[1].as_ref().unwrap().to_string(),
+                )
+            })
             .collect();
         for k in [0u32, 1, 499, 500, 833, 999] {
             let want = 60 * k + 1770;
-            let got = sums.get(&format!("<http://ex/s{k}>")).expect("group present");
-            assert!(got.contains(&want.to_string()), "group {k}: SUM want {want}, got {got}");
+            let got = sums
+                .get(&format!("<http://ex/s{k}>"))
+                .expect("group present");
+            assert!(
+                got.contains(&want.to_string()),
+                "group {k}: SUM want {want}, got {got}"
+            );
         }
     }
 
@@ -1889,7 +2108,11 @@ mod tests {
             "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY DESC(?a)",
         )
         .unwrap();
-        let ages: Vec<String> = r.rows.iter().map(|row| row[1].as_ref().unwrap().to_string()).collect();
+        let ages: Vec<String> = r
+            .rows
+            .iter()
+            .map(|row| row[1].as_ref().unwrap().to_string())
+            .collect();
         // 35, 30, 25 descending
         assert!(ages[0].contains("35") && ages[2].contains("25"));
     }
@@ -1957,9 +2180,18 @@ mod tests {
     #[test]
     fn filter_pushdown_boundaries() {
         // >=, <=, = pushed-down comparisons.
-        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a >= 30) }"), 2);
-        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a <= 30) }"), 2);
-        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a = 25) }"), 1);
+        assert_eq!(
+            count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a >= 30) }"),
+            2
+        );
+        assert_eq!(
+            count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a <= 30) }"),
+            2
+        );
+        assert_eq!(
+            count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a = 25) }"),
+            1
+        );
     }
 
     #[test]
@@ -1984,7 +2216,9 @@ mod tests {
         // result must match a naive evaluator.
         let mut seed = 0x00C0FFEEu64;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         let n = 22u32;
@@ -2043,7 +2277,11 @@ mod tests {
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:age ?a OPTIONAL { ?s ex:knows ?k } }",
         ];
         for q in cases {
-            assert_eq!(super::count(&g(), q).unwrap(), query(&g(), q).unwrap().len(), "count mismatch: {q}");
+            assert_eq!(
+                super::count(&g(), q).unwrap(),
+                query(&g(), q).unwrap().len(),
+                "count mismatch: {q}"
+            );
         }
     }
 
@@ -2052,7 +2290,9 @@ mod tests {
         // Two-pattern group-count join vs the materialised count over a random graph.
         let mut seed = 0xBEEF_1234u64;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
@@ -2068,11 +2308,17 @@ mod tests {
     fn limit_early_termination() {
         // LIMIT over a single-pattern scan (early-terminating path).
         assert_eq!(count("SELECT * WHERE { ?s ?p ?o } LIMIT 5"), 5);
-        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } LIMIT 2"), 2);
+        assert_eq!(
+            count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } LIMIT 2"),
+            2
+        );
         // OFFSET + LIMIT.
         assert_eq!(count("SELECT * WHERE { ?s ?p ?o } LIMIT 3 OFFSET 2"), 3);
         // LIMIT larger than the result is fine.
-        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } LIMIT 100"), 3);
+        assert_eq!(
+            count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } LIMIT 100"),
+            3
+        );
         // LIMIT with a pushed-down sargable filter.
         assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a > 20) } LIMIT 1"), 1);
     }
@@ -2197,7 +2443,16 @@ mod tests {
             "turtle",
         )
         .unwrap();
-        let c = |q: &str| query(&g, &format!("PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s ex:age ?a . FILTER({q}) }}")).unwrap().len();
+        let c = |q: &str| {
+            query(
+                &g,
+                &format!(
+                    "PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s ex:age ?a . FILTER({q}) }}"
+                ),
+            )
+            .unwrap()
+            .len()
+        };
         assert_eq!(c("?a > 30"), 2); // 40,50
         assert_eq!(c("?a >= 30"), 3); // 30,40,50
         assert_eq!(c("?a < 30"), 2); // 10,20
@@ -2217,7 +2472,14 @@ mod tests {
             "turtle",
         )
         .unwrap();
-        let cm = |q: &str| query(&gm, &format!("PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s ex:v ?v . FILTER({q}) }}")).unwrap().len();
+        let cm = |q: &str| {
+            query(
+                &gm,
+                &format!("PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s ex:v ?v . FILTER({q}) }}"),
+            )
+            .unwrap()
+            .len()
+        };
         assert_eq!(cm("?v > 90"), 2); // 95 (inline) AND 200 (xsd:int, non-inline) — both kept
         assert_eq!(cm("?v < 60"), 2); // 50 and -10
     }
@@ -2262,21 +2524,41 @@ mod tests {
         let cnt = |q: &str| query(&g, q).unwrap().len();
         // Only the number 50 satisfies an ordering comparison; every non-numeric is a
         // type error -> excluded.
-        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v > -1) }"), 1);
-        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v < 100) }"), 1);
+        assert_eq!(
+            cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v > -1) }"),
+            1
+        );
+        assert_eq!(
+            cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v < 100) }"),
+            1
+        );
         // OPEN-WORLD `=` / `!=` (W3C open-world suite): an IRI and a language-tagged
         // literal are KNOWN different from a number (`!=` true), but a plain string or
         // boolean against a number is a cross-family TYPE ERROR -> excluded. So 50,
         // ex:thing and "bonjour"@fr pass; "hi" and true error out.
-        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v != 5) }"), 3);
-        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v = 5) }"), 0);
+        assert_eq!(
+            cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v != 5) }"),
+            3
+        );
+        assert_eq!(
+            cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v = 5) }"),
+            0
+        );
         // Value equality across integer datatypes still holds.
         let g2 = Graph::load_str(
             "@prefix ex: <http://ex/> . ex:a ex:v \"05\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
             "turtle",
         )
         .unwrap();
-        assert_eq!(query(&g2, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v = 5) }").unwrap().len(), 1);
+        assert_eq!(
+            query(
+                &g2,
+                "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v = 5) }"
+            )
+            .unwrap()
+            .len(),
+            1
+        );
         // 3-valued OR: `(?v > -1) || (?v = "hi")` — s1 true via >, s2 ("hi") true via =,
         // the rest error||false = false. So 2 rows.
         assert_eq!(
@@ -2299,7 +2581,10 @@ mod tests {
         // IF(error, _, _) is an error -> the "hi" row is excluded (NOT the else branch).
         assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(IF(?v > -1, true, true)) }"), 1);
         // IN reuses `=`: only the numeric matches the numeric list entry.
-        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v IN (50)) }"), 1);
+        assert_eq!(
+            cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v IN (50)) }"),
+            1
+        );
 
         // Short-circuit, proven rigorously: STRLEN is UNSUPPORTED, so evaluating the
         // right operand returns Err and `query` would fail. The query SUCCEEDING is
@@ -2307,9 +2592,15 @@ mod tests {
         // truth table tolerates an error).
         let g1 = Graph::load_str("@prefix ex: <http://ex/> . ex:s1 ex:v 50 .", "turtle").unwrap();
         let r1 = query(&g1, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v = 99) && (STRLEN(?v) > 0)) }");
-        assert_eq!(r1.expect("false && _ must short-circuit, not error").len(), 0);
+        assert_eq!(
+            r1.expect("false && _ must short-circuit, not error").len(),
+            0
+        );
         let r2 = query(&g1, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v = 50) || (STRLEN(?v) > 0)) }");
-        assert_eq!(r2.expect("true || _ must short-circuit, not error").len(), 1);
+        assert_eq!(
+            r2.expect("true || _ must short-circuit, not error").len(),
+            1
+        );
 
         // IN preserves a type error (unbound operand): `!(?k IN (ex:x))` with ?k
         // unbound is error -> false -> excluded, NOT `!(false)` = true -> included.
@@ -2333,23 +2624,44 @@ mod tests {
         // FROM g1: the store default graph is re-scoped away.
         assert_eq!(n("SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }"), 2);
         // FROM g1 + g2 merge; no FROM NAMED -> GRAPH matches nothing.
-        assert_eq!(n("SELECT * FROM <http://ex/g1> FROM <http://ex/g2> WHERE { ?s ?p ?o }"), 3);
-        assert_eq!(n("SELECT * FROM <http://ex/g1> WHERE { GRAPH ?g { ?s ?p ?o } }"), 0);
+        assert_eq!(
+            n("SELECT * FROM <http://ex/g1> FROM <http://ex/g2> WHERE { ?s ?p ?o }"),
+            3
+        );
+        assert_eq!(
+            n("SELECT * FROM <http://ex/g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+            0
+        );
         // FROM NAMED only: empty active default graph, exactly that named graph.
-        assert_eq!(n("SELECT * FROM NAMED <http://ex/g2> WHERE { ?s ?p ?o }"), 0);
-        assert_eq!(n("SELECT * FROM NAMED <http://ex/g2> WHERE { GRAPH ?g { ?s ?p ?o } }"), 1);
+        assert_eq!(
+            n("SELECT * FROM NAMED <http://ex/g2> WHERE { ?s ?p ?o }"),
+            0
+        );
+        assert_eq!(
+            n("SELECT * FROM NAMED <http://ex/g2> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+            1
+        );
         // An absent graph name denotes the empty graph (no error, no rows).
         assert_eq!(n("SELECT * FROM <http://ex/nope> WHERE { ?s ?p ?o }"), 0);
         // ASK / count / JSON run against the same active dataset.
         assert!(!ask(&g, "ASK FROM NAMED <http://ex/g1> { ?s ?p ?o }").unwrap());
         assert!(ask(&g, "ASK FROM <http://ex/g1> { ?s ?p ?o }").unwrap());
-        assert_eq!(super::count(&g, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap(), 2);
+        assert_eq!(
+            super::count(&g, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap(),
+            2
+        );
         assert_eq!(
             query_json(&g, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap(),
-            json::to_sparql_json(&query(&g, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap())
+            json::to_sparql_json(
+                &query(&g, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap()
+            )
         );
         // CONSTRUCT honours the clause too.
-        let ts = construct(&g, "CONSTRUCT { ?s ?p ?o } FROM <http://ex/g2> WHERE { ?s ?p ?o }").unwrap();
+        let ts = construct(
+            &g,
+            "CONSTRUCT { ?s ?p ?o } FROM <http://ex/g2> WHERE { ?s ?p ?o }",
+        )
+        .unwrap();
         assert_eq!(ts.len(), 1);
         // No dataset clause: the store itself, unchanged.
         assert_eq!(n("SELECT * WHERE { ?s ?p ?o }"), 1);
@@ -2382,16 +2694,30 @@ mod tests {
         assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }").unwrap());
         assert!(!ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap());
         // ASK with FILTER / join.
-        assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 34) }").unwrap());
-        assert!(!ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 100) }").unwrap());
+        assert!(ask(
+            &g(),
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 34) }"
+        )
+        .unwrap());
+        assert!(!ask(
+            &g(),
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 100) }"
+        )
+        .unwrap());
         // query(): unit-row encoding (zero vars, 0/1 rows).
         let r = query(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 30 }").unwrap();
         assert_eq!((r.vars.len(), r.rows.len()), (0, 1));
         let r = query(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 31 }").unwrap();
         assert_eq!((r.vars.len(), r.rows.len()), (0, 0));
         // count(): 1 / 0.
-        assert_eq!(super::count(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap(), 1);
-        assert_eq!(super::count(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap(), 0);
+        assert_eq!(
+            super::count(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap(),
+            1
+        );
+        assert_eq!(
+            super::count(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap(),
+            0
+        );
         // query_json(): the SPARQL 1.1 JSON boolean form.
         assert_eq!(
             query_json(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap(),
@@ -2412,7 +2738,10 @@ mod tests {
         // NOT EXISTS: people who know no-one (carol).
         let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER NOT EXISTS { ?s ex:knows ?o } }").unwrap();
         assert_eq!(r.rows.len(), 1);
-        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/carol>");
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap().to_string(),
+            "<http://ex/carol>"
+        );
         // Uncorrelated EXISTS: a satisfiable / unsatisfiable constant pattern keeps / drops all rows.
         assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ex:alice ex:knows ex:bob } }"), 3);
         assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ex:alice ex:knows ex:carol } }"), 0);
@@ -2425,7 +2754,11 @@ mod tests {
             1 // alice: knows bob, and bob knows carol
         );
         // NOT EXISTS in ASK.
-        assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 35 FILTER NOT EXISTS { ?s ex:knows ?o } }").unwrap());
+        assert!(ask(
+            &g(),
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age 35 FILTER NOT EXISTS { ?s ex:knows ?o } }"
+        )
+        .unwrap());
     }
 
     #[test]
@@ -2436,8 +2769,14 @@ mod tests {
             r.rows[0][0].as_ref().unwrap().to_string()
         };
         // RFC / spec vectors for "abc".
-        assert_eq!(one("SELECT (MD5(\"abc\") AS ?h) {}"), "\"900150983cd24fb0d6963f7d28e17f72\"");
-        assert_eq!(one("SELECT (SHA1(\"abc\") AS ?h) {}"), "\"a9993e364706816aba3e25717850c26c9cd0d89d\"");
+        assert_eq!(
+            one("SELECT (MD5(\"abc\") AS ?h) {}"),
+            "\"900150983cd24fb0d6963f7d28e17f72\""
+        );
+        assert_eq!(
+            one("SELECT (SHA1(\"abc\") AS ?h) {}"),
+            "\"a9993e364706816aba3e25717850c26c9cd0d89d\""
+        );
         assert_eq!(
             one("SELECT (SHA256(\"abc\") AS ?h) {}"),
             "\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\""
@@ -2454,25 +2793,37 @@ mod tests {
             r.rows[0][0].as_ref().map(|t| t.to_string())
         };
         let dt = "\"2010-12-21T15:38:02-08:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
-        assert_eq!(one(&format!("SELECT (TZ({dt}) AS ?x) {{}}")).unwrap(), "\"-08:00\"");
+        assert_eq!(
+            one(&format!("SELECT (TZ({dt}) AS ?x) {{}}")).unwrap(),
+            "\"-08:00\""
+        );
         assert_eq!(
             one(&format!("SELECT (TIMEZONE({dt}) AS ?x) {{}}")).unwrap(),
             "\"-PT8H\"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>"
         );
         let dtz = "\"2010-12-21T15:38:02Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
-        assert_eq!(one(&format!("SELECT (TZ({dtz}) AS ?x) {{}}")).unwrap(), "\"Z\"");
+        assert_eq!(
+            one(&format!("SELECT (TZ({dtz}) AS ?x) {{}}")).unwrap(),
+            "\"Z\""
+        );
         assert_eq!(
             one(&format!("SELECT (TIMEZONE({dtz}) AS ?x) {{}}")).unwrap(),
             "\"PT0S\"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>"
         );
         // No timezone: TZ -> "", TIMEZONE -> type error (unbound).
         let dn = "\"2011-02-01T01:02:03\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
-        assert_eq!(one(&format!("SELECT (TZ({dn}) AS ?x) {{}}")).unwrap(), "\"\"");
+        assert_eq!(
+            one(&format!("SELECT (TZ({dn}) AS ?x) {{}}")).unwrap(),
+            "\"\""
+        );
         assert_eq!(one(&format!("SELECT (TIMEZONE({dn}) AS ?x) {{}}")), None);
 
         // BNODE(): two calls in one row give two distinct fresh blank nodes.
         let r = query(&g(), "SELECT (BNODE() AS ?a) (BNODE() AS ?b) {}").unwrap();
-        let (a, b) = (r.rows[0][0].as_ref().unwrap(), r.rows[0][1].as_ref().unwrap());
+        let (a, b) = (
+            r.rows[0][0].as_ref().unwrap(),
+            r.rows[0][1].as_ref().unwrap(),
+        );
         assert_ne!(a, b);
         // BNODE(str): same argument in the same solution -> same bnode; different
         // rows -> different bnodes.
@@ -2501,31 +2852,67 @@ mod tests {
             let r = query(&g(), q).unwrap();
             r.rows[0][0].as_ref().map(|t| t.to_string())
         };
-        assert_eq!(one("SELECT (UCASE(\"bar\"@en) AS ?x) {}").unwrap(), "\"BAR\"@en");
-        assert_eq!(one("SELECT (LCASE(\"BAR\"@en) AS ?x) {}").unwrap(), "\"bar\"@en");
-        assert_eq!(one("SELECT (SUBSTR(\"bar\"@en, 2) AS ?x) {}").unwrap(), "\"ar\"@en");
-        assert_eq!(one("SELECT (SUBSTR(\"bar\"@en, 1, 1) AS ?x) {}").unwrap(), "\"b\"@en");
+        assert_eq!(
+            one("SELECT (UCASE(\"bar\"@en) AS ?x) {}").unwrap(),
+            "\"BAR\"@en"
+        );
+        assert_eq!(
+            one("SELECT (LCASE(\"BAR\"@en) AS ?x) {}").unwrap(),
+            "\"bar\"@en"
+        );
+        assert_eq!(
+            one("SELECT (SUBSTR(\"bar\"@en, 2) AS ?x) {}").unwrap(),
+            "\"ar\"@en"
+        );
+        assert_eq!(
+            one("SELECT (SUBSTR(\"bar\"@en, 1, 1) AS ?x) {}").unwrap(),
+            "\"b\"@en"
+        );
         // CONCAT: same tag everywhere -> tagged; mixed -> simple; non-string -> error.
-        assert_eq!(one("SELECT (CONCAT(\"a\"@en, \"b\"@en) AS ?x) {}").unwrap(), "\"ab\"@en");
-        assert_eq!(one("SELECT (CONCAT(\"a\"@en, \"b\") AS ?x) {}").unwrap(), "\"ab\"");
+        assert_eq!(
+            one("SELECT (CONCAT(\"a\"@en, \"b\"@en) AS ?x) {}").unwrap(),
+            "\"ab\"@en"
+        );
+        assert_eq!(
+            one("SELECT (CONCAT(\"a\"@en, \"b\") AS ?x) {}").unwrap(),
+            "\"ab\""
+        );
         assert_eq!(one("SELECT (CONCAT(\"a\", 1) AS ?x) {}"), None);
         // STRBEFORE/STRAFTER: result carries arg1's tag on a match, plain "" on no
         // match, and incompatible language tags are a type error.
-        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"b\") AS ?x) {}").unwrap(), "\"a\"@en");
-        assert_eq!(one("SELECT (STRAFTER(\"abc\"@en, \"b\"@en) AS ?x) {}").unwrap(), "\"c\"@en");
-        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"z\") AS ?x) {}").unwrap(), "\"\"");
-        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"b\"@cy) AS ?x) {}"), None);
+        assert_eq!(
+            one("SELECT (STRBEFORE(\"abc\"@en, \"b\") AS ?x) {}").unwrap(),
+            "\"a\"@en"
+        );
+        assert_eq!(
+            one("SELECT (STRAFTER(\"abc\"@en, \"b\"@en) AS ?x) {}").unwrap(),
+            "\"c\"@en"
+        );
+        assert_eq!(
+            one("SELECT (STRBEFORE(\"abc\"@en, \"z\") AS ?x) {}").unwrap(),
+            "\"\""
+        );
+        assert_eq!(
+            one("SELECT (STRBEFORE(\"abc\"@en, \"b\"@cy) AS ?x) {}"),
+            None
+        );
         assert_eq!(one("SELECT (STRAFTER(\"abc\", \"b\"@en) AS ?x) {}"), None);
         // REPLACE keeps the text's tag.
         #[cfg(feature = "regex")]
-        assert_eq!(one("SELECT (REPLACE(\"abc\"@en, \"b\", \"-\") AS ?x) {}").unwrap(), "\"a-c\"@en");
+        assert_eq!(
+            one("SELECT (REPLACE(\"abc\"@en, \"b\", \"-\") AS ?x) {}").unwrap(),
+            "\"a-c\"@en"
+        );
         // STRDT/STRLANG require a simple-literal first argument.
         assert_eq!(
             one("PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (STRDT(\"1\", xsd:integer) AS ?x) {}").unwrap(),
             "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"
         );
         assert_eq!(one("PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (STRDT(\"1\"@en, xsd:integer) AS ?x) {}"), None);
-        assert_eq!(one("SELECT (STRLANG(\"a\", \"en\") AS ?x) {}").unwrap(), "\"a\"@en");
+        assert_eq!(
+            one("SELECT (STRLANG(\"a\", \"en\") AS ?x) {}").unwrap(),
+            "\"a\"@en"
+        );
         assert_eq!(one("SELECT (STRLANG(\"a\"@en, \"en\") AS ?x) {}"), None);
     }
 
@@ -2535,11 +2922,11 @@ mod tests {
         // JSON — across the single-pattern fast path, the general path, OPTIONAL
         // unbounds, aggregates and ASK.
         let queries = [
-            "SELECT * WHERE { ?s ?p ?o }",                                                  // fast path
-            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",                  // fast path, projected
+            "SELECT * WHERE { ?s ?p ?o }", // fast path
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }", // fast path, projected
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } }", // general
-            "PREFIX ex: <http://ex/> SELECT (AVG(?a) AS ?avg) WHERE { ?s ex:age ?a }",      // aggregate
-            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }",                                 // boolean form
+            "PREFIX ex: <http://ex/> SELECT (AVG(?a) AS ?avg) WHERE { ?s ex:age ?a }", // aggregate
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }", // boolean form
         ];
         let b = QueryBudget::unlimited();
         for q in queries {
@@ -2552,10 +2939,15 @@ mod tests {
         // boundary must fall so that the concatenation is still byte-identical.
         let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
         for i in 0..3000 {
-            ttl.push_str(&format!("ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"));
+            ttl.push_str(&format!(
+                "ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"
+            ));
         }
         let big = Graph::load_str(&ttl, "turtle").unwrap();
-        for q in ["SELECT * WHERE { ?s ?p ?o }", "SELECT ?s ?o WHERE { ?s ?p ?o . ?s ?p2 ?o }"] {
+        for q in [
+            "SELECT * WHERE { ?s ?p ?o }",
+            "SELECT ?s ?o WHERE { ?s ?p ?o . ?s ?p2 ?o }",
+        ] {
             let single = query_json(&big, q).unwrap();
             let chunks = query_json_chunks_with_budget(&big, q, &b).unwrap();
             assert!(chunks.len() > 1, "expected a multi-chunk stream for: {q}");
@@ -2565,7 +2957,10 @@ mod tests {
 
     #[test]
     fn query_json_chunks_respects_budget() {
-        let b = QueryBudget { max_rows: Some(3), ..QueryBudget::unlimited() };
+        let b = QueryBudget {
+            max_rows: Some(3),
+            ..QueryBudget::unlimited()
+        };
         let e = query_json_chunks_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
     }
@@ -2598,13 +2993,20 @@ mod tests {
         for rows in [3_000u32, 60_000] {
             let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
             for i in 0..rows {
-                ttl.push_str(&format!("ex:s{} ex:p \"value-{}-padding-padding-padding\" .\n", i, i));
+                ttl.push_str(&format!(
+                    "ex:s{} ex:p \"value-{}-padding-padding-padding\" .\n",
+                    i, i
+                ));
             }
             let graph = Graph::load_str(&ttl, "turtle").unwrap();
 
             // Reference: the untripped body, complete and unaffected by the new gate.
             let full = query_json(&graph, q).unwrap();
-            assert_eq!(full.matches("\"s\":").count(), rows as usize, "unbudgeted body must be complete");
+            assert_eq!(
+                full.matches("\"s\":").count(),
+                rows as usize,
+                "unbudgeted body must be complete"
+            );
 
             let flag = Arc::new(AtomicBool::new(false));
             let budget = QueryBudget::cancelled_by(Arc::clone(&flag));
@@ -2618,7 +3020,11 @@ mod tests {
             // The flag is raised ONLY by the sink, so reaching the error at all proves the
             // trip happened after the pre-serialize gate. The serial branch stops within
             // ~1024 further rows, so it legitimately emits just the one chunk.
-            assert!(chunks >= 1, "sink never reached at {} rows — trip is not mid-serialize", rows);
+            assert!(
+                chunks >= 1,
+                "sink never reached at {} rows — trip is not mid-serialize",
+                rows
+            );
             assert_eq!(err, "query budget exceeded (cancelled)", "at {} rows", rows);
 
             // A budget that never trips still yields the complete body byte-for-byte —
@@ -2631,7 +3037,11 @@ mod tests {
                 ControlFlow::Continue(())
             })
             .unwrap();
-            assert_eq!(streamed, full, "untripped budgeted body must equal the unbudgeted one at {} rows", rows);
+            assert_eq!(
+                streamed, full,
+                "untripped budgeted body must equal the unbudgeted one at {} rows",
+                rows
+            );
         }
     }
 
@@ -2680,7 +3090,10 @@ mod tests {
                 std::ops::ControlFlow::Continue(())
             })
             .unwrap();
-            assert_eq!(streamed, buffered, "prepared-stream concat mismatch for: {q}");
+            assert_eq!(
+                streamed, buffered,
+                "prepared-stream concat mismatch for: {q}"
+            );
         }
     }
 
@@ -2693,12 +3106,17 @@ mod tests {
     fn query_json_stream_flushes_first_chunk_before_exhaustion() {
         let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
         for i in 0..3000 {
-            ttl.push_str(&format!("ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"));
+            ttl.push_str(&format!(
+                "ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"
+            ));
         }
         let big = Graph::load_str(&ttl, "turtle").unwrap();
         let q = "SELECT * WHERE { ?s ?p ?o }";
         let single = query_json(&big, q).unwrap();
-        assert!(single.len() > 64 * 1024, "test corpus must exceed one chunk");
+        assert!(
+            single.len() > 64 * 1024,
+            "test corpus must exceed one chunk"
+        );
 
         let mut chunks: Vec<String> = Vec::new();
         query_json_stream_with_budget(&big, q, &QueryBudget::unlimited(), |c| {
@@ -2707,12 +3125,26 @@ mod tests {
         })
         .unwrap();
         // Multiple flushes: the first arrived before the last was produced.
-        assert!(chunks.len() > 1, "expected an incremental multi-chunk stream, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected an incremental multi-chunk stream, got {}",
+            chunks.len()
+        );
         // The first chunk opens the SPARQL-results document (header emitted before all rows).
-        assert!(chunks[0].starts_with("{\"head\""), "first chunk must carry the header: {}", &chunks[0][..chunks[0].len().min(40)]);
+        assert!(
+            chunks[0].starts_with("{\"head\""),
+            "first chunk must carry the header: {}",
+            &chunks[0][..chunks[0].len().min(40)]
+        );
         // Only the final chunk closes the document.
-        assert!(chunks.last().unwrap().ends_with("]}}"), "last chunk must close the document");
-        assert!(!chunks[0].ends_with("]}}"), "the header chunk must NOT be the whole document");
+        assert!(
+            chunks.last().unwrap().ends_with("]}}"),
+            "last chunk must close the document"
+        );
+        assert!(
+            !chunks[0].ends_with("]}}"),
+            "the header chunk must NOT be the whole document"
+        );
         assert_eq!(chunks.concat(), single, "stream concat mismatch");
     }
 
@@ -2723,16 +3155,26 @@ mod tests {
     fn query_json_stream_break_stops_early() {
         let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
         for i in 0..3000 {
-            ttl.push_str(&format!("ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"));
+            ttl.push_str(&format!(
+                "ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"
+            ));
         }
         let big = Graph::load_str(&ttl, "turtle").unwrap();
         let mut calls = 0usize;
-        query_json_stream_with_budget(&big, "SELECT * WHERE { ?s ?p ?o }", &QueryBudget::unlimited(), |_c| {
-            calls += 1;
-            std::ops::ControlFlow::Break(()) // bail after the very first chunk
-        })
+        query_json_stream_with_budget(
+            &big,
+            "SELECT * WHERE { ?s ?p ?o }",
+            &QueryBudget::unlimited(),
+            |_c| {
+                calls += 1;
+                std::ops::ControlFlow::Break(()) // bail after the very first chunk
+            },
+        )
         .unwrap();
-        assert_eq!(calls, 1, "engine must stop after the sink breaks on the first chunk");
+        assert_eq!(
+            calls, 1,
+            "engine must stop after the sink breaks on the first chunk"
+        );
     }
 
     /// [OPUS-4.8] roborev 1538 (High) / sq-7d3dj.10: a budget must bound CPU/memory on a
@@ -2755,7 +3197,10 @@ mod tests {
         let big = Graph::load_str(&ttl, "turtle").unwrap();
         let q = "SELECT * WHERE { ?s ?p ?o }";
         // Tiny row cap on a 60k scan: must refuse with the budget error.
-        let b = QueryBudget { max_rows: Some(5), ..QueryBudget::unlimited() };
+        let b = QueryBudget {
+            max_rows: Some(5),
+            ..QueryBudget::unlimited()
+        };
         let e = query_json_with_budget(&big, q, &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
         // Already-expired deadline-only budget: the multi-core fan-out is now ADMITTED
@@ -2771,11 +3216,18 @@ mod tests {
         let e = query_json_with_budget(&big, q, &b).unwrap_err();
         let elapsed = start.elapsed();
         assert!(e.contains("query budget exceeded (timeout)"), "got: {e}");
-        assert!(elapsed < std::time::Duration::from_secs(2), "expired-deadline scan took {elapsed:?} — budget not bounding work");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "expired-deadline scan took {elapsed:?} — budget not bounding work"
+        );
         // Without a budget the same large scan still works (parallel path) and is complete:
         // one `"s":` binding key per result row.
         let full = query_json(&big, q).unwrap();
-        assert_eq!(full.matches("\"s\":").count(), 60_000, "unbudgeted scan must return all rows");
+        assert_eq!(
+            full.matches("\"s\":").count(),
+            60_000,
+            "unbudgeted scan must return all rows"
+        );
     }
 
     /// [OPUS-4.8] (sq-7d3dj.10) The multi-core SELECT-JSON serializer runs under a
@@ -2793,21 +3245,27 @@ mod tests {
         // empty result sets for the required size coverage.
         let mut big_ttl = String::from("@prefix ex: <http://ex/> .\n");
         for i in 0..60_000u32 {
-            big_ttl.push_str(&format!("ex:s{} ex:p \"value-{}-padding-padding-padding\" .\n", i, i));
+            big_ttl.push_str(&format!(
+                "ex:s{} ex:p \"value-{}-padding-padding-padding\" .\n",
+                i, i
+            ));
         }
         let big = Graph::load_str(&big_ttl, "turtle").unwrap();
         let small = g();
         let cases: Vec<(&Graph, &str)> = vec![
-            (&big, "SELECT * WHERE { ?s ?p ?o }"),                   // large — fan-out engaged
-            (&big, "SELECT ?o WHERE { ?s ?p ?o }"),                 // large, projected
-            (&big, "SELECT * WHERE { ?s <http://ex/absent> ?o }"),  // empty (unsatisfiable predicate)
-            (&small, "SELECT * WHERE { ?s ?p ?o }"),                // small — below the fan-out threshold
+            (&big, "SELECT * WHERE { ?s ?p ?o }"), // large — fan-out engaged
+            (&big, "SELECT ?o WHERE { ?s ?p ?o }"), // large, projected
+            (&big, "SELECT * WHERE { ?s <http://ex/absent> ?o }"), // empty (unsatisfiable predicate)
+            (&small, "SELECT * WHERE { ?s ?p ?o }"), // small — below the fan-out threshold
         ];
 
         for (graph, q) in cases {
             // Single-core reference: a generous ROW cap forces the cooperative SERIAL
             // loop (parallel_json_fanout → None) yet never trips (cap ≫ result size).
-            let serial_b = QueryBudget { max_rows: Some(10_000_000), ..QueryBudget::unlimited() };
+            let serial_b = QueryBudget {
+                max_rows: Some(10_000_000),
+                ..QueryBudget::unlimited()
+            };
             let serial = query_json_with_budget(graph, q, &serial_b).unwrap();
 
             // Multi-core: a DEADLINE-only budget far in the future admits the fan-out.
@@ -2816,15 +3274,29 @@ mod tests {
                 ..QueryBudget::unlimited()
             };
             let parallel = query_json_with_budget(graph, q, &par_b).unwrap();
-            assert_eq!(parallel, serial, "multi-core deadline-only body must be byte-identical to single-core for: {}", q);
+            assert_eq!(
+                parallel, serial,
+                "multi-core deadline-only body must be byte-identical to single-core for: {}",
+                q
+            );
 
             // The chunked (streamed) form the HTTP server uses must concatenate to the
             // same bytes — Content-Length is derived from these bytes, so this pins it.
             let chunks = query_json_chunks_with_budget(graph, q, &par_b).unwrap();
-            assert_eq!(chunks.concat(), serial, "chunked deadline-only concat must equal single-core for: {}", q);
+            assert_eq!(
+                chunks.concat(),
+                serial,
+                "chunked deadline-only concat must equal single-core for: {}",
+                q
+            );
 
             // And the fully-unbudgeted parallel path agrees too.
-            assert_eq!(query_json(graph, q).unwrap(), serial, "unbudgeted body must equal single-core for: {}", q);
+            assert_eq!(
+                query_json(graph, q).unwrap(),
+                serial,
+                "unbudgeted body must equal single-core for: {}",
+                q
+            );
         }
 
         // Bounded overrun: a huge result under an ALREADY-EXPIRED deadline-only budget
@@ -2838,7 +3310,11 @@ mod tests {
         let e = query_json_with_budget(&big, "SELECT * WHERE { ?s ?p ?o }", &expired).unwrap_err();
         let elapsed = start.elapsed();
         assert!(e.contains("query budget exceeded (timeout)"), "got: {}", e);
-        assert!(elapsed < Duration::from_secs(2), "expired-deadline fan-out took {:?} — overrun not bounded", elapsed);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expired-deadline fan-out took {:?} — overrun not bounded",
+            elapsed
+        );
     }
 
     #[test]
@@ -2856,14 +3332,27 @@ mod tests {
     #[test]
     fn budget_max_rows_refuses_not_truncates() {
         // 8 triples; max_rows 3 must REFUSE (error), never return a truncated result.
-        let b = QueryBudget { max_rows: Some(3), ..QueryBudget::unlimited() };
-        let e = query_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).map(|r| r.len()).unwrap_err();
+        let b = QueryBudget {
+            max_rows: Some(3),
+            ..QueryBudget::unlimited()
+        };
+        let e = query_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b)
+            .map(|r| r.len())
+            .unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
         let e = query_json_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
         // A generous row budget changes nothing.
-        let b = QueryBudget { max_rows: Some(1000), ..QueryBudget::unlimited() };
-        assert_eq!(query_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap().len(), 8);
+        let b = QueryBudget {
+            max_rows: Some(1000),
+            ..QueryBudget::unlimited()
+        };
+        assert_eq!(
+            query_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b)
+                .unwrap()
+                .len(),
+            8
+        );
     }
 
     /// [OPUS-4.8] (sq-s5is) The byte-accounted cap prices ROW WIDTH — the dimension the
@@ -2882,11 +3371,22 @@ mod tests {
         }
         let wide = Graph::load_str(&ttl, "turtle").unwrap();
         // A byte budget that comfortably fits the 3-wide BGP must NOT refuse it…
-        let generous = QueryBudget { max_bytes: Some(1 << 20), ..QueryBudget::unlimited() };
-        assert_eq!(query_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &generous).unwrap().len(), 9);
+        let generous = QueryBudget {
+            max_bytes: Some(1 << 20),
+            ..QueryBudget::unlimited()
+        };
+        assert_eq!(
+            query_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &generous)
+                .unwrap()
+                .len(),
+            9
+        );
         // …and a byte budget far below any 9-row working set MUST refuse with max-bytes
         // (not max-rows: the row cap is unset here, so width is the only thing tripping).
-        let tight = QueryBudget { max_bytes: Some(4), ..QueryBudget::unlimited() };
+        let tight = QueryBudget {
+            max_bytes: Some(4),
+            ..QueryBudget::unlimited()
+        };
         let e = query_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &tight).unwrap_err();
         assert!(e.contains("query budget exceeded (max-bytes)"), "got: {e}");
         let e = query_json_with_budget(&wide, "SELECT * WHERE { ?s ?p ?o }", &tight).unwrap_err();
@@ -2904,11 +3404,19 @@ mod tests {
         // literals needs no feature-gated builtin, so this holds in BOTH feature states.
         let q = "SELECT ?big WHERE { BIND(CONCAT('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
                  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') AS ?big) }";
-        let b = QueryBudget { max_rows: Some(10), max_bytes: Some(16), ..QueryBudget::unlimited() };
+        let b = QueryBudget {
+            max_rows: Some(10),
+            max_bytes: Some(16),
+            ..QueryBudget::unlimited()
+        };
         let e = query_with_budget(&g(), q, &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-bytes)"), "got: {e}");
         // A generous byte cap returns the single row unmodified.
-        let ok = QueryBudget { max_rows: Some(10), max_bytes: Some(1 << 20), ..QueryBudget::unlimited() };
+        let ok = QueryBudget {
+            max_rows: Some(10),
+            max_bytes: Some(1 << 20),
+            ..QueryBudget::unlimited()
+        };
         assert_eq!(query_with_budget(&g(), q, &ok).unwrap().len(), 1);
     }
 
@@ -2918,9 +3426,17 @@ mod tests {
     #[test]
     fn budget_max_bytes_unset_is_noop() {
         let q = "SELECT * WHERE { ?s ?p ?o }";
-        let only_rows = QueryBudget { max_rows: Some(100), ..QueryBudget::unlimited() };
+        let only_rows = QueryBudget {
+            max_rows: Some(100),
+            ..QueryBudget::unlimited()
+        };
         assert_eq!(query_with_budget(&g(), q, &only_rows).unwrap().len(), 8);
-        assert_eq!(query_with_budget(&g(), q, &QueryBudget::unlimited()).unwrap().len(), 8);
+        assert_eq!(
+            query_with_budget(&g(), q, &QueryBudget::unlimited())
+                .unwrap()
+                .len(),
+            8
+        );
         assert_eq!(
             query_json(&g(), q).unwrap(),
             query_json_with_budget(&g(), q, &QueryBudget::unlimited()).unwrap()
@@ -2950,7 +3466,9 @@ mod tests {
         // Deterministic pseudo-random graph (seeded LCG, no external randomness).
         let mut seed: u64 = 0x1234_5678;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         let n_nodes = 40u32;
@@ -2969,7 +3487,11 @@ mod tests {
 
         // Chain: ?a e ?b . ?b e ?c
         let chain = naive_count_chain(&edges);
-        let q = query(&graph, "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }").unwrap();
+        let q = query(
+            &graph,
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }",
+        )
+        .unwrap();
         assert_eq!(q.len(), chain, "chain join count mismatch");
 
         // Triangle: ?a e ?b . ?b e ?c . ?c e ?a  (cyclic)
@@ -3015,7 +3537,10 @@ mod tests {
         let mut reg = FunctionRegistry::new();
         reg.register("http://ex/fn#double", |args: &[Term]| {
             let [Term::Literal(l)] = args else {
-                return Err(format!("double() expects 1 literal argument, got {}", args.len()));
+                return Err(format!(
+                    "double() expects 1 literal argument, got {}",
+                    args.len()
+                ));
             };
             let n: i64 = l.value().parse().map_err(|e| format!("double(): {e}"))?;
             Ok(Term::Literal(oxrdf::Literal::from(n * 2)))
@@ -3034,7 +3559,11 @@ mod tests {
             &reg,
         )
         .unwrap();
-        let ds: Vec<String> = r.rows.iter().map(|row| row[0].as_ref().unwrap().to_string()).collect();
+        let ds: Vec<String> = r
+            .rows
+            .iter()
+            .map(|row| row[0].as_ref().unwrap().to_string())
+            .collect();
         assert!(ds[0].contains("\"50\"") && ds[1].contains("\"60\"") && ds[2].contains("\"70\""));
         // FILTER: the result participates in ordinary value comparison.
         let r = query_with_functions(
@@ -3045,7 +3574,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.len(), 1); // carol (35 -> 70)
-        // The budget variant threads the registry too.
+                                // The budget variant threads the registry too.
         let r = query_with_functions_and_budget(
             &g(),
             "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
@@ -3062,7 +3591,9 @@ mod tests {
         let reg = doubling_registry();
         let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(<http://ex/fn#nope>(?a) > 0) }";
         // Registry installed but the IRI is not in it: the same hard error …
-        let err = query_with_functions(&g(), q, &reg).map(|r| r.len()).unwrap_err();
+        let err = query_with_functions(&g(), q, &reg)
+            .map(|r| r.len())
+            .unwrap_err();
         assert!(err.contains("unsupported SPARQL function"), "got: {err}");
         // … as the registry-free entry point raises (pre-registry behaviour intact).
         let err = query(&g(), q).map(|r| r.len()).unwrap_err();
@@ -3090,7 +3621,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.len(), 3);
-        assert!(r.rows.iter().all(|row| row[1].is_none()), "errored BIND must be unbound");
+        assert!(
+            r.rows.iter().all(|row| row[1].is_none()),
+            "errored BIND must be unbound"
+        );
         // In a FILTER the same error excludes every row (error -> EBV false).
         let r = query_with_functions(
             &g(),
@@ -3128,16 +3662,20 @@ mod tests {
         // A (pathological) registration under an XSD cast IRI must NOT shadow the
         // builtin constructor cast — the cast check runs first.
         let mut reg = doubling_registry();
-        reg.register("http://www.w3.org/2001/XMLSchema#integer", |_args: &[Term]| {
-            Ok(Term::Literal(oxrdf::Literal::from(999)))
-        });
+        reg.register(
+            "http://www.w3.org/2001/XMLSchema#integer",
+            |_args: &[Term]| Ok(Term::Literal(oxrdf::Literal::from(999))),
+        );
         let r = query_with_functions(
             &g(),
             "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (xsd:integer(\"7\") AS ?i) WHERE {}",
             &reg,
         )
         .unwrap();
-        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"7\"^^<http://www.w3.org/2001/XMLSchema#integer>");
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap().to_string(),
+            "\"7\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        );
         // The registry is uninstalled when the entry point returns: the same custom
         // IRI is a hard error again on the plain entry point afterwards.
         let q = "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(fn:double(?a) > 0) }";

@@ -42,7 +42,14 @@ fn load(ttl: &str) -> Graph {
 /// Row representation: each cell is Some(term_string) or None for unbound.
 fn rows(g: &Graph, q: &str) -> Vec<Vec<Option<String>>> {
     let r = query(g, &format!("{PFX}{q}")).expect("query failed");
-    r.rows.iter().map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect()).collect()
+    r.rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()))
+                .collect()
+        })
+        .collect()
 }
 
 /// The oracle for a LIMIT/OFFSET result: run the FULL ORDER BY (no LIMIT),
@@ -89,7 +96,8 @@ fn duplicate_keys() {
         let limit = 5;
         // SINGLE sort key ?v (all tied). Observe ?s to see which rows survived.
         let base_q = "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v";
-        let topk_q = format!("SELECT ?s WHERE {{ ?s ex:v ?v }} ORDER BY ?v LIMIT {limit} OFFSET {offset}");
+        let topk_q =
+            format!("SELECT ?s WHERE {{ ?s ex:v ?v }} ORDER BY ?v LIMIT {limit} OFFSET {offset}");
         let got = rows(&g, &topk_q);
         let exp = oracle(&g, base_q, offset, limit);
         assert_eq!(
@@ -115,10 +123,19 @@ fn limit_zero() {
 
     // LIMIT 0 (with and without OFFSET) must return empty rows, not panic/abort.
     let got = rows(&g, "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v LIMIT 0");
-    assert!(got.is_empty(), "limit_zero: LIMIT 0 must be empty, got {got:?}");
+    assert!(
+        got.is_empty(),
+        "limit_zero: LIMIT 0 must be empty, got {got:?}"
+    );
 
-    let got = rows(&g, "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v LIMIT 0 OFFSET 3");
-    assert!(got.is_empty(), "limit_zero: LIMIT 0 OFFSET 3 must be empty, got {got:?}");
+    let got = rows(
+        &g,
+        "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v LIMIT 0 OFFSET 3",
+    );
+    assert!(
+        got.is_empty(),
+        "limit_zero: LIMIT 0 OFFSET 3 must be empty, got {got:?}"
+    );
 }
 
 // ─── empty_input ─────────────────────────────────────────────────────────────
@@ -130,11 +147,20 @@ fn limit_zero() {
 fn empty_input() {
     // Graph has data, but the query pattern matches no rows.
     let g = load("ex:s1 ex:v 1 .\n");
-    let got = rows(&g, "SELECT ?s WHERE { ?s ex:nonexistent ?v } ORDER BY ?v LIMIT 5");
+    let got = rows(
+        &g,
+        "SELECT ?s WHERE { ?s ex:nonexistent ?v } ORDER BY ?v LIMIT 5",
+    );
     assert!(got.is_empty(), "empty_input: expected empty, got {got:?}");
     // Also with OFFSET.
-    let got = rows(&g, "SELECT ?s WHERE { ?s ex:nonexistent ?v } ORDER BY ?v LIMIT 5 OFFSET 2");
-    assert!(got.is_empty(), "empty_input (offset): expected empty, got {got:?}");
+    let got = rows(
+        &g,
+        "SELECT ?s WHERE { ?s ex:nonexistent ?v } ORDER BY ?v LIMIT 5 OFFSET 2",
+    );
+    assert!(
+        got.is_empty(),
+        "empty_input (offset): expected empty, got {got:?}"
+    );
 }
 
 // ─── offset_budget_ge_n ──────────────────────────────────────────────────────
@@ -156,10 +182,15 @@ fn offset_budget_ge_n() {
     // cap == n (offset 3 + limit 5) and cap > n (offset 6 + limit 5): both must
     // take the full-sort path without panicking and match the oracle.
     for (offset, limit) in [(3usize, 5usize), (6, 5), (7, 5)] {
-        let topk_q = format!("SELECT ?s ?v WHERE {{ ?s ex:v ?v }} ORDER BY ?v LIMIT {limit} OFFSET {offset}");
+        let topk_q = format!(
+            "SELECT ?s ?v WHERE {{ ?s ex:v ?v }} ORDER BY ?v LIMIT {limit} OFFSET {offset}"
+        );
         let got = rows(&g, &topk_q);
         let exp = oracle(&g, base_q, offset, limit);
-        assert_eq!(got, exp, "offset_budget_ge_n: offset={offset} limit={limit}");
+        assert_eq!(
+            got, exp,
+            "offset_budget_ge_n: offset={offset} limit={limit}"
+        );
     }
 }
 
@@ -176,7 +207,9 @@ fn distinct_keys() {
 
     for (offset, limit) in [(0, 5), (10, 5), (25, 10), (0, 30)] {
         let base_q = "SELECT ?s ?age WHERE { ?s ex:age ?age } ORDER BY ?age";
-        let topk_q = format!("SELECT ?s ?age WHERE {{ ?s ex:age ?age }} ORDER BY ?age LIMIT {limit} OFFSET {offset}");
+        let topk_q = format!(
+            "SELECT ?s ?age WHERE {{ ?s ex:age ?age }} ORDER BY ?age LIMIT {limit} OFFSET {offset}"
+        );
         let got = rows(&g, &topk_q);
         let exp = oracle(&g, base_q, offset, limit);
         assert_eq!(
@@ -202,7 +235,9 @@ fn offset_lands_on_boundary() {
     // offset=10 lands exactly at the start of the ?v=1 group.
     let base_q = "SELECT ?s ?v WHERE { ?s ex:v ?v } ORDER BY ?v ?s";
     for (offset, limit) in [(10, 5), (10, 10), (0, 10), (5, 10)] {
-        let topk_q = format!("SELECT ?s ?v WHERE {{ ?s ex:v ?v }} ORDER BY ?v ?s LIMIT {limit} OFFSET {offset}");
+        let topk_q = format!(
+            "SELECT ?s ?v WHERE {{ ?s ex:v ?v }} ORDER BY ?v ?s LIMIT {limit} OFFSET {offset}"
+        );
         let got = rows(&g, &topk_q);
         let exp = oracle(&g, base_q, offset, limit);
         assert_eq!(
@@ -228,10 +263,7 @@ fn desc_ordering() {
         let topk_q = format!("SELECT ?s ?score WHERE {{ ?s ex:score ?score }} ORDER BY DESC(?score) LIMIT {limit} OFFSET {offset}");
         let got = rows(&g, &topk_q);
         let exp = oracle(&g, base_q, offset, limit);
-        assert_eq!(
-            got, exp,
-            "desc_ordering: offset={offset} limit={limit}"
-        );
+        assert_eq!(got, exp, "desc_ordering: offset={offset} limit={limit}");
     }
 }
 
@@ -281,13 +313,12 @@ fn mixed_types() {
     let base_q = "SELECT ?s ?v WHERE { ?s ex:name|ex:v ?v } ORDER BY ?v";
     // Just verify top-k matches full-sort for various slices.
     for (offset, limit) in [(0, 3), (2, 3), (4, 3)] {
-        let topk_q = format!("SELECT ?s ?v WHERE {{ ?s ex:name|ex:v ?v }} ORDER BY ?v LIMIT {limit} OFFSET {offset}");
+        let topk_q = format!(
+            "SELECT ?s ?v WHERE {{ ?s ex:name|ex:v ?v }} ORDER BY ?v LIMIT {limit} OFFSET {offset}"
+        );
         let got = rows(&g, &topk_q);
         let exp = oracle(&g, base_q, offset, limit);
-        assert_eq!(
-            got, exp,
-            "mixed_types: offset={offset} limit={limit}"
-        );
+        assert_eq!(got, exp, "mixed_types: offset={offset} limit={limit}");
     }
 }
 
@@ -299,8 +330,14 @@ fn offset_beyond_size() {
     let ttl = "ex:s1 ex:v 1 . ex:s2 ex:v 2 . ex:s3 ex:v 3 .\n";
     let g = load(ttl);
 
-    let got = rows(&g, "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v LIMIT 5 OFFSET 100");
-    assert!(got.is_empty(), "offset_beyond_size: expected empty, got {got:?}");
+    let got = rows(
+        &g,
+        "SELECT ?s WHERE { ?s ex:v ?v } ORDER BY ?v LIMIT 5 OFFSET 100",
+    );
+    assert!(
+        got.is_empty(),
+        "offset_beyond_size: expected empty, got {got:?}"
+    );
 }
 
 // ─── k_at_threshold ──────────────────────────────────────────────────────────
@@ -372,7 +409,9 @@ fn iri_column() {
     let mut ttl = String::new();
     for i in 0..100usize {
         // Pad to 3 digits so lexicographic IRI order matches numeric order.
-        ttl.push_str(&format!("ex:pub{i:03} <http://www.w3.org/2000/01/rdf-schema#seeAlso> ex:ref{i:03} .\n"));
+        ttl.push_str(&format!(
+            "ex:pub{i:03} <http://www.w3.org/2000/01/rdf-schema#seeAlso> ex:ref{i:03} .\n"
+        ));
     }
     let g = load(&ttl);
 

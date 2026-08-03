@@ -62,10 +62,7 @@ fn ucq_canonical(q: &Query, answer: &[&str]) -> BTreeSet<String> {
     let body = peel(pattern);
     let mut disjuncts = Vec::new();
     collect_union(body, &mut disjuncts);
-    disjuncts
-        .iter()
-        .map(|bgp| canon_bgp(bgp, answer))
-        .collect()
+    disjuncts.iter().map(|bgp| canon_bgp(bgp, answer)).collect()
 }
 
 /// Peel the outer Project/Distinct to reach the UCQ body.
@@ -242,10 +239,7 @@ fn oracle_role_inclusion() {
     let q = query("SELECT ?x ?y WHERE { ?x :worksFor ?y }");
     let r = rewrite(&q, &t).unwrap();
     let got = ucq_canonical(&r.query, &["x", "y"]);
-    let want = expected(&[
-        "?x <http://ex/worksFor> ?y",
-        "?x <http://ex/manages> ?y",
-    ]);
+    let want = expected(&["?x <http://ex/worksFor> ?y", "?x <http://ex/manages> ?y"]);
     assert_eq!(got, want, "report = {:?}", r.report);
 }
 
@@ -361,9 +355,7 @@ fn oracle_non_ql_axiom_skipped() {
 // ---------------------------------------------------------------------------------------------
 #[test]
 fn oracle_inverse_of_role_chain() {
-    let t = tbox(
-        ":employs owl:inverseOf :worksFor . :manages rdfs:subPropertyOf :employs .",
-    );
+    let t = tbox(":employs owl:inverseOf :worksFor . :manages rdfs:subPropertyOf :employs .");
     let q = query("SELECT ?x ?y WHERE { ?x :worksFor ?y }");
     let r = rewrite(&q, &t).unwrap();
     let got = ucq_canonical(&r.query, &["x", "y"]);
@@ -449,7 +441,8 @@ fn oracle_minimise_drops_redundant_conjunct() {
     let got = ucq_production(&q, &t, &["x"]);
     let want = expected(&[&format!("?x <{TYPE}> <http://ex/A>")]);
     assert_eq!(
-        got, want,
+        got,
+        want,
         "minimisation must drop the A∧B disjunct (contained in A); report = {:?}",
         rewrite_production(&q, &t).unwrap().report
     );
@@ -478,7 +471,8 @@ fn oracle_treewitness_folds_existential_role() {
         &format!("?x <{TYPE}> <http://ex/Employee>"),
     ]);
     assert_eq!(
-        got, want,
+        got,
+        want,
         "tree-witness production UCQ must be {{ worksFor(?x,_), Employee(?x) }}; report = {:?}",
         rewrite_production(&q, &t).unwrap().report
     );
@@ -502,7 +496,8 @@ fn oracle_treewitness_blocked_on_bound_object() {
     let got = ucq_production(&q, &t, &["x", "y"]);
     let want = expected(&["?x <http://ex/worksFor> ?y"]);
     assert_eq!(
-        got, want,
+        got,
+        want,
         "tree-witness must NOT fold a bound (projected) object; report = {:?}",
         rewrite_production(&q, &t).unwrap().report
     );
@@ -525,7 +520,8 @@ fn oracle_minimise_subclass_chain_to_generator() {
     let got = ucq_production(&q, &t, &["x"]);
     let want = expected(&[&format!("?x <{TYPE}> <http://ex/A>")]);
     assert_eq!(
-        got, want,
+        got,
+        want,
         "A∧C under A⊑B⊑C minimises to {{ A(?x) }}; report = {:?}",
         rewrite_production(&q, &t).unwrap().report
     );
@@ -606,7 +602,8 @@ fn oracle_minimise_keeps_two_var_product() {
         &format!("?x {a} . ?y {a}"),
     ]);
     assert_eq!(
-        got, want,
+        got,
+        want,
         "two distinguished vars must keep all 4 disjuncts (no over-minimisation); report = {:?}",
         rewrite_production(&q, &t).unwrap().report
     );

@@ -17,12 +17,15 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 // [OPUS-4.8] criterion 0.8 deprecated its own black_box in favour of std::hint::black_box.
-use std::hint::black_box;
 use sparq_substrate::{
-    join::{build_table, hash_probe_serial, lftj_recurse, merge_join, JoinKeys, NoBudget, Trie, TrieIter},
+    join::{
+        build_table, hash_probe_serial, lftj_recurse, merge_join, JoinKeys, NoBudget, Trie,
+        TrieIter,
+    },
     numeric::{ArithOp, Dec, Num},
     rows::{Row, NO_ID},
 };
+use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,7 +53,10 @@ fn sorted_rows(n: u32) -> (Vec<Row>, Vec<Row>) {
 
 /// `JoinKeys` descriptor: single equi-join key on column 0; append right col 1.
 fn key_col0() -> JoinKeys {
-    JoinKeys { key_cols: vec![(0, 0)], right_only: vec![1] }
+    JoinKeys {
+        key_cols: vec![(0, 0)],
+        right_only: vec![1],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +155,10 @@ fn bench_num_arithmetic(c: &mut Criterion) {
             .map(|i| {
                 (
                     Num::Dec(Dec { mant: i, scale: 2 }),
-                    Num::Dec(Dec { mant: i + 1, scale: 2 }),
+                    Num::Dec(Dec {
+                        mant: i + 1,
+                        scale: 2,
+                    }),
                 )
             })
             .collect();
@@ -210,19 +219,25 @@ fn bench_lftj_triangle(c: &mut Criterion) {
     let mut group = c.benchmark_group("lftj_triangle");
     for n in [10u32, 30, 100] {
         // Complete-graph edges: (i,j) for all 0 ≤ i < j < n, sorted lexicographically.
-        let edges: Vec<(u32, u32)> =
-            (0..n).flat_map(|i| ((i + 1)..n).map(move |j| (i, j))).collect();
-        let r0 = Trie { tuples: edges.iter().map(|&(a, b)| vec![a, b]).collect() };
-        let r1 = Trie { tuples: edges.iter().map(|&(b, c)| vec![b, c]).collect() };
-        let r2 = Trie { tuples: edges.iter().map(|&(a, c)| vec![a, c]).collect() };
+        let edges: Vec<(u32, u32)> = (0..n)
+            .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+            .collect();
+        let r0 = Trie {
+            tuples: edges.iter().map(|&(a, b)| vec![a, b]).collect(),
+        };
+        let r1 = Trie {
+            tuples: edges.iter().map(|&(b, c)| vec![b, c]).collect(),
+        };
+        let r2 = Trie {
+            tuples: edges.iter().map(|&(a, c)| vec![a, c]).collect(),
+        };
         // level 0 (?a): tries 0 and 2; level 1 (?b): tries 0 and 1; level 2 (?c): tries 1 and 2.
         let parts_at_level = vec![vec![0usize, 2], vec![0usize, 1], vec![1usize, 2]];
         let expected = n * (n.saturating_sub(1)) * (n.saturating_sub(2)) / 6;
         group.throughput(Throughput::Elements(expected as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                let mut iters =
-                    vec![TrieIter::new(&r0), TrieIter::new(&r1), TrieIter::new(&r2)];
+                let mut iters = vec![TrieIter::new(&r0), TrieIter::new(&r1), TrieIter::new(&r2)];
                 let mut current = vec![NO_ID; 3];
                 let mut out = Vec::new();
                 lftj_recurse(
@@ -255,9 +270,15 @@ fn bench_lftj_triangle(c: &mut Criterion) {
 fn bench_lftj_intersection_k3(c: &mut Criterion) {
     let mut group = c.benchmark_group("lftj_intersection_k3");
     for n in [1_000u32, 10_000, 100_000] {
-        let r = Trie { tuples: (0..n).step_by(2).map(|v| vec![v]).collect() };
-        let s = Trie { tuples: (0..n).step_by(3).map(|v| vec![v]).collect() };
-        let t = Trie { tuples: (0..n).step_by(5).map(|v| vec![v]).collect() };
+        let r = Trie {
+            tuples: (0..n).step_by(2).map(|v| vec![v]).collect(),
+        };
+        let s = Trie {
+            tuples: (0..n).step_by(3).map(|v| vec![v]).collect(),
+        };
+        let t = Trie {
+            tuples: (0..n).step_by(5).map(|v| vec![v]).collect(),
+        };
         // All three tries participate at level 0: k=3.
         let parts_at_level = vec![vec![0usize, 1, 2]];
         // multiples of lcm(2,3,5)=30 in 0..n — 0 IS included, so the count is
@@ -267,8 +288,7 @@ fn bench_lftj_intersection_k3(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                let mut iters =
-                    vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
+                let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
                 let mut current = vec![NO_ID; 1];
                 let mut out = Vec::new();
                 lftj_recurse(
@@ -293,6 +313,13 @@ fn bench_lftj_intersection_k3(c: &mut Criterion) {
 // Registration
 // ---------------------------------------------------------------------------
 
-criterion_group!(join_benches, bench_merge_join, bench_hash_build, bench_hash_probe, bench_lftj_triangle, bench_lftj_intersection_k3);
+criterion_group!(
+    join_benches,
+    bench_merge_join,
+    bench_hash_build,
+    bench_hash_probe,
+    bench_lftj_triangle,
+    bench_lftj_intersection_k3
+);
 criterion_group!(numeric_benches, bench_num_arithmetic);
 criterion_main!(join_benches, numeric_benches);

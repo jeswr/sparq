@@ -95,7 +95,8 @@ ex:bob ex:odd "weird"^^ex:custom .
 /// test pins duplicate-VALUE ordering in a no-entailment fixture.
 #[test]
 fn entailed_solution_order_matches_engine_order_by() {
-    let (mut dict, mut triples) = Graph::parse_to_triples(FIXTURE, "turtle").expect("fixture parses");
+    let (mut dict, mut triples) =
+        Graph::parse_to_triples(FIXTURE, "turtle").expect("fixture parses");
 
     // Two RDF 1.2 quoted-triple objects (structural dict terms; differ in their object
     // component, one of which is an inline-integer id) — interned exactly as a loader
@@ -119,23 +120,27 @@ fn entailed_solution_order_matches_engine_order_by() {
 
     // Materialise the RDFS closure: the ordered answer set must contain ENTAILED rows.
     let added = materialize(Profile::Rdfs, &mut dict, &mut triples);
-    assert!(added > 0, "the fixture must actually entail new solutions (got {} added)", added);
+    assert!(
+        added > 0,
+        "the fixture must actually entail new solutions (got {} added)",
+        added
+    );
 
     // Reasoner side: sort the full object multiset (duplicates preserved — the closure
     // is triple-level duplicate-free, so any duplicate object values come from distinct
     // triples, and both sides see the same triples).
     let mut objects: Vec<Id> = triples.iter().map(|t| t[2]).collect();
     sort_ids(&dict, &mut objects);
-    let reason_order: Vec<String> = objects.iter().map(|&id| dict.term(id).to_string()).collect();
+    let reason_order: Vec<String> = objects
+        .iter()
+        .map(|&id| dict.term(id).to_string())
+        .collect();
 
     // Engine side: SAME closure, full multiset ORDER BY (no DISTINCT — both sides are
     // triple-level duplicate-free and must match without deduplication).
     let graph = Graph::from_parts(dict, triples);
-    let res = sparq_engine::query(
-        &graph,
-        "SELECT ?o WHERE { ?s ?p ?o } ORDER BY ?o",
-    )
-    .expect("engine query runs");
+    let res = sparq_engine::query(&graph, "SELECT ?o WHERE { ?s ?p ?o } ORDER BY ?o")
+        .expect("engine query runs");
     let engine_order: Vec<String> = res
         .rows
         .iter()
@@ -177,18 +182,22 @@ ex:b2 ex:val "2"^^xsd:integer .
 ex:c  ex:val "-3"^^xsd:integer .
 ex:d  ex:val "5"^^xsd:integer .
 "#;
-    let (mut dict, mut triples) =
-        Graph::parse_to_triples(MULTI, "turtle").expect("fixture parses");
+    let (mut dict, mut triples) = Graph::parse_to_triples(MULTI, "turtle").expect("fixture parses");
 
     // No RDFS axioms in the fixture — materialise must add nothing.
     let added = materialize(Profile::Rdfs, &mut dict, &mut triples);
-    assert_eq!(added, 0, "no RDFS schema in fixture — materialise must add nothing");
+    assert_eq!(
+        added, 0,
+        "no RDFS schema in fixture — materialise must add nothing"
+    );
 
     // Reasoner side: sort the full object multiset (duplicates preserved).
     let mut objects: Vec<Id> = triples.iter().map(|t| t[2]).collect();
     sort_ids(&dict, &mut objects);
-    let reason_order: Vec<String> =
-        objects.iter().map(|&id| dict.term(id).to_string()).collect();
+    let reason_order: Vec<String> = objects
+        .iter()
+        .map(|&id| dict.term(id).to_string())
+        .collect();
 
     // Engine side: same multiset via real ORDER BY, no DISTINCT (duplicates kept).
     let graph = Graph::from_parts(dict, triples);
@@ -206,8 +215,7 @@ ex:d  ex:val "5"^^xsd:integer .
         "multiset sizes must match (duplicates preserved on both sides)"
     );
     assert_eq!(
-        reason_order,
-        engine_order,
+        reason_order, engine_order,
         "multiset ORDER BY parity diverged for duplicate bindings"
     );
 }

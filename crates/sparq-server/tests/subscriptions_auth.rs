@@ -52,7 +52,11 @@ async fn spawn_with(config: ServerConfig) -> String {
 
 /// A config whose read surface is gated by `TOKEN` (`--auth-token` + `--auth-token-read`).
 fn read_gated_config() -> ServerConfig {
-    ServerConfig { auth_token: Some(TOKEN.to_string()), auth_token_read: true, ..ServerConfig::default() }
+    ServerConfig {
+        auth_token: Some(TOKEN.to_string()),
+        auth_token_read: true,
+        ..ServerConfig::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -74,13 +78,19 @@ async fn sse_status(addr: &str, bearer: Option<&str>) -> reqwest::StatusCode {
 #[tokio::test]
 async fn sse_without_token_is_401_when_read_gated() {
     let addr = spawn_with(read_gated_config()).await;
-    assert_eq!(sse_status(&addr, None).await, reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        sse_status(&addr, None).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
 async fn sse_with_wrong_token_is_401_when_read_gated() {
     let addr = spawn_with(read_gated_config()).await;
-    assert_eq!(sse_status(&addr, Some("not-the-token")).await, reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        sse_status(&addr, Some("not-the-token")).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
@@ -88,10 +98,27 @@ async fn sse_with_correct_token_opens_stream() {
     let addr = spawn_with(read_gated_config()).await;
     let mut url = reqwest::Url::parse(&format!("http://{addr}/subscriptions/sse")).unwrap();
     url.query_pairs_mut().append_pair("query", AGES);
-    let resp = reqwest::Client::new().get(url).header("authorization", format!("Bearer {TOKEN}")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK, "correct token must open the stream");
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
-    assert!(ct.starts_with("text/event-stream"), "unexpected content-type: {ct}");
+    let resp = reqwest::Client::new()
+        .get(url)
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "correct token must open the stream"
+    );
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "unexpected content-type: {ct}"
+    );
 }
 
 #[tokio::test]
@@ -104,7 +131,11 @@ async fn sse_open_when_no_read_token_configured() {
 #[tokio::test]
 async fn sse_open_when_only_write_gated() {
     // A write-only token (no --auth-token-read) leaves the read surface open (back-compat).
-    let cfg = ServerConfig { auth_token: Some(TOKEN.to_string()), auth_token_read: false, ..ServerConfig::default() };
+    let cfg = ServerConfig {
+        auth_token: Some(TOKEN.to_string()),
+        auth_token_read: false,
+        ..ServerConfig::default()
+    };
     let addr = spawn_with(cfg).await;
     assert_eq!(sse_status(&addr, None).await, reqwest::StatusCode::OK);
 }
@@ -123,7 +154,11 @@ fn ws_uri(addr: &str) -> Uri {
 async fn try_ws_upgrade(builder: ClientRequestBuilder) -> Result<Option<String>, u16> {
     match tokio_tungstenite::connect_async(builder).await {
         Ok((_stream, resp)) => {
-            let proto = resp.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()).map(str::to_string);
+            let proto = resp
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             Ok(proto)
         }
         Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => Err(resp.status().as_u16()),
@@ -134,23 +169,31 @@ async fn try_ws_upgrade(builder: ClientRequestBuilder) -> Result<Option<String>,
 #[tokio::test]
 async fn ws_upgrade_without_token_is_rejected_when_read_gated() {
     let addr = spawn_with(read_gated_config()).await;
-    let status = try_ws_upgrade(ClientRequestBuilder::new(ws_uri(&addr))).await.expect_err("upgrade must be refused without a token");
+    let status = try_ws_upgrade(ClientRequestBuilder::new(ws_uri(&addr)))
+        .await
+        .expect_err("upgrade must be refused without a token");
     assert_eq!(status, 401, "unauthenticated WS upgrade must be 401");
 }
 
 #[tokio::test]
 async fn ws_upgrade_with_wrong_token_is_rejected_when_read_gated() {
     let addr = spawn_with(read_gated_config()).await;
-    let builder = ClientRequestBuilder::new(ws_uri(&addr)).with_header("Authorization", "Bearer nope");
-    let status = try_ws_upgrade(builder).await.expect_err("wrong token must be refused");
+    let builder =
+        ClientRequestBuilder::new(ws_uri(&addr)).with_header("Authorization", "Bearer nope");
+    let status = try_ws_upgrade(builder)
+        .await
+        .expect_err("wrong token must be refused");
     assert_eq!(status, 401);
 }
 
 #[tokio::test]
 async fn ws_upgrade_with_authorization_header_is_accepted() {
     let addr = spawn_with(read_gated_config()).await;
-    let builder = ClientRequestBuilder::new(ws_uri(&addr)).with_header("Authorization", format!("Bearer {TOKEN}"));
-    let proto = try_ws_upgrade(builder).await.expect("Bearer header must be accepted");
+    let builder = ClientRequestBuilder::new(ws_uri(&addr))
+        .with_header("Authorization", format!("Bearer {TOKEN}"));
+    let proto = try_ws_upgrade(builder)
+        .await
+        .expect("Bearer header must be accepted");
     // No subprotocol was offered, so none is echoed back.
     assert_eq!(proto, None);
 }
@@ -160,31 +203,50 @@ async fn ws_upgrade_with_bearer_subprotocol_is_accepted_and_echoed() {
     let addr = spawn_with(read_gated_config()).await;
     let sub = format!("bearer.{TOKEN}");
     let builder = ClientRequestBuilder::new(ws_uri(&addr)).with_sub_protocol(sub.clone());
-    let proto = try_ws_upgrade(builder).await.expect("bearer subprotocol must be accepted");
+    let proto = try_ws_upgrade(builder)
+        .await
+        .expect("bearer subprotocol must be accepted");
     // RFC 6455: the server confirms the matched subprotocol so the browser handshake completes.
-    assert_eq!(proto.as_deref(), Some(sub.as_str()), "server must echo the accepted bearer subprotocol");
+    assert_eq!(
+        proto.as_deref(),
+        Some(sub.as_str()),
+        "server must echo the accepted bearer subprotocol"
+    );
 }
 
 #[tokio::test]
 async fn ws_upgrade_with_wrong_bearer_subprotocol_is_rejected() {
     let addr = spawn_with(read_gated_config()).await;
     let builder = ClientRequestBuilder::new(ws_uri(&addr)).with_sub_protocol("bearer.nope");
-    let status = try_ws_upgrade(builder).await.expect_err("a wrong subprotocol token must be refused");
-    assert_eq!(status, 401, "the subprotocol token is VALIDATED, not merely echoed");
+    let status = try_ws_upgrade(builder)
+        .await
+        .expect_err("a wrong subprotocol token must be refused");
+    assert_eq!(
+        status, 401,
+        "the subprotocol token is VALIDATED, not merely echoed"
+    );
 }
 
 #[tokio::test]
 async fn ws_upgrade_open_when_no_read_token_configured() {
     // Back-compat: no token at all → the upgrade succeeds with no credentials.
     let addr = spawn_with(ServerConfig::default()).await;
-    let proto = try_ws_upgrade(ClientRequestBuilder::new(ws_uri(&addr))).await.expect("upgrade must succeed with no token configured");
+    let proto = try_ws_upgrade(ClientRequestBuilder::new(ws_uri(&addr)))
+        .await
+        .expect("upgrade must succeed with no token configured");
     assert_eq!(proto, None);
 }
 
 #[tokio::test]
 async fn ws_upgrade_open_when_only_write_gated() {
     // A write-only token leaves the WS read surface open (back-compat).
-    let cfg = ServerConfig { auth_token: Some(TOKEN.to_string()), auth_token_read: false, ..ServerConfig::default() };
+    let cfg = ServerConfig {
+        auth_token: Some(TOKEN.to_string()),
+        auth_token_read: false,
+        ..ServerConfig::default()
+    };
     let addr = spawn_with(cfg).await;
-    try_ws_upgrade(ClientRequestBuilder::new(ws_uri(&addr))).await.expect("write-only gate must leave the WS upgrade open");
+    try_ws_upgrade(ClientRequestBuilder::new(ws_uri(&addr)))
+        .await
+        .expect("write-only gate must leave the WS upgrade open");
 }

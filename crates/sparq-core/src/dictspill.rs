@@ -74,7 +74,10 @@ impl SpillConfig {
         let budget = detected_ram_bytes()
             .map(|r| ((r / 4) as usize).max(64 << 20))
             .unwrap_or(2 << 30);
-        SpillConfig { mem_budget: budget, disk_floor: 1 << 30 }
+        SpillConfig {
+            mem_budget: budget,
+            disk_floor: 1 << 30,
+        }
     }
 
     /// The env-var gate used by [`Graph::build_external`](crate::Graph::build_external):
@@ -110,7 +113,8 @@ impl SpillConfig {
         if let Some(mb) = lookup("SPARQ_DICT_SPILL_BUDGET_MB").and_then(|v| v.parse::<u64>().ok()) {
             cfg.mem_budget = (mb as usize).saturating_mul(1 << 20).max(1 << 20);
         }
-        if let Some(mb) = lookup("SPARQ_DICT_SPILL_DISK_FLOOR_MB").and_then(|v| v.parse::<u64>().ok())
+        if let Some(mb) =
+            lookup("SPARQ_DICT_SPILL_DISK_FLOOR_MB").and_then(|v| v.parse::<u64>().ok())
         {
             cfg.disk_floor = mb.saturating_mul(1 << 20);
         }
@@ -193,7 +197,11 @@ fn serialize_termparts(tp: &TermParts, out: &mut Vec<u8>) {
             out.extend_from_slice(prefix.as_bytes());
             out.extend_from_slice(suffix.as_bytes());
         }
-        TermParts::Lit { value, datatype, lang } => {
+        TermParts::Lit {
+            value,
+            datatype,
+            lang,
+        } => {
             out.push(TAG_LIT);
             out.extend_from_slice(&(value.len() as u32).to_le_bytes());
             out.extend_from_slice(value.as_bytes());
@@ -241,13 +249,24 @@ fn parse_term(bytes: &[u8]) -> TermParts<'_> {
     match bytes[0] {
         TAG_IRI => {
             let prefix = rd(bytes, &mut p);
-            TermParts::Iri { prefix, suffix: rest(bytes, p) }
+            TermParts::Iri {
+                prefix,
+                suffix: rest(bytes, p),
+            }
         }
         TAG_LIT => {
             let value = rd(bytes, &mut p);
             let datatype = rd(bytes, &mut p);
-            let lang = if bytes[p] == 1 { Some(rest(bytes, p + 1)) } else { None };
-            TermParts::Lit { value, datatype, lang }
+            let lang = if bytes[p] == 1 {
+                Some(rest(bytes, p + 1))
+            } else {
+                None
+            };
+            TermParts::Lit {
+                value,
+                datatype,
+                lang,
+            }
         }
         _ => TermParts::Blank(rest(bytes, p)),
     }
@@ -323,7 +342,9 @@ impl VarSorter {
         }
         #[cfg(not(feature = "parallel"))]
         self.buf.sort_unstable_by(|a, b| var_cmp(mode, a, b));
-        let path = self.tmp.join(format!("{}-run{}.bin", self.tag, self.runs.len()));
+        let path = self
+            .tmp
+            .join(format!("{}-run{}.bin", self.tag, self.runs.len()));
         let mut w = BufWriter::new(std::fs::File::create(&path)?);
         for (seq, bytes) in self.buf.drain(..) {
             w.write_all(&seq.to_le_bytes())?;
@@ -343,7 +364,12 @@ impl VarSorter {
         for p in &self.runs {
             readers.push(BufReader::new(std::fs::File::open(p)?));
         }
-        let mut m = VarMerge { mode, readers, heap: std::collections::BinaryHeap::new(), runs: std::mem::take(&mut self.runs) };
+        let mut m = VarMerge {
+            mode,
+            readers,
+            heap: std::collections::BinaryHeap::new(),
+            runs: std::mem::take(&mut self.runs),
+        };
         for i in 0..m.readers.len() {
             m.refill(i)?;
         }
@@ -400,7 +426,12 @@ impl VarMerge {
                 let len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
                 let mut bytes = vec![0u8; len];
                 r.read_exact(&mut bytes)?;
-                self.heap.push(VarHeapEnt { mode: self.mode, seq, bytes: bytes.into_boxed_slice(), run });
+                self.heap.push(VarHeapEnt {
+                    mode: self.mode,
+                    seq,
+                    bytes: bytes.into_boxed_slice(),
+                    run,
+                });
                 Ok(())
             }
         }
@@ -434,7 +465,10 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> io::Result<bool> {
             if filled == 0 {
                 return Ok(false);
             }
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated dict-spill record"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated dict-spill record",
+            ));
         }
         filled += n;
     }
@@ -554,7 +588,9 @@ impl<T: PodRec + Send> PodSorter<T> {
         }
         #[cfg(not(feature = "parallel"))]
         self.buf.sort_unstable();
-        let path = self.tmp.join(format!("{}-run{}.bin", self.tag, self.runs.len()));
+        let path = self
+            .tmp
+            .join(format!("{}-run{}.bin", self.tag, self.runs.len()));
         let mut w = BufWriter::new(std::fs::File::create(&path)?);
         for t in self.buf.drain(..) {
             t.write(&mut w)?;
@@ -570,7 +606,11 @@ impl<T: PodRec + Send> PodSorter<T> {
         for p in &self.runs {
             readers.push(BufReader::new(std::fs::File::open(p)?));
         }
-        let mut m = PodMerge { readers, heap: std::collections::BinaryHeap::new(), runs: std::mem::take(&mut self.runs) };
+        let mut m = PodMerge {
+            readers,
+            heap: std::collections::BinaryHeap::new(),
+            runs: std::mem::take(&mut self.runs),
+        };
         for i in 0..m.readers.len() {
             m.refill(i)?;
         }
@@ -723,7 +763,9 @@ impl SpillInterner {
         let routed: Vec<Vec<ShardEntries>> = partials
             .par_iter()
             .map(|(pd, _)| {
-                let mut b: Vec<ShardEntries> = (0..n).map(|_| Vec::with_capacity(pd.len() / n + 1)).collect();
+                let mut b: Vec<ShardEntries> = (0..n)
+                    .map(|_| Vec::with_capacity(pd.len() / n + 1))
+                    .collect();
                 let mut scratch: Vec<u8> = Vec::new();
                 for i in 1..=pd.len() as Id {
                     let tp = pd.term_parts(i);
@@ -745,7 +787,10 @@ impl SpillInterner {
         // DISJOINT writes — same SlotPtr pattern (and safety argument) as
         // `ShardedDict::intern_partials`: the hash routing assigns every (partial,
         // local-id) slot to exactly one shard.
-        let mut remaps: Vec<Vec<u64>> = partials.iter().map(|(pd, _)| vec![0u64; pd.len() + 1]).collect();
+        let mut remaps: Vec<Vec<u64>> = partials
+            .iter()
+            .map(|(pd, _)| vec![0u64; pd.len() + 1])
+            .collect();
         #[derive(Clone, Copy)]
         struct SlotPtr(*mut u64, usize);
         // SAFETY: `SlotPtr` (a `*mut u64`) only ever touches its own hash-routed slot —
@@ -755,7 +800,10 @@ impl SpillInterner {
         // SAFETY: shared read of a `Copy` raw-pointer handle; the writes it performs are
         // disjoint by hash routing (see the `Send` argument). [OPUS-4.8 sq-8wbn]
         unsafe impl Sync for SlotPtr {}
-        let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
+        let scatter: Vec<SlotPtr> = remaps
+            .iter_mut()
+            .map(|v| SlotPtr(v.as_mut_ptr(), v.len()))
+            .collect();
 
         self.shards
             .par_iter_mut()
@@ -769,7 +817,10 @@ impl SpillInterner {
                         // SAFETY: i < len and this (pidx, i) slot is hash-routed to
                         // exactly this shard — disjoint writes, no reads until the
                         // parallel scope ends.
-                        unsafe { ptr.add(*i as usize).write((STAGED_DICT_BASE * (s as u64 + 1)) | seq as u64) };
+                        unsafe {
+                            ptr.add(*i as usize)
+                                .write((STAGED_DICT_BASE * (s as u64 + 1)) | seq as u64)
+                        };
                     }
                 }
                 Ok(())
@@ -806,7 +857,11 @@ impl SpillInterner {
                             }
                             Ok(v)
                         };
-                        let comps = [resolve(local_ids[0])?, resolve(local_ids[1])?, resolve(local_ids[2])?];
+                        let comps = [
+                            resolve(local_ids[0])?,
+                            resolve(local_ids[1])?,
+                            resolve(local_ids[2])?,
+                        ];
                         let tt_index = self.triples.len() as u64;
                         self.triples.push(comps);
                         remaps[pidx][i as usize] = TRIPLE_TT_BASE | tt_index;
@@ -821,7 +876,11 @@ impl SpillInterner {
             let mut out: Vec<u8> = Vec::with_capacity(ptriples.len() * 24);
             for &[a, b, c] in ptriples {
                 for id in [a, b, c] {
-                    let v = if id >= dict::INLINE_BASE { id as u64 } else { rm[id as usize] };
+                    let v = if id >= dict::INLINE_BASE {
+                        id as u64
+                    } else {
+                        rm[id as usize]
+                    };
                     out.extend_from_slice(&v.to_le_bytes());
                 }
             }
@@ -890,7 +949,12 @@ impl TableBuilder {
 /// (`dict-meta/terms/offs/hash/hid.bin`) and the `numerics.bin`/`temporals.bin` caches in
 /// final-id order, and build the per-shard `seq -> final id` remap files. Returns the
 /// plan for the triple-remap phase.
-pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &SpillConfig) -> Result<RemapPlan, String> {
+pub(crate) fn consolidate(
+    mut st: SpillInterner,
+    dir: &Path,
+    tmp: &Path,
+    cfg: &SpillConfig,
+) -> Result<RemapPlan, String> {
     let n = st.shards.len();
     let sort_budget = (cfg.mem_budget / 2).max(1 << 20);
     let io_err = |e: io::Error| e.to_string();
@@ -917,7 +981,12 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     // run sorts inside are rayon-parallel.
     let mut counts: Vec<u64> = Vec::with_capacity(n);
     for (s, (rec_path, seq_count, _)) in shard_files.iter().enumerate() {
-        let mut sorter = VarSorter::new(VarKey::BytesThenSeq, sort_budget, tmp, &format!("dsp-s{s}-byterm"));
+        let mut sorter = VarSorter::new(
+            VarKey::BytesThenSeq,
+            sort_budget,
+            tmp,
+            &format!("dsp-s{s}-byterm"),
+        );
         {
             let mut r = BufReader::new(std::fs::File::open(rec_path).map_err(io_err)?);
             let mut head = [0u8; 4];
@@ -934,8 +1003,12 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         std::fs::remove_file(rec_path).ok();
         ensure_disk(tmp, cfg.disk_floor)?;
 
-        let mut distinct_w = BufWriter::new(std::fs::File::create(tmp.join(format!("dsp-distinct{s}.bin"))).map_err(io_err)?);
-        let mut pairs_w = BufWriter::new(std::fs::File::create(tmp.join(format!("dsp-pairs{s}.bin"))).map_err(io_err)?);
+        let mut distinct_w = BufWriter::new(
+            std::fs::File::create(tmp.join(format!("dsp-distinct{s}.bin"))).map_err(io_err)?,
+        );
+        let mut pairs_w = BufWriter::new(
+            std::fs::File::create(tmp.join(format!("dsp-pairs{s}.bin"))).map_err(io_err)?,
+        );
         let mut merge = sorter.into_merge().map_err(io_err)?;
         let mut cur: Option<(Box<[u8]>, u32)> = None;
         let mut count: u64 = 0;
@@ -943,12 +1016,18 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
             let same = matches!(&cur, Some((cb, _)) if **cb == *bytes);
             if same {
                 let min = cur.as_ref().unwrap().1;
-                MinSeqPair { min_seq: min, seq }.write(&mut pairs_w).map_err(io_err)?;
+                MinSeqPair { min_seq: min, seq }
+                    .write(&mut pairs_w)
+                    .map_err(io_err)?;
             } else {
                 distinct_w.write_all(&seq.to_le_bytes()).map_err(io_err)?;
-                distinct_w.write_all(&(bytes.len() as u32).to_le_bytes()).map_err(io_err)?;
+                distinct_w
+                    .write_all(&(bytes.len() as u32).to_le_bytes())
+                    .map_err(io_err)?;
                 distinct_w.write_all(&bytes).map_err(io_err)?;
-                MinSeqPair { min_seq: seq, seq }.write(&mut pairs_w).map_err(io_err)?;
+                MinSeqPair { min_seq: seq, seq }
+                    .write(&mut pairs_w)
+                    .map_err(io_err)?;
                 cur = Some((bytes, seq));
                 count += 1;
             }
@@ -977,10 +1056,14 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     ensure_disk(dir, cfg.disk_floor)?;
     let mut prefixes = TableBuilder::default();
     let mut datatypes = TableBuilder::default();
-    let mut terms_w = BufWriter::new(std::fs::File::create(dir.join("dict-terms.bin")).map_err(io_err)?);
-    let mut offs_w = BufWriter::new(std::fs::File::create(dir.join("dict-offs.bin")).map_err(io_err)?);
-    let mut numer_w = BufWriter::new(std::fs::File::create(dir.join("numerics.bin")).map_err(io_err)?);
-    let mut tempi_w = BufWriter::new(std::fs::File::create(dir.join("temporals.bin")).map_err(io_err)?);
+    let mut terms_w =
+        BufWriter::new(std::fs::File::create(dir.join("dict-terms.bin")).map_err(io_err)?);
+    let mut offs_w =
+        BufWriter::new(std::fs::File::create(dir.join("dict-offs.bin")).map_err(io_err)?);
+    let mut numer_w =
+        BufWriter::new(std::fs::File::create(dir.join("numerics.bin")).map_err(io_err)?);
+    let mut tempi_w =
+        BufWriter::new(std::fs::File::create(dir.join("temporals.bin")).map_err(io_err)?);
     let flags_path = tmp.join("dsp-tflags.bin");
     let mut flags_w = BufWriter::new(std::fs::File::create(&flags_path).map_err(io_err)?);
     // The hash-pair sorter is alive across the WHOLE shard loop, concurrently with each
@@ -990,7 +1073,12 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     let mut pos: u64 = 0;
     for s in 0..n {
         let distinct_path = tmp.join(format!("dsp-distinct{s}.bin"));
-        let mut sorter = VarSorter::new(VarKey::SeqOnly, sort_budget / 2, tmp, &format!("dsp-s{s}-byseq"));
+        let mut sorter = VarSorter::new(
+            VarKey::SeqOnly,
+            sort_budget / 2,
+            tmp,
+            &format!("dsp-s{s}-byseq"),
+        );
         {
             let mut r = BufReader::new(std::fs::File::open(&distinct_path).map_err(io_err)?);
             let mut head = [0u8; 8];
@@ -999,12 +1087,16 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
                 let len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
                 let mut bytes = vec![0u8; len];
                 r.read_exact(&mut bytes).map_err(io_err)?;
-                sorter.push(min_seq, bytes.into_boxed_slice()).map_err(io_err)?;
+                sorter
+                    .push(min_seq, bytes.into_boxed_slice())
+                    .map_err(io_err)?;
             }
         }
         std::fs::remove_file(&distinct_path).ok();
 
-        let mut m2f_w = BufWriter::new(std::fs::File::create(tmp.join(format!("dsp-m2f{s}.bin"))).map_err(io_err)?);
+        let mut m2f_w = BufWriter::new(
+            std::fs::File::create(tmp.join(format!("dsp-m2f{s}.bin"))).map_err(io_err)?,
+        );
         let mut merge = sorter.into_merge().map_err(io_err)?;
         let mut local: u64 = 0;
         while let Some((min_seq, bytes)) = merge.next().map_err(io_err)? {
@@ -1014,11 +1106,24 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
             // Stream the dict record (the exact `save_mmap` bytes), its offset, the
             // (hash, id) lookup pair, and the numeric/temporal cache cells.
             offs_w.write_all(&pos.to_le_bytes()).map_err(io_err)?;
-            let (rec, numeric, temporal): (dict::StoredRef, f64, Option<crate::temporal::Temporal>) = match tp {
-                TermParts::Iri { prefix, suffix } => {
-                    (dict::StoredRef::Iri { prefix: prefixes.intern(prefix), suffix }, f64::NAN, None)
-                }
-                TermParts::Lit { value, datatype, lang } => {
+            let (rec, numeric, temporal): (
+                dict::StoredRef,
+                f64,
+                Option<crate::temporal::Temporal>,
+            ) = match tp {
+                TermParts::Iri { prefix, suffix } => (
+                    dict::StoredRef::Iri {
+                        prefix: prefixes.intern(prefix),
+                        suffix,
+                    },
+                    f64::NAN,
+                    None,
+                ),
+                TermParts::Lit {
+                    value,
+                    datatype,
+                    lang,
+                } => {
                     // [FABLE-5] (sq-9781x / sq-74oy4 / sq-6b1lj) SAME DATATYPE-AWARE acceptance
                     // (`cached_numeric_f64`) as the in-RAM `numerics_of` — the spilled cache must
                     // be byte-identical to the in-RAM one, and both equal `Num::of_literal`'s
@@ -1029,14 +1134,33 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
                     } else {
                         f64::NAN
                     };
-                    let temporal = if lang.is_none() { crate::temporal::Temporal::of_lit(value, datatype) } else { None };
-                    (dict::StoredRef::Lit { value, datatype: datatypes.intern(datatype), lang }, numeric, temporal)
+                    let temporal = if lang.is_none() {
+                        crate::temporal::Temporal::of_lit(value, datatype)
+                    } else {
+                        None
+                    };
+                    (
+                        dict::StoredRef::Lit {
+                            value,
+                            datatype: datatypes.intern(datatype),
+                            lang,
+                        },
+                        numeric,
+                        temporal,
+                    )
                 }
                 TermParts::Blank(b) => (dict::StoredRef::Blank(b), f64::NAN, None),
-                TermParts::Triple(_) => unreachable!("triple terms cannot enter the spilled interner"),
+                TermParts::Triple(_) => {
+                    unreachable!("triple terms cannot enter the spilled interner")
+                }
             };
             pos += dict::write_record(&mut terms_w, &rec).map_err(io_err)?;
-            hash_sorter.push(HashPair { hash: dict::hash_termparts(&tp), id }).map_err(io_err)?;
+            hash_sorter
+                .push(HashPair {
+                    hash: dict::hash_termparts(&tp),
+                    id,
+                })
+                .map_err(io_err)?;
             numer_w.write_all(&numeric.to_le_bytes()).map_err(io_err)?;
             let (instant, flag) = match temporal {
                 Some(t) => (t.instant, crate::temp_flag(t)),
@@ -1045,7 +1169,9 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
             tempi_w.write_all(&instant.to_le_bytes()).map_err(io_err)?;
             flags_w.write_all(&[flag]).map_err(io_err)?;
             m2f_w.write_all(&min_seq.to_le_bytes()).map_err(io_err)?;
-            m2f_w.write_all(&(id as u32).to_le_bytes()).map_err(io_err)?;
+            m2f_w
+                .write_all(&(id as u32).to_le_bytes())
+                .map_err(io_err)?;
         }
         debug_assert_eq!(local, counts[s]);
         m2f_w.flush().map_err(io_err)?;
@@ -1063,7 +1189,8 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         let pairs_path = tmp.join(format!("dsp-pairs{s}.bin"));
         // `by_min`'s merge readers feed `by_seq`'s run buffer concurrently — split the
         // budget between the two sorters.
-        let mut by_min: PodSorter<MinSeqPair> = PodSorter::new(sort_budget / 2, tmp, &format!("dsp-s{s}-bymin"));
+        let mut by_min: PodSorter<MinSeqPair> =
+            PodSorter::new(sort_budget / 2, tmp, &format!("dsp-s{s}-bymin"));
         {
             let mut r = BufReader::new(std::fs::File::open(&pairs_path).map_err(io_err)?);
             let mut b = [0u8; 8];
@@ -1074,7 +1201,8 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         std::fs::remove_file(&pairs_path).ok();
 
         let m2f_path = tmp.join(format!("dsp-m2f{s}.bin"));
-        let mut by_seq: PodSorter<SeqFinal> = PodSorter::new(sort_budget / 2, tmp, &format!("dsp-s{s}-final"));
+        let mut by_seq: PodSorter<SeqFinal> =
+            PodSorter::new(sort_budget / 2, tmp, &format!("dsp-s{s}-final"));
         {
             let mut m2f = BufReader::new(std::fs::File::open(&m2f_path).map_err(io_err)?);
             let mut merge = by_min.into_merge().map_err(io_err)?;
@@ -1099,7 +1227,12 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
                 if m != p.min_seq {
                     return Err("dict-spill: remap join mismatch (missing canonical seq)".into());
                 }
-                by_seq.push(SeqFinal { seq: p.seq, final_id: f }).map_err(io_err)?;
+                by_seq
+                    .push(SeqFinal {
+                        seq: p.seq,
+                        final_id: f,
+                    })
+                    .map_err(io_err)?;
             }
         }
         std::fs::remove_file(&m2f_path).ok();
@@ -1168,15 +1301,21 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     // dict-meta.bin (version header + prefixes + datatypes + term count) — identical bytes to
     // `save_mmap`. [OPUS-4.8] (review 1409) The version header records the id-space partition.
     {
-        let mut meta = BufWriter::new(std::fs::File::create(dir.join("dict-meta.bin")).map_err(io_err)?);
-        meta.write_all(&dict::DICT_META_MAGIC.to_le_bytes()).map_err(io_err)?;
-        meta.write_all(&dict::DICT_META_VERSION.to_le_bytes()).map_err(io_err)?;
-        meta.write_all(&dict::INLINE_BASE.to_le_bytes()).map_err(io_err)?;
-        meta.write_all(&(prefixes.names.len() as u32).to_le_bytes()).map_err(io_err)?;
+        let mut meta =
+            BufWriter::new(std::fs::File::create(dir.join("dict-meta.bin")).map_err(io_err)?);
+        meta.write_all(&dict::DICT_META_MAGIC.to_le_bytes())
+            .map_err(io_err)?;
+        meta.write_all(&dict::DICT_META_VERSION.to_le_bytes())
+            .map_err(io_err)?;
+        meta.write_all(&dict::INLINE_BASE.to_le_bytes())
+            .map_err(io_err)?;
+        meta.write_all(&(prefixes.names.len() as u32).to_le_bytes())
+            .map_err(io_err)?;
         for p in &prefixes.names {
             dict::write_str(&mut meta, p).map_err(io_err)?;
         }
-        meta.write_all(&(datatypes.names.len() as u32).to_le_bytes()).map_err(io_err)?;
+        meta.write_all(&(datatypes.names.len() as u32).to_le_bytes())
+            .map_err(io_err)?;
         for d in &datatypes.names {
             dict::write_str(&mut meta, d).map_err(io_err)?;
         }
@@ -1188,8 +1327,10 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     // `save_mmap` also produces. Triple-term `(hash, final id)` pairs were pushed into the
     // SAME sorter during finalisation, so the merged stream stays globally sorted.
     {
-        let mut hw = BufWriter::new(std::fs::File::create(dir.join("dict-hash.bin")).map_err(io_err)?);
-        let mut iw = BufWriter::new(std::fs::File::create(dir.join("dict-hid.bin")).map_err(io_err)?);
+        let mut hw =
+            BufWriter::new(std::fs::File::create(dir.join("dict-hash.bin")).map_err(io_err)?);
+        let mut iw =
+            BufWriter::new(std::fs::File::create(dir.join("dict-hid.bin")).map_err(io_err)?);
         let mut merge = hash_sorter.into_merge().map_err(io_err)?;
         while let Some(p) = merge.next().map_err(io_err)? {
             hw.write_all(&p.hash.to_le_bytes()).map_err(io_err)?;
@@ -1199,7 +1340,12 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         iw.flush().map_err(io_err)?;
     }
 
-    Ok(RemapPlan { staged_path, staged_count, shards: shards_out, tt_finals: tt_finals.per_occurrence })
+    Ok(RemapPlan {
+        staged_path,
+        staged_count,
+        shards: shards_out,
+        tt_finals: tt_finals.per_occurrence,
+    })
 }
 
 /// [OPUS-4.8] (sq-jvbr) Result of [`finalize_triple_terms`]: the per-OCCURRENCE final dict id
@@ -1235,7 +1381,10 @@ fn finalize_triple_terms(
 ) -> Result<TripleTermFinals, String> {
     let io_err = |e: io::Error| e.to_string();
     if staged_triples.is_empty() {
-        return Ok(TripleTermFinals { per_occurrence: Vec::new(), distinct: 0 });
+        return Ok(TripleTermFinals {
+            per_occurrence: Vec::new(),
+            distinct: 0,
+        });
     }
     let _ = tmp; // disk floor already enforced before this phase; no further spill here
 
@@ -1289,8 +1438,14 @@ fn finalize_triple_terms(
                 dedup.insert(comps, id);
                 // Stream the triple-term dict record + sidecar cells (NaN numeric, no temporal).
                 offs_w.write_all(&pos.to_le_bytes()).map_err(io_err)?;
-                *pos += dict::write_record(terms_w, &dict::StoredRef::Triple(comps)).map_err(io_err)?;
-                hash_sorter.push(HashPair { hash: dict::hash_triple_ids(comps), id }).map_err(io_err)?;
+                *pos +=
+                    dict::write_record(terms_w, &dict::StoredRef::Triple(comps)).map_err(io_err)?;
+                hash_sorter
+                    .push(HashPair {
+                        hash: dict::hash_triple_ids(comps),
+                        id,
+                    })
+                    .map_err(io_err)?;
                 numer_w.write_all(&f64::NAN.to_le_bytes()).map_err(io_err)?;
                 tempi_w.write_all(&f64::NAN.to_le_bytes()).map_err(io_err)?;
                 flags_w.write_all(&[0u8]).map_err(io_err)?;
@@ -1299,7 +1454,10 @@ fn finalize_triple_terms(
         };
         per_occurrence.push(id);
     }
-    Ok(TripleTermFinals { per_occurrence, distinct: next_rank as usize })
+    Ok(TripleTermFinals {
+        per_occurrence,
+        distinct: next_rank as usize,
+    })
 }
 
 /// Per-shard sliding window over a dense remap file, advanced at epoch boundaries —
@@ -1337,12 +1495,18 @@ impl ShardWindow {
             let len = (hi - lo) as usize;
             let mut bytes = vec![0u8; len * 4];
             self.r.read_exact(&mut bytes)?;
-            self.window = bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            self.window = bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
             self.seq_base = lo;
         }
         let i = (seq - self.seq_base) as usize;
         self.window.get(i).copied().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "dict-spill: staged reference outside its epoch window")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "dict-spill: staged reference outside its epoch window",
+            )
         })
     }
 }
@@ -1358,9 +1522,17 @@ pub(crate) fn remap_staged(
     chunk: usize,
 ) -> Result<(), String> {
     let io_err = |e: io::Error| e.to_string();
-    let mut windows: Vec<ShardWindow> = plan.shards.iter().map(ShardWindow::open).collect::<io::Result<_>>().map_err(io_err)?;
+    let mut windows: Vec<ShardWindow> = plan
+        .shards
+        .iter()
+        .map(ShardWindow::open)
+        .collect::<io::Result<_>>()
+        .map_err(io_err)?;
     {
-        let mut r = BufReader::with_capacity(1 << 20, std::fs::File::open(&plan.staged_path).map_err(io_err)?);
+        let mut r = BufReader::with_capacity(
+            1 << 20,
+            std::fs::File::open(&plan.staged_path).map_err(io_err)?,
+        );
         let mut rec = [0u8; 24];
         for t in 0..plan.staged_count {
             r.read_exact(&mut rec).map_err(io_err)?;
@@ -1378,7 +1550,9 @@ pub(crate) fn remap_staged(
                     })?
                 } else {
                     let s = (v / STAGED_DICT_BASE) as usize - 1;
-                    windows[s].map(t, (v % STAGED_DICT_BASE) as u32).map_err(io_err)?
+                    windows[s]
+                        .map(t, (v % STAGED_DICT_BASE) as u32)
+                        .map_err(io_err)?
                 };
             }
             buf.push(out);
@@ -1401,11 +1575,29 @@ mod tests {
     #[test]
     fn term_record_roundtrip() {
         let cases: Vec<TermParts> = vec![
-            TermParts::Iri { prefix: "http://ex/", suffix: "a" },
-            TermParts::Iri { prefix: "", suffix: "urn:x" },
-            TermParts::Lit { value: "v", datatype: "http://www.w3.org/2001/XMLSchema#string", lang: None },
-            TermParts::Lit { value: "café", datatype: "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString", lang: Some("fr") },
-            TermParts::Lit { value: "", datatype: "http://www.w3.org/2001/XMLSchema#string", lang: None },
+            TermParts::Iri {
+                prefix: "http://ex/",
+                suffix: "a",
+            },
+            TermParts::Iri {
+                prefix: "",
+                suffix: "urn:x",
+            },
+            TermParts::Lit {
+                value: "v",
+                datatype: "http://www.w3.org/2001/XMLSchema#string",
+                lang: None,
+            },
+            TermParts::Lit {
+                value: "café",
+                datatype: "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+                lang: Some("fr"),
+            },
+            TermParts::Lit {
+                value: "",
+                datatype: "http://www.w3.org/2001/XMLSchema#string",
+                lang: None,
+            },
             TermParts::Blank("b0"),
         ];
         let mut buf = Vec::new();
@@ -1430,7 +1622,11 @@ mod tests {
             x = x.wrapping_mul(1103515245).wrapping_add(12345);
             let v = x % 100000;
             expect.push(v);
-            s.push(SeqFinal { seq: v, final_id: !v }).unwrap();
+            s.push(SeqFinal {
+                seq: v,
+                final_id: !v,
+            })
+            .unwrap();
         }
         expect.sort_unstable();
         let mut m = s.into_merge().unwrap();
@@ -1458,7 +1654,9 @@ mod tests {
         let mut last: Option<(Box<[u8]>, u32)> = None;
         while let Some((seq, bytes)) = m.next().unwrap() {
             match &last {
-                Some((lb, ls)) if **lb == *bytes => assert!(seq > *ls, "within a group seqs ascend"),
+                Some((lb, ls)) if **lb == *bytes => {
+                    assert!(seq > *ls, "within a group seqs ascend")
+                }
                 _ => groups += 1,
             }
             last = Some((bytes, seq));
@@ -1476,7 +1674,11 @@ mod tests {
     #[test]
     fn spill_config_detected_has_sane_defaults() {
         let c = SpillConfig::detected();
-        assert!(c.mem_budget >= 64 << 20, "budget floors at 64 MiB: {}", c.mem_budget);
+        assert!(
+            c.mem_budget >= 64 << 20,
+            "budget floors at 64 MiB: {}",
+            c.mem_budget
+        );
         assert_eq!(c.disk_floor, 1 << 30, "default disk floor is 1 GiB");
         // detected_ram_bytes is unix-only and documented to return None when undetectable
         // (sysconf can legitimately fail on some targets/sandboxes). Only assert positivity
@@ -1484,7 +1686,10 @@ mod tests {
         // unavailable. (roborev/Copilot 2026-06-14)
         #[cfg(unix)]
         if let Some(ram) = detected_ram_bytes() {
-            assert!(ram > 0, "detected physical RAM must be positive when reported");
+            assert!(
+                ram > 0,
+                "detected physical RAM must be positive when reported"
+            );
         }
     }
 
@@ -1499,14 +1704,22 @@ mod tests {
         // lookup there is no global state to race, so no RAII restore guard is needed.
         use std::collections::HashMap;
         let env = |pairs: &[(&str, &str)]| {
-            let m: HashMap<String, String> =
-                pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let m: HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
             move |name: &str| m.get(name).cloned()
         };
 
         // Disabled / unset -> None.
-        assert!(SpillConfig::from_lookup(env(&[("SPARQ_DICT_SPILL", "off")])).is_none(), "off => disabled");
-        assert!(SpillConfig::from_lookup(env(&[])).is_none(), "unset => disabled");
+        assert!(
+            SpillConfig::from_lookup(env(&[("SPARQ_DICT_SPILL", "off")])).is_none(),
+            "off => disabled"
+        );
+        assert!(
+            SpillConfig::from_lookup(env(&[])).is_none(),
+            "unset => disabled"
+        );
 
         // Enabled with explicit budget + floor overrides.
         let c = SpillConfig::from_lookup(env(&[
@@ -1524,7 +1737,11 @@ mod tests {
             ("SPARQ_DICT_SPILL_BUDGET_MB", "0"),
         ]))
         .expect("auto enables");
-        assert_eq!(c.mem_budget, 1 << 20, "0 MB budget clamps to the 1 MiB minimum");
+        assert_eq!(
+            c.mem_budget,
+            1 << 20,
+            "0 MB budget clamps to the 1 MiB minimum"
+        );
     }
 
     #[test]
@@ -1546,7 +1763,10 @@ mod tests {
         // Cover both the leading-component (rd) and trailing-component (rest) readers for
         // every tag, plus the lang present/absent split of TAG_LIT.
         let cases: Vec<TermParts> = vec![
-            TermParts::Iri { prefix: "http://example.org/ns#", suffix: "Thing" },
+            TermParts::Iri {
+                prefix: "http://example.org/ns#",
+                suffix: "Thing",
+            },
             TermParts::Lit {
                 value: "hello",
                 datatype: "http://www.w3.org/2001/XMLSchema#string",
@@ -1593,7 +1813,11 @@ mod tests {
             let r = SeqFinal::read(&b);
             assert_eq!((r.seq, r.final_id), (seq, final_id));
         }
-        for (hash, id) in [(0u64, 0u32), (0xdead_beef_cafe_1234, 7), (u64::MAX, u32::MAX)] {
+        for (hash, id) in [
+            (0u64, 0u32),
+            (0xdead_beef_cafe_1234, 7),
+            (u64::MAX, u32::MAX),
+        ] {
             let mut b = Vec::new();
             HashPair { hash, id }.write(&mut b).unwrap();
             assert_eq!(b.len(), HashPair::SIZE);
@@ -1610,7 +1834,10 @@ mod tests {
         let mut buf = [0u8; 4];
         assert!(read_full(&mut c, &mut buf).unwrap(), "first read fills");
         assert_eq!(buf, [1, 2, 3, 4]);
-        assert!(!read_full(&mut c, &mut buf).unwrap(), "clean EOF at boundary => false");
+        assert!(
+            !read_full(&mut c, &mut buf).unwrap(),
+            "clean EOF at boundary => false"
+        );
 
         // A partial record (EOF mid-record) is corruption -> UnexpectedEof error.
         let mut c = Cursor::new(vec![1u8, 2]);
@@ -1626,7 +1853,11 @@ mod tests {
         assert_eq!(t.intern("a"), 0, "repeat => same id");
         assert_eq!(t.intern("c"), 2);
         assert_eq!(t.intern("b"), 1);
-        assert_eq!(t.names.len(), 3, "only distinct names retained, in first-seen order");
+        assert_eq!(
+            t.names.len(),
+            3,
+            "only distinct names retained, in first-seen order"
+        );
         assert_eq!(&*t.names[0], "a");
         assert_eq!(&*t.names[2], "c");
     }
@@ -1659,7 +1890,9 @@ mod tests {
         assert_eq!(win.map(100, 3).unwrap(), 20);
         assert_eq!(win.map(120, 4).unwrap(), 21);
         // A seq outside the now-active epoch window fails closed (never panics / mis-reads).
-        let err = win.map(120, 9).expect_err("seq beyond the epoch window must error");
+        let err = win
+            .map(120, 9)
+            .expect_err("seq beyond the epoch window must error");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         drop(win);
         std::fs::remove_dir_all(&tmp).ok();

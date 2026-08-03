@@ -256,7 +256,10 @@ mod tests {
         );
         // Not conforming, and at least the minInclusive (negative age) + minCount
         // (missing name) violations are present.
-        assert!(json.starts_with(r#"{"conforms":false,"results":[{"#), "{json}");
+        assert!(
+            json.starts_with(r#"{"conforms":false,"results":[{"#),
+            "{json}"
+        );
         // The focus node is the offending instance, as an N-Triples IRI term.
         assert!(
             json.contains(r#""focusNode":"<http://example.org/bob>""#),

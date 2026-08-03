@@ -191,11 +191,36 @@ ex:ValidResource2 ex:property1 "A" ; ex:property1 "B" ;
         &r,
         false,
         &[
-            violation(ex("InvalidResource1"), p1.clone(), Some(lit("A")), "EqualsConstraintComponent"),
-            violation(ex("InvalidResource1"), p1.clone(), Some(lit("B")), "EqualsConstraintComponent"),
-            violation(ex("InvalidResource2"), p1.clone(), Some(lit("A")), "EqualsConstraintComponent"),
-            violation(ex("InvalidResource3"), p1.clone(), Some(lit("A")), "EqualsConstraintComponent"),
-            violation(ex("InvalidResource4"), p1, Some(lit("B")), "EqualsConstraintComponent"),
+            violation(
+                ex("InvalidResource1"),
+                p1.clone(),
+                Some(lit("A")),
+                "EqualsConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource1"),
+                p1.clone(),
+                Some(lit("B")),
+                "EqualsConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource2"),
+                p1.clone(),
+                Some(lit("A")),
+                "EqualsConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource3"),
+                p1.clone(),
+                Some(lit("A")),
+                "EqualsConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource4"),
+                p1,
+                Some(lit("B")),
+                "EqualsConstraintComponent",
+            ),
         ],
     );
 }
@@ -218,13 +243,26 @@ ex:ValidResource2 ex:property1 [ ex:property2 "A" ] ; ex:property1 [ ex:property
   ex:property3 [ ex:property4 "C" ] ; ex:property3 [ ex:property4 "D" ] .
 "#;
     let r = run(doc);
-    let seq = Some(Path::Sequence(vec![pred_path("property1"), pred_path("property2")]));
+    let seq = Some(Path::Sequence(vec![
+        pred_path("property1"),
+        pred_path("property2"),
+    ]));
     assert_report(
         &r,
         false,
         &[
-            violation(ex("InvalidResource1"), seq.clone(), Some(lit("A")), "DisjointConstraintComponent"),
-            violation(ex("InvalidResource2"), seq, Some(lit("A")), "DisjointConstraintComponent"),
+            violation(
+                ex("InvalidResource1"),
+                seq.clone(),
+                Some(lit("A")),
+                "DisjointConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource2"),
+                seq,
+                Some(lit("A")),
+                "DisjointConstraintComponent",
+            ),
         ],
     );
 }
@@ -250,9 +288,24 @@ ex:ValidResource2 ex:property1 3.1 .
         &r,
         false,
         &[
-            violation(ex("InvalidResource1"), p1.clone(), Some(int(4)), "LessThanConstraintComponent"),
-            violation(ex("InvalidResource2"), p1.clone(), Some(int(6)), "LessThanConstraintComponent"),
-            violation(ex("InvalidResource3"), p1, Some(int(5)), "LessThanConstraintComponent"),
+            violation(
+                ex("InvalidResource1"),
+                p1.clone(),
+                Some(int(4)),
+                "LessThanConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource2"),
+                p1.clone(),
+                Some(int(6)),
+                "LessThanConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource3"),
+                p1,
+                Some(int(5)),
+                "LessThanConstraintComponent",
+            ),
         ],
     );
 }
@@ -277,8 +330,18 @@ ex:ValidResource3 ex:property1 5 ; ex:property2 [ ex:property3 5 ] .
         &r,
         false,
         &[
-            violation(ex("InvalidResource1"), p1.clone(), Some(int(5)), "LessThanOrEqualsConstraintComponent"),
-            violation(ex("InvalidResource2"), p1, Some(int(6)), "LessThanOrEqualsConstraintComponent"),
+            violation(
+                ex("InvalidResource1"),
+                p1.clone(),
+                Some(int(5)),
+                "LessThanOrEqualsConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource2"),
+                p1,
+                Some(int(6)),
+                "LessThanOrEqualsConstraintComponent",
+            ),
         ],
     );
 }
@@ -336,8 +399,18 @@ ex:ValidResource2 rdf:type rdfs:Resource ;
         &r,
         false,
         &[
-            violation(ex("InvalidResource1"), tp.clone(), Some(ex("InvalidResource1")), "ClassConstraintComponent"),
-            violation(ex("InvalidResource1"), tp, Some(lit("A string")), "ClassConstraintComponent"),
+            violation(
+                ex("InvalidResource1"),
+                tp.clone(),
+                Some(ex("InvalidResource1")),
+                "ClassConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource1"),
+                tp,
+                Some(lit("A string")),
+                "ClassConstraintComponent",
+            ),
         ],
     );
 }
@@ -368,9 +441,24 @@ ex:property2 rdf:type rdf:Property .
         &r,
         false,
         &[
-            violation(ex("InvalidResource1"), p1.clone(), Some(lit("A")), "SubsetOfConstraintComponent"),
-            violation(ex("InvalidResource2"), p1.clone(), Some(lit("A")), "SubsetOfConstraintComponent"),
-            violation(ex("InvalidResource3"), p1, Some(lit("B")), "SubsetOfConstraintComponent"),
+            violation(
+                ex("InvalidResource1"),
+                p1.clone(),
+                Some(lit("A")),
+                "SubsetOfConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource2"),
+                p1.clone(),
+                Some(lit("A")),
+                "SubsetOfConstraintComponent",
+            ),
+            violation(
+                ex("InvalidResource3"),
+                p1,
+                Some(lit("B")),
+                "SubsetOfConstraintComponent",
+            ),
         ],
     );
 }
@@ -466,8 +554,18 @@ ex:TestShape-holds a sh:PropertyShape ; sh:path ex:holds ; sh:rootClass ex:Anima
         &r,
         false,
         &[
-            violation(ex("Zoo"), p.clone(), Some(ex("Plant")), "RootClassConstraintComponent"),
-            violation(ex("Zoo"), p, Some(ex("Car")), "RootClassConstraintComponent"),
+            violation(
+                ex("Zoo"),
+                p.clone(),
+                Some(ex("Plant")),
+                "RootClassConstraintComponent",
+            ),
+            violation(
+                ex("Zoo"),
+                p,
+                Some(ex("Car")),
+                "RootClassConstraintComponent",
+            ),
         ],
     );
 }
@@ -484,10 +582,16 @@ ex:TestShape a sh:NodeShape ; sh:datatype xsd:integer ; sh:severity sh:Debug ;
 "#;
     let r = run(doc);
     // One Debug-severity DatatypeConstraintComponent result, yet conforms = true.
-    assert!(r.conforms, "Debug-only report must conform: {}", summarize(&r.results));
+    assert!(
+        r.conforms,
+        "Debug-only report must conform: {}",
+        summarize(&r.results)
+    );
     assert_eq!(r.results.len(), 1);
     assert_eq!(r.results[0].severity, format!("{SH}Debug"));
-    assert!(r.results[0].source_component.ends_with("DatatypeConstraintComponent"));
+    assert!(r.results[0]
+        .source_component
+        .ends_with("DatatypeConstraintComponent"));
 }
 
 /// `severity-005`: a `sh:Trace`-severity result conforms (Trace is the lowest).
@@ -498,7 +602,11 @@ ex:TestShape a sh:NodeShape ; sh:datatype xsd:integer ; sh:severity sh:Trace ;
   sh:targetNode "Hello" .
 "#;
     let r = run(doc);
-    assert!(r.conforms, "Trace-only report must conform: {}", summarize(&r.results));
+    assert!(
+        r.conforms,
+        "Trace-only report must conform: {}",
+        summarize(&r.results)
+    );
     assert_eq!(r.results.len(), 1);
     assert_eq!(r.results[0].severity, format!("{SH}Trace"));
 }
@@ -515,7 +623,10 @@ ex:PersonShape-age a sh:PropertyShape ; sh:path ex:age ; sh:severity sh:Warning 
 ex:Bob a ex:Person ; ex:age "twenty two" .
 "#;
     let r = run(doc);
-    assert!(!r.conforms, "a Warning result must break default conformance");
+    assert!(
+        !r.conforms,
+        "a Warning result must break default conformance"
+    );
     assert_eq!(r.results.len(), 1);
     assert_eq!(r.results[0].severity, format!("{SH}Warning"));
 }
@@ -543,5 +654,7 @@ ex:Bob a ex:Person ; ex:age "twenty two" .
     assert_eq!(res.path, Some(pred_path("age")));
     assert_eq!(res.value, Some(lit("twenty two")));
     assert_eq!(res.severity, format!("{SH}Warning"));
-    assert!(res.source_component.ends_with("DatatypeConstraintComponent"));
+    assert!(res
+        .source_component
+        .ends_with("DatatypeConstraintComponent"));
 }

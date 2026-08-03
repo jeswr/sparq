@@ -108,7 +108,10 @@ fn serialize_quad(quad: &Quad) -> String {
         GraphName::DefaultGraph => {
             format!("{} {} {} .", quad.subject, quad.predicate, quad.object)
         }
-        g => format!("{} {} {} {} .", quad.subject, quad.predicate, quad.object, g),
+        g => format!(
+            "{} {} {} {} .",
+            quad.subject, quad.predicate, quad.object, g
+        ),
     }
 }
 
@@ -124,7 +127,8 @@ mod tests {
         assert_eq!(CanonicalQuad::parse(g3, MAX).unwrap().as_str(), g3);
         let g4 = "<https://ex/s> <https://ex/p> \"new\" <https://ex/g> .";
         assert_eq!(CanonicalQuad::parse(g4, MAX).unwrap().as_str(), g4);
-        let typed = "<https://ex/s> <https://ex/p> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .";
+        let typed =
+            "<https://ex/s> <https://ex/p> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .";
         assert_eq!(CanonicalQuad::parse(typed, MAX).unwrap().as_str(), typed);
         let lang = "<https://ex/s> <https://ex/p> \"hi\"@en .";
         assert_eq!(CanonicalQuad::parse(lang, MAX).unwrap().as_str(), lang);
@@ -133,16 +137,19 @@ mod tests {
     #[test]
     fn parse_rejects_non_canonical_byte_forms() {
         for line in [
-            "<https://ex/s>  <https://ex/p> \"x\" .",       // double space
-            "<https://ex/s> <https://ex/p> \"x\".",         // missing space before dot
-            " <https://ex/s> <https://ex/p> \"x\" .",       // leading space
-            "<https://ex/s> <https://ex/p> \"x\" . ",       // trailing space
+            "<https://ex/s>  <https://ex/p> \"x\" .", // double space
+            "<https://ex/s> <https://ex/p> \"x\".",   // missing space before dot
+            " <https://ex/s> <https://ex/p> \"x\" .", // leading space
+            "<https://ex/s> <https://ex/p> \"x\" . ", // trailing space
             "<https://ex/s> <https://ex/p> \"x\" . # note", // comment
             // Explicit xsd:string is non-canonical (simple-literal form wins).
             "<https://ex/s> <https://ex/p> \"x\"^^<http://www.w3.org/2001/XMLSchema#string> .",
         ] {
             assert!(
-                matches!(CanonicalQuad::parse(line, MAX), Err(CrdtError::NonCanonical { .. })),
+                matches!(
+                    CanonicalQuad::parse(line, MAX),
+                    Err(CrdtError::NonCanonical { .. })
+                ),
                 "{line:?} must be rejected as non-canonical"
             );
         }

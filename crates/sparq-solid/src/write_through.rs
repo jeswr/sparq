@@ -240,7 +240,10 @@ impl PodStore {
             .map_err(|e| format!("put_acl denied: malformed ACL IRI <{}>: {}", acl_iri, e))?;
         // PARSE FIRST — a malformed document is rejected before anything mutates.
         let new_graph = Graph::load_str(content, format).map_err(|e| {
-            format!("put_acl denied: ACL content for <{}> did not parse as {}: {}", acl_iri, format, e)
+            format!(
+                "put_acl denied: ACL content for <{}> did not parse as {}: {}",
+                acl_iri, format, e
+            )
         })?;
         let new_len = graph_len(&new_graph);
 
@@ -261,7 +264,11 @@ impl PodStore {
             self.restore_named_slot(&term, prior, acp);
             return Err(e);
         }
-        Ok(AclWriteOutcome { acl: name, existed, triples: new_len })
+        Ok(AclWriteOutcome {
+            acl: name,
+            existed,
+            triples: new_len,
+        })
     }
 
     /// Shared `delete_acl` body — capture, remove, re-materialize, rollback-on-error.
@@ -286,7 +293,11 @@ impl PodStore {
             self.restore_named_slot(&term, prior, acp);
             return Err(e);
         }
-        Ok(AclWriteOutcome { acl: name, existed, triples: 0 })
+        Ok(AclWriteOutcome {
+            acl: name,
+            existed,
+            triples: 0,
+        })
     }
 
     /// Remove and return the sub-graph currently stored under `name`, if any (so it can be
@@ -337,7 +348,11 @@ impl PodStore {
     /// `materialize_acp()` the write path used before — and, [SONNET-4.6] sq-ysv3u, with no
     /// verified credentials either, so an `acp:vc` matcher stays fail-closed across an ACL
     /// write exactly as it is on a plain `materialize_acp()`.
-    fn rematerialize_scoped(&mut self, acp: bool, scope: crate::ReindexScope) -> Result<(), String> {
+    fn rematerialize_scoped(
+        &mut self,
+        acp: bool,
+        scope: crate::ReindexScope,
+    ) -> Result<(), String> {
         if acp {
             self.materialize_acp_with_scoped(
                 &crate::AccessProvenance::new(),

@@ -32,7 +32,9 @@ const ODRL: &str = "http://www.w3.org/ns/odrl/2/";
 const TARGET: &str = "urn:t/1";
 
 fn req(action_local: &str, party: &str, at: Option<&str>) -> Request {
-    let mut r = Request::new(format!("{}{}", ODRL, action_local)).on(TARGET).by(party);
+    let mut r = Request::new(format!("{}{}", ODRL, action_local))
+        .on(TARGET)
+        .by(party);
     if let Some(t) = at {
         r = r.at(t);
     }
@@ -68,7 +70,10 @@ fn defect1_two_operand_expired_permission_is_not_granted_by_n3() {
     // The Rust reference path denies: the two right-operands under a non-set operator
     // fold to an ambiguous (unsatisfiable) guard — fail-closed.
     let rust = rust_outcome(POL_TWO_OPERAND_EXPIRED, &request);
-    assert!(!rust.granted, "Rust reference path must NOT grant the expired permission");
+    assert!(
+        !rust.granted,
+        "Rust reference path must NOT grant the expired permission"
+    );
 
     // The N3 path must not be more permissive. A constraint node whose operands it
     // cannot fully evaluate is REFUSED outright (fail-closed), materializing nothing.
@@ -80,7 +85,10 @@ fn defect1_two_operand_expired_permission_is_not_granted_by_n3() {
          got {:?}",
         out
     );
-    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        graph.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 }
 
 /// The same fail-open shape with only the RIGHT operand duplicated
@@ -96,13 +104,19 @@ fn defect1_multi_right_operand_constraint_is_not_granted_by_n3() {
 _:c odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
     odrl:rightOperand <urn:alice> , <urn:bob> ."#;
     let request = req("read", "urn:alice", None);
-    assert!(!rust_outcome(POL, &request).granted, "Rust reference must NOT grant");
+    assert!(
+        !rust_outcome(POL, &request).granted,
+        "Rust reference must NOT grant"
+    );
     let mut graph = Graph::new();
     assert!(
         materialize_odrl_n3(&mut graph, POL, &request).is_err(),
         "N3 path must refuse a multi-right-operand constraint node"
     );
-    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        graph.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 }
 
 /// The DENY-side mirror, and the reason the driver-level guard is load-bearing on its
@@ -130,7 +144,10 @@ _:c odrl:leftOperand odrl:recipient , odrl:purpose ;
          REFUSED, never silently ignored (dropping a deny widens access), got {:?}",
         out
     );
-    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        graph.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 }
 
 // ── Defect 2: the conflict-refusal guard ─────────────────────────────────────
@@ -149,8 +166,14 @@ fn defect2_conflict_perm_policy_is_refused_by_n3() {
 
     // Rust reference: a loud, fail-closed refusal — no grant, no deny.
     let rust = rust_outcome(POL_CONFLICT_PERM, &request);
-    assert!(rust.refused, "Rust reference path must REFUSE odrl:conflict odrl:perm");
-    assert!(!rust.granted && !rust.prohibited, "a refusal materializes nothing");
+    assert!(
+        rust.refused,
+        "Rust reference path must REFUSE odrl:conflict odrl:perm"
+    );
+    assert!(
+        !rust.granted && !rust.prohibited,
+        "a refusal materializes nothing"
+    );
 
     // N3 path must refuse too — never materialize the grant.
     let mut graph = Graph::new();
@@ -160,7 +183,10 @@ fn defect2_conflict_perm_policy_is_refused_by_n3() {
         "N3 path must refuse an unimplementable odrl:conflict strategy, got {:?}",
         out
     );
-    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        graph.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 }
 
 #[test]
@@ -171,7 +197,10 @@ fn defect2_unknown_conflict_strategy_iri_is_refused_by_n3() {
     let request = req("read", "urn:alice", None);
 
     let rust = rust_outcome(POL, &request);
-    assert!(rust.refused, "Rust reference path must REFUSE an unknown odrl:conflict IRI");
+    assert!(
+        rust.refused,
+        "Rust reference path must REFUSE an unknown odrl:conflict IRI"
+    );
     assert!(!rust.granted, "a refusal materializes nothing");
 
     let mut graph = Graph::new();
@@ -181,7 +210,10 @@ fn defect2_unknown_conflict_strategy_iri_is_refused_by_n3() {
         "N3 path must refuse an unknown odrl:conflict strategy IRI, got {:?}",
         out
     );
-    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        graph.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 }
 
 /// `odrl:conflict odrl:invalid` (the ODRL default) voids a CONFLICTING policy as a whole —
@@ -200,22 +232,34 @@ fn defect2_conflict_invalid_tracks_rust_admissibility_both_ways() {
     let request = req("read", "urn:alice", None);
 
     // Conflicting → Rust refuses → N3 must refuse.
-    assert!(rust_outcome(CONFLICTING, &request).refused, "Rust refuses the conflicting policy");
+    assert!(
+        rust_outcome(CONFLICTING, &request).refused,
+        "Rust refuses the conflicting policy"
+    );
     let mut g1 = Graph::new();
     assert!(
         materialize_odrl_n3(&mut g1, CONFLICTING, &request).is_err(),
         "N3 must refuse odrl:conflict odrl:invalid with a detected conflict"
     );
-    assert!(g1.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        g1.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 
     // No conflict → admissible on BOTH paths, and the grant is still emitted (the guard
     // must not degenerate into "refuse every odrl:conflict policy").
     let rust = rust_outcome(UNCONFLICTED, &request);
-    assert!(!rust.refused && rust.granted, "Rust admits the unconflicted invalid-policy");
+    assert!(
+        !rust.refused && rust.granted,
+        "Rust admits the unconflicted invalid-policy"
+    );
     let mut g2 = Graph::new();
     let out = materialize_odrl_n3(&mut g2, UNCONFLICTED, &request)
         .expect("N3 admits the unconflicted invalid-policy");
-    assert!(out.granted, "the unconflicted policy still grants on the N3 path");
+    assert!(
+        out.granted,
+        "the unconflicted policy still grants on the N3 path"
+    );
 }
 
 // ── Multi-valued rule attributes (action/target/assignee) ────────────────────
@@ -257,7 +301,10 @@ fn multi_valued_assignee_permission_is_refused_by_n3() {
             "N3 path must refuse a multi-assignee permission (party {party}), got {:?}",
             out
         );
-        assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+        assert!(
+            graph.named.is_empty(),
+            "nothing may be materialized on a refusal"
+        );
     }
 }
 
@@ -269,8 +316,15 @@ fn multi_valued_target_permission_is_refused_by_n3() {
     odrl:target <urn:t/1> , <urn:t/2> ] ."#;
     let mut graph = Graph::new();
     let out = materialize_odrl_n3(&mut graph, POL, &req("read", "urn:alice", None));
-    assert!(out.is_err(), "N3 path must refuse a multi-target permission, got {:?}", out);
-    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        out.is_err(),
+        "N3 path must refuse a multi-target permission, got {:?}",
+        out
+    );
+    assert!(
+        graph.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 }
 
 #[test]
@@ -281,8 +335,15 @@ fn multi_valued_action_permission_is_refused_by_n3() {
     odrl:action odrl:read , odrl:write ] ."#;
     let mut graph = Graph::new();
     let out = materialize_odrl_n3(&mut graph, POL, &req("write", "urn:alice", None));
-    assert!(out.is_err(), "N3 path must refuse a multi-action permission, got {:?}", out);
-    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        out.is_err(),
+        "N3 path must refuse a multi-action permission, got {:?}",
+        out
+    );
+    assert!(
+        graph.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 }
 
 #[test]
@@ -295,8 +356,15 @@ fn multi_valued_assignee_prohibition_is_refused_by_n3() {
     odrl:assignee <urn:alice> , <urn:bob> ] ."#;
     let mut graph = Graph::new();
     let out = materialize_odrl_n3(&mut graph, POL, &req("read", "urn:alice", None));
-    assert!(out.is_err(), "N3 path must refuse a multi-assignee prohibition, got {:?}", out);
-    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    assert!(
+        out.is_err(),
+        "N3 path must refuse a multi-assignee prohibition, got {:?}",
+        out
+    );
+    assert!(
+        graph.named.is_empty(),
+        "nothing may be materialized on a refusal"
+    );
 }
 
 /// The guard must suppress ONLY multi-valued attributes: a single-valued permission
@@ -310,7 +378,10 @@ fn single_valued_rule_attributes_still_grant_on_n3() {
     let mut graph = Graph::new();
     let out = materialize_odrl_n3(&mut graph, POL, &req("read", "urn:alice", None))
         .expect("N3 admits a single-valued permission");
-    assert!(out.granted, "a single-valued permission still grants on the N3 path");
+    assert!(
+        out.granted,
+        "a single-valued permission still grants on the N3 path"
+    );
 }
 
 // ── The RULES layer on its own ───────────────────────────────────────────────

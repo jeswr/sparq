@@ -51,7 +51,9 @@ type AuthSet = Vec<(String, String, String)>;
 
 fn rust_set(policy_ttl: &str, action_local: &str, party: &str, at: Option<&str>) -> AuthSet {
     let policy = parse_policy_str(policy_ttl, "turtle").expect("policy parses");
-    let mut req = Request::new(format!("{}{}", ODRL, action_local)).on(TARGET).by(party);
+    let mut req = Request::new(format!("{}{}", ODRL, action_local))
+        .on(TARGET)
+        .by(party);
     if let Some(t) = at {
         req = req.at(t);
     }
@@ -69,7 +71,9 @@ fn rust_set(policy_ttl: &str, action_local: &str, party: &str, at: Option<&str>)
 }
 
 fn n3_set(policy_ttl: &str, action_local: &str, party: &str, at: Option<&str>) -> AuthSet {
-    let mut req = Request::new(format!("{}{}", ODRL, action_local)).on(TARGET).by(party);
+    let mut req = Request::new(format!("{}{}", ODRL, action_local))
+        .on(TARGET)
+        .by(party);
     if let Some(t) = at {
         req = req.at(t);
     }
@@ -89,13 +93,26 @@ fn n3_set(policy_ttl: &str, action_local: &str, party: &str, at: Option<&str>) -
 fn expect(pairs: &[(&str, &str, &str)]) -> AuthSet {
     let mut s: AuthSet = pairs
         .iter()
-        .map(|(a, m, t)| ((*a).to_owned(), format!("{}{}", AUTH_NS, m), (*t).to_owned()))
+        .map(|(a, m, t)| {
+            (
+                (*a).to_owned(),
+                format!("{}{}", AUTH_NS, m),
+                (*t).to_owned(),
+            )
+        })
         .collect();
     s.sort();
     s
 }
 
-fn assert_case(label: &str, policy: &str, action: &str, party: &str, at: Option<&str>, want: &[(&str, &str, &str)]) {
+fn assert_case(
+    label: &str,
+    policy: &str,
+    action: &str,
+    party: &str,
+    at: Option<&str>,
+    want: &[(&str, &str, &str)],
+) {
     let rust = rust_set(policy, action, party, at);
     let n3 = n3_set(policy, action, party, at);
     let expected = expect(want);
@@ -197,7 +214,14 @@ _:c2 odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
 
 #[test]
 fn b1_unconstrained_permission_grant() {
-    assert_case("B1", POL_B1, "read", "urn:alice", None, &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "B1",
+        POL_B1,
+        "read",
+        "urn:alice",
+        None,
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
@@ -207,22 +231,50 @@ fn b2_unconstrained_permission_wrong_assignee_no_grant() {
 
 #[test]
 fn a1_datetime_lteq_within_window_grant() {
-    assert_case("A1", POL_A1, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "A1",
+        POL_A1,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
 fn a2_datetime_lteq_past_deadline_no_grant() {
-    assert_case("A2", POL_A1, "read", "urn:alice", Some("2027-01-01T00:00:00Z"), &[]);
+    assert_case(
+        "A2",
+        POL_A1,
+        "read",
+        "urn:alice",
+        Some("2027-01-01T00:00:00Z"),
+        &[],
+    );
 }
 
 #[test]
 fn a3_datetime_gteq_above_floor_grant() {
-    assert_case("A3", POL_A3, "read", "urn:alice", Some("2026-06-01T00:00:00Z"), &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "A3",
+        POL_A3,
+        "read",
+        "urn:alice",
+        Some("2026-06-01T00:00:00Z"),
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
 fn a4_recipient_eq_match_grant() {
-    assert_case("A4", POL_A4, "read", "urn:alice", None, &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "A4",
+        POL_A4,
+        "read",
+        "urn:alice",
+        None,
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
@@ -233,7 +285,14 @@ fn a5_recipient_eq_mismatch_no_grant() {
 #[test]
 fn a6_recipient_neq_not_excluded_grant() {
     // urn:alice is NOT the excluded party (urn:bob is) → grant
-    assert_case("A6", POL_A6, "read", "urn:alice", None, &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "A6",
+        POL_A6,
+        "read",
+        "urn:alice",
+        None,
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
@@ -244,43 +303,92 @@ fn a7_recipient_neq_is_excluded_no_grant() {
 
 #[test]
 fn c1_unconstrained_prohibition_deny() {
-    assert_case("C1", POL_C1, "read", "urn:alice", None, &[("urn:alice", "denyRead", "urn:t/1")]);
+    assert_case(
+        "C1",
+        POL_C1,
+        "read",
+        "urn:alice",
+        None,
+        &[("urn:alice", "denyRead", "urn:t/1")],
+    );
 }
 
 #[test]
 fn c2_deny_overrides_permission() {
     // prohibition + permission both match: deny wins (deny-overrides)
-    assert_case("C2", POL_C2, "read", "urn:alice", None, &[("urn:alice", "denyRead", "urn:t/1")]);
+    assert_case(
+        "C2",
+        POL_C2,
+        "read",
+        "urn:alice",
+        None,
+        &[("urn:alice", "denyRead", "urn:t/1")],
+    );
 }
 
 #[test]
 fn d1_or_lc_first_sub_satisfied_grant() {
     // c1 (lteq 2026-12-31) satisfied at 2026-07-18 → or satisfied → grant
-    assert_case("D1", POL_D1, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "D1",
+        POL_D1,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
 fn d2_or_lc_second_sub_satisfied_grant() {
     // c1 not satisfied (past deadline at 2027-01-01), c2 (recipient eq alice) satisfied → or satisfied → grant
-    assert_case("D2", POL_D1, "read", "urn:alice", Some("2027-01-01T00:00:00Z"), &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "D2",
+        POL_D1,
+        "read",
+        "urn:alice",
+        Some("2027-01-01T00:00:00Z"),
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
 fn d3_or_lc_none_satisfied_no_grant() {
     // c1 (lteq 2025-01-01) past, c2 (recipient eq bob) wrong party → or not satisfied → no grant
-    assert_case("D3", POL_D3, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[]);
+    assert_case(
+        "D3",
+        POL_D3,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[],
+    );
 }
 
 #[test]
 fn d4_and_lc_both_satisfied_grant() {
     // c1 (gteq 2026-01-01) satisfied, c2 (lteq 2026-12-31) satisfied at 2026-07-18 → and satisfied → grant
-    assert_case("D4", POL_D4, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "D4",
+        POL_D4,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
 fn d5_and_lc_one_unsatisfied_no_grant() {
     // c1 (gteq 2026-01-01) satisfied, c2 (recipient eq bob) not satisfied for alice → and not satisfied → no grant
-    assert_case("D5", POL_D5, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[]);
+    assert_case(
+        "D5",
+        POL_D5,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[],
+    );
 }
 
 // ── Constrained prohibitions (deny window ends 2026-12-31) ───────────────────
@@ -328,46 +436,102 @@ _:c2 odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
 #[test]
 fn e1_constrained_prohibition_satisfied_deny() {
     // inside the window → the constrained prohibition matches → deny
-    assert_case("E1", POL_E1, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "denyRead", "urn:t/1")]);
+    assert_case(
+        "E1",
+        POL_E1,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[("urn:alice", "denyRead", "urn:t/1")],
+    );
 }
 
 #[test]
 fn e2_constrained_prohibition_lapsed_no_deny() {
     // past the window → the constraint is unsatisfied → no deny, nothing else matches
-    assert_case("E2", POL_E1, "read", "urn:alice", Some("2027-06-01T00:00:00Z"), &[]);
+    assert_case(
+        "E2",
+        POL_E1,
+        "read",
+        "urn:alice",
+        Some("2027-06-01T00:00:00Z"),
+        &[],
+    );
 }
 
 #[test]
 fn e3_constrained_prohibition_overrides_matching_permission() {
     // inside the window BOTH the permission and the constrained prohibition match:
     // deny-overrides — the deny is emitted and the grant is suppressed
-    assert_case("E3", POL_E2, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "denyRead", "urn:t/1")]);
+    assert_case(
+        "E3",
+        POL_E2,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[("urn:alice", "denyRead", "urn:t/1")],
+    );
 }
 
 #[test]
 fn e4_lapsed_prohibition_re_exposes_permission() {
     // past the window the prohibition no longer carves the request out → grant only
-    assert_case("E4", POL_E2, "read", "urn:alice", Some("2027-06-01T00:00:00Z"), &[("urn:alice", "read", "urn:t/1")]);
+    assert_case(
+        "E4",
+        POL_E2,
+        "read",
+        "urn:alice",
+        Some("2027-06-01T00:00:00Z"),
+        &[("urn:alice", "read", "urn:t/1")],
+    );
 }
 
 #[test]
 fn e5_and_lc_prohibition_inside_window_deny() {
-    assert_case("E5", POL_E3, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "denyRead", "urn:t/1")]);
+    assert_case(
+        "E5",
+        POL_E3,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[("urn:alice", "denyRead", "urn:t/1")],
+    );
 }
 
 #[test]
 fn e6_and_lc_prohibition_outside_window_no_deny() {
     // before the gteq floor → the odrl:and LC is unsatisfied → no deny
-    assert_case("E6", POL_E3, "read", "urn:alice", Some("2025-06-01T00:00:00Z"), &[]);
+    assert_case(
+        "E6",
+        POL_E3,
+        "read",
+        "urn:alice",
+        Some("2025-06-01T00:00:00Z"),
+        &[],
+    );
 }
 
 #[test]
 fn e7_or_lc_prohibition_sub_satisfied_deny() {
     // bob: the recipient-eq-bob sub is satisfied... but the prohibition assignee is
     // alice, so bob is not carved out; alice at a PAST lteq bound is not either.
-    assert_case("E7a", POL_E4, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[]);
+    assert_case(
+        "E7a",
+        POL_E4,
+        "read",
+        "urn:alice",
+        Some("2026-07-18T00:00:00Z"),
+        &[],
+    );
     // alice INSIDE the lteq bound: the or-LC is satisfied via c1 → deny
-    assert_case("E7b", POL_E4, "read", "urn:alice", Some("2024-06-01T00:00:00Z"), &[("urn:alice", "denyRead", "urn:t/1")]);
+    assert_case(
+        "E7b",
+        POL_E4,
+        "read",
+        "urn:alice",
+        Some("2024-06-01T00:00:00Z"),
+        &[("urn:alice", "denyRead", "urn:t/1")],
+    );
 }
 
 #[test]
@@ -377,9 +541,14 @@ fn e9_use_umbrella_prohibition_refused() {
     let pol = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
 <urn:pol/e9> a odrl:Set ; odrl:prohibition [
     odrl:action odrl:use ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ."#;
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:alice");
     let mut graph = Graph::new();
-    assert!(materialize_odrl_n3(&mut graph, pol, &req).is_err(), "E9: use-umbrella prohibition must refuse");
+    assert!(
+        materialize_odrl_n3(&mut graph, pol, &req).is_err(),
+        "E9: use-umbrella prohibition must refuse"
+    );
     assert!(graph.named.is_empty(), "E9: nothing may be materialized");
 }
 
@@ -391,9 +560,14 @@ fn e10_duty_carrying_permission_refused() {
 <urn:pol/e10> a odrl:Set ; odrl:permission [
     odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
     odrl:duty [ odrl:action odrl:attribute ] ] ."#;
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:alice");
     let mut graph = Graph::new();
-    assert!(materialize_odrl_n3(&mut graph, pol, &req).is_err(), "E10: duty-carrying policy must refuse");
+    assert!(
+        materialize_odrl_n3(&mut graph, pol, &req).is_err(),
+        "E10: duty-carrying policy must refuse"
+    );
     assert!(graph.named.is_empty(), "E10: nothing may be materialized");
 }
 
@@ -406,22 +580,37 @@ fn e8_out_of_scope_prohibition_constraint_refused() {
     odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
     odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
                       odrl:rightOperand <urn:marketing> ] ] ."#;
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:alice");
     let mut graph = Graph::new();
-    assert!(materialize_odrl_n3(&mut graph, pol, &req).is_err(), "E8: out-of-scope prohibition constraint must refuse");
+    assert!(
+        materialize_odrl_n3(&mut graph, pol, &req).is_err(),
+        "E8: out-of-scope prohibition constraint must refuse"
+    );
     assert!(graph.named.is_empty(), "E8: nothing may be materialized");
 }
 
 // ── Canonical dateTime subset (lexical comparison soundness) ─────────────────
 
 fn assert_n3_rejects(label: &str, policy: &str, at: Option<&str>) {
-    let mut req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let mut req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:alice");
     if let Some(t) = at {
         req = req.at(t);
     }
     let mut graph = Graph::new();
-    assert!(materialize_odrl_n3(&mut graph, policy, &req).is_err(), "{}: must be rejected fail-closed", label);
-    assert!(graph.named.is_empty(), "{}: nothing may be materialized", label);
+    assert!(
+        materialize_odrl_n3(&mut graph, policy, &req).is_err(),
+        "{}: must be rejected fail-closed",
+        label
+    );
+    assert!(
+        graph.named.is_empty(),
+        "{}: nothing may be materialized",
+        label
+    );
 }
 
 #[test]
@@ -460,9 +649,14 @@ fn inj1_n3_implication_rule_in_policy_rejected() {
     // an N3 rule deriving an auth:* grant directly is NOT Turtle → strict parse Err
     let evil = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
 { ?s ?p ?o . } => { <urn:mallory> <https://sparq.dev/ns/auth#read> <urn:t/1> . } ."#;
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:mallory");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:mallory");
     let mut graph = Graph::new();
-    assert!(materialize_odrl_n3(&mut graph, evil, &req).is_err(), "INJ1: N3 rule must be rejected");
+    assert!(
+        materialize_odrl_n3(&mut graph, evil, &req).is_err(),
+        "INJ1: N3 rule must be rejected"
+    );
     assert!(graph.named.is_empty(), "INJ1: nothing may be materialized");
 }
 
@@ -477,18 +671,31 @@ fn inj2_hostile_literal_is_inert_after_reserialization() {
 <urn:pol/inj> <urn:note> "\" .\n<urn:mallory> <https://sparq.dev/ns/auth#read> <urn:t/1> .\n{ ?a ?b ?c . } => { ?a <https://sparq.dev/ns/auth#read> <urn:t/1> . } . \\" ."#;
     // mallory holds no permission: were the payload executable, the injected rule /
     // triple would grant it read — assert nothing materializes
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:mallory");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:mallory");
     let mut graph = Graph::new();
-    let out = materialize_odrl_n3(&mut graph, pol, &req).expect("INJ2: hostile literal still parses");
-    assert!(!out.granted && !out.prohibited, "INJ2: payload must be inert");
+    let out =
+        materialize_odrl_n3(&mut graph, pol, &req).expect("INJ2: hostile literal still parses");
+    assert!(
+        !out.granted && !out.prohibited,
+        "INJ2: payload must be inert"
+    );
     assert!(graph.named.is_empty(), "INJ2: nothing may be materialized");
     // the legitimate permission in the same policy still works
-    let req_alice = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let req_alice = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:alice");
     let mut graph_alice = Graph::new();
-    let out_alice = materialize_odrl_n3(&mut graph_alice, pol, &req_alice).expect("INJ2: alice path parses");
+    let out_alice =
+        materialize_odrl_n3(&mut graph_alice, pol, &req_alice).expect("INJ2: alice path parses");
     assert_eq!(
         out_alice.grant_triple,
-        Some(("urn:alice".to_owned(), format!("{}read", AUTH_NS), "urn:t/1".to_owned())),
+        Some((
+            "urn:alice".to_owned(),
+            format!("{}read", AUTH_NS),
+            "urn:t/1".to_owned()
+        )),
         "INJ2: only alice's legitimate grant materializes"
     );
     assert!(out_alice.deny_triple.is_none(), "INJ2: no injected deny");
@@ -502,7 +709,10 @@ fn inj3_malicious_request_party_rejected() {
         .on(TARGET)
         .by("urn:eve> <https://sparq.dev/ns/auth#read> <urn:t/1> . <urn:x");
     let mut graph = Graph::new();
-    assert!(materialize_odrl_n3(&mut graph, POL_B1, &req).is_err(), "INJ3: malformed party IRI must be rejected");
+    assert!(
+        materialize_odrl_n3(&mut graph, POL_B1, &req).is_err(),
+        "INJ3: malformed party IRI must be rejected"
+    );
     assert!(graph.named.is_empty(), "INJ3: nothing may be materialized");
 }
 
@@ -512,7 +722,10 @@ fn inj4_malicious_request_action_rejected() {
         .on(TARGET)
         .by("urn:alice");
     let mut graph = Graph::new();
-    assert!(materialize_odrl_n3(&mut graph, POL_B1, &req).is_err(), "INJ4: malformed action IRI must be rejected");
+    assert!(
+        materialize_odrl_n3(&mut graph, POL_B1, &req).is_err(),
+        "INJ4: malformed action IRI must be rejected"
+    );
     assert!(graph.named.is_empty(), "INJ4: nothing may be materialized");
 }
 
@@ -531,7 +744,9 @@ fn inj5_direct_auth_triple_in_valid_turtle_rejected() {
 <urn:pol/inj5> a odrl:Set ; odrl:permission [
     odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] .
 <urn:mallory> <https://sparq.dev/ns/auth#read> <urn:t/1> ."#;
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:mallory");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:mallory");
     let mut graph = Graph::new();
     let out = materialize_odrl_n3(&mut graph, evil, &req);
     assert!(out.is_err(), "INJ5: asserted auth:* fact must be rejected");
@@ -551,7 +766,9 @@ fn inj6_internal_odrlx_derivation_facts_rejected() {
 _:c odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
     odrl:rightOperand <urn:alice> .
 _:c odrlx:atomicSat <urn:odrl-req> ."#;
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:mallory");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:mallory");
     let mut graph = Graph::new();
     assert!(
         materialize_odrl_n3(&mut graph, fake_sat, &req).is_err(),
@@ -566,13 +783,18 @@ _:c odrlx:atomicSat <urn:odrl-req> ."#;
 <urn:pol/inj6b> a odrl:Set ; odrl:permission [
     odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] .
 <urn:pol/inj6b> odrlx:prohibMatches <urn:odrl-req> ."#;
-    let req_alice = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let req_alice = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:alice");
     let mut graph_b = Graph::new();
     assert!(
         materialize_odrl_n3(&mut graph_b, fake_prohib, &req_alice).is_err(),
         "INJ6: asserted odrlx:prohibMatches must be rejected"
     );
-    assert!(graph_b.named.is_empty(), "INJ6: nothing may be materialized");
+    assert!(
+        graph_b.named.is_empty(),
+        "INJ6: nothing may be materialized"
+    );
 }
 
 #[test]
@@ -583,7 +805,9 @@ fn inj7_reserved_request_subject_facts_rejected() {
 <urn:pol/inj7> a odrl:Set ; odrl:permission [
     odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:mallory> ] .
 <urn:odrl-req> odrl:assignee <urn:mallory> ."#;
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:alice");
     let mut graph = Graph::new();
     assert!(
         materialize_odrl_n3(&mut graph, evil, &req).is_err(),
@@ -601,7 +825,9 @@ fn inj8_caller_minted_request_typed_subject_rejected() {
     odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:mallory> ] .
 <urn:fake-req> a odrl:Request ; odrl:action odrl:read ;
     odrl:target <urn:t/1> ; odrl:assignee <urn:mallory> ."#;
-    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:alice");
     let mut graph = Graph::new();
     assert!(
         materialize_odrl_n3(&mut graph, evil, &req).is_err(),
@@ -795,8 +1021,11 @@ const SHAPES: &[Shape] = &[
 ];
 
 /// Which rules the generated policy carries.
-const RULE_KINDS: &[(&str, bool, bool)] =
-    &[("permission", true, false), ("prohibition", false, true), ("both", true, true)];
+const RULE_KINDS: &[(&str, bool, bool)] = &[
+    ("permission", true, false),
+    ("prohibition", false, true),
+    ("both", true, true),
+];
 
 /// The `odrl:conflict` declaration under test — the defect-2 family.
 const CONFLICTS: &[(&str, &str)] = &[
@@ -808,7 +1037,9 @@ const CONFLICTS: &[(&str, &str)] = &[
 ];
 
 fn render(defs: &str, suffix: &str) -> String {
-    defs.replace("@S@", suffix).replace("@PAST@", PAST).replace("@FUTURE@", FUTURE)
+    defs.replace("@S@", suffix)
+        .replace("@PAST@", PAST)
+        .replace("@FUTURE@", FUTURE)
 }
 
 /// Assemble one generated policy: the `conflict` declaration, the requested rule kinds,
@@ -825,8 +1056,11 @@ fn generate_policy(
         if !on {
             continue;
         }
-        let attach =
-            if shape.defs.is_empty() { String::new() } else { format!(" ;\n  odrl:constraint _:c{}", suffix) };
+        let attach = if shape.defs.is_empty() {
+            String::new()
+        } else {
+            format!(" ;\n  odrl:constraint _:c{}", suffix)
+        };
         rules.push_str(&format!(
             "  odrl:{} [ odrl:action odrl:{} ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice>{} ] ;\n",
             pred, action, attach
@@ -872,7 +1106,10 @@ fn assert_not_more_permissive(
     cov: &mut Coverage,
 ) {
     cov.total += 1;
-    let request = Request::new(format!("{}read", ODRL)).on(TARGET).by(party).at(NOW);
+    let request = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by(party)
+        .at(NOW);
 
     let parsed = parse_policy_str(policy_ttl, "turtle");
     let mut n3_graph = Graph::new();
@@ -908,7 +1145,11 @@ fn assert_not_more_permissive(
         // Refused outright: nothing is materialized and the caller fails closed. That is
         // never more permissive than any Rust outcome.
         cov.n3_refused += 1;
-        assert!(n3_graph.named.is_empty(), "{}: a refusal must materialize nothing", label);
+        assert!(
+            n3_graph.named.is_empty(),
+            "{}: a refusal must materialize nothing",
+            label
+        );
         return;
     };
     if out.grant_triple.is_some() {
@@ -993,7 +1234,11 @@ fn generated_n3_is_never_more_permissive_than_the_rust_reference() {
                 // divergence — the Rust evaluator lets `use` permit `read` while the
                 // strata match action IRIs exactly — is a per-shape property. Sweeping it
                 // across all five conflict strategies only re-ran the same refusals.
-                let actions: &[&str] = if *cname == "unset" { &["read", "use"] } else { &["read"] };
+                let actions: &[&str] = if *cname == "unset" {
+                    &["read", "use"]
+                } else {
+                    &["read"]
+                };
                 // The `odrl:use` umbrella is deliberately OUTSIDE the equivalence scope:
                 // the Rust evaluator lets a `use` permission permit a `read` request
                 // while the strata match action IRIs exactly, so the N3 path is strictly
@@ -1023,17 +1268,53 @@ fn generated_n3_is_never_more_permissive_than_the_rust_reference() {
     // Pin that the sweep genuinely exercised the comparison — real grants and real
     // denies came out of BOTH paths, and the refusal path fired too.
     assert!(cov.total >= 500, "sweep must be broad, ran {}", cov.total);
-    assert!(cov.n3_granted >= 20, "N3 must actually grant somewhere, got {}", cov.n3_granted);
-    assert!(cov.n3_denied >= 20, "N3 must actually deny somewhere, got {}", cov.n3_denied);
-    assert!(cov.n3_refused >= 20, "the refusal path must fire, got {}", cov.n3_refused);
-    assert!(cov.rust_granted >= 20, "Rust must actually grant somewhere, got {}", cov.rust_granted);
-    assert!(cov.rust_denied >= 20, "Rust must actually deny somewhere, got {}", cov.rust_denied);
-    assert!(cov.rust_refused >= 20, "Rust must refuse somewhere, got {}", cov.rust_refused);
+    assert!(
+        cov.n3_granted >= 20,
+        "N3 must actually grant somewhere, got {}",
+        cov.n3_granted
+    );
+    assert!(
+        cov.n3_denied >= 20,
+        "N3 must actually deny somewhere, got {}",
+        cov.n3_denied
+    );
+    assert!(
+        cov.n3_refused >= 20,
+        "the refusal path must fire, got {}",
+        cov.n3_refused
+    );
+    assert!(
+        cov.rust_granted >= 20,
+        "Rust must actually grant somewhere, got {}",
+        cov.rust_granted
+    );
+    assert!(
+        cov.rust_denied >= 20,
+        "Rust must actually deny somewhere, got {}",
+        cov.rust_denied
+    );
+    assert!(
+        cov.rust_refused >= 20,
+        "Rust must refuse somewhere, got {}",
+        cov.rust_refused
+    );
     // The EQUALITY assertion is likewise trivially satisfiable by an empty in-scope
     // sub-corpus, or by one in which both paths always emit nothing.
-    assert!(cov.equiv_cases >= 100, "equivalence sub-corpus too small: {}", cov.equiv_cases);
-    assert!(cov.equiv_grants >= 10, "equivalence scope must include grants: {}", cov.equiv_grants);
-    assert!(cov.equiv_denies >= 10, "equivalence scope must include denies: {}", cov.equiv_denies);
+    assert!(
+        cov.equiv_cases >= 100,
+        "equivalence sub-corpus too small: {}",
+        cov.equiv_cases
+    );
+    assert!(
+        cov.equiv_grants >= 10,
+        "equivalence scope must include grants: {}",
+        cov.equiv_grants
+    );
+    assert!(
+        cov.equiv_denies >= 10,
+        "equivalence scope must include denies: {}",
+        cov.equiv_denies
+    );
     println!(
         "generated differential: {} cases; n3 grant/deny/refuse = {}/{}/{}; \
          rust grant/deny/refuse = {}/{}/{}; equivalence sub-corpus = {} cases \

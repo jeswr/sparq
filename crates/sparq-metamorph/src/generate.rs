@@ -97,7 +97,10 @@ fn object_term(rng: &mut SplitMix64, i: u64) -> String {
         2 => format!("\"{}.5E0\"^^<{XSD}#double>", rng.below(10)),
         3 => format!("\"str{i}\""),
         4 => format!("\"mot{i}\"@fr"),
-        5 => format!("\"{}\"^^<{XSD}#boolean>", if rng.below(2) == 0 { "true" } else { "false" }),
+        5 => format!(
+            "\"{}\"^^<{XSD}#boolean>",
+            if rng.below(2) == 0 { "true" } else { "false" }
+        ),
         _ => format!("<{EX}/o{i}>"),
     }
 }
@@ -186,7 +189,11 @@ mod tests {
         let first = rng.next_u64();
         let mut rng2 = SplitMix64::new(0);
         assert_eq!(first, rng2.next_u64(), "same seed, same stream");
-        assert_ne!(SplitMix64::new(1).next_u64(), first, "different seed, different stream");
+        assert_ne!(
+            SplitMix64::new(1).next_u64(),
+            first,
+            "different seed, different stream"
+        );
         // Fixed-point pin: seed 0 first output of SplitMix64 with the standard constants.
         assert_eq!(first, 0xE220_A839_7B1D_CDAF);
     }

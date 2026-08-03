@@ -46,8 +46,12 @@ const QUERIES: &[(&str, &str)] = &[
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let scale: u32 = arg_val(&args, "--scale").and_then(|s| s.parse().ok()).unwrap_or(20_000);
-    let iters: usize = arg_val(&args, "--iters").and_then(|s| s.parse().ok()).unwrap_or(5);
+    let scale: u32 = arg_val(&args, "--scale")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20_000);
+    let iters: usize = arg_val(&args, "--iters")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
 
     // `sparq-bench dump <scale> <out.nt>` — write the synthetic dataset for the
     // larger-scale QLever comparison.
@@ -56,7 +60,10 @@ fn main() {
         let out = args.get(3).map(String::as_str).unwrap_or("synthetic.nt");
         let t = Instant::now();
         let n = dataset::write_nt(scale, out).expect("write dataset");
-        eprintln!("wrote {n} triples ({scale} entities) to {out} in {:.1}s", t.elapsed().as_secs_f64());
+        eprintln!(
+            "wrote {n} triples ({scale} entities) to {out} in {:.1}s",
+            t.elapsed().as_secs_f64()
+        );
         return;
     }
 
@@ -74,10 +81,12 @@ fn main() {
     // differential vs Oxigraph (sq-3dyje.4): random ground-term update sequences
     // through both sparq update paths + Oxigraph, canonical per-step compare.
     if args.get(1).map(String::as_str) == Some("update-fuzz") {
-        let seed_start: u64 =
-            arg_val(&args, "--seed-start").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let count: u64 =
-            arg_val(&args, "--seed-count").and_then(|s| s.parse().ok()).unwrap_or(1000);
+        let seed_start: u64 = arg_val(&args, "--seed-start")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let count: u64 = arg_val(&args, "--seed-count")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000);
         update_fuzz::run(seed_start, count);
         return;
     }
@@ -92,7 +101,9 @@ fn main() {
         let q = std::fs::read_to_string(q_arg).unwrap_or_else(|_| q_arg.clone());
         let g = sparq_core::Graph::load_str(&ttl, "turtle").expect("sparq load");
         let store = oxigraph::store::Store::new().unwrap();
-        store.load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes()).expect("oxi load");
+        store
+            .load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes())
+            .expect("oxi load");
         let oxi = oxi_count(&store, &q);
         let sparq = match sparq_engine::query(&g, &q) {
             Ok(r) => r.len() as i64,
@@ -119,9 +130,15 @@ fn main() {
     // this, on the SAME box + SAME generated corpus + SAME query files, so the two TSVs are a
     // self-consistent same-box comparison (NOT the cross-machine gh-runner CI band).
     if args.get(1).map(String::as_str) == Some("bench-corpus") {
-        let corpus = args.get(2).expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
-        let format = args.get(3).expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
-        let dir = args.get(4).expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
+        let corpus = args
+            .get(2)
+            .expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
+        let format = args
+            .get(3)
+            .expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
+        let dir = args
+            .get(4)
+            .expect("usage: bench-corpus <corpus> <format> <queries-dir> [iters]");
         let q_iters: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(5);
         bench_corpus_oxigraph(corpus, format, dir, q_iters);
         return;
@@ -135,7 +152,10 @@ fn main() {
 }
 
 fn arg_val(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 // ---- comparison --------------------------------------------------------------
@@ -162,7 +182,10 @@ fn compare(scale: u32, iters: usize) {
         .expect("oxi load");
     let oxi_load = t.elapsed();
 
-    println!("{:<14} {:>12} {:>12} {:>9}", "stage", "sparq", "oxigraph", "speedup");
+    println!(
+        "{:<14} {:>12} {:>12} {:>9}",
+        "stage", "sparq", "oxigraph", "speedup"
+    );
     println!("{}", "-".repeat(50));
     println!(
         "{:<14} {:>12} {:>12} {:>8.2}x",
@@ -171,7 +194,11 @@ fn compare(scale: u32, iters: usize) {
         fmt_dur(oxi_load),
         oxi_load.as_secs_f64() / sparq_load.as_secs_f64()
     );
-    println!("(triples loaded: sparq={}, oxi={})\n", g.len(), store.len().unwrap());
+    println!(
+        "(triples loaded: sparq={}, oxi={})\n",
+        g.len(),
+        store.len().unwrap()
+    );
 
     // ---- queries ----
     println!(
@@ -181,7 +208,9 @@ fn compare(scale: u32, iters: usize) {
     println!("{}", "-".repeat(76));
     let mut mismatches = 0;
     for (name, q) in QUERIES {
-        let (sd, srows) = time_min(iters, || sparq_engine::query(&g, q).expect("sparq query").len());
+        let (sd, srows) = time_min(iters, || {
+            sparq_engine::query(&g, q).expect("sparq query").len()
+        });
         let (od, orows) = time_min(iters, || oxi_count(&store, q));
         let ok = srows == orows;
         if !ok {
@@ -210,7 +239,10 @@ fn compare(scale: u32, iters: usize) {
     );
     println!("  oxigraph {:>10}", fmt_bytes(oxi_mem));
     if sparq_mem > 0 && oxi_mem > 0 {
-        println!("  ratio    {:.2}x (oxi/sparq)", oxi_mem as f64 / sparq_mem as f64);
+        println!(
+            "  ratio    {:.2}x (oxi/sparq)",
+            oxi_mem as f64 / sparq_mem as f64
+        );
     }
 
     if mismatches > 0 {
@@ -357,7 +389,9 @@ fn mem_subprocess(engine: &str, scale: u32) {
         }
         "oxigraph" => {
             let store = oxigraph::store::Store::new().unwrap();
-            store.load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes()).unwrap();
+            store
+                .load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes())
+                .unwrap();
             let rss = peak_rss_bytes();
             std::hint::black_box(&store);
             println!("{rss} 0");

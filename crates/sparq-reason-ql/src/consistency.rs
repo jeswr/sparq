@@ -470,7 +470,10 @@ mod tests {
             triple("http://ex/i", RDF_TYPE, "http://ex/B"),
         ]);
         let QlConsistency::Inconsistent(v) = check_consistency(&violating) else {
-            panic!("expected Inconsistent, got {:?}", check_consistency(&violating));
+            panic!(
+                "expected Inconsistent, got {:?}",
+                check_consistency(&violating)
+            );
         };
         assert_eq!(
             v.axiom,

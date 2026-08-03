@@ -280,7 +280,13 @@ impl PathIds {
 }
 
 /// Breadth-first reachability closure over ids — the id twin of [`closure`].
-fn closure_ids(g: &GraphView, start: Id, inner: &PathIds, forward: bool, reflexive: bool) -> Vec<Id> {
+fn closure_ids(
+    g: &GraphView,
+    start: Id,
+    inner: &PathIds,
+    forward: bool,
+    reflexive: bool,
+) -> Vec<Id> {
     let mut seen: FxHashSet<Id> = FxHashSet::default();
     let mut out: Vec<Id> = Vec::new();
     let mut queue: Vec<Id> = vec![start];
@@ -804,8 +810,14 @@ mod tests {
             Path::Predicate(p("knows")),
             Path::Predicate(p("absent")),
             Path::Inverse(Box::new(Path::Predicate(p("parent")))),
-            Path::Sequence(vec![Path::Predicate(p("knows")), Path::Predicate(p("name"))]),
-            Path::Alternative(vec![Path::Predicate(p("knows")), Path::Predicate(p("parent"))]),
+            Path::Sequence(vec![
+                Path::Predicate(p("knows")),
+                Path::Predicate(p("name")),
+            ]),
+            Path::Alternative(vec![
+                Path::Predicate(p("knows")),
+                Path::Predicate(p("parent")),
+            ]),
             Path::ZeroOrMore(Box::new(Path::Predicate(p("knows")))),
             Path::OneOrMore(Box::new(Path::Predicate(p("knows")))),
             Path::ZeroOrOne(Box::new(Path::Predicate(p("knows")))),

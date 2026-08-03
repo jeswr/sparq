@@ -18,8 +18,7 @@ fn main() {
         std::process::exit(2);
     };
     let load = |path: &str| -> sparq_core::Graph {
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         // Resolve any relative IRIs against the file's own location.
         sparq_shacl::load_turtle_with_base(&text, &format!("file://{path}"))
             .unwrap_or_else(|e| panic!("parse {path}: {e}"))

@@ -402,8 +402,15 @@ fn ntriples_triple_term_object_reparses_via_nt_loader() {
     // The N-Triples reload must equal the Turtle reload of the SAME serialised bytes
     // (write/read symmetry: the two loaders agree on the triple-term structure).
     let g_ttl = Graph::load_str(&nt, "turtle").unwrap();
-    let r_ttl = query(&g_ttl, &format!("SELECT ?t WHERE {{ ?r <{RDF_REIFIES}> ?t }}")).unwrap();
-    assert_eq!(r_ttl.rows, r.rows, "N-Triples reload must match Turtle reload");
+    let r_ttl = query(
+        &g_ttl,
+        &format!("SELECT ?t WHERE {{ ?r <{RDF_REIFIES}> ?t }}"),
+    )
+    .unwrap();
+    assert_eq!(
+        r_ttl.rows, r.rows,
+        "N-Triples reload must match Turtle reload"
+    );
 }
 
 #[test]

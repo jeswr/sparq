@@ -56,8 +56,6 @@ fn one_cell(g: &Graph, q: &str) -> Option<String> {
     r.rows[0][0].as_ref().map(|t| t.to_string())
 }
 
-
-
 // ─── aggregate_error_in_group ─────────────────────────────────────────────────
 
 /// SUM/AVG over a group that contains a non-numeric literal (a type error) must
@@ -85,23 +83,42 @@ mod aggregate_error_in_group {
     fn sum_with_non_numeric_member_is_unbound() {
         // The whole-dataset group contains both 10 and "hello".
         // "hello" is non-numeric → errored = true → sum_values returns None → Value::Error → unbound.
-        let result = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (SUM(?o) AS ?s) WHERE { ?x ex:v ?o }");
-        assert_eq!(result, None, "SUM with a non-numeric member must be UNBOUND, got {result:?}");
+        let result = one_cell(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (SUM(?o) AS ?s) WHERE { ?x ex:v ?o }",
+        );
+        assert_eq!(
+            result, None,
+            "SUM with a non-numeric member must be UNBOUND, got {result:?}"
+        );
     }
 
     /// AVG with a non-numeric member → unbound.
     #[test]
     fn avg_with_non_numeric_member_is_unbound() {
-        let result = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (AVG(?o) AS ?a) WHERE { ?x ex:v ?o }");
-        assert_eq!(result, None, "AVG with a non-numeric member must be UNBOUND, got {result:?}");
+        let result = one_cell(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (AVG(?o) AS ?a) WHERE { ?x ex:v ?o }",
+        );
+        assert_eq!(
+            result, None,
+            "AVG with a non-numeric member must be UNBOUND, got {result:?}"
+        );
     }
 
     /// COUNT(?o) over the same data is NOT affected: it counts BOUND members and
     /// never inspects their type. Both 10 and "hello" are bound → COUNT = 2.
     #[test]
     fn count_with_non_numeric_member_counts_bound_members() {
-        let result = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (COUNT(?o) AS ?n) WHERE { ?x ex:v ?o }");
-        assert_eq!(result, Some(int_lit(2)), "COUNT must count all bound members, got {result:?}");
+        let result = one_cell(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (COUNT(?o) AS ?n) WHERE { ?x ex:v ?o }",
+        );
+        assert_eq!(
+            result,
+            Some(int_lit(2)),
+            "COUNT must count all bound members, got {result:?}"
+        );
     }
 
     /// SUM over a GROUP BY where one group has only numeric members (the 10s) and
@@ -125,7 +142,11 @@ mod aggregate_error_in_group {
         assert_eq!(r.rows.len(), 2, "two groups (bad, nums)");
         // ORDER BY ?g: "bad" < "nums" lexicographically.
         // group "bad": SUM of {"hello"} → unbound
-        assert_eq!(r.rows[0][1], None, "\"bad\" group SUM must be UNBOUND, got {:?}", r.rows[0][1]);
+        assert_eq!(
+            r.rows[0][1], None,
+            "\"bad\" group SUM must be UNBOUND, got {:?}",
+            r.rows[0][1]
+        );
         // group "nums": SUM of {10, 20} = 30 → bound
         assert_eq!(
             r.rows[1][1].as_ref().map(|t| t.to_string()),
@@ -155,9 +176,16 @@ mod aggregate_mixed_numeric {
             "turtle",
         )
         .unwrap();
-        let result = one_cell(&g, "PREFIX ex: <http://ex/> SELECT (SUM(?v) AS ?s) WHERE { ?x ex:v ?v }");
+        let result = one_cell(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (SUM(?v) AS ?s) WHERE { ?x ex:v ?v }",
+        );
         // Expected: "10.5"^^xsd:decimal
-        assert_eq!(result, Some(dec_lit("10.5")), "SUM(int, decimal) must be decimal, got {result:?}");
+        assert_eq!(
+            result,
+            Some(dec_lit("10.5")),
+            "SUM(int, decimal) must be decimal, got {result:?}"
+        );
     }
 
     /// SUM(int, double) → double.  10 (int) + 1.5E0 (double) = 11.5, whose canonical
@@ -171,8 +199,15 @@ mod aggregate_mixed_numeric {
             "turtle",
         )
         .unwrap();
-        let result = one_cell(&g, "PREFIX ex: <http://ex/> SELECT (SUM(?v) AS ?s) WHERE { ?x ex:v ?v }");
-        assert_eq!(result, Some(double_lit("1.15E1")), "SUM(int, double) must be double, got {result:?}");
+        let result = one_cell(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (SUM(?v) AS ?s) WHERE { ?x ex:v ?v }",
+        );
+        assert_eq!(
+            result,
+            Some(double_lit("1.15E1")),
+            "SUM(int, double) must be double, got {result:?}"
+        );
     }
 
     /// AVG(3 integers) = decimal quotient when division doesn't produce an exact integer.
@@ -184,7 +219,10 @@ mod aggregate_mixed_numeric {
             "turtle",
         )
         .unwrap();
-        let result = one_cell(&g, "PREFIX ex: <http://ex/> SELECT (AVG(?v) AS ?a) WHERE { ?x ex:v ?v }");
+        let result = one_cell(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (AVG(?v) AS ?a) WHERE { ?x ex:v ?v }",
+        );
         // 2+4+6 = 12 (integer SUM); AVG = 12/3, and xsd:integer÷xsd:integer is DECIMAL
         // division per SPARQL/XPath. The exact quotient is 4, serialised at the smallest
         // scale ≥ 1 the engine's `Dec::checked_div` produces → the canonical "4.0"^^xsd:decimal.
@@ -204,8 +242,15 @@ mod aggregate_mixed_numeric {
             "turtle",
         )
         .unwrap();
-        let result = one_cell(&g, "PREFIX ex: <http://ex/> SELECT (AVG(?v) AS ?a) WHERE { ?x ex:v ?v }");
-        assert_eq!(result, Some(dec_lit("1.5")), "AVG(int, decimal) must be decimal 1.5, got {result:?}");
+        let result = one_cell(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (AVG(?v) AS ?a) WHERE { ?x ex:v ?v }",
+        );
+        assert_eq!(
+            result,
+            Some(dec_lit("1.5")),
+            "AVG(int, decimal) must be decimal 1.5, got {result:?}"
+        );
     }
 }
 
@@ -224,8 +269,15 @@ mod count_distinct {
             "turtle",
         )
         .unwrap();
-        let n = one_cell(&g, "PREFIX ex: <http://ex/> SELECT (COUNT(DISTINCT ?o) AS ?n) WHERE { ?s ex:p ?o }");
-        assert_eq!(n, Some(int_lit(2)), "COUNT(DISTINCT) must count distinct terms, got {n:?}");
+        let n = one_cell(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (COUNT(DISTINCT ?o) AS ?n) WHERE { ?s ex:p ?o }",
+        );
+        assert_eq!(
+            n,
+            Some(int_lit(2)),
+            "COUNT(DISTINCT) must count distinct terms, got {n:?}"
+        );
     }
 
     /// COUNT(DISTINCT ?o) vs COUNT(?o): they differ when duplicates exist.
@@ -236,10 +288,20 @@ mod count_distinct {
             "turtle",
         )
         .unwrap();
-        let all = one_cell(&g, "PREFIX ex: <http://ex/> SELECT (COUNT(?o) AS ?n) WHERE { ?s ex:p ?o }");
-        let distinct = one_cell(&g, "PREFIX ex: <http://ex/> SELECT (COUNT(DISTINCT ?o) AS ?n) WHERE { ?s ex:p ?o }");
+        let all = one_cell(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (COUNT(?o) AS ?n) WHERE { ?s ex:p ?o }",
+        );
+        let distinct = one_cell(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT (COUNT(DISTINCT ?o) AS ?n) WHERE { ?s ex:p ?o }",
+        );
         assert_eq!(all, Some(int_lit(3)), "COUNT(all) = 3, got {all:?}");
-        assert_eq!(distinct, Some(int_lit(1)), "COUNT(DISTINCT) = 1, got {distinct:?}");
+        assert_eq!(
+            distinct,
+            Some(int_lit(1)),
+            "COUNT(DISTINCT) = 1, got {distinct:?}"
+        );
     }
 
     /// COUNT(DISTINCT *) (CountSolutions with distinct) counts distinct whole-rows.
@@ -256,8 +318,16 @@ mod count_distinct {
         // UNION does not dedup: COUNT(*) = 2, COUNT(DISTINCT *) = 1.
         let all = r.rows[0][0].as_ref().map(|t| t.to_string());
         let dist = r.rows[0][1].as_ref().map(|t| t.to_string());
-        assert_eq!(all, Some(int_lit(2)), "COUNT(*) should be 2 (bag), got {all:?}");
-        assert_eq!(dist, Some(int_lit(1)), "COUNT(DISTINCT *) should be 1, got {dist:?}");
+        assert_eq!(
+            all,
+            Some(int_lit(2)),
+            "COUNT(*) should be 2 (bag), got {all:?}"
+        );
+        assert_eq!(
+            dist,
+            Some(int_lit(1)),
+            "COUNT(DISTINCT *) should be 1, got {dist:?}"
+        );
     }
 }
 
@@ -290,7 +360,12 @@ mod filter_three_valued_logic {
             "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(STRLEN(?s) > 0) }",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 0, "FILTER on type error must drop all rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "FILTER on type error must drop all rows, got {}",
+            r.rows.len()
+        );
     }
 
     /// FILTER(STRLEN(?o) > 0): ?o is an xsd:integer → STRLEN of a non-string is a type error.
@@ -302,7 +377,12 @@ mod filter_three_valued_logic {
             "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:p ?o FILTER(STRLEN(?o) > 0) }",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 0, "STRLEN(?integer) is a type error → filter drops rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "STRLEN(?integer) is a type error → filter drops rows, got {}",
+            r.rows.len()
+        );
     }
 
     /// A FILTER with a VALID condition keeps the matching rows and drops the rest.
@@ -314,7 +394,12 @@ mod filter_three_valued_logic {
             "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:p ?o FILTER(?o > 1) }",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 2, "FILTER(?o > 1) must keep exactly 2 rows (2 and 3), got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            2,
+            "FILTER(?o > 1) must keep exactly 2 rows (2 and 3), got {}",
+            r.rows.len()
+        );
     }
 
     /// FILTER error is NOT the same as FILTER false: a negated error (`!error`) is
@@ -327,7 +412,12 @@ mod filter_three_valued_logic {
             "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(!STRLEN(?s) > 0) }",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 0, "!error is still error → all rows dropped, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "!error is still error → all rows dropped, got {}",
+            r.rows.len()
+        );
     }
 
     /// FILTER on an unbound optional variable: the variable is unbound → Value::Unbound
@@ -345,7 +435,12 @@ mod filter_three_valued_logic {
             "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o OPTIONAL { ?s ex:q ?opt } FILTER(?opt > 0) }",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 0, "FILTER on unbound ?opt → dropped, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "FILTER on unbound ?opt → dropped, got {}",
+            r.rows.len()
+        );
     }
 
     /// SPARQL AND short-circuits on FALSE (not on error). `false AND error` = false.
@@ -355,14 +450,26 @@ mod filter_three_valued_logic {
         let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a ex:p 1 .", "turtle").unwrap();
         // false && (type error) = false → row dropped
         let r_false_and = query(&g, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(false && STRLEN(?s) > 0) }").unwrap();
-        assert_eq!(r_false_and.rows.len(), 0, "false && error = false → dropped");
+        assert_eq!(
+            r_false_and.rows.len(),
+            0,
+            "false && error = false → dropped"
+        );
 
         // true && (type error) = error → row dropped
-        let r_true_and = query(&g, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(true && STRLEN(?s) > 0) }").unwrap();
+        let r_true_and = query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(true && STRLEN(?s) > 0) }",
+        )
+        .unwrap();
         assert_eq!(r_true_and.rows.len(), 0, "true && error = error → dropped");
 
         // true && true = true → row kept
-        let r_true_true = query(&g, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(true && ?o > 0) }").unwrap();
+        let r_true_true = query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(true && ?o > 0) }",
+        )
+        .unwrap();
         assert_eq!(r_true_true.rows.len(), 1, "true && true = true → kept");
     }
 
@@ -372,7 +479,11 @@ mod filter_three_valued_logic {
     fn filter_or_short_circuits_on_true() {
         let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a ex:p 1 .", "turtle").unwrap();
         // true || error = true → row kept
-        let r_true_or = query(&g, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(true || STRLEN(?s) > 0) }").unwrap();
+        let r_true_or = query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:p ?o FILTER(true || STRLEN(?s) > 0) }",
+        )
+        .unwrap();
         assert_eq!(r_true_or.rows.len(), 1, "true || error = true → kept");
 
         // false || error = error → row dropped
@@ -405,7 +516,12 @@ mod type_error_builtins {
     fn not_isiri_of_unbound_is_error_drops_row() {
         let q = format!("SELECT ?s WHERE {{ {OPT_BODY} FILTER(!isIRI(?u)) }}");
         let r = query(&g_opt(), &q).unwrap();
-        assert_eq!(r.rows.len(), 0, "!isIRI(?unbound) must be a type error (row dropped), got {} rows", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "!isIRI(?unbound) must be a type error (row dropped), got {} rows",
+            r.rows.len()
+        );
     }
 
     /// All four type tests error on unbound, in BOTH polarities (error ≠ false: the
@@ -417,7 +533,12 @@ mod type_error_builtins {
             for form in [format!("{f}(?u)"), format!("!{f}(?u)")] {
                 let q = format!("SELECT ?s WHERE {{ {OPT_BODY} FILTER({form}) }}");
                 let r = query(&g_opt(), &q).unwrap();
-                assert_eq!(r.rows.len(), 0, "FILTER({form}) with ?u unbound must drop the row, got {} rows", r.rows.len());
+                assert_eq!(
+                    r.rows.len(),
+                    0,
+                    "FILTER({form}) with ?u unbound must drop the row, got {} rows",
+                    r.rows.len()
+                );
             }
         }
     }
@@ -433,9 +554,17 @@ mod type_error_builtins {
         };
         assert_eq!(keep("isIRI(?o)"), 1, "isIRI(bound IRI) must be true");
         assert_eq!(keep("!isIRI(?o)"), 0, "!isIRI(bound IRI) must be false");
-        assert_eq!(keep("isLiteral(?o)"), 0, "isLiteral(bound IRI) must be false");
+        assert_eq!(
+            keep("isLiteral(?o)"),
+            0,
+            "isLiteral(bound IRI) must be false"
+        );
         assert_eq!(keep("isBlank(?o)"), 0, "isBlank(bound IRI) must be false");
-        assert_eq!(keep("isNumeric(?o)"), 0, "isNumeric(bound IRI) must be false");
+        assert_eq!(
+            keep("isNumeric(?o)"),
+            0,
+            "isNumeric(bound IRI) must be false"
+        );
     }
 
     /// An ERRORED (not merely unbound) argument also propagates: STRLEN(?s) on an
@@ -445,7 +574,12 @@ mod type_error_builtins {
     fn type_test_propagates_errored_argument() {
         let q = "SELECT ?s WHERE { ?s <http://ex/p> ?o FILTER(!isNumeric(STRLEN(?s))) }";
         let r = query(&g_opt(), q).unwrap();
-        assert_eq!(r.rows.len(), 0, "isNumeric(type-error) must propagate the error, got {} rows", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "isNumeric(type-error) must propagate the error, got {} rows",
+            r.rows.len()
+        );
     }
 
     /// STR(bnode) is a type error: a BIND of it leaves the variable UNBOUND (row
@@ -458,9 +592,20 @@ mod type_error_builtins {
         for bind in ["STR(?s)", "STRLEN(STR(?s))"] {
             let q = format!("SELECT ?s ?v WHERE {{ ?s <http://ex/p> ?o . BIND({bind} AS ?v) }}");
             let r = query(&g, &q).unwrap();
-            assert_eq!(r.rows.len(), 1, "BIND of an error keeps the row for: {bind}");
-            assert!(r.rows[0][0].is_some(), "?s (the bnode) stays bound for: {bind}");
-            assert_eq!(r.rows[0][1], None, "BIND({bind}) over a bnode must leave ?v UNBOUND, got {:?}", r.rows[0][1]);
+            assert_eq!(
+                r.rows.len(),
+                1,
+                "BIND of an error keeps the row for: {bind}"
+            );
+            assert!(
+                r.rows[0][0].is_some(),
+                "?s (the bnode) stays bound for: {bind}"
+            );
+            assert_eq!(
+                r.rows[0][1], None,
+                "BIND({bind}) over a bnode must leave ?v UNBOUND, got {:?}",
+                r.rows[0][1]
+            );
         }
     }
 
@@ -474,7 +619,10 @@ mod type_error_builtins {
         )
         .unwrap();
         let cell = |q: &str| one_cell(&g, q);
-        assert_eq!(cell("SELECT (STR(<http://ex/x>) AS ?v) WHERE {}"), Some("\"http://ex/x\"".into()));
+        assert_eq!(
+            cell("SELECT (STR(<http://ex/x>) AS ?v) WHERE {}"),
+            Some("\"http://ex/x\"".into())
+        );
         assert_eq!(
             cell("SELECT ?v WHERE { <http://ex/a> <http://ex/p> ?o BIND(STR(?o) AS ?v) }"),
             Some("\"hi\"".into()),
@@ -485,8 +633,16 @@ mod type_error_builtins {
             Some("\"7\"".into()),
             "STR of a typed literal is its lexical form"
         );
-        assert_eq!(cell("SELECT (STR(1+1) AS ?v) WHERE {}"), Some("\"2\"".into()), "STR of a computed numeric");
-        assert_eq!(cell("SELECT (STR(1 < 2) AS ?v) WHERE {}"), Some("\"true\"".into()), "STR of a computed boolean");
+        assert_eq!(
+            cell("SELECT (STR(1+1) AS ?v) WHERE {}"),
+            Some("\"2\"".into()),
+            "STR of a computed numeric"
+        );
+        assert_eq!(
+            cell("SELECT (STR(1 < 2) AS ?v) WHERE {}"),
+            Some("\"true\"".into()),
+            "STR of a computed boolean"
+        );
     }
 
     /// STR(?u) with ?u UNBOUND stays a type error (was already an error before the
@@ -496,7 +652,10 @@ mod type_error_builtins {
         let q = format!("SELECT ?s ?v WHERE {{ {OPT_BODY} BIND(STR(?u) AS ?v) }}");
         let r = query(&g_opt(), &q).unwrap();
         assert_eq!(r.rows.len(), 1);
-        assert_eq!(r.rows[0][1], None, "BIND(STR(?unbound)) must leave ?v unbound");
+        assert_eq!(
+            r.rows[0][1], None,
+            "BIND(STR(?unbound)) must leave ?v unbound"
+        );
     }
 }
 
@@ -529,13 +688,25 @@ mod optional_scoping {
         )
         .unwrap();
         // Three subjects: a (has q), b (no q), c (has q).
-        assert_eq!(r.rows.len(), 3, "OPTIONAL must keep all 3 left rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            3,
+            "OPTIONAL must keep all 3 left rows, got {}",
+            r.rows.len()
+        );
         // b must have ?o = None (unbound, not missing row).
         let b_row = r.rows.iter().find(|row| {
-            row[0].as_ref().map(|t| t.to_string().contains("/b")).unwrap_or(false)
+            row[0]
+                .as_ref()
+                .map(|t| t.to_string().contains("/b"))
+                .unwrap_or(false)
         });
         let b_row = b_row.expect("ex:b row must be present");
-        assert_eq!(b_row[1], None, "ex:b has no ex:q, so ?o must be unbound, got {:?}", b_row[1]);
+        assert_eq!(
+            b_row[1], None,
+            "ex:b has no ex:q, so ?o must be unbound, got {:?}",
+            b_row[1]
+        );
     }
 
     /// OPTIONAL with a FILTER condition: the filter is applied to the COMBINED row
@@ -553,13 +724,44 @@ mod optional_scoping {
             "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE { ?s ex:p ?v OPTIONAL { ?s ex:q ?o FILTER(?o > 15) } } ORDER BY ?s",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 3, "OPTIONAL with filter must keep all 3 left rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            3,
+            "OPTIONAL with filter must keep all 3 left rows, got {}",
+            r.rows.len()
+        );
         // a: q=10, 10 > 15 is false → ?o unbound
-        let a_row = r.rows.iter().find(|row| row[0].as_ref().map(|t| t.to_string().contains("/a")).unwrap_or(false)).unwrap();
-        assert_eq!(a_row[1], None, "ex:a: q=10 fails FILTER(q>15), so ?o must be unbound, got {:?}", a_row[1]);
+        let a_row = r
+            .rows
+            .iter()
+            .find(|row| {
+                row[0]
+                    .as_ref()
+                    .map(|t| t.to_string().contains("/a"))
+                    .unwrap_or(false)
+            })
+            .unwrap();
+        assert_eq!(
+            a_row[1], None,
+            "ex:a: q=10 fails FILTER(q>15), so ?o must be unbound, got {:?}",
+            a_row[1]
+        );
         // c: q=30, 30 > 15 is true → ?o = 30
-        let c_row = r.rows.iter().find(|row| row[0].as_ref().map(|t| t.to_string().contains("/c")).unwrap_or(false)).unwrap();
-        assert!(c_row[1].is_some(), "ex:c: q=30 passes FILTER(q>15), ?o must be bound, got {:?}", c_row[1]);
+        let c_row = r
+            .rows
+            .iter()
+            .find(|row| {
+                row[0]
+                    .as_ref()
+                    .map(|t| t.to_string().contains("/c"))
+                    .unwrap_or(false)
+            })
+            .unwrap();
+        assert!(
+            c_row[1].is_some(),
+            "ex:c: q=30 passes FILTER(q>15), ?o must be bound, got {:?}",
+            c_row[1]
+        );
     }
 
     /// OPTIONAL: multiple matching right rows produce one output row per combination.
@@ -577,7 +779,12 @@ mod optional_scoping {
         )
         .unwrap();
         // ex:a has two ex:q values (10 and 20) → 2 output rows.
-        assert_eq!(r.rows.len(), 2, "OPTIONAL with 2 matching right rows must produce 2 output rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            2,
+            "OPTIONAL with 2 matching right rows must produce 2 output rows, got {}",
+            r.rows.len()
+        );
     }
 
     /// OPTIONAL with a shared variable that is sometimes unbound on the left: the general
@@ -600,8 +807,16 @@ mod optional_scoping {
         .unwrap();
         // One left row (ex:a): no ex:r → ?y unbound; has ex:q 99 → ?z = 99.
         assert_eq!(r.rows.len(), 1);
-        assert_eq!(r.rows[0][1], None, "?y (ex:r match) should be unbound, got {:?}", r.rows[0][1]);
-        assert!(r.rows[0][2].is_some(), "?z (ex:q match) should be bound to 99, got {:?}", r.rows[0][2]);
+        assert_eq!(
+            r.rows[0][1], None,
+            "?y (ex:r match) should be unbound, got {:?}",
+            r.rows[0][1]
+        );
+        assert!(
+            r.rows[0][2].is_some(),
+            "?z (ex:q match) should be bound to 99, got {:?}",
+            r.rows[0][2]
+        );
     }
 }
 
@@ -639,7 +854,12 @@ mod minus_scoping {
         .unwrap();
         // Left: {a, b, c}. Right: {a:1, b:2, c:3} but on DIFFERENT variables → no shared variable
         // Wait - ?s and ?x don't overlap. So disjoint → nothing removed.
-        assert_eq!(r.rows.len(), 3, "MINUS with disjoint variables must be a no-op, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            3,
+            "MINUS with disjoint variables must be a no-op, got {}",
+            r.rows.len()
+        );
     }
 
     /// MINUS with compatible rows: rows whose shared variable values match are dropped.
@@ -653,9 +873,20 @@ mod minus_scoping {
         // Left: {a (type X), b (type X), c (type Y)}.
         // Right: {s → a, s → b} (those with type X).
         // ?s is shared; a and b have type X and are removed → only c remains.
-        assert_eq!(r.rows.len(), 1, "MINUS must remove a and b (type X), leaving c, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            1,
+            "MINUS must remove a and b (type X), leaving c, got {}",
+            r.rows.len()
+        );
         let remaining = r.rows[0][0].as_ref().map(|t| t.to_string());
-        assert!(remaining.as_deref().map(|s| s.contains("/c")).unwrap_or(false), "only ex:c should survive, got {remaining:?}");
+        assert!(
+            remaining
+                .as_deref()
+                .map(|s| s.contains("/c"))
+                .unwrap_or(false),
+            "only ex:c should survive, got {remaining:?}"
+        );
     }
 
     /// MINUS with incompatible rows: different values for the shared variable → kept.
@@ -667,7 +898,12 @@ mod minus_scoping {
         )
         .unwrap();
         // Right side has ?s ex:type ex:Z — nothing matches (no Z triples) → all left kept.
-        assert_eq!(r.rows.len(), 3, "MINUS with no compatible right rows must keep all 3 left rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            3,
+            "MINUS with no compatible right rows must keep all 3 left rows, got {}",
+            r.rows.len()
+        );
     }
 
     /// MINUS with an OPTIONAL on the left: when ?x is unbound on the left, the
@@ -694,10 +930,22 @@ mod minus_scoping {
         .unwrap();
         // ex:a: ?opt = 42 → compatible with right {s=a, opt=42} → REMOVED.
         // ex:b: ?opt = unbound → no domain overlap on ?opt → NOT removed.
-        assert_eq!(r.rows.len(), 1, "only ex:b (unbound ?opt) should survive, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            1,
+            "only ex:b (unbound ?opt) should survive, got {}",
+            r.rows.len()
+        );
         let s = r.rows[0][0].as_ref().map(|t| t.to_string());
-        assert!(s.as_deref().map(|s| s.contains("/b")).unwrap_or(false), "surviving row should be ex:b, got {s:?}");
-        assert_eq!(r.rows[0][1], None, "?opt should be unbound for ex:b, got {:?}", r.rows[0][1]);
+        assert!(
+            s.as_deref().map(|s| s.contains("/b")).unwrap_or(false),
+            "surviving row should be ex:b, got {s:?}"
+        );
+        assert_eq!(
+            r.rows[0][1], None,
+            "?opt should be unbound for ex:b, got {:?}",
+            r.rows[0][1]
+        );
     }
 }
 
@@ -734,7 +982,15 @@ mod order_by_type_boundary {
             assert_eq!(r.rows.len(), 3, "3 objects must yield 3 rows for: {q}");
             r.rows
                 .iter()
-                .map(|row| row[0].as_ref().expect("bound").to_string().chars().next().expect("non-empty term"))
+                .map(|row| {
+                    row[0]
+                        .as_ref()
+                        .expect("bound")
+                        .to_string()
+                        .chars()
+                        .next()
+                        .expect("non-empty term")
+                })
                 .collect()
         };
         // ASC: blank ('_') < IRI ('<') < literal ('"').
@@ -755,8 +1011,16 @@ mod order_by_type_boundary {
     /// Across numeric/string: numerics sort before plain-string literals.
     #[test]
     fn order_by_numeric_before_string_literal() {
-        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a ex:p 1 . ex:b ex:p \"abc\" .", "turtle").unwrap();
-        let r = query(&g, "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:p ?o } ORDER BY ASC(?o)").unwrap();
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:p 1 . ex:b ex:p \"abc\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r = query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:p ?o } ORDER BY ASC(?o)",
+        )
+        .unwrap();
         assert_eq!(r.rows.len(), 2);
         // numeric (1) should precede string ("abc") in SPARQL total order. Assert the
         // EXACT terms rather than a `contains("integer")` datatype-substring check.
@@ -778,7 +1042,11 @@ mod order_by_type_boundary {
     /// (they compare as less than any term).
     #[test]
     fn order_by_unbound_sorts_first_in_asc() {
-        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a ex:p 1 . ex:b ex:p 2 .", "turtle").unwrap();
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:p 1 . ex:b ex:p 2 .",
+            "turtle",
+        )
+        .unwrap();
         // OPTIONAL with no match → ?opt is unbound for all rows.
         let r = query(
             &g,
@@ -820,9 +1088,17 @@ mod having_clause {
             "PREFIX ex: <http://ex/> SELECT ?s (COUNT(*) AS ?n) WHERE { ?s ex:tag ?t } GROUP BY ?s HAVING (COUNT(*) > 2)",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 1, "only ex:a (3 tags) should satisfy HAVING(COUNT > 2), got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            1,
+            "only ex:a (3 tags) should satisfy HAVING(COUNT > 2), got {}",
+            r.rows.len()
+        );
         let s = r.rows[0][0].as_ref().map(|t| t.to_string());
-        assert!(s.as_deref().map(|s| s.contains("/a")).unwrap_or(false), "ex:a must be the surviving group, got {s:?}");
+        assert!(
+            s.as_deref().map(|s| s.contains("/a")).unwrap_or(false),
+            "ex:a must be the surviving group, got {s:?}"
+        );
         let n = r.rows[0][1].as_ref().map(|t| t.to_string());
         assert_eq!(n, Some(int_lit(3)), "COUNT for ex:a must be 3, got {n:?}");
     }
@@ -836,7 +1112,12 @@ mod having_clause {
         )
         .unwrap();
         // a (3 tags) and c (2 tags) both satisfy >= 2; b (1 tag) does not.
-        assert_eq!(r.rows.len(), 2, "ex:a and ex:c should satisfy HAVING(COUNT >= 2), got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            2,
+            "ex:a and ex:c should satisfy HAVING(COUNT >= 2), got {}",
+            r.rows.len()
+        );
     }
 
     /// HAVING with a condition that no group satisfies → 0 rows.
@@ -847,7 +1128,12 @@ mod having_clause {
             "PREFIX ex: <http://ex/> SELECT ?s (COUNT(*) AS ?n) WHERE { ?s ex:tag ?t } GROUP BY ?s HAVING (COUNT(*) > 100)",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 0, "no group has more than 100 tags, should be 0 rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            0,
+            "no group has more than 100 tags, should be 0 rows, got {}",
+            r.rows.len()
+        );
     }
 }
 
@@ -871,23 +1157,38 @@ mod sample_and_group_concat {
     /// SAMPLE over a non-empty group must return a BOUND value.
     #[test]
     fn sample_over_non_empty_group_is_bound() {
-        let result = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (SAMPLE(?o) AS ?v) WHERE { ?s ex:p ?o }");
-        assert!(result.is_some(), "SAMPLE over non-empty group must be bound, got None");
+        let result = one_cell(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (SAMPLE(?o) AS ?v) WHERE { ?s ex:p ?o }",
+        );
+        assert!(
+            result.is_some(),
+            "SAMPLE over non-empty group must be bound, got None"
+        );
     }
 
     /// GROUP_CONCAT joins all member string values with the default separator (space).
     /// The result is a plain (simple) literal.
     #[test]
     fn group_concat_default_separator_joins_with_space() {
-        let result = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (GROUP_CONCAT(?o) AS ?v) WHERE { ?s ex:p ?o }");
+        let result = one_cell(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (GROUP_CONCAT(?o) AS ?v) WHERE { ?s ex:p ?o }",
+        );
         let s = result.expect("GROUP_CONCAT must produce a bound value");
         // The result must be a simple literal containing the three values separated by spaces.
         // The ORDER is unspecified, but all three must appear.
         for val in ["x", "y", "z"] {
-            assert!(s.contains(val), "GROUP_CONCAT result must contain {val:?}, got {s:?}");
+            assert!(
+                s.contains(val),
+                "GROUP_CONCAT result must contain {val:?}, got {s:?}"
+            );
         }
         // Spaces as separator (not commas, not empty).
-        assert!(s.contains(' '), "GROUP_CONCAT default separator is space, got {s:?}");
+        assert!(
+            s.contains(' '),
+            "GROUP_CONCAT default separator is space, got {s:?}"
+        );
     }
 
     /// GROUP_CONCAT with a custom separator (semicolon).
@@ -898,22 +1199,42 @@ mod sample_and_group_concat {
             "PREFIX ex: <http://ex/> SELECT (GROUP_CONCAT(?o; SEPARATOR=\";\") AS ?v) WHERE { ?s ex:p ?o }",
         );
         let s = result.expect("GROUP_CONCAT with separator must produce a bound value");
-        assert!(s.contains(';'), "GROUP_CONCAT separator=';' must appear in result, got {s:?}");
+        assert!(
+            s.contains(';'),
+            "GROUP_CONCAT separator=';' must appear in result, got {s:?}"
+        );
         // No spaces (not the default separator).
-        assert!(!s.contains(' '), "custom separator ';' must not add spaces, got {s:?}");
+        assert!(
+            !s.contains(' '),
+            "custom separator ';' must not add spaces, got {s:?}"
+        );
     }
 
     /// MIN/MAX over a group of plain string literals: lexicographic order.
     #[test]
     fn min_max_over_string_literals() {
         // Lexicographic: "x" < "y" < "z".
-        let mn = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (MIN(?o) AS ?v) WHERE { ?s ex:p ?o }");
-        let mx = one_cell(&g(), "PREFIX ex: <http://ex/> SELECT (MAX(?o) AS ?v) WHERE { ?s ex:p ?o }");
+        let mn = one_cell(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (MIN(?o) AS ?v) WHERE { ?s ex:p ?o }",
+        );
+        let mx = one_cell(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (MAX(?o) AS ?v) WHERE { ?s ex:p ?o }",
+        );
         // MIN = "x", MAX = "z". Assert the EXACT plain-literal term (a simple xsd:string
         // renders without a datatype suffix) — a `contains('"') && contains('x')` check
         // would also pass for a wrong value like "xyz" or "x-ray".
-        assert_eq!(mn.as_deref(), Some("\"x\""), "MIN of {{\"x\",\"y\",\"z\"}} must be the plain literal \"x\", got {mn:?}");
-        assert_eq!(mx.as_deref(), Some("\"z\""), "MAX of {{\"x\",\"y\",\"z\"}} must be the plain literal \"z\", got {mx:?}");
+        assert_eq!(
+            mn.as_deref(),
+            Some("\"x\""),
+            "MIN of {{\"x\",\"y\",\"z\"}} must be the plain literal \"x\", got {mn:?}"
+        );
+        assert_eq!(
+            mx.as_deref(),
+            Some("\"z\""),
+            "MAX of {{\"x\",\"y\",\"z\"}} must be the plain literal \"z\", got {mx:?}"
+        );
     }
 }
 
@@ -943,7 +1264,12 @@ mod subselect_and_union {
             "PREFIX ex: <http://ex/> SELECT ?s WHERE { { ?s ex:p ?o } UNION { ?s ex:p ?o } }",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 6, "UNION is a bag: 3+3=6 rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            6,
+            "UNION is a bag: 3+3=6 rows, got {}",
+            r.rows.len()
+        );
     }
 
     /// A sub-SELECT projects only some variables. The outer query sees only the
@@ -968,7 +1294,12 @@ mod subselect_and_union {
             "PREFIX ex: <http://ex/> SELECT ?o WHERE { SELECT ?o WHERE { ?s ex:p ?o } LIMIT 2 }",
         )
         .unwrap();
-        assert_eq!(r.rows.len(), 2, "sub-SELECT LIMIT 2 must cap outer to 2 rows, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            2,
+            "sub-SELECT LIMIT 2 must cap outer to 2 rows, got {}",
+            r.rows.len()
+        );
     }
 }
 
@@ -992,7 +1323,11 @@ mod values_inline {
         assert_eq!(r.rows.len(), 2, "VALUES must bind 2 rows");
         // second row has ?y = UNDEF → unbound
         let second = &r.rows[1];
-        assert_eq!(second[1], None, "UNDEF must be unbound (not a literal), got {:?}", second[1]);
+        assert_eq!(
+            second[1], None,
+            "UNDEF must be unbound (not a literal), got {:?}",
+            second[1]
+        );
     }
 
     /// VALUES joined with a BGP: only rows where both VALUES and BGP bind consistently match.
@@ -1011,7 +1346,10 @@ mod values_inline {
         .unwrap();
         assert_eq!(r.rows.len(), 2, "VALUES restricts ?s to ex:a and ex:b");
         let s0 = r.rows[0][0].as_ref().map(|t| t.to_string());
-        assert!(s0.as_deref().map(|s| s.contains("/a")).unwrap_or(false), "first row should be ex:a, got {s0:?}");
+        assert!(
+            s0.as_deref().map(|s| s.contains("/a")).unwrap_or(false),
+            "first row should be ex:a, got {s0:?}"
+        );
     }
 }
 
@@ -1043,11 +1381,24 @@ mod dp_planner_result_equivalence {
         let mut r = query(g, q).expect("query error");
         // Sort rows for order-independent comparison.
         r.rows.sort_by(|a, b| {
-            let sa: Vec<String> = a.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect();
-            let sb: Vec<String> = b.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect();
+            let sa: Vec<String> = a
+                .iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default())
+                .collect();
+            let sb: Vec<String> = b
+                .iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default())
+                .collect();
             sa.cmp(&sb)
         });
-        r.rows.iter().map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect()).collect()
+        r.rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.as_ref().map(|t| t.to_string()))
+                    .collect()
+            })
+            .collect()
     }
 
     #[test]
@@ -1057,7 +1408,10 @@ mod dp_planner_result_equivalence {
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?o1 ?o2 WHERE { ?s ex:p1 ?o1 . ?s ex:p2 ?o2 }";
         let greedy = sorted_rows(&g, q);
         let dp = sparq_engine::with_dp_planner(|| sorted_rows(&g, q));
-        assert_eq!(greedy, dp, "DP planner must produce the same result as greedy on a star BGP");
+        assert_eq!(
+            greedy, dp,
+            "DP planner must produce the same result as greedy on a star BGP"
+        );
     }
 
     #[test]
@@ -1072,7 +1426,10 @@ mod dp_planner_result_equivalence {
         let q = "PREFIX ex: <http://ex/> SELECT ?a ?b ?c ?d WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?d }";
         let greedy = sorted_rows(&g, q);
         let dp = sparq_engine::with_dp_planner(|| sorted_rows(&g, q));
-        assert_eq!(greedy, dp, "DP planner must produce the same result as greedy on a chain BGP");
+        assert_eq!(
+            greedy, dp,
+            "DP planner must produce the same result as greedy on a chain BGP"
+        );
     }
 
     #[test]
@@ -1084,7 +1441,10 @@ mod dp_planner_result_equivalence {
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?o1 ?o2 WHERE { ?s ex:p1 ?o1 . ?s ex:p2 ?o2 }";
         let greedy = sorted_rows(&g, q);
         let dp_fallback = sparq_engine::with_dp_planner_budget(0, || sorted_rows(&g, q));
-        assert_eq!(greedy, dp_fallback, "dp budget=0 must fall back to greedy, result must agree");
+        assert_eq!(
+            greedy, dp_fallback,
+            "dp budget=0 must fall back to greedy, result must agree"
+        );
     }
 
     /// The greedy planner produces correct results regardless of whether the dp-planner
@@ -1099,9 +1459,17 @@ mod dp_planner_result_equivalence {
         )
         .unwrap();
         // Only ex:a has p3, so only ex:a matches all three.
-        assert_eq!(r.rows.len(), 1, "only ex:a has all three predicates, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            1,
+            "only ex:a has all three predicates, got {}",
+            r.rows.len()
+        );
         let s = r.rows[0][0].as_ref().map(|t| t.to_string());
-        assert!(s.as_deref().map(|s| s.contains("/a")).unwrap_or(false), "ex:a must be the result, got {s:?}");
+        assert!(
+            s.as_deref().map(|s| s.contains("/a")).unwrap_or(false),
+            "ex:a must be the result, got {s:?}"
+        );
     }
 }
 
@@ -1129,14 +1497,26 @@ mod numeric_whitespace_collapse_consistency {
         let g = padded_graph();
         // Relational FILTER fast path reads the numeric cache.
         let lt = query(&g, "SELECT ?s WHERE { ?s <http://ex/v> ?o FILTER(?o < 5) }").unwrap();
-        assert_eq!(lt.rows.len(), 2, "both the padded and plain integer are < 5");
+        assert_eq!(
+            lt.rows.len(),
+            2,
+            "both the padded and plain integer are < 5"
+        );
         // Equality: the padded lexical equals the value 1.
         let eq = query(&g, "SELECT ?s WHERE { ?s <http://ex/v> ?o FILTER(?o = 1) }").unwrap();
         assert_eq!(eq.rows.len(), 2, "both the padded and plain integer = 1");
         // Arithmetic (through the trimming Num::of_literal) already accepted it — assert the
         // three seams now AGREE.
-        let arith = query(&g, "SELECT ?s WHERE { ?s <http://ex/v> ?o BIND(?o + 0 AS ?n) FILTER(?n < 5) }").unwrap();
-        assert_eq!(arith.rows.len(), 2, "arithmetic path agrees: both rows survive");
+        let arith = query(
+            &g,
+            "SELECT ?s WHERE { ?s <http://ex/v> ?o BIND(?o + 0 AS ?n) FILTER(?n < 5) }",
+        )
+        .unwrap();
+        assert_eq!(
+            arith.rows.len(),
+            2,
+            "arithmetic path agrees: both rows survive"
+        );
     }
 
     #[test]
@@ -1150,7 +1530,11 @@ mod numeric_whitespace_collapse_consistency {
         )
         .unwrap();
         // 2x2 value-equal pairs (a=a, a=b, b=a, b=b) — all four since both are value 1.
-        assert_eq!(r.rows.len(), 4, "all four ordered pairs are value-equal (both are 1)");
+        assert_eq!(
+            r.rows.len(),
+            4,
+            "all four ordered pairs are value-equal (both are 1)"
+        );
     }
 }
 
@@ -1209,8 +1593,8 @@ mod numeric_fast_slow_path_agreement {
         // row; `> 5` excludes it. Fast and slow paths must agree (asserted inside filter_rows).
         for obj in [
             "\"1\"^^xsd:integer",
-            "\"1.\"^^xsd:integer",   // trailing dot, no fraction: of_literal accepts as int 1
-            "\"1.0\"^^xsd:integer",  // trailing-zero fraction: normalised scale 0 -> int 1
+            "\"1.\"^^xsd:integer", // trailing dot, no fraction: of_literal accepts as int 1
+            "\"1.0\"^^xsd:integer", // trailing-zero fraction: normalised scale 0 -> int 1
             "\"1.0\"^^xsd:decimal",
             "\"1.0E0\"^^xsd:double",
             "\"1.0\"^^xsd:float",
@@ -1230,9 +1614,21 @@ mod numeric_fast_slow_path_agreement {
             "\" 1.0 \"^^xsd:decimal",
             "\"\\t1.0E0\\n\"^^xsd:double",
         ] {
-            assert_eq!(filter_rows(obj, "?o < 5"), 1, "{obj} < 5 (padded = value 1)");
-            assert_eq!(filter_rows(obj, "?o = 1"), 1, "{obj} = 1 (padded = value 1)");
-            assert_eq!(filter_rows(obj, "?o > 0"), 1, "{obj} > 0 (padded = value 1)");
+            assert_eq!(
+                filter_rows(obj, "?o < 5"),
+                1,
+                "{obj} < 5 (padded = value 1)"
+            );
+            assert_eq!(
+                filter_rows(obj, "?o = 1"),
+                1,
+                "{obj} = 1 (padded = value 1)"
+            );
+            assert_eq!(
+                filter_rows(obj, "?o > 0"),
+                1,
+                "{obj} > 0 (padded = value 1)"
+            );
         }
     }
 
@@ -1247,12 +1643,30 @@ mod numeric_fast_slow_path_agreement {
             ("\"1E2\"^^xsd:decimal", "exponent on a decimal"),
             // 40-digit integer / decimal: beyond i128 (i128::MAX is a 39-digit number
             // ~1.7e38) → of_literal None (not i128-representable), so a type error.
-            ("\"9999999999999999999999999999999999999999\"^^xsd:integer", "i128-overflow integer"),
-            ("\"9999999999999999999999999999999999999999.5\"^^xsd:decimal", "i128-overflow decimal"),
+            (
+                "\"9999999999999999999999999999999999999999\"^^xsd:integer",
+                "i128-overflow integer",
+            ),
+            (
+                "\"9999999999999999999999999999999999999999.5\"^^xsd:decimal",
+                "i128-overflow decimal",
+            ),
         ] {
-            assert_eq!(filter_rows(obj, "?o < 999999"), 0, "{obj} < … excluded ({why})");
-            assert_eq!(filter_rows(obj, "?o > -999999"), 0, "{obj} > … excluded ({why})");
-            assert_eq!(filter_rows(obj, "?o = 100"), 0, "{obj} = … excluded ({why})");
+            assert_eq!(
+                filter_rows(obj, "?o < 999999"),
+                0,
+                "{obj} < … excluded ({why})"
+            );
+            assert_eq!(
+                filter_rows(obj, "?o > -999999"),
+                0,
+                "{obj} > … excluded ({why})"
+            );
+            assert_eq!(
+                filter_rows(obj, "?o = 100"),
+                0,
+                "{obj} = … excluded ({why})"
+            );
             // BOUND(?o) is still true (the row is a real term) — proves it is a numeric TYPE
             // error on the comparison, not that the term vanished from the graph.
             let bound = query(
@@ -1268,7 +1682,8 @@ mod numeric_fast_slow_path_agreement {
     fn illformed_lexical_does_not_value_join_with_its_numeric_value() {
         // sq-6b1lj value-join surface: `"1.5"^^xsd:integer` must NOT pair with 1.5 (a decimal)
         // under `=` (it is a type error), on the `JKey::Num`/value-join path.
-        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n\
+        let ttl =
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n\
             ex:a ex:v \"1.5\"^^xsd:integer .\n\
             ex:b ex:w \"1.5\"^^xsd:decimal .\n";
         let g = Graph::load_str(ttl, "turtle").unwrap();
@@ -1292,7 +1707,8 @@ mod numeric_fast_slow_path_agreement {
         // sargable fast path (which now DECLINES on the ill-formed constant) and the exact
         // path must agree on exclusion. A datatype-agnostic constant parse would WRONGLY match
         // (1.5 == 1.5). Uses xsd:integer for the FULL datatype IRI so the SPARQL parser is happy.
-        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n\
+        let ttl =
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n\
             ex:s ex:v \"1.5\"^^xsd:decimal .\n";
         let g = Graph::load_str(ttl, "turtle").unwrap();
         let xi = "http://www.w3.org/2001/XMLSchema#integer";
@@ -1313,7 +1729,11 @@ mod numeric_fast_slow_path_agreement {
             "SELECT ?s WHERE { ?s <http://ex/v> ?o FILTER(?o = \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal>) }",
         )
         .unwrap();
-        assert_eq!(ok.rows.len(), 1, "well-formed decimal constant 1.5 matches the decimal 1.5");
+        assert_eq!(
+            ok.rows.len(),
+            1,
+            "well-formed decimal constant 1.5 matches the decimal 1.5"
+        );
     }
 
     /// MUTATION WITNESS (fast/cache seam): with the datatype-aware cache in force, the

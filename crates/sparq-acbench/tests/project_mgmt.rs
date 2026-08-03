@@ -29,7 +29,7 @@ fn project_mgmt_types_accessible() {
 /// Determinism: same seed → byte-identical N-Quads output.
 #[test]
 fn generate_u2_determinism() {
-    use sparq_acbench::{GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, GenParams};
     let params = GenParams::smoke();
     let ds1 = project_mgmt::generate(&params);
     let ds2 = project_mgmt::generate(&params);
@@ -42,7 +42,7 @@ fn generate_u2_determinism() {
 /// The generator emits at least one AllExcept intent (core U2 expressibility signal).
 #[test]
 fn generate_u2_all_except_expressibility() {
-    use sparq_acbench::{Audience, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, Audience, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
     let all_except_intents: Vec<_> = ds
@@ -65,7 +65,7 @@ fn generate_u2_all_except_expressibility() {
 /// ODRL entry must be Native (Prohibition is native for all-except).
 #[test]
 fn all_except_intents_have_per_model_expressibility_entries() {
-    use sparq_acbench::{AcModel, Audience, Expressibility, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, AcModel, Audience, Expressibility, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
@@ -77,7 +77,10 @@ fn all_except_intents_have_per_model_expressibility_entries() {
         .filter(|(_, row)| matches!(&row.audience, Audience::AllExcept(_)))
         .map(|(i, _)| i)
         .collect();
-    assert!(!ae_indices.is_empty(), "must have at least one AllExcept intent");
+    assert!(
+        !ae_indices.is_empty(),
+        "must have at least one AllExcept intent"
+    );
 
     for &ae_idx in &ae_indices {
         // Gather expressibility entries for this intent index.
@@ -107,7 +110,10 @@ fn all_except_intents_have_per_model_expressibility_entries() {
         // WAC: AllExcept → no deny → must be Expansion or Unsupported, never Native.
         let wac_expr = &wac_entry.unwrap().1.expressibility;
         assert!(
-            matches!(wac_expr, Expressibility::Expansion(_) | Expressibility::Unsupported),
+            matches!(
+                wac_expr,
+                Expressibility::Expansion(_) | Expressibility::Unsupported
+            ),
             "WAC AllExcept expressibility must be Expansion or Unsupported, got {wac_expr:?}"
         );
 
@@ -133,7 +139,7 @@ fn all_except_intents_have_per_model_expressibility_entries() {
 /// matchers. The expressibility matrix must record this blowup factor.
 #[test]
 fn group_intents_have_acp_expansion_entries() {
-    use sparq_acbench::{AcModel, Audience, Expressibility, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, AcModel, Audience, Expressibility, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
@@ -172,7 +178,7 @@ fn group_intents_have_acp_expansion_entries() {
 /// This test verifies the oracle's fail-closed invariant against actual generator output.
 #[test]
 fn unknown_agent_is_denied_by_all_models() {
-    use sparq_acbench::{AcModel, Decision, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, AcModel, Decision, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
@@ -193,13 +199,16 @@ fn unknown_agent_is_denied_by_all_models() {
         .iter()
         .filter(|ed| ed.request.agent == external && ed.model == AcModel::Wac)
         .count();
-    assert!(wac_denies > 0, "Must have at least one WAC decision for the unknown agent");
+    assert!(
+        wac_denies > 0,
+        "Must have at least one WAC decision for the unknown agent"
+    );
 }
 
 /// Owner is allowed read on project 0 by all models.
 #[test]
 fn owner_allowed_on_own_project() {
-    use sparq_acbench::{AcModel, Decision, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, AcModel, Decision, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
@@ -229,13 +238,17 @@ fn owner_allowed_on_own_project() {
 /// Member write on a project is denied (only read was granted to member groups).
 #[test]
 fn member_write_on_project_is_denied() {
-    use sparq_acbench::{AcModel, AccessMode, Decision, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, AcModel, AccessMode, Decision, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
     let member = "https://bench.sparq.dev/pm/agents/org/0/agent/1";
     let project0 = "https://bench.sparq.dev/pm/org/0/project/0/";
-    let write_mode = AccessMode { read: false, write: true, control: false };
+    let write_mode = AccessMode {
+        read: false,
+        write: true,
+        control: false,
+    };
 
     let decision = ds.expected_decisions.iter().find(|ed| {
         ed.request.agent == member
@@ -259,7 +272,7 @@ fn member_write_on_project_is_denied() {
 /// Each step must have a description and expected_deltas covering all three models.
 #[test]
 fn churn_steps_non_empty_and_structured() {
-    use sparq_acbench::{AcModel, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, AcModel, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
@@ -274,11 +287,8 @@ fn churn_steps_non_empty_and_structured() {
             "Churn step {i} must have a description"
         );
         // Each step must have expected_deltas for all three models.
-        let models_covered: std::collections::HashSet<_> = step
-            .expected_deltas
-            .iter()
-            .map(|ed| &ed.model)
-            .collect();
+        let models_covered: std::collections::HashSet<_> =
+            step.expected_deltas.iter().map(|ed| &ed.model).collect();
         assert!(
             models_covered.contains(&AcModel::Wac),
             "Churn step {i} must have a WAC expected delta"
@@ -299,12 +309,15 @@ fn churn_steps_non_empty_and_structured() {
 /// Verifies the by-construction delta: before grant → Deny; grant → Allow.
 #[test]
 fn churn_grant_step_produces_allow_delta() {
-    use sparq_acbench::{AcModel, Decision, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, AcModel, Decision, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
     // Grant step is always first (grant → revoke order).
-    let grant_step = ds.churn_steps.first().expect("must have at least one churn step");
+    let grant_step = ds
+        .churn_steps
+        .first()
+        .expect("must have at least one churn step");
     assert!(grant_step.description.starts_with("Grant"));
 
     // The WAC expected delta after a grant must be Allow.
@@ -323,11 +336,14 @@ fn churn_grant_step_produces_allow_delta() {
 /// W2 query fixtures: all four classes are present and non-empty.
 #[test]
 fn query_fixtures_all_classes_present() {
-    use sparq_acbench::{GenParams, QueryClass, project_mgmt};
+    use sparq_acbench::{project_mgmt, GenParams, QueryClass};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
-    assert!(!ds.queries.is_empty(), "U2 must produce at least one W2 query fixture");
+    assert!(
+        !ds.queries.is_empty(),
+        "U2 must produce at least one W2 query fixture"
+    );
 
     let has_point = ds.queries.iter().any(|q| q.class == QueryClass::Point);
     let has_scan = ds.queries.iter().any(|q| q.class == QueryClass::Scan);
@@ -343,7 +359,7 @@ fn query_fixtures_all_classes_present() {
 /// Data graph contains the expected hierarchy of orgs, projects, sites, and documents.
 #[test]
 fn data_graph_contains_hierarchy_triples() {
-    use sparq_acbench::{GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 
@@ -354,55 +370,73 @@ fn data_graph_contains_hierarchy_triples() {
         .data_nquads
         .iter()
         .any(|nq| nq.contains("bench.sparq.dev/pm/org/0/") && nq.contains("BasicContainer"));
-    assert!(has_org, "data graph must contain an org BasicContainer triple");
+    assert!(
+        has_org,
+        "data graph must contain an org BasicContainer triple"
+    );
 
     // Must contain a project container triple.
     let has_project = ds
         .data_nquads
         .iter()
         .any(|nq| nq.contains("/project/0/") && nq.contains("BasicContainer"));
-    assert!(has_project, "data graph must contain a project BasicContainer triple");
+    assert!(
+        has_project,
+        "data graph must contain a project BasicContainer triple"
+    );
 
     // Must contain a vcard:Group triple for role groups.
     let has_group = ds
         .data_nquads
         .iter()
         .any(|nq| nq.contains("vcard/ns#Group"));
-    assert!(has_group, "data graph must contain vcard:Group triples for role groups");
+    assert!(
+        has_group,
+        "data graph must contain vcard:Group triples for role groups"
+    );
 }
 
 /// Compiled WAC policy is non-empty.
 #[test]
 fn wac_policy_non_empty() {
-    use sparq_acbench::{GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
-    assert!(!ds.wac_policy.is_empty(), "WAC compiled policy must be non-empty");
+    assert!(
+        !ds.wac_policy.is_empty(),
+        "WAC compiled policy must be non-empty"
+    );
 }
 
 /// Compiled ACP policy is non-empty.
 #[test]
 fn acp_policy_non_empty() {
-    use sparq_acbench::{GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
-    assert!(!ds.acp_policy.is_empty(), "ACP compiled policy must be non-empty");
+    assert!(
+        !ds.acp_policy.is_empty(),
+        "ACP compiled policy must be non-empty"
+    );
 }
 
 /// Compiled ODRL policy is non-empty.
 #[test]
 fn odrl_policy_non_empty() {
-    use sparq_acbench::{GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
-    assert!(!ds.odrl_policy.is_empty(), "ODRL compiled policy must be non-empty");
+    assert!(
+        !ds.odrl_policy.is_empty(),
+        "ODRL compiled policy must be non-empty"
+    );
 }
 
 /// Cross-org group reuse: the subcontractor group IRI appears in multiple container
 /// policies (cross-org reuse is the signature AC shape of U2).
 #[test]
 fn subcontractor_cross_org_group_reuse() {
-    use sparq_acbench::{Audience, GenParams, project_mgmt};
+    use sparq_acbench::{project_mgmt, Audience, GenParams};
     let mut params = GenParams::smoke();
     params.sf = 1; // ensure at least 2 orgs
     let ds = project_mgmt::generate(&params);
@@ -429,7 +463,7 @@ fn subcontractor_cross_org_group_reuse() {
 /// when evaluated directly against the intent table.
 #[test]
 fn expected_decisions_consistent_with_oracle() {
-    use sparq_acbench::{AcModel, GenParams, oracle_acp, oracle_odrl, oracle_wac, project_mgmt};
+    use sparq_acbench::{oracle_acp, oracle_odrl, oracle_wac, project_mgmt, AcModel, GenParams};
     let params = GenParams::smoke();
     let ds = project_mgmt::generate(&params);
 

@@ -109,7 +109,9 @@ fn main() {
         s
     });
     best("agg_count_row", iters, || {
-        col.iter().filter(|&&id| g.numeric_value(id).is_some()).count()
+        col.iter()
+            .filter(|&&id| g.numeric_value(id).is_some())
+            .count()
     });
     best("agg_min_row", iters, || {
         col.iter()

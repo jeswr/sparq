@@ -250,7 +250,9 @@ impl IssuerSignatureScheme for SchnorrBjjScheme {
     fn in_circuit(&self) -> InCircuitVerifier {
         // Embedded-curve scheme => a native hidden-issuer in-circuit member exists
         // (`sparq-zk-compose`'s `hidden_issuer_d{depth}`).
-        InCircuitVerifier::Native { member_hint: "hidden_issuer" }
+        InCircuitVerifier::Native {
+            member_hint: "hidden_issuer",
+        }
     }
 }
 
@@ -536,9 +538,9 @@ fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
     // A distinct domain tag from the challenge so the nonce-PRF output can never
     // collide with / be mistaken for a challenge value.
     const SIG_DOMAIN_NONCE: u64 = 0x5a4b_5349_475f_4e31; // "ZKSIG_N1"
-    // Map the secret scalar into the base field via its big-endian bytes. The
-    // base field (BN254 scalar field) is larger than the Baby-JubJub scalar
-    // field, so this reduction is injective on canonical sk encodings.
+                                                         // Map the secret scalar into the base field via its big-endian bytes. The
+                                                         // base field (BN254 scalar field) is larger than the Baby-JubJub scalar
+                                                         // field, so this reduction is injective on canonical sk encodings.
     let sk_base = Fr::from_be_bytes_mod_order(&sk.0.into_bigint().to_bytes_be());
     let k_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), sk_base, *m]);
     let k = JjScalar::from_be_bytes_mod_order(&k_base.into_bigint().to_bytes_be());
@@ -616,14 +618,7 @@ fn challenge(r: &Affine<EdwardsConfig>, pk: &Affine<EdwardsConfig>, m: &Fr) -> J
     // and `public_key_from_hex` before reaching here — codex #3.)
     let (rx, ry) = r.xy().unwrap_or((Fr::from(0u64), Fr::from(0u64)));
     let (px, py) = pk.xy().unwrap_or((Fr::from(0u64), Fr::from(0u64)));
-    let e_base: Fr = poseidon2::hash(&[
-        Fr::from(SIG_DOMAIN_COMMITMENT),
-        rx,
-        ry,
-        px,
-        py,
-        *m,
-    ]);
+    let e_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_COMMITMENT), rx, ry, px, py, *m]);
     // Reduce the base-field challenge into the scalar field (big-endian bytes,
     // mod the scalar order). Deterministic and recomputable in-circuit.
     JjScalar::from_be_bytes_mod_order(&e_base.into_bigint().to_bytes_be())
@@ -896,9 +891,9 @@ pub fn accepted_status_leaf(list_id: &Fr, version: u64, status_list_root: &Fr) -
 // [OPUS-4.8] audit #12.
 pub fn status_list_id_to_field(list_iri: &str) -> Fr {
     const SIG_DOMAIN_STATUS_LIST_IRI: u64 = 0x5a4b_5349_475f_4c49; // "ZKSIG_LI"
-    // Fold the UTF-8 bytes 31 at a time (each chunk fits a BN254 field element
-    // headroom-safe) through the sponge, prefixed by the domain tag and the
-    // byte length so two IRIs differing only by trailing padding cannot collide.
+                                                                   // Fold the UTF-8 bytes 31 at a time (each chunk fits a BN254 field element
+                                                                   // headroom-safe) through the sponge, prefixed by the domain tag and the
+                                                                   // byte length so two IRIs differing only by trailing padding cannot collide.
     let bytes = list_iri.as_bytes();
     let mut acc: Vec<Fr> = Vec::with_capacity(2 + bytes.len() / 31 + 1);
     acc.push(Fr::from(SIG_DOMAIN_STATUS_LIST_IRI));
@@ -1268,7 +1263,11 @@ pub struct InCircuitSchnorrWitness {
 /// is an ISSUANCE/PROVER-SIDE helper: it does not itself verify the signature
 /// (the circuit does), it only lays out the witness fields. Callers that want a
 /// sanity check should also call [`verify`].
-pub fn in_circuit_witness(pk: &PublicKey, m: &Fr, sig: &Signature) -> Option<InCircuitSchnorrWitness> {
+pub fn in_circuit_witness(
+    pk: &PublicKey,
+    m: &Fr,
+    sig: &Signature,
+) -> Option<InCircuitSchnorrWitness> {
     // [OPUS-4.8] sq-l15mi (audit H-1): reject a torsion / low-order / off-curve key
     // before laying out a circuit witness. The in-circuit `schnorr_verify` now
     // enforces `[L]·pk == O`, so a torsion-key witness would be unprovable; refuse
@@ -1283,14 +1282,7 @@ pub fn in_circuit_witness(pk: &PublicKey, m: &Fr, sig: &Signature) -> Option<InC
     // reduction (the in-circuit `e_base`). Recompute it from the SAME inputs
     // `challenge` uses, but keep the base-field value (challenge() returns the
     // reduced JjScalar; here we need both halves of the reduction).
-    let e_base: Fr = poseidon2::hash(&[
-        Fr::from(SIG_DOMAIN_COMMITMENT),
-        r_x,
-        r_y,
-        pk_x,
-        pk_y,
-        *m,
-    ]);
+    let e_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_COMMITMENT), r_x, r_y, pk_x, pk_y, *m]);
     // Reduce e_base into the scalar field, then re-embed the reduced value and
     // derive the quotient k = (e_base - e) / L (exact in the integers).
     let e_scalar = JjScalar::from_be_bytes_mod_order(&e_base.into_bigint().to_bytes_be());
@@ -1366,8 +1358,7 @@ pub fn in_circuit_holder_witness(hsk: &SecretKey) -> Option<InCircuitHolderPokWi
 /// `zk:issuerKey` registry literal and the manifest key-set carry this.
 pub fn public_key_to_hex(pk: &PublicKey) -> String {
     let mut bytes = Vec::new();
-    pk.0
-        .serialize_compressed(&mut bytes)
+    pk.0.serialize_compressed(&mut bytes)
         .expect("affine point serializes");
     to_hex(&bytes)
 }
@@ -1553,7 +1544,10 @@ mod tests {
         let m = commitment_message(&Fr::from(100u64));
         let sig = sign(&sk, &m, &mut rng());
         let m_other = commitment_message(&Fr::from(101u64));
-        assert!(!verify(&pk, &m_other, &sig), "sig over a different commitment must fail");
+        assert!(
+            !verify(&pk, &m_other, &sig),
+            "sig over a different commitment must fail"
+        );
     }
 
     #[test]
@@ -1564,7 +1558,10 @@ mod tests {
         let (_sk_b, pk_b) = keypair(4);
         let m = commitment_message(&Fr::from(7u64));
         let sig = sign(&sk_a, &m, &mut rng());
-        assert!(!verify(&pk_b, &m, &sig), "sig under a different key must fail");
+        assert!(
+            !verify(&pk_b, &m, &sig),
+            "sig under a different key must fail"
+        );
     }
 
     #[test]
@@ -1665,7 +1662,10 @@ mod tests {
             "(0,-1) is an order-2 torsion point, not in the prime-order subgroup"
         );
         let torsion = PublicKey(torsion_pt);
-        assert!(!torsion.is_prime_order(), "torsion key must not be prime-order");
+        assert!(
+            !torsion.is_prime_order(),
+            "torsion key must not be prime-order"
+        );
 
         // Soundness gates: a torsion key cannot enter K or a circuit witness.
         assert!(
@@ -1738,7 +1738,10 @@ mod tests {
         let sk_base = Fr::from_be_bytes_mod_order(&sk.0.into_bigint().to_bytes_be());
         let k_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), sk_base, m]);
         let k_first = JjScalar::from_be_bytes_mod_order(&k_base.into_bigint().to_bytes_be());
-        assert!(!k_first.is_zero(), "first fold is non-degenerate for this seed");
+        assert!(
+            !k_first.is_zero(),
+            "first fold is non-degenerate for this seed"
+        );
         assert_eq!(
             super::derive_nonce(&sk, &m),
             k_first,
@@ -1750,7 +1753,10 @@ mod tests {
         let h2 = sk.sign_commitment(&Fr::from(0xabcdu64));
         assert_eq!(h1, h2, "deterministic signing remains replay-stable");
         let sig = signature_from_hex(&h1).expect("round-trips");
-        assert!(verify(&pk, &m, &sig), "signature still verifies after CT rewrite");
+        assert!(
+            verify(&pk, &m, &sig),
+            "signature still verifies after CT rewrite"
+        );
     }
 
     /// [OPUS-4.8] codex #4: distinct messages get DISTINCT nonces `R` — the
@@ -1781,7 +1787,10 @@ mod tests {
         let hex = sk.sign_commitment_with_status(&c, &salt, &sref);
         let sig = signature_from_hex(&hex).expect("round-trips");
         let msg = commitment_message_with_status(&c, &salt, &sref);
-        assert!(verify(&pk, &msg, &sig), "honest status-bound signature verifies");
+        assert!(
+            verify(&pk, &msg, &sig),
+            "honest status-bound signature verifies"
+        );
 
         // A DIFFERENT version (freshness rollover) ⇒ different message ⇒ fails.
         let sref_v8 = status_ref_digest(&list_id, 94, 8);
@@ -1795,7 +1804,10 @@ mod tests {
         let other_list = status_list_id_to_field("https://attacker.example/empty");
         let sref_other = status_ref_digest(&other_list, 94, 7);
         let msg_other = commitment_message_with_status(&c, &salt, &sref_other);
-        assert!(!verify(&pk, &msg_other, &sig), "wrong list id must not verify");
+        assert!(
+            !verify(&pk, &msg_other, &sig),
+            "wrong list id must not verify"
+        );
         // The bare salt-only message (the prover OMITTING the status ref) ⇒
         // fails: a status-bound credential cannot be presented as salt-only.
         let salt_only = commitment_message_with_salt(&c, &salt);
@@ -1838,26 +1850,38 @@ mod tests {
         let hex = sk.sign_commitment_with_status(&c, &salt, &sref);
         let sig = signature_from_hex(&hex).expect("round-trips");
         let msg = commitment_message_with_status(&c, &salt, &sref);
-        assert!(verify(&pk, &msg, &sig), "honest committed-index signature verifies");
+        assert!(
+            verify(&pk, &msg, &sig),
+            "honest committed-index signature verifies"
+        );
 
         // Hiding: the SAME index under a DIFFERENT blinding commits differently,
         // so two presentations of the same credential are not linkable by the
         // commitment (the clear-index linkability channel is closed).
         let idx_commit2 = status_index_commitment(94, &Fr::from(0x1234u64));
-        assert_ne!(idx_commit, idx_commit2, "different blinding => different commitment");
+        assert_ne!(
+            idx_commit, idx_commit2,
+            "different blinding => different commitment"
+        );
 
         // A DIFFERENT committed index => different digest => signature fails.
         let other_commit = status_index_commitment(95, &blinding);
         let sref_other = status_ref_commit_digest(&list_id, &other_commit, 7);
         let msg_other = commitment_message_with_status(&c, &salt, &sref_other);
-        assert!(!verify(&pk, &msg_other, &sig), "a different index commitment must not verify");
+        assert!(
+            !verify(&pk, &msg_other, &sig),
+            "a different index commitment must not verify"
+        );
 
         // The CLEAR-index digest (audit #12) is domain-separated from the
         // committed-index one: even with a numerically-equal field input it
         // cannot be substituted (distinct domain tags).
         let clear = status_ref_digest(&list_id, 94, 7);
         let committed = status_ref_commit_digest(&list_id, &idx_commit, 7);
-        assert_ne!(clear, committed, "clear-index and committed-index digests are domain-separated");
+        assert_ne!(
+            clear, committed,
+            "clear-index and committed-index digests are domain-separated"
+        );
     }
 
     /// [OPUS-4.8] sq-6qe: the `(list, version)` reference commitment is HIDING
@@ -1872,11 +1896,17 @@ mod tests {
 
         // Hiding: same (list, version) under different blinding commits differently.
         let rc_other_blinding = status_ref_commitment(&list_a, 7, &Fr::from(0x1234u64));
-        assert_ne!(rc, rc_other_blinding, "different blinding => different commitment");
+        assert_ne!(
+            rc, rc_other_blinding,
+            "different blinding => different commitment"
+        );
 
         // Binding: a different version OR a different list changes the commitment.
         let rc_other_version = status_ref_commitment(&list_a, 8, &Fr::from(0xb11du64));
-        assert_ne!(rc, rc_other_version, "different version => different commitment");
+        assert_ne!(
+            rc, rc_other_version,
+            "different version => different commitment"
+        );
         let rc_other_list = status_ref_commitment(&list_b, 7, &Fr::from(0xb11du64));
         assert_ne!(rc, rc_other_list, "different list => different commitment");
     }
@@ -1899,26 +1929,38 @@ mod tests {
         let hex = sk.sign_commitment_with_status(&c, &salt, &sref);
         let sig = signature_from_hex(&hex).expect("round-trips");
         let msg = commitment_message_with_status(&c, &salt, &sref);
-        assert!(verify(&pk, &msg, &sig), "honest fully-hidden signature verifies");
+        assert!(
+            verify(&pk, &msg, &sig),
+            "honest fully-hidden signature verifies"
+        );
 
         // A different reference commitment (e.g. a different list/version/blinding)
         // => different digest => signature fails.
         let ref_commit2 = status_ref_commitment(&list_id, 8, &Fr::from(0x5efb10u64));
         let sref2 = status_ref_fully_committed_digest(&ref_commit2, &idx_commit);
         let msg2 = commitment_message_with_status(&c, &salt, &sref2);
-        assert!(!verify(&pk, &msg2, &sig), "a different reference commitment must not verify");
+        assert!(
+            !verify(&pk, &msg2, &sig),
+            "a different reference commitment must not verify"
+        );
 
         // A different index commitment => different digest => signature fails.
         let idx_commit2 = status_index_commitment(95, &Fr::from(0xbeefu64));
         let sref3 = status_ref_fully_committed_digest(&ref_commit, &idx_commit2);
         let msg3 = commitment_message_with_status(&c, &salt, &sref3);
-        assert!(!verify(&pk, &msg3, &sig), "a different index commitment must not verify");
+        assert!(
+            !verify(&pk, &msg3, &sig),
+            "a different index commitment must not verify"
+        );
 
         // Domain separation from the two other disclosure modes: even with
         // numerically-equal inputs the three digests differ (distinct domain tags).
         let clear = status_ref_digest(&list_id, 94, 7);
         let committed_clear_list = status_ref_commit_digest(&list_id, &idx_commit, 7);
-        assert_ne!(sref, clear, "fully-hidden vs clear-index digests are domain-separated");
+        assert_ne!(
+            sref, clear,
+            "fully-hidden vs clear-index digests are domain-separated"
+        );
         assert_ne!(
             sref, committed_clear_list,
             "fully-hidden vs committed-index-clear-list digests are domain-separated"
@@ -1936,8 +1978,16 @@ mod tests {
         let leaf = accepted_status_leaf(&list_id, 7, &root);
 
         let other_list = status_list_id_to_field("https://dmv.example/status/4");
-        assert_ne!(leaf, accepted_status_leaf(&other_list, 7, &root), "list binds");
-        assert_ne!(leaf, accepted_status_leaf(&list_id, 8, &root), "version binds");
+        assert_ne!(
+            leaf,
+            accepted_status_leaf(&other_list, 7, &root),
+            "list binds"
+        );
+        assert_ne!(
+            leaf,
+            accepted_status_leaf(&list_id, 8, &root),
+            "version binds"
+        );
         assert_ne!(
             leaf,
             accepted_status_leaf(&list_id, 7, &Fr::from(0x87654321u64)),
@@ -1946,7 +1996,10 @@ mod tests {
 
         // Distinct domain from the reference commitment (no leaf/commitment confusion).
         let rc = status_ref_commitment(&list_id, 7, &root); // same inputs, different role
-        assert_ne!(leaf, rc, "accepted-set leaf and ref commitment are domain-separated");
+        assert_ne!(
+            leaf, rc,
+            "accepted-set leaf and ref commitment are domain-separated"
+        );
     }
 
     /// [OPUS-4.8] audit #12: the list-id hash is collision-resistant on distinct
@@ -2205,12 +2258,18 @@ mod tests {
         assert_eq!(SIG_DOMAIN_JOIN, u64::from_be_bytes(*b"ZKSIG_JN"));
         // The blinder is HIDING: same value, different blinder => unlinkable.
         let c2 = join_value_commitment(&value, &Fr::from(0xb2u64));
-        assert_ne!(c, c2, "different blinders must yield unlinkable commitments");
+        assert_ne!(
+            c, c2,
+            "different blinders must yield unlinkable commitments"
+        );
         // Domain separation: a join commitment must never collide with the
         // status-index commitment over the same (value-as-index, blinding) — the
         // distinct tag prevents cross-substitution.
         let idx_c = status_index_commitment(0x1234u64, &blinding);
-        assert_ne!(c, idx_c, "join commitment must be domain-separated from the index commitment");
+        assert_ne!(
+            c, idx_c,
+            "join commitment must be domain-separated from the index commitment"
+        );
     }
 
     // --- sq-1hsl: the pluggable OFF-circuit signature seam ------------------
@@ -2256,7 +2315,10 @@ mod tests {
         let scheme = SchnorrBjjScheme;
         // The trait reports the v1 cryptosuite IRI (single source of truth with
         // the closed enum tag).
-        assert_eq!(scheme.cryptosuite_iri(), SignatureScheme::POSEIDON2_SCHNORR_V1_IRI);
+        assert_eq!(
+            scheme.cryptosuite_iri(),
+            SignatureScheme::POSEIDON2_SCHNORR_V1_IRI
+        );
 
         // Honest signature: trait accept == direct verify accept (both true).
         let direct = {
@@ -2264,7 +2326,10 @@ mod tests {
             verify(&pk, &m, &sig)
         };
         let via_trait = scheme.verify_message(&pk_hex, &m, &sig_hex);
-        assert!(direct && via_trait, "honest signature must verify both ways");
+        assert!(
+            direct && via_trait,
+            "honest signature must verify both ways"
+        );
         assert_eq!(direct, via_trait, "trait must mirror direct verify exactly");
 
         // Tampered message: both reject.
@@ -2274,16 +2339,27 @@ mod tests {
             verify(&pk, &m_bad, &sig)
         };
         assert_eq!(scheme.verify_message(&pk_hex, &m_bad, &sig_hex), direct_bad);
-        assert!(!scheme.verify_message(&pk_hex, &m_bad, &sig_hex), "tampered msg fails");
+        assert!(
+            !scheme.verify_message(&pk_hex, &m_bad, &sig_hex),
+            "tampered msg fails"
+        );
 
         // Malformed key / signature hex: fail-closed, never panic.
-        assert!(!scheme.verify_message("zz", &m, &sig_hex), "bad key hex => false");
-        assert!(!scheme.verify_message(&pk_hex, &m, "zz"), "bad sig hex => false");
+        assert!(
+            !scheme.verify_message("zz", &m, &sig_hex),
+            "bad key hex => false"
+        );
+        assert!(
+            !scheme.verify_message(&pk_hex, &m, "zz"),
+            "bad sig hex => false"
+        );
 
         // And the scheme reports its NATIVE in-circuit member (embedded curve).
         assert_eq!(
             scheme.in_circuit(),
-            InCircuitVerifier::Native { member_hint: "hidden_issuer" }
+            InCircuitVerifier::Native {
+                member_hint: "hidden_issuer"
+            }
         );
     }
 
@@ -2297,11 +2373,21 @@ mod tests {
         let iri = SignatureScheme::POSEIDON2_SCHNORR_V1_IRI;
         assert!(resolve_signature_scheme(iri).is_some());
         assert!(SignatureScheme::from_cryptosuite_iri(iri).is_some());
-        assert_eq!(resolve_signature_scheme(iri).unwrap().cryptosuite_iri(), iri);
+        assert_eq!(
+            resolve_signature_scheme(iri).unwrap().cryptosuite_iri(),
+            iri
+        );
 
         // Unknown IRIs: resolver None AND enum None (lock step).
-        for bogus in ["", "urn:other", "https://sparq.dev/ns/zk#poseidon2-schnorr-v2"] {
-            assert!(resolve_signature_scheme(bogus).is_none(), "resolver fail-closed");
+        for bogus in [
+            "",
+            "urn:other",
+            "https://sparq.dev/ns/zk#poseidon2-schnorr-v2",
+        ] {
+            assert!(
+                resolve_signature_scheme(bogus).is_none(),
+                "resolver fail-closed"
+            );
             assert_eq!(
                 resolve_signature_scheme(bogus).is_none(),
                 SignatureScheme::from_cryptosuite_iri(bogus).is_none(),
@@ -2374,7 +2460,9 @@ mod tests {
         // The in-circuit discriminator differs per scheme (Native vs None).
         assert_eq!(
             schemes[0].in_circuit(),
-            InCircuitVerifier::Native { member_hint: "hidden_issuer" }
+            InCircuitVerifier::Native {
+                member_hint: "hidden_issuer"
+            }
         );
         assert_eq!(schemes[1].in_circuit(), InCircuitVerifier::None);
     }

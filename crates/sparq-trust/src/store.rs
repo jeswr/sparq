@@ -704,7 +704,12 @@ mod tests {
         );
         let mut store = TrustStore::new();
         store
-            .put(TrustDocument::new(TrustLayer::ServerWide, 1, server, gate()))
+            .put(TrustDocument::new(
+                TrustLayer::ServerWide,
+                1,
+                server,
+                gate(),
+            ))
             .unwrap();
         let eff = store.effective_rules(&iri("https://pod.ex/docs/x"));
         assert_eq!(eff.len(), 1, "the server rule covers the target");
@@ -733,7 +738,12 @@ mod tests {
         );
         let mut store = TrustStore::new();
         store
-            .put(TrustDocument::new(TrustLayer::ServerWide, 1, server, gate()))
+            .put(TrustDocument::new(
+                TrustLayer::ServerWide,
+                1,
+                server,
+                gate(),
+            ))
             .unwrap();
         store
             .put(TrustDocument::new(
@@ -780,7 +790,12 @@ mod tests {
         );
         let mut store = TrustStore::new();
         store
-            .put(TrustDocument::new(TrustLayer::ServerWide, 1, server, gate()))
+            .put(TrustDocument::new(
+                TrustLayer::ServerWide,
+                1,
+                server,
+                gate(),
+            ))
             .unwrap();
         store
             .put(TrustDocument::new(
@@ -889,7 +904,10 @@ mod tests {
             ))
             .unwrap();
         let v2 = store.policy_version(&target);
-        assert_ne!(v1, v2, "adding a covering document bumps the policy version");
+        assert_ne!(
+            v1, v2,
+            "adding a covering document bumps the policy version"
+        );
 
         // Editing it (version bump) changes the version again.
         store
@@ -967,12 +985,7 @@ mod tests {
         );
         let mut store = TrustStore::new();
         store
-            .put(TrustDocument::new(
-                TrustLayer::ServerWide,
-                1,
-                rules,
-                gate(),
-            ))
+            .put(TrustDocument::new(TrustLayer::ServerWide, 1, rules, gate()))
             .unwrap();
         let target = iri("https://pod.ex/docs/resource");
         // Direct call with an explicit instant — exercises the `effective_rules_at` body.
@@ -982,7 +995,11 @@ mod tests {
         // `effective_rules` (system-clock path) must produce the same count for a
         // non-time-gated store — also exercises `now_unix_secs`.
         let eff = store.effective_rules(&target);
-        assert_eq!(eff.len(), 1, "effective_rules agrees with effective_rules_at");
+        assert_eq!(
+            eff.len(),
+            1,
+            "effective_rules agrees with effective_rules_at"
+        );
     }
 
     /// Direct unit test: `TrustDocument::with_certifications` constructor and
@@ -993,7 +1010,7 @@ mod tests {
     #[test]
     fn with_certifications_and_certifications_accessor_are_directly_exercised() {
         use crate::graph::{CertScope, Certification};
-        use sparq_zk::sig::{SecretKey, public_key_to_hex};
+        use sparq_zk::sig::{public_key_to_hex, SecretKey};
         let key = a_key_hex();
         let rules = policy_rules(
             "https://pod.ex/trust#cov-r2",

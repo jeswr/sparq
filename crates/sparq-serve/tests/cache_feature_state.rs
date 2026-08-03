@@ -33,7 +33,11 @@ fn epoch_vector_bumps_touched_pods_only() {
     // Publish touching only g1.
     ring.publish((), [g1.clone()]);
     assert_eq!(ring.current().epochs().epoch(&g1), 1, "touched pod bumped");
-    assert_eq!(ring.current().epochs().epoch(&g2), 0, "untouched pod unchanged");
+    assert_eq!(
+        ring.current().epochs().epoch(&g2),
+        0,
+        "untouched pod unchanged"
+    );
 
     // Publish touching only g2.
     ring.publish((), [g2.clone()]);

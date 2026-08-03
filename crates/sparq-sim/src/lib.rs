@@ -220,9 +220,17 @@ impl<'g> Sim<'g> {
             max_pair_frequency: cfg.max_pair_frequency,
             profile_fallback: cfg.profile_fallback,
             #[cfg(feature = "tbox")]
-            tbox: if cfg.tbox_aware { Some(build_tbox_expander(graph)) } else { None },
+            tbox: if cfg.tbox_aware {
+                Some(build_tbox_expander(graph))
+            } else {
+                None
+            },
             #[cfg(feature = "lexical")]
-            lexical_idx: if cfg.lexical_fallback { Some(build_lexical_index(graph)) } else { None },
+            lexical_idx: if cfg.lexical_fallback {
+                Some(build_lexical_index(graph))
+            } else {
+                None
+            },
             #[cfg(feature = "multi-hop")]
             depth: cfg.depth.max(1),
             n_triples: graph.len().max(1) as f64,
@@ -298,7 +306,11 @@ impl<'g> Sim<'g> {
         elems.dedup();
         let weights: Vec<f64> = elems.iter().map(|&(_, p, _)| self.weight(p)).collect();
         let total = weights.iter().sum();
-        Signature { elems, weights, total }
+        Signature {
+            elems,
+            weights,
+            total,
+        }
     }
 
     /// Breadth-first expansion for the opt-in `multi-hop` feature. Each layer scans in
@@ -462,14 +474,20 @@ impl<'g> Sim<'g> {
             // approximation as the direct path). [FABLE-5]
             #[cfg(feature = "tbox")]
             if let Some(tbox) = &self.tbox {
-                let sub_preds: &[Id] =
-                    tbox.subprop_down.get(&p).map(Vec::as_slice).unwrap_or_default();
+                let sub_preds: &[Id] = tbox
+                    .subprop_down
+                    .get(&p)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
                 let is_type_elem = self.mode == SignatureMode::PredicateNeighbor
                     && dir == OUT
                     && p == tbox.rdf_type
                     && tbox.rdf_type != NO_ID;
                 let sub_classes: &[Id] = if is_type_elem {
-                    tbox.subclass_down.get(&n).map(Vec::as_slice).unwrap_or_default()
+                    tbox.subclass_down
+                        .get(&n)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
                 } else {
                     &[]
                 };
@@ -531,7 +549,9 @@ impl<'g> Sim<'g> {
         // 4. Neighbor-sparse fallback: when index-driven generation starves
         // (fewer than k candidates), fill the remaining slots with
         // predicate-PROFILE matches (see `profile_fallback`).
-        if self.profile_fallback && self.mode == SignatureMode::PredicateNeighbor && scored.len() < k
+        if self.profile_fallback
+            && self.mode == SignatureMode::PredicateNeighbor
+            && scored.len() < k
         {
             self.fill_profile_fallback(sig, k, exclude, &mut scored);
         }
@@ -544,7 +564,10 @@ impl<'g> Sim<'g> {
         if self.lexical_idx.is_some() && exclude.is_some() && scored.len() < k {
             self.fill_lexical_fallback(k, exclude, &mut scored);
         }
-        scored.into_iter().map(|(c, s)| (self.graph.dict.term(c), s)).collect()
+        scored
+            .into_iter()
+            .map(|(c, s)| (self.graph.dict.term(c), s))
+            .collect()
     }
 
     /// The neighbor-sparse fallback of [`most_similar`](Self::most_similar):
@@ -588,7 +611,10 @@ impl<'g> Sim<'g> {
             // Who else plays this role? Every subject (OUT) / object (IN) of
             // the predicate's block.
             let sorted_by = if dir == OUT { 0 } else { 2 };
-            let scan = self.graph.store.scan_sorted(&[None, Some(p), None], sorted_by);
+            let scan = self
+                .graph
+                .store
+                .scan_sorted(&[None, Some(p), None], sorted_by);
             let mut last: Option<Id> = None;
             for row in scan.rows.iter() {
                 let cand = scan.to_spo(row)[sorted_by];
@@ -612,7 +638,12 @@ impl<'g> Sim<'g> {
         let probe = self.profile_of(sig);
         let mut fb: Vec<(Id, f64)> = acc
             .into_keys()
-            .map(|c| (c, weighted_jaccard(&probe, &self.signature_of_id_mode(c, false))))
+            .map(|c| {
+                (
+                    c,
+                    weighted_jaccard(&probe, &self.signature_of_id_mode(c, false)),
+                )
+            })
             .filter(|&(_, s)| s > 0.0)
             .collect();
         fb.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -650,7 +681,11 @@ impl<'g> Sim<'g> {
         elems.dedup();
         let weights: Vec<f64> = elems.iter().map(|&(_, p, _)| self.weight(p)).collect();
         let total = weights.iter().sum();
-        Signature { elems, weights, total }
+        Signature {
+            elems,
+            weights,
+            total,
+        }
     }
 
     /// Whether an id names an entity (IRI or blank node) — literals (incl. inline
@@ -675,13 +710,10 @@ impl<'g> Sim<'g> {
     /// structural and profile tiers have already starved. Only fires when
     /// `exclude = Some(query_id)`. [SONNET-4.6] sq-181
     #[cfg(feature = "lexical")]
-    fn fill_lexical_fallback(
-        &self,
-        k: usize,
-        exclude: Option<Id>,
-        scored: &mut Vec<(Id, f64)>,
-    ) {
-        let Some(lexical) = &self.lexical_idx else { return };
+    fn fill_lexical_fallback(&self, k: usize, exclude: Option<Id>, scored: &mut Vec<(Id, f64)>) {
+        let Some(lexical) = &self.lexical_idx else {
+            return;
+        };
         let Some(query_id) = exclude else { return };
 
         let query_key: Option<String> = {
@@ -701,7 +733,11 @@ impl<'g> Sim<'g> {
                     return None;
                 }
                 let s = trigram_jaccard(&query_key, key);
-                if s > 0.0 { Some((*id, s)) } else { None }
+                if s > 0.0 {
+                    Some((*id, s))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -721,7 +757,9 @@ impl<'g> Sim<'g> {
     /// Inferred elements receive `original_weight × TBOX_ATTENUATION`. When an inferred
     /// element duplicates a direct element the direct weight (higher) wins. [SONNET-4.6] sq-181
     fn tbox_expand_signature(&self, sig: Signature, keep_neighbor: bool) -> Signature {
-        let Some(tbox) = &self.tbox else { return sig; };
+        let Some(tbox) = &self.tbox else {
+            return sig;
+        };
 
         let n_base = sig.elems.len();
         let mut new_elems: Vec<(u8, Id, Id)> = Vec::new();
@@ -744,11 +782,7 @@ impl<'g> Sim<'g> {
 
             // Expand via rdfs:subClassOf: add (OUT, rdf:type, sc) for each superclass sc.
             // Only when keep_neighbor = true (PredicateNeighbor mode) and p = rdf:type.
-            if keep_neighbor
-                && dir == OUT
-                && p == tbox.rdf_type
-                && tbox.rdf_type != NO_ID
-            {
+            if keep_neighbor && dir == OUT && p == tbox.rdf_type && tbox.rdf_type != NO_ID {
                 if let Some(superclasses) = tbox.subclass_up.get(&nbr) {
                     for &sc in superclasses {
                         let e = (OUT, tbox.rdf_type, sc);
@@ -788,7 +822,11 @@ impl<'g> Sim<'g> {
 
         let (elems, weights): (Vec<_>, Vec<_>) = deduped.into_iter().unzip();
         let total = weights.iter().sum();
-        Signature { elems, weights, total }
+        Signature {
+            elems,
+            weights,
+            total,
+        }
     }
 }
 
@@ -804,9 +842,9 @@ fn build_tbox_expander(graph: &Graph) -> TboxExpander {
         .unwrap_or(NO_ID);
 
     let mut sc_direct: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-    if let Some(sc_id) =
-        graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(RDFS_SUBCLASS_OF_IRI)))
-    {
+    if let Some(sc_id) = graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(
+        RDFS_SUBCLASS_OF_IRI,
+    ))) {
         let scan = graph.store.scan(&[None, Some(sc_id), None]);
         for row in scan.rows.iter() {
             let [s, _, o] = scan.to_spo(row);
@@ -815,9 +853,9 @@ fn build_tbox_expander(graph: &Graph) -> TboxExpander {
     }
 
     let mut sp_direct: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-    if let Some(sp_id) =
-        graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(RDFS_SUBPROPERTY_OF_IRI)))
-    {
+    if let Some(sp_id) = graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(
+        RDFS_SUBPROPERTY_OF_IRI,
+    ))) {
         let scan = graph.store.scan(&[None, Some(sp_id), None]);
         for row in scan.rows.iter() {
             let [s, _, o] = scan.to_spo(row);
@@ -850,9 +888,7 @@ fn tbox_invert(direct: &FxHashMap<Id, Vec<Id>>) -> FxHashMap<Id, Vec<Id>> {
 /// BFS transitive closure: `node → all reachable successors` in a directed graph
 /// given as `node → direct successors`. [SONNET-4.6] sq-181
 #[cfg(feature = "tbox")]
-fn tbox_transitive_closure(
-    direct: &FxHashMap<Id, Vec<Id>>,
-) -> FxHashMap<Id, Vec<Id>> {
+fn tbox_transitive_closure(direct: &FxHashMap<Id, Vec<Id>>) -> FxHashMap<Id, Vec<Id>> {
     let mut closure: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
     for &start in direct.keys() {
         let mut seen: rustc_hash::FxHashSet<Id> = rustc_hash::FxHashSet::default();
@@ -924,13 +960,15 @@ fn trigram_jaccard(a: &str, b: &str) -> f64 {
         let lcp = ca.iter().zip(cb.iter()).take_while(|(x, y)| x == y).count();
         return lcp as f64 / ca.len().max(cb.len()) as f64;
     }
-    let ta: rustc_hash::FxHashSet<[char; 3]> =
-        ca.windows(3).map(|w| [w[0], w[1], w[2]]).collect();
-    let tb: rustc_hash::FxHashSet<[char; 3]> =
-        cb.windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+    let ta: rustc_hash::FxHashSet<[char; 3]> = ca.windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+    let tb: rustc_hash::FxHashSet<[char; 3]> = cb.windows(3).map(|w| [w[0], w[1], w[2]]).collect();
     let inter = ta.iter().filter(|t| tb.contains(*t)).count();
     let union = ta.len() + tb.len() - inter;
-    if union == 0 { 1.0 } else { inter as f64 / union as f64 }
+    if union == 0 {
+        1.0
+    } else {
+        inter as f64 / union as f64
+    }
 }
 
 // ---- Signature metric free functions -------------------------------------------
@@ -1059,12 +1097,17 @@ impl Sim<'_> {
             }
         }
         shared.sort_unstable_by(|&((da, pa, na), wa), &((db, pb, nb), wb)| {
-            wb.total_cmp(&wa).then_with(|| (pa, na, da).cmp(&(pb, nb, db)))
+            wb.total_cmp(&wa)
+                .then_with(|| (pa, na, da).cmp(&(pb, nb, db)))
         });
         shared
             .into_iter()
             .map(|((dir, p, n), w)| SharedElement {
-                direction: if dir == OUT { Direction::Out } else { Direction::In },
+                direction: if dir == OUT {
+                    Direction::Out
+                } else {
+                    Direction::In
+                },
                 predicate: self.graph.dict.term(p),
                 neighbor: (n != NO_ID).then(|| self.graph.dict.term(n)),
                 weight: w,
@@ -1110,7 +1153,11 @@ impl Default for SketchConfig {
     fn default() -> Self {
         // Default seed: "SKETCH" in ASCII. With 128 hashes / 32 bands (4 rows), an
         // entity pair with unweighted Jaccard s collides with prob 1 − (1 − s⁴)³².
-        SketchConfig { num_hashes: 128, bands: 32, seed: 0x534B_4554_4348 }
+        SketchConfig {
+            num_hashes: 128,
+            bands: 32,
+            seed: 0x534B_4554_4348,
+        }
     }
 }
 
@@ -1213,13 +1260,25 @@ impl<'g> Sim<'g> {
             }
             let slot = entities.len() as u32;
             for b in 0..bands {
-                buckets.entry((b as u32, band_key(b, rows, &mins))).or_default().push(slot);
+                buckets
+                    .entry((b as u32, band_key(b, rows, &mins)))
+                    .or_default()
+                    .push(slot);
             }
             entities.push(id);
             slot_of.insert(id, slot);
             data.extend_from_slice(&mins);
         }
-        SketchIndex { sim: self, num_hashes, bands, rows, entities, slot_of, data, buckets }
+        SketchIndex {
+            sim: self,
+            num_hashes,
+            bands,
+            rows,
+            entities,
+            slot_of,
+            data,
+            buckets,
+        }
     }
 }
 
@@ -1290,7 +1349,10 @@ impl SketchIndex<'_, '_> {
         // 1. LSH candidate generation: union of `a`'s buckets across all bands.
         let mut cand_slots: Vec<u32> = Vec::new();
         for b in 0..self.bands {
-            if let Some(bucket) = self.buckets.get(&(b as u32, band_key(b, self.rows, sketch))) {
+            if let Some(bucket) = self
+                .buckets
+                .get(&(b as u32, band_key(b, self.rows, sketch)))
+            {
                 cand_slots.extend(bucket.iter().copied());
             }
         }
@@ -1317,7 +1379,10 @@ impl SketchIndex<'_, '_> {
             .collect();
         scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         scored.truncate(k);
-        scored.into_iter().map(|(c, v)| (self.sim.graph.dict.term(c), v)).collect()
+        scored
+            .into_iter()
+            .map(|(c, v)| (self.sim.graph.dict.term(c), v))
+            .collect()
     }
 }
 
@@ -1335,7 +1400,13 @@ mod tests {
     }
 
     fn unweighted(g: &Graph) -> Sim<'_> {
-        Sim::with_config(g, SimConfig { idf: false, ..SimConfig::default() })
+        Sim::with_config(
+            g,
+            SimConfig {
+                idf: false,
+                ..SimConfig::default()
+            },
+        )
     }
 
     fn explicit_signature(entries: &[((u8, Id, Id), f64)]) -> Signature {
@@ -1482,7 +1553,8 @@ mod tests {
 
     #[test]
     fn identical_signatures_similarity_one() {
-        let g = graph(":alice :knows :bob ; :worksAt :acme . :carol :knows :bob ; :worksAt :acme .");
+        let g =
+            graph(":alice :knows :bob ; :worksAt :acme . :carol :knows :bob ; :worksAt :acme .");
         let sim = unweighted(&g);
         assert_eq!(sim.similarity(&iri("alice"), &iri("carol")), 1.0);
         assert_eq!(sim.similarity(&iri("alice"), &iri("alice")), 1.0);
@@ -1493,7 +1565,9 @@ mod tests {
         // sig(alice) = {(out,knows,bob), (out,knows,eve), (out,worksAt,acme)}  (3 elems)
         // sig(dave)  = {(out,knows,eve), (out,plays,chess)}                    (2 elems)
         // intersection = {(out,knows,eve)} = 1; union = 4 → 0.25.
-        let g = graph(":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .");
+        let g = graph(
+            ":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .",
+        );
         let sim = unweighted(&g);
         assert_eq!(sim.similarity(&iri("alice"), &iri("dave")), 0.25);
         // symmetric
@@ -1526,7 +1600,11 @@ mod tests {
         let g = graph(":a :knows :x ; :worksAt :acme . :b :knows :y ; :worksAt :corp .");
         let pred_only = Sim::with_config(
             &g,
-            SimConfig { mode: SignatureMode::Predicates, idf: false, ..SimConfig::default() },
+            SimConfig {
+                mode: SignatureMode::Predicates,
+                idf: false,
+                ..SimConfig::default()
+            },
         );
         // Same predicate profile, different neighbors.
         assert_eq!(pred_only.similarity(&iri("a"), &iri("b")), 1.0);
@@ -1546,7 +1624,10 @@ mod tests {
         let plain = unweighted(&g);
         let ab = plain.similarity(&iri("a"), &iri("b"));
         let ac = plain.similarity(&iri("a"), &iri("c"));
-        assert_eq!(ab, ac, "unweighted: both pairs share exactly one of a's two elements");
+        assert_eq!(
+            ab, ac,
+            "unweighted: both pairs share exactly one of a's two elements"
+        );
         let idf = Sim::new(&g);
         assert!(
             idf.similarity(&iri("a"), &iri("b")) > idf.similarity(&iri("a"), &iri("c")),
@@ -1562,7 +1643,11 @@ mod tests {
         assert!(with_type.similarity(&iri("a"), &iri("b")) > 0.0);
         let no_type = Sim::with_config(
             &g,
-            SimConfig { idf: false, exclude_predicates: vec![rdf_type], ..SimConfig::default() },
+            SimConfig {
+                idf: false,
+                exclude_predicates: vec![rdf_type],
+                ..SimConfig::default()
+            },
         );
         assert_eq!(no_type.similarity(&iri("a"), &iri("b")), 0.0);
         assert_eq!(no_type.signature(&iri("a")).unwrap().len(), 1); // just (out, :p, :x)
@@ -1583,14 +1668,23 @@ mod tests {
         assert_eq!(top[0].1, 1.0);
         assert_eq!(names[1], "<http://ex.org/half>"); // shares 1 elem; union = 3+2-1 → 1/4
         assert_eq!(top[1].1, 0.25);
-        assert!(!names.iter().any(|n| n == "<http://ex.org/a>"), "self must be excluded");
-        assert!(!names.iter().any(|n| n == "<http://ex.org/far>"), "disjoint entity must not appear");
+        assert!(
+            !names.iter().any(|n| n == "<http://ex.org/a>"),
+            "self must be excluded"
+        );
+        assert!(
+            !names.iter().any(|n| n == "<http://ex.org/far>"),
+            "disjoint entity must not appear"
+        );
         // most_similar scores must agree with the pairwise API.
         assert_eq!(top[1].1, sim.similarity(&iri("a"), &iri("half")));
         // … and literals must never be returned as entities.
         let g2 = graph(":s1 :p \"lit\" . :s2 :p \"lit\" .");
         let sim2 = unweighted(&g2);
-        assert!(sim2.most_similar(&iri("s1"), 5).iter().all(|(t, _)| !matches!(t, Term::Literal(_))));
+        assert!(sim2
+            .most_similar(&iri("s1"), 5)
+            .iter()
+            .all(|(t, _)| !matches!(t, Term::Literal(_))));
     }
 
     #[test]
@@ -1641,7 +1735,10 @@ mod tests {
         );
         let top = strict.most_similar(&iri("a"), 10);
         assert_eq!(top[0].0.to_string(), "<http://ex.org/b>");
-        assert_eq!(top[0].1, 1.0, "re-score must include the capped hub element");
+        assert_eq!(
+            top[0].1, 1.0,
+            "re-score must include the capped hub element"
+        );
         // c..f share only the capped hub element → not generated (the approximation;
         // fallback disabled pins the strict v1 behaviour).
         assert_eq!(top.len(), 1);
@@ -1650,7 +1747,11 @@ mod tests {
         // (c..f share 1 of a's 2 roles → 0.5).
         let sim = Sim::with_config(
             &g,
-            SimConfig { idf: false, max_pair_frequency: 5, ..SimConfig::default() },
+            SimConfig {
+                idf: false,
+                max_pair_frequency: 5,
+                ..SimConfig::default()
+            },
         );
         let top = sim.most_similar(&iri("a"), 10);
         assert_eq!(top[0].0.to_string(), "<http://ex.org/b>");
@@ -1674,9 +1775,16 @@ mod tests {
         // Pin the STRUCTURAL starvation invariant: the lexical tier (when compiled in)
         // would legitimately fill slots here (`s2`/`s3` are lexically close to `s1`),
         // so it is disabled along with the profile fallback.
-        let strict_cfg = SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() };
+        let strict_cfg = SimConfig {
+            idf: false,
+            profile_fallback: false,
+            ..SimConfig::default()
+        };
         #[cfg(feature = "lexical")]
-        let strict_cfg = SimConfig { lexical_fallback: false, ..strict_cfg };
+        let strict_cfg = SimConfig {
+            lexical_fallback: false,
+            ..strict_cfg
+        };
         let strict = Sim::with_config(&g, strict_cfg);
         assert!(
             strict.most_similar(&iri("s1"), 5).is_empty(),
@@ -1706,9 +1814,15 @@ mod tests {
         let sim = unweighted(&g);
         let top = sim.most_similar(&iri("a"), 5);
         let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
-        assert_eq!(names[0], "<http://ex.org/twin>", "exact match first: {names:?}");
+        assert_eq!(
+            names[0], "<http://ex.org/twin>",
+            "exact match first: {names:?}"
+        );
         assert_eq!(top[0].1, sim.similarity(&iri("a"), &iri("twin")));
-        assert!(names.contains(&"<http://ex.org/role>".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"<http://ex.org/role>".to_string()),
+            "{names:?}"
+        );
         // No fallback when generation already yields k candidates.
         let top1 = sim.most_similar(&iri("a"), 1);
         assert_eq!(top1.len(), 1);
@@ -1753,14 +1867,19 @@ mod tests {
         let rdf_type = NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type").unwrap();
         let sim = Sim::with_config(
             &g,
-            SimConfig { exclude_predicates: vec![rdf_type], ..SimConfig::default() },
+            SimConfig {
+                exclude_predicates: vec![rdf_type],
+                ..SimConfig::default()
+            },
         );
         // All pairwise similarities over the population, labelled by same-class.
         let entities: Vec<(usize, Term)> = (0..CLASSES)
             .flat_map(|c| (0..PER_CLASS).map(move |e| (c, iri(&format!("c{c}e{e}")))))
             .collect();
-        let sigs: Vec<(usize, Signature)> =
-            entities.iter().map(|(c, t)| (*c, sim.signature(t).unwrap())).collect();
+        let sigs: Vec<(usize, Signature)> = entities
+            .iter()
+            .map(|(c, t)| (*c, sim.signature(t).unwrap()))
+            .collect();
         let mut pos: Vec<f64> = Vec::new();
         let mut neg: Vec<f64> = Vec::new();
         for i in 0..sigs.len() {
@@ -1814,7 +1933,9 @@ mod tests {
     fn explain_similarity_hand_computed_exact() {
         // Same graph as `plain_jaccard_hand_computed`: the ONLY shared element is
         // (out, knows, eve); unweighted, so its weight is exactly 1.0.
-        let g = graph(":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .");
+        let g = graph(
+            ":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .",
+        );
         let sim = unweighted(&g);
         let expected = vec![SharedElement {
             direction: Direction::Out,
@@ -1822,8 +1943,14 @@ mod tests {
             neighbor: Some(iri("eve")),
             weight: 1.0,
         }];
-        assert_eq!(sim.explain_similarity(&iri("alice"), &iri("dave")), expected);
-        assert_eq!(sim.explain_similarity(&iri("dave"), &iri("alice")), expected);
+        assert_eq!(
+            sim.explain_similarity(&iri("alice"), &iri("dave")),
+            expected
+        );
+        assert_eq!(
+            sim.explain_similarity(&iri("dave"), &iri("alice")),
+            expected
+        );
         // Σ / (|A| + |B| − Σ) = 1 / (3 + 2 − 1) reconstructs the 0.25 score exactly.
         assert_eq!(sim.similarity(&iri("alice"), &iri("dave")), 0.25);
         assert_eq!(1.0 / (3.0 + 2.0 - 1.0), 0.25);
@@ -1879,7 +2006,11 @@ mod tests {
                 assert!(e.weight > 0.0);
             }
             // … and NO true intersection element missing.
-            let inter = sa.elems.iter().filter(|e| sb.elems.binary_search(e).is_ok()).count();
+            let inter = sa
+                .elems
+                .iter()
+                .filter(|e| sb.elems.binary_search(e).is_ok())
+                .count();
             assert_eq!(ex.len(), inter, "{a} vs {b}");
             // Σ(explain) reconstructs the exact weighted-Jaccard score.
             let sigma: f64 = ex.iter().map(|e| e.weight).sum();
@@ -1887,7 +2018,10 @@ mod tests {
             if sigma == 0.0 {
                 assert_eq!(score, 0.0, "{a} vs {b}");
             } else {
-                assert_close(sigma / (sa.total_weight() + sb.total_weight() - sigma), score);
+                assert_close(
+                    sigma / (sa.total_weight() + sb.total_weight() - sigma),
+                    score,
+                );
             }
         }
         // Non-vacuity anchors: the overlapping pairs really scored.
@@ -1934,7 +2068,11 @@ mod tests {
         let g = graph(":a :knows :x ; :worksAt :acme . :b :knows :y ; :worksAt :corp .");
         let sim = Sim::with_config(
             &g,
-            SimConfig { mode: SignatureMode::Predicates, idf: false, ..SimConfig::default() },
+            SimConfig {
+                mode: SignatureMode::Predicates,
+                idf: false,
+                ..SimConfig::default()
+            },
         );
         let ex = sim.explain_similarity(&iri("a"), &iri("b"));
         assert_eq!(ex.len(), 2, "shared roles: knows + worksAt");
@@ -1953,8 +2091,12 @@ mod tests {
     fn explain_similarity_absent_disjoint_and_self() {
         let g = graph(":a :p :x . :b :q :y .");
         let sim = unweighted(&g);
-        assert!(sim.explain_similarity(&iri("a"), &iri("missing")).is_empty());
-        assert!(sim.explain_similarity(&iri("missing"), &iri("a")).is_empty());
+        assert!(sim
+            .explain_similarity(&iri("a"), &iri("missing"))
+            .is_empty());
+        assert!(sim
+            .explain_similarity(&iri("missing"), &iri("a"))
+            .is_empty());
         assert!(sim.explain_similarity(&iri("a"), &iri("b")).is_empty());
         let ex = sim.explain_similarity(&iri("a"), &iri("a"));
         assert_eq!(ex.len(), sim.signature(&iri("a")).unwrap().len());
@@ -2006,7 +2148,11 @@ mod tests {
         );
         let tbox_sim = Sim::with_config(
             &g,
-            SimConfig { idf: false, tbox_aware: true, ..SimConfig::default() },
+            SimConfig {
+                idf: false,
+                tbox_aware: true,
+                ..SimConfig::default()
+            },
         );
         let sig = tbox_sim.signature(&iri("alice")).unwrap();
         let rdf_type_id = g
@@ -2014,19 +2160,32 @@ mod tests {
                 NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type").unwrap(),
             ))
             .expect("rdf:type must be in the graph");
-        let person_id = g.id_of(&iri("Person")).expect(":Person must be in the graph");
-        let professor_id = g.id_of(&iri("Professor")).expect(":Professor must be in the graph");
+        let person_id = g
+            .id_of(&iri("Person"))
+            .expect(":Person must be in the graph");
+        let professor_id = g
+            .id_of(&iri("Professor"))
+            .expect(":Professor must be in the graph");
         // Direct type element present.
-        assert!(sig.elems.contains(&(OUT, rdf_type_id, professor_id)), "direct type missing");
+        assert!(
+            sig.elems.contains(&(OUT, rdf_type_id, professor_id)),
+            "direct type missing"
+        );
         // Inferred supertype element present.
-        assert!(sig.elems.contains(&(OUT, rdf_type_id, person_id)), "inferred supertype missing");
+        assert!(
+            sig.elems.contains(&(OUT, rdf_type_id, person_id)),
+            "inferred supertype missing"
+        );
         // Inferred element has attenuated weight (0.5 × direct weight = 0.5 × 1.0 = 0.5).
         let pos = sig
             .elems
             .iter()
             .position(|&e| e == (OUT, rdf_type_id, person_id))
             .unwrap();
-        assert!((sig.weights[pos] - 0.5).abs() < 1e-12, "inferred weight should be 0.5");
+        assert!(
+            (sig.weights[pos] - 0.5).abs() < 1e-12,
+            "inferred weight should be 0.5"
+        );
     }
 
     /// Without T-box, alice (Professor) and bob (Person) share no structural element.
@@ -2042,11 +2201,19 @@ mod tests {
         );
         let plain = Sim::with_config(
             &g,
-            SimConfig { idf: false, tbox_aware: false, ..SimConfig::default() },
+            SimConfig {
+                idf: false,
+                tbox_aware: false,
+                ..SimConfig::default()
+            },
         );
         let tbox_sim = Sim::with_config(
             &g,
-            SimConfig { idf: false, tbox_aware: true, ..SimConfig::default() },
+            SimConfig {
+                idf: false,
+                tbox_aware: true,
+                ..SimConfig::default()
+            },
         );
         assert_eq!(
             plain.similarity(&iri("alice"), &iri("bob")),
@@ -2067,16 +2234,30 @@ mod tests {
         let g = graph(":a :p :b . :c :p :b .");
         let plain = Sim::with_config(
             &g,
-            SimConfig { idf: false, tbox_aware: false, ..SimConfig::default() },
+            SimConfig {
+                idf: false,
+                tbox_aware: false,
+                ..SimConfig::default()
+            },
         );
         let tbox_sim = Sim::with_config(
             &g,
-            SimConfig { idf: false, tbox_aware: true, ..SimConfig::default() },
+            SimConfig {
+                idf: false,
+                tbox_aware: true,
+                ..SimConfig::default()
+            },
         );
         let sa_plain = plain.signature(&iri("a")).unwrap();
         let sa_tbox = tbox_sim.signature(&iri("a")).unwrap();
-        assert_eq!(sa_plain.elems, sa_tbox.elems, "elements must be identical without hierarchy");
-        assert_eq!(sa_plain.weights, sa_tbox.weights, "weights must be identical without hierarchy");
+        assert_eq!(
+            sa_plain.elems, sa_tbox.elems,
+            "elements must be identical without hierarchy"
+        );
+        assert_eq!(
+            sa_plain.weights, sa_tbox.weights,
+            "weights must be identical without hierarchy"
+        );
     }
 
     /// Sibling-subproperty RETRIEVAL: `:a :p1 :n` and `:b :p2 :n` share ONLY the
@@ -2093,11 +2274,24 @@ mod tests {
              :a :p1 :n .
              :b :p2 :n .",
         );
-        let cfg = SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() };
+        let cfg = SimConfig {
+            idf: false,
+            profile_fallback: false,
+            ..SimConfig::default()
+        };
         #[cfg(feature = "lexical")]
-        let cfg = SimConfig { lexical_fallback: false, ..cfg };
+        let cfg = SimConfig {
+            lexical_fallback: false,
+            ..cfg
+        };
         // Without T-box awareness (and no fallbacks) :b is unreachable from :a.
-        let plain = Sim::with_config(&g, SimConfig { tbox_aware: false, ..cfg.clone() });
+        let plain = Sim::with_config(
+            &g,
+            SimConfig {
+                tbox_aware: false,
+                ..cfg.clone()
+            },
+        );
         assert!(
             plain.most_similar(&iri("a"), 5).is_empty(),
             "without T-box, :a and :b share no element"
@@ -2114,7 +2308,10 @@ mod tests {
             .find(|(t, _)| t.to_string() == "<http://ex.org/b>")
             .map(|&(_, s)| s)
             .expect("sibling-subproperty entity :b must be retrieved");
-        assert_eq!(b_score, pairwise, "retrieval score must equal the pairwise score");
+        assert_eq!(
+            b_score, pairwise,
+            "retrieval score must equal the pairwise score"
+        );
     }
 
     // ---- lexical feature tests ----------------------------------------------------
@@ -2128,8 +2325,10 @@ mod tests {
         assert_eq!(trigram_jaccard("abc", "xyz"), 0.0);
         let partial = trigram_jaccard("alice_smith", "alice_jones");
         assert!(partial > 0.0 && partial < 1.0, "partial overlap: {partial}");
-        assert!(partial > trigram_jaccard("alice_smith", "bob_jones"),
-                "alice_smith closer to alice_jones than to bob_jones");
+        assert!(
+            partial > trigram_jaccard("alice_smith", "bob_jones"),
+            "alice_smith closer to alice_jones than to bob_jones"
+        );
         // Short-string fallback
         assert_close(trigram_jaccard("ab", "ab"), 1.0);
         assert_eq!(trigram_jaccard("ab", "cd"), 0.0);
@@ -2195,7 +2394,10 @@ mod tests {
             "lexical tier must find alice_jones; got: {names:?}"
         );
         // alice_smith itself must not appear in its own results.
-        assert!(!names.contains(&"<http://ex.org/alice_smith>".to_string()), "self must be excluded");
+        assert!(
+            !names.contains(&"<http://ex.org/alice_smith>".to_string()),
+            "self must be excluded"
+        );
     }
 
     /// `lexical_fallback` ranks BELOW structural exact results. [SONNET-4.6] sq-181
@@ -2210,12 +2412,19 @@ mod tests {
         );
         let sim = Sim::with_config(
             &g,
-            SimConfig { idf: false, lexical_fallback: true, ..SimConfig::default() },
+            SimConfig {
+                idf: false,
+                lexical_fallback: true,
+                ..SimConfig::default()
+            },
         );
         let top = sim.most_similar(&iri("a"), 5);
         // :twin must appear before any lexical candidate.
         let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
-        assert_eq!(names[0], "<http://ex.org/twin>", "structural match must lead; got {names:?}");
+        assert_eq!(
+            names[0], "<http://ex.org/twin>",
+            "structural match must lead; got {names:?}"
+        );
     }
 
     /// Trigram overlap does not require a shared prefix: `xalice` shares the

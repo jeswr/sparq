@@ -298,9 +298,7 @@ fn drain(
             if has_self {
                 if let Some(r) = names.self_role(d) {
                     #[cfg(feature = "rbox")]
-                    add_self_link_rbox(
-                        sat, r, x, ix, names, role_box, queue,
-                    );
+                    add_self_link_rbox(sat, r, x, ix, names, role_box, queue);
                     #[cfg(not(feature = "rbox"))]
                     add_link(sat, r, x, x, ix, names, queue);
                 }
@@ -947,9 +945,7 @@ fn saturate_par_inner(
                 }
                 #[cfg(feature = "rbox")]
                 for (r, x) in chunk.self_links {
-                    add_self_link_rbox(
-                        &mut sat, r, x, &ix, names, role_box, &mut queue,
-                    );
+                    add_self_link_rbox(&mut sat, r, x, &ix, names, role_box, &mut queue);
                 }
             }
             stats.apply_nanos += elapsed_nanos(t_apply);

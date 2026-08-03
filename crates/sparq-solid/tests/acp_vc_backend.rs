@@ -8,9 +8,7 @@
 
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use sparq_core::Graph;
-use sparq_solid::{
-    AccessProvenance, Mode, PodStore, Session, VcRequirement, VerifiedCredentials,
-};
+use sparq_solid::{AccessProvenance, Mode, PodStore, Session, VcRequirement, VerifiedCredentials};
 use sparq_vc::did::DidKeyResolver;
 use sparq_vc::{sign, ProofConfig, SigningKey};
 
@@ -36,9 +34,17 @@ fn triple(s: &str, p: &str, o: Term) -> Triple {
 /// A credential asserting that `subject` is an `AgeCredential` subject in the `18+` band.
 fn credential(subject: &str) -> Vec<Triple> {
     vec![
-        triple("https://issuer.ex/creds/1", CREDENTIAL_SUBJECT, Term::NamedNode(iri(subject))),
+        triple(
+            "https://issuer.ex/creds/1",
+            CREDENTIAL_SUBJECT,
+            Term::NamedNode(iri(subject)),
+        ),
         triple(subject, RDF_TYPE, Term::NamedNode(iri(AGE_CREDENTIAL))),
-        triple(subject, AGE_BAND, Term::Literal(Literal::new_simple_literal("18+"))),
+        triple(
+            subject,
+            AGE_BAND,
+            Term::Literal(Literal::new_simple_literal("18+")),
+        ),
     ]
 }
 
@@ -54,7 +60,9 @@ fn issuer_key() -> (SigningKey, String, String) {
 fn pod() -> String {
     let g = "https://pod.ex/clinic/.acr";
     let mut s = format!("<{DOC}#it> <https://ex.dev/ns#k> \"v\" <{DOC}> .\n");
-    s.push_str(&format!("<{g}> <{ACP}memberAccessControl> <{g}#c> <{g}> .\n"));
+    s.push_str(&format!(
+        "<{g}> <{ACP}memberAccessControl> <{g}#c> <{g}> .\n"
+    ));
     s.push_str(&format!("<{g}#c> <{ACP}apply> <{g}#pol> <{g}> .\n"));
     s.push_str(&format!("<{g}#pol> <{ACP}allow> <{ACL}Read> <{g}> .\n"));
     s.push_str(&format!("<{g}#pol> <{ACP}allOf> <{g}#m> <{g}> .\n"));
@@ -63,8 +71,15 @@ fn pod() -> String {
 }
 
 fn can_read(s: &PodStore, agent: &str) -> bool {
-    let session = Session { agent: Some(agent), client: None, issuer: None, now: None };
-    s.accessible(&session, Mode::Read).iter().any(|g| g.as_str() == DOC)
+    let session = Session {
+        agent: Some(agent),
+        client: None,
+        issuer: None,
+        now: None,
+    };
+    s.accessible(&session, Mode::Read)
+        .iter()
+        .any(|g| g.as_str() == DOC)
 }
 
 /// End-to-end: sign a credential for alice, verify it through the backend, and watch the
@@ -101,15 +116,26 @@ fn a_tampered_credential_is_refused_and_grants_nothing() {
 
     // Bob re-points the signed credential at himself with a better claim.
     let mut tampered = honest.clone();
-    tampered[2] = triple(BOB, AGE_BAND, Term::Literal(Literal::new_simple_literal("21+")));
+    tampered[2] = triple(
+        BOB,
+        AGE_BAND,
+        Term::Literal(Literal::new_simple_literal("21+")),
+    );
 
     let req = VcRequirement::new(OVER_18, &did, AGE_CREDENTIAL);
     let mut creds = VerifiedCredentials::new();
     let err = creds
         .admit_data_integrity(&tampered, &proof, &DidKeyResolver, &[req])
         .expect_err("a modified credential must not verify");
-    assert!(format!("{}", err).contains("proof did not verify"), "got: {}", err);
-    assert!(creds.is_empty(), "a refused credential must record no holding");
+    assert!(
+        format!("{}", err).contains("proof did not verify"),
+        "got: {}",
+        err
+    );
+    assert!(
+        creds.is_empty(),
+        "a refused credential must record no holding"
+    );
 
     let mut store = PodStore::new(Graph::load_dataset(&pod(), "nquads").expect("loads"));
     store
@@ -132,7 +158,10 @@ fn a_credential_from_an_unaccepted_issuer_satisfies_nothing() {
     let recorded = creds
         .admit_data_integrity(&cred, &proof, &DidKeyResolver, &[req])
         .expect("the proof itself is valid");
-    assert!(recorded.is_empty(), "a different issuer must not satisfy the requirement");
+    assert!(
+        recorded.is_empty(),
+        "a different issuer must not satisfy the requirement"
+    );
     assert!(creds.is_empty());
 }
 
@@ -164,7 +193,9 @@ fn an_unmet_claim_or_type_satisfies_nothing() {
     let ok = VcRequirement::new(OVER_18, &did, AGE_CREDENTIAL)
         .with_claim(AGE_BAND, Term::Literal(Literal::new_simple_literal("18+")));
     assert_eq!(
-        creds.admit_data_integrity(&cred, &proof, &DidKeyResolver, &[ok]).expect("valid proof"),
+        creds
+            .admit_data_integrity(&cred, &proof, &DidKeyResolver, &[ok])
+            .expect("valid proof"),
         vec![OVER_18.to_owned()]
     );
 }
@@ -181,9 +212,17 @@ fn an_unmet_claim_or_type_satisfies_nothing() {
 fn a_two_subject_credential_is_refused_in_either_order() {
     let (key, did, vm) = issuer_key();
     let mut cred = credential(ALICE);
-    cred.push(triple("https://issuer.ex/creds/1", CREDENTIAL_SUBJECT, Term::NamedNode(iri(BOB))));
+    cred.push(triple(
+        "https://issuer.ex/creds/1",
+        CREDENTIAL_SUBJECT,
+        Term::NamedNode(iri(BOB)),
+    ));
     cred.push(triple(BOB, RDF_TYPE, Term::NamedNode(iri(AGE_CREDENTIAL))));
-    cred.push(triple(BOB, AGE_BAND, Term::Literal(Literal::new_simple_literal("18+"))));
+    cred.push(triple(
+        BOB,
+        AGE_BAND,
+        Term::Literal(Literal::new_simple_literal("18+")),
+    ));
     let proof = sign(&cred, &key, &ProofConfig::new(vm)).expect("signs");
 
     // the same signed graph, with bob's `credentialSubject` moved to the front
@@ -198,7 +237,10 @@ fn a_two_subject_credential_is_refused_in_either_order() {
             .admit_data_integrity(&order, &proof, &DidKeyResolver, &[req])
             .expect_err("two subjects must be refused, not resolved by slice order");
         assert!(format!("{}", err).contains("ambiguous"), "got: {}", err);
-        assert!(creds.is_empty(), "an ambiguous credential must record no holding");
+        assert!(
+            creds.is_empty(),
+            "an ambiguous credential must record no holding"
+        );
 
         let mut store = PodStore::new(Graph::load_dataset(&pod(), "nquads").expect("loads"));
         store

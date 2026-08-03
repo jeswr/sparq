@@ -108,7 +108,11 @@ mod gated {
 
     /// Extend a partial solution by binding `slot` against `value`, or `None` on a
     /// fixed-mismatch / inconsistent re-binding.
-    fn bind(sol: &BTreeMap<String, String>, slot: Slot, value: &str) -> Option<BTreeMap<String, String>> {
+    fn bind(
+        sol: &BTreeMap<String, String>,
+        slot: Slot,
+        value: &str,
+    ) -> Option<BTreeMap<String, String>> {
         match slot {
             Slot::Fixed(f) => (f == value).then(|| sol.clone()),
             Slot::Bind(k) => match sol.get(&k) {
@@ -126,7 +130,13 @@ mod gated {
     /// serialisation the pattern constants render to (oxrdf `Display`).
     fn triples_as_strings(data: &[Triple]) -> Vec<(String, String, String)> {
         data.iter()
-            .map(|t| (t.subject.to_string(), t.predicate.to_string(), t.object.to_string()))
+            .map(|t| {
+                (
+                    t.subject.to_string(),
+                    t.predicate.to_string(),
+                    t.object.to_string(),
+                )
+            })
             .collect()
     }
 
@@ -142,8 +152,12 @@ mod gated {
                     let mut next = Vec::new();
                     for sol in &sols {
                         for (s, p, o) in data {
-                            let Some(a) = bind(sol, term_slot(&pat.subject), s) else { continue };
-                            let Some(b) = bind(&a, pred_slot(&pat.predicate), p) else { continue };
+                            let Some(a) = bind(sol, term_slot(&pat.subject), s) else {
+                                continue;
+                            };
+                            let Some(b) = bind(&a, pred_slot(&pat.predicate), p) else {
+                                continue;
+                            };
                             if let Some(c) = bind(&b, term_slot(&pat.object), o) {
                                 next.push(c);
                             }
@@ -159,7 +173,10 @@ mod gated {
                 sols
             }
             GraphPattern::Project { inner, variables } => {
-                let keep: BTreeSet<String> = variables.iter().map(|v| format!("?{}", v.as_str())).collect();
+                let keep: BTreeSet<String> = variables
+                    .iter()
+                    .map(|v| format!("?{}", v.as_str()))
+                    .collect();
                 eval(inner, data)
                     .into_iter()
                     .map(|sol| sol.into_iter().filter(|(k, _)| keep.contains(k)).collect())
@@ -183,9 +200,12 @@ mod gated {
     fn projection(q: &Query) -> Vec<String> {
         fn find(gp: &GraphPattern) -> Option<Vec<String>> {
             match gp {
-                GraphPattern::Project { variables, .. } => {
-                    Some(variables.iter().map(|v| format!("?{}", v.as_str())).collect())
-                }
+                GraphPattern::Project { variables, .. } => Some(
+                    variables
+                        .iter()
+                        .map(|v| format!("?{}", v.as_str()))
+                        .collect(),
+                ),
                 GraphPattern::Distinct { inner }
                 | GraphPattern::Reduced { inner }
                 | GraphPattern::Slice { inner, .. } => find(inner),
@@ -353,7 +373,10 @@ mod gated {
              returned different `?x` answer sets; blank = {:?}, var = {:?}",
             a_blank, a_var
         );
-        assert_eq!(a_blank, oracle, "blank-node UCQ answers must equal the hand-derived oracle");
+        assert_eq!(
+            a_blank, oracle,
+            "blank-node UCQ answers must equal the hand-derived oracle"
+        );
     }
 
     /// sparqldl-05: `ASK { _:a rdf:type :Person }` with `:Student rdfs:subClassOf :Person`.
@@ -381,7 +404,12 @@ mod gated {
         // Positive ABox: only a Student is asserted. `ASK Person` is TRUE iff the
         // Student ⊑ Person disjunct is present and matches — the load-bearing behaviour.
         let type_iri = format!("<{TYPE}>");
-        let has_student = abox(&[&format!("{} {} {} .", iri("alice"), type_iri, iri("Student"))]);
+        let has_student = abox(&[&format!(
+            "{} {} {} .",
+            iri("alice"),
+            type_iri,
+            iri("Student")
+        )]);
         // Negative ABox: an unrelated type only — must be FALSE.
         let no_person = abox(&[&format!("{} {} {} .", iri("bob"), type_iri, iri("Robot"))]);
 
@@ -440,11 +468,9 @@ mod gated {
         // When :p(?X, _:a) is rewritten and _:a is SHARED (bound), the role-inclusion fires
         // replacing :p with :manages (object stays the same). Same disjunct count as :manages.
         // Both blank and var forms should produce identical counts.
-        let t = tbox(&[
-            "<http://example.org/test#manages> \
+        let t = tbox(&["<http://example.org/test#manages> \
              <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> \
-             <http://example.org/test#p> .",
-        ]);
+             <http://example.org/test#p> ."]);
 
         // sparqldl-08 shape: SELECT ?X ?Y { ?X :p _:a . _:a :r ?Y }  (_:a SHARED — bound)
         let q_blank = q(&format!(
@@ -476,12 +502,10 @@ mod gated {
         ]);
 
         // Hand-derived oracle: exactly the two closed paths.
-        let oracle: BTreeSet<Vec<String>> = [
-            vec![iri("x1"), iri("y1")],
-            vec![iri("x2"), iri("y2")],
-        ]
-        .into_iter()
-        .collect();
+        let oracle: BTreeSet<Vec<String>> =
+            [vec![iri("x1"), iri("y1")], vec![iri("x2"), iri("y2")]]
+                .into_iter()
+                .collect();
 
         let a_blank = answers(&r_blank.query, &data);
         let a_var = answers(&r_var.query, &data);

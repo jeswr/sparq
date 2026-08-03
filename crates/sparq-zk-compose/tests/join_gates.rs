@@ -78,7 +78,11 @@ fn trusted_k(sk: &SecretKey) -> KeySet {
     KeySet::from_hex_keys([public_key_to_hex(&sk.public_key())])
 }
 fn fixture_snapshot() -> StatusListSnapshot {
-    StatusListSnapshot { status_list: STATUS_LIST.to_string(), version: STATUS_VERSION, bits: vec![0u8] }
+    StatusListSnapshot {
+        status_list: STATUS_LIST.to_string(),
+        version: STATUS_VERSION,
+        bits: vec![0u8],
+    }
 }
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
@@ -101,7 +105,9 @@ fn attest_full(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestatio
         commitment: FieldHex::from_field(&commitment),
         issuer_public_key: public_key_to_hex(&sk.public_key()),
         signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
-        cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        cryptosuite: SignatureScheme::Poseidon2SchnorrV1
+            .cryptosuite_iri()
+            .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
             ref_commitment: None,
@@ -159,24 +165,32 @@ fn graph_a2() -> GraphCommitment {
 }
 
 fn scan_inputs(c: &GraphCommitment, pattern: Pattern) -> ProofInputs {
-    build_scan(std::slice::from_ref(c), &pattern).expect("scan builds").inputs
+    build_scan(std::slice::from_ref(c), &pattern)
+        .expect("scan builds")
+        .inputs
 }
 
 /// The scan over pattern A (`?a <ex/knows> ?p`).
 fn scan_a_inputs(c: &GraphCommitment) -> ProofInputs {
-    scan_inputs(c, Pattern {
-        s: Slot::Var,
-        p: Slot::Const(Term::NamedNode(iri("http://ex/knows"))),
-        o: Slot::Var,
-    })
+    scan_inputs(
+        c,
+        Pattern {
+            s: Slot::Var,
+            p: Slot::Const(Term::NamedNode(iri("http://ex/knows"))),
+            o: Slot::Var,
+        },
+    )
 }
 /// The scan over pattern B (`?p <ex/age> ?o`).
 fn scan_b_inputs(c: &GraphCommitment) -> ProofInputs {
-    scan_inputs(c, Pattern {
-        s: Slot::Var,
-        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
-        o: Slot::Var,
-    })
+    scan_inputs(
+        c,
+        Pattern {
+            s: Slot::Var,
+            p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+            o: Slot::Var,
+        },
+    )
 }
 
 fn commitment_hex(inputs: &ProofInputs) -> FieldHex {
@@ -240,20 +254,37 @@ fn join_manifest() -> ProofManifest {
         join_obligations: vec![("p".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot()],
         sub_proofs: vec![
-            SubProof { inputs: scan_a, proof_hex: String::new() },
-            SubProof { inputs: scan_b, proof_hex: String::new() },
-            SubProof { inputs: join, proof_hex: String::new() },
+            SubProof {
+                inputs: scan_a,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: scan_b,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: join,
+                proof_hex: String::new(),
+            },
         ],
         binding_edges: vec![],
-        join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
+        join_edges: vec![JoinEdge {
+            scan_a: 0,
+            graph_a: 0,
+            scan_b: 1,
+            graph_b: 0,
+            join_proof: 2,
+        }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     }
 }
 
@@ -344,23 +375,43 @@ fn multi_scan_manifest() -> ProofManifest {
         join_obligations: vec![("p".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot()],
         sub_proofs: vec![
-            SubProof { inputs: scan_a, proof_hex: String::new() },
-            SubProof { inputs: scan_a2, proof_hex: String::new() },
-            SubProof { inputs: scan_b, proof_hex: String::new() },
-            SubProof { inputs: join, proof_hex: String::new() },
+            SubProof {
+                inputs: scan_a,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: scan_a2,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: scan_b,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: join,
+                proof_hex: String::new(),
+            },
         ],
         binding_edges: vec![],
         // scan_a -> sub-proof 1 (scan_a2, the SECOND scan answering pattern A),
         // scan_b -> sub-proof 2, join_proof -> sub-proof 3.
-        join_edges: vec![JoinEdge { scan_a: 1, graph_a: 0, scan_b: 2, graph_b: 0, join_proof: 3 }],
+        join_edges: vec![JoinEdge {
+            scan_a: 1,
+            graph_a: 0,
+            scan_b: 2,
+            graph_b: 0,
+            join_proof: 3,
+        }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     }
 }
 
@@ -425,7 +476,9 @@ fn forge_join_commit_a_not_matching_scan_rejected() {
     }
     match prefilter(&m) {
         Err(CheckError::JoinCommitmentMismatch { edge: 0 }) => {}
-        other => panic!("cross-scan commit_a forgery must be JoinCommitmentMismatch, got {other:?}"),
+        other => {
+            panic!("cross-scan commit_a forgery must be JoinCommitmentMismatch, got {other:?}")
+        }
     }
 }
 
@@ -440,7 +493,9 @@ fn forge_join_commit_b_not_matching_scan_rejected() {
     }
     match prefilter(&m) {
         Err(CheckError::JoinCommitmentMismatch { edge: 0 }) => {}
-        other => panic!("cross-scan commit_b forgery must be JoinCommitmentMismatch, got {other:?}"),
+        other => {
+            panic!("cross-scan commit_b forgery must be JoinCommitmentMismatch, got {other:?}")
+        }
     }
 }
 
@@ -456,7 +511,9 @@ fn forge_join_edge_points_at_wrong_scan_rejected() {
     m.join_edges[0].scan_a = 1;
     match prefilter(&m) {
         Err(CheckError::JoinCommitmentMismatch { edge: 0 }) => {}
-        other => panic!("edge pointed at the wrong scan must be JoinCommitmentMismatch, got {other:?}"),
+        other => {
+            panic!("edge pointed at the wrong scan must be JoinCommitmentMismatch, got {other:?}")
+        }
     }
 }
 
@@ -553,7 +610,10 @@ fn finding_a_cross_scan_alias_forge_rejected_by_q6() {
     m.join_obligations.clear(); // and NO disclosed obligation either — the forge
     match prefilter(&m) {
         Err(CheckError::Sparqzk(VerifyError::MissingObligation(edge))) => {
-            assert_eq!(edge.variable, "p", "the dropped obligation is on the join variable ?p");
+            assert_eq!(
+                edge.variable, "p",
+                "the dropped obligation is on the join variable ?p"
+            );
             assert_eq!(
                 edge.patterns,
                 (0, 1),
@@ -594,11 +654,14 @@ const SLOT_C: u32 = 0; // ?p is the SUBJECT of `?p <ex/city> ?c`
 
 /// The scan over pattern C (`?p <ex/city> ?c`).
 fn scan_c_inputs(c: &GraphCommitment) -> ProofInputs {
-    scan_inputs(c, Pattern {
-        s: Slot::Var,
-        p: Slot::Const(Term::NamedNode(iri("http://ex/city"))),
-        o: Slot::Var,
-    })
+    scan_inputs(
+        c,
+        Pattern {
+            s: Slot::Var,
+            p: Slot::Const(Term::NamedNode(iri("http://ex/city"))),
+            o: Slot::Var,
+        },
+    )
 }
 
 /// A 3-way join manifest over `?p` shared across patterns A, B, C. Two hidden join
@@ -621,10 +684,16 @@ fn chain_manifest(shared_commitment: bool) -> ProofManifest {
     let mut join_bc = join_eq_inputs(commit_b, commit_c, SLOT_B, SLOT_C);
     // Honest N-way: both hops bind the SAME hiding commitment. Forge: hop 2 differs.
     let shared = FieldHex("0x0c".to_string());
-    if let ProofInputs::JoinEq { join_commitment, .. } = &mut join_ab {
+    if let ProofInputs::JoinEq {
+        join_commitment, ..
+    } = &mut join_ab
+    {
         *join_commitment = shared.clone();
     }
-    if let ProofInputs::JoinEq { join_commitment, .. } = &mut join_bc {
+    if let ProofInputs::JoinEq {
+        join_commitment, ..
+    } = &mut join_bc
+    {
         *join_commitment = if shared_commitment {
             shared.clone()
         } else {
@@ -658,25 +727,54 @@ fn chain_manifest(shared_commitment: bool) -> ProofManifest {
         ],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot()],
         sub_proofs: vec![
-            SubProof { inputs: scan_a, proof_hex: String::new() },
-            SubProof { inputs: scan_b, proof_hex: String::new() },
-            SubProof { inputs: scan_c, proof_hex: String::new() },
-            SubProof { inputs: join_ab, proof_hex: String::new() },
-            SubProof { inputs: join_bc, proof_hex: String::new() },
+            SubProof {
+                inputs: scan_a,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: scan_b,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: scan_c,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: join_ab,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: join_bc,
+                proof_hex: String::new(),
+            },
         ],
         binding_edges: vec![],
         join_edges: vec![
-            JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 3 },
-            JoinEdge { scan_a: 1, graph_a: 0, scan_b: 2, graph_b: 0, join_proof: 4 },
+            JoinEdge {
+                scan_a: 0,
+                graph_a: 0,
+                scan_b: 1,
+                graph_b: 0,
+                join_proof: 3,
+            },
+            JoinEdge {
+                scan_a: 1,
+                graph_a: 0,
+                scan_b: 2,
+                graph_b: 0,
+                join_proof: 4,
+            },
         ],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     }
 }
 
@@ -763,7 +861,9 @@ fn forge_join_proof_not_join_eq_rejected() {
     m.join_edges[0].join_proof = 0; // sub-proof 0 is a scan, not a join_eq.
     match prefilter(&m) {
         Err(CheckError::JoinEdgeKindMismatch { edge: 0 }) => {}
-        other => panic!("join_proof pointing at a scan must be JoinEdgeKindMismatch, got {other:?}"),
+        other => {
+            panic!("join_proof pointing at a scan must be JoinEdgeKindMismatch, got {other:?}")
+        }
     }
 }
 
@@ -801,7 +901,7 @@ use sparq_zk::field::field_from_hex_str;
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
-    verify_manifest, encode_artifacts, EntailmentPolicy, HolderBindingPolicy, HolderRegistry,
+    encode_artifacts, verify_manifest, EntailmentPolicy, HolderBindingPolicy, HolderRegistry,
     InMemorySeenNonces, VerifierNonce,
 };
 
@@ -817,8 +917,10 @@ fn toolchain_available() -> bool {
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("sparq_zk_compose_join_{name}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "sparq_zk_compose_join_{name}_{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -912,15 +1014,21 @@ fn full_bb_join_accept_real_proof() {
     let j_art = prover
         .prove_in(&j_id, &j_toml, &scratch("join_eq"), "join_eq")
         .expect("join_eq proves (the relation is satisfiable for a real join)");
-    assert!(!j_art.proof.is_empty(), "join_eq produced a non-empty proof");
+    assert!(
+        !j_art.proof.is_empty(),
+        "join_eq produced a non-empty proof"
+    );
 
     // The join's public commit_a/commit_b MUST equal the two scans' commitments
     // (the bind_joins anti-A2 binding) — they do, because build_join read them from
     // the SAME GraphCommitments build_scan committed.
-    assert_eq!(commitment_hex(&scan_a.inputs), match &built_join.inputs {
-        ProofInputs::JoinEq { commit_a, .. } => commit_a.clone(),
-        _ => unreachable!(),
-    });
+    assert_eq!(
+        commitment_hex(&scan_a.inputs),
+        match &built_join.inputs {
+            ProofInputs::JoinEq { commit_a, .. } => commit_a.clone(),
+            _ => unreachable!(),
+        }
+    );
 
     // --- assemble the full manifest with REAL proofs on every sub-proof. ---
     let sk = test_issuer_sk(1);
@@ -940,20 +1048,37 @@ fn full_bb_join_accept_real_proof() {
         join_obligations: vec![("p".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: challenge.clone() },
+        binding: BindingMode::Challenge {
+            challenge: challenge.clone(),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot()],
         sub_proofs: vec![
-            SubProof { inputs: scan_a.inputs, proof_hex: encode_artifacts(&sa_art) },
-            SubProof { inputs: scan_b.inputs, proof_hex: encode_artifacts(&sb_art) },
-            SubProof { inputs: built_join.inputs, proof_hex: encode_artifacts(&j_art) },
+            SubProof {
+                inputs: scan_a.inputs,
+                proof_hex: encode_artifacts(&sa_art),
+            },
+            SubProof {
+                inputs: scan_b.inputs,
+                proof_hex: encode_artifacts(&sb_art),
+            },
+            SubProof {
+                inputs: built_join.inputs,
+                proof_hex: encode_artifacts(&j_art),
+            },
         ],
         binding_edges: vec![],
-        join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
+        join_edges: vec![JoinEdge {
+            scan_a: 0,
+            graph_a: 0,
+            scan_b: 1,
+            graph_b: 0,
+            join_proof: 2,
+        }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     };
     // The verifier nonce that all three proofs committed (CHALLENGE_HEX) is bound
     // as field 0 of every sub-proof by the audit-#1 reconstruction.

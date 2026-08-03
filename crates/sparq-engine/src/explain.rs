@@ -28,11 +28,11 @@ use std::fmt::Write as _;
 
 use oxrdf::Variable;
 use rustc_hash::FxHashMap;
-use sparq_core::store::{Pattern as IdPattern, Perm, BUILT};
-use sparq_core::Graph;
 use spargebra::algebra::GraphPattern;
 use spargebra::term::TriplePattern;
 use spargebra::{Query, SparqlParser};
+use sparq_core::store::{Pattern as IdPattern, Perm, BUILT};
+use sparq_core::Graph;
 
 use crate::exec::{self, Prepared, ScanCmp};
 use crate::QueryBudget;
@@ -42,7 +42,9 @@ use crate::QueryBudget;
 /// filters — WITHOUT executing the query (a planning-only dry run; see the
 /// module docs for the one runtime-dependent caveat).
 pub fn explain(graph: &Graph, sparql: &str) -> Result<String, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let q = SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     // [OPUS-4.8] (sq-7d3dj.30.1) EXPLAIN the ACTUAL executed plan: apply the same
     // pre-execution algebra rewrite `PreparedQuery::parse` does (feature-gated).
     #[cfg(feature = "algebra-rewrite")]
@@ -53,7 +55,10 @@ pub fn explain(graph: &Graph, sparql: &str) -> Result<String, String> {
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     let (form, pattern) = query_form_pattern(&q);
     let mut out = String::new();
-    let _ = writeln!(out, "EXPLAIN ({form}) — planning-only dry run; nothing is executed.");
+    let _ = writeln!(
+        out,
+        "EXPLAIN ({form}) — planning-only dry run; nothing is executed."
+    );
     let _ = writeln!(
         out,
         "Cardinalities are index-range estimates; join strategies marked (predicted) depend on actual row counts at run time."
@@ -70,8 +75,14 @@ pub fn explain_analyze(graph: &Graph, sparql: &str) -> Result<String, String> {
 }
 
 /// [`explain_analyze`] under a cooperative [`QueryBudget`] (deadline / max rows).
-pub fn explain_analyze_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+pub fn explain_analyze_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<String, String> {
+    let q = SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     // [OPUS-4.8] (sq-7d3dj.30.1) ANALYZE the ACTUAL executed plan (feature-gated rewrite).
     #[cfg(feature = "algebra-rewrite")]
     let q = crate::rewrite::rewrite_query(q);
@@ -85,7 +96,10 @@ pub fn explain_analyze_with_budget(graph: &Graph, sparql: &str, budget: &QueryBu
     }
 
     let mut out = String::new();
-    let _ = writeln!(out, "EXPLAIN ANALYZE ({form}) — plan below, then the per-operator execution trace.");
+    let _ = writeln!(
+        out,
+        "EXPLAIN ANALYZE ({form}) — plan below, then the per-operator execution trace."
+    );
     let _ = writeln!(out, "Plan:");
     render_pattern(graph, pattern, &mut out, 1)?;
 
@@ -107,9 +121,21 @@ pub fn explain_analyze_with_budget(graph: &Graph, sparql: &str, budget: &QueryBu
 
     let _ = writeln!(out, "Execution trace (operator → output rows, wall time):");
     for n in &nodes {
-        let _ = writeln!(out, "{}{}  rows={}  time={}", indent(n.depth + 1), n.label, n.rows, fmt_nanos(n.nanos));
+        let _ = writeln!(
+            out,
+            "{}{}  rows={}  time={}",
+            indent(n.depth + 1),
+            n.label,
+            n.rows,
+            fmt_nanos(n.nanos)
+        );
     }
-    let _ = writeln!(out, "Total: {} result row(s) in {}", total_rows, fmt_nanos(total_nanos));
+    let _ = writeln!(
+        out,
+        "Total: {} result row(s) in {}",
+        total_rows,
+        fmt_nanos(total_nanos)
+    );
     Ok(out)
 }
 
@@ -150,7 +176,12 @@ fn fmt_est(card: f64) -> String {
 /// flattenable FILTERs — exactly the shapes `eval_graph_pattern` routes to the
 /// BGP planner) are rendered as one planned BGP node; everything else mirrors
 /// the evaluator's operator dispatch.
-fn render_pattern(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -> Result<(), String> {
+fn render_pattern(
+    graph: &Graph,
+    p: &GraphPattern,
+    out: &mut String,
+    d: usize,
+) -> Result<(), String> {
     if exec::is_conjunctive(p) {
         return render_conjunctive(graph, p, out, d);
     }
@@ -168,7 +199,11 @@ fn render_pattern(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -
             render_pattern(graph, left, out, d + 1)?;
             render_pattern(graph, right, out, d + 1)
         }
-        GraphPattern::LeftJoin { left, right, expression } => {
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
             match expression {
                 Some(e) => line(format!("LeftJoin / OPTIONAL (filter: {e})")),
                 None => line("LeftJoin / OPTIONAL".into()),
@@ -181,8 +216,15 @@ fn render_pattern(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -
             render_pattern(graph, left, out, d + 1)?;
             render_pattern(graph, right, out, d + 1)
         }
-        GraphPattern::Extend { inner, variable, expression } => {
-            line(format!("Extend / BIND(?{} := {expression})", variable.as_str()));
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
+            line(format!(
+                "Extend / BIND(?{} := {expression})",
+                variable.as_str()
+            ));
             render_pattern(graph, inner, out, d + 1)
         }
         GraphPattern::Minus { left, right } => {
@@ -190,16 +232,29 @@ fn render_pattern(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -
             render_pattern(graph, left, out, d + 1)?;
             render_pattern(graph, right, out, d + 1)
         }
-        GraphPattern::Values { variables, bindings } => {
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => {
             line(format!(
                 "Values ({} row(s) over {})",
                 bindings.len(),
-                variables.iter().map(|v| format!("?{}", v.as_str())).collect::<Vec<_>>().join(", ")
+                variables
+                    .iter()
+                    .map(|v| format!("?{}", v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
             Ok(())
         }
-        GraphPattern::Path { subject, path, object } => {
-            line(format!("PropertyPath {subject} {path} {object} (materialised pair relation)"));
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => {
+            line(format!(
+                "PropertyPath {subject} {path} {object} (materialised pair relation)"
+            ));
             Ok(())
         }
         GraphPattern::Graph { name, inner } => {
@@ -209,7 +264,11 @@ fn render_pattern(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -
         GraphPattern::Project { inner, variables } => {
             line(format!(
                 "Project {}",
-                variables.iter().map(|v| format!("?{}", v.as_str())).collect::<Vec<_>>().join(", ")
+                variables
+                    .iter()
+                    .map(|v| format!("?{}", v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
             render_pattern(graph, inner, out, d + 1)
         }
@@ -221,7 +280,11 @@ fn render_pattern(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -
             line("Reduced".into());
             render_pattern(graph, inner, out, d + 1)
         }
-        GraphPattern::Slice { inner, start, length } => {
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => {
             line(format!(
                 "Slice (offset {start}{})",
                 length.map(|l| format!(", limit {l}")).unwrap_or_default()
@@ -232,13 +295,21 @@ fn render_pattern(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -
             line(format!("OrderBy ({} key(s))", expression.len()));
             render_pattern(graph, inner, out, d + 1)
         }
-        GraphPattern::Group { inner, variables, aggregates } => {
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
             line(format!(
                 "Group (by {}; {} aggregate(s))",
                 if variables.is_empty() {
                     "<all>".to_string()
                 } else {
-                    variables.iter().map(|v| format!("?{}", v.as_str())).collect::<Vec<_>>().join(", ")
+                    variables
+                        .iter()
+                        .map(|v| format!("?{}", v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 },
                 aggregates.len()
             ));
@@ -254,7 +325,12 @@ fn render_pattern(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -
 /// Renders a conjunctive subtree as the planned BGP: filter-pushdown split, the
 /// binary-vs-WCOJ dispatch, and (for binary plans) the replayed GOO join order
 /// with estimates and per-step strategy.
-fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usize) -> Result<(), String> {
+fn render_conjunctive(
+    graph: &Graph,
+    p: &GraphPattern,
+    out: &mut String,
+    d: usize,
+) -> Result<(), String> {
     let mut patterns: Vec<TriplePattern> = Vec::new();
     let mut filters = Vec::new();
     exec::flatten_conjunction(p, &mut patterns, &mut filters);
@@ -280,7 +356,11 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
                 "{}pattern {tp} (est {} rows{})",
                 indent(d + 1),
                 pr.est,
-                if pr.unsatisfiable { ", absent constant" } else { "" }
+                if pr.unsatisfiable {
+                    ", absent constant"
+                } else {
+                    ""
+                }
             );
         }
         return Ok(());
@@ -294,14 +374,20 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
             indent(d),
             patterns.len()
         );
-        let prepared_wcoj: Vec<(IdPattern, [Option<Variable>; 3])> =
-            prepared.iter().map(|p| (p.id_pat, p.pos_vars.clone())).collect();
+        let prepared_wcoj: Vec<(IdPattern, [Option<Variable>; 3])> = prepared
+            .iter()
+            .map(|p| (p.id_pat, p.pos_vars.clone()))
+            .collect();
         let order = exec::wcoj_global_order(graph, &patterns, &prepared_wcoj);
         let _ = writeln!(
             out,
             "{}global variable order: {}",
             indent(d + 1),
-            order.iter().map(|v| format!("?{}", v.as_str())).collect::<Vec<_>>().join(", ")
+            order
+                .iter()
+                .map(|v| format!("?{}", v.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         for (tp, pr) in patterns.iter().zip(&prepared) {
             let _ = writeln!(out, "{}trie {tp} (est {} rows)", indent(d + 1), pr.est);
@@ -347,7 +433,8 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
 
     for step in 2..=prepared.len() {
         let est_rows_before = cur_card.max(0.0).round() as usize;
-        let (i, new_card, connected) = exec::goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+        let (i, new_card, connected) =
+            exec::goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
         cur_card = new_card;
         done[i] = true;
         cs_ctx.note_done(i);
@@ -375,7 +462,9 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
             );
         } else {
             let merge_var = sorted_by.clone().filter(|sv| pr.var_pos(sv).is_some());
-            let scan_sort = filt.map(|(c, _)| c).or_else(|| merge_var.as_ref().and_then(|jv| pr.var_pos(jv)));
+            let scan_sort = filt
+                .map(|(c, _)| c)
+                .or_else(|| merge_var.as_ref().and_then(|jv| pr.var_pos(jv)));
             let rhs_sorted = predicted_sort_var(pr, scan_sort);
             if let Some(jv) = merge_var.filter(|jv| rhs_sorted.as_ref() == Some(jv)) {
                 strategy = format!(
@@ -390,7 +479,11 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
             } else if connected {
                 strategy = format!(
                     "hash join on {} with scan {}{} (est {} rows)",
-                    connecting.iter().map(|v| format!("?{}", v.as_str())).collect::<Vec<_>>().join(", "),
+                    connecting
+                        .iter()
+                        .map(|v| format!("?{}", v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     patterns[i],
                     filter_note(pr, filt),
                     pr.est
@@ -406,7 +499,12 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
         }
         sorted_by = new_sorted;
         add_vars(&mut vars, pr);
-        let _ = writeln!(out, "{}{step}. {strategy} → est {} rows", indent(d + 1), fmt_est(cur_card));
+        let _ = writeln!(
+            out,
+            "{}{step}. {strategy} → est {} rows",
+            indent(d + 1),
+            fmt_est(cur_card)
+        );
     }
 
     for f in &residual {
@@ -450,7 +548,10 @@ fn sorted_note(sorted: &Option<Variable>) -> String {
 /// store's actual choice.
 fn predicted_sort_var(p: &Prepared, sort_col: Option<usize>) -> Option<Variable> {
     let perm = predicted_perm(&p.id_pat, sort_col);
-    perm.order().into_iter().find(|&c| p.id_pat[c].is_none()).and_then(|c| p.pos_vars[c].clone())
+    perm.order()
+        .into_iter()
+        .find(|&c| p.id_pat[c].is_none())
+        .and_then(|c| p.pos_vars[c].clone())
 }
 
 fn predicted_perm(id_pat: &IdPattern, sort_col: Option<usize>) -> Perm {
@@ -505,11 +606,19 @@ mod tests {
         )
         .unwrap();
         assert!(plan.contains("planning-only"), "{plan}");
-        assert!(plan.contains("BGP [binary join plan: greedy GOO ordering] (2 patterns)"), "{plan}");
+        assert!(
+            plan.contains("BGP [binary join plan: greedy GOO ordering] (2 patterns)"),
+            "{plan}"
+        );
         // Join order: the smaller knows pattern seeds the plan...
         assert!(plan.contains("1. scan ?a <http://ex/knows> ?b (est 2 rows, sorted by ?b) [seed: smallest estimate]"), "{plan}");
         // ...then a merge join on the shared variable with its estimate.
-        assert!(plan.contains("2. merge join on ?b with scan ?b <http://ex/age> ?age (est 3 rows, sorted by ?b)"), "{plan}");
+        assert!(
+            plan.contains(
+                "2. merge join on ?b with scan ?b <http://ex/age> ?age (est 3 rows, sorted by ?b)"
+            ),
+            "{plan}"
+        );
     }
 
     #[test]
@@ -532,7 +641,10 @@ mod tests {
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?a }",
         )
         .unwrap();
-        assert!(plan.contains("worst-case-optimal join: Leapfrog Triejoin"), "{plan}");
+        assert!(
+            plan.contains("worst-case-optimal join: Leapfrog Triejoin"),
+            "{plan}"
+        );
         assert!(plan.contains("global variable order:"), "{plan}");
     }
 
@@ -545,8 +657,15 @@ mod tests {
             ttl.push_str(&format!("ex:n{i} ex:age {i} .\n"));
         }
         let g = Graph::load_str(&ttl, "turtle").unwrap();
-        let plan = explain(&g, "PREFIX ex: <http://ex/> SELECT * WHERE { ?r ex:special ?k . ?k ex:age ?v }").unwrap();
-        assert!(plan.contains("bind join (index nested-loop, predicted) on ?k"), "{plan}");
+        let plan = explain(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?r ex:special ?k . ?k ex:age ?v }",
+        )
+        .unwrap();
+        assert!(
+            plan.contains("bind join (index nested-loop, predicted) on ?k"),
+            "{plan}"
+        );
     }
 
     #[test]
@@ -571,7 +690,11 @@ mod tests {
 
     #[test]
     fn explain_construct_and_malformed() {
-        let plan = explain(&g(), "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:q ?o } WHERE { ?s ex:knows ?o }").unwrap();
+        let plan = explain(
+            &g(),
+            "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:q ?o } WHERE { ?s ex:knows ?o }",
+        )
+        .unwrap();
         assert!(plan.contains("EXPLAIN (CONSTRUCT)"), "{plan}");
         assert!(explain(&g(), "SELECT WHERE {").is_err());
     }
@@ -582,7 +705,11 @@ mod tests {
         // store's actual `scan_sorted` choice for every bound-mask × sort-col
         // combination (the differential guard against drift).
         let g = g();
-        let some_id = g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://ex/knows").unwrap())).unwrap();
+        let some_id = g
+            .id_of(&oxrdf::Term::NamedNode(
+                oxrdf::NamedNode::new("http://ex/knows").unwrap(),
+            ))
+            .unwrap();
         let masks: Vec<IdPattern> = vec![
             [None, None, None],
             [Some(some_id), None, None],
@@ -599,7 +726,10 @@ mod tests {
                     Some(c) => g.store.scan_sorted(pat, c).perm,
                     None => g.store.scan(pat).perm,
                 };
-                assert_eq!(predicted as usize, actual as usize, "pattern {pat:?} sort {sort_col:?}");
+                assert_eq!(
+                    predicted as usize, actual as usize,
+                    "pattern {pat:?} sort {sort_col:?}"
+                );
             }
         }
     }
@@ -612,7 +742,10 @@ mod tests {
         )
         .unwrap();
         assert!(r.contains("Execution trace"), "{r}");
-        assert!(r.contains("BGP [binary GOO] (2 patterns, 0 filters)  rows=2"), "{r}");
+        assert!(
+            r.contains("BGP [binary GOO] (2 patterns, 0 filters)  rows=2"),
+            "{r}"
+        );
         assert!(r.contains("Total: 2 result row(s)"), "{r}");
         // ASK runs too.
         let r = explain_analyze(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }").unwrap();
@@ -641,7 +774,11 @@ mod tests {
             ttl.push_str(&format!("ex:s{i} ex:p ex:o{i} .\nex:s{i} ex:q ex:r{i} .\n"));
         }
         let g = Graph::load_str(&ttl, "turtle").unwrap();
-        let plan = explain(&g, "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:p ?b . ?c ex:q ?d }").unwrap();
+        let plan = explain(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:p ?b . ?c ex:q ?d }",
+        )
+        .unwrap();
         assert!(plan.contains("cross product"), "{plan}");
     }
 
@@ -774,7 +911,10 @@ mod tests {
     #[test]
     fn explain_empty_bgp_unit_solution() {
         let plan = explain(&g(), "SELECT * WHERE {}").unwrap();
-        assert!(plan.contains("BGP (empty \u{2014} unit solution)"), "{plan}");
+        assert!(
+            plan.contains("BGP (empty \u{2014} unit solution)"),
+            "{plan}"
+        );
     }
 
     /// `query_form_pattern` :: DESCRIBE arm (the Describe variant).
@@ -799,7 +939,10 @@ mod tests {
     /// argument flows through correctly.
     #[test]
     fn explain_analyze_with_budget_direct_call() {
-        let budget = QueryBudget { max_rows: Some(100), ..QueryBudget::unlimited() };
+        let budget = QueryBudget {
+            max_rows: Some(100),
+            ..QueryBudget::unlimited()
+        };
         let r = explain_analyze_with_budget(
             &g(),
             "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a }",

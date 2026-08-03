@@ -348,8 +348,7 @@ pub fn from_rdf(dataset: &[RdfQuad], options: &FromRdfOptions) -> Result<Json, J
         }
         // Spec step 4.6.1: in compound-literal mode an rdf:direction triple marks
         // its subject as a compound-literal blank node.
-        if options.rdf_direction == RdfDirection::CompoundLiteral && predicate_id == RDF_DIRECTION
-        {
+        if options.rdf_direction == RdfDirection::CompoundLiteral && predicate_id == RDF_DIRECTION {
             let subs = compound_subjects.entry(graph_key.clone()).or_default();
             if !subs.contains(&subject_id) {
                 subs.push(subject_id.clone());
@@ -469,7 +468,12 @@ pub fn from_rdf(dataset: &[RdfQuad], options: &FromRdfOptions) -> Result<Json, J
                 if !is_well_formed_list_node(&graphs, &node_graph, &node_id) {
                     break;
                 }
-                items.push((node_graph.clone(), node_id.clone(), RDF_FIRST.to_string(), 0));
+                items.push((
+                    node_graph.clone(),
+                    node_id.clone(),
+                    RDF_FIRST.to_string(),
+                    0,
+                ));
                 cells.push((node_graph.clone(), node_id.clone()));
                 head_slot = next.slot();
                 property = next.property.clone();
@@ -538,8 +542,7 @@ struct Renderer<'a> {
 
 impl Renderer<'_> {
     fn render_node(&self, graph: &str, id: &str, node: &Node) -> Json {
-        let mut members: Vec<(String, Json)> =
-            vec![("@id".to_string(), Json::Str(id.to_string()))];
+        let mut members: Vec<(String, Json)> = vec![("@id".to_string(), Json::Str(id.to_string()))];
         if !node.types.is_empty() {
             members.push((
                 "@type".to_string(),
@@ -770,8 +773,8 @@ fn well_formed_language(tag: &str) -> bool {
     let mut parts = tag.split('-');
     match parts.next() {
         Some(first)
-            if (1..=8).contains(&first.len())
-                && first.bytes().all(|b| b.is_ascii_alphabetic()) => {}
+            if (1..=8).contains(&first.len()) && first.bytes().all(|b| b.is_ascii_alphabetic()) => {
+        }
         _ => return false,
     }
     parts.all(|p| (1..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()))

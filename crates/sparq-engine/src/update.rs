@@ -19,7 +19,6 @@
 use crate::dataset::{build, decode_triples, TripleSet, TripleTerms};
 use oxrdf::{BlankNode, NamedOrBlankNode, Term, Variable};
 use rustc_hash::FxHashMap;
-use sparq_core::Graph;
 use spargebra::algebra::{GraphTarget, QueryDataset};
 use spargebra::term::{
     GraphName, GraphNamePattern, GroundQuad, GroundQuadPattern, GroundTerm, GroundTermPattern,
@@ -28,6 +27,7 @@ use spargebra::term::{
 use spargebra::GraphUpdateOperation;
 use spargebra::SparqlParser;
 use spargebra::Update;
+use sparq_core::Graph;
 
 /// A graph slot: `None` = the default graph, `Some(term)` = that named graph.
 type GraphSlot = Option<Term>;
@@ -80,7 +80,11 @@ fn freshen_term(t: &Term, fresh: &mut FreshBnodes) -> Term {
                 _ => tr.subject.clone(),
             };
             let object = freshen_term(&tr.object, fresh);
-            Term::Triple(Box::new(oxrdf::Triple::new(subject, tr.predicate.clone(), object)))
+            Term::Triple(Box::new(oxrdf::Triple::new(
+                subject,
+                tr.predicate.clone(),
+                object,
+            )))
         }
         other => other.clone(),
     }
@@ -90,14 +94,22 @@ fn quad_to_triple_fresh(q: &Quad, fresh: &mut FreshBnodes) -> SlotTriple {
     let subject = freshen_term(&nob_to_term(&q.subject), fresh);
     (
         graph_name_slot(&q.graph_name),
-        [subject, Term::NamedNode(q.predicate.clone()), freshen_term(&q.object, fresh)],
+        [
+            subject,
+            Term::NamedNode(q.predicate.clone()),
+            freshen_term(&q.object, fresh),
+        ],
     )
 }
 
 fn ground_quad_to_triple(q: &GroundQuad) -> SlotTriple {
     (
         graph_name_slot(&q.graph_name),
-        [Term::NamedNode(q.subject.clone()), Term::NamedNode(q.predicate.clone()), ground_to_term(&q.object)],
+        [
+            Term::NamedNode(q.subject.clone()),
+            Term::NamedNode(q.predicate.clone()),
+            ground_to_term(&q.object),
+        ],
     )
 }
 
@@ -116,7 +128,11 @@ impl Dataset {
     fn decode(graph: &Graph) -> Dataset {
         Dataset {
             default: decode_triples(graph),
-            named: graph.named.iter().map(|(name, g)| (name.clone(), decode_triples(g))).collect(),
+            named: graph
+                .named
+                .iter()
+                .map(|(name, g)| (name.clone(), decode_triples(g)))
+                .collect(),
         }
     }
 
@@ -162,7 +178,11 @@ impl Dataset {
     /// ones — `GRAPH <g> {}` over a CREATEd-but-empty graph must yield the unit row).
     fn build(&self) -> Graph {
         let mut g = build(&self.default);
-        g.named = self.named.iter().map(|(name, set)| (name.clone(), build(set))).collect();
+        g.named = self
+            .named
+            .iter()
+            .map(|(name, set)| (name.clone(), build(set)))
+            .collect();
         g
     }
 
@@ -188,7 +208,13 @@ impl Dataset {
                     }
                 }
             }
-            None => g.named = self.named.iter().map(|(name, set)| (name.clone(), build(set))).collect(),
+            None => {
+                g.named = self
+                    .named
+                    .iter()
+                    .map(|(name, set)| (name.clone(), build(set)))
+                    .collect()
+            }
         }
         g
     }
@@ -240,7 +266,9 @@ fn tp_subst(tp: &TermPattern, get: &Subst, fresh: &mut FreshBnodes) -> Option<Te
                 _ => return None,
             };
             let object = tp_subst(&t.object, get, fresh)?;
-            Some(Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, object))))
+            Some(Term::Triple(Box::new(oxrdf::Triple::new(
+                subject, predicate, object,
+            ))))
         }
     }
 }
@@ -261,7 +289,9 @@ fn gtp_subst(tp: &GroundTermPattern, get: &Subst) -> Option<Term> {
                 _ => return None,
             };
             let object = gtp_subst(&t.object, get)?;
-            Some(Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, object))))
+            Some(Term::Triple(Box::new(oxrdf::Triple::new(
+                subject, predicate, object,
+            ))))
         }
     }
 }
@@ -296,8 +326,12 @@ fn instantiate_templates(
     pattern: &spargebra::algebra::GraphPattern,
 ) -> Result<(Vec<SlotTriple>, Vec<SlotTriple>), String> {
     let result = crate::exec::eval_select(active, pattern)?;
-    let cols: FxHashMap<Variable, usize> =
-        result.vars.iter().enumerate().map(|(i, v)| (v.clone(), i)).collect();
+    let cols: FxHashMap<Variable, usize> = result
+        .vars
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.clone(), i))
+        .collect();
     let mut dels: Vec<SlotTriple> = Vec::new();
     let mut inss: Vec<SlotTriple> = Vec::new();
     for row in &result.rows {
@@ -313,7 +347,9 @@ fn instantiate_templates(
             };
             dels.push((slot, [s, p, o]));
         }
-        let mut fresh = FreshBnodes { map: FxHashMap::default() };
+        let mut fresh = FreshBnodes {
+            map: FxHashMap::default(),
+        };
         for ip in insert {
             let (Some(slot), Some(s), Some(p), Some(o)) = (
                 gnp_subst(&ip.graph_name, &get),
@@ -397,10 +433,16 @@ fn load_document(source: &str) -> Result<TripleSet, String> {
     let requested = std::path::Path::new(raw);
     // Resolve relative paths against the allowlisted base, then canonicalise to collapse `..`
     // and follow symlinks so the containment check cannot be bypassed.
-    let joined = if requested.is_absolute() { requested.to_path_buf() } else { base.join(requested) };
+    let joined = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        base.join(requested)
+    };
     let path = std::fs::canonicalize(&joined).map_err(|e| format!("LOAD {source}: {e}"))?;
     if !path.starts_with(&base) {
-        return Err(format!("LOAD of {source} refused: resolves outside the allowlisted base directory"));
+        return Err(format!(
+            "LOAD of {source} refused: resolves outside the allowlisted base directory"
+        ));
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("LOAD {source}: {e}"))?;
     let format = match path.extension().and_then(|e| e.to_str()) {
@@ -421,7 +463,9 @@ fn apply_op(ds: &mut Dataset, op: &GraphUpdateOperation) -> Result<(), String> {
         GraphUpdateOperation::InsertData { data } => {
             // Fresh blank nodes for the whole operation (roborev 1646): same label in this
             // INSERT DATA -> same node; never the existing store's `_:b`.
-            let mut fresh = FreshBnodes { map: FxHashMap::default() };
+            let mut fresh = FreshBnodes {
+                map: FxHashMap::default(),
+            };
             for q in data {
                 let (slot, t) = quad_to_triple_fresh(q, &mut fresh);
                 ds.insert(&slot, t);
@@ -466,20 +510,27 @@ fn apply_op(ds: &mut Dataset, op: &GraphUpdateOperation) -> Result<(), String> {
         GraphUpdateOperation::Create { graph, .. } => {
             ds.graph_mut(&Term::NamedNode(graph.clone()));
         }
-        GraphUpdateOperation::Load { silent, source, destination } => {
-            match load_document(source.as_str()) {
-                Ok(triples) => ds.slot_mut(&graph_name_slot(destination)).extend(triples),
-                Err(e) => {
-                    if !silent {
-                        return Err(e);
-                    }
+        GraphUpdateOperation::Load {
+            silent,
+            source,
+            destination,
+        } => match load_document(source.as_str()) {
+            Ok(triples) => ds.slot_mut(&graph_name_slot(destination)).extend(triples),
+            Err(e) => {
+                if !silent {
+                    return Err(e);
                 }
             }
-        }
+        },
         // DELETE { d } INSERT { i } WHERE { p } — evaluate the WHERE against the dataset
         // state so far (re-scoped by USING when present), instantiate the templates per
         // solution, then apply all deletes and then all inserts (SPARQL semantics).
-        GraphUpdateOperation::DeleteInsert { delete, insert, using, pattern } => {
+        GraphUpdateOperation::DeleteInsert {
+            delete,
+            insert,
+            using,
+            pattern,
+        } => {
             let active = match using {
                 Some(u) => ds.build_using(u),
                 None => ds.build(),
@@ -500,7 +551,9 @@ fn apply_op(ds: &mut Dataset, op: &GraphUpdateOperation) -> Result<(), String> {
 /// preserved). Errors (leaving the input untouched — it is borrowed) on a parse error or a
 /// non-SILENT failing LOAD.
 pub fn update(graph: &Graph, sparql: &str) -> Result<Graph, String> {
-    let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
+    let upd = SparqlParser::new()
+        .parse_update(sparql)
+        .map_err(|e| e.to_string())?;
     apply_update_rebuild(graph, &upd)
 }
 
@@ -601,7 +654,11 @@ pub enum UpdateEffect {
     /// A resolved per-slot insert/delete batch — the deterministic delta the in-memory
     /// application produced for one graph slot (`None` = default graph, `Some` = named graph).
     /// Deletes are applied before inserts, mirroring the in-memory order.
-    Delta { slot: GraphSlot, inserts: Vec<TripleTerms>, deletes: Vec<TripleTerms> },
+    Delta {
+        slot: GraphSlot,
+        inserts: Vec<TripleTerms>,
+        deletes: Vec<TripleTerms>,
+    },
     /// `CLEAR <target>` — deterministic; replayed verbatim.
     Clear(GraphTarget),
     /// `DROP <target>` — deterministic; replayed verbatim.
@@ -615,7 +672,12 @@ pub enum UpdateEffect {
 type EffectSink<'a> = Option<&'a mut Vec<UpdateEffect>>;
 
 /// Records a resolved delta effect (only when a sink is present and the batch is non-empty).
-fn record_delta(sink: &mut EffectSink, slot: &GraphSlot, inserts: &[TripleTerms], deletes: &[TripleTerms]) {
+fn record_delta(
+    sink: &mut EffectSink,
+    slot: &GraphSlot,
+    inserts: &[TripleTerms],
+    deletes: &[TripleTerms],
+) {
     if let Some(s) = sink {
         if !inserts.is_empty() || !deletes.is_empty() {
             s.push(UpdateEffect::Delta {
@@ -726,7 +788,9 @@ fn update_in_place_core(
     sink: EffectSink,
 ) -> Result<(), String> {
     let _budget = crate::exec::budget::install(budget);
-    let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
+    let upd = SparqlParser::new()
+        .parse_update(sparql)
+        .map_err(|e| e.to_string())?;
     apply_update_in_place(graph, &upd, sink)
 }
 
@@ -743,8 +807,13 @@ fn apply_update_in_place(
         match op {
             GraphUpdateOperation::InsertData { data } => {
                 // Fresh blank nodes for the whole operation (roborev 1646) — see apply_op.
-                let mut fresh = FreshBnodes { map: FxHashMap::default() };
-                let triples: Vec<_> = data.iter().map(|q| quad_to_triple_fresh(q, &mut fresh)).collect();
+                let mut fresh = FreshBnodes {
+                    map: FxHashMap::default(),
+                };
+                let triples: Vec<_> = data
+                    .iter()
+                    .map(|q| quad_to_triple_fresh(q, &mut fresh))
+                    .collect();
                 for (slot, ins) in group_by_slot(triples) {
                     apply_slot_delta(graph, &slot, &ins, &[])?;
                     record_delta(&mut sink, &slot, &ins, &[]);
@@ -810,7 +879,11 @@ fn apply_update_in_place(
                     s.push(UpdateEffect::Create(name));
                 }
             }
-            GraphUpdateOperation::Load { silent, source, destination } => {
+            GraphUpdateOperation::Load {
+                silent,
+                source,
+                destination,
+            } => {
                 match load_document(source.as_str()) {
                     Ok(triples) => {
                         let slot = graph_name_slot(destination);
@@ -828,7 +901,12 @@ fn apply_update_in_place(
                     }
                 }
             }
-            GraphUpdateOperation::DeleteInsert { delete, insert, using, pattern } => {
+            GraphUpdateOperation::DeleteInsert {
+                delete,
+                insert,
+                using,
+                pattern,
+            } => {
                 // Without USING the WHERE pattern is evaluated against the graph as updated
                 // so far in this request (scans merge the overlay; GRAPH blocks see the live
                 // named graphs), matching the rebuild path's semantics. With USING, the
@@ -891,7 +969,11 @@ pub fn apply_effects(graph: &mut Graph, effects: &[UpdateEffect]) -> Result<(), 
     // (3) MATERIALISE: the per-effect loop (unchanged from the pre-journal `apply_effects`).
     for effect in effects {
         match effect {
-            UpdateEffect::Delta { slot, inserts, deletes } => {
+            UpdateEffect::Delta {
+                slot,
+                inserts,
+                deletes,
+            } => {
                 // Deletes first, then inserts — the same per-slot order the in-memory side used.
                 apply_slot_delta(graph, slot, &[], deletes)?;
                 apply_slot_delta(graph, slot, inserts, &[])?;
@@ -947,7 +1029,10 @@ pub fn apply_effects(graph: &mut Graph, effects: &[UpdateEffect]) -> Result<(), 
 ///   * `Create(_)` -> nothing (an empty graph carries no triples).
 ///
 /// The result is the per-slot quad-delta whose single-frame commit makes the WHOLE body atomic.
-fn resolve_effect_records(graph: &Graph, effects: &[UpdateEffect]) -> Vec<(bool, GraphSlot, TripleTerms)> {
+fn resolve_effect_records(
+    graph: &Graph,
+    effects: &[UpdateEffect],
+) -> Vec<(bool, GraphSlot, TripleTerms)> {
     let mut records: Vec<(bool, GraphSlot, TripleTerms)> = Vec::new();
 
     // [OPUS-4.8] (sq-aalh) A CLEAR/DROP retracts the triples PRESENT WHEN IT RUNS — i.e. the state
@@ -1023,8 +1108,7 @@ fn resolve_effect_records(graph: &Graph, effects: &[UpdateEffect]) -> Vec<(bool,
     // (pre-body graphs first, then any new intra-body slots in touch order). Decoding stays lazy —
     // this only collects the slot NAMES; `clear_slot` decodes each as it visits it.
     fn named_slots(graph: &Graph, running: &[(GraphSlot, TripleSet)]) -> Vec<GraphSlot> {
-        let mut names: Vec<GraphSlot> =
-            graph.named.iter().map(|(n, _)| Some(n.clone())).collect();
+        let mut names: Vec<GraphSlot> = graph.named.iter().map(|(n, _)| Some(n.clone())).collect();
         for (slot, _) in running {
             if slot.is_some() && !names.contains(slot) {
                 names.push(slot.clone());
@@ -1035,7 +1119,11 @@ fn resolve_effect_records(graph: &Graph, effects: &[UpdateEffect]) -> Vec<(bool,
 
     for effect in effects {
         match effect {
-            UpdateEffect::Delta { slot, inserts, deletes } => {
+            UpdateEffect::Delta {
+                slot,
+                inserts,
+                deletes,
+            } => {
                 let view = slot_mut(graph, &mut running, slot);
                 for t in deletes {
                     records.push((false, slot.clone(), t.clone()));
@@ -1052,9 +1140,12 @@ fn resolve_effect_records(graph: &Graph, effects: &[UpdateEffect]) -> Vec<(bool,
             // — computed against the RUNNING view so intra-body inserts are correctly retracted.
             UpdateEffect::Clear(target) | UpdateEffect::Drop(target) => match target {
                 GraphTarget::DefaultGraph => clear_slot(graph, &mut records, &mut running, &None),
-                GraphTarget::NamedNode(n) => {
-                    clear_slot(graph, &mut records, &mut running, &Some(Term::NamedNode(n.clone())))
-                }
+                GraphTarget::NamedNode(n) => clear_slot(
+                    graph,
+                    &mut records,
+                    &mut running,
+                    &Some(Term::NamedNode(n.clone())),
+                ),
                 GraphTarget::NamedGraphs => {
                     for name in named_slots(graph, &running) {
                         clear_slot(graph, &mut records, &mut running, &name);
@@ -1178,7 +1269,10 @@ mod tests {
     #[test]
     fn journal_intra_body_insert_then_drop_named_is_net_empty() {
         let base = Graph::load_dataset("", "nquads").unwrap();
-        let effects = captured("", "PREFIX : <http://ex/> INSERT DATA { GRAPH :x { :a :b :c } } ; DROP GRAPH :x");
+        let effects = captured(
+            "",
+            "PREFIX : <http://ex/> INSERT DATA { GRAPH :x { :a :b :c } } ; DROP GRAPH :x",
+        );
         let frame = resolve_effect_records(&base, &effects);
         assert!(
             journal_net(&frame).is_empty(),
@@ -1193,7 +1287,10 @@ mod tests {
     fn journal_drop_then_insert_keeps_inserted_quad() {
         let ds = "<http://ex/old> <http://ex/p> <http://ex/o> <http://ex/x> .";
         let base = Graph::load_dataset(ds, "nquads").unwrap();
-        let effects = captured(ds, "PREFIX : <http://ex/> DROP GRAPH :x ; INSERT DATA { GRAPH :x { :a :b :c } }");
+        let effects = captured(
+            ds,
+            "PREFIX : <http://ex/> DROP GRAPH :x ; INSERT DATA { GRAPH :x { :a :b :c } }",
+        );
         let net = journal_net(&resolve_effect_records(&base, &effects));
         let x = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/x"));
         let want = [
@@ -1201,7 +1298,11 @@ mod tests {
             Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/b")),
             Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/c")),
         ];
-        assert_eq!(net, vec![(Some(x), want)], "DROP-then-INSERT journals exactly the new quad");
+        assert_eq!(
+            net,
+            vec![(Some(x), want)],
+            "DROP-then-INSERT journals exactly the new quad"
+        );
     }
 
     /// MULTI-GRAPH: insert into X and Y, CLEAR only X → journal nets to Y's quad alone (X cleared,
@@ -1218,7 +1319,11 @@ mod tests {
             Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/e")),
             Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/f")),
         ];
-        assert_eq!(net, vec![(Some(y), yf)], "only Y survives the X-only CLEAR in the journal");
+        assert_eq!(
+            net,
+            vec![(Some(y), yf)],
+            "only Y survives the X-only CLEAR in the journal"
+        );
     }
 
     /// END-TO-END crash-recovery: build the resolved frame, COMMIT it to a durable store's redo
@@ -1233,7 +1338,10 @@ mod tests {
         // Pre-existing state: X already holds one quad (so we also prove the PRE-body quad IS
         // correctly retracted while the intra-body insert is too).
         let ds = "<http://ex/old> <http://ex/p> <http://ex/o> <http://ex/x> .";
-        Graph::load_dataset(ds, "nquads").unwrap().save(&dir).unwrap();
+        Graph::load_dataset(ds, "nquads")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
 
         let sparql = "PREFIX : <http://ex/> INSERT DATA { GRAPH :x { :a :b :c } } ; CLEAR GRAPH :x";
         {
@@ -1252,7 +1360,9 @@ mod tests {
         // and depends on `Term` string formatting).
         let x_name = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/x"));
         let x = g.named.iter().find(|(n, _)| *n == x_name);
-        let x_rows = x.map(|(_, sub)| sub.store.scan(&[None, None, None]).rows.len()).unwrap_or(0);
+        let x_rows = x
+            .map(|(_, sub)| sub.store.scan(&[None, None, None]).rows.len())
+            .unwrap_or(0);
         assert_eq!(
             x_rows, 0,
             "after crash-recovery redo, X must be empty (pre-body AND intra-body quads retracted)"
@@ -1299,18 +1409,37 @@ mod tests {
 
         // In-memory parity: `update` (rebuild path) must reach the identical final state.
         let mem = update(&Graph::load_str("", "ntriples").unwrap(), sparql).unwrap();
-        let mx = mem.named.iter().find(|(n, _)| *n == x_name).map(|(_, s)| count(s)).unwrap_or(0);
-        let my = mem.named.iter().find(|(n, _)| *n == y_name).map(|(_, s)| count(s)).unwrap_or(0);
-        assert_eq!((mx, my), (0, 1), "in-memory final state matches the reloaded durable state");
+        let mx = mem
+            .named
+            .iter()
+            .find(|(n, _)| *n == x_name)
+            .map(|(_, s)| count(s))
+            .unwrap_or(0);
+        let my = mem
+            .named
+            .iter()
+            .find(|(n, _)| *n == y_name)
+            .map(|(_, s)| count(s))
+            .unwrap_or(0);
+        assert_eq!(
+            (mx, my),
+            (0, 1),
+            "in-memory final state matches the reloaded durable state"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn insert_delete_clear() {
-        let g = Graph::load_str("@prefix : <http://ex/> . :a :p :b . :b :p :c .", "turtle").unwrap();
+        let g =
+            Graph::load_str("@prefix : <http://ex/> . :a :p :b . :b :p :c .", "turtle").unwrap();
         assert_eq!(count(&g), 2);
         // INSERT DATA adds; set semantics (a re-insert is a no-op).
-        let g = update(&g, "PREFIX : <http://ex/> INSERT DATA { :c :p :d . :a :q :x }").unwrap();
+        let g = update(
+            &g,
+            "PREFIX : <http://ex/> INSERT DATA { :c :p :d . :a :q :x }",
+        )
+        .unwrap();
         assert_eq!(count(&g), 4);
         let g = update(&g, "PREFIX : <http://ex/> INSERT DATA { :a :p :b }").unwrap();
         assert_eq!(count(&g), 4);
@@ -1320,7 +1449,10 @@ mod tests {
         let g = update(&g, "PREFIX : <http://ex/> DELETE DATA { :z :z :z }").unwrap();
         assert_eq!(count(&g), 3);
         // The graph is still queryable after a rebuild.
-        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { :c :p ?o }").unwrap(), 1);
+        assert_eq!(
+            crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { :c :p ?o }").unwrap(),
+            1
+        );
         // CLEAR empties the default graph.
         let g = update(&g, "CLEAR ALL").unwrap();
         assert_eq!(count(&g), 0);
@@ -1328,7 +1460,11 @@ mod tests {
 
     #[test]
     fn delete_insert_where() {
-        let g = Graph::load_str("@prefix : <http://ex/> . :a :age 30 . :b :age 25 .", "turtle").unwrap();
+        let g = Graph::load_str(
+            "@prefix : <http://ex/> . :a :age 30 . :b :age 25 .",
+            "turtle",
+        )
+        .unwrap();
         // Rename predicate :age -> :years for every match.
         let g = update(
             &g,
@@ -1336,8 +1472,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(count(&g), 2);
-        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :age ?a }").unwrap(), 0);
-        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :years ?a }").unwrap(), 2);
+        assert_eq!(
+            crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :age ?a }").unwrap(),
+            0
+        );
+        assert_eq!(
+            crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :years ?a }").unwrap(),
+            2
+        );
         // DELETE WHERE shorthand removes all matches.
         let g = update(&g, "PREFIX : <http://ex/> DELETE WHERE { ?s :years ?a }").unwrap();
         assert_eq!(count(&g), 0);
@@ -1358,12 +1500,20 @@ mod tests {
         assert_eq!(count(&g.named[0].1), 1);
 
         // GRAPH-scoped INSERT DATA goes to the right graph (auto-creating :g2).
-        let g = update(&g, "PREFIX : <http://ex/> INSERT DATA { GRAPH :g1 { :x :q :z } GRAPH :g2 { :n :m :o } }").unwrap();
+        let g = update(
+            &g,
+            "PREFIX : <http://ex/> INSERT DATA { GRAPH :g1 { :x :q :z } GRAPH :g2 { :n :m :o } }",
+        )
+        .unwrap();
         assert_eq!(g.named.len(), 2);
         assert_eq!(count(&g.named[0].1), 2);
 
         // GRAPH-scoped DELETE DATA.
-        let g = update(&g, "PREFIX : <http://ex/> DELETE DATA { GRAPH :g1 { :x :q :y } }").unwrap();
+        let g = update(
+            &g,
+            "PREFIX : <http://ex/> DELETE DATA { GRAPH :g1 { :x :q :y } }",
+        )
+        .unwrap();
         assert_eq!(count(&g.named[0].1), 1);
 
         // DELETE/INSERT WHERE with GRAPH templates + GRAPH WHERE (the ADD desugaring shape).
@@ -1372,13 +1522,21 @@ mod tests {
             "PREFIX : <http://ex/> INSERT { GRAPH :g3 { ?s ?p ?o } } WHERE { GRAPH :g2 { ?s ?p ?o } }",
         )
         .unwrap();
-        let g3 = g.named.iter().find(|(n, _)| n.to_string().contains("g3")).unwrap();
+        let g3 = g
+            .named
+            .iter()
+            .find(|(n, _)| n.to_string().contains("g3"))
+            .unwrap();
         assert_eq!(count(&g3.1), 1);
 
         // CLEAR GRAPH empties only that graph; DROP removes it.
         let g = update(&g, "PREFIX : <http://ex/> CLEAR GRAPH :g2").unwrap();
         assert_eq!(g.named.len(), 3); // entry kept, empty
-        let g2 = g.named.iter().find(|(n, _)| n.to_string().contains("g2")).unwrap();
+        let g2 = g
+            .named
+            .iter()
+            .find(|(n, _)| n.to_string().contains("g2"))
+            .unwrap();
         assert_eq!(count(&g2.1), 0);
         let g = update(&g, "PREFIX : <http://ex/> DROP GRAPH :g3").unwrap();
         assert_eq!(g.named.len(), 2);
@@ -1411,11 +1569,29 @@ mod tests {
         assert_eq!(count(&g.named[0].1), 2);
         // COPY replaces the destination.
         let g = update(&g, "COPY DEFAULT TO GRAPH <http://ex/g1>").unwrap();
-        assert_eq!(count(&g.named.iter().find(|(n, _)| n.to_string().contains("g1")).unwrap().1), 1);
+        assert_eq!(
+            count(
+                &g.named
+                    .iter()
+                    .find(|(n, _)| n.to_string().contains("g1"))
+                    .unwrap()
+                    .1
+            ),
+            1
+        );
         // MOVE drops the source.
         let g = update(&g, "MOVE GRAPH <http://ex/g1> TO GRAPH <http://ex/g2>").unwrap();
         assert!(!g.named.iter().any(|(n, _)| n.to_string().contains("g1")));
-        assert_eq!(count(&g.named.iter().find(|(n, _)| n.to_string().contains("g2")).unwrap().1), 1);
+        assert_eq!(
+            count(
+                &g.named
+                    .iter()
+                    .find(|(n, _)| n.to_string().contains("g2"))
+                    .unwrap()
+                    .1
+            ),
+            1
+        );
     }
 
     /// USING re-scopes the WHERE dataset: the named graph becomes the active default graph.
@@ -1430,14 +1606,24 @@ mod tests {
         )
         .unwrap();
         // Only :g1's triple matched (the real default graph was re-scoped away).
-        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :copied ?o }").unwrap(), 1);
-        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { :a :copied :b }").unwrap(), 1);
+        assert_eq!(
+            crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :copied ?o }").unwrap(),
+            1
+        );
+        assert_eq!(
+            crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { :a :copied :b }").unwrap(),
+            1
+        );
     }
 
     /// Blank nodes in an INSERT template are FRESH per solution.
     #[test]
     fn insert_template_bnodes_fresh_per_solution() {
-        let g = Graph::load_str("@prefix : <http://ex/> . :a :age 30 . :b :age 25 .", "turtle").unwrap();
+        let g = Graph::load_str(
+            "@prefix : <http://ex/> . :a :age 30 . :b :age 25 .",
+            "turtle",
+        )
+        .unwrap();
         let g = update(
             &g,
             "PREFIX : <http://ex/> INSERT { ?s :note _:n . _:n :label \"x\" } WHERE { ?s :age ?a }",
@@ -1446,7 +1632,10 @@ mod tests {
         // 2 solutions × 2 template triples = 4 inserted (distinct bnodes per solution).
         assert_eq!(count(&g), 2 + 4);
         // Two DISTINCT bnodes -> two :label triples.
-        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?n :label ?l }").unwrap(), 2);
+        assert_eq!(
+            crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?n :label ?l }").unwrap(),
+            2
+        );
     }
 
     /// The delta-overlay path (`update_in_place`) must be observationally identical to the
@@ -1494,7 +1683,11 @@ mod tests {
         for (i, op) in ops.iter().enumerate() {
             update_in_place(&mut inplace, op).unwrap();
             rebuilt = update(&rebuilt, op).unwrap();
-            assert_eq!(dump(&inplace), dump(&rebuilt), "states diverged after op {i}");
+            assert_eq!(
+                dump(&inplace),
+                dump(&rebuilt),
+                "states diverged after op {i}"
+            );
             // The overlay graph must also answer pattern queries identically (un-compacted).
             for q in [
                 "PREFIX : <http://ex/> SELECT * WHERE { ?s :p ?o }",
@@ -1502,10 +1695,17 @@ mod tests {
                 "PREFIX : <http://ex/> SELECT * WHERE { ?s :p ?m . ?m :p ?o }",
                 "PREFIX : <http://ex/> SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }",
             ] {
-                assert_eq!(crate::count(&inplace, q).unwrap(), crate::count(&rebuilt, q).unwrap(), "query {q} diverged after op {i}");
+                assert_eq!(
+                    crate::count(&inplace, q).unwrap(),
+                    crate::count(&rebuilt, q).unwrap(),
+                    "query {q} diverged after op {i}"
+                );
             }
         }
-        assert!(inplace.store.has_overlay(), "the in-place path must have gone through the overlay");
+        assert!(
+            inplace.store.has_overlay(),
+            "the in-place path must have gone through the overlay"
+        );
         // CLEAR still empties via replacement.
         update_in_place(&mut inplace, "CLEAR ALL").unwrap();
         assert_eq!(dump(&inplace).len(), 0);
@@ -1528,13 +1728,19 @@ mod tests {
     fn bench_update_latency() {
         use sparq_core::dict::{Dict as D, Id};
         use std::time::Instant;
-        let n: usize =
-            std::env::var("SPARQ_BENCH_TRIPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000_000);
+        let n: usize = std::env::var("SPARQ_BENCH_TRIPLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000_000);
         let nsubj = (n / 10).max(1);
         let t0 = Instant::now();
         let mut dict = D::new();
-        let preds: Vec<Id> = (0..10).map(|p| dict.intern_iri(&format!("http://ex/p{p}"))).collect();
-        let subjs: Vec<Id> = (0..nsubj).map(|s| dict.intern_iri(&format!("http://ex/s{s}"))).collect();
+        let preds: Vec<Id> = (0..10)
+            .map(|p| dict.intern_iri(&format!("http://ex/p{p}")))
+            .collect();
+        let subjs: Vec<Id> = (0..nsubj)
+            .map(|s| dict.intern_iri(&format!("http://ex/s{s}")))
+            .collect();
         // NON-LINEAR mix (murmur3 finalizer) for the object index, so the triple set has
         // ~n DISTINCT triples — any linear pattern is periodic mod nsubj and collapses
         // under dedup.
@@ -1545,8 +1751,9 @@ mod tests {
             h ^= h >> 33;
             (h % nsubj as u64) as usize
         };
-        let triples: Vec<[Id; 3]> =
-            (0..n).map(|i| [subjs[i % nsubj], preds[i % 10], subjs[mix(i)]]).collect();
+        let triples: Vec<[Id; 3]> = (0..n)
+            .map(|i| [subjs[i % nsubj], preds[i % 10], subjs[mix(i)]])
+            .collect();
         let g = Graph::from_parts(dict, triples);
         eprintln!("graph: {} triples, built in {:.2?}", g.len(), t0.elapsed());
 
@@ -1557,7 +1764,11 @@ mod tests {
         let t = Instant::now();
         let g_old = update(&g, ins).unwrap();
         let old = t.elapsed();
-        eprintln!("old (rebuild) 10-triple INSERT DATA: {:.2?}  -> {} triples", old, g_old.len());
+        eprintln!(
+            "old (rebuild) 10-triple INSERT DATA: {:.2?}  -> {} triples",
+            old,
+            g_old.len()
+        );
         drop(g_old);
 
         // NEW: delta-overlay, measured over several batches for a stable per-update figure.
@@ -1568,8 +1779,13 @@ mod tests {
         let t = Instant::now();
         let reps = 100;
         for i in 0..reps {
-            let upd = format!("PREFIX : <http://ex/> INSERT DATA {{ {} }}",
-                (0..10).map(|j| format!(":x{i}_{j} :q :y{i}_{j} .")).collect::<Vec<_>>().join(" "));
+            let upd = format!(
+                "PREFIX : <http://ex/> INSERT DATA {{ {} }}",
+                (0..10)
+                    .map(|j| format!(":x{i}_{j} :q :y{i}_{j} ."))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
             update_in_place(&mut g, &upd).unwrap();
         }
         let new_avg = t.elapsed() / reps;
@@ -1577,8 +1793,12 @@ mod tests {
             "new (overlay) 10-triple INSERT DATA: first {:.2?}, avg over {reps} batches {:.2?}  -> {} triples",
             new_first, new_avg, g.len()
         );
-        eprintln!("speedup: {:.0}x (rebuild {:.3}s vs overlay {:.6}s)",
-            old.as_secs_f64() / new_avg.as_secs_f64(), old.as_secs_f64(), new_avg.as_secs_f64());
+        eprintln!(
+            "speedup: {:.0}x (rebuild {:.3}s vs overlay {:.6}s)",
+            old.as_secs_f64() / new_avg.as_secs_f64(),
+            old.as_secs_f64(),
+            new_avg.as_secs_f64()
+        );
     }
 
     /// [OPUS-4.8] roborev 1646 (High): `LOAD <file://…>` must be REFUSED by default — an
@@ -1592,7 +1812,10 @@ mod tests {
         let inside = dir.join("data.ttl");
         std::fs::write(&inside, "@prefix : <http://ex/> . :a :p :b .").unwrap();
         // A secret file OUTSIDE the allowlisted base (one level up).
-        let secret = dir.parent().unwrap().join(format!("sparq_secret_1646_{}.ttl", std::process::id()));
+        let secret = dir
+            .parent()
+            .unwrap()
+            .join(format!("sparq_secret_1646_{}.ttl", std::process::id()));
         std::fs::write(&secret, "@prefix : <http://ex/> . :secret :leaked :value .").unwrap();
 
         let g = empty_graph();
@@ -1602,27 +1825,46 @@ mod tests {
 
         // (1) DEFAULT: no allowlist installed -> refused (the file is never read).
         let e = err(update(&g, &load_inside));
-        assert!(e.contains("file:// access is disabled"), "default LOAD must be refused, got: {e}");
+        assert!(
+            e.contains("file:// access is disabled"),
+            "default LOAD must be refused, got: {e}"
+        );
         // SILENT swallows the refusal into a no-op (still loads nothing).
         let g_silent = update(&g, &format!("LOAD SILENT <file://{}>", inside.display())).unwrap();
         assert_eq!(count(&g_silent), 0);
 
         // (2) Allowlisted base: a file UNDER the base loads.
         let loaded = with_load_base(dir.clone(), || update(&g, &load_inside)).unwrap();
-        assert_eq!(count(&loaded), 1, "LOAD under the allowlisted base must succeed");
+        assert_eq!(
+            count(&loaded),
+            1,
+            "LOAD under the allowlisted base must succeed"
+        );
 
         // (3) A path that escapes the base (absolute, outside) is refused even with a base set.
         let load_secret = format!("LOAD <file://{}>", secret.display());
         let e = err(with_load_base(dir.clone(), || update(&g, &load_secret)));
-        assert!(e.contains("outside the allowlisted base"), "escape must be refused, got: {e}");
+        assert!(
+            e.contains("outside the allowlisted base"),
+            "escape must be refused, got: {e}"
+        );
         // …and a `..` traversal to the same secret is likewise refused.
-        let rel = format!("LOAD <file://../{}>", secret.file_name().unwrap().to_str().unwrap());
+        let rel = format!(
+            "LOAD <file://../{}>",
+            secret.file_name().unwrap().to_str().unwrap()
+        );
         let e = err(with_load_base(dir.clone(), || update(&g, &rel)));
-        assert!(e.contains("outside the allowlisted base") || e.contains("LOAD"), "traversal must be refused, got: {e}");
+        assert!(
+            e.contains("outside the allowlisted base") || e.contains("LOAD"),
+            "traversal must be refused, got: {e}"
+        );
 
         // (4) The base does not leak past the scope: a subsequent LOAD is refused again.
         let e = err(update(&g, &load_inside));
-        assert!(e.contains("file:// access is disabled"), "base must not leak, got: {e}");
+        assert!(
+            e.contains("file:// access is disabled"),
+            "base must not leak, got: {e}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_file(&secret);
@@ -1642,20 +1884,33 @@ mod tests {
         let g = Graph::load_str(src, "turtle").unwrap();
         let g = update(&g, ins).unwrap();
         assert_eq!(count(&g), 2, "both triples present");
-        let subjects = crate::count(&g, "SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o }").unwrap();
-        assert_eq!(subjects, 2, "INSERT DATA bnode must be fresh (distinct from existing _:b)");
+        let subjects =
+            crate::count(&g, "SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o }").unwrap();
+        assert_eq!(
+            subjects, 2,
+            "INSERT DATA bnode must be fresh (distinct from existing _:b)"
+        );
 
         // Delta-overlay path: same freshness guarantee.
         let mut g2 = Graph::load_str(src, "turtle").unwrap();
         update_in_place(&mut g2, ins).unwrap();
         assert_eq!(count(&g2), 2);
-        let subjects2 = crate::count(&g2, "SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o }").unwrap();
+        let subjects2 =
+            crate::count(&g2, "SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o }").unwrap();
         assert_eq!(subjects2, 2, "in-place INSERT DATA bnode must be fresh too");
 
         // Within ONE INSERT DATA op, the same label is the SAME fresh node.
         let g3 = Graph::load_str("@prefix : <http://ex/> . :x :p :y .", "turtle").unwrap();
-        let g3 = update(&g3, "PREFIX : <http://ex/> INSERT DATA { _:s :a :o . _:s :b :o2 }").unwrap();
-        let one_subj = crate::count(&g3, "SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isBlank(?s)) }").unwrap();
+        let g3 = update(
+            &g3,
+            "PREFIX : <http://ex/> INSERT DATA { _:s :a :o . _:s :b :o2 }",
+        )
+        .unwrap();
+        let one_subj = crate::count(
+            &g3,
+            "SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isBlank(?s)) }",
+        )
+        .unwrap();
         assert_eq!(one_subj, 1, "same label in one INSERT DATA op is one node");
     }
 }
@@ -1703,7 +1958,11 @@ mod update_contract {
     /// "did anything change" probe used by the atomicity assertions.
     fn dataset_count(g: &Graph) -> usize {
         let pat: IdPattern = [None, None, None];
-        g.store.scan(&pat).rows.len() + g.named.iter().map(|(_, sub)| sub.store.scan(&pat).rows.len()).sum::<usize>()
+        g.store.scan(&pat).rows.len()
+            + g.named
+                .iter()
+                .map(|(_, sub)| sub.store.scan(&pat).rows.len())
+                .sum::<usize>()
     }
 
     /// A canonical dataset dump (sorted (s,p,o,graph) strings) for exact PRE/POST-request
@@ -1734,7 +1993,11 @@ mod update_contract {
     /// A store with one named graph `:g1` (and an empty default graph) — the fixture for the
     /// graph-management contract rows. Returned fresh per row so rows never interfere.
     fn store() -> Graph {
-        Graph::load_dataset("<http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .", "nquads").unwrap()
+        Graph::load_dataset(
+            "<http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .",
+            "nquads",
+        )
+        .unwrap()
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1748,23 +2011,46 @@ mod update_contract {
     #[test]
     fn contract_clear() {
         // Absent target — success either way (auto-create store; SHOULD precondition unmet).
-        assert!(update(&store(), "CLEAR GRAPH <http://ex/absent>").is_ok(), "CLEAR absent (non-SILENT) is a no-op success here");
-        assert!(update(&store(), "CLEAR SILENT GRAPH <http://ex/absent>").is_ok(), "CLEAR SILENT absent is a no-op success");
+        assert!(
+            update(&store(), "CLEAR GRAPH <http://ex/absent>").is_ok(),
+            "CLEAR absent (non-SILENT) is a no-op success here"
+        );
+        assert!(
+            update(&store(), "CLEAR SILENT GRAPH <http://ex/absent>").is_ok(),
+            "CLEAR SILENT absent is a no-op success"
+        );
         // Anchor (valid): CLEAR of the existing :g1 succeeds and empties it.
         let g = update(&store(), "CLEAR GRAPH <http://ex/g1>").unwrap();
-        let g1 = g.named.iter().find(|(n, _)| n.to_string().contains("g1")).expect("entry kept");
-        assert_eq!(g1.1.store.scan(&[None, None, None]).rows.len(), 0, "CLEAR empties the existing graph");
+        let g1 = g
+            .named
+            .iter()
+            .find(|(n, _)| n.to_string().contains("g1"))
+            .expect("entry kept");
+        assert_eq!(
+            g1.1.store.scan(&[None, None, None]).rows.len(),
+            0,
+            "CLEAR empties the existing graph"
+        );
     }
 
     /// DROP (§3.1.4). Same SHOULD-conditioned-on-empty-graph-recording story as CLEAR: DROP of an
     /// absent graph is a no-op SUCCESS with/without SILENT. Valid anchor: DROP of :g1 removes it.
     #[test]
     fn contract_drop() {
-        assert!(update(&store(), "DROP GRAPH <http://ex/absent>").is_ok(), "DROP absent (non-SILENT) is a no-op success here");
-        assert!(update(&store(), "DROP SILENT GRAPH <http://ex/absent>").is_ok(), "DROP SILENT absent is a no-op success");
+        assert!(
+            update(&store(), "DROP GRAPH <http://ex/absent>").is_ok(),
+            "DROP absent (non-SILENT) is a no-op success here"
+        );
+        assert!(
+            update(&store(), "DROP SILENT GRAPH <http://ex/absent>").is_ok(),
+            "DROP SILENT absent is a no-op success"
+        );
         // Anchor (valid): DROP of the existing :g1 removes its entry.
         let g = update(&store(), "DROP GRAPH <http://ex/g1>").unwrap();
-        assert!(!g.named.iter().any(|(n, _)| n.to_string().contains("g1")), "DROP removes the existing graph entry");
+        assert!(
+            !g.named.iter().any(|(n, _)| n.to_string().contains("g1")),
+            "DROP removes the existing graph entry"
+        );
     }
 
     /// CREATE (§3.1.5). Existing target: spec SHOULD-error, again conditioned on recording empty
@@ -1772,11 +2058,20 @@ mod update_contract {
     /// with/without SILENT. Valid anchor: CREATE of a fresh graph adds a queryable empty entry.
     #[test]
     fn contract_create() {
-        assert!(update(&store(), "CREATE GRAPH <http://ex/g1>").is_ok(), "CREATE existing (non-SILENT) is a no-op success here");
-        assert!(update(&store(), "CREATE SILENT GRAPH <http://ex/g1>").is_ok(), "CREATE SILENT existing is a no-op success");
+        assert!(
+            update(&store(), "CREATE GRAPH <http://ex/g1>").is_ok(),
+            "CREATE existing (non-SILENT) is a no-op success here"
+        );
+        assert!(
+            update(&store(), "CREATE SILENT GRAPH <http://ex/g1>").is_ok(),
+            "CREATE SILENT existing is a no-op success"
+        );
         // Anchor (valid): CREATE of a fresh graph materialises an (empty) entry.
         let g = update(&store(), "CREATE GRAPH <http://ex/fresh>").unwrap();
-        assert!(g.named.iter().any(|(n, _)| n.to_string().contains("fresh")), "CREATE adds the new graph");
+        assert!(
+            g.named.iter().any(|(n, _)| n.to_string().contains("fresh")),
+            "CREATE adds the new graph"
+        );
     }
 
     /// LOAD (§3.1.2) — the ONE operation where SILENT actually flips the outcome. A failing LOAD
@@ -1787,14 +2082,28 @@ mod update_contract {
     fn contract_load_silent_is_the_real_lever() {
         // Unsupported scheme: hard error without SILENT.
         let e = update(&store(), "LOAD <http://ex/data.ttl>");
-        assert!(e.is_err(), "non-SILENT LOAD of an unfetchable source must ERROR (§3.1.2)");
+        assert!(
+            e.is_err(),
+            "non-SILENT LOAD of an unfetchable source must ERROR (§3.1.2)"
+        );
         // SILENT swallows the failure into a no-op success that changes nothing.
         let before = dump(&store());
-        let g = update(&store(), "LOAD SILENT <http://ex/data.ttl>").expect("LOAD SILENT failure is success");
-        assert_eq!(dump(&g), before, "LOAD SILENT failure loads nothing (no-op success)");
+        let g = update(&store(), "LOAD SILENT <http://ex/data.ttl>")
+            .expect("LOAD SILENT failure is success");
+        assert_eq!(
+            dump(&g),
+            before,
+            "LOAD SILENT failure loads nothing (no-op success)"
+        );
         // file:// with no allowlisted base is likewise refused without SILENT, no-op with it.
-        assert!(update(&store(), "LOAD <file:///etc/hostname>").is_err(), "file:// LOAD refused by default (non-SILENT errors)");
-        assert!(update(&store(), "LOAD SILENT <file:///etc/hostname>").is_ok(), "file:// LOAD refusal is swallowed by SILENT");
+        assert!(
+            update(&store(), "LOAD <file:///etc/hostname>").is_err(),
+            "file:// LOAD refused by default (non-SILENT errors)"
+        );
+        assert!(
+            update(&store(), "LOAD SILENT <file:///etc/hostname>").is_ok(),
+            "file:// LOAD refusal is swallowed by SILENT"
+        );
     }
 
     /// ADD / MOVE / COPY with source == destination (§3.2). The parser desugars the identity case
@@ -1804,19 +2113,46 @@ mod update_contract {
     fn contract_add_move_copy_self_is_noop() {
         for verb in ["ADD", "MOVE", "COPY"] {
             let req = format!("{verb} GRAPH <http://ex/g1> TO GRAPH <http://ex/g1>");
-            let g = update(&store(), &req).unwrap_or_else(|e| panic!("{verb} self must be a no-op success, got: {e}"));
+            let g = update(&store(), &req)
+                .unwrap_or_else(|e| panic!("{verb} self must be a no-op success, got: {e}"));
             // The source/destination graph is untouched (its one triple survives).
-            let g1 = g.named.iter().find(|(n, _)| n.to_string().contains("g1")).expect("g1 preserved");
-            assert_eq!(g1.1.store.scan(&[None, None, None]).rows.len(), 1, "{verb} self leaves the graph unchanged");
+            let g1 = g
+                .named
+                .iter()
+                .find(|(n, _)| n.to_string().contains("g1"))
+                .expect("g1 preserved");
+            assert_eq!(
+                g1.1.store.scan(&[None, None, None]).rows.len(),
+                1,
+                "{verb} self leaves the graph unchanged"
+            );
             // SILENT identity is also a success no-op.
             let req_s = format!("{verb} SILENT GRAPH <http://ex/g1> TO GRAPH <http://ex/g1>");
-            assert!(update(&store(), &req_s).is_ok(), "{verb} SILENT self is a no-op success");
+            assert!(
+                update(&store(), &req_s).is_ok(),
+                "{verb} SILENT self is a no-op success"
+            );
         }
         // Anchor (valid): MOVE between DISTINCT graphs relocates the triple and drops the source.
-        let g = update(&store(), "MOVE GRAPH <http://ex/g1> TO GRAPH <http://ex/g2>").unwrap();
-        assert!(!g.named.iter().any(|(n, _)| n.to_string().contains("g1")), "MOVE drops the source");
-        let g2 = g.named.iter().find(|(n, _)| n.to_string().contains("g2")).expect("destination created");
-        assert_eq!(g2.1.store.scan(&[None, None, None]).rows.len(), 1, "MOVE delivered the triple");
+        let g = update(
+            &store(),
+            "MOVE GRAPH <http://ex/g1> TO GRAPH <http://ex/g2>",
+        )
+        .unwrap();
+        assert!(
+            !g.named.iter().any(|(n, _)| n.to_string().contains("g1")),
+            "MOVE drops the source"
+        );
+        let g2 = g
+            .named
+            .iter()
+            .find(|(n, _)| n.to_string().contains("g2"))
+            .expect("destination created");
+        assert_eq!(
+            g2.1.store.scan(&[None, None, None]).rows.len(),
+            1,
+            "MOVE delivered the triple"
+        );
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1839,13 +2175,25 @@ mod update_contract {
         assert!(r.is_err(), "the request must fail (the LOAD op errors)");
         // `update` borrows `base` and rebuilds a private copy, so the input is provably untouched;
         // the *returned* (would-be-new) graph is never produced — full rollback.
-        assert_eq!(dump(&base), snapshot, "a failed multi-op request rolls the dataset back to its pre-request snapshot");
-        assert_eq!(dataset_count(&base), 1, "the valid INSERT DATA prefix must NOT have committed");
+        assert_eq!(
+            dump(&base),
+            snapshot,
+            "a failed multi-op request rolls the dataset back to its pre-request snapshot"
+        );
+        assert_eq!(
+            dataset_count(&base),
+            1,
+            "the valid INSERT DATA prefix must NOT have committed"
+        );
 
         // The all-succeed counterpart commits every operation.
         let ok = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; INSERT DATA { :c :p :d }";
         let g = update(&base, ok).expect("an all-succeed request commits");
-        assert_eq!(dataset_count(&g), 3, "an all-succeed request commits every operation");
+        assert_eq!(
+            dataset_count(&g),
+            3,
+            "an all-succeed request commits every operation"
+        );
     }
 
     /// IN-PLACE path ([`update_in_place`]): by its DOCUMENTED contract it is NOT atomic on its own
@@ -1860,7 +2208,11 @@ mod update_contract {
         let r = update_in_place(&mut g, failing);
         assert!(r.is_err(), "the request still reports the failure");
         // The INSERT DATA prefix committed before the LOAD failed — documented non-atomicity.
-        assert_eq!(dataset_count(&g), before + 1, "in-place leaves the pre-failure prefix applied (documented contract)");
+        assert_eq!(
+            dataset_count(&g),
+            before + 1,
+            "in-place leaves the pre-failure prefix applied (documented contract)"
+        );
     }
 
     /// The PRODUCTION request-level-atomicity pattern for the in-place path: fork a private
@@ -1876,10 +2228,14 @@ mod update_contract {
         // Apply to a fork; the failing request leaves the fork partial — but we never seal it.
         let mut working = base.fork();
         let published = match update_in_place(&mut working, failing) {
-            Ok(()) => working,        // would seal the new state
-            Err(_) => base.fork(),    // discard the partial fork, re-fork from the untouched base
+            Ok(()) => working,     // would seal the new state
+            Err(_) => base.fork(), // discard the partial fork, re-fork from the untouched base
         };
-        assert_eq!(dump(&published), snapshot, "fork-and-discard on error publishes the pre-request snapshot (atomic)");
+        assert_eq!(
+            dump(&published),
+            snapshot,
+            "fork-and-discard on error publishes the pre-request snapshot (atomic)"
+        );
 
         // The all-succeed counterpart seals the new state.
         let ok = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; INSERT DATA { :c :p :d }";
@@ -1888,9 +2244,17 @@ mod update_contract {
             Ok(()) => working,
             Err(_) => base.fork(),
         };
-        assert_eq!(dataset_count(&published), 3, "an all-succeed request seals the fully-applied working copy");
+        assert_eq!(
+            dataset_count(&published),
+            3,
+            "an all-succeed request seals the fully-applied working copy"
+        );
         // The base the fork came from is, throughout, untouched by either request.
-        assert_eq!(dump(&base), snapshot, "the published base is never mutated by a working-copy apply");
+        assert_eq!(
+            dump(&base),
+            snapshot,
+            "the published base is never mutated by a working-copy apply"
+        );
     }
 
     /// [OPUS-4.8] (sq-o1wp) [`update_in_place_atomic`] packages the fork → apply → seal-only-on-`Ok`
@@ -1910,13 +2274,25 @@ mod update_contract {
         let r = update_in_place_atomic(&mut g, failing);
         assert!(r.is_err(), "the request reports the failure");
         // Unlike the bare in-place path, the valid INSERT DATA prefix is NOT committed.
-        assert_eq!(dump(&g), snapshot, "atomic in-place rolls the dataset back to its pre-request snapshot");
-        assert_eq!(dataset_count(&g), 1, "the pre-failure prefix must NOT have committed in place");
+        assert_eq!(
+            dump(&g),
+            snapshot,
+            "atomic in-place rolls the dataset back to its pre-request snapshot"
+        );
+        assert_eq!(
+            dataset_count(&g),
+            1,
+            "the pre-failure prefix must NOT have committed in place"
+        );
 
         // The all-succeed counterpart commits every operation in place.
         let ok = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; INSERT DATA { :c :p :d }";
         update_in_place_atomic(&mut g, ok).expect("an all-succeed request commits in place");
-        assert_eq!(dataset_count(&g), 3, "an all-succeed request commits every operation in place");
+        assert_eq!(
+            dataset_count(&g),
+            3,
+            "an all-succeed request commits every operation in place"
+        );
     }
 
     /// [OPUS-4.8] (sq-o1wp) A parse error never mutates `graph` under the atomic wrapper (the fork is
@@ -1926,8 +2302,15 @@ mod update_contract {
     fn in_place_atomic_parse_error_and_budget_entry_point() {
         let mut g = Graph::load_str("@prefix : <http://ex/> . :seed :p :o .", "turtle").unwrap();
         let snapshot = dump(&g);
-        assert!(update_in_place_atomic(&mut g, "NOT A VALID UPDATE").is_err(), "parse error is reported");
-        assert_eq!(dump(&g), snapshot, "a parse error leaves the graph untouched");
+        assert!(
+            update_in_place_atomic(&mut g, "NOT A VALID UPDATE").is_err(),
+            "parse error is reported"
+        );
+        assert_eq!(
+            dump(&g),
+            snapshot,
+            "a parse error leaves the graph untouched"
+        );
 
         // Budgeted entry point: an all-succeed request under an unlimited budget commits.
         update_in_place_atomic_with_budget(
@@ -1936,7 +2319,11 @@ mod update_contract {
             &crate::QueryBudget::unlimited(),
         )
         .expect("budgeted atomic apply commits an all-succeed request");
-        assert_eq!(dataset_count(&g), 2, "the budgeted atomic apply committed the insert");
+        assert_eq!(
+            dataset_count(&g),
+            2,
+            "the budgeted atomic apply committed the insert"
+        );
     }
 }
 
@@ -2010,8 +2397,16 @@ mod capture_replay {
     }
 
     fn assert_equiv(a: &Graph, b: &Graph, ctx: &str) {
-        assert_eq!(dump(a), dump(b), "captured and replayed datasets diverged: {ctx}");
-        assert_eq!(a.named.len(), b.named.len(), "named-graph slot count diverged: {ctx}");
+        assert_eq!(
+            dump(a),
+            dump(b),
+            "captured and replayed datasets diverged: {ctx}"
+        );
+        assert_eq!(
+            a.named.len(),
+            b.named.len(),
+            "named-graph slot count diverged: {ctx}"
+        );
     }
 
     /// THE CORE GUARANTEE. An UPDATE containing `NOW()`, `RAND()`, `UUID()`, `STRUUID()` and a
@@ -2043,10 +2438,15 @@ mod capture_replay {
         assert_eq!(deltas.len(), 1, "one resolved insert delta");
         // The captured timestamps/uuids are concrete: three DISTINCT uuid objects exist
         // (would also be three after a re-roll, but the point is they are PINNED in the log).
-        let uuids = crate::count(&a, "PREFIX : <http://ex/> SELECT DISTINCT ?u WHERE { ?s :id ?u }").unwrap();
+        let uuids = crate::count(
+            &a,
+            "PREFIX : <http://ex/> SELECT DISTINCT ?u WHERE { ?s :id ?u }",
+        )
+        .unwrap();
         assert_eq!(uuids, 3, "three distinct captured UUIDs replayed verbatim");
         // The fresh BNODE() / template bnode resolved once and replayed as the SAME node shape.
-        let notes = crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?n :for ?s }").unwrap();
+        let notes =
+            crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?n :for ?s }").unwrap();
         assert_eq!(notes, 3, "fresh blank nodes replayed");
     }
 
@@ -2062,7 +2462,11 @@ mod capture_replay {
         let mut slots: Vec<_> = effects
             .iter()
             .filter_map(|e| match e {
-                UpdateEffect::Delta { slot, inserts, deletes } => {
+                UpdateEffect::Delta {
+                    slot,
+                    inserts,
+                    deletes,
+                } => {
                     assert!(deletes.is_empty(), "INSERT DATA produces no deletes");
                     Some((slot.is_none(), inserts.len()))
                 }
@@ -2070,7 +2474,11 @@ mod capture_replay {
             })
             .collect();
         slots.sort();
-        assert_eq!(slots, vec![(false, 2), (true, 2)], "default(2) + named(2) insert deltas");
+        assert_eq!(
+            slots,
+            vec![(false, 2), (true, 2)],
+            "default(2) + named(2) insert deltas"
+        );
         assert_eq!(a.named.len(), 1, ":g1 created once");
     }
 
@@ -2086,7 +2494,9 @@ mod capture_replay {
         assert_eq!(count(&a), 0, "default triple deleted");
         assert_eq!(count(&a.named[0].1), 0, "named triple deleted");
         // Two delete-only Delta effects.
-        let deletes_only = effects.iter().all(|e| matches!(e, UpdateEffect::Delta { inserts, .. } if inserts.is_empty()));
+        let deletes_only = effects
+            .iter()
+            .all(|e| matches!(e, UpdateEffect::Delta { inserts, .. } if inserts.is_empty()));
         assert!(deletes_only, "DELETE DATA produces delete-only deltas");
         assert_eq!(effects.len(), 2, "default + named delete deltas");
     }
@@ -2101,24 +2511,40 @@ mod capture_replay {
             "PREFIX : <http://ex/> DELETE { ?s :age ?a } INSERT { ?s :years ?a } WHERE { ?s :age ?a }";
         let (a, b, effects) = capture_and_replay(src, "turtle", sparql);
         assert_equiv(&a, &b, "delete/insert-where default");
-        assert_eq!(crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?s :years ?a }").unwrap(), 2);
-        assert_eq!(crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?s :age ?a }").unwrap(), 0);
+        assert_eq!(
+            crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?s :years ?a }").unwrap(),
+            2
+        );
+        assert_eq!(
+            crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?s :age ?a }").unwrap(),
+            0
+        );
         // The first Delta captured is the deletes (inserts empty), then the inserts.
         let kinds: Vec<(bool, bool)> = effects
             .iter()
             .filter_map(|e| match e {
-                UpdateEffect::Delta { inserts, deletes, .. } => Some((!inserts.is_empty(), !deletes.is_empty())),
+                UpdateEffect::Delta {
+                    inserts, deletes, ..
+                } => Some((!inserts.is_empty(), !deletes.is_empty())),
                 _ => None,
             })
             .collect();
-        assert_eq!(kinds, vec![(false, true), (true, false)], "deletes captured before inserts");
+        assert_eq!(
+            kinds,
+            vec![(false, true), (true, false)],
+            "deletes captured before inserts"
+        );
 
         // A named-graph slot via a GRAPH template (the ADD-desugar shape).
         let src2 = "<http://ex/x> <http://ex/q> <http://ex/y> <http://ex/g1> .";
         let sparql2 = "PREFIX : <http://ex/> INSERT { GRAPH :g2 { ?s ?p ?o } } WHERE { GRAPH :g1 { ?s ?p ?o } }";
         let (a2, b2, _) = capture_and_replay(src2, "nquads", sparql2);
         assert_equiv(&a2, &b2, "delete/insert-where named");
-        let g2 = a2.named.iter().find(|(n, _)| n.to_string().contains("g2")).expect(":g2 created");
+        let g2 = a2
+            .named
+            .iter()
+            .find(|(n, _)| n.to_string().contains("g2"))
+            .expect(":g2 created");
         assert_eq!(count(&g2.1), 1, "named-graph insert delta replayed");
     }
 
@@ -2154,7 +2580,12 @@ mod capture_replay {
         let src = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
                    <http://ex/x> <http://ex/q> <http://ex/y> <http://ex/g1> .\n\
                    <http://ex/m> <http://ex/n> <http://ex/o> <http://ex/g2> .";
-        for clause in ["DROP DEFAULT", "DROP GRAPH <http://ex/g1>", "DROP NAMED", "DROP ALL"] {
+        for clause in [
+            "DROP DEFAULT",
+            "DROP GRAPH <http://ex/g1>",
+            "DROP NAMED",
+            "DROP ALL",
+        ] {
             let (a, b, effects) = capture_and_replay(src, "nquads", clause);
             assert_equiv(&a, &b, clause);
             assert!(
@@ -2173,13 +2604,20 @@ mod capture_replay {
     #[test]
     fn create_effect_replays_empty_named_graph() {
         let (a, b, effects) = capture_and_replay("", "turtle", "CREATE GRAPH <http://ex/fresh>");
-        assert!(matches!(effects.as_slice(), [UpdateEffect::Create(_)]), "one Create effect");
-        assert!(a.named.iter().any(|(n, _)| n.to_string().contains("fresh")), "slot created on A");
+        assert!(
+            matches!(effects.as_slice(), [UpdateEffect::Create(_)]),
+            "one Create effect"
+        );
+        assert!(
+            a.named.iter().any(|(n, _)| n.to_string().contains("fresh")),
+            "slot created on A"
+        );
         assert_equiv(&a, &b, "create graph");
         // Idempotent: CREATE of an existing graph is still a captured Create that replays cleanly.
         let mut a2 = a;
         let mut b2 = b;
-        let e2 = update_in_place_capturing(&mut a2, "CREATE GRAPH <http://ex/fresh>", &budget()).unwrap();
+        let e2 = update_in_place_capturing(&mut a2, "CREATE GRAPH <http://ex/fresh>", &budget())
+            .unwrap();
         apply_effects(&mut b2, &e2).unwrap();
         assert_eq!(a2.named.len(), 1, "no duplicate slot from a re-CREATE");
         assert_equiv(&a2, &b2, "idempotent create");
@@ -2194,7 +2632,10 @@ mod capture_replay {
         // WHERE matches nothing → no per-solution templates → no recorded delta.
         let sparql = "PREFIX : <http://ex/> DELETE { ?s :age ?a } INSERT { ?s :years ?a } WHERE { ?s :age ?a }";
         let (a, b, effects) = capture_and_replay(src, "turtle", sparql);
-        assert!(effects.is_empty(), "empty WHERE records no Delta effect, got {effects:?}");
+        assert!(
+            effects.is_empty(),
+            "empty WHERE records no Delta effect, got {effects:?}"
+        );
         assert_equiv(&a, &b, "empty where");
         assert_eq!(count(&a), 1, "the unmatched update changed nothing");
 
@@ -2203,8 +2644,12 @@ mod capture_replay {
         // the empty BATCH, not the empty EFFECT, that is elided. DELETE DATA of nothing parses
         // to an empty data list, so it records nothing either.
         let empty_insert = "PREFIX : <http://ex/> INSERT { ?s :q ?o } WHERE { ?s :nomatch ?o }";
-        let e2 = update_in_place_capturing(&mut load(src, "turtle"), empty_insert, &budget()).unwrap();
-        assert!(e2.is_empty(), "an INSERT-WHERE with no matches records nothing");
+        let e2 =
+            update_in_place_capturing(&mut load(src, "turtle"), empty_insert, &budget()).unwrap();
+        assert!(
+            e2.is_empty(),
+            "an INSERT-WHERE with no matches records nothing"
+        );
     }
 
     /// `ensure_named` ROUTING through `apply_slot_delta`: an INSERT DATA into a BRAND-NEW named
@@ -2233,8 +2678,16 @@ mod capture_replay {
         )
         .unwrap();
         apply_effects(&mut b, &e2).unwrap();
-        assert_eq!(a.named.len(), 1, "no duplicate slot on a second insert into the same graph");
-        assert_eq!(count(&a.named[0].1), 2, "both triples landed in the one slot");
+        assert_eq!(
+            a.named.len(),
+            1,
+            "no duplicate slot on a second insert into the same graph"
+        );
+        assert_eq!(
+            count(&a.named[0].1),
+            2,
+            "both triples landed in the one slot"
+        );
         assert_equiv(&a, &b, "ensure_named single slot");
 
         // A DELETE into an ABSENT named graph is a no-op (apply_slot_delta's inserts-empty
@@ -2248,7 +2701,11 @@ mod capture_replay {
         // The delete batch is non-empty so it IS recorded, but applies to an absent graph as a
         // no-op; replaying it on B must likewise be a no-op (no slot created).
         apply_effects(&mut b, &e3).unwrap();
-        assert_eq!(a.named.len(), 1, "delete into an absent graph creates no slot");
+        assert_eq!(
+            a.named.len(),
+            1,
+            "delete into an absent graph creates no slot"
+        );
         assert_equiv(&a, &b, "delete absent named graph");
     }
 
@@ -2268,12 +2725,24 @@ mod capture_replay {
         update_in_place_with_budget(&mut none, sparql, &budget()).unwrap();
         // Capturing path on an independent graph + replay onto a third.
         let (cap, replay, _) = capture_and_replay(src, "turtle", sparql);
-        assert_eq!(dump(&none), dump(&cap), "no-sink and capturing apply the same state");
-        assert_eq!(dump(&none), dump(&replay), "replay reproduces the no-sink state");
+        assert_eq!(
+            dump(&none),
+            dump(&cap),
+            "no-sink and capturing apply the same state"
+        );
+        assert_eq!(
+            dump(&none),
+            dump(&replay),
+            "replay reproduces the no-sink state"
+        );
         // And the plain `update_in_place` wrapper (unlimited budget) is the same again.
         let mut plain = load(src, "turtle");
         update_in_place(&mut plain, sparql).unwrap();
-        assert_eq!(dump(&plain), dump(&none), "update_in_place wrapper == budgeted no-sink");
+        assert_eq!(
+            dump(&plain),
+            dump(&none),
+            "update_in_place wrapper == budgeted no-sink"
+        );
     }
 
     /// `apply_effects` on a FRESH (empty) graph reproduces a multi-operation request's full
@@ -2296,14 +2765,27 @@ mod capture_replay {
         // Replay onto an independently-built graph (the durable mirror, identically seeded).
         let mut mirror = load(src, "turtle");
         apply_effects(&mut mirror, &effects).unwrap();
-        assert_eq!(dump(&captured), dump(&mirror), "full multi-op request replayed identically");
+        assert_eq!(
+            dump(&captured),
+            dump(&mirror),
+            "full multi-op request replayed identically"
+        );
         // CLEARed g1 is empty-but-present; dropped g2 is gone.
-        assert!(captured.named.iter().any(|(n, _)| n.to_string().contains("g1")));
-        assert!(!captured.named.iter().any(|(n, _)| n.to_string().contains("g2")));
+        assert!(captured
+            .named
+            .iter()
+            .any(|(n, _)| n.to_string().contains("g1")));
+        assert!(!captured
+            .named
+            .iter()
+            .any(|(n, _)| n.to_string().contains("g2")));
         // Replaying the SAME log a SECOND time onto the same mirror is idempotent for the
         // structural ops and set-semantic for the data ops (no divergence).
         apply_effects(&mut mirror, &effects).unwrap();
-        assert_eq!(dump(&captured), dump(&mirror), "re-applying the effect log does not diverge");
+        assert_eq!(
+            dump(&captured),
+            dump(&mirror),
+            "re-applying the effect log does not diverge"
+        );
     }
 }
-

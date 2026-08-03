@@ -41,10 +41,18 @@ fn ex(local: &str) -> Term {
     iri(&format!("http://ex/{local}"))
 }
 fn s_lit(v: &str) -> Term {
-    Term::Lit(v.into(), "http://www.w3.org/2001/XMLSchema#string".into(), None)
+    Term::Lit(
+        v.into(),
+        "http://www.w3.org/2001/XMLSchema#string".into(),
+        None,
+    )
 }
 fn b_true() -> Term {
-    Term::Lit("true".into(), "http://www.w3.org/2001/XMLSchema#boolean".into(), None)
+    Term::Lit(
+        "true".into(),
+        "http://www.w3.org/2001/XMLSchema#boolean".into(),
+        None,
+    )
 }
 
 /// Serialize ground facts for the oracle (simple Iri/Lit shapes only — what the generators
@@ -81,7 +89,11 @@ fn serialize(facts: &FxHashSet<[Term; 3]>) -> String {
 
 fn oracle(rules: &str, base: &FxHashSet<[Term; 3]>) -> FxHashSet<[Term; 3]> {
     let src = format!("{rules}\n{}", serialize(base));
-    reason_n3_terms(&src, None).expect("oracle parse").facts.into_iter().collect()
+    reason_n3_terms(&src, None)
+        .expect("oracle parse")
+        .facts
+        .into_iter()
+        .collect()
 }
 
 fn assert_equal(g: &MaterializedN3Graph, rules: &str, base: &FxHashSet<[Term; 3]>, at: &str) {
@@ -154,7 +166,9 @@ impl World {
 #[test]
 fn counting_with_layer_guard_and_builtins_matches_from_scratch() {
     let mut rng = Rng(0x5EED_2026_0612_1001);
-    let world = World { nodes: (0..30).map(|i| ex(&format!("n{i}"))).collect() };
+    let world = World {
+        nodes: (0..30).map(|i| ex(&format!("n{i}"))).collect(),
+    };
 
     // Initial base: a parent forest + names + some likes/status.
     let mut base: FxHashSet<[Term; 3]> = FxHashSet::default();
@@ -214,11 +228,18 @@ fn counting_with_layer_guard_and_builtins_matches_from_scratch() {
                 base.remove(t);
             }
         }
-        assert_eq!(g.mode(), N3Mode::Counting, "must stay on the fast path (batch {batch})");
+        assert_eq!(
+            g.mode(),
+            N3Mode::Counting,
+            "must stay on the fast path (batch {batch})"
+        );
         assert_eq!(g.base_len(), base.len(), "base drifted at batch {batch}");
         assert_equal(&g, RULES, &base, &format!("batch {batch}"));
     }
-    assert!(guard_batches > 0, "schedule should have exercised the guard fallback");
+    assert!(
+        guard_batches > 0,
+        "schedule should have exercised the guard fallback"
+    );
 }
 
 #[test]
@@ -232,12 +253,20 @@ fn unsupported_builtin_rules_run_in_fallback_and_stay_correct() {
     let int = "http://www.w3.org/2001/XMLSchema#integer";
     let mut base: FxHashSet<[Term; 3]> = FxHashSet::default();
     for i in 0..10 {
-        base.insert([ex(&format!("n{i}")), ex("n"), Term::Lit(i.to_string(), int.into(), None)]);
+        base.insert([
+            ex(&format!("n{i}")),
+            ex("n"),
+            Term::Lit(i.to_string(), int.into(), None),
+        ]);
     }
     let base_vec: Vec<[Term; 3]> = base.iter().cloned().collect();
     let mut g = MaterializedN3Graph::new(MATH_RULES, &base_vec).expect("parse");
     assert_eq!(g.mode(), N3Mode::Fallback);
-    assert!(g.fallback_reason().unwrap().contains("math#sum"), "{:?}", g.fallback_reason());
+    assert!(
+        g.fallback_reason().unwrap().contains("math#sum"),
+        "{:?}",
+        g.fallback_reason()
+    );
     assert_equal(&g, MATH_RULES, &base, "initial");
     for batch in 0..8 {
         let t = [
@@ -253,7 +282,10 @@ fn unsupported_builtin_rules_run_in_fallback_and_stay_correct() {
             g.insert(std::slice::from_ref(&t));
             base.insert(t);
         }
-        assert!(g.full_rebuilds() > before, "fallback mutations re-materialize");
+        assert!(
+            g.full_rebuilds() > before,
+            "fallback mutations re-materialize"
+        );
         assert_equal(&g, MATH_RULES, &base, &format!("batch {batch}"));
     }
 }
@@ -275,7 +307,11 @@ fn decimal_data_reaching_concatenation_falls_back_sticky_and_stays_correct() {
 
     // A decimal literal flowing into string:concatenation is outside the parity whitelist:
     // the graph must drop to (sticky) engine fallback and stay correct.
-    let t = [ex("b"), ex("val"), Term::Lit("1.50".into(), dec.into(), None)];
+    let t = [
+        ex("b"),
+        ex("val"),
+        Term::Lit("1.50".into(), dec.into(), None),
+    ];
     g.insert(std::slice::from_ref(&t));
     base.insert(t);
     assert_eq!(g.mode(), N3Mode::Fallback);
@@ -344,8 +380,16 @@ fn wac_small_pod_differential() {
     base.insert([res(""), solidx("ownAcl"), res(".acl")]);
     let auth = iri("https://pod.ex/.acl#owner");
     base.insert([auth, ty.clone(), acl("Authorization")]);
-    base.insert([iri("https://pod.ex/.acl#owner"), solidx("inDoc"), res(".acl")]);
-    base.insert([iri("https://pod.ex/.acl#owner"), acl("agent"), iri("https://alice.ex/#me")]);
+    base.insert([
+        iri("https://pod.ex/.acl#owner"),
+        solidx("inDoc"),
+        res(".acl"),
+    ]);
+    base.insert([
+        iri("https://pod.ex/.acl#owner"),
+        acl("agent"),
+        iri("https://alice.ex/#me"),
+    ]);
     base.insert([iri("https://pod.ex/.acl#owner"), acl("default"), res("")]);
     base.insert([iri("https://pod.ex/.acl#owner"), acl("mode"), acl("Read")]);
 
@@ -356,14 +400,22 @@ fn wac_small_pod_differential() {
 
     // Alice can read the inherited resources.
     let auth_read = iri("https://sparq.dev/ns/auth#read");
-    assert!(g.contains(&[iri("https://alice.ex/#me"), auth_read.clone(), res("docs/a")]));
+    assert!(g.contains(&[
+        iri("https://alice.ex/#me"),
+        auth_read.clone(),
+        res("docs/a")
+    ]));
 
     // ACL edit: grant Write too (incremental, no rebuild).
     let before = g.full_rebuilds();
     let t = [iri("https://pod.ex/.acl#owner"), acl("mode"), acl("Write")];
     g.insert(std::slice::from_ref(&t));
     base.insert(t);
-    assert_eq!(g.full_rebuilds(), before, "plain ACL edit must stay incremental");
+    assert_eq!(
+        g.full_rebuilds(),
+        before,
+        "plain ACL edit must stay incremental"
+    );
     assert_equal(&g, &rules, &base, "after mode insert");
 
     // Revoke Read (incremental delete).
@@ -402,17 +454,31 @@ fn delete_of_asserted_layer_derivable_fact_is_an_ownership_transfer() {
     assert_eq!(g.mode(), N3Mode::Counting);
     let before = g.full_rebuilds();
     g.delete(&[[ex("a"), ex("ancestor"), ex("c")]]);
-    assert!(g.contains(&[ex("a"), ex("ancestor"), ex("c")]), "fact stays via the layer");
-    assert_eq!(g.mode(), N3Mode::Counting, "no sticky fallback for an ownership transfer");
+    assert!(
+        g.contains(&[ex("a"), ex("ancestor"), ex("c")]),
+        "fact stays via the layer"
+    );
+    assert_eq!(
+        g.mode(),
+        N3Mode::Counting,
+        "no sticky fallback for an ownership transfer"
+    );
     assert!(g.fallback_reason().is_none(), "not a data disqualification");
     // sq-6tykl.6: the hand-off is settled by the layer's own local re-derivation — it must
     // NOT cost a full re-materialization.
-    assert_eq!(g.full_rebuilds(), before, "ownership transfer must not rebuild");
+    assert_eq!(
+        g.full_rebuilds(),
+        before,
+        "ownership transfer must not rebuild"
+    );
     // Oracle: closure equals a from-scratch run on the current base.
     let mirror: FxHashSet<[Term; 3]> = base[..2].iter().cloned().collect();
     let src = format!("{rules}\n{}", serialize(&mirror));
-    let oracle: FxHashSet<[Term; 3]> =
-        reason_n3_terms(&src, None).unwrap().facts.into_iter().collect();
+    let oracle: FxHashSet<[Term; 3]> = reason_n3_terms(&src, None)
+        .unwrap()
+        .facts
+        .into_iter()
+        .collect();
     let got: FxHashSet<[Term; 3]> = g.closure().into_iter().collect();
     assert_eq!(got, oracle, "closure must equal the from-scratch oracle");
     // And the INSERT direction of the transfer: asserting an already-derived fact.
@@ -420,7 +486,11 @@ fn delete_of_asserted_layer_derivable_fact_is_an_ownership_transfer() {
     g.insert(&[[ex("a"), ex("ancestor"), ex("c")]]);
     assert!(g.contains(&[ex("a"), ex("ancestor"), ex("c")]));
     assert_eq!(g.mode(), N3Mode::Counting);
-    assert_eq!(g.full_rebuilds(), before, "the insert direction must not rebuild either");
+    assert_eq!(
+        g.full_rebuilds(),
+        before,
+        "the insert direction must not rebuild either"
+    );
 
     // BEHAVIOURAL WITNESS for the insert direction (review round 2). Membership + mode +
     // rebuild count all hold vacuously here: asserting a fact the closure already has adds
@@ -448,8 +518,11 @@ fn delete_of_asserted_layer_derivable_fact_is_an_ownership_transfer() {
     assert_eq!(g.full_rebuilds(), before, "and still no re-materialization");
     let mirror: FxHashSet<[Term; 3]> = [base[1].clone()].into_iter().collect();
     let src = format!("{rules}\n{}", serialize(&mirror));
-    let oracle: FxHashSet<[Term; 3]> =
-        reason_n3_terms(&src, None).unwrap().facts.into_iter().collect();
+    let oracle: FxHashSet<[Term; 3]> = reason_n3_terms(&src, None)
+        .unwrap()
+        .facts
+        .into_iter()
+        .collect();
     let got: FxHashSet<[Term; 3]> = g.closure().into_iter().collect();
     assert_eq!(got, oracle, "closure must equal the from-scratch oracle");
 }
@@ -482,7 +555,9 @@ fn ownership_transfer_deltas_stay_incremental_and_match_from_scratch() {
     let mut rng = Rng(0x0BAD_C0DE_6714_6006);
     // A small world keeps `:ancestor` edges densely re-derivable, so a large share of the
     // asserted `:ancestor` facts are genuine ownership transfers rather than plain base facts.
-    let world = World { nodes: (0..7).map(|i| ex(&format!("n{i}"))).collect() };
+    let world = World {
+        nodes: (0..7).map(|i| ex(&format!("n{i}"))).collect(),
+    };
     let pick = |rng: &mut Rng| world.nodes[rng.below(world.nodes.len())].clone();
     let gen_fact = |rng: &mut Rng| -> [Term; 3] {
         let a = pick(rng);
@@ -501,7 +576,12 @@ fn ownership_transfer_deltas_stay_incremental_and_match_from_scratch() {
     }
     let base_vec: Vec<[Term; 3]> = base.iter().cloned().collect();
     let mut g = MaterializedN3Graph::new(TRANSFER_RULES, &base_vec).expect("rules parse");
-    assert_eq!(g.mode(), N3Mode::Counting, "must qualify: {:?}", g.fallback_reason());
+    assert_eq!(
+        g.mode(),
+        N3Mode::Counting,
+        "must qualify: {:?}",
+        g.fallback_reason()
+    );
     assert_equal(&g, TRANSFER_RULES, &base, "initial");
     let rebuilds = g.full_rebuilds();
 
@@ -527,8 +607,9 @@ fn ownership_transfer_deltas_stay_incremental_and_match_from_scratch() {
                 continue;
             }
             let n = 1 + rng.below(4);
-            let delta: Vec<[Term; 3]> =
-                (0..n).map(|_| current[rng.below(current.len())].clone()).collect();
+            let delta: Vec<[Term; 3]> = (0..n)
+                .map(|_| current[rng.below(current.len())].clone())
+                .collect();
             let still: Vec<bool> = delta.iter().map(|t| g.contains(t)).collect();
             g.delete(&delta);
             for t in &delta {
@@ -543,7 +624,11 @@ fn ownership_transfer_deltas_stay_incremental_and_match_from_scratch() {
                 }
             }
         }
-        assert_eq!(g.mode(), N3Mode::Counting, "must stay on the fast path (batch {batch})");
+        assert_eq!(
+            g.mode(),
+            N3Mode::Counting,
+            "must stay on the fast path (batch {batch})"
+        );
         assert_eq!(
             g.full_rebuilds(),
             rebuilds,
@@ -577,8 +662,15 @@ fn empty_premise_rule_falls_back_and_stays_correct() {
 "#;
     let base: Vec<[Term; 3]> = vec![[ex("x"), ex("q"), ex("y")]];
     let g = MaterializedN3Graph::new(rules, &base).unwrap();
-    assert_eq!(g.mode(), N3Mode::Fallback, "{{}} rule must disqualify the counting path");
-    assert!(g.fallback_reason().is_some(), "must report a disqualification reason");
+    assert_eq!(
+        g.mode(),
+        N3Mode::Fallback,
+        "{{}} rule must disqualify the counting path"
+    );
+    assert!(
+        g.fallback_reason().is_some(),
+        "must report a disqualification reason"
+    );
     assert!(
         g.contains(&[ex("a"), ex("p"), ex("b")]),
         "the constant conclusion of the {{}} rule must be in the closure (1868)"
@@ -598,8 +690,15 @@ fn builtin_only_premise_rule_falls_back_and_stays_correct() {
 "#;
     let base: Vec<[Term; 3]> = vec![[ex("x"), ex("q"), ex("y")]];
     let g = MaterializedN3Graph::new(rules, &base).unwrap();
-    assert_eq!(g.mode(), N3Mode::Fallback, "builtin-only premise must disqualify counting");
-    assert!(g.fallback_reason().is_some(), "must report a disqualification reason");
+    assert_eq!(
+        g.mode(),
+        N3Mode::Fallback,
+        "builtin-only premise must disqualify counting"
+    );
+    assert!(
+        g.fallback_reason().is_some(),
+        "must report a disqualification reason"
+    );
     assert!(
         g.contains(&[ex("out"), ex("is"), s_lit("foobar")]),
         "the builtin-derived conclusion must be in the closure (1868)"
@@ -625,9 +724,16 @@ fn data_rule_fallback_reports_reason_and_clears() {
     // Insert a log:implies triple AS DATA — forces fallback.
     let implies = iri("http://www.w3.org/2000/10/swap/log#implies");
     g.insert(&[[ex("r1"), implies.clone(), ex("r2")]]);
-    assert_eq!(g.mode(), N3Mode::Fallback, "implies-as-data forces fallback");
+    assert_eq!(
+        g.mode(),
+        N3Mode::Fallback,
+        "implies-as-data forces fallback"
+    );
     let reason = g.fallback_reason();
-    assert!(reason.is_some(), "data-rule fallback must report a reason (1868 Low)");
+    assert!(
+        reason.is_some(),
+        "data-rule fallback must report a reason (1868 Low)"
+    );
     assert!(
         reason.unwrap().contains("implies"),
         "reason should name the implies-as-data cause, got {reason:?}"
@@ -635,6 +741,13 @@ fn data_rule_fallback_reports_reason_and_clears() {
 
     // Remove it — counting resumes and the reason clears.
     g.delete(&[[ex("r1"), implies, ex("r2")]]);
-    assert_eq!(g.mode(), N3Mode::Counting, "removing the data rule resumes counting");
-    assert!(g.fallback_reason().is_none(), "reason must clear when counting resumes");
+    assert_eq!(
+        g.mode(),
+        N3Mode::Counting,
+        "removing the data rule resumes counting"
+    );
+    assert!(
+        g.fallback_reason().is_none(),
+        "reason must clear when counting resumes"
+    );
 }

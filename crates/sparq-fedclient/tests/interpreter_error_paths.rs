@@ -101,7 +101,13 @@ fn one_pred_descriptor(pred: &str) -> SourceDescriptor {
 }
 
 /// A one-pattern BGP `?s <pred> ?o` + its plan over the single descriptor.
-fn one_pattern_plan(pred: &str) -> (Bgp, Vec<sparq_fedplan::PatternSources>, sparq_fedplan::JoinTree) {
+fn one_pattern_plan(
+    pred: &str,
+) -> (
+    Bgp,
+    Vec<sparq_fedplan::PatternSources>,
+    sparq_fedplan::JoinTree,
+) {
     let bgp = Bgp::new(vec![TriplePattern::new(var("s"), iri(pred), var("o"))]);
     let descriptors = [one_pred_descriptor(pred)];
     let sel = select_sources(&bgp, &descriptors);
@@ -234,7 +240,10 @@ fn resolver_built_with_empty_bgp_fails_closed_on_pattern_index() {
 /// var names MUST match the variables `lower_leaf` projects for the pattern, else the relation's
 /// columns are misnamed and the join key never lines up.
 fn srj_pairs(va: &str, vb: &str, pairs: &[(&str, &str)]) -> String {
-    let mut s = format!(r#"{{"head":{{"vars":["{}","{}"]}},"results":{{"bindings":["#, va, vb);
+    let mut s = format!(
+        r#"{{"head":{{"vars":["{}","{}"]}},"results":{{"bindings":["#,
+        va, vb
+    );
     for (i, (a, b)) in pairs.iter().enumerate() {
         if i > 0 {
             s.push(',');
@@ -278,7 +287,14 @@ fn join_with_no_shared_binding_is_empty() {
     // ?s :p ?o → o ∈ {o1, o2}
     answers.insert(
         "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }".to_string(),
-        srj_pairs("s", "o", &[("http://ex/s1", "http://ex/o1"), ("http://ex/s2", "http://ex/o2")]),
+        srj_pairs(
+            "s",
+            "o",
+            &[
+                ("http://ex/s1", "http://ex/o1"),
+                ("http://ex/s2", "http://ex/o2"),
+            ],
+        ),
     );
     // ?o :q ?z → subjects {oX} — DISJOINT from {o1, o2} ⇒ empty join on ?o.
     answers.insert(
@@ -337,7 +353,14 @@ fn join_preserves_multiplicity_fan_out() {
     // s1 has two :q values ⇒ two join partners.
     answers.insert(
         "SELECT ?s ?z WHERE { ?s <http://ex/q> ?z }".to_string(),
-        srj_pairs("s", "z", &[("http://ex/s1", "http://ex/z1"), ("http://ex/s1", "http://ex/z2")]),
+        srj_pairs(
+            "s",
+            "z",
+            &[
+                ("http://ex/s1", "http://ex/z1"),
+                ("http://ex/s1", "http://ex/z2"),
+            ],
+        ),
     );
 
     let ep = Endpoint::new(
@@ -350,7 +373,11 @@ fn join_preserves_multiplicity_fan_out() {
     let adapters: Vec<&dyn FederatedSource> = vec![&ep];
     let resolver = SourceResolver::new(&bgp, &adapters);
     let rel: Relation = materialize_single_source(&resolver, &sel, &ep, &tree).unwrap();
-    assert_eq!(rel.rows.len(), 2, "the fan-out must yield two rows (multiplicity preserved)");
+    assert_eq!(
+        rel.rows.len(),
+        2,
+        "the fan-out must yield two rows (multiplicity preserved)"
+    );
     // Both rows share s1+o1 and differ only in ?z — assert the exact multiset.
     use oxrdf::NamedNode;
     let nn = |s: &str| Some(oxrdf::Term::NamedNode(NamedNode::new(s).unwrap()));

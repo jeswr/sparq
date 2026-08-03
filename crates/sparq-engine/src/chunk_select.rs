@@ -131,7 +131,10 @@ pub(crate) fn tri_mask_select(decoded: &[f64], cmp: VecCmp) -> TriMaskResult {
         }
     }
 
-    TriMaskResult { confident_passes, delegated }
+    TriMaskResult {
+        confident_passes,
+        delegated,
+    }
 }
 
 /// Merges two ascending index lists into a single ascending list (standard merge step).
@@ -171,7 +174,10 @@ mod tests {
         // FILTER(?x > 4.0): 5.0, 7.0, 9.0 pass (indices 2, 3, 4); no ties, no NaN.
         let r = tri_mask_select(&decoded, VecCmp::Gt(4.0));
         assert_eq!(r.confident_passes, vec![2, 3, 4]);
-        assert!(r.delegated.is_empty(), "no NaN or tie => delegated must be empty");
+        assert!(
+            r.delegated.is_empty(),
+            "no NaN or tie => delegated must be empty"
+        );
     }
 
     /// NaN sentinel lanes are classified Unknown and go into `delegated`, never
@@ -206,7 +212,10 @@ mod tests {
         let decoded = [1.0f64, 5.0, 9.0];
         // FILTER(?x = 5.0): only the tie (5.0) is delegated; others are confident fails.
         let r = tri_mask_select(&decoded, VecCmp::Eq(5.0));
-        assert!(r.confident_passes.is_empty(), "x=1 and x=9 are confident fails for Eq(5)");
+        assert!(
+            r.confident_passes.is_empty(),
+            "x=1 and x=9 are confident fails for Eq(5)"
+        );
         assert_eq!(r.delegated, vec![1]);
     }
 
@@ -216,7 +225,7 @@ mod tests {
     fn pos_neg_zero_are_ties() {
         let decoded = [1.0f64, 0.0f64]; // +0.0
         let r = tri_mask_select(&decoded, VecCmp::Lt(-0.0f64)); // constant is -0.0
-        // 1.0 > -0.0, not a tie, confident fail for Lt(-0)
+                                                                // 1.0 > -0.0, not a tie, confident fail for Lt(-0)
         assert!(r.confident_passes.is_empty());
         // +0.0 == -0.0, so index 1 is a tie -> delegated
         assert_eq!(r.delegated, vec![1]);
@@ -225,7 +234,10 @@ mod tests {
     /// `merge_ascending` of two ascending lists produces one ascending list. [SONNET-4.6]
     #[test]
     fn merge_ascending_interleaves_correctly() {
-        assert_eq!(merge_ascending(&[0, 3, 6], &[1, 2, 5]), vec![0, 1, 2, 3, 5, 6]);
+        assert_eq!(
+            merge_ascending(&[0, 3, 6], &[1, 2, 5]),
+            vec![0, 1, 2, 3, 5, 6]
+        );
         assert_eq!(merge_ascending(&[], &[1, 2, 3]), vec![1, 2, 3]);
         assert_eq!(merge_ascending(&[1, 2, 3], &[]), vec![1, 2, 3]);
         // Both-empty case: annotate types so the compiler can resolve the generic. [SONNET-4.6]
@@ -280,6 +292,10 @@ mod tests {
             r.confident_passes.is_empty(),
             "2^53 lane vs 2^53+1 constant must be a TIE, not a confident pass or fail"
         );
-        assert_eq!(r.delegated, vec![0], "tie must go to delegated for scalar exact check");
+        assert_eq!(
+            r.delegated,
+            vec![0],
+            "tie must go to delegated for scalar exact check"
+        );
     }
 }

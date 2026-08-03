@@ -40,8 +40,7 @@ fn roundtrip_sparse_ids() {
     assert_eq!(reopened.get(43), None);
 
     // iter() yields all pairs in insertion order.
-    let pairs: Vec<(u32, Vec<f32>)> =
-        reopened.iter().map(|(id, v)| (id, v.to_vec())).collect();
+    let pairs: Vec<(u32, Vec<f32>)> = reopened.iter().map(|(id, v)| (id, v.to_vec())).collect();
     assert_eq!(pairs[0], (42, vec![1.0, 2.0, 3.0]));
     assert_eq!(pairs[1], (7, vec![4.0, 5.0, 6.0]));
     assert_eq!(pairs[2], (1_000_000, vec![-1.5, 0.0, 2.5]));
@@ -65,12 +64,21 @@ fn build_phase_errors() {
 
     let mut store = VectorStore::create(&path, 2).unwrap();
     assert!(store.put(1, &[1.0]).is_err(), "dim mismatch rejected");
-    assert!(store.put(1, &[1.0, f32::NAN]).is_err(), "non-finite rejected");
-    assert!(store.put(1, &[0.0, 0.0]).is_err(), "all-zero rejected (cosine undefined)");
+    assert!(
+        store.put(1, &[1.0, f32::NAN]).is_err(),
+        "non-finite rejected"
+    );
+    assert!(
+        store.put(1, &[0.0, 0.0]).is_err(),
+        "all-zero rejected (cosine undefined)"
+    );
     store.put(1, &[1.0, 2.0]).unwrap();
     assert!(store.put(1, &[3.0, 4.0]).is_err(), "duplicate id rejected");
     store.finalize().unwrap();
-    assert!(store.put(2, &[1.0, 2.0]).is_err(), "put after finalize rejected");
+    assert!(
+        store.put(2, &[1.0, 2.0]).is_err(),
+        "put after finalize rejected"
+    );
     store.finalize().unwrap(); // idempotent
 }
 
@@ -168,7 +176,10 @@ fn streaming_writer_produces_byte_identical_store() {
     in_ram.finalize().unwrap();
     assert_eq!(streaming.len(), 3);
     let store = streaming.finalize().unwrap();
-    assert_eq!(std::fs::read(&a_path).unwrap(), std::fs::read(&b_path).unwrap());
+    assert_eq!(
+        std::fs::read(&a_path).unwrap(),
+        std::fs::read(&b_path).unwrap()
+    );
 
     // The returned handle is a normal opened store.
     assert_eq!(store.dim(), 3);
@@ -283,5 +294,8 @@ fn open_from_bytes_handles_unaligned_source_buffer() {
     assert_eq!(mem.get(42), Some(&[1.0f32, 2.0, 3.0][..]));
     assert_eq!(mem.get(7), Some(&[-4.5f32, 5.25, 6.0][..]));
     let pairs: Vec<(u32, Vec<f32>)> = mem.iter().map(|(id, v)| (id, v.to_vec())).collect();
-    assert_eq!(pairs, [(42, vec![1.0, 2.0, 3.0]), (7, vec![-4.5, 5.25, 6.0])]);
+    assert_eq!(
+        pairs,
+        [(42, vec![1.0, 2.0, 3.0]), (7, vec![-4.5, 5.25, 6.0])]
+    );
 }

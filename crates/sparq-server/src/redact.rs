@@ -152,7 +152,10 @@ mod tests {
 
     #[test]
     fn empty_query_records_zero_length() {
-        assert_eq!(redact_target("/sparql?"), "/sparql?<redacted len=0 fp=cbf29ce484222325>");
+        assert_eq!(
+            redact_target("/sparql?"),
+            "/sparql?<redacted len=0 fp=cbf29ce484222325>"
+        );
     }
 
     #[test]

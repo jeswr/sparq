@@ -306,7 +306,8 @@ impl SparqClient for EmbeddedSparqClient {
         // SAME query as the HTTP/in-mem paths — the injection-safe `select_meta` builder VERBATIM.
         let q = sparql::select_meta(iri)?;
         self.dispatch(move |graph| {
-            let result = sparq_engine::query(graph, &q).map_err(|e| engine_err("select_meta", e))?;
+            let result =
+                sparq_engine::query(graph, &q).map_err(|e| engine_err("select_meta", e))?;
             // No row ⇒ the resource is not indexed (fail-closed: never invent metadata).
             let row = result.rows.first().ok_or(SparqError::NotFound)?;
             let ct_col = var_col(&result, "ct").ok_or_else(|| {
@@ -371,7 +372,8 @@ impl SparqClient for EmbeddedSparqClient {
         // `update_delete_resource` builder. Atomic single-op.
         let u = sparql::update_delete_resource(iri)?;
         self.dispatch(move |graph| {
-            sparq_engine::update_in_place_atomic(graph, &u).map_err(|e| engine_err("delete_meta", e))
+            sparq_engine::update_in_place_atomic(graph, &u)
+                .map_err(|e| engine_err("delete_meta", e))
         })
         .await
     }
@@ -460,7 +462,8 @@ impl SparqClient for EmbeddedSparqClient {
     async fn remove_child(&self, container: &str, child: &str) -> Result<(), SparqError> {
         let u = sparql::update_remove_child(container, child)?;
         self.dispatch(move |graph| {
-            sparq_engine::update_in_place_atomic(graph, &u).map_err(|e| engine_err("remove_child", e))
+            sparq_engine::update_in_place_atomic(graph, &u)
+                .map_err(|e| engine_err("remove_child", e))
         })
         .await
     }
@@ -496,8 +499,8 @@ impl SparqClient for EmbeddedSparqClient {
     async fn referenced_blob_keys(&self) -> Result<std::collections::HashSet<String>, SparqError> {
         let q = sparql::select_referenced_blob_keys();
         self.dispatch(move |graph| {
-            let result =
-                sparq_engine::query(graph, &q).map_err(|e| engine_err("referenced_blob_keys", e))?;
+            let result = sparq_engine::query(graph, &q)
+                .map_err(|e| engine_err("referenced_blob_keys", e))?;
             let bk_col = var_col(&result, "bk").ok_or_else(|| {
                 SparqError::Backend("fatal: referenced-blob-keys result missing ?bk column".into())
             })?;

@@ -68,5 +68,8 @@ fn iri_equality_filter_rows_correct_through_rewrite() {
     assert_eq!(rows.rows.len(), 2, "exactly two solutions: {joined}");
     assert!(joined.contains("http://ex/a"), "row a expected: {joined}");
     assert!(joined.contains("http://ex/c"), "row c expected: {joined}");
-    assert!(!joined.contains("http://ex/b"), "row b must be filtered out: {joined}");
+    assert!(
+        !joined.contains("http://ex/b"),
+        "row b must be filtered out: {joined}"
+    );
 }

@@ -162,7 +162,11 @@ fn hard_request_cap_stops_a_persistently_throttled_endpoint() {
     let err = fetch_paginated(&fake, "https://x.test/works/", "q", &p, &mut |_| {})
         .expect_err("cap trips");
     assert!(err.contains("hard request cap"), "got: {}", err);
-    assert_eq!(*fake.calls.borrow(), 3, "stopped exactly at the request cap");
+    assert_eq!(
+        *fake.calls.borrow(),
+        3,
+        "stopped exactly at the request cap"
+    );
 }
 
 // -------------------------------------------------------------------------------------
@@ -186,14 +190,15 @@ fn from_env_errors_without_key_and_succeeds_with_a_dummy_key() {
 
     // A dummy value (NOT the real key) proves the read path without any network call.
     std::env::set_var("CORE_API_KEY", "dummy-test-value-not-a-real-key");
-    assert!(CoreClient::from_env().is_ok(), "a set key constructs a client");
+    assert!(
+        CoreClient::from_env().is_ok(),
+        "a set key constructs a client"
+    );
     // with_policy / policy accessor (no network): the override is reflected.
-    let client = CoreClient::from_env()
-        .unwrap()
-        .with_policy(RetryPolicy {
-            max_pages: 1,
-            ..RetryPolicy::default()
-        });
+    let client = CoreClient::from_env().unwrap().with_policy(RetryPolicy {
+        max_pages: 1,
+        ..RetryPolicy::default()
+    });
     assert_eq!(client.policy().max_pages, 1);
 
     std::env::set_var("CORE_API_KEY", "   ");

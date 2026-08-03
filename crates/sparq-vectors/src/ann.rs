@@ -39,13 +39,13 @@
 use crate::store::VectorStore;
 #[cfg(feature = "approx-ann")]
 use instant_distance::{Builder, HnswMap, Point, Search};
+use oxrdf::Term;
+use sparq_core::dict::Id;
+use sparq_core::Graph;
 #[cfg(feature = "approx-ann")]
 use std::collections::HashMap;
 #[cfg(feature = "approx-ann")]
 use std::sync::{Arc, RwLock};
-use oxrdf::Term;
-use sparq_core::dict::Id;
-use sparq_core::Graph;
 
 /// Cosine similarity of two equal-length vectors, in `[-1, 1]` (0 if either is zero).
 /// Eight independent accumulator lanes so the compiler auto-vectorizes the loop.
@@ -69,8 +69,11 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
         na[0] += a[i] * a[i];
         nb[0] += b[i] * b[i];
     }
-    let (dot, na, nb) =
-        (dot.iter().sum::<f32>(), na.iter().sum::<f32>(), nb.iter().sum::<f32>());
+    let (dot, na, nb) = (
+        dot.iter().sum::<f32>(),
+        na.iter().sum::<f32>(),
+        nb.iter().sum::<f32>(),
+    );
     if na == 0.0 || nb == 0.0 {
         0.0
     } else {
@@ -88,8 +91,7 @@ pub fn nearest_exact(store: &VectorStore, query: &[f32], k: usize) -> Vec<(Id, f
     if query.iter().all(|&v| v == 0.0) {
         return Vec::new();
     }
-    let mut scored: Vec<(Id, f32)> =
-        store.iter().map(|(id, v)| (id, cosine(query, v))).collect();
+    let mut scored: Vec<(Id, f32)> = store.iter().map(|(id, v)| (id, cosine(query, v))).collect();
     scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     scored.truncate(k);
     scored
@@ -128,8 +130,12 @@ pub fn nearest_term_exact(
     term: &Term,
     k: usize,
 ) -> Vec<(Term, f32)> {
-    let Some(id) = graph.id_of(term) else { return Vec::new() };
-    let Some(query) = store.get(id) else { return Vec::new() };
+    let Some(id) = graph.id_of(term) else {
+        return Vec::new();
+    };
+    let Some(query) = store.get(id) else {
+        return Vec::new();
+    };
     nearest_exact(store, query, k + 1)
         .into_iter()
         .filter(|&(n, _)| n != id)
@@ -204,8 +210,7 @@ fn tiebreak_domain_term(graph: &Graph, id: Id) -> Result<Term, String> {
             Term::NamedNode(_) | Term::Literal(_) => true,
             Term::BlankNode(_) => false,
             Term::Triple(t) => {
-                !matches!(t.subject, oxrdf::NamedOrBlankNode::BlankNode(_))
-                    && is_ground(&t.object)
+                !matches!(t.subject, oxrdf::NamedOrBlankNode::BlankNode(_)) && is_ground(&t.object)
             }
         }
     }
@@ -322,7 +327,11 @@ pub struct HnswConfig {
 #[cfg(feature = "approx-ann")]
 impl Default for HnswConfig {
     fn default() -> Self {
-        HnswConfig { ef_search: 100, ef_construction: 100, seed: 0x5350_5156_0001 }
+        HnswConfig {
+            ef_search: 100,
+            ef_construction: 100,
+            seed: 0x5350_5156_0001,
+        }
     }
 }
 
@@ -347,7 +356,10 @@ impl HnswConfig {
     /// the build deterministic for a fixed seed (the same seed yields the same graph). The
     /// `nearest` / `nearest_with_ef` query path and its monotone-recall contract are unchanged.
     pub fn fast_build() -> Self {
-        HnswConfig { ef_construction: 40, ..HnswConfig::default() }
+        HnswConfig {
+            ef_construction: 40,
+            ..HnswConfig::default()
+        }
     }
 
     /// [OPUS-4.8] (sq-ose80) A **higher-recall** preset: same `ef_search` and `seed` as the
@@ -357,7 +369,10 @@ impl HnswConfig {
     /// build-once, query-forever index where the extra build time amortises. (Also a pure config
     /// preset — no dependency, no default change, deterministic for a fixed seed.)
     pub fn high_recall() -> Self {
-        HnswConfig { ef_construction: 200, ..HnswConfig::default() }
+        HnswConfig {
+            ef_construction: 200,
+            ..HnswConfig::default()
+        }
     }
 }
 
@@ -491,8 +506,16 @@ impl VectorIndex {
     /// Uses the build-time `ef_search`. An all-zero `query` returns no
     /// results (same contract as [`nearest_exact`]).
     pub fn nearest(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
-        assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
-        let Some(q) = normalized(query) else { return Vec::new() };
+        assert_eq!(
+            query.len(),
+            self.dim,
+            "query dim {} != store dim {}",
+            query.len(),
+            self.dim
+        );
+        let Some(q) = normalized(query) else {
+            return Vec::new();
+        };
         let q = NPoint(q);
         let mut search = Search::default();
         self.map
@@ -537,8 +560,16 @@ impl VectorIndex {
     /// **APPROXIMATE** — recall `< 1.0` at any finite `ef_search`; use [`nearest_exact`]
     /// for answer-exact results.
     pub fn nearest_with_ef(&self, query: &[f32], k: usize, ef_search: usize) -> Vec<(Id, f32)> {
-        assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
-        let Some(q) = normalized(query) else { return Vec::new() };
+        assert_eq!(
+            query.len(),
+            self.dim,
+            "query dim {} != store dim {}",
+            query.len(),
+            self.dim
+        );
+        let Some(q) = normalized(query) else {
+            return Vec::new();
+        };
         let q = NPoint(q);
         let mut search = Search::default();
         // [SONNET-4.6] (sq-jo6ty) Short-circuit: the build-time ef → primary map (zero overhead).
@@ -612,8 +643,12 @@ impl VectorIndex {
         store: &VectorStore,
         k: usize,
     ) -> Vec<(Term, f32)> {
-        let Some(id) = graph.id_of(term) else { return Vec::new() };
-        let Some(query) = store.get(id) else { return Vec::new() };
+        let Some(id) = graph.id_of(term) else {
+            return Vec::new();
+        };
+        let Some(query) = store.get(id) else {
+            return Vec::new();
+        };
         self.nearest(query, k + 1)
             .into_iter()
             .filter(|&(n, _)| n != id)
@@ -638,7 +673,13 @@ impl VectorIndex {
         store: &VectorStore,
         k: usize,
     ) -> Vec<(Id, f32)> {
-        assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
+        assert_eq!(
+            query.len(),
+            self.dim,
+            "query dim {} != store dim {}",
+            query.len(),
+            self.dim
+        );
         crate::filter::nearest_exact_filtered(store, query, mask, k)
     }
 
@@ -672,9 +713,18 @@ mod tests {
         // Identical direction → 1, orthogonal → 0, opposite → −1 (length cancels: cosine is
         // magnitude-invariant, so 3·a and a give the same score).
         assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
-        assert!((cosine(&[1.0, 0.0], &[3.0, 0.0]) - 1.0).abs() < 1e-6, "cosine ignores magnitude");
-        assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6, "orthogonal vectors are 0");
-        assert!((cosine(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6, "opposite vectors are -1");
+        assert!(
+            (cosine(&[1.0, 0.0], &[3.0, 0.0]) - 1.0).abs() < 1e-6,
+            "cosine ignores magnitude"
+        );
+        assert!(
+            cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6,
+            "orthogonal vectors are 0"
+        );
+        assert!(
+            (cosine(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6,
+            "opposite vectors are -1"
+        );
         // 45° between (1,0) and (1,1): cos = 1/√2.
         assert!((cosine(&[1.0, 0.0], &[1.0, 1.0]) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
     }
@@ -696,7 +746,10 @@ mod tests {
         // dim 11 is not a multiple of the 8 SIMD lanes, so the scalar tail loop must run. A vector
         // against itself is still exactly 1.0 — proving the tail accumulators are summed in.
         let v: Vec<f32> = (1..=11).map(|i| i as f32).collect();
-        assert!((cosine(&v, &v) - 1.0).abs() < 1e-5, "self-cosine over a tail length must be 1.0");
+        assert!(
+            (cosine(&v, &v) - 1.0).abs() < 1e-5,
+            "self-cosine over a tail length must be 1.0"
+        );
         // And a length below one full lane (dim 3) goes entirely through the tail loop.
         let w = [2.0f32, -1.0, 4.0];
         assert!((cosine(&w, &w) - 1.0).abs() < 1e-6);
@@ -737,7 +790,10 @@ mod tests {
                 "ntriples",
             )
             .unwrap();
-            let id = |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
+            let id = |s: &str| {
+                g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+                    .unwrap()
+            };
             let num = |n: &str| {
                 g.id_of(&Term::Literal(oxrdf::Literal::new_typed_literal(
                     n,
@@ -745,8 +801,11 @@ mod tests {
                 )))
                 .unwrap()
             };
-            let path = std::env::temp_dir()
-                .join(format!("sparq_vec_tiebreak_{}_{}.spqv", std::process::id(), name));
+            let path = std::env::temp_dir().join(format!(
+                "sparq_vec_tiebreak_{}_{}.spqv",
+                std::process::id(),
+                name
+            ));
             let mut store = VectorStore::create(path, 2).unwrap();
             store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0
             store.put(id("http://ex/z-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
@@ -760,7 +819,9 @@ mod tests {
         const TWO: &str = "\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>";
 
         fn iris(g: &Graph, hits: &[(sparq_core::dict::Id, f32)]) -> Vec<String> {
-            hits.iter().map(|&(id, _)| g.dict.term(id).to_string()).collect()
+            hits.iter()
+                .map(|&(id, _)| g.dict.term(id).to_string())
+                .collect()
         }
 
         #[test]
@@ -770,12 +831,19 @@ mod tests {
             // candidates → the smallest N-Triples key `"10"^^xsd:integer` wins (id order would
             // have picked `<http://ex/z-tied>` — the lowest id — instead).
             let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 2, None).unwrap();
-            assert_eq!(iris(&g, &hits), vec!["<http://ex/top>".to_string(), TEN.to_string()]);
+            assert_eq!(
+                iris(&g, &hits),
+                vec!["<http://ex/top>".to_string(), TEN.to_string()]
+            );
             // k=3: two slots for the tie group → "10" then "2"; z-tied is still excluded.
             let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 3, None).unwrap();
             assert_eq!(
                 iris(&g, &hits),
-                vec!["<http://ex/top>".to_string(), TEN.to_string(), TWO.to_string()]
+                vec![
+                    "<http://ex/top>".to_string(),
+                    TEN.to_string(),
+                    TWO.to_string()
+                ]
             );
         }
 
@@ -787,22 +855,33 @@ mod tests {
             assert_eq!(iris(&g, &hits), vec!["<http://ex/top>".to_string()]);
             // k ≥ store size returns everything (all candidates admitted, no boundary).
             assert_eq!(
-                nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 99, None).unwrap().len(),
+                nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 99, None)
+                    .unwrap()
+                    .len(),
                 5
             );
             // k=0 and the all-zero query yield no results (VG-DEG-2/3 alignment).
-            assert!(nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 0, None).unwrap().is_empty());
-            assert!(nearest_exact_tiebreak(&store, &g, &[0.0, 0.0], 3, None).unwrap().is_empty());
+            assert!(nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 0, None)
+                .unwrap()
+                .is_empty());
+            assert!(nearest_exact_tiebreak(&store, &g, &[0.0, 0.0], 3, None)
+                .unwrap()
+                .is_empty());
         }
 
         #[test]
         fn exclude_drops_the_seed_before_ranking() {
             let (g, store) = fixture("exclude");
-            let top = g.id_of(&Term::NamedNode(NamedNode::new("http://ex/top").unwrap())).unwrap();
+            let top = g
+                .id_of(&Term::NamedNode(NamedNode::new("http://ex/top").unwrap()))
+                .unwrap();
             // With the exact-match seed excluded, k=1 lands directly on the boundary tie group.
             let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 1, Some(top)).unwrap();
             assert_eq!(iris(&g, &hits), vec![TEN.to_string()]);
-            assert!(hits.iter().all(|&(id, _)| id != top), "the excluded seed must not appear");
+            assert!(
+                hits.iter().all(|&(id, _)| id != top),
+                "the excluded seed must not appear"
+            );
         }
 
         // [SONNET-4.6] (#2445 review) The embeddable-domain guard: the VG-TIE-1 key is only
@@ -828,10 +907,13 @@ mod tests {
                     "ntriples",
                 )
                 .unwrap();
-                let iri =
-                    |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
-                let bnode =
-                    g.id_of(&Term::BlankNode(BlankNode::new_unchecked("tied"))).unwrap();
+                let iri = |s: &str| {
+                    g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+                        .unwrap()
+                };
+                let bnode = g
+                    .id_of(&Term::BlankNode(BlankNode::new_unchecked("tied")))
+                    .unwrap();
                 let path = std::env::temp_dir().join(format!(
                     "sparq_vec_tiebreak_bnode_{}_{}.spqv",
                     std::process::id(),
@@ -850,7 +932,11 @@ mod tests {
                 // k=2: one slot for the two-way 0.6 tie — the blank node's key would have to
                 // enter the ordering, so the call must refuse, naming the term kind.
                 let err = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 2, None).unwrap_err();
-                assert!(err.contains("_:tied") || err.contains("blank"), "got: {}", err);
+                assert!(
+                    err.contains("_:tied") || err.contains("blank"),
+                    "got: {}",
+                    err
+                );
             }
 
             #[test]
@@ -862,8 +948,7 @@ mod tests {
                 assert!(err.contains("blank node"), "got: {}", err);
                 // And with the blank node strictly above the boundary: make it the unique
                 // best by querying its own direction.
-                let err =
-                    nearest_exact_tiebreak(&store, &g, &[0.6, -0.8], 1, None).unwrap_err();
+                let err = nearest_exact_tiebreak(&store, &g, &[0.6, -0.8], 1, None).unwrap_err();
                 assert!(err.contains("blank node"), "got: {}", err);
             }
 
@@ -896,8 +981,10 @@ mod tests {
 
         #[test]
         fn build_shares_point_allocations_with_the_map_instead_of_deep_copying() {
-            let path = std::env::temp_dir()
-                .join(format!("sparq-vectors-arcshare-{}.spqv", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "sparq-vectors-arcshare-{}.spqv",
+                std::process::id()
+            ));
             let mut store = VectorStore::create(&path, 8).unwrap();
             for i in 0..64u32 {
                 // Deterministic non-zero vectors; sparse ids exercise the id→slot index.

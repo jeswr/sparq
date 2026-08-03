@@ -127,12 +127,12 @@ pub fn inline_id_of_int(v: i64) -> Option<Id> {
 /// as a general-purpose copy (a `Graph` remains deliberately non-`Clone`).
 #[derive(Default, Clone)]
 pub struct Dict {
-    prefixes: Vec<Box<str>>,                  // id -> IRI namespace prefix
-    prefix_ids: FxHashMap<Box<str>, u32>,     // prefix -> id
-    datatypes: Vec<NamedNode>,                // id -> literal datatype (a small set)
-    datatype_ids: FxHashMap<Box<str>, u32>,   // datatype IRI -> id
-    terms: Vec<Stored>,                       // id-1 -> compact term (empty once compacted)
-    table: HashTable<Id>,                     // hash(term) -> id (bare ids, compared via the arena)
+    prefixes: Vec<Box<str>>,                // id -> IRI namespace prefix
+    prefix_ids: FxHashMap<Box<str>, u32>,   // prefix -> id
+    datatypes: Vec<NamedNode>,              // id -> literal datatype (a small set)
+    datatype_ids: FxHashMap<Box<str>, u32>, // datatype IRI -> id
+    terms: Vec<Stored>,                     // id-1 -> compact term (empty once compacted)
+    table: HashTable<Id>,                   // hash(term) -> id (bare ids, compared via the arena)
     // When `Some` (after `into_blob`), id->term is served from a single concatenated term
     // BLOB + per-term offsets instead of `Vec<Stored>` — no per-term `Box<str>` allocation
     // overhead, ~half the resident dict bytes. `table` is kept (lookup verifies via the
@@ -167,8 +167,15 @@ pub struct Dict {
 /// inline id distinct from — the triple's own id; nesting recurses through the object).
 #[derive(Clone)]
 enum Stored {
-    Iri { prefix: u32, suffix: Box<str> },
-    Lit { value: Box<str>, datatype: u32, lang: Option<Box<str>> },
+    Iri {
+        prefix: u32,
+        suffix: Box<str>,
+    },
+    Lit {
+        value: Box<str>,
+        datatype: u32,
+        lang: Option<Box<str>>,
+    },
     Blank(Box<str>),
     Triple([Id; 3]),
 }
@@ -177,8 +184,15 @@ enum Stored {
 /// serialising results directly from ids. An IRI is its namespace prefix + local
 /// suffix; a literal its lexical value, datatype IRI and optional language.
 pub enum TermParts<'a> {
-    Iri { prefix: &'a str, suffix: &'a str },
-    Lit { value: &'a str, datatype: &'a str, lang: Option<&'a str> },
+    Iri {
+        prefix: &'a str,
+        suffix: &'a str,
+    },
+    Lit {
+        value: &'a str,
+        datatype: &'a str,
+        lang: Option<&'a str>,
+    },
     Blank(&'a str),
     /// An RDF 1.2 triple term: the ids of its subject/predicate/object (resolve each via
     /// `term_parts`/`term` recursively — a child may also be an inline-integer id).
@@ -267,7 +281,10 @@ pub(crate) fn hash_triple_ids(ids: [Id; 3]) -> u64 {
 // land on the identical id whether interned via the owned-Term path or the borrowed path).
 pub(crate) fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
     match l.direction() {
-        Some(d) => Some(std::borrow::Cow::Owned(format!("{}--{d}", l.language().unwrap_or("")))),
+        Some(d) => Some(std::borrow::Cow::Owned(format!(
+            "{}--{d}",
+            l.language().unwrap_or("")
+        ))),
         None => l.language().map(std::borrow::Cow::Borrowed),
     }
 }
@@ -333,7 +350,11 @@ pub fn parse_base_direction(dir: &str) -> Option<oxrdf::BaseDirection> {
 fn hash_term(t: &Term) -> u64 {
     match t {
         Term::NamedNode(n) => hash_iri(n.as_str()),
-        Term::Literal(l) => hash_lit(l.value(), l.datatype().as_str(), lang_with_dir(l).as_deref()),
+        Term::Literal(l) => hash_lit(
+            l.value(),
+            l.datatype().as_str(),
+            lang_with_dir(l).as_deref(),
+        ),
         Term::BlankNode(b) => hash_blank(b.as_str()),
         _ => 0,
     }
@@ -345,7 +366,11 @@ fn hash_term(t: &Term) -> u64 {
 pub(crate) fn hash_termparts(tp: &TermParts) -> u64 {
     match tp {
         TermParts::Iri { prefix, suffix } => hash_iri_parts(prefix, suffix),
-        TermParts::Lit { value, datatype, lang } => hash_lit(value, datatype, *lang),
+        TermParts::Lit {
+            value,
+            datatype,
+            lang,
+        } => hash_lit(value, datatype, *lang),
         TermParts::Blank(b) => hash_blank(b),
         // Dict-relative (ids of the SOURCE dict): only meaningful within one dict.
         // The cross-dict parts paths (`intern_partials`) reject triple terms explicitly.
@@ -357,7 +382,15 @@ pub(crate) fn hash_termparts(tp: &TermParts) -> u64 {
 fn hash_stored(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> u64 {
     match s {
         Stored::Iri { prefix, suffix } => hash_iri_parts(&prefixes[*prefix as usize], suffix),
-        Stored::Lit { value, datatype, lang } => hash_lit(value, datatypes[*datatype as usize].as_str(), lang.as_deref()),
+        Stored::Lit {
+            value,
+            datatype,
+            lang,
+        } => hash_lit(
+            value,
+            datatypes[*datatype as usize].as_str(),
+            lang.as_deref(),
+        ),
         Stored::Blank(b) => hash_blank(b),
         Stored::Triple(ids) => hash_triple_ids(*ids),
     }
@@ -378,7 +411,9 @@ fn stored_is_iri(s: &Stored, iri: &str, prefixes: &[Box<str>]) -> bool {
     match s {
         Stored::Iri { prefix, suffix } => {
             let p = &prefixes[*prefix as usize];
-            iri.len() == p.len() + suffix.len() && iri.as_bytes().starts_with(p.as_bytes()) && iri[p.len()..] == **suffix
+            iri.len() == p.len() + suffix.len()
+                && iri.as_bytes().starts_with(p.as_bytes())
+                && iri[p.len()..] == **suffix
         }
         _ => false,
     }
@@ -387,17 +422,28 @@ fn stored_is_iri(s: &Stored, iri: &str, prefixes: &[Box<str>]) -> bool {
 #[inline]
 fn stored_is_iri_parts(s: &Stored, prefix: &str, suffix: &str, prefixes: &[Box<str>]) -> bool {
     match s {
-        Stored::Iri { prefix: pid, suffix: suf } => prefixes[*pid as usize].as_ref() == prefix && **suf == *suffix,
+        Stored::Iri {
+            prefix: pid,
+            suffix: suf,
+        } => prefixes[*pid as usize].as_ref() == prefix && **suf == *suffix,
         _ => false,
     }
 }
 
 #[inline]
-fn stored_is_lit(s: &Stored, value: &str, datatype: &str, lang: Option<&str>, datatypes: &[NamedNode]) -> bool {
+fn stored_is_lit(
+    s: &Stored,
+    value: &str,
+    datatype: &str,
+    lang: Option<&str>,
+    datatypes: &[NamedNode],
+) -> bool {
     match s {
-        Stored::Lit { value: v, datatype: dt, lang: lg } => {
-            **v == *value && lg.as_deref() == lang && datatypes[*dt as usize].as_str() == datatype
-        }
+        Stored::Lit {
+            value: v,
+            datatype: dt,
+            lang: lg,
+        } => **v == *value && lg.as_deref() == lang && datatypes[*dt as usize].as_str() == datatype,
         _ => false,
     }
 }
@@ -408,7 +454,13 @@ fn stored_is_lit(s: &Stored, value: &str, datatype: &str, lang: Option<&str>, da
 fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
     match q {
         Term::NamedNode(n) => stored_is_iri(s, n.as_str(), prefixes),
-        Term::Literal(l) => stored_is_lit(s, l.value(), l.datatype().as_str(), lang_with_dir(l).as_deref(), datatypes),
+        Term::Literal(l) => stored_is_lit(
+            s,
+            l.value(),
+            l.datatype().as_str(),
+            lang_with_dir(l).as_deref(),
+            datatypes,
+        ),
         Term::BlankNode(b) => matches!(s, Stored::Blank(x) if **x == *b.as_str()),
         _ => false,
     }
@@ -456,7 +508,11 @@ fn reconstruct_triple(d: &Dict, ids: [Id; 3], depth: u32) -> Term {
         Term::NamedNode(n) => n,
         _ => NamedNode::new_unchecked(OOR_TRIPLE_PREDICATE),
     };
-    Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, term_at_depth(d, ids[2], depth + 1))))
+    Term::Triple(Box::new(oxrdf::Triple::new(
+        subject,
+        predicate,
+        term_at_depth(d, ids[2], depth + 1),
+    )))
 }
 
 // ---- Memory-mapped (out-of-core) dictionary --------------------------------------
@@ -470,8 +526,15 @@ fn reconstruct_triple(d: &Dict, ids: [Id; 3], depth: u32) -> Term {
 /// concatenated record format shared by the in-memory compacted dict and the mmap'd
 /// out-of-core dict). Mirrors [`Stored`] but with `&str` slices into the blob.
 pub(crate) enum StoredRef<'a> {
-    Iri { prefix: u32, suffix: &'a str },
-    Lit { value: &'a str, datatype: u32, lang: Option<&'a str> },
+    Iri {
+        prefix: u32,
+        suffix: &'a str,
+    },
+    Lit {
+        value: &'a str,
+        datatype: u32,
+        lang: Option<&'a str>,
+    },
     Blank(&'a str),
     Triple([Id; 3]),
 }
@@ -511,7 +574,10 @@ fn parse_stored_ref(b: &[u8]) -> StoredRef<'_> {
     match b[0] {
         0 => {
             let prefix = rd_u32(b, &mut p);
-            StoredRef::Iri { prefix, suffix: rd_str(b, &mut p) }
+            StoredRef::Iri {
+                prefix,
+                suffix: rd_str(b, &mut p),
+            }
         }
         1 => {
             let value = rd_str(b, &mut p);
@@ -522,7 +588,11 @@ fn parse_stored_ref(b: &[u8]) -> StoredRef<'_> {
             } else {
                 None
             };
-            StoredRef::Lit { value, datatype, lang }
+            StoredRef::Lit {
+                value,
+                datatype,
+                lang,
+            }
         }
         3 => StoredRef::Triple([rd_u32(b, &mut p), rd_u32(b, &mut p), rd_u32(b, &mut p)]),
         _ => StoredRef::Blank(rd_str(b, &mut p)),
@@ -567,7 +637,10 @@ fn parse_stored_ref_checked(b: &[u8]) -> Option<StoredRef<'_>> {
     Some(match *b.first()? {
         0 => {
             let prefix = rd_u32_checked(b, &mut p)?;
-            StoredRef::Iri { prefix, suffix: rd_str_checked(b, &mut p)? }
+            StoredRef::Iri {
+                prefix,
+                suffix: rd_str_checked(b, &mut p)?,
+            }
         }
         1 => {
             let value = rd_str_checked(b, &mut p)?;
@@ -580,9 +653,17 @@ fn parse_stored_ref_checked(b: &[u8]) -> Option<StoredRef<'_>> {
                 0 => None,
                 _ => return None, // the lang-present flag is a strict 0/1
             };
-            StoredRef::Lit { value, datatype, lang }
+            StoredRef::Lit {
+                value,
+                datatype,
+                lang,
+            }
         }
-        3 => StoredRef::Triple([rd_u32_checked(b, &mut p)?, rd_u32_checked(b, &mut p)?, rd_u32_checked(b, &mut p)?]),
+        3 => StoredRef::Triple([
+            rd_u32_checked(b, &mut p)?,
+            rd_u32_checked(b, &mut p)?,
+            rd_u32_checked(b, &mut p)?,
+        ]),
         2 => StoredRef::Blank(rd_str_checked(b, &mut p)?),
         _ => return None, // unknown record tag
     })
@@ -597,7 +678,11 @@ fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
             iri.push_str(suffix);
             Term::NamedNode(NamedNode::new_unchecked(iri))
         }
-        StoredRef::Lit { value, datatype, lang } => Term::Literal(match lang {
+        StoredRef::Lit {
+            value,
+            datatype,
+            lang,
+        } => Term::Literal(match lang {
             // A stored `lang--dir` slot is an RDF 1.2 directional language-tagged string
             // (see `lang_with_dir`); a plain tag is an ordinary one. [OPUS-4.8] sq-bj7o: the
             // suffix is only a base direction when it is exactly `ltr`/`rtl`
@@ -606,15 +691,23 @@ fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
             // index decodes to a PLAIN language-tagged literal with tag `en--bogus` here AND
             // to `("en--bogus", None)` there. Previously any non-`rtl` suffix was silently
             // coerced to `ltr`, which both fabricated a direction and diverged from the split.
-            Some(l) => match l.split_once("--").and_then(|(tag, dir)| parse_base_direction(dir).map(|d| (tag, d))) {
+            Some(l) => match l
+                .split_once("--")
+                .and_then(|(tag, dir)| parse_base_direction(dir).map(|d| (tag, d)))
+            {
                 Some((tag, dir)) => Literal::new_directional_language_tagged_literal_unchecked(
                     value.to_string(),
                     tag.to_string(),
                     dir,
                 ),
-                None => Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string()),
+                None => {
+                    Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string())
+                }
             },
-            None => Literal::new_typed_literal(value.to_string(), d.datatypes[datatype as usize].clone()),
+            None => Literal::new_typed_literal(
+                value.to_string(),
+                d.datatypes[datatype as usize].clone(),
+            ),
         }),
         StoredRef::Blank(b) => Term::BlankNode(oxrdf::BlankNode::new_unchecked(b.to_string())),
         StoredRef::Triple(ids) => reconstruct_triple(d, ids, 0),
@@ -634,7 +727,10 @@ const MAX_TRIPLE_DEPTH: u32 = 64;
 #[inline]
 fn term_at_depth(d: &Dict, id: Id, depth: u32) -> Term {
     if is_inline(id) {
-        return Term::Literal(Literal::new_typed_literal((id - INLINE_BASE).to_string(), xsd::INTEGER));
+        return Term::Literal(Literal::new_typed_literal(
+            (id - INLINE_BASE).to_string(),
+            xsd::INTEGER,
+        ));
     }
     match d.record(id) {
         StoredRef::Triple(ids) => reconstruct_triple(d, ids, depth),
@@ -644,14 +740,28 @@ fn term_at_depth(d: &Dict, id: Id, depth: u32) -> Term {
 
 /// NOTE: like `stored_eq_term`, `Term::Triple` always misses here — `Dict::lookup`
 /// resolves a triple term's component ids first and matches `StoredRef::Triple` by id.
-fn stored_ref_eq_term(s: &StoredRef, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
+fn stored_ref_eq_term(
+    s: &StoredRef,
+    q: &Term,
+    prefixes: &[Box<str>],
+    datatypes: &[NamedNode],
+) -> bool {
     match (s, q) {
         (StoredRef::Iri { prefix, suffix }, Term::NamedNode(n)) => {
             let p = &prefixes[*prefix as usize];
             let iri = n.as_str();
-            iri.len() == p.len() + suffix.len() && iri.starts_with(p.as_ref()) && iri[p.len()..] == **suffix
+            iri.len() == p.len() + suffix.len()
+                && iri.starts_with(p.as_ref())
+                && iri[p.len()..] == **suffix
         }
-        (StoredRef::Lit { value, datatype, lang }, Term::Literal(l)) => {
+        (
+            StoredRef::Lit {
+                value,
+                datatype,
+                lang,
+            },
+            Term::Literal(l),
+        ) => {
             *value == l.value()
                 && lang.as_deref() == lang_with_dir(l).as_deref()
                 && datatypes[*datatype as usize].as_str() == l.datatype().as_str()
@@ -666,10 +776,19 @@ fn stored_ref_eq_term(s: &StoredRef, q: &Term, prefixes: &[Box<str>], datatypes:
 #[inline]
 fn stored_as_ref(s: &Stored) -> StoredRef<'_> {
     match s {
-        Stored::Iri { prefix, suffix } => StoredRef::Iri { prefix: *prefix, suffix },
-        Stored::Lit { value, datatype, lang } => {
-            StoredRef::Lit { value, datatype: *datatype, lang: lang.as_deref() }
-        }
+        Stored::Iri { prefix, suffix } => StoredRef::Iri {
+            prefix: *prefix,
+            suffix,
+        },
+        Stored::Lit {
+            value,
+            datatype,
+            lang,
+        } => StoredRef::Lit {
+            value,
+            datatype: *datatype,
+            lang: lang.as_deref(),
+        },
         Stored::Blank(b) => StoredRef::Blank(b),
         Stored::Triple(ids) => StoredRef::Triple(*ids),
     }
@@ -680,7 +799,11 @@ fn stored_as_ref(s: &Stored) -> StoredRef<'_> {
 fn hash_stored_ref(s: &StoredRef, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> u64 {
     match s {
         StoredRef::Iri { prefix, suffix } => hash_iri_parts(&prefixes[*prefix as usize], suffix),
-        StoredRef::Lit { value, datatype, lang } => hash_lit(value, datatypes[*datatype as usize].as_str(), *lang),
+        StoredRef::Lit {
+            value,
+            datatype,
+            lang,
+        } => hash_lit(value, datatypes[*datatype as usize].as_str(), *lang),
         StoredRef::Blank(b) => hash_blank(b),
         StoredRef::Triple(ids) => hash_triple_ids(*ids),
     }
@@ -694,26 +817,44 @@ fn stored_ref_is_iri(s: &StoredRef, iri: &str, prefixes: &[Box<str>]) -> bool {
     match s {
         StoredRef::Iri { prefix, suffix } => {
             let p = &prefixes[*prefix as usize];
-            iri.len() == p.len() + suffix.len() && iri.as_bytes().starts_with(p.as_bytes()) && iri[p.len()..] == **suffix
+            iri.len() == p.len() + suffix.len()
+                && iri.as_bytes().starts_with(p.as_bytes())
+                && iri[p.len()..] == **suffix
         }
         _ => false,
     }
 }
 
 #[inline]
-fn stored_ref_is_iri_parts(s: &StoredRef, prefix: &str, suffix: &str, prefixes: &[Box<str>]) -> bool {
+fn stored_ref_is_iri_parts(
+    s: &StoredRef,
+    prefix: &str,
+    suffix: &str,
+    prefixes: &[Box<str>],
+) -> bool {
     match s {
-        StoredRef::Iri { prefix: pid, suffix: suf } => prefixes[*pid as usize].as_ref() == prefix && *suf == suffix,
+        StoredRef::Iri {
+            prefix: pid,
+            suffix: suf,
+        } => prefixes[*pid as usize].as_ref() == prefix && *suf == suffix,
         _ => false,
     }
 }
 
 #[inline]
-fn stored_ref_is_lit(s: &StoredRef, value: &str, datatype: &str, lang: Option<&str>, datatypes: &[NamedNode]) -> bool {
+fn stored_ref_is_lit(
+    s: &StoredRef,
+    value: &str,
+    datatype: &str,
+    lang: Option<&str>,
+    datatypes: &[NamedNode],
+) -> bool {
     match s {
-        StoredRef::Lit { value: v, datatype: dt, lang: lg } => {
-            *v == value && *lg == lang && datatypes[*dt as usize].as_str() == datatype
-        }
+        StoredRef::Lit {
+            value: v,
+            datatype: dt,
+            lang: lg,
+        } => *v == value && *lg == lang && datatypes[*dt as usize].as_str() == datatype,
         _ => false,
     }
 }
@@ -734,16 +875,22 @@ fn hash_tabled(
     if i >= base {
         return hash_stored(&terms[i - base], prefixes, datatypes);
     }
-    let (b, offs) = blob.as_ref().expect("a tabled id below `base` must be a blob id");
-    hash_stored_ref(&parse_stored_ref(&b[offs[i] as usize..]), prefixes, datatypes)
+    let (b, offs) = blob
+        .as_ref()
+        .expect("a tabled id below `base` must be a blob id");
+    hash_stored_ref(
+        &parse_stored_ref(&b[offs[i] as usize..]),
+        prefixes,
+        datatypes,
+    )
 }
 
 /// The mmap-backed term store + lookup index (out-of-core dictionary).
 #[cfg(feature = "mmap")]
 struct MappedDict {
-    blob: memmap2::Mmap,    // concatenated term records (the format `save_mmap` writes)
+    blob: memmap2::Mmap, // concatenated term records (the format `save_mmap` writes)
     offsets: memmap2::Mmap, // [u64; n] byte offset of each term record in `blob`
-    hashes: memmap2::Mmap,  // [u64; n] content hashes, SORTED (for lookup)
+    hashes: memmap2::Mmap, // [u64; n] content hashes, SORTED (for lookup)
     hashids: memmap2::Mmap, // [u32; n] term ids parallel to `hashes`
 }
 
@@ -769,7 +916,9 @@ impl MappedDict {
         // SAFETY: `write_pod_slice` wrote these as raw NATIVE-endian u32 (little-endian on
         // every supported target — pinned by `DICT_ON_DISK_LE_GUARD`, sq-lvw8); mmap base is
         // page-aligned (>= 4). This pointer cast reads them back in the same native order.
-        unsafe { std::slice::from_raw_parts(self.hashids.as_ptr().cast::<u32>(), self.hashids.len() / 4) }
+        unsafe {
+            std::slice::from_raw_parts(self.hashids.as_ptr().cast::<u32>(), self.hashids.len() / 4)
+        }
     }
     /// The parsed term record for a 1-based id.
     ///
@@ -805,7 +954,12 @@ impl MappedDict {
     ///
     /// Any violation is a clean `InvalidData` error — never a panic, never UB.
     #[cfg(feature = "mmap")]
-    fn validate(&self, len: usize, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> std::io::Result<()> {
+    fn validate(
+        &self,
+        len: usize,
+        prefixes: &[Box<str>],
+        datatypes: &[NamedNode],
+    ) -> std::io::Result<()> {
         // [OPUS-4.8] sq-ueuk — delegate to the mmap-free `&[u8]` seam below. The four
         // mmap'd files are passed as plain byte slices (a `memmap2::Mmap` derefs to `&[u8]`),
         // so ALL of the header/length/bounds/record/index logic lives in a pure function
@@ -820,7 +974,15 @@ impl MappedDict {
         // is enforced for the whole persistence format by `DICT_ON_DISK_LE_GUARD` (a build error
         // on a big-endian target), so on every platform this validator actually runs on, the
         // explicit-LE seam and the native-endian readers observe identical integers.
-        validate_dict_bytes(&self.blob, &self.offsets, &self.hashes, &self.hashids, len, prefixes, datatypes)
+        validate_dict_bytes(
+            &self.blob,
+            &self.offsets,
+            &self.hashes,
+            &self.hashids,
+            len,
+            prefixes,
+            datatypes,
+        )
     }
 }
 
@@ -862,15 +1024,30 @@ fn validate_dict_bytes(
     prefixes: &[Box<str>],
     datatypes: &[NamedNode],
 ) -> std::io::Result<()> {
-    let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("mmap dict: {m}"));
-    if offsets.len() != len.checked_mul(8).ok_or_else(|| bad("term count overflows offset-array size"))? {
-        return Err(bad("dict-offs.bin length is not term_count * 8 (corrupt or truncated)"));
+    let bad =
+        |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("mmap dict: {m}"));
+    if offsets.len()
+        != len
+            .checked_mul(8)
+            .ok_or_else(|| bad("term count overflows offset-array size"))?
+    {
+        return Err(bad(
+            "dict-offs.bin length is not term_count * 8 (corrupt or truncated)",
+        ));
     }
     if hashes.len() != len * 8 {
-        return Err(bad("dict-hash.bin length is not term_count * 8 (corrupt or truncated)"));
+        return Err(bad(
+            "dict-hash.bin length is not term_count * 8 (corrupt or truncated)",
+        ));
     }
-    if hashids.len() != len.checked_mul(4).ok_or_else(|| bad("term count overflows hashid-array size"))? {
-        return Err(bad("dict-hid.bin length is not term_count * 4 (corrupt or truncated)"));
+    if hashids.len()
+        != len
+            .checked_mul(4)
+            .ok_or_else(|| bad("term count overflows hashid-array size"))?
+    {
+        return Err(bad(
+            "dict-hid.bin length is not term_count * 4 (corrupt or truncated)",
+        ));
     }
     let len_id = u32::try_from(len).map_err(|_| bad("term count exceeds u32 id space"))?;
     // Read the `idx`-th little-endian `u64` offset directly from the byte region. The length
@@ -887,8 +1064,11 @@ fn validate_dict_bytes(
     let mut triple_sp: Vec<(Id, Id, Id)> = Vec::new();
     for idx in 0..len {
         let own_id = (idx as Id) + 1; // records are stored in 1-based id order
-        let off = offset_at(idx).ok_or_else(|| bad("offset-array index out of range (corrupt or truncated)"))?;
-        let rec = blob.get(off..).ok_or_else(|| bad("term offset is past the end of dict-terms.bin"))?;
+        let off = offset_at(idx)
+            .ok_or_else(|| bad("offset-array index out of range (corrupt or truncated)"))?;
+        let rec = blob
+            .get(off..)
+            .ok_or_else(|| bad("term offset is past the end of dict-terms.bin"))?;
         let parsed = parse_stored_ref_checked(rec)
             .ok_or_else(|| bad("a term record is malformed (bad tag/length or non-UTF-8 bytes)"))?;
         // Range-check the table indices / component ids the record carries: these are
@@ -902,7 +1082,9 @@ fn validate_dict_bytes(
             }
             StoredRef::Lit { datatype, .. } => {
                 if datatype as usize >= datatypes.len() {
-                    return Err(bad("a literal record references an out-of-range datatype id"));
+                    return Err(bad(
+                        "a literal record references an out-of-range datatype id",
+                    ));
                 }
             }
             StoredRef::Triple(ids) => {
@@ -944,7 +1126,11 @@ fn validate_dict_bytes(
     for (_own, s, p) in triple_sp {
         match record_kind(s) {
             Some(0 | 2) => {} // IRI or blank — valid subject
-            _ => return Err(bad("a quoted-triple subject component is not an IRI or blank node")),
+            _ => {
+                return Err(bad(
+                    "a quoted-triple subject component is not an IRI or blank node",
+                ))
+            }
         }
         match record_kind(p) {
             Some(0) => {} // IRI — valid predicate
@@ -959,7 +1145,9 @@ fn validate_dict_bytes(
     for chunk in hashids.chunks_exact(4) {
         let id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         if id == 0 || id > len_id {
-            return Err(bad("dict-hid.bin contains an out-of-range term id (corrupt lookup index)"));
+            return Err(bad(
+                "dict-hid.bin contains an out-of-range term id (corrupt lookup index)",
+            ));
         }
     }
     Ok(())
@@ -1007,7 +1195,10 @@ mod kani_proofs {
         kani::assume(v <= INLINE_MAX);
         let id = inline_id_of_int(v as i64)
             .expect("inline_id_of_int must return Some for every v in [0, INLINE_MAX]");
-        assert!(is_inline(id), "inline_id_of_int result must satisfy is_inline");
+        assert!(
+            is_inline(id),
+            "inline_id_of_int result must satisfy is_inline"
+        );
         assert_eq!(
             id - INLINE_BASE,
             v,
@@ -1045,17 +1236,32 @@ mod kani_proofs {
     #[kani::proof]
     fn id_partition_disjoint() {
         let id: u32 = kani::any();
-        let in_no_id       = id == NO_ID;
-        let in_dict        = id > NO_ID && id < INLINE_BASE;
-        let in_inline      = is_inline(id);
+        let in_no_id = id == NO_ID;
+        let in_dict = id > NO_ID && id < INLINE_BASE;
+        let in_inline = is_inline(id);
         let in_local_vocab = id > INLINE_BASE + INLINE_MAX;
         // Disjointness: every pair is mutually exclusive.
-        assert!(!(in_no_id && in_dict),         "NO_ID region overlaps dict region");
-        assert!(!(in_no_id && in_inline),       "NO_ID region overlaps inline region");
-        assert!(!(in_no_id && in_local_vocab),  "NO_ID region overlaps local-vocab region");
-        assert!(!(in_dict && in_inline),        "dict region overlaps inline region");
-        assert!(!(in_dict && in_local_vocab),   "dict region overlaps local-vocab region");
-        assert!(!(in_inline && in_local_vocab), "inline region overlaps local-vocab region");
+        assert!(!(in_no_id && in_dict), "NO_ID region overlaps dict region");
+        assert!(
+            !(in_no_id && in_inline),
+            "NO_ID region overlaps inline region"
+        );
+        assert!(
+            !(in_no_id && in_local_vocab),
+            "NO_ID region overlaps local-vocab region"
+        );
+        assert!(
+            !(in_dict && in_inline),
+            "dict region overlaps inline region"
+        );
+        assert!(
+            !(in_dict && in_local_vocab),
+            "dict region overlaps local-vocab region"
+        );
+        assert!(
+            !(in_inline && in_local_vocab),
+            "inline region overlaps local-vocab region"
+        );
         // Exhaustiveness: every id belongs to at least one region (combined with
         // disjointness this gives exactly one).
         assert!(
@@ -1079,8 +1285,14 @@ mod kani_proofs {
         // Every one of the four regions has at least one member — else a "four-region"
         // disjointness/exhaustiveness proof is secretly a three- or two-region one.
         assert!(NO_ID == 0, "the NO_ID region is the singleton {0}");
-        assert!(INLINE_BASE > 1, "the dict region [1, INLINE_BASE) is non-empty");
-        assert!(INLINE_MAX > 0, "the inline region [INLINE_BASE, INLINE_BASE + INLINE_MAX] is non-empty");
+        assert!(
+            INLINE_BASE > 1,
+            "the dict region [1, INLINE_BASE) is non-empty"
+        );
+        assert!(
+            INLINE_MAX > 0,
+            "the inline region [INLINE_BASE, INLINE_BASE + INLINE_MAX] is non-empty"
+        );
         // The local-vocab region (INLINE_BASE + INLINE_MAX, u32::MAX] is non-empty: its low
         // bound is strictly below u32::MAX. Widen to u64 so the sum cannot wrap.
         assert!(
@@ -1090,7 +1302,10 @@ mod kani_proofs {
         // Sharp boundaries: the ends of the inline region are inline; the ids just outside
         // it (the last dict id, the first local-vocab id) are NOT.
         assert!(is_inline(INLINE_BASE) && is_inline(INLINE_BASE + INLINE_MAX));
-        assert!(!is_inline(INLINE_BASE - 1), "the last dict id must not be classed inline");
+        assert!(
+            !is_inline(INLINE_BASE - 1),
+            "the last dict id must not be classed inline"
+        );
         assert!(
             !is_inline(INLINE_BASE + INLINE_MAX + 1),
             "the first local-vocab id must not be classed inline"
@@ -1100,7 +1315,10 @@ mod kani_proofs {
         // boundary `INLINE_MAX` is not silently excluded by the `assume`.
         let v: u32 = kani::any();
         kani::assume(v <= INLINE_MAX);
-        kani::cover!(v == INLINE_MAX, "the round-trip domain reaches its inline boundary");
+        kani::cover!(
+            v == INLINE_MAX,
+            "the round-trip domain reaches its inline boundary"
+        );
         kani::cover!(v == 0, "the round-trip domain reaches zero");
     }
 
@@ -1177,7 +1395,9 @@ mod kani_proofs {
         }
         let prefixes: [Box<str>; 1] = [Box::from("p")];
         let datatypes = [NamedNode::new_unchecked("http://example.org/dt")];
-        let _ = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, LEN, &prefixes, &datatypes);
+        let _ = validate_dict_bytes(
+            &blob, &offsets, &hashes, &hashids, LEN, &prefixes, &datatypes,
+        );
     }
 
     /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern) for the two mmap
@@ -1246,15 +1466,22 @@ impl Dict {
     #[inline]
     fn push(&mut self, hash: u64, stored: Stored) -> Id {
         let id = (self.base + self.terms.len()) as Id + 1; // 1-based
-        // Enforced in release too: once the (non-inline) dictionary reaches INLINE_BASE
-        // distinct terms, new ids would collide with the inline-integer range and decode
-        // as integers — silent corruption. 2^31 ≈ 2.1B distinct non-integer terms is the
-        // hard capacity limit of the u32 scheme; fail loudly (widen Id to u64).
+                                                           // Enforced in release too: once the (non-inline) dictionary reaches INLINE_BASE
+                                                           // distinct terms, new ids would collide with the inline-integer range and decode
+                                                           // as integers — silent corruption. 2^31 ≈ 2.1B distinct non-integer terms is the
+                                                           // hard capacity limit of the u32 scheme; fail loudly (widen Id to u64).
         assert!(id < INLINE_BASE, "dictionary exceeded the id capacity (2^31 distinct non-integer terms); widen Id to u64");
         self.terms.push(stored);
-        let (base, terms, blob, prefixes, datatypes) =
-            (self.base, &self.terms, &self.blob, &self.prefixes, &self.datatypes);
-        self.table.insert_unique(hash, id, |&i| hash_tabled(i, base, terms, blob, prefixes, datatypes));
+        let (base, terms, blob, prefixes, datatypes) = (
+            self.base,
+            &self.terms,
+            &self.blob,
+            &self.prefixes,
+            &self.datatypes,
+        );
+        self.table.insert_unique(hash, id, |&i| {
+            hash_tabled(i, base, terms, blob, prefixes, datatypes)
+        });
         id
     }
 
@@ -1283,7 +1510,10 @@ impl Dict {
     /// so the bulk-load hot path is unchanged beyond one predictable comparison.
     #[inline]
     fn tabled_base_ref(&self, id: Id) -> StoredRef<'_> {
-        let (blob, offs) = self.blob.as_ref().expect("a tabled id below `base` requires the blob");
+        let (blob, offs) = self
+            .blob
+            .as_ref()
+            .expect("a tabled id below `base` requires the blob");
         parse_stored_ref(&blob[offs[(id - 1) as usize] as usize..])
     }
 
@@ -1311,9 +1541,21 @@ impl Dict {
     fn tabled_is_lit(&self, id: Id, value: &str, datatype: &str, lang: Option<&str>) -> bool {
         let i = (id - 1) as usize;
         if i >= self.base {
-            stored_is_lit(&self.terms[i - self.base], value, datatype, lang, &self.datatypes)
+            stored_is_lit(
+                &self.terms[i - self.base],
+                value,
+                datatype,
+                lang,
+                &self.datatypes,
+            )
         } else {
-            stored_ref_is_lit(&self.tabled_base_ref(id), value, datatype, lang, &self.datatypes)
+            stored_ref_is_lit(
+                &self.tabled_base_ref(id),
+                value,
+                datatype,
+                lang,
+                &self.datatypes,
+            )
         }
     }
 
@@ -1341,9 +1583,19 @@ impl Dict {
     fn tabled_eq_term(&self, id: Id, term: &Term) -> bool {
         let i = (id - 1) as usize;
         if i >= self.base {
-            stored_eq_term(&self.terms[i - self.base], term, &self.prefixes, &self.datatypes)
+            stored_eq_term(
+                &self.terms[i - self.base],
+                term,
+                &self.prefixes,
+                &self.datatypes,
+            )
         } else {
-            stored_ref_eq_term(&self.tabled_base_ref(id), term, &self.prefixes, &self.datatypes)
+            stored_ref_eq_term(
+                &self.tabled_base_ref(id),
+                term,
+                &self.prefixes,
+                &self.datatypes,
+            )
         }
     }
 
@@ -1388,13 +1640,17 @@ impl Dict {
                 return Some(id);
             }
         }
-        self.table.find(hash, |&id| self.tabled_is_iri(id, iri)).copied()
+        self.table
+            .find(hash, |&id| self.tabled_is_iri(id, iri))
+            .copied()
     }
 
     #[inline]
     fn find_iri_parts(&self, hash: u64, prefix: &str, suffix: &str) -> Option<Id> {
         #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_iri_parts(s, prefix, suffix, &self.prefixes)) {
+        if let Some(id) = self.mapped_find(hash, |s| {
+            stored_ref_is_iri_parts(s, prefix, suffix, &self.prefixes)
+        }) {
             return Some(id);
         }
         if let Some(f) = &self.frozen {
@@ -1402,13 +1658,17 @@ impl Dict {
                 return Some(id);
             }
         }
-        self.table.find(hash, |&id| self.tabled_is_iri_parts(id, prefix, suffix)).copied()
+        self.table
+            .find(hash, |&id| self.tabled_is_iri_parts(id, prefix, suffix))
+            .copied()
     }
 
     #[inline]
     fn find_lit(&self, hash: u64, value: &str, datatype: &str, lang: Option<&str>) -> Option<Id> {
         #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_lit(s, value, datatype, lang, &self.datatypes)) {
+        if let Some(id) = self.mapped_find(hash, |s| {
+            stored_ref_is_lit(s, value, datatype, lang, &self.datatypes)
+        }) {
             return Some(id);
         }
         if let Some(f) = &self.frozen {
@@ -1416,13 +1676,17 @@ impl Dict {
                 return Some(id);
             }
         }
-        self.table.find(hash, |&id| self.tabled_is_lit(id, value, datatype, lang)).copied()
+        self.table
+            .find(hash, |&id| self.tabled_is_lit(id, value, datatype, lang))
+            .copied()
     }
 
     #[inline]
     fn find_blank(&self, hash: u64, label: &str) -> Option<Id> {
         #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Blank(b) if *b == label)) {
+        if let Some(id) =
+            self.mapped_find(hash, |s| matches!(s, StoredRef::Blank(b) if *b == label))
+        {
             return Some(id);
         }
         if let Some(f) = &self.frozen {
@@ -1430,13 +1694,16 @@ impl Dict {
                 return Some(id);
             }
         }
-        self.table.find(hash, |&id| self.tabled_is_blank(id, label)).copied()
+        self.table
+            .find(hash, |&id| self.tabled_is_blank(id, label))
+            .copied()
     }
 
     #[inline]
     fn find_triple_ids(&self, hash: u64, ids: [Id; 3]) -> Option<Id> {
         #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Triple(x) if *x == ids)) {
+        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Triple(x) if *x == ids))
+        {
             return Some(id);
         }
         if let Some(f) = &self.frozen {
@@ -1444,13 +1711,17 @@ impl Dict {
                 return Some(id);
             }
         }
-        self.table.find(hash, |&id| self.tabled_is_triple(id, ids)).copied()
+        self.table
+            .find(hash, |&id| self.tabled_is_triple(id, ids))
+            .copied()
     }
 
     #[inline]
     fn find_term(&self, hash: u64, term: &Term) -> Option<Id> {
         #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| stored_ref_eq_term(s, term, &self.prefixes, &self.datatypes)) {
+        if let Some(id) = self.mapped_find(hash, |s| {
+            stored_ref_eq_term(s, term, &self.prefixes, &self.datatypes)
+        }) {
             return Some(id);
         }
         if let Some(f) = &self.frozen {
@@ -1458,7 +1729,9 @@ impl Dict {
                 return Some(id);
             }
         }
-        self.table.find(hash, |&id| self.tabled_eq_term(id, term)).copied()
+        self.table
+            .find(hash, |&id| self.tabled_eq_term(id, term))
+            .copied()
     }
 
     /// Interns an IRI term from its string, returning its id.
@@ -1470,7 +1743,13 @@ impl Dict {
         }
         let (p, suffix) = split_iri(iri);
         let prefix = self.intern_prefix(p);
-        self.push(hash, Stored::Iri { prefix, suffix: suffix.into() })
+        self.push(
+            hash,
+            Stored::Iri {
+                prefix,
+                suffix: suffix.into(),
+            },
+        )
     }
 
     /// Interns an IRI already split into (prefix, suffix) — used by the parallel-load
@@ -1482,7 +1761,13 @@ impl Dict {
             return id;
         }
         let prefix = self.intern_prefix(prefix);
-        self.push(hash, Stored::Iri { prefix, suffix: suffix.into() })
+        self.push(
+            hash,
+            Stored::Iri {
+                prefix,
+                suffix: suffix.into(),
+            },
+        )
     }
 
     /// Interns a literal from its components, returning its id. Canonical small
@@ -1497,7 +1782,14 @@ impl Dict {
             return id;
         }
         let datatype = self.intern_datatype(datatype);
-        self.push(hash, Stored::Lit { value: value.into(), datatype, lang: lang.map(Into::into) })
+        self.push(
+            hash,
+            Stored::Lit {
+                value: value.into(),
+                datatype,
+                lang: lang.map(Into::into),
+            },
+        )
     }
 
     /// Interns a blank node from its label, returning its id.
@@ -1534,7 +1826,11 @@ impl Dict {
     pub fn intern(&mut self, term: &Term) -> Id {
         match term {
             Term::NamedNode(n) => self.intern_iri(n.as_str()),
-            Term::Literal(l) => self.intern_lit(l.value(), l.datatype().as_str(), lang_with_dir(l).as_deref()),
+            Term::Literal(l) => self.intern_lit(
+                l.value(),
+                l.datatype().as_str(),
+                lang_with_dir(l).as_deref(),
+            ),
             Term::BlankNode(b) => self.intern_blank(b.as_str()),
             Term::Triple(t) => {
                 let s = match t.subject {
@@ -1561,7 +1857,11 @@ impl Dict {
     fn intern_parts(&mut self, tp: &TermParts) -> Id {
         match tp {
             TermParts::Iri { prefix, suffix } => self.intern_iri_parts(prefix, suffix),
-            TermParts::Lit { value, datatype, lang } => self.intern_lit(value, datatype, *lang),
+            TermParts::Lit {
+                value,
+                datatype,
+                lang,
+            } => self.intern_lit(value, datatype, *lang),
             TermParts::Blank(b) => self.intern_blank(b),
             TermParts::Triple(_) => {
                 panic!("RDF 1.2 triple terms must be interned structurally (intern_triple_ids), not via the parts-based leaf path")
@@ -1577,8 +1877,12 @@ impl Dict {
         // find the triple by its component ids.
         if let Term::Triple(t) = term {
             let s = match t.subject {
-                oxrdf::NamedOrBlankNode::NamedNode(ref n) => self.lookup(&Term::NamedNode(n.clone())),
-                oxrdf::NamedOrBlankNode::BlankNode(ref b) => self.lookup(&Term::BlankNode(b.clone())),
+                oxrdf::NamedOrBlankNode::NamedNode(ref n) => {
+                    self.lookup(&Term::NamedNode(n.clone()))
+                }
+                oxrdf::NamedOrBlankNode::BlankNode(ref b) => {
+                    self.lookup(&Term::BlankNode(b.clone()))
+                }
             };
             let p = self.lookup(&Term::NamedNode(t.predicate.clone()));
             let o = self.lookup(&t.object);
@@ -1626,10 +1930,19 @@ impl Dict {
         // The &str slices borrow the mmap/blob record store (or the arena), plus the
         // in-RAM prefix+datatype tables, all owned by `self` for `'_` — zero-copy.
         match self.record(id) {
-            StoredRef::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[prefix as usize], suffix },
-            StoredRef::Lit { value, datatype, lang } => {
-                TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
-            }
+            StoredRef::Iri { prefix, suffix } => TermParts::Iri {
+                prefix: &self.prefixes[prefix as usize],
+                suffix,
+            },
+            StoredRef::Lit {
+                value,
+                datatype,
+                lang,
+            } => TermParts::Lit {
+                value,
+                datatype: self.datatypes[datatype as usize].as_str(),
+                lang,
+            },
             StoredRef::Blank(b) => TermParts::Blank(b),
             StoredRef::Triple(ids) => TermParts::Triple(ids),
         }
@@ -1649,11 +1962,11 @@ impl Dict {
             return None;
         }
         match self.record(id) {
-            StoredRef::Lit { value, datatype, lang: None }
-                if self.datatypes[datatype as usize].as_ref() == xsd::STRING =>
-            {
-                Some(value)
-            }
+            StoredRef::Lit {
+                value,
+                datatype,
+                lang: None,
+            } if self.datatypes[datatype as usize].as_ref() == xsd::STRING => Some(value),
             _ => None,
         }
     }
@@ -1664,7 +1977,10 @@ impl Dict {
     #[inline]
     pub fn term(&self, id: Id) -> Term {
         if is_inline(id) {
-            return Term::Literal(Literal::new_typed_literal((id - INLINE_BASE).to_string(), xsd::INTEGER));
+            return Term::Literal(Literal::new_typed_literal(
+                (id - INLINE_BASE).to_string(),
+                xsd::INTEGER,
+            ));
         }
         reconstruct_ref(self, &self.record(id))
     }
@@ -1702,7 +2018,10 @@ impl Dict {
         if let Some(m) = &self.mapped {
             return m.stored(id);
         }
-        let (blob, offs) = self.blob.as_ref().expect("an id below `base` requires the blob or mmap store");
+        let (blob, offs) = self
+            .blob
+            .as_ref()
+            .expect("an id below `base` requires the blob or mmap store");
         match offs.get(i) {
             Some(&off) => parse_stored_ref(&blob[off as usize..]),
             None => OOR_TERM,
@@ -1751,21 +2070,43 @@ impl Dict {
     pub fn merge_remap(&mut self, other: &Dict) -> Vec<Id> {
         self.terms.reserve(other.terms.len());
         {
-            let (base, terms, blob, prefixes, datatypes) =
-                (self.base, &self.terms, &self.blob, &self.prefixes, &self.datatypes);
-            self.table
-                .reserve(other.terms.len(), |&i| hash_tabled(i, base, terms, blob, prefixes, datatypes));
+            let (base, terms, blob, prefixes, datatypes) = (
+                self.base,
+                &self.terms,
+                &self.blob,
+                &self.prefixes,
+                &self.datatypes,
+            );
+            self.table.reserve(other.terms.len(), |&i| {
+                hash_tabled(i, base, terms, blob, prefixes, datatypes)
+            });
         }
         let mut remap: Vec<Id> = Vec::with_capacity(other.terms.len());
         for s in &other.terms {
             let id = match s {
-                Stored::Iri { prefix, suffix } => self.intern_iri_parts(&other.prefixes[*prefix as usize], suffix),
-                Stored::Lit { value, datatype, lang } => self.intern_lit(value, other.datatypes[*datatype as usize].as_str(), lang.as_deref()),
+                Stored::Iri { prefix, suffix } => {
+                    self.intern_iri_parts(&other.prefixes[*prefix as usize], suffix)
+                }
+                Stored::Lit {
+                    value,
+                    datatype,
+                    lang,
+                } => self.intern_lit(
+                    value,
+                    other.datatypes[*datatype as usize].as_str(),
+                    lang.as_deref(),
+                ),
                 Stored::Blank(b) => self.intern_blank(b),
                 // A triple term's components always precede it in `other` (interning
                 // pushes children first), so their remapped ids are already known.
                 Stored::Triple(ids) => {
-                    let m = |id: Id| if is_inline(id) { id } else { remap[(id - 1) as usize] };
+                    let m = |id: Id| {
+                        if is_inline(id) {
+                            id
+                        } else {
+                            remap[(id - 1) as usize]
+                        }
+                    };
                     self.intern_triple_ids([m(ids[0]), m(ids[1]), m(ids[2])])
                 }
             };
@@ -1966,15 +2307,24 @@ impl Dict {
     /// hashing (the dominant cost) runs in parallel; the inserts are a fast serial pass
     /// (the table is pre-sized, so no resize re-hashing). Arena-mode only.
     pub fn build_table(&mut self) {
-        debug_assert!(self.base == 0 && self.blob.is_none(), "build_table is arena-mode only");
+        debug_assert!(
+            self.base == 0 && self.blob.is_none(),
+            "build_table is arena-mode only"
+        );
         let hashes: Vec<u64> = {
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
-                self.terms.par_iter().map(|t| hash_stored(t, &self.prefixes, &self.datatypes)).collect()
+                self.terms
+                    .par_iter()
+                    .map(|t| hash_stored(t, &self.prefixes, &self.datatypes))
+                    .collect()
             }
             #[cfg(not(feature = "parallel"))]
-            self.terms.iter().map(|t| hash_stored(t, &self.prefixes, &self.datatypes)).collect()
+            self.terms
+                .iter()
+                .map(|t| hash_stored(t, &self.prefixes, &self.datatypes))
+                .collect()
         };
         let mut table = HashTable::with_capacity(self.terms.len());
         for (i, &h) in hashes.iter().enumerate() {
@@ -1989,7 +2339,10 @@ impl Dict {
     /// [`save_mmap`](Self::save_mmap), which handles appended terms too.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::Write;
-        assert_eq!(self.base, 0, "Dict::save is arena-mode only; use save_mmap for blob/mmap'd (or grown) dicts");
+        assert_eq!(
+            self.base, 0,
+            "Dict::save is arena-mode only; use save_mmap for blob/mmap'd (or grown) dicts"
+        );
         let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         w.write_all(&(self.prefixes.len() as u32).to_le_bytes())?;
         for p in &self.prefixes {
@@ -2007,7 +2360,11 @@ impl Dict {
                     w.write_all(&prefix.to_le_bytes())?;
                     write_str(&mut w, suffix)?;
                 }
-                Stored::Lit { value, datatype, lang } => {
+                Stored::Lit {
+                    value,
+                    datatype,
+                    lang,
+                } => {
                     w.write_all(&[1])?;
                     write_str(&mut w, value)?;
                     w.write_all(&datatype.to_le_bytes())?;
@@ -2071,16 +2428,32 @@ impl Dict {
         let mut terms = Vec::with_capacity(nt.min(file_len));
         for _ in 0..nt {
             terms.push(match read_u8(&mut r)? {
-                0 => Stored::Iri { prefix: read_u32(&mut r)?, suffix: read_str_bounded_io(&mut r, file_len)? },
+                0 => Stored::Iri {
+                    prefix: read_u32(&mut r)?,
+                    suffix: read_str_bounded_io(&mut r, file_len)?,
+                },
                 1 => {
                     let value = read_str_bounded_io(&mut r, file_len)?;
                     let datatype = read_u32(&mut r)?;
-                    let lang = if read_u8(&mut r)? == 1 { Some(read_str_bounded_io(&mut r, file_len)?) } else { None };
-                    Stored::Lit { value, datatype, lang }
+                    let lang = if read_u8(&mut r)? == 1 {
+                        Some(read_str_bounded_io(&mut r, file_len)?)
+                    } else {
+                        None
+                    };
+                    Stored::Lit {
+                        value,
+                        datatype,
+                        lang,
+                    }
                 }
                 2 => Stored::Blank(read_str_bounded_io(&mut r, file_len)?),
                 3 => Stored::Triple([read_u32(&mut r)?, read_u32(&mut r)?, read_u32(&mut r)?]),
-                other => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad term tag {other}"))),
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("bad term tag {other}"),
+                    ))
+                }
             });
         }
         let t_parse = t0.elapsed();
@@ -2090,7 +2463,9 @@ impl Dict {
         for (i, t) in terms.iter().enumerate() {
             let id = (i as Id) + 1;
             let hash = hash_stored(t, &prefixes, &datatypes);
-            table.insert_unique(hash, id, |&j| hash_stored(&terms[(j - 1) as usize], &prefixes, &datatypes));
+            table.insert_unique(hash, id, |&j| {
+                hash_stored(&terms[(j - 1) as usize], &prefixes, &datatypes)
+            });
         }
         if timing {
             eprintln!(
@@ -2227,7 +2602,9 @@ impl Dict {
         let nd = read_u32(&mut r)? as usize;
         let mut datatypes = Vec::with_capacity(nd.min(meta_len / 4));
         for _ in 0..nd {
-            datatypes.push(NamedNode::new_unchecked(String::from(read_str_bounded(&mut r, meta_len)?)));
+            datatypes.push(NamedNode::new_unchecked(String::from(read_str_bounded(
+                &mut r, meta_len,
+            )?)));
         }
         let mut nbuf = [0u8; 8];
         r.read_exact(&mut nbuf)?;
@@ -2249,7 +2626,13 @@ impl Dict {
         // BEFORE handing back a Dict whose `term`/`lookup` paths would otherwise
         // dereference them unchecked.
         mapped.validate(len, &prefixes, &datatypes)?;
-        Ok(Dict { prefixes, datatypes, mapped: Some(std::sync::Arc::new(mapped)), base: len, ..Default::default() })
+        Ok(Dict {
+            prefixes,
+            datatypes,
+            mapped: Some(std::sync::Arc::new(mapped)),
+            base: len,
+            ..Default::default()
+        })
     }
 
     /// A structural FORK of this dictionary (the dict half of `Graph::fork`): the
@@ -2320,10 +2703,19 @@ impl Dict {
         let mut terms: Vec<Stored> = Vec::with_capacity(n);
         for id in 1..=n as Id {
             terms.push(match self.record(id) {
-                StoredRef::Iri { prefix, suffix } => Stored::Iri { prefix, suffix: suffix.into() },
-                StoredRef::Lit { value, datatype, lang } => {
-                    Stored::Lit { value: value.into(), datatype, lang: lang.map(Into::into) }
-                }
+                StoredRef::Iri { prefix, suffix } => Stored::Iri {
+                    prefix,
+                    suffix: suffix.into(),
+                },
+                StoredRef::Lit {
+                    value,
+                    datatype,
+                    lang,
+                } => Stored::Lit {
+                    value: value.into(),
+                    datatype,
+                    lang: lang.map(Into::into),
+                },
                 StoredRef::Blank(b) => Stored::Blank(b.into()),
                 StoredRef::Triple(ids) => Stored::Triple(ids),
             });
@@ -2425,7 +2817,11 @@ impl Dict {
             + self.terms.iter().map(stored_owned_bytes).sum::<usize>();
         #[cfg(feature = "mmap")]
         if self.mapped.is_some() {
-            let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum();
+            let prefix_bytes: usize = self
+                .prefixes
+                .iter()
+                .map(|p| p.len() + std::mem::size_of::<Box<str>>())
+                .sum();
             let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
             let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
             return frozen_base + appended + table + prefix_bytes + dt_bytes;
@@ -2433,15 +2829,30 @@ impl Dict {
         // Compacted (blob) mode: the term blob + u32 offsets + the kept hash table, plus
         // the small prefix/datatype tables — no per-`Stored` slot or per-`Box<str>` term.
         if let Some((blob, offs)) = &self.blob {
-            let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum::<usize>() * 2;
+            let prefix_bytes: usize = self
+                .prefixes
+                .iter()
+                .map(|p| p.len() + std::mem::size_of::<Box<str>>())
+                .sum::<usize>()
+                * 2;
             let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
             let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
-            return frozen_base + appended + blob.capacity() + offs.capacity() * 4 + table + prefix_bytes + dt_bytes;
+            return frozen_base
+                + appended
+                + blob.capacity()
+                + offs.capacity() * 4
+                + table
+                + prefix_bytes
+                + dt_bytes;
         }
         let term_slots = self.terms.capacity() * std::mem::size_of::<Stored>();
         let owned: usize = self.terms.iter().map(stored_owned_bytes).sum();
-        let prefix_bytes: usize =
-            self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum::<usize>() * 2; // Vec + map key
+        let prefix_bytes: usize = self
+            .prefixes
+            .iter()
+            .map(|p| p.len() + std::mem::size_of::<Box<str>>())
+            .sum::<usize>()
+            * 2; // Vec + map key
         let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
         let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
         frozen_base + term_slots + owned + prefix_bytes + dt_bytes + table
@@ -2465,7 +2876,11 @@ pub(crate) fn write_record(w: &mut impl std::io::Write, t: &StoredRef) -> std::i
             write_str(w, suffix)?;
             1 + 4 + 4 + suffix.len() as u64
         }
-        StoredRef::Lit { value, datatype, lang } => {
+        StoredRef::Lit {
+            value,
+            datatype,
+            lang,
+        } => {
             w.write_all(&[1])?;
             write_str(w, value)?;
             w.write_all(&datatype.to_le_bytes())?;
@@ -2544,7 +2959,9 @@ fn write_pod_slice<T: Copy>(path: &std::path::Path, data: &[T]) -> std::io::Resu
     // at the native-endian raw byte write, rather than silently emit a BE file.
     let () = DICT_ON_DISK_LE_GUARD;
     // SAFETY: T is u32/u64 (POD); we only read its bytes.
-    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data))
+    };
     std::fs::write(path, bytes)
 }
 
@@ -2578,7 +2995,12 @@ fn read_str_bounded_io(r: &mut impl std::io::Read, max: usize) -> std::io::Resul
     r.read_exact(&mut buf)?;
     String::from_utf8(buf)
         .map(String::into_boxed_str)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf-8 in dictionary"))
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid utf-8 in dictionary",
+            )
+        })
 }
 
 /// [OPUS-4.8] sq-znld — `read_str` for UNTRUSTED metadata: rejects a length larger than
@@ -2598,7 +3020,12 @@ fn read_str_bounded(r: &mut impl std::io::Read, max: usize) -> std::io::Result<B
     r.read_exact(&mut buf)?;
     String::from_utf8(buf)
         .map(String::into_boxed_str)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf-8 in dictionary"))
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid utf-8 in dictionary",
+            )
+        })
 }
 
 /// The owned heap bytes of a compact stored term's string content (suffix / value /
@@ -2690,19 +3117,23 @@ impl ShardedDict {
             let s = (hash_term(&t) % n as u64) as usize;
             buckets[s].push((tag, idx, t));
         }
-        let intern_bucket = |s: usize, shard: &mut Dict, bucket: Vec<(u32, Id, Term)>| -> Vec<(u32, Id, Id)> {
-            bucket
-                .into_iter()
-                .map(|(tag, idx, t)| {
-                    let lid = shard.intern(&t);
-                    // [OPUS-4.8] Always-on (not debug_assert): a shard overflowing its STRIDE
-                    // makes temp-id ranges of adjacent shards overlap, which silently corrupts
-                    // the order-preserving remap (`remap_sharded`) in release builds. Fail hard.
-                    assert!(lid < stride, "shard {s} exceeded STRIDE ({stride}) — raise shard count / widen Id");
-                    (tag, idx, (s as u32) * stride + lid)
-                })
-                .collect()
-        };
+        let intern_bucket =
+            |s: usize, shard: &mut Dict, bucket: Vec<(u32, Id, Term)>| -> Vec<(u32, Id, Id)> {
+                bucket
+                    .into_iter()
+                    .map(|(tag, idx, t)| {
+                        let lid = shard.intern(&t);
+                        // [OPUS-4.8] Always-on (not debug_assert): a shard overflowing its STRIDE
+                        // makes temp-id ranges of adjacent shards overlap, which silently corrupts
+                        // the order-preserving remap (`remap_sharded`) in release builds. Fail hard.
+                        assert!(
+                            lid < stride,
+                            "shard {s} exceeded STRIDE ({stride}) — raise shard count / widen Id"
+                        );
+                        (tag, idx, (s as u32) * stride + lid)
+                    })
+                    .collect()
+            };
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -2755,14 +3186,19 @@ impl ShardedDict {
     /// local id is out of the partial's range, or references a slot that was never
     /// routed/interned (e.g. children-first arena ordering was violated). Such input is
     /// rejected with a descriptive message rather than silently mis-indexing the remap.
-    pub fn intern_partials(&mut self, partials: &[(Dict, Vec<[Id; 3]>)]) -> Result<Vec<Vec<Id>>, String> {
+    pub fn intern_partials(
+        &mut self,
+        partials: &[(Dict, Vec<[Id; 3]>)],
+    ) -> Result<Vec<Vec<Id>>, String> {
         let n = self.n_leaf;
         let stride = self.stride;
         // Route each partial's LEAF terms to per-leaf-shard sub-buckets (parallel over
         // partials). Triple terms (`TermParts::Triple`) are skipped here — they take the
         // serial second pass below.
         fn route<'a>(pd: &'a Dict, n: usize) -> Vec<Vec<(Id, TermParts<'a>)>> {
-            let mut b: Vec<Vec<(Id, TermParts<'a>)>> = (0..n).map(|_| Vec::with_capacity(pd.len() / n + 1)).collect();
+            let mut b: Vec<Vec<(Id, TermParts<'a>)>> = (0..n)
+                .map(|_| Vec::with_capacity(pd.len() / n + 1))
+                .collect();
             for i in 1..=pd.len() as Id {
                 let tp = pd.term_parts(i);
                 if matches!(tp, TermParts::Triple(_)) {
@@ -2779,10 +3215,14 @@ impl ShardedDict {
             partials.par_iter().map(|(pd, _)| route(pd, n)).collect()
         };
         #[cfg(not(feature = "parallel"))]
-        let routed: Vec<Vec<Vec<(Id, TermParts)>>> = partials.iter().map(|(pd, _)| route(pd, n)).collect();
+        let routed: Vec<Vec<Vec<(Id, TermParts)>>> =
+            partials.iter().map(|(pd, _)| route(pd, n)).collect();
 
         // Pre-size the remap table; shards scatter into it with DISJOINT writes.
-        let mut remaps: Vec<Vec<Id>> = partials.iter().map(|(pd, _)| vec![0 as Id; pd.len() + 1]).collect();
+        let mut remaps: Vec<Vec<Id>> = partials
+            .iter()
+            .map(|(pd, _)| vec![0 as Id; pd.len() + 1])
+            .collect();
         // Raw view of `remaps` so each shard can write its own (partial, local-id) slots
         // from a parallel context. SAFETY (disjointness): the hash routing above assigns
         // every (pidx, i) leaf slot to exactly ONE leaf shard, so no two shards write the
@@ -2798,7 +3238,10 @@ impl ShardedDict {
         // SAFETY: shared read of a `Copy` raw-pointer handle; the writes it performs are
         // disjoint by the hash routing above (see the `Send` argument). [OPUS-4.8 sq-8wbn]
         unsafe impl Sync for SlotPtr {}
-        let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
+        let scatter: Vec<SlotPtr> = remaps
+            .iter_mut()
+            .map(|v| SlotPtr(v.as_mut_ptr(), v.len()))
+            .collect();
 
         // Intern each LEAF shard's terms in parallel (single-writer per shard → no
         // contention), walking partials in order so per-shard id assignment matches the
@@ -2811,7 +3254,10 @@ impl ShardedDict {
                     // [OPUS-4.8] Always-on (not debug_assert): STRIDE overflow makes adjacent
                     // shards' temp-id ranges overlap and silently corrupts `remap_sharded`
                     // (the scatter below would also write a wrong final id). Fail hard.
-                    assert!(lid < stride, "shard {s} exceeded STRIDE ({stride}) — raise shard count / widen Id");
+                    assert!(
+                        lid < stride,
+                        "shard {s} exceeded STRIDE ({stride}) — raise shard count / widen Id"
+                    );
                     debug_assert!((*i as usize) < len);
                     // SAFETY: i < len (local ids are 1..=pd.len() < pd.len()+1) and this
                     // (pidx, i) slot is written by exactly this shard — see SlotPtr.
@@ -2824,10 +3270,16 @@ impl ShardedDict {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            self.shards[..n].par_iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
+            self.shards[..n]
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(s, shard)| intern_shard(s, shard));
         }
         #[cfg(not(feature = "parallel"))]
-        self.shards[..n].iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
+        self.shards[..n]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(s, shard)| intern_shard(s, shard));
 
         // [OPUS-4.8] (sq-t3rt) Serial second pass — triple terms into the triple shard.
         // [OPUS-4.8] (sq-perf) FAST PATH: triple terms are rare reification metadata, but the
@@ -2850,7 +3302,11 @@ impl ShardedDict {
     /// term↔id bijection the hash-routed path could not preserve). Serial: triple-shard id
     /// assignment must follow first-occurrence (partial, then arena) order deterministically,
     /// and triple terms are rare metadata.
-    fn intern_triple_terms(&mut self, partials: &[(Dict, Vec<[Id; 3]>)], remaps: &mut [Vec<Id>]) -> Result<(), String> {
+    fn intern_triple_terms(
+        &mut self,
+        partials: &[(Dict, Vec<[Id; 3]>)],
+        remaps: &mut [Vec<Id>],
+    ) -> Result<(), String> {
         let tshard_idx = self.n_leaf; // the triple shard
         let stride = self.stride;
         // Resolve a component LOCAL id to its TEMP id via this partial's remap. Inline
@@ -2887,10 +3343,17 @@ impl ShardedDict {
                         }
                         Ok(slot)
                     };
-                    let temp_ids = [resolve(local_ids[0])?, resolve(local_ids[1])?, resolve(local_ids[2])?];
+                    let temp_ids = [
+                        resolve(local_ids[0])?,
+                        resolve(local_ids[1])?,
+                        resolve(local_ids[2])?,
+                    ];
                     let lid = self.shards[tshard_idx].intern_triple_ids(temp_ids);
                     // The triple shard, like every shard, must not overflow its STRIDE band.
-                    assert!(lid < stride, "triple shard exceeded STRIDE ({stride}) — raise shard count / widen Id");
+                    assert!(
+                        lid < stride,
+                        "triple shard exceeded STRIDE ({stride}) — raise shard count / widen Id"
+                    );
                     remaps[pidx][i as usize] = (tshard_idx as u32) * stride + lid;
                 }
             }
@@ -2936,8 +3399,10 @@ impl ShardedDict {
             "merged dictionary has {total_terms} terms, exceeding the dictionary id partition (< {INLINE_BASE}) — widen Id to u64"
         );
         // Unify prefix + datatype tables; build per-shard local-id -> unified-id remaps.
-        let (mut uni_prefixes, mut pidx): (Vec<Box<str>>, FxHashMap<Box<str>, u32>) = Default::default();
-        let (mut uni_dts, mut didx): (Vec<NamedNode>, FxHashMap<Box<str>, u32>) = Default::default();
+        let (mut uni_prefixes, mut pidx): (Vec<Box<str>>, FxHashMap<Box<str>, u32>) =
+            Default::default();
+        let (mut uni_dts, mut didx): (Vec<NamedNode>, FxHashMap<Box<str>, u32>) =
+            Default::default();
         let mut prefix_remap: Vec<Vec<u32>> = Vec::with_capacity(self.shards.len());
         let mut dt_remap: Vec<Vec<u32>> = Vec::with_capacity(self.shards.len());
         for sh in &self.shards {
@@ -2973,8 +3438,19 @@ impl ShardedDict {
         {
             let remap_one = |stored: Stored, pr: &[u32], dr: &[u32]| -> Stored {
                 match stored {
-                    Stored::Iri { prefix, suffix } => Stored::Iri { prefix: pr[prefix as usize], suffix },
-                    Stored::Lit { value, datatype, lang } => Stored::Lit { value, datatype: dr[datatype as usize], lang },
+                    Stored::Iri { prefix, suffix } => Stored::Iri {
+                        prefix: pr[prefix as usize],
+                        suffix,
+                    },
+                    Stored::Lit {
+                        value,
+                        datatype,
+                        lang,
+                    } => Stored::Lit {
+                        value,
+                        datatype: dr[datatype as usize],
+                        lang,
+                    },
                     Stored::Blank(b) => Stored::Blank(b),
                     // [OPUS-4.8] (sq-t3rt) A triple term lives only in the triple shard
                     // (`shards[n_leaf]`); its component ids are TEMP ids (leaf or earlier
@@ -2982,21 +3458,21 @@ impl ShardedDict {
                     // order-preserving `remap_sharded` the perm files use. Children sort
                     // before parents (lower base / earlier triple-shard local), so every
                     // component's final id is already well-defined.
-                    Stored::Triple(ids) => {
-                        Stored::Triple([
-                            remap_sharded(ids[0], &base, stride),
-                            remap_sharded(ids[1], &base, stride),
-                            remap_sharded(ids[2], &base, stride),
-                        ])
-                    }
+                    Stored::Triple(ids) => Stored::Triple([
+                        remap_sharded(ids[0], &base, stride),
+                        remap_sharded(ids[1], &base, stride),
+                        remap_sharded(ids[2], &base, stride),
+                    ]),
                 }
             };
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
                 // Split the spare capacity into one disjoint slice per shard.
-                let mut spare: &mut [std::mem::MaybeUninit<Stored>] = &mut terms.spare_capacity_mut()[..total];
-                let mut slices: Vec<&mut [std::mem::MaybeUninit<Stored>]> = Vec::with_capacity(self.shards.len());
+                let mut spare: &mut [std::mem::MaybeUninit<Stored>] =
+                    &mut terms.spare_capacity_mut()[..total];
+                let mut slices: Vec<&mut [std::mem::MaybeUninit<Stored>]> =
+                    Vec::with_capacity(self.shards.len());
                 for sh in &self.shards {
                     let (head, tail) = spare.split_at_mut(sh.terms.len());
                     slices.push(head);
@@ -3024,9 +3500,24 @@ impl ShardedDict {
                 }
             }
         }
-        let prefix_ids = uni_prefixes.iter().enumerate().map(|(i, p)| (p.clone(), i as u32)).collect();
-        let datatype_ids = uni_dts.iter().enumerate().map(|(i, d)| (d.as_str().into(), i as u32)).collect();
-        let merged = Dict { prefixes: uni_prefixes, prefix_ids, datatypes: uni_dts, datatype_ids, terms, ..Default::default() };
+        let prefix_ids = uni_prefixes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i as u32))
+            .collect();
+        let datatype_ids = uni_dts
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.as_str().into(), i as u32))
+            .collect();
+        let merged = Dict {
+            prefixes: uni_prefixes,
+            prefix_ids,
+            datatypes: uni_dts,
+            datatype_ids,
+            terms,
+            ..Default::default()
+        };
         (merged, base, stride)
     }
 }
@@ -3057,8 +3548,16 @@ mod tests {
             let id = d.intern(&int(&v.to_string()));
             assert!(is_inline(id), "{v} should inline");
             assert_eq!(id, INLINE_BASE + v);
-            assert_eq!(d.term(id), int(&v.to_string()), "round-trips to the canonical term");
-            assert_eq!(d.lookup(&int(&v.to_string())), id, "lookup agrees with intern");
+            assert_eq!(
+                d.term(id),
+                int(&v.to_string()),
+                "round-trips to the canonical term"
+            );
+            assert_eq!(
+                d.lookup(&int(&v.to_string())),
+                id,
+                "lookup agrees with intern"
+            );
         }
         assert_eq!(d.len(), 0, "no inline integer is stored in the dictionary");
     }
@@ -3072,7 +3571,10 @@ mod tests {
         let mut d = Dict::new();
         // Plain xsd:string (explicit datatype) and a "simple" literal (implicit xsd:string):
         // both are plain strings and must return their value slice.
-        let s_typed = d.intern(&Term::Literal(Literal::new_typed_literal("hello", xsd::STRING)));
+        let s_typed = d.intern(&Term::Literal(Literal::new_typed_literal(
+            "hello",
+            xsd::STRING,
+        )));
         let s_simple = d.intern(&Term::Literal(Literal::new_simple_literal("world")));
         let s_empty = d.intern(&Term::Literal(Literal::new_simple_literal("")));
         assert_eq!(d.plain_string_value(s_typed), Some("hello"));
@@ -3087,22 +3589,38 @@ mod tests {
         );
 
         // Every non-plain-string kind must be `None`.
-        let lang = d.intern(&Term::Literal(Literal::new_language_tagged_literal("hello", "en").unwrap()));
-        let int_lit = d.intern(&Term::Literal(Literal::new_typed_literal("42", xsd::INTEGER)));
+        let lang = d.intern(&Term::Literal(
+            Literal::new_language_tagged_literal("hello", "en").unwrap(),
+        ));
+        let int_lit = d.intern(&Term::Literal(Literal::new_typed_literal(
+            "42",
+            xsd::INTEGER,
+        )));
         let other_dt = d.intern(&Term::Literal(Literal::new_typed_literal(
             "x",
             NamedNode::new("http://ex/dt").unwrap(),
         )));
         let iri = d.intern(&Term::NamedNode(NamedNode::new("http://ex/a").unwrap()));
         let blank = d.intern(&Term::BlankNode(oxrdf::BlankNode::new("b0").unwrap()));
-        let inline_int = d.intern(&Term::Literal(Literal::new_typed_literal("7", xsd::INTEGER)));
-        assert_eq!(d.plain_string_value(lang), None, "lang-tagged is not a plain string");
+        let inline_int = d.intern(&Term::Literal(Literal::new_typed_literal(
+            "7",
+            xsd::INTEGER,
+        )));
+        assert_eq!(
+            d.plain_string_value(lang),
+            None,
+            "lang-tagged is not a plain string"
+        );
         assert_eq!(d.plain_string_value(int_lit), None, "large integer literal");
         assert_eq!(d.plain_string_value(other_dt), None, "other datatype");
         assert_eq!(d.plain_string_value(iri), None, "IRI");
         assert_eq!(d.plain_string_value(blank), None, "blank node");
         assert!(is_inline(inline_int), "small int inlines");
-        assert_eq!(d.plain_string_value(inline_int), None, "inline integer id is never a string");
+        assert_eq!(
+            d.plain_string_value(inline_int),
+            None,
+            "inline integer id is never a string"
+        );
     }
 
     /// [OPUS-4.8] sq-cvug — a triple-term component id that is IN RANGE but resolves to the
@@ -3122,7 +3640,9 @@ mod tests {
         // (a) Literal in the SUBJECT slot (subject must be IRI|blank). Must not panic; the
         // result is a triple term whose subject is the safe blank-node placeholder.
         let bad_subj = d.intern_triple_ids([lit, iri, obj]);
-        let Term::Triple(t) = d.term(bad_subj) else { panic!("expected a triple term") };
+        let Term::Triple(t) = d.term(bad_subj) else {
+            panic!("expected a triple term")
+        };
         assert_eq!(
             t.subject,
             oxrdf::BlankNode::new_unchecked(OOR_TRIPLE_SUBJECT).into(),
@@ -3132,7 +3652,9 @@ mod tests {
         // (b) Literal in the PREDICATE slot (predicate must be IRI). Must not panic; the
         // predicate is the safe placeholder IRI.
         let bad_pred = d.intern_triple_ids([iri, lit, obj]);
-        let Term::Triple(t) = d.term(bad_pred) else { panic!("expected a triple term") };
+        let Term::Triple(t) = d.term(bad_pred) else {
+            panic!("expected a triple term")
+        };
         assert_eq!(
             t.predicate,
             NamedNode::new_unchecked(OOR_TRIPLE_PREDICATE),
@@ -3142,15 +3664,22 @@ mod tests {
         // A blank-node subject and an inline-integer object are valid and decode normally.
         let inline_obj = d.intern(&int("7"));
         let ok = d.intern_triple_ids([blank, iri, inline_obj]);
-        let Term::Triple(t) = d.term(ok) else { panic!("expected a triple term") };
+        let Term::Triple(t) = d.term(ok) else {
+            panic!("expected a triple term")
+        };
         assert_eq!(t.subject, oxrdf::BlankNode::new_unchecked("b0").into());
         assert_eq!(t.predicate, NamedNode::new_unchecked("http://ex/p"));
         assert_eq!(t.object, int("7"));
 
         // The same fail-closed behaviour must hold after compaction (the blob record path).
         let d = d.into_blob();
-        let Term::Triple(t) = d.term(bad_subj) else { panic!("expected a triple term") };
-        assert_eq!(t.subject, oxrdf::BlankNode::new_unchecked(OOR_TRIPLE_SUBJECT).into());
+        let Term::Triple(t) = d.term(bad_subj) else {
+            panic!("expected a triple term")
+        };
+        assert_eq!(
+            t.subject,
+            oxrdf::BlankNode::new_unchecked(OOR_TRIPLE_SUBJECT).into()
+        );
     }
 
     /// [OPUS-4.8] sq-bj7o — base-direction VALIDATION + cross-path PARITY. The stored
@@ -3194,19 +3723,31 @@ mod tests {
             let id = d.intern_lit("v", xsd::STRING.as_str(), Some(slot));
             for d in [d.clone(), d.clone().into_blob()] {
                 // The stored slot is preserved verbatim (the fast path reads exactly this).
-                let TermParts::Lit { lang: Some(stored), .. } = d.term_parts(id) else {
+                let TermParts::Lit {
+                    lang: Some(stored), ..
+                } = d.term_parts(id)
+                else {
                     panic!("expected a lang literal for slot {slot:?}");
                 };
                 assert_eq!(stored, slot, "stored slot mutated for {slot:?}");
 
                 // The materialised Term: direction() and language() MUST match the split.
-                let Term::Literal(l) = d.term(id) else { panic!("expected a literal for {slot:?}") };
+                let Term::Literal(l) = d.term(id) else {
+                    panic!("expected a literal for {slot:?}")
+                };
                 let mat_dir = l.direction().map(|x| match x {
                     oxrdf::BaseDirection::Ltr => "ltr",
                     oxrdf::BaseDirection::Rtl => "rtl",
                 });
-                assert_eq!(mat_dir, want_dir, "materialised direction != split for {slot:?}");
-                assert_eq!(l.language(), Some(want_tag), "materialised lang != split tag for {slot:?}");
+                assert_eq!(
+                    mat_dir, want_dir,
+                    "materialised direction != split for {slot:?}"
+                );
+                assert_eq!(
+                    l.language(),
+                    Some(want_tag),
+                    "materialised lang != split tag for {slot:?}"
+                );
             }
         }
     }
@@ -3239,7 +3780,12 @@ mod tests {
             assert_eq!(d.lookup(t), id, "lookup round-trips");
         }
         // A term that was never interned must still miss.
-        assert_eq!(d.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/absent"))), NO_ID);
+        assert_eq!(
+            d.lookup(&Term::NamedNode(NamedNode::new_unchecked(
+                "http://ex/absent"
+            ))),
+            NO_ID
+        );
         // Compaction is idempotent.
         let d = d.into_blob();
         assert_eq!(d.term(ids[0]), terms[0]);
@@ -3260,7 +3806,11 @@ mod tests {
             }
         };
         let terms: Vec<Term> = (0..300).map(mk).collect();
-        let items: Vec<(u32, Id, Term)> = terms.iter().enumerate().map(|(j, t)| (0, (j + 1) as Id, t.clone())).collect();
+        let items: Vec<(u32, Id, Term)> = terms
+            .iter()
+            .enumerate()
+            .map(|(j, t)| (0, (j + 1) as Id, t.clone()))
+            .collect();
         let resolved = sd.intern_terms(items);
         let mut temp_of: std::collections::HashMap<Id, Id> = std::collections::HashMap::new();
         for (_, j, temp) in &resolved {
@@ -3276,7 +3826,10 @@ mod tests {
             assert_eq!(merged.term(fin), *t, "term {j} round-trips");
         }
         // Duplicates (same content) share a temp id.
-        assert_eq!(temp_of[&1], temp_of[&91], "j=0 and j=90 are the same term (n0)");
+        assert_eq!(
+            temp_of[&1], temp_of[&91],
+            "j=0 and j=90 are the same term (n0)"
+        );
         // Order preservation: sorting distinct temp ids == sorting their final ids.
         let mut temps: Vec<Id> = temp_of.values().copied().collect();
         temps.sort_unstable();
@@ -3284,7 +3837,10 @@ mod tests {
         let mut prev = 0;
         for &temp in &temps {
             let fin = remap_sharded(temp, &base, stride);
-            assert!(fin > prev, "final ids strictly increase with temp ids (no re-sort needed)");
+            assert!(
+                fin > prev,
+                "final ids strictly increase with temp ids (no re-sort needed)"
+            );
             prev = fin;
         }
         // Final ids are dense [1, 90].
@@ -3298,12 +3854,18 @@ mod tests {
         // normal lookup/intern invariant — lookup hits every term, and re-interning an existing
         // term returns its id (no duplicate), while a fresh term appends above the merged ids.
         let mut sd = ShardedDict::new(4);
-        let mk = |i: usize| -> Term { Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/n{i}"))) };
+        let mk = |i: usize| -> Term {
+            Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/n{i}")))
+        };
         let terms: Vec<Term> = (0..50).map(mk).collect();
-        let items: Vec<(u32, Id, Term)> =
-            terms.iter().enumerate().map(|(j, t)| (0, (j + 1) as Id, t.clone())).collect();
+        let items: Vec<(u32, Id, Term)> = terms
+            .iter()
+            .enumerate()
+            .map(|(j, t)| (0, (j + 1) as Id, t.clone()))
+            .collect();
         let resolved = sd.intern_terms(items);
-        let temp_of: std::collections::HashMap<Id, Id> = resolved.iter().map(|(_, j, temp)| (*j, *temp)).collect();
+        let temp_of: std::collections::HashMap<Id, Id> =
+            resolved.iter().map(|(_, j, temp)| (*j, *temp)).collect();
         let (mut merged, base, stride) = sd.into_merged();
         merged.build_table();
         assert_eq!(merged.len(), 50, "distinct term count");
@@ -3312,7 +3874,11 @@ mod tests {
             // lookup must HIT (was an empty table before build_table) and agree with the final id.
             assert_eq!(merged.lookup(t), fin, "lookup hits term {j}");
             // re-interning an existing term must NOT add a duplicate.
-            assert_eq!(merged.intern(t), fin, "re-intern of existing term {j} is idempotent");
+            assert_eq!(
+                merged.intern(t),
+                fin,
+                "re-intern of existing term {j} is idempotent"
+            );
         }
         assert_eq!(merged.len(), 50, "no duplicates created by re-interning");
         // A fresh term appends above the merged ids.
@@ -3341,16 +3907,30 @@ mod tests {
         // IRIs sharing a namespace dedupe the prefix; every term round-trips exactly,
         // and lookup agrees with intern (the content hash matches across paths).
         let mut d = Dict::new();
-        let iris = ["http://ex/a", "http://ex/b", "http://www.w3.org/2001/XMLSchema#date", "urn:x"];
-        let ids: Vec<Id> = iris.iter().map(|i| d.intern(&Term::NamedNode(NamedNode::new_unchecked(*i)))).collect();
+        let iris = [
+            "http://ex/a",
+            "http://ex/b",
+            "http://www.w3.org/2001/XMLSchema#date",
+            "urn:x",
+        ];
+        let ids: Vec<Id> = iris
+            .iter()
+            .map(|i| d.intern(&Term::NamedNode(NamedNode::new_unchecked(*i))))
+            .collect();
         for (iri, id) in iris.iter().zip(&ids) {
             let t = Term::NamedNode(NamedNode::new_unchecked(*iri));
             assert_eq!(d.term(*id), t);
             assert_eq!(d.lookup(&t), *id);
         }
         // Distinct IRIs get distinct ids; re-interning is idempotent.
-        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), iris.len());
-        assert_eq!(d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a"))), ids[0]);
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            iris.len()
+        );
+        assert_eq!(
+            d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a"))),
+            ids[0]
+        );
         // A language-tagged literal and a typed literal round-trip with their components.
         let lang = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "en"));
         let dec = Term::Literal(Literal::new_typed_literal("1.0", xsd::DECIMAL));
@@ -3478,26 +4058,43 @@ mod tests {
         let id = d.intern(&tt);
         assert!((1..INLINE_BASE).contains(&id));
         // Children were interned (subject + predicate; the object is inline).
-        assert_eq!(d.len(), 3, "subject + predicate + the triple itself (inline object not stored)");
+        assert_eq!(
+            d.len(),
+            3,
+            "subject + predicate + the triple itself (inline object not stored)"
+        );
         // term() rebuilds a structural Term::Triple, not a literal.
         assert_eq!(d.term(id), tt);
         // lookup agrees with intern; a separately-built identical triple shares the id.
         assert_eq!(d.lookup(&tt), id);
-        assert_eq!(d.intern(&triple("http://ex/alice", "http://ex/age", int("30"))), id);
+        assert_eq!(
+            d.intern(&triple("http://ex/alice", "http://ex/age", int("30"))),
+            id
+        );
         // A different triple gets a different id; lookup with absent components misses.
         let other = triple("http://ex/bob", "http://ex/age", int("30"));
         let oid = d.intern(&other);
         assert_ne!(oid, id);
-        assert_eq!(d.lookup(&triple("http://ex/carol", "http://ex/age", int("30"))), NO_ID);
+        assert_eq!(
+            d.lookup(&triple("http://ex/carol", "http://ex/age", int("30"))),
+            NO_ID
+        );
         // A triple whose components exist but that was never interned also misses.
-        assert_eq!(d.lookup(&triple("http://ex/alice", "http://ex/age", int("25"))), NO_ID);
+        assert_eq!(
+            d.lookup(&triple("http://ex/alice", "http://ex/age", int("25"))),
+            NO_ID
+        );
     }
 
     #[test]
     fn nested_triple_terms_roundtrip() {
         // RDF 1.2 nests triple terms through the OBJECT position.
         let mut d = Dict::new();
-        let inner = triple("http://ex/a", "http://ex/b", Term::NamedNode(NamedNode::new_unchecked("http://ex/c")));
+        let inner = triple(
+            "http://ex/a",
+            "http://ex/b",
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/c")),
+        );
         let outer = triple("http://ex/x", "http://ex/p", inner.clone());
         let oid = d.intern(&outer);
         let iid = d.intern(&inner);
@@ -3529,7 +4126,10 @@ mod tests {
         assert_eq!(d.term(ids[2]), plain);
         assert_eq!(d.lookup(&outer), ids[0]);
         assert_eq!(d.lookup(&inner), ids[1]);
-        assert_eq!(d.lookup(&triple("http://ex/x", "http://ex/p", int("7"))), NO_ID);
+        assert_eq!(
+            d.lookup(&triple("http://ex/x", "http://ex/p", int("7"))),
+            NO_ID
+        );
     }
 
     #[test]
@@ -3566,10 +4166,13 @@ mod tests {
         let partials = vec![(pd, Vec::<[Id; 3]>::new())];
 
         let mut sd = ShardedDict::new(4);
-        let err = sd
-            .intern_partials(&partials)
-            .expect_err("an out-of-range triple component id must be a descriptive Err, not garbage/panic");
-        assert!(err.contains("out of range"), "error should name the out-of-range cause: {err:?}");
+        let err = sd.intern_partials(&partials).expect_err(
+            "an out-of-range triple component id must be a descriptive Err, not garbage/panic",
+        );
+        assert!(
+            err.contains("out of range"),
+            "error should name the out-of-range cause: {err:?}"
+        );
 
         // Second case: an IN-RANGE but UNPOPULATED component slot. The triple references a
         // non-inline local id whose remap slot the leaf pass never fills (here the triple's
@@ -3582,9 +4185,9 @@ mod tests {
         let partials2 = vec![(pd2, Vec::<[Id; 3]>::new())];
 
         let mut sd2 = ShardedDict::new(4);
-        let err2 = sd2
-            .intern_partials(&partials2)
-            .expect_err("an unpopulated triple component slot must be a descriptive Err, not garbage/panic");
+        let err2 = sd2.intern_partials(&partials2).expect_err(
+            "an unpopulated triple component slot must be a descriptive Err, not garbage/panic",
+        );
         assert!(
             err2.contains("out of range") || err2.contains("unpopulated"),
             "error should name the out-of-range / unpopulated cause: {err2:?}"
@@ -3613,7 +4216,10 @@ mod tests {
         use std::cell::Cell;
         let mut d = Dict::new();
         for i in 0..64 {
-            d.intern(&Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/t{}", i))));
+            d.intern(&Term::NamedNode(NamedNode::new_unchecked(format!(
+                "http://ex/t{}",
+                i
+            ))));
         }
         let dir = std::env::temp_dir().join(format!("sparq-dict-hashfirst-{}", std::process::id()));
         d.save_mmap(&dir).unwrap();
@@ -3628,8 +4234,15 @@ mod tests {
             calls.set(calls.get() + 1);
             stored_ref_is_iri(s, "http://ex/t7", &m.prefixes)
         });
-        assert!(found.is_some(), "the term must be found through the mapped index");
-        assert_eq!(calls.get(), 1, "eq must run once — only for the entry whose 64-bit hash matched");
+        assert!(
+            found.is_some(),
+            "the term must be found through the mapped index"
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "eq must run once — only for the entry whose 64-bit hash matched"
+        );
 
         // (b) A hash that is absent: `eq` must NEVER run. This is the load-bearing half — it is
         //     what makes a dictionary MISS cost zero string compares.
@@ -3639,7 +4252,11 @@ mod tests {
             true // would report a bogus hit if the hash gate were ever removed
         });
         assert_eq!(found, None, "an absent hash must not resolve to any id");
-        assert_eq!(calls.get(), 0, "eq must not run at all when no stored 64-bit hash matches");
+        assert_eq!(
+            calls.get(),
+            0,
+            "eq must not run at all when no stored 64-bit hash matches"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3678,8 +4295,18 @@ mod tests {
         }
         let (a, ha, b, hb) =
             pair.expect("two IRIs sharing the 7-bit h2 tag must exist among 4096 candidates");
-        assert_eq!(tag(ha), tag(hb), "the pair must share the h2 tag: {} / {}", a, b);
-        assert_ne!(ha, hb, "the pair must differ in the FULL 64-bit hash: {} / {}", a, b);
+        assert_eq!(
+            tag(ha),
+            tag(hb),
+            "the pair must share the h2 tag: {} / {}",
+            a,
+            b
+        );
+        assert_ne!(
+            ha, hb,
+            "the pair must differ in the FULL 64-bit hash: {} / {}",
+            a, b
+        );
 
         // (a) The in-memory prefilter is tag-only. Probing a `HashTable<Id>` exactly as
         //     `find_iri` does (`table.find(hash, eq)`) invokes `eq` for the tag-colliding entry
@@ -3693,7 +4320,10 @@ mod tests {
             calls.set(calls.get() + 1);
             false
         });
-        assert!(hit.is_none(), "a tag-only collision must not resolve to an id");
+        assert!(
+            hit.is_none(),
+            "a tag-only collision must not resolve to an id"
+        );
         assert_eq!(
             calls.get(),
             1,
@@ -3708,7 +4338,11 @@ mod tests {
         );
         let mut d = Dict::new();
         let (ia, ib) = (d.intern(&ta), d.intern(&tb));
-        assert_ne!(ia, ib, "an h2-tag collision must not dedup {} and {} onto one id", a, b);
+        assert_ne!(
+            ia, ib,
+            "an h2-tag collision must not dedup {} and {} onto one id",
+            a, b
+        );
         assert_eq!(d.intern(&ta), ia, "re-interning must dedup to the same id");
         assert_eq!(d.intern(&tb), ib, "re-interning must dedup to the same id");
         assert_eq!(d.lookup(&ta), ia);
@@ -3730,7 +4364,10 @@ mod tests {
         assert_eq!(d2.term(oid), outer);
         assert_eq!(d2.term(iid), inner);
         assert_eq!(d2.lookup(&outer), oid);
-        assert_eq!(d2.lookup(&triple("http://ex/x", "http://ex/p", int("8"))), NO_ID);
+        assert_eq!(
+            d2.lookup(&triple("http://ex/x", "http://ex/p", int("8"))),
+            NO_ID
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3758,7 +4395,8 @@ mod tests {
         let mut d = Dict::new();
         d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a")));
         d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/b")));
-        let dir = std::env::temp_dir().join(format!("sparq-dict-endian-mmap-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq-dict-endian-mmap-{}", std::process::id()));
         d.save_mmap(&dir).unwrap();
 
         // (a) `write_pod_slice` is a raw native-endian byte copy; on this LE host the on-disk
@@ -3769,21 +4407,35 @@ mod tests {
         for chunk in offs_bytes.chunks_exact(8) {
             // Re-encoding the LE-decoded value must reproduce the on-disk bytes exactly.
             let v = u64::from_le_bytes(chunk.try_into().unwrap());
-            assert_eq!(&v.to_le_bytes(), chunk, "dict-offs.bin is little-endian on this host");
+            assert_eq!(
+                &v.to_le_bytes(),
+                chunk,
+                "dict-offs.bin is little-endian on this host"
+            );
         }
         // (b) Same for `dict-hid.bin` (the u32 lookup ids the seam reads via `from_le_bytes`).
         let hid_bytes = std::fs::read(dir.join("dict-hid.bin")).unwrap();
         assert_eq!(hid_bytes.len() % 4, 0, "hashid array is whole u32s");
         for chunk in hid_bytes.chunks_exact(4) {
             let v = u32::from_le_bytes(chunk.try_into().unwrap());
-            assert_eq!(&v.to_le_bytes(), chunk, "dict-hid.bin is little-endian on this host");
+            assert_eq!(
+                &v.to_le_bytes(),
+                chunk,
+                "dict-hid.bin is little-endian on this host"
+            );
         }
 
         // (c) End-to-end: the store re-opens and resolves — i.e. the native-endian mmap readers
         //     and the explicit-LE `validate_dict_bytes` (run inside `open_mmap`) agree.
         let d2 = Dict::open_mmap(&dir).unwrap();
-        assert_eq!(d2.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a"))), 1);
-        assert_eq!(d2.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/b"))), 2);
+        assert_eq!(
+            d2.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a"))),
+            1
+        );
+        assert_eq!(
+            d2.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/b"))),
+            2
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3802,24 +4454,55 @@ mod tests {
         // (a) A current-format store opens fine, and the header records the current partition.
         d.save_mmap(&dir).unwrap();
         let meta = std::fs::read(dir.join("dict-meta.bin")).unwrap();
-        assert_eq!(&meta[0..4], &DICT_META_MAGIC.to_le_bytes(), "meta starts with the magic");
-        assert_eq!(&meta[4..8], &DICT_META_VERSION.to_le_bytes(), "then the version");
-        assert_eq!(&meta[8..12], &INLINE_BASE.to_le_bytes(), "then the id partition");
-        assert!(Dict::open_mmap(&dir).is_ok(), "current-format store must open");
+        assert_eq!(
+            &meta[0..4],
+            &DICT_META_MAGIC.to_le_bytes(),
+            "meta starts with the magic"
+        );
+        assert_eq!(
+            &meta[4..8],
+            &DICT_META_VERSION.to_le_bytes(),
+            "then the version"
+        );
+        assert_eq!(
+            &meta[8..12],
+            &INLINE_BASE.to_le_bytes(),
+            "then the id partition"
+        );
+        assert!(
+            Dict::open_mmap(&dir).is_ok(),
+            "current-format store must open"
+        );
 
         // (b) A store with a MISMATCHED partition (simulating the old INLINE_BASE = 1<<30) must
         //     be rejected — its inline ids would be misread as dictionary ids.
         let mut tampered = meta.clone();
         tampered[8..12].copy_from_slice(&(1u32 << 30).to_le_bytes());
-        std::fs::File::create(dir.join("dict-meta.bin")).unwrap().write_all(&tampered).unwrap();
-        let err = Dict::open_mmap(&dir).err().expect("mismatched partition must be rejected");
-        assert!(err.to_string().contains("partition mismatch"), "clear rebuild error: {err}");
+        std::fs::File::create(dir.join("dict-meta.bin"))
+            .unwrap()
+            .write_all(&tampered)
+            .unwrap();
+        let err = Dict::open_mmap(&dir)
+            .err()
+            .expect("mismatched partition must be rejected");
+        assert!(
+            err.to_string().contains("partition mismatch"),
+            "clear rebuild error: {err}"
+        );
 
         // (c) A LEGACY header-less file (begins directly with the prefix count) must be rejected.
         let legacy_body = &meta[12..]; // drop magic+version+partition → pre-versioning layout
-        std::fs::File::create(dir.join("dict-meta.bin")).unwrap().write_all(legacy_body).unwrap();
-        let err = Dict::open_mmap(&dir).err().expect("legacy header-less file must be rejected");
-        assert!(err.to_string().contains("legacy"), "clear rebuild error: {err}");
+        std::fs::File::create(dir.join("dict-meta.bin"))
+            .unwrap()
+            .write_all(legacy_body)
+            .unwrap();
+        let err = Dict::open_mmap(&dir)
+            .err()
+            .expect("legacy header-less file must be rejected");
+        assert!(
+            err.to_string().contains("legacy"),
+            "clear rebuild error: {err}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3835,8 +4518,15 @@ mod tests {
         let prefixes: Vec<Box<str>> = vec![Box::from("http://ex/")];
         let datatypes = vec![NamedNode::new_unchecked("http://ex/dt")];
         let recs = [
-            StoredRef::Iri { prefix: 0, suffix: "a" },
-            StoredRef::Lit { value: "v", datatype: 0, lang: None },
+            StoredRef::Iri {
+                prefix: 0,
+                suffix: "a",
+            },
+            StoredRef::Lit {
+                value: "v",
+                datatype: 0,
+                lang: None,
+            },
         ];
         let mut blob: Vec<u8> = Vec::new();
         let mut offsets: Vec<u8> = Vec::new();
@@ -3852,19 +4542,37 @@ mod tests {
         hashids.extend_from_slice(&2u32.to_le_bytes());
 
         // (a) The well-formed buffers validate.
-        validate_dict_bytes(&blob, &offsets, &hashes, &hashids, len, &prefixes, &datatypes)
-            .expect("a well-formed in-memory store validates");
+        validate_dict_bytes(
+            &blob, &offsets, &hashes, &hashids, len, &prefixes, &datatypes,
+        )
+        .expect("a well-formed in-memory store validates");
 
         // (b) Wrong offset-array length (truncated dict-offs.bin) is rejected.
-        let err = validate_dict_bytes(&blob, &offsets[..8], &hashes, &hashids, len, &prefixes, &datatypes)
-            .expect_err("a truncated offset array must be rejected");
+        let err = validate_dict_bytes(
+            &blob,
+            &offsets[..8],
+            &hashes,
+            &hashids,
+            len,
+            &prefixes,
+            &datatypes,
+        )
+        .expect_err("a truncated offset array must be rejected");
         assert!(err.to_string().contains("dict-offs.bin"), "{err}");
 
         // (c) An offset past the end of the blob is rejected (no panic / OOB).
         let mut bad_offsets = offsets.clone();
         bad_offsets[0..8].copy_from_slice(&((blob.len() + 1) as u64).to_le_bytes());
-        let err = validate_dict_bytes(&blob, &bad_offsets, &hashes, &hashids, len, &prefixes, &datatypes)
-            .expect_err("an out-of-range offset must be rejected");
+        let err = validate_dict_bytes(
+            &blob,
+            &bad_offsets,
+            &hashes,
+            &hashids,
+            len,
+            &prefixes,
+            &datatypes,
+        )
+        .expect_err("an out-of-range offset must be rejected");
         assert!(err.to_string().contains("past the end"), "{err}");
 
         // (d) An out-of-range prefix id is rejected (empty prefix table makes prefix 0 invalid).
@@ -3875,15 +4583,31 @@ mod tests {
         // (e) A hashid of 0 (would underflow `offsets[id-1]`) is rejected.
         let mut bad_hashids = hashids.clone();
         bad_hashids[0..4].copy_from_slice(&0u32.to_le_bytes());
-        let err = validate_dict_bytes(&blob, &offsets, &hashes, &bad_hashids, len, &prefixes, &datatypes)
-            .expect_err("a zero hashid must be rejected");
+        let err = validate_dict_bytes(
+            &blob,
+            &offsets,
+            &hashes,
+            &bad_hashids,
+            len,
+            &prefixes,
+            &datatypes,
+        )
+        .expect_err("a zero hashid must be rejected");
         assert!(err.to_string().contains("dict-hid.bin"), "{err}");
 
         // (f) A hashid > len (would index past the offset array) is rejected.
         let mut over_hashids = hashids.clone();
         over_hashids[4..8].copy_from_slice(&(len as u32 + 1).to_le_bytes());
-        let err = validate_dict_bytes(&blob, &offsets, &hashes, &over_hashids, len, &prefixes, &datatypes)
-            .expect_err("an out-of-range hashid must be rejected");
+        let err = validate_dict_bytes(
+            &blob,
+            &offsets,
+            &hashes,
+            &over_hashids,
+            len,
+            &prefixes,
+            &datatypes,
+        )
+        .expect_err("an out-of-range hashid must be rejected");
         assert!(err.to_string().contains("dict-hid.bin"), "{err}");
 
         // (g) Totally-empty inputs with len 0 validate (vacuously well-formed).
@@ -3915,7 +4639,9 @@ mod tests {
         let mut global = Dict::new();
         // Pre-populate the global dict so ids diverge from the partial's.
         for i in 0..5 {
-            global.intern(&Term::NamedNode(NamedNode::new_unchecked(format!("http://pre/{i}"))));
+            global.intern(&Term::NamedNode(NamedNode::new_unchecked(format!(
+                "http://pre/{i}"
+            ))));
         }
         let mut partial = Dict::new();
         let inner = triple("http://ex/a", "http://ex/b", int("7"));
@@ -3925,7 +4651,10 @@ mod tests {
         let gid = remap[(local_outer - 1) as usize];
         assert_eq!(global.term(gid), outer);
         assert_eq!(global.lookup(&outer), gid);
-        assert_eq!(global.lookup(&inner), remap[(partial.lookup(&inner) - 1) as usize]);
+        assert_eq!(
+            global.lookup(&inner),
+            remap[(partial.lookup(&inner) - 1) as usize]
+        );
     }
 
     #[test]
@@ -3949,16 +4678,36 @@ mod tests {
         let mut d = Dict::new();
         // In-range values: the fast-path id equals interning the canonical integer literal,
         // and decodes back to that value via the inline partition.
-        for v in [0i64, 1, 2, 42, 1_000_000, INLINE_MAX as i64 - 1, INLINE_MAX as i64] {
+        for v in [
+            0i64,
+            1,
+            2,
+            42,
+            1_000_000,
+            INLINE_MAX as i64 - 1,
+            INLINE_MAX as i64,
+        ] {
             let id = inline_id_of_int(v).unwrap_or_else(|| panic!("{v} is in range"));
             assert!(is_inline(id), "{v} maps to an inline id");
             assert_eq!(id, INLINE_BASE + v as u32, "exact inline encoding for {v}");
-            assert_eq!(id, d.intern(&int(&v.to_string())), "fast-path id == canonical literal's id for {v}");
+            assert_eq!(
+                id,
+                d.intern(&int(&v.to_string())),
+                "fast-path id == canonical literal's id for {v}"
+            );
         }
         // Out-of-range: negative and just past INLINE_MAX both fall back to the dictionary.
-        assert_eq!(inline_id_of_int(-1), None, "negative integers are not inline");
+        assert_eq!(
+            inline_id_of_int(-1),
+            None,
+            "negative integers are not inline"
+        );
         assert_eq!(inline_id_of_int(i64::MIN), None);
-        assert_eq!(inline_id_of_int(INLINE_MAX as i64 + 1), None, "one past the inline ceiling is not inline");
+        assert_eq!(
+            inline_id_of_int(INLINE_MAX as i64 + 1),
+            None,
+            "one past the inline ceiling is not inline"
+        );
         assert_eq!(inline_id_of_int(i64::MAX), None);
         // The dictionary stayed empty: no inline value was ever stored as a term.
         assert_eq!(d.len(), 0);
@@ -3973,11 +4722,23 @@ mod tests {
     fn is_inline_partition_boundaries() {
         assert!(!is_inline(NO_ID), "0 / NO_ID is not inline");
         assert!(!is_inline(1), "the first dictionary id is not inline");
-        assert!(!is_inline(INLINE_BASE - 1), "the last dictionary id is not inline");
+        assert!(
+            !is_inline(INLINE_BASE - 1),
+            "the last dictionary id is not inline"
+        );
         assert!(is_inline(INLINE_BASE), "INLINE_BASE (value 0) is inline");
-        assert!(is_inline(INLINE_BASE + INLINE_MAX), "the inline ceiling is inline");
+        assert!(
+            is_inline(INLINE_BASE + INLINE_MAX),
+            "the inline ceiling is inline"
+        );
         // One past the inline range is the engine's local-vocab space, NOT an inline integer.
-        assert!(!is_inline(INLINE_BASE + INLINE_MAX + 1), "above the inline range is not inline");
-        assert!(!is_inline(u32::MAX), "the very top of the id space is not inline");
+        assert!(
+            !is_inline(INLINE_BASE + INLINE_MAX + 1),
+            "above the inline range is not inline"
+        );
+        assert!(
+            !is_inline(u32::MAX),
+            "the very top of the id space is not inline"
+        );
     }
 }

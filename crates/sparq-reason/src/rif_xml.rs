@@ -316,7 +316,10 @@ struct XmlNode {
 impl XmlNode {
     /// Return the value of the first attribute with the given local name.
     fn attr(&self, key: &str) -> Option<&str> {
-        self.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Return the first child with the given tag name, if any.
@@ -375,7 +378,10 @@ impl XmlNode {
     fn only_child(&self, ctx: &str) -> Result<&XmlNode, ImportError> {
         match self.children.as_slice() {
             [one] => Ok(one),
-            [] => Err(ImportError::MalformedXml(format!("{} has no child element", ctx))),
+            [] => Err(ImportError::MalformedXml(format!(
+                "{} has no child element",
+                ctx
+            ))),
             _ => Err(ImportError::MalformedXml(format!(
                 "{} must have exactly one child element (single-cardinality wrapper), found {}",
                 ctx,
@@ -404,17 +410,30 @@ fn parse_xml_tree(xml_bytes: &[u8]) -> Result<XmlNode, ImportError> {
     let mut stack: Vec<XmlNode> = Vec::new();
 
     loop {
-        match reader.read_event().map_err(|e| ImportError::MalformedXml(format!("{}", e)))? {
+        match reader
+            .read_event()
+            .map_err(|e| ImportError::MalformedXml(format!("{}", e)))?
+        {
             Event::Start(e) => {
                 let local = local_name_str(e.local_name().as_ref());
                 let attrs = read_attrs(&e)?;
-                stack.push(XmlNode { tag: local, text: String::new(), attrs, children: Vec::new() });
+                stack.push(XmlNode {
+                    tag: local,
+                    text: String::new(),
+                    attrs,
+                    children: Vec::new(),
+                });
             }
             Event::Empty(e) => {
                 // Self-closing element — push and immediately pop.
                 let local = local_name_str(e.local_name().as_ref());
                 let attrs = read_attrs(&e)?;
-                let node = XmlNode { tag: local, text: String::new(), attrs, children: Vec::new() };
+                let node = XmlNode {
+                    tag: local,
+                    text: String::new(),
+                    attrs,
+                    children: Vec::new(),
+                };
                 if let Some(parent) = stack.last_mut() {
                     parent.children.push(node);
                 } else {
@@ -423,7 +442,9 @@ fn parse_xml_tree(xml_bytes: &[u8]) -> Result<XmlNode, ImportError> {
                 }
             }
             Event::Text(t) => {
-                let s = t.decode().map_err(|e| ImportError::MalformedXml(format!("{}", e)));
+                let s = t
+                    .decode()
+                    .map_err(|e| ImportError::MalformedXml(format!("{}", e)));
                 if let Some(top) = stack.last_mut() {
                     // Preserve text exactly — do NOT trim here.
                     // parse_term applies per-type trimming (IRI → trim; xsd:string → preserve).
@@ -450,8 +471,9 @@ fn parse_xml_tree(xml_bytes: &[u8]) -> Result<XmlNode, ImportError> {
             // entities are fail-closed (MalformedXml) — we never silently drop bytes.
             // [SONNET-4.6]
             Event::GeneralRef(r) => {
-                let name =
-                    r.decode().map_err(|e| ImportError::MalformedXml(format!("{}", e)))?;
+                let name = r
+                    .decode()
+                    .map_err(|e| ImportError::MalformedXml(format!("{}", e)))?;
                 let resolved = resolve_xml_entity(&name)?;
                 if let Some(top) = stack.last_mut() {
                     top.text.push_str(&resolved);
@@ -465,7 +487,9 @@ fn parse_xml_tree(xml_bytes: &[u8]) -> Result<XmlNode, ImportError> {
         }
     }
 
-    Err(ImportError::MalformedXml("unexpected end of document".to_string()))
+    Err(ImportError::MalformedXml(
+        "unexpected end of document".to_string(),
+    ))
 }
 
 fn local_name_str(bytes: &[u8]) -> String {
@@ -494,19 +518,14 @@ fn resolve_xml_entity(name: &str) -> Result<String, ImportError> {
             rest.parse::<u32>()
         }
         .map_err(|_| {
+            ImportError::MalformedXml(format!("bad numeric character reference &{};", name))
+        })?;
+        return char::from_u32(cp).map(|c| c.to_string()).ok_or_else(|| {
             ImportError::MalformedXml(format!(
-                "bad numeric character reference &{};",
+                "numeric character reference &{}; out of Unicode range",
                 name
             ))
-        })?;
-        return char::from_u32(cp)
-            .map(|c| c.to_string())
-            .ok_or_else(|| {
-                ImportError::MalformedXml(format!(
-                    "numeric character reference &{}; out of Unicode range",
-                    name
-                ))
-            });
+        });
     }
     Err(ImportError::MalformedXml(format!(
         "unknown XML entity reference &{};  (RIF/XML fail-closed: only predefined entities \
@@ -645,7 +664,9 @@ fn iri_to_builtin(iri: &str) -> Result<Builtin, ImportError> {
         return Ok(Builtin::ListContains);
     }
     // Deferred / unknown → fail closed
-    Err(ImportError::UnknownExternal { iri: iri.to_string() })
+    Err(ImportError::UnknownExternal {
+        iri: iri.to_string(),
+    })
 }
 
 /// Const-friendly string concatenation for use in match arms.
@@ -758,12 +779,18 @@ fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
                 })
             } else if is_whitespace_collapse_type(ty) {
                 // Known XSD collapse types: trim.
-                Ok(Term::Lit { lex: node.text.trim().to_string(), datatype: ty.to_string() })
+                Ok(Term::Lit {
+                    lex: node.text.trim().to_string(),
+                    datatype: ty.to_string(),
+                })
             } else {
                 // All other types (including explicit xsd:string and unrecognized types):
                 // preserve exact whitespace — the lexical form belongs to the value space
                 // of the declared datatype, which may be whitespace-sensitive.
-                Ok(Term::Lit { lex: node.text.clone(), datatype: ty.to_string() })
+                Ok(Term::Lit {
+                    lex: node.text.clone(),
+                    datatype: ty.to_string(),
+                })
             }
         }
         "Var" => {
@@ -789,7 +816,9 @@ fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
         }
         other => {
             check_non_core(other)?;
-            Err(ImportError::UnrecognizedElement { tag: other.to_string() })
+            Err(ImportError::UnrecognizedElement {
+                tag: other.to_string(),
+            })
         }
     }
 }
@@ -985,12 +1014,16 @@ fn substitute_in_atom(a: Atom, map: &HashMap<String, String>) -> Atom {
 fn substitute_in_cond(cond: BodyCond, map: &HashMap<String, String>) -> BodyCond {
     match cond {
         BodyCond::Atom(a) => BodyCond::Atom(substitute_in_atom(a, map)),
-        BodyCond::And(subs) => {
-            BodyCond::And(subs.into_iter().map(|s| substitute_in_cond(s, map)).collect())
-        }
-        BodyCond::Or(subs) => {
-            BodyCond::Or(subs.into_iter().map(|s| substitute_in_cond(s, map)).collect())
-        }
+        BodyCond::And(subs) => BodyCond::And(
+            subs.into_iter()
+                .map(|s| substitute_in_cond(s, map))
+                .collect(),
+        ),
+        BodyCond::Or(subs) => BodyCond::Or(
+            subs.into_iter()
+                .map(|s| substitute_in_cond(s, map))
+                .collect(),
+        ),
         BodyCond::Exists(vars, sub) => {
             // Defensive: substitute through any Exists nodes not yet processed.
             // In the normal alpha_rename_cond path (innermost-first), inner Exists
@@ -1078,7 +1111,9 @@ fn parse_positive_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
         "Atom" => Ok(vec![parse_positional_atom(node)?]),
         other => {
             check_non_core(other)?;
-            Err(ImportError::UnrecognizedElement { tag: other.to_string() })
+            Err(ImportError::UnrecognizedElement {
+                tag: other.to_string(),
+            })
         }
     }
 }
@@ -1118,9 +1153,9 @@ fn parse_positive_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
 /// [SONNET-4.6] sq-n7y15
 fn parse_positional_atom(node: &XmlNode) -> Result<Atom, ImportError> {
     // <op> is a single-cardinality wrapper: fail-closed on duplicates (sq-4l1fj).
-    let op_node = node.unique_child("op", "positional Atom")?.ok_or_else(|| {
-        ImportError::MalformedXml("positional <Atom> missing <op>".to_string())
-    })?;
+    let op_node = node
+        .unique_child("op", "positional Atom")?
+        .ok_or_else(|| ImportError::MalformedXml("positional <Atom> missing <op>".to_string()))?;
     // The <op> child must be exactly one <Const> carrying the predicate IRI.
     let op_const = op_node.only_child("positional Atom <op>")?;
     if op_const.tag != "Const" {
@@ -1219,9 +1254,9 @@ fn parse_positional_atom(node: &XmlNode) -> Result<Atom, ImportError> {
 /// [SONNET-4.6] sq-jsgyn
 fn parse_frame_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
     // <object> is single-cardinality (sq-4l1fj): duplicate <object> → MalformedXml.
-    let obj_node = node.unique_child("object", "Frame")?.ok_or_else(|| ImportError::MalformedXml(
-        "Frame missing <object>".to_string(),
-    ))?;
+    let obj_node = node
+        .unique_child("object", "Frame")?
+        .ok_or_else(|| ImportError::MalformedXml("Frame missing <object>".to_string()))?;
     let obj = parse_first_term(obj_node)?;
 
     // Collect ALL <slot> children — multiple slots are legal (multi-slot frame, sq-jsgyn).
@@ -1247,8 +1282,11 @@ fn parse_frame_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
             return Err(ImportError::NamedArgUniterm { name });
         }
 
-        let slot_terms: Vec<Term> =
-            slot.children.iter().map(parse_term).collect::<Result<_, _>>()?;
+        let slot_terms: Vec<Term> = slot
+            .children
+            .iter()
+            .map(parse_term)
+            .collect::<Result<_, _>>()?;
         if slot_terms.len() != 2 {
             return Err(ImportError::MalformedXml(format!(
                 "Frame <slot> must have exactly 2 term children, got {}",
@@ -1267,37 +1305,46 @@ fn parse_frame_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
 fn parse_member(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Member><instance>TERM</instance><class>TERM</class></Member>
     // Fail-closed on a DUPLICATE <instance>/<class> wrapper (sq-4l1fj).
-    let inst = node.unique_child("instance", "Member")?.ok_or_else(|| ImportError::MalformedXml(
-        "Member missing <instance>".to_string(),
-    ))?;
-    let cls = node.unique_child("class", "Member")?.ok_or_else(|| ImportError::MalformedXml(
-        "Member missing <class>".to_string(),
-    ))?;
-    Ok(Atom::Member { obj: parse_first_term(inst)?, class: parse_first_term(cls)? })
+    let inst = node
+        .unique_child("instance", "Member")?
+        .ok_or_else(|| ImportError::MalformedXml("Member missing <instance>".to_string()))?;
+    let cls = node
+        .unique_child("class", "Member")?
+        .ok_or_else(|| ImportError::MalformedXml("Member missing <class>".to_string()))?;
+    Ok(Atom::Member {
+        obj: parse_first_term(inst)?,
+        class: parse_first_term(cls)?,
+    })
 }
 
 fn parse_subclass(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Subclass><sub>TERM</sub><sup>TERM</sup></Subclass>
     // Fail-closed on a DUPLICATE <sub>/<sup> wrapper (sq-4l1fj).
-    let sub = node.unique_child("sub", "Subclass")?.ok_or_else(|| ImportError::MalformedXml(
-        "Subclass missing <sub>".to_string(),
-    ))?;
-    let sup = node.unique_child("sup", "Subclass")?.ok_or_else(|| ImportError::MalformedXml(
-        "Subclass missing <sup>".to_string(),
-    ))?;
-    Ok(Atom::Subclass { sub: parse_first_term(sub)?, sup: parse_first_term(sup)? })
+    let sub = node
+        .unique_child("sub", "Subclass")?
+        .ok_or_else(|| ImportError::MalformedXml("Subclass missing <sub>".to_string()))?;
+    let sup = node
+        .unique_child("sup", "Subclass")?
+        .ok_or_else(|| ImportError::MalformedXml("Subclass missing <sup>".to_string()))?;
+    Ok(Atom::Subclass {
+        sub: parse_first_term(sub)?,
+        sup: parse_first_term(sup)?,
+    })
 }
 
 fn parse_equal(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Equal><left>TERM</left><right>TERM</right></Equal>
     // Fail-closed on a DUPLICATE <left>/<right> wrapper (sq-4l1fj).
-    let left = node.unique_child("left", "Equal")?.ok_or_else(|| ImportError::MalformedXml(
-        "Equal missing <left>".to_string(),
-    ))?;
-    let right = node.unique_child("right", "Equal")?.ok_or_else(|| ImportError::MalformedXml(
-        "Equal missing <right>".to_string(),
-    ))?;
-    Ok(Atom::Equal { left: parse_first_term(left)?, right: parse_first_term(right)? })
+    let left = node
+        .unique_child("left", "Equal")?
+        .ok_or_else(|| ImportError::MalformedXml("Equal missing <left>".to_string()))?;
+    let right = node
+        .unique_child("right", "Equal")?
+        .ok_or_else(|| ImportError::MalformedXml("Equal missing <right>".to_string()))?;
+    Ok(Atom::Equal {
+        left: parse_first_term(left)?,
+        right: parse_first_term(right)?,
+    })
 }
 
 /// Parse the single term child of a single-cardinality wrapper element (e.g.
@@ -1313,28 +1360,32 @@ fn parse_first_term(wrapper: &XmlNode) -> Result<Term, ImportError> {
 fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
     // <External><content><Atom><op><Const type="rif:iri">IRI</Const></op><args>...</args></Atom></content></External>
     // Fail-closed on a DUPLICATE <content> wrapper (sq-4l1fj).
-    let content = node.unique_child("content", "External")?.ok_or_else(|| ImportError::MalformedXml(
-        "External missing <content>".to_string(),
-    ))?;
+    let content = node
+        .unique_child("content", "External")?
+        .ok_or_else(|| ImportError::MalformedXml("External missing <content>".to_string()))?;
     // The child of <content> should be <Atom> (for predicates) or <Expr> (for functions).
     // Single-cardinality: surplus siblings are rejected, not dropped (sq-anuo9).
     let inner = content.only_child("External <content>")?;
     if inner.tag != "Atom" && inner.tag != "Expr" {
         check_non_core(&inner.tag)?;
-        return Err(ImportError::UnrecognizedElement { tag: inner.tag.clone() });
+        return Err(ImportError::UnrecognizedElement {
+            tag: inner.tag.clone(),
+        });
     }
 
     // Get the operator IRI from <op><Const type="rif:iri">IRI</Const></op>
     // Fail-closed on a DUPLICATE <op> wrapper (sq-4l1fj).
-    let op_node = inner.unique_child("op", "External Atom/Expr")?.ok_or_else(|| ImportError::MalformedXml(
-        "External Atom/Expr missing <op>".to_string(),
-    ))?;
+    let op_node = inner
+        .unique_child("op", "External Atom/Expr")?
+        .ok_or_else(|| ImportError::MalformedXml("External Atom/Expr missing <op>".to_string()))?;
     // Single-cardinality: the <op> wrapper holds exactly one <Const> (sq-anuo9).
     let op_const = op_node.only_child("External <op>")?;
     let op_iri = if op_const.tag == "Const" {
         op_const.text.trim().to_string()
     } else {
-        return Err(ImportError::MalformedXml("External <op> child is not <Const>".to_string()));
+        return Err(ImportError::MalformedXml(
+            "External <op> child is not <Const>".to_string(),
+        ));
     };
 
     let builtin = iri_to_builtin(&op_iri)?;
@@ -1421,9 +1472,9 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
             }
             // Fail-closed on a DUPLICATE <formula> wrapper (sq-4l1fj): a dropped second
             // <formula> under <Exists> silently loses a conjunct of the existential body.
-            let formula = node.unique_child("formula", "Exists")?.ok_or_else(|| ImportError::MalformedXml(
-                "Exists missing <formula>".to_string(),
-            ))?;
+            let formula = node
+                .unique_child("formula", "Exists")?
+                .ok_or_else(|| ImportError::MalformedXml("Exists missing <formula>".to_string()))?;
             let sub = parse_formula_child(formula)?;
             Ok(BodyCond::Exists(declared_vars, Box::new(sub)))
         }
@@ -1438,7 +1489,9 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
                 // Under RIF-Core §2.3 a multi-slot frame is the conjunction of per-slot
                 // frames; this is the semantically equivalent Horn-body lowering.
                 // [SONNET-4.6] sq-jsgyn
-                Ok(BodyCond::And(atoms.into_iter().map(BodyCond::Atom).collect()))
+                Ok(BodyCond::And(
+                    atoms.into_iter().map(BodyCond::Atom).collect(),
+                ))
             }
         }
         "Member" => Ok(BodyCond::Atom(parse_member(node)?)),
@@ -1449,7 +1502,9 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
         "Atom" => Ok(BodyCond::Atom(parse_positional_atom(node)?)),
         other => {
             check_non_core(other)?;
-            Err(ImportError::UnrecognizedElement { tag: other.to_string() })
+            Err(ImportError::UnrecognizedElement {
+                tag: other.to_string(),
+            })
         }
     }
 }
@@ -1537,9 +1592,9 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
 
             // Fail-closed on a DUPLICATE <formula> wrapper (sq-4l1fj): a dropped second
             // <formula> under <Forall> silently loses a whole rule.
-            let formula = node.unique_child("formula", "Forall")?.ok_or_else(|| ImportError::MalformedXml(
-                "Forall missing <formula>".to_string(),
-            ))?;
+            let formula = node
+                .unique_child("formula", "Forall")?
+                .ok_or_else(|| ImportError::MalformedXml("Forall missing <formula>".to_string()))?;
             // Single-cardinality: the Forall <formula> holds exactly one body element
             // (an <Implies> or a bare atom); a surplus sibling is rejected (sq-anuo9).
             let body_node = formula.only_child("Forall <formula>")?;
@@ -1563,7 +1618,9 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
         }
         other => {
             check_non_core(other)?;
-            Err(ImportError::UnrecognizedElement { tag: other.to_string() })
+            Err(ImportError::UnrecognizedElement {
+                tag: other.to_string(),
+            })
         }
     }
 }
@@ -1582,12 +1639,12 @@ fn parse_implies(node: &XmlNode, forall_vars: &BTreeSet<String>) -> Result<Vec<R
         ));
     }
 
-    let if_node = node.child("if").ok_or_else(|| ImportError::MalformedXml(
-        "Implies missing <if>".to_string(),
-    ))?;
-    let then_node = node.child("then").ok_or_else(|| ImportError::MalformedXml(
-        "Implies missing <then>".to_string(),
-    ))?;
+    let if_node = node
+        .child("if")
+        .ok_or_else(|| ImportError::MalformedXml("Implies missing <if>".to_string()))?;
+    let then_node = node
+        .child("then")
+        .ok_or_else(|| ImportError::MalformedXml("Implies missing <then>".to_string()))?;
 
     // Parse the body condition. Single-cardinality: the <if> holds exactly one condition.
     // A surplus condition sibling used to be silently dropped by `.children.first()` — for
@@ -1648,10 +1705,7 @@ const NON_CORE_PROFILES: &[&str] = &[
 /// Per RIF-Core §3 (Imports): a conforming RIF-Core processor MUST reject a
 /// document whose imports closure contains a document with an incompatible profile.
 /// An explicitly non-Core profile IRI is the detectable case.
-fn check_import_profile(
-    location: &str,
-    profile: Option<&str>,
-) -> Result<(), ImportError> {
+fn check_import_profile(location: &str, profile: Option<&str>) -> Result<(), ImportError> {
     let Some(prof) = profile else { return Ok(()) };
     let prof = prof.trim();
     // An explicit non-Core profile is incompatible with a RIF-Core document.
@@ -1695,7 +1749,9 @@ where
     F: Fn(&str) -> Option<Vec<u8>>,
 {
     if root.tag != "Document" {
-        return Err(ImportError::UnrecognizedElement { tag: root.tag.clone() });
+        return Err(ImportError::UnrecognizedElement {
+            tag: root.tag.clone(),
+        });
     }
 
     let mut doc = Document::new();
@@ -1733,7 +1789,10 @@ where
                                     // closure for the offline check — a full transitive
                                     // resolver is tracked as sq-wbql1 future work).
                                     let imp_root = parse_xml_tree(&bytes)?;
-                                    let imp_doc = interpret_document(&imp_root, None::<&fn(&str) -> Option<Vec<u8>>>)?;
+                                    let imp_doc = interpret_document(
+                                        &imp_root,
+                                        None::<&fn(&str) -> Option<Vec<u8>>>,
+                                    )?;
                                     // Accumulate its rules for the combined validate.
                                     imported_rules.extend(imp_doc.rules);
                                 }
@@ -1753,7 +1812,9 @@ where
                     }
                     check_non_core(&item.tag)?;
                     // Other directives (e.g. <Profile>) are unrecognized.
-                    return Err(ImportError::UnrecognizedElement { tag: item.tag.clone() });
+                    return Err(ImportError::UnrecognizedElement {
+                        tag: item.tag.clone(),
+                    });
                 }
             }
             "payload" => {
@@ -1761,7 +1822,9 @@ where
             }
             other => {
                 check_non_core(other)?;
-                return Err(ImportError::UnrecognizedElement { tag: other.to_string() });
+                return Err(ImportError::UnrecognizedElement {
+                    tag: other.to_string(),
+                });
             }
         }
     }
@@ -1794,7 +1857,9 @@ fn interpret_payload(payload: &XmlNode, doc: &mut Document) -> Result<(), Import
             "Group" => interpret_group(child, doc)?,
             other => {
                 check_non_core(other)?;
-                return Err(ImportError::UnrecognizedElement { tag: other.to_string() });
+                return Err(ImportError::UnrecognizedElement {
+                    tag: other.to_string(),
+                });
             }
         }
     }
@@ -1832,7 +1897,9 @@ fn interpret_group(group: &XmlNode, doc: &mut Document) -> Result<(), ImportErro
             }
             other => {
                 check_non_core(other)?;
-                return Err(ImportError::UnrecognizedElement { tag: other.to_string() });
+                return Err(ImportError::UnrecognizedElement {
+                    tag: other.to_string(),
+                });
             }
         }
     }
@@ -2449,7 +2516,11 @@ mod tests {
     #[test]
     fn test_or_split_into_two_rules() {
         let doc = import(OR_SPLIT_XML).expect("valid RIF-Core XML with Or body");
-        assert_eq!(doc.rules.len(), 2, "Or-split must produce one rule per disjunct");
+        assert_eq!(
+            doc.rules.len(),
+            2,
+            "Or-split must produce one rule per disjunct"
+        );
         // Both rules have the same head.
         let head0 = &doc.rules[0].head;
         let head1 = &doc.rules[1].head;
@@ -2462,11 +2533,16 @@ mod tests {
     /// unconditionally renamed to a fresh `__ex` name.
     #[test]
     fn test_exists_flatten() {
-        let doc = import(EXISTS_FLATTEN_XML).expect("Exists-flatten with alpha-rename should succeed");
+        let doc =
+            import(EXISTS_FLATTEN_XML).expect("Exists-flatten with alpha-rename should succeed");
         assert_eq!(doc.rules.len(), 1);
         let rule = &doc.rules[0];
         // Body should have 2 atoms (the And inside the Exists was flattened).
-        assert_eq!(rule.body.len(), 2, "both atoms from the Exists body are present");
+        assert_eq!(
+            rule.body.len(),
+            2,
+            "both atoms from the Exists body are present"
+        );
 
         // The original existential variable name "z" must NOT appear — it was alpha-renamed.
         let z_var = Term::Var("z".to_string());
@@ -2495,7 +2571,10 @@ mod tests {
                 .any(|t| matches!(t, Term::Var(v) if v.starts_with("__ex"))),
             _ => false,
         });
-        assert!(has_fresh, "a fresh alpha-renamed existential var must appear in body");
+        assert!(
+            has_fresh,
+            "a fresh alpha-renamed existential var must appear in body"
+        );
     }
 
     /// Round-trip: parse minimal XML and verify structural equality with hand-built Document.
@@ -2576,13 +2655,20 @@ mod tests {
         // Verify one body contains A and the other B.
         let has_iri = |body: &Vec<Atom>, iri: &str| {
             body.iter().any(|a| {
-                if let Atom::Frame { val: Term::Iri(v), .. } = a { v == iri } else { false }
+                if let Atom::Frame {
+                    val: Term::Iri(v), ..
+                } = a
+                {
+                    v == iri
+                } else {
+                    false
+                }
             })
         };
-        let has_a = has_iri(body0, "http://example.org/A")
-            || has_iri(body1, "http://example.org/A");
-        let has_b = has_iri(body0, "http://example.org/B")
-            || has_iri(body1, "http://example.org/B");
+        let has_a =
+            has_iri(body0, "http://example.org/A") || has_iri(body1, "http://example.org/A");
+        let has_b =
+            has_iri(body0, "http://example.org/B") || has_iri(body1, "http://example.org/B");
         assert!(has_a, "one rule body corresponds to disjunct A");
         assert!(has_b, "one rule body corresponds to disjunct B");
     }
@@ -2632,15 +2718,25 @@ mod tests {
 
         let cases: Vec<ImportError> = vec![
             ImportError::MalformedXml("bad".to_string()),
-            ImportError::ImportDirective { location: "http://ex/r".to_string() },
+            ImportError::ImportDirective {
+                location: "http://ex/r".to_string(),
+            },
             ImportError::NonCoreElement {
                 element: "Naf".to_string(),
                 reason: "monotone".to_string(),
             },
-            ImportError::UnknownExternal { iri: "http://ex/f".to_string() },
-            ImportError::NamedArgUniterm { name: "foo".to_string() },
-            ImportError::UnrecognizedElement { tag: "Bogus".to_string() },
-            ImportError::ValidationFailed(RifError::UnboundHeadVar { var: "x".to_string() }),
+            ImportError::UnknownExternal {
+                iri: "http://ex/f".to_string(),
+            },
+            ImportError::NamedArgUniterm {
+                name: "foo".to_string(),
+            },
+            ImportError::UnrecognizedElement {
+                tag: "Bogus".to_string(),
+            },
+            ImportError::ValidationFailed(RifError::UnboundHeadVar {
+                var: "x".to_string(),
+            }),
         ];
         for e in &cases {
             let s = e.to_string();
@@ -2678,7 +2774,10 @@ mod tests {
 </Document>"#;
         let err = import(xml).expect_err("unbound head var must be caught by validate");
         assert!(
-            matches!(err, ImportError::ValidationFailed(RifError::UnboundHeadVar { .. })),
+            matches!(
+                err,
+                ImportError::ValidationFailed(RifError::UnboundHeadVar { .. })
+            ),
             "expected ValidationFailed(UnboundHeadVar), got: {}",
             err
         );
@@ -2687,10 +2786,8 @@ mod tests {
     /// A known builtin IRI round-trips correctly.
     #[test]
     fn test_builtin_numeric_add_parses() {
-        let b = iri_to_builtin(
-            "http://www.w3.org/2007/rif-builtin-function#numeric-add",
-        )
-        .expect("numeric-add must map to Builtin::NumericAdd");
+        let b = iri_to_builtin("http://www.w3.org/2007/rif-builtin-function#numeric-add")
+            .expect("numeric-add must map to Builtin::NumericAdd");
         assert_eq!(b, Builtin::NumericAdd);
     }
 
@@ -2707,21 +2804,42 @@ mod tests {
         assert_eq!(rule.body.len(), 2, "body has two atoms");
 
         // Collect all variable names from body object positions.
-        let body_obj_vars: Vec<String> = rule.body.iter().filter_map(|a| {
-            if let Atom::Frame { obj: Term::Var(v), .. } = a { Some(v.clone()) } else { None }
-        }).collect();
+        let body_obj_vars: Vec<String> = rule
+            .body
+            .iter()
+            .filter_map(|a| {
+                if let Atom::Frame {
+                    obj: Term::Var(v), ..
+                } = a
+                {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(body_obj_vars.len(), 2, "both body atoms have a Var object");
 
         // The two object vars must be DISTINCT (not both "x").
         let distinct: BTreeSet<_> = body_obj_vars.iter().cloned().collect();
-        assert_eq!(distinct.len(), 2,
+        assert_eq!(
+            distinct.len(),
+            2,
             "Fix-1: shadow capture — body vars must be distinct after alpha-rename; \
-             got {:?} (both are the same var, indicating capture)", body_obj_vars);
+             got {:?} (both are the same var, indicating capture)",
+            body_obj_vars
+        );
 
         // One must be the universal "x", the other a fresh __ex name.
-        assert!(distinct.contains("x"), "universal ?x must still appear in body");
+        assert!(
+            distinct.contains("x"),
+            "universal ?x must still appear in body"
+        );
         let has_fresh = distinct.iter().any(|v| v.starts_with("__ex"));
-        assert!(has_fresh, "existential ?x must be renamed to a __ex fresh var");
+        assert!(
+            has_fresh,
+            "existential ?x must be renamed to a __ex fresh var"
+        );
     }
 
     /// Test (b): sibling Exists — Forall ?x: head :- And(Exists ?y(p(?x,?y)), Exists ?y(q(?x,?y))).
@@ -2731,22 +2849,43 @@ mod tests {
         let doc = import(SIBLING_EXISTS_XML).expect("sibling exists doc must import");
         assert_eq!(doc.rules.len(), 1);
         let rule = &doc.rules[0];
-        assert_eq!(rule.body.len(), 2, "body has two atoms (one per sibling Exists)");
+        assert_eq!(
+            rule.body.len(),
+            2,
+            "body has two atoms (one per sibling Exists)"
+        );
 
         // The val of each body Frame should be a distinct fresh var.
-        let fresh_vals: Vec<String> = rule.body.iter().filter_map(|a| {
-            if let Atom::Frame { val: Term::Var(v), .. } = a { Some(v.clone()) } else { None }
-        }).collect();
+        let fresh_vals: Vec<String> = rule
+            .body
+            .iter()
+            .filter_map(|a| {
+                if let Atom::Frame {
+                    val: Term::Var(v), ..
+                } = a
+                {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(fresh_vals.len(), 2, "both body atoms have a Var value");
 
         let distinct: BTreeSet<_> = fresh_vals.iter().cloned().collect();
-        assert_eq!(distinct.len(), 2,
+        assert_eq!(
+            distinct.len(),
+            2,
             "Fix-1: sibling reuse — two sibling Exists ?y must produce TWO distinct fresh vars; \
-             got {:?}", fresh_vals);
+             got {:?}",
+            fresh_vals
+        );
 
         // Both must be fresh __ex names.
-        assert!(fresh_vals.iter().all(|v| v.starts_with("__ex")),
-            "all existential vars from sibling Exists must be renamed to __ex names");
+        assert!(
+            fresh_vals.iter().all(|v| v.starts_with("__ex")),
+            "all existential vars from sibling Exists must be renamed to __ex names"
+        );
     }
 
     /// Test (c): nested Exists — the innermost binder wins.
@@ -2762,11 +2901,17 @@ mod tests {
         // The body atom must use a fresh var (not the original "z").
         let z_var = Term::Var("z".to_string());
         let has_z = matches!(&rule.body[0], Atom::Frame { val, .. } if val == &z_var);
-        assert!(!has_z, "original 'z' must not appear — innermost Exists renamed it");
+        assert!(
+            !has_z,
+            "original 'z' must not appear — innermost Exists renamed it"
+        );
 
         let has_fresh = matches!(&rule.body[0],
             Atom::Frame { val: Term::Var(v), .. } if v.starts_with("__ex"));
-        assert!(has_fresh, "innermost ?z must be renamed to a __ex fresh var");
+        assert!(
+            has_fresh,
+            "innermost ?z must be renamed to a __ex fresh var"
+        );
     }
 
     /// Test (d): non-colliding existential var is UNCONDITIONALLY renamed; validate() passes.
@@ -2782,8 +2927,10 @@ mod tests {
         // ?w must NOT appear under its original name.
         let w_var = Term::Var("w".to_string());
         let has_original_w = matches!(&rule.body[0], Atom::Frame { val, .. } if val == &w_var);
-        assert!(!has_original_w,
-            "non-colliding existential ?w must be renamed unconditionally (Fix-1)");
+        assert!(
+            !has_original_w,
+            "non-colliding existential ?w must be renamed unconditionally (Fix-1)"
+        );
 
         // A fresh __ex var must appear instead.
         let has_fresh = matches!(&rule.body[0],
@@ -2801,28 +2948,39 @@ mod tests {
     fn test_capture_mutation_check() {
         // Helper: collect all Term::Var object-position names from a flat disjunct.
         fn body_obj_var_names(body: &[Atom]) -> Vec<String> {
-            body.iter().filter_map(|a| {
-                if let Atom::Frame { obj: Term::Var(v), .. } = a { Some(v.clone()) } else { None }
-            }).collect()
+            body.iter()
+                .filter_map(|a| {
+                    if let Atom::Frame {
+                        obj: Term::Var(v), ..
+                    } = a
+                    {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         }
 
         // --- Shadow pattern WITHOUT alpha_rename_cond ---
         // Construct: And(Frame{obj:Var("x"),...}, Exists(["x"], Frame{obj:Var("x"),...}))
-        let make_shadow = || BodyCond::And(vec![
-            BodyCond::Atom(Atom::Frame {
-                obj: Term::Var("x".to_string()),
-                pred: Term::Iri("http://ex/p".to_string()),
-                val: Term::Iri("http://ex/v".to_string()),
-            }),
-            BodyCond::Exists(
-                vec!["x".to_string()],
-                Box::new(BodyCond::Atom(Atom::Frame {
+        let make_shadow = || {
+            BodyCond::And(vec![
+                BodyCond::Atom(Atom::Frame {
                     obj: Term::Var("x".to_string()),
-                    pred: Term::Iri("http://ex/q".to_string()),
+                    pred: Term::Iri("http://ex/p".to_string()),
                     val: Term::Iri("http://ex/v".to_string()),
-                })),
-            ),
-        ]);
+                }),
+                BodyCond::Exists(
+                    vec!["x".to_string()],
+                    Box::new(BodyCond::Atom(Atom::Frame {
+                        obj: Term::Var("x".to_string()),
+                        pred: Term::Iri("http://ex/q".to_string()),
+                        val: Term::Iri("http://ex/v".to_string()),
+                    })),
+                ),
+            ])
+        };
 
         // Without alpha_rename_cond: expand_body drops the Exists wrapper → both atoms
         // use obj=Var("x") → body_obj_var_names returns ["x", "x"].
@@ -2831,10 +2989,13 @@ mod tests {
         let raw_vars = body_obj_var_names(&raw_disjuncts[0]);
         let raw_distinct: BTreeSet<_> = raw_vars.iter().cloned().collect();
         // Mutation check (RED without rename): without alpha-rename, duplicate var detected.
-        assert_eq!(raw_distinct.len(), 1,
+        assert_eq!(
+            raw_distinct.len(),
+            1,
             "mutation check: without alpha_rename_cond, shadow produces duplicate 'x' — \
              capture confirmed (this assertion verifies the mutation FAILS; \
-             disable alpha_rename_cond in parse_implies and tests (a)/(b) go RED)");
+             disable alpha_rename_cond in parse_implies and tests (a)/(b) go RED)"
+        );
 
         // With alpha_rename_cond: distinct vars.
         let mut counter = 0u32;
@@ -2844,39 +3005,56 @@ mod tests {
         assert_eq!(renamed_disjuncts.len(), 1);
         let renamed_vars = body_obj_var_names(&renamed_disjuncts[0]);
         let renamed_distinct: BTreeSet<_> = renamed_vars.iter().cloned().collect();
-        assert_eq!(renamed_distinct.len(), 2,
-            "with alpha_rename_cond, shadow body vars are distinct (capture fixed)");
+        assert_eq!(
+            renamed_distinct.len(),
+            2,
+            "with alpha_rename_cond, shadow body vars are distinct (capture fixed)"
+        );
 
         // --- Sibling pattern WITHOUT alpha_rename_cond ---
         // Construct: And(Exists(["y"], Frame{val:Var("y")}), Exists(["y"], Frame{val:Var("y")}))
         fn body_val_var_names(body: &[Atom]) -> Vec<String> {
-            body.iter().filter_map(|a| {
-                if let Atom::Frame { val: Term::Var(v), .. } = a { Some(v.clone()) } else { None }
-            }).collect()
+            body.iter()
+                .filter_map(|a| {
+                    if let Atom::Frame {
+                        val: Term::Var(v), ..
+                    } = a
+                    {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         }
-        let make_sibling = || BodyCond::And(vec![
-            BodyCond::Exists(
-                vec!["y".to_string()],
-                Box::new(BodyCond::Atom(Atom::Frame {
-                    obj: Term::Iri("http://ex/s".to_string()),
-                    pred: Term::Iri("http://ex/p".to_string()),
-                    val: Term::Var("y".to_string()),
-                })),
-            ),
-            BodyCond::Exists(
-                vec!["y".to_string()],
-                Box::new(BodyCond::Atom(Atom::Frame {
-                    obj: Term::Iri("http://ex/s".to_string()),
-                    pred: Term::Iri("http://ex/q".to_string()),
-                    val: Term::Var("y".to_string()),
-                })),
-            ),
-        ]);
+        let make_sibling = || {
+            BodyCond::And(vec![
+                BodyCond::Exists(
+                    vec!["y".to_string()],
+                    Box::new(BodyCond::Atom(Atom::Frame {
+                        obj: Term::Iri("http://ex/s".to_string()),
+                        pred: Term::Iri("http://ex/p".to_string()),
+                        val: Term::Var("y".to_string()),
+                    })),
+                ),
+                BodyCond::Exists(
+                    vec!["y".to_string()],
+                    Box::new(BodyCond::Atom(Atom::Frame {
+                        obj: Term::Iri("http://ex/s".to_string()),
+                        pred: Term::Iri("http://ex/q".to_string()),
+                        val: Term::Var("y".to_string()),
+                    })),
+                ),
+            ])
+        };
         let sib_raw_disjuncts = expand_body(make_sibling());
         let sib_raw_vars = body_val_var_names(&sib_raw_disjuncts[0]);
         let sib_raw_distinct: BTreeSet<_> = sib_raw_vars.iter().cloned().collect();
-        assert_eq!(sib_raw_distinct.len(), 1,
-            "mutation check: without alpha_rename_cond, sibling produces duplicate 'y'");
+        assert_eq!(
+            sib_raw_distinct.len(),
+            1,
+            "mutation check: without alpha_rename_cond, sibling produces duplicate 'y'"
+        );
 
         // With alpha_rename_cond → distinct.
         let mut counter2 = 0u32;
@@ -2885,8 +3063,11 @@ mod tests {
         let sib_renamed_disjuncts = expand_body(sib_renamed);
         let sib_renamed_vars = body_val_var_names(&sib_renamed_disjuncts[0]);
         let sib_renamed_distinct: BTreeSet<_> = sib_renamed_vars.iter().cloned().collect();
-        assert_eq!(sib_renamed_distinct.len(), 2,
-            "with alpha_rename_cond, sibling body vars are distinct");
+        assert_eq!(
+            sib_renamed_distinct.len(),
+            2,
+            "with alpha_rename_cond, sibling body vars are distinct"
+        );
     }
 
     // ---- Silent-drop / fail-closed tests (Fix-2) ----------------------------
@@ -3016,7 +3197,11 @@ mod tests {
   </Forall></sentences></Group></payload>
 </Document>"#;
         let doc = import(control).expect("single-child <if> is conformant and must import");
-        assert_eq!(doc.rules.len(), 1, "control rule must import as exactly one rule");
+        assert_eq!(
+            doc.rules.len(),
+            1,
+            "control rule must import as exactly one rule"
+        );
     }
 
     /// `<then>` holding TWO head atoms drops the second (under-derivation) → rejected.
@@ -3349,20 +3534,25 @@ mod tests {
     /// This is the regression guard: Fix-6 must not break schema-valid multi-declare.
     #[test]
     fn test_multi_declare_valid_exists() {
-        let doc = import(MULTI_DECLARE_VALID_EXISTS_XML)
-            .expect("valid multi-declare Exists (one Var per declare) must import (Fix-6 regression guard)");
+        let doc = import(MULTI_DECLARE_VALID_EXISTS_XML).expect(
+            "valid multi-declare Exists (one Var per declare) must import (Fix-6 regression guard)",
+        );
         assert_eq!(doc.rules.len(), 1);
         let rule = &doc.rules[0];
         // Body has two atoms (one per declared var in the multi-declare Exists).
-        assert_eq!(rule.body.len(), 2, "both atoms from the multi-declare Exists body are present");
+        assert_eq!(
+            rule.body.len(),
+            2,
+            "both atoms from the multi-declare Exists body are present"
+        );
 
         // Neither original var name "a" nor "b" must appear (both unconditionally renamed).
         let a_var = Term::Var("a".to_string());
         let b_var = Term::Var("b".to_string());
         let has_original = rule.body.iter().any(|atom| match atom {
-            Atom::Frame { obj, pred, val } => {
-                [obj, pred, val].iter().any(|t| *t == &a_var || *t == &b_var)
-            }
+            Atom::Frame { obj, pred, val } => [obj, pred, val]
+                .iter()
+                .any(|t| *t == &a_var || *t == &b_var),
             Atom::Builtin { args, .. } => args.iter().any(|t| t == &a_var || t == &b_var),
             _ => false,
         });
@@ -3372,14 +3562,25 @@ mod tests {
         );
 
         // Collect all fresh vars from body val positions.
-        let fresh_vals: Vec<String> = rule.body.iter().filter_map(|a| {
-            if let Atom::Frame { val: Term::Var(v), .. } = a {
-                Some(v.clone())
-            } else {
-                None
-            }
-        }).collect();
-        assert_eq!(fresh_vals.len(), 2, "both body atoms have a Var value (the renamed existentials)");
+        let fresh_vals: Vec<String> = rule
+            .body
+            .iter()
+            .filter_map(|a| {
+                if let Atom::Frame {
+                    val: Term::Var(v), ..
+                } = a
+                {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            fresh_vals.len(),
+            2,
+            "both body atoms have a Var value (the renamed existentials)"
+        );
 
         // Both must be fresh __ex names AND must be DISTINCT.
         assert!(
@@ -3515,7 +3716,8 @@ mod tests {
     </Frame>
   </sentences></Group></payload>
 </Document>"#;
-        let err = import(xml).expect_err("unknown entity &undefined; must be rejected (fail-closed)");
+        let err =
+            import(xml).expect_err("unknown entity &undefined; must be rejected (fail-closed)");
         assert!(
             matches!(err, ImportError::MalformedXml(_)),
             "expected MalformedXml for unknown entity, got: {}",
@@ -3546,7 +3748,10 @@ mod tests {
         assert_eq!(resolve_xml_entity("#X26").unwrap(), "&");
         // Unknown general entity → fail-closed.
         assert!(
-            matches!(resolve_xml_entity("undefined"), Err(ImportError::MalformedXml(_))),
+            matches!(
+                resolve_xml_entity("undefined"),
+                Err(ImportError::MalformedXml(_))
+            ),
             "unknown entity must produce MalformedXml"
         );
     }
@@ -3633,7 +3838,11 @@ mod tests {
   </sentences></Group></payload>
 </Document>"#;
         let doc = import(control).expect("single-slot Frame fact is conformant and must import");
-        assert_eq!(doc.rules.len(), 1, "control Frame fact must import as exactly one rule");
+        assert_eq!(
+            doc.rules.len(),
+            1,
+            "control Frame fact must import as exactly one rule"
+        );
     }
 
     // ---- sq-jsgyn: multi-slot Frame desugaring tests --------------------------
@@ -3688,9 +3897,9 @@ mod tests {
         assert!(has_p1, "per-slot fact for p1->v1 must be present");
         assert!(has_p2, "per-slot fact for p2->v2 must be present");
         // Both share the same object IRI.
-        let all_same_obj = heads.iter().all(|a| {
-            matches!(a, Atom::Frame { obj: Term::Iri(o), .. } if o == "http://ex/obj")
-        });
+        let all_same_obj = heads
+            .iter()
+            .all(|a| matches!(a, Atom::Frame { obj: Term::Iri(o), .. } if o == "http://ex/obj"));
         assert!(all_same_obj, "all per-slot atoms must share the same obj");
     }
 
@@ -3729,10 +3938,18 @@ mod tests {
 </Document>"#;
         let doc = import(xml).expect("2-slot Frame in body must import (sq-jsgyn)");
         // Single rule (no Or-split, single head).
-        assert_eq!(doc.rules.len(), 1, "2-slot body Frame → 1 rule (no Or-split)");
+        assert_eq!(
+            doc.rules.len(),
+            1,
+            "2-slot body Frame → 1 rule (no Or-split)"
+        );
         let rule = &doc.rules[0];
         // Body: 2 atoms (one per slot).
-        assert_eq!(rule.body.len(), 2, "2-slot body Frame desugars to 2 body atoms");
+        assert_eq!(
+            rule.body.len(),
+            2,
+            "2-slot body Frame desugars to 2 body atoms"
+        );
         // Head: 1 atom (the head frame has a single slot).
         assert_eq!(rule.head.len(), 1, "single-slot head produces 1 head atom");
         // Verify the body contains both per-slot atoms.
@@ -3747,9 +3964,10 @@ mod tests {
         assert!(has_p1, "body must contain the p1->v1 per-slot atom");
         assert!(has_p2, "body must contain the p2->v2 per-slot atom");
         // Both share the same object variable ?x.
-        let all_same_obj = rule.body.iter().all(|a| {
-            matches!(a, Atom::Frame { obj: Term::Var(v), .. } if v == "x")
-        });
+        let all_same_obj = rule
+            .body
+            .iter()
+            .all(|a| matches!(a, Atom::Frame { obj: Term::Var(v), .. } if v == "x"));
         assert!(all_same_obj, "all per-slot body atoms share obj=?x");
     }
 
@@ -3785,10 +4003,18 @@ mod tests {
   </sentences></Group></payload>
 </Document>"#;
         let doc = import(xml).expect("2-slot Frame in head must import (sq-jsgyn)");
-        assert_eq!(doc.rules.len(), 1, "single rule (single-slot body, no Or-split)");
+        assert_eq!(
+            doc.rules.len(),
+            1,
+            "single rule (single-slot body, no Or-split)"
+        );
         let rule = &doc.rules[0];
         // Head: 2 atoms (one per slot).
-        assert_eq!(rule.head.len(), 2, "2-slot head Frame desugars to 2 head atoms");
+        assert_eq!(
+            rule.head.len(),
+            2,
+            "2-slot head Frame desugars to 2 head atoms"
+        );
         // Body: 1 atom (single-slot body Frame).
         assert_eq!(rule.body.len(), 1, "single-slot body produces 1 body atom");
         // Verify both head atoms are present with correct pred/val.
@@ -3839,7 +4065,11 @@ mod tests {
         let doc = import(xml).expect("3-slot Frame in body must import (sq-jsgyn)");
         assert_eq!(doc.rules.len(), 1, "single rule");
         let rule = &doc.rules[0];
-        assert_eq!(rule.body.len(), 3, "3-slot body Frame desugars to 3 body atoms");
+        assert_eq!(
+            rule.body.len(),
+            3,
+            "3-slot body Frame desugars to 3 body atoms"
+        );
         assert_eq!(rule.head.len(), 1, "single-slot head produces 1 head atom");
     }
 
@@ -3955,20 +4185,47 @@ mod tests {
 </Document>"#;
         let doc = import(xml).expect("mutation-check: 2-slot body must import");
         let rule = &doc.rules[0];
-        assert_eq!(rule.body.len(), 2, "must have 2 body atoms (per-slot split)");
+        assert_eq!(
+            rule.body.len(),
+            2,
+            "must have 2 body atoms (per-slot split)"
+        );
         // Collect the pred IRIs from body atoms.
-        let preds: Vec<String> = rule.body.iter().filter_map(|a| {
-            if let Atom::Frame { pred: Term::Iri(p), .. } = a { Some(p.clone()) } else { None }
-        }).collect();
-        assert_eq!(preds.len(), 2, "both body atoms must be Frame atoms with IRI predicates");
+        let preds: Vec<String> = rule
+            .body
+            .iter()
+            .filter_map(|a| {
+                if let Atom::Frame {
+                    pred: Term::Iri(p), ..
+                } = a
+                {
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            preds.len(),
+            2,
+            "both body atoms must be Frame atoms with IRI predicates"
+        );
         // The two predicates must be DISTINCT — the per-slot split is the load-bearing mechanism.
         // If the loop was collapsed to a single atom, both preds would be the same → assertion fails.
-        assert_ne!(preds[0], preds[1],
+        assert_ne!(
+            preds[0], preds[1],
             "per-slot split mutation: predicates must differ (PRED_A vs PRED_B); \
-             a single-atom collapse would produce identical preds → this assertion fails → RED");
+             a single-atom collapse would produce identical preds → this assertion fails → RED"
+        );
         // Specifically the two expected predicates.
-        assert!(preds.contains(&"http://ex/PRED_A".to_string()), "PRED_A must be present");
-        assert!(preds.contains(&"http://ex/PRED_B".to_string()), "PRED_B must be present");
+        assert!(
+            preds.contains(&"http://ex/PRED_A".to_string()),
+            "PRED_A must be present"
+        );
+        assert!(
+            preds.contains(&"http://ex/PRED_B".to_string()),
+            "PRED_B must be present"
+        );
     }
 
     /// Parent `<Member>` — a duplicate `<instance>` OR a duplicate `<class>` is rejected.
@@ -4154,7 +4411,11 @@ mod tests {
   </Forall></sentences></Group></payload>
 </Document>"#;
         let doc = import(control).expect("single-<formula> Forall is conformant and must import");
-        assert_eq!(doc.rules.len(), 1, "control Forall must import as exactly one rule");
+        assert_eq!(
+            doc.rules.len(),
+            1,
+            "control Forall must import as exactly one rule"
+        );
     }
 
     /// Parent `<Exists>` (in a rule body) — a duplicate `<formula>` is rejected. A dropped
@@ -4218,7 +4479,11 @@ mod tests {
   </sentences></Group></payload>
 </Document>"#;
         let doc = import(control).expect("single-<items> List value is conformant and must import");
-        assert_eq!(doc.rules.len(), 1, "control List-valued Frame fact must import as one rule");
+        assert_eq!(
+            doc.rules.len(),
+            1,
+            "control List-valued Frame fact must import as one rule"
+        );
     }
 
     // ---- Positional Atom tests (sq-n7y15) -----------------------------------
@@ -4552,7 +4817,9 @@ mod tests {
         let o_id = dict.intern_iri("http://ex/b");
 
         assert!(
-            closure.iter().any(|t| t[0] == s_id && t[1] == p_id && t[2] == o_id),
+            closure
+                .iter()
+                .any(|t| t[0] == s_id && t[1] == p_id && t[2] == o_id),
             "end-to-end: the derived triple (a, relatedTo, b) must appear in the closure; \
              this proves positional Atom R(a,b) was matched by the rule body and the \
              conclusion Frame was derived"
@@ -4565,7 +4832,12 @@ mod tests {
     #[test]
     fn test_unique_child_helper_branches() {
         fn leaf(tag: &str) -> XmlNode {
-            XmlNode { tag: tag.to_string(), text: String::new(), attrs: Vec::new(), children: Vec::new() }
+            XmlNode {
+                tag: tag.to_string(),
+                text: String::new(),
+                attrs: Vec::new(),
+                children: Vec::new(),
+            }
         }
         // Children: two <a>, one <b>, zero <c>.
         let parent = XmlNode {
@@ -4587,9 +4859,17 @@ mod tests {
         // Two <a> → Err(MalformedXml) naming the tag + "duplicate".
         match parent.unique_child("a", "Parent") {
             Err(ImportError::MalformedXml(msg)) => {
-                assert!(msg.contains("duplicate"), "message must say 'duplicate': {}", msg);
+                assert!(
+                    msg.contains("duplicate"),
+                    "message must say 'duplicate': {}",
+                    msg
+                );
                 assert!(msg.contains("<a>"), "message must name <a>: {}", msg);
-                assert!(msg.contains("Parent"), "message must name the parent ctx: {}", msg);
+                assert!(
+                    msg.contains("Parent"),
+                    "message must name the parent ctx: {}",
+                    msg
+                );
             }
             Err(e) => panic!("expected MalformedXml, got a different error: {}", e),
             Ok(_) => panic!("two <a> must be rejected, got Ok"),
@@ -4615,7 +4895,11 @@ mod tests {
     #[test]
     fn import_with_closure_no_imports_passes() {
         let result = import_with_closure(FRAME_FACT_DOC, |_| None);
-        assert!(result.is_ok(), "no-import doc must pass, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "no-import doc must pass, got: {:?}",
+            result.err()
+        );
     }
 
     /// A blanket-refused import (resolver returns None) → `ImportDirective` fail-closed.
@@ -4737,7 +5021,10 @@ mod tests {
   <payload><Group></Group></payload>
 </Document>"#;
         let ok = import_with_closure(no_profile, |_| Some(EMPTY_GROUP_DOC.to_vec()));
-        assert!(ok.is_ok(), "no-profile import MUST be accepted (mutation check — ok side)");
+        assert!(
+            ok.is_ok(),
+            "no-profile import MUST be accepted (mutation check — ok side)"
+        );
 
         // REJECTED: BLD profile.
         let bld_profile = br#"<Document xmlns="http://www.w3.org/2007/rif#">

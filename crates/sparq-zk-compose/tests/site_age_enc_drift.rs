@@ -69,7 +69,9 @@ fn parse_age_operand_enc(ts: &str) -> Vec<(u64, String)> {
         if line.is_empty() || line.starts_with("//") {
             continue;
         }
-        let Some(colon) = line.find(':') else { continue };
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
         let Ok(age) = line[..colon].trim().parse::<u64>() else {
             continue;
         };
@@ -127,7 +129,10 @@ fn site_age_operand_enc_matches_native_encoder() {
         // partial checkout) is skipped rather than failed — same offline-tolerant
         // posture as site/scripts/sync-zk-catalog.mjs. In CI the file exists, so the
         // gate below always bites.
-        eprintln!("[sq-1s2.4] {} absent — skipping drift guard", path.display());
+        eprintln!(
+            "[sq-1s2.4] {} absent — skipping drift guard",
+            path.display()
+        );
         return;
     };
 
@@ -158,10 +163,13 @@ fn site_age_operand_enc_matches_native_encoder() {
 /// the `AGE_OPERAND_ENC` entry for the same age (the two site files must not disagree).
 #[test]
 fn capture_manifest_operand_enc_matches_native_encoder() {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../site/scripts/capture-zk-manifest.mjs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../site/scripts/capture-zk-manifest.mjs");
     let Ok(mjs) = std::fs::read_to_string(&path) else {
-        eprintln!("[sq-1s2.4] {} absent — skipping drift guard", path.display());
+        eprintln!(
+            "[sq-1s2.4] {} absent — skipping drift guard",
+            path.display()
+        );
         return;
     };
 

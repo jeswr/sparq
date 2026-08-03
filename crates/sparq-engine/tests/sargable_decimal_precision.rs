@@ -56,7 +56,11 @@ fn oracle_true(g: &Graph, cond: &str) -> bool {
 fn high_precision_decimal_equality_does_not_match_integer() {
     // "1.000000000000000001" != 1, so FILTER(?v = 1) must return ZERO rows.
     let g = graph_with(&format!(r#""{HP}"^^xsd:decimal"#));
-    assert_eq!(sargable_count(&g, "?v = 1"), 0, "?v = 1 must not match {HP}");
+    assert_eq!(
+        sargable_count(&g, "?v = 1"),
+        0,
+        "?v = 1 must not match {HP}"
+    );
 }
 
 #[test]
@@ -71,11 +75,20 @@ fn high_precision_decimal_all_operators_match_oracle() {
     // Every comparison operator: the sargable count must equal the exact BIND oracle.
     // Expected (from the bead): = 0, > 1, < 0, >= 1, <= 0.
     let g = graph_with(&format!(r#""{HP}"^^xsd:decimal"#));
-    for (cond, want) in [("?v = 1", 0), ("?v > 1", 1), ("?v < 1", 0), ("?v >= 1", 1), ("?v <= 1", 0)] {
+    for (cond, want) in [
+        ("?v = 1", 0),
+        ("?v > 1", 1),
+        ("?v < 1", 0),
+        ("?v >= 1", 1),
+        ("?v <= 1", 0),
+    ] {
         let got = sargable_count(&g, cond);
         let oracle = usize::from(oracle_true(&g, cond));
         assert_eq!(got, want, "sargable {cond}: got {got} rows, want {want}");
-        assert_eq!(got, oracle, "sargable {cond} ({got}) diverged from BIND oracle ({oracle})");
+        assert_eq!(
+            got, oracle,
+            "sargable {cond} ({got}) diverged from BIND oracle ({oracle})"
+        );
     }
 }
 
@@ -108,18 +121,23 @@ fn property_high_precision_decimals_match_oracle() {
     // integer's f64 (fraction just above / just below), the sargable path must agree with
     // the exact BIND oracle for every operator. No proptest dep — a fixed crafted sample.
     let cases = [
-        "1.000000000000000001",  // > 1, f64 -> 1.0
-        "0.999999999999999999",  // < 1, f64 -> 1.0
-        "2.000000000000000003",  // > 2, f64 -> 2.0
-        "9.999999999999999999",  // < 10, f64 -> 10.0
-        "1.0000000000000000",    // == 1 exactly (trailing zeros; f64 -> 1.0)
+        "1.000000000000000001", // > 1, f64 -> 1.0
+        "0.999999999999999999", // < 1, f64 -> 1.0
+        "2.000000000000000003", // > 2, f64 -> 2.0
+        "9.999999999999999999", // < 10, f64 -> 10.0
+        "1.0000000000000000",   // == 1 exactly (trailing zeros; f64 -> 1.0)
     ];
     for val in cases {
         let g = graph_with(&format!(r#""{val}"^^xsd:decimal"#));
-        for cond in ["?v = 1", "?v > 1", "?v < 1", "?v >= 1", "?v <= 1", "?v = 2", "?v > 2", "?v < 10"] {
+        for cond in [
+            "?v = 1", "?v > 1", "?v < 1", "?v >= 1", "?v <= 1", "?v = 2", "?v > 2", "?v < 10",
+        ] {
             let got = sargable_count(&g, cond);
             let oracle = usize::from(oracle_true(&g, cond));
-            assert_eq!(got, oracle, "value {val}, {cond}: sargable {got} != oracle {oracle}");
+            assert_eq!(
+                got, oracle,
+                "value {val}, {cond}: sargable {got} != oracle {oracle}"
+            );
         }
     }
 }

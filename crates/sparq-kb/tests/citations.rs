@@ -15,9 +15,9 @@
 //! Run: `cargo test -p sparq-kb --features query --test citations`
 #![cfg(feature = "query")]
 
+use sparq_kb::query::canned;
 use sparq_kb::query::citations::render_citations;
 use sparq_kb::query::{ask_pkg, load_pkg, load_pkg_with_extra};
-use sparq_kb::query::canned;
 
 // ---------------------------------------------------------------------------
 // Fixture KB: two Findings with provenance + one without.
@@ -105,8 +105,7 @@ fn fixture_kb_renders_correct_citations_and_metrics_are_sound() {
 
     // (a) Resolution-rate 1.0, fabricated-count 0.
     assert_eq!(
-        report.metrics.fabricated_count,
-        0,
+        report.metrics.fabricated_count, 0,
         "no fabricated citations: every source IRI in the result must be in the graph"
     );
     #[allow(clippy::float_cmp)]
@@ -154,8 +153,7 @@ fn fixture_kb_renders_correct_citations_and_metrics_are_sound() {
 #[test]
 fn finding_without_prov_produces_no_fabricated_citation_in_output() {
     let graph = load_pkg_with_extra(&[FIXTURE_KB]).expect("PKG + fixture loads");
-    let rows = ask_pkg(&graph, &canned::FINDING_PROVENANCE.render(None))
-        .expect("query runs");
+    let rows = ask_pkg(&graph, &canned::FINDING_PROVENANCE.render(None)).expect("query runs");
 
     // The mandatory prov:wasDerivedFrom join excludes f-no-prov.
     assert!(
@@ -179,8 +177,7 @@ fn finding_without_prov_produces_no_fabricated_citation_in_output() {
         report.rendered_text
     );
     assert_eq!(
-        report.metrics.fabricated_count,
-        0,
+        report.metrics.fabricated_count, 0,
         "fabricated-count must be 0"
     );
 }
@@ -210,8 +207,7 @@ fn real_pkg_citations_resolution_rate_is_one_and_fabricated_count_is_zero() {
     // Load-bearing invariant: every [source] citation resolves to a real
     // prov:wasDerivedFrom triple in the graph.
     assert_eq!(
-        report.metrics.fabricated_count,
-        0,
+        report.metrics.fabricated_count, 0,
         "fabricated-citation count must be 0 over the real PKG \
          (SHACL already forbids dangling cito:citesAsEvidence, \
          but the harness MEASURES, not assumes)"

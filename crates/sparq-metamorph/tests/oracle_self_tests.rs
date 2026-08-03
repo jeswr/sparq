@@ -98,9 +98,17 @@ fn tlp_branches_partition_the_base_as_the_case_analysis_predicts() {
     let queries = tlp_queries(PATTERN, PREDICATE);
     assert_eq!(rows(&engine, &queries.base), 4, "s1..s4");
     assert_eq!(rows(&engine, &queries.branch_true), 1, "s2: 20 < 25");
-    assert_eq!(rows(&engine, &queries.branch_false), 1, "s1: 30 < 25 is false");
+    assert_eq!(
+        rows(&engine, &queries.branch_false),
+        1,
+        "s1: 30 < 25 is false"
+    );
     // s3: "twenty" < 25 is a type error; s4: ?age unbound (OPTIONAL) is an error.
-    assert_eq!(rows(&engine, &queries.branch_error), 2, "s3 type error + s4 unbound");
+    assert_eq!(
+        rows(&engine, &queries.branch_error),
+        2,
+        "s3 type error + s4 unbound"
+    );
 }
 
 // --- non-vacuity: each oracle passes on the pristine engine, flags the mutant ---
@@ -115,7 +123,10 @@ fn tlp_passes_on_pristine_sparq() {
 fn tlp_flags_the_seeded_wrong_result_mutant() {
     let mutant = FilterDropsRow::new(pristine());
     let verdict = check_tlp(&mutant, PATTERN, PREDICATE);
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 #[test]
@@ -128,7 +139,10 @@ fn norec_passes_on_pristine_sparq() {
 fn norec_flags_the_seeded_wrong_result_mutant() {
     let mutant = FilterDropsRow::new(pristine());
     let verdict = check_norec(&mutant, PATTERN, PREDICATE);
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 #[test]
@@ -146,7 +160,10 @@ fn differential_flags_the_seeded_wrong_result_mutant() {
     let mutant = FilterDropsRow::new(pristine());
     let query = format!("SELECT * WHERE {{ {PATTERN} FILTER( {PREDICATE} ) }}");
     let verdict = check_differential(&[&reference, &mutant], &query);
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 // --- fail-closed: engine errors are engine failures, never passes or violations ---
@@ -212,7 +229,11 @@ fn lang_atom_exercises_the_full_ebv_trichotomy() {
     let predicate = "LANG(?v) = \"fr\"";
     let queries = tlp_queries(LANG_PATTERN, predicate);
     assert_eq!(rows(&engine, &queries.base), 3, "s1..s3");
-    assert_eq!(rows(&engine, &queries.branch_true), 1, "s1: LANG(\"mot\"@fr) = \"fr\"");
+    assert_eq!(
+        rows(&engine, &queries.branch_true),
+        1,
+        "s1: LANG(\"mot\"@fr) = \"fr\""
+    );
     assert_eq!(
         rows(&engine, &queries.branch_false),
         1,
@@ -234,9 +255,21 @@ fn is_literal_atom_splits_literals_from_iris() {
     let engine = InProcessSparq::from_ntriples("sparq", LANG_DATA).unwrap();
     let predicate = "isLiteral(?v)";
     let queries = tlp_queries(LANG_PATTERN, predicate);
-    assert_eq!(rows(&engine, &queries.branch_true), 2, "s1 lang-tagged + s2 plain");
-    assert_eq!(rows(&engine, &queries.branch_false), 1, "s3: an IRI is not a literal");
-    assert_eq!(rows(&engine, &queries.branch_error), 0, "?v is always bound here");
+    assert_eq!(
+        rows(&engine, &queries.branch_true),
+        2,
+        "s1 lang-tagged + s2 plain"
+    );
+    assert_eq!(
+        rows(&engine, &queries.branch_false),
+        1,
+        "s3: an IRI is not a literal"
+    );
+    assert_eq!(
+        rows(&engine, &queries.branch_error),
+        0,
+        "?v is always bound here"
+    );
     assert!(check_tlp(&engine, LANG_PATTERN, predicate).is_pass());
     assert!(check_norec(&engine, LANG_PATTERN, predicate).is_pass());
 }
@@ -245,10 +278,12 @@ fn is_literal_atom_splits_literals_from_iris() {
 /// the non-vacuity anchor extended to the new atom family.
 #[test]
 fn mutant_is_flagged_on_a_lang_predicate() {
-    let mutant =
-        FilterDropsRow::new(InProcessSparq::from_ntriples("sparq", LANG_DATA).unwrap());
+    let mutant = FilterDropsRow::new(InProcessSparq::from_ntriples("sparq", LANG_DATA).unwrap());
     let verdict = check_tlp(&mutant, LANG_PATTERN, "LANG(?v) = \"fr\"");
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 // --- generated cases: the oracles hold on the real engine across seeds ---
@@ -327,8 +362,7 @@ fn generated_cases_with_the_new_atoms_hold_on_pristine_sparq() {
         let case = generate_case(seed);
         let has_lang = case.predicate.contains("LANG(?v)");
         let has_is_literal = case.predicate.contains("isLiteral(?v)");
-        if !(has_lang && lang_checked < WANT) && !(has_is_literal && is_literal_checked < WANT)
-        {
+        if !(has_lang && lang_checked < WANT) && !(has_is_literal && is_literal_checked < WANT) {
             continue;
         }
         let engine = InProcessSparq::from_ntriples("sparq", &case.data_ntriples)
@@ -382,8 +416,7 @@ const DISTINCT_DATA: &str = concat!(
     "<http://example.org/s5> <http://example.org/v> \"40\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
     "<http://example.org/s5> <http://example.org/g> \"C\" .\n",
 );
-const DISTINCT_PATTERN: &str =
-    "?s <http://example.org/v> ?v . ?s <http://example.org/g> ?g";
+const DISTINCT_PATTERN: &str = "?s <http://example.org/v> ?v . ?s <http://example.org/g> ?g";
 const DISTINCT_PREDICATE: &str = "?v < 25";
 
 fn distinct_engine() -> InProcessSparq {
@@ -423,7 +456,11 @@ fn distinct_partitions_recombine_by_set_union_not_multiset_union() {
 fn distinct_star_partitions_are_disjoint_so_cardinalities_add() {
     let engine = distinct_engine();
     let queries = tlp_distinct_queries(DISTINCT_PATTERN, DISTINCT_PREDICATE, &[]);
-    assert_eq!(rows(&engine, &queries.base), 5, "s1..s5 are pairwise distinct");
+    assert_eq!(
+        rows(&engine, &queries.base),
+        5,
+        "s1..s5 are pairwise distinct"
+    );
     assert_eq!(
         rows(&engine, &queries.branch_true)
             + rows(&engine, &queries.branch_false)
@@ -528,7 +565,10 @@ fn aggregate_partitions_recombine_by_addition() {
             "{agg:?} — the error branch (s4, no ?w) folds to the identity, not unbound"
         );
         let verdict = check_tlp_aggregate(&engine, AGG_PATTERN, AGG_PREDICATE, &agg);
-        assert!(verdict.is_pass(), "{agg:?}: expected a pass, got {verdict:?}");
+        assert!(
+            verdict.is_pass(),
+            "{agg:?}: expected a pass, got {verdict:?}"
+        );
     }
 }
 
@@ -546,7 +586,11 @@ fn an_aggregate_error_lands_in_exactly_one_branch_and_unbinds_the_base() {
         None,
         "s4's failed cast makes the whole base aggregate a type error -> unbound"
     );
-    assert_eq!(agg_cell(&engine, &q.branch_true).as_deref(), Some("30"), "10 + 20");
+    assert_eq!(
+        agg_cell(&engine, &q.branch_true).as_deref(),
+        Some("30"),
+        "10 + 20"
+    );
     assert_eq!(
         agg_cell(&engine, &q.branch_false).as_deref(),
         Some("120"),
@@ -583,10 +627,16 @@ fn sum_is_fatal_on_an_aggregate_error_while_count_drops_the_erroring_member() {
     // The false branch owns s3 and s6 (both erroring) and s5 (bound): SUM unbound,
     // COUNT = 1. The law holds either way.
     assert_eq!(agg_cell(&engine, &sum_q.branch_false), None);
-    assert_eq!(agg_cell(&engine, &count_q.branch_false).as_deref(), Some("1"));
+    assert_eq!(
+        agg_cell(&engine, &count_q.branch_false).as_deref(),
+        Some("1")
+    );
     for agg in [&sum, &count] {
         let verdict = check_tlp_aggregate(&engine, AGG_PATTERN, AGG_PREDICATE, agg);
-        assert!(verdict.is_pass(), "{agg:?}: expected a pass, got {verdict:?}");
+        assert!(
+            verdict.is_pass(),
+            "{agg:?}: expected a pass, got {verdict:?}"
+        );
     }
 }
 
@@ -825,7 +875,10 @@ fn ordered_differential_flags_a_reordering_the_unordered_oracle_cannot_see() {
         "the bag is unchanged, so the unordered oracle is blind to this bug: {unordered:?}"
     );
     let ordered = check_differential_ordered(&[&reference, &mutant], &query, &keys);
-    assert!(ordered.is_violation(), "expected a violation, got {ordered:?}");
+    assert!(
+        ordered.is_violation(),
+        "expected a violation, got {ordered:?}"
+    );
 }
 
 #[test]
@@ -851,7 +904,10 @@ fn ordered_differential_still_flags_the_row_dropping_mutant() {
     let (query, sort_vars) = ordered_fixture();
     let keys: Vec<&str> = sort_vars.iter().map(String::as_str).collect();
     let verdict = check_differential_ordered(&[&reference, &mutant], &query, &keys);
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 #[test]

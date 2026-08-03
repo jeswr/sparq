@@ -1077,9 +1077,9 @@ fn implicated_construct(ce: &ClassExpression) -> Option<String> {
              New-Feature-ObjectQCR-002)"
                 .to_string(),
         ),
-        ClassExpression::ObjectUnionOf(_) => Some(
-            "owl:unionOf (implicated by DOCUMENTED_DIVERGENCES WebOnt-I5.5-005)".to_string(),
-        ),
+        ClassExpression::ObjectUnionOf(_) => {
+            Some("owl:unionOf (implicated by DOCUMENTED_DIVERGENCES WebOnt-I5.5-005)".to_string())
+        }
         ClassExpression::ObjectIntersectionOf(members) => {
             members.iter().find_map(implicated_construct)
         }
@@ -1171,7 +1171,11 @@ fn ql_branch(dict: &Dict, triples: &[[Id; 3]]) -> ConsistencyOutcome {
         Ok(kb) => kb,
         // Unreachable in practice (these triples already extracted through L1, so subjects/
         // predicates are IRIs or blank nodes) — kept fail-closed regardless.
-        Err(msg) => return out(ConsistencyVerdict::Unknown(UnknownReason::QlCaptureGap(msg))),
+        Err(msg) => {
+            return out(ConsistencyVerdict::Unknown(UnknownReason::QlCaptureGap(
+                msg,
+            )))
+        }
     };
     match sparq_reason_ql::check_consistency(&kb) {
         QlConsistency::Consistent => out(ConsistencyVerdict::Consistent),
@@ -1628,7 +1632,14 @@ fn roll_conclusion_anonymous(dict: &Dict, concl: &Ontology) -> Result<Vec<Axiom>
     let mut consumed: FxHashSet<Id> = FxHashSet::default();
     for &(property, source, target) in &top_edges {
         let mut visiting: FxHashSet<Id> = FxHashSet::default();
-        let filler = roll_bnode(dict, target, &types, &outgoing, &mut visiting, &mut consumed)?;
+        let filler = roll_bnode(
+            dict,
+            target,
+            &types,
+            &outgoing,
+            &mut visiting,
+            &mut consumed,
+        )?;
         rolled.push(Axiom::ClassAssertion {
             class: ClassExpression::ObjectSomeValuesFrom(
                 ObjectPropertyExpression::ObjectProperty(property),
@@ -1894,8 +1905,14 @@ mod fallback_tests {
         let shorter = Ontology {
             axioms: vec![sub(1, 2)],
         };
-        assert!(same_axiom_multiset(&one, &reordered), "order must not matter");
-        assert!(!same_axiom_multiset(&one, &different), "content must matter");
+        assert!(
+            same_axiom_multiset(&one, &reordered),
+            "order must not matter"
+        );
+        assert!(
+            !same_axiom_multiset(&one, &different),
+            "content must matter"
+        );
         assert!(!same_axiom_multiset(&one, &shorter), "arity must matter");
     }
 }

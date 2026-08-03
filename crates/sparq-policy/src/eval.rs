@@ -1563,7 +1563,8 @@ fn is_none_of(actual: &Value, bound: &Value) -> bool {
 /// faithful: both operands must be IRI/string values (the space the
 /// `|`/space/comma set encoding covers). See [`is_none_of`]. [FABLE-5] sq-uaz85.
 fn set_negation_representable(actual: &Value, bound: &Value) -> bool {
-    matches!(actual, Value::Iri(_) | Value::Str(_)) && matches!(bound, Value::Iri(_) | Value::Str(_))
+    matches!(actual, Value::Iri(_) | Value::Str(_))
+        && matches!(bound, Value::Iri(_) | Value::Str(_))
 }
 
 /// A total-ish order for orderable values: numeric by magnitude, dateTime by

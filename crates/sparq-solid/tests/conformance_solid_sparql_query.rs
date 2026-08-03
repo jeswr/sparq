@@ -18,7 +18,10 @@ use sparq_core::Graph;
 use sparq_solid::{Mode, PodStore, Session};
 use std::collections::BTreeSet;
 
-const SUITE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/conformance/solid-sparql-query");
+const SUITE_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/conformance/solid-sparql-query"
+);
 
 fn load_manifest() -> serde_json::Value {
     let path = format!("{SUITE_DIR}/manifest.json");
@@ -38,9 +41,12 @@ fn build_store(fixture_file: &str) -> PodStore {
 /// requester (`Session::default()`); a WebID string => an authenticated agent.
 fn session_for<'a>(requesters: &'a serde_json::Value, name: &str) -> Session<'a> {
     match requesters.get(name) {
-        Some(serde_json::Value::String(webid)) => {
-            Session { agent: Some(webid.as_str()), client: None, issuer: None, now: None }
-        }
+        Some(serde_json::Value::String(webid)) => Session {
+            agent: Some(webid.as_str()),
+            client: None,
+            issuer: None,
+            now: None,
+        },
         Some(serde_json::Value::Null) => Session::default(),
         other => panic!("unknown requester {name:?} in manifest: {other:?}"),
     }
@@ -71,7 +77,10 @@ fn scalar_literal(result: &sparq_engine::QueryResult, var: &str) -> String {
         .iter()
         .position(|v| v.as_str() == var)
         .unwrap_or_else(|| panic!("query does not project ?{var}"));
-    let row = result.rows.first().unwrap_or_else(|| panic!("no solution row for ?{var}"));
+    let row = result
+        .rows
+        .first()
+        .unwrap_or_else(|| panic!("no solution row for ?{var}"));
     match row.get(col).and_then(|t| t.as_ref()) {
         Some(Term::Literal(l)) => l.value().to_owned(),
         other => panic!("expected a literal for ?{var}, got {other:?}"),
@@ -97,7 +106,9 @@ fn solid_sparql_query_query_semantics_conformance() {
     );
     let fixture = manifest["fixture"].as_str().expect("manifest.fixture");
     let requesters = &manifest["requesters"];
-    let cases = manifest["cases"].as_array().expect("manifest.cases is an array");
+    let cases = manifest["cases"]
+        .as_array()
+        .expect("manifest.cases is an array");
     assert!(!cases.is_empty(), "the conformance suite has no cases");
 
     let store = build_store(fixture);
@@ -116,7 +127,9 @@ fn solid_sparql_query_query_semantics_conformance() {
                 let want = expect["value"].as_u64().expect("expect.value") as usize;
                 let got = store
                     .query_as(&session, Mode::Read, query)
-                    .unwrap_or_else(|e| panic!("[{id}] query errored (must be absent-not-error): {e}"))
+                    .unwrap_or_else(|e| {
+                        panic!("[{id}] query errored (must be absent-not-error): {e}")
+                    })
                     .rows
                     .len();
                 assert_eq!(got, want, "[{id}] rowCount");
@@ -145,10 +158,16 @@ fn solid_sparql_query_query_semantics_conformance() {
                     .unwrap_or_else(|e| panic!("[{id}] graph query errored: {e}"));
                 let bound = iri_bindings(&res, var);
                 for want in &includes {
-                    assert!(bound.contains(want), "[{id}] ?{var} must include {want}; got {bound:?}");
+                    assert!(
+                        bound.contains(want),
+                        "[{id}] ?{var} must include {want}; got {bound:?}"
+                    );
                 }
                 for forbidden in &excludes {
-                    assert!(!bound.contains(forbidden), "[{id}] ?{var} must NOT include {forbidden}; got {bound:?}");
+                    assert!(
+                        !bound.contains(forbidden),
+                        "[{id}] ?{var} must NOT include {forbidden}; got {bound:?}"
+                    );
                 }
             }
             other => panic!("[{id}] unknown expect.type {other:?}"),
@@ -156,7 +175,14 @@ fn solid_sparql_query_query_semantics_conformance() {
         passed += 1;
     }
 
-    assert_eq!(passed, cases.len(), "every case in the suite must run and pass");
+    assert_eq!(
+        passed,
+        cases.len(),
+        "every case in the suite must run and pass"
+    );
     // Guard against silent shrinkage of the vendored suite.
-    assert!(passed >= 15, "the query-semantics suite unexpectedly shrank to {passed} cases");
+    assert!(
+        passed >= 15,
+        "the query-semantics suite unexpectedly shrank to {passed} cases"
+    );
 }

@@ -652,7 +652,8 @@ fn entailment_subproperty_direct_and_converse() {
     // definitive verdict via {R(a,b), B(b), (∀S.¬B)(a)} with fresh a/b/B — previously an
     // UnencodedConclusion abstention. r ⊑ s entails r ⊑ s...
     let premise = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .";
-    let conclusion = ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .";
+    let conclusion =
+        ":r a owl:ObjectProperty . :s a owl:ObjectProperty . :r rdfs:subPropertyOf :s .";
     let (v, b) = entail(premise, conclusion);
     assert_eq!(v, EntailmentVerdict::Entailed);
     assert_eq!(b, Branch::AlchTableau);
@@ -732,7 +733,10 @@ fn entailment_out_of_fragment_inputs_fail_closed() {
     // Premise outside the fragment.
     let (v, b) = entail(":p owl:inverseOf :q .", ":A rdfs:subClassOf :B .");
     assert!(
-        matches!(v, EntailmentVerdict::Unknown(UnknownReason::OutOfFragment(_))),
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::OutOfFragment(_))
+        ),
         "premise: expected OutOfFragment, got {:?}",
         v
     );
@@ -740,7 +744,10 @@ fn entailment_out_of_fragment_inputs_fail_closed() {
     // Conclusion outside the fragment.
     let (v, b) = entail(":A rdfs:subClassOf :B .", ":p owl:inverseOf :q .");
     assert!(
-        matches!(v, EntailmentVerdict::Unknown(UnknownReason::OutOfFragment(_))),
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::OutOfFragment(_))
+        ),
         "conclusion: expected OutOfFragment, got {:?}",
         v
     );
@@ -795,10 +802,8 @@ mod transitive {
         assert_eq!(out.verdict, EntailmentVerdict::Entailed);
         assert_eq!(out.branch, Branch::AlchTableau);
 
-        let (mut d, prem, concl) = parse_two(
-            premise_plain,
-            ":r a owl:ObjectProperty .\n:a :r :c .",
-        );
+        let (mut d, prem, concl) =
+            parse_two(premise_plain, ":r a owl:ObjectProperty .\n:a :r :c .");
         let out = DirectChecker::new().entailment(&mut d, &prem, &concl);
         assert_eq!(
             out.verdict,
@@ -874,7 +879,11 @@ fn entailment_conclusion_bnode_somevaluesfrom2bnode() {
                    :a rdf:type [ owl:onProperty :p ; owl:someValuesFrom owl:Thing ] .";
     let conclusion = ":p a owl:ObjectProperty . :a :p _:x .";
     let (v, b) = entail(premise, conclusion);
-    assert_eq!(v, EntailmentVerdict::Entailed, "somevaluesfrom2bnode must be Entailed");
+    assert_eq!(
+        v,
+        EntailmentVerdict::Entailed,
+        "somevaluesfrom2bnode must be Entailed"
+    );
     assert_eq!(b, Branch::AlchTableau);
 }
 
@@ -893,7 +902,11 @@ fn entailment_conclusion_bnode_webont_somevaluesfrom_003() {
                       :fred :parent _:b1 . _:b1 a owl:Thing . \
                       _:b1 :parent _:b2 . _:b2 a owl:Thing .";
     let (v, b) = entail(premise, conclusion);
-    assert_eq!(v, EntailmentVerdict::Entailed, "WebOnt-someValuesFrom-003 must be Entailed");
+    assert_eq!(
+        v,
+        EntailmentVerdict::Entailed,
+        "WebOnt-someValuesFrom-003 must be Entailed"
+    );
     assert_eq!(b, Branch::AlchTableau);
 }
 
@@ -1021,7 +1034,11 @@ fn entailment_budget_fallback_rl_recovers_entailed() {
         EntailmentVerdict::Entailed,
         "the RL fallback must recover the verdict the starved tableau abandoned"
     );
-    assert_eq!(b, Branch::RlMaterialization, "traceability: the fallback branch owns it");
+    assert_eq!(
+        b,
+        Branch::RlMaterialization,
+        "traceability: the fallback branch owns it"
+    );
     // Control: with the DEFAULT budget the tableau decides it itself and nothing is attributed
     // to a profile branch — the fallback is reached only through budget exhaustion.
     let (v_default, b_default) = entail(premise, conclusion);
@@ -1046,7 +1063,10 @@ fn entailment_budget_fallback_rl_recovers_not_entailed() {
     assert_eq!(b, Branch::RlMaterialization);
     // Same answer as the complete tableau at the default budget — the fallback agrees with the
     // branch it is standing in for, it does not invent a different verdict.
-    assert_eq!(entail(premise, conclusion).0, EntailmentVerdict::NotEntailed);
+    assert_eq!(
+        entail(premise, conclusion).0,
+        EntailmentVerdict::NotEntailed
+    );
 }
 
 #[test]
@@ -1059,11 +1079,18 @@ fn entailment_budget_fallback_keeps_resource_budget_when_out_of_profile() {
     let conclusion = ":a rdf:type :B .";
     let (v, b) = entail_starved(premise, conclusion);
     assert!(
-        matches!(v, EntailmentVerdict::Unknown(UnknownReason::ResourceBudget(_))),
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::ResourceBudget(_))
+        ),
         "out-of-profile refutation must keep the ResourceBudget abstention, got {:?}",
         v
     );
-    assert_eq!(b, Branch::AlchTableau, "the abstention is still the tableau's");
+    assert_eq!(
+        b,
+        Branch::AlchTableau,
+        "the abstention is still the tableau's"
+    );
 }
 
 #[test]
@@ -1077,7 +1104,10 @@ fn entailment_budget_fallback_respects_the_rl_divergence_guard() {
     let conclusion = ":a rdf:type :B .";
     let (v, b) = entail_starved(premise, conclusion);
     assert!(
-        matches!(v, EntailmentVerdict::Unknown(UnknownReason::ResourceBudget(_))),
+        matches!(
+            v,
+            EntailmentVerdict::Unknown(UnknownReason::ResourceBudget(_))
+        ),
         "the RL divergence guard must block a `Consistent`-derived NotEntailed, got {:?}",
         v
     );
@@ -1085,5 +1115,8 @@ fn entailment_budget_fallback_respects_the_rl_divergence_guard() {
     assert_eq!(b, Branch::AlchTableau);
     // The COMPLETE tableau does decide it (negatively) at the default budget — proof that the
     // abstention above is the guard being conservative, not the answer being unknowable.
-    assert_eq!(entail(premise, conclusion).0, EntailmentVerdict::NotEntailed);
+    assert_eq!(
+        entail(premise, conclusion).0,
+        EntailmentVerdict::NotEntailed
+    );
 }

@@ -123,8 +123,9 @@ fn social_dataset(n: usize) -> Vec<T> {
     for i in 0..n {
         let p: &'static str = Box::leak(format!("<http://ex/p{i}>").into_boxed_str());
         let name: &'static str = Box::leak(format!("\"name{i}\"").into_boxed_str());
-        let age: &'static str =
-            Box::leak(format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", i % 50).into_boxed_str());
+        let age: &'static str = Box::leak(
+            format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", i % 50).into_boxed_str(),
+        );
         let city: &'static str = Box::leak(format!("<http://ex/city{}>", i % 7).into_boxed_str());
         v.push((p, "<http://ex/name>", name));
         v.push((p, "<http://ex/age>", age));
@@ -132,7 +133,8 @@ fn social_dataset(n: usize) -> Vec<T> {
     }
     for c in 0..7 {
         let city: &'static str = Box::leak(format!("<http://ex/city{c}>", c = c).into_boxed_str());
-        let country: &'static str = Box::leak(format!("<http://ex/country{}>", c % 3).into_boxed_str());
+        let country: &'static str =
+            Box::leak(format!("<http://ex/country{}>", c % 3).into_boxed_str());
         v.push((city, "<http://ex/country>", country));
     }
     v
@@ -160,7 +162,10 @@ fn star_join_matches_brute_force() {
     // The engine omits `?c` from projection; the reference includes it. Compare on the
     // projected columns by re-projecting the reference to {p, name, age}.
     let reference = project(reference, &["p", "name", "age"]);
-    assert_eq!(engine, reference, "star-join result must equal the brute-force bag");
+    assert_eq!(
+        engine, reference,
+        "star-join result must equal the brute-force bag"
+    );
     assert!(!engine.is_empty(), "non-vacuous");
 }
 
@@ -187,7 +192,10 @@ fn snowflake_join_matches_brute_force() {
         ),
         &["p", "co"],
     );
-    assert_eq!(engine, reference, "snowflake result must equal the brute-force bag");
+    assert_eq!(
+        engine, reference,
+        "snowflake result must equal the brute-force bag"
+    );
     assert!(!engine.is_empty(), "non-vacuous");
 }
 
@@ -213,7 +221,10 @@ fn selective_join_matches_brute_force() {
         ),
         &["p", "age"],
     );
-    assert_eq!(engine, reference, "selective join result must equal the brute-force bag");
+    assert_eq!(
+        engine, reference,
+        "selective join result must equal the brute-force bag"
+    );
     assert!(!engine.is_empty(), "non-vacuous");
 }
 
@@ -247,11 +258,17 @@ fn repeated_var_pattern_matches_brute_force() {
     let reference = project(
         brute(
             triples,
-            &[["?x", "<http://ex/eq>", "?x"], ["?x", "<http://ex/p>", "?v"]],
+            &[
+                ["?x", "<http://ex/eq>", "?x"],
+                ["?x", "<http://ex/p>", "?v"],
+            ],
         ),
         &["x", "v"],
     );
-    assert_eq!(engine, reference, "repeated-var self-join must equal brute force");
+    assert_eq!(
+        engine, reference,
+        "repeated-var self-join must equal brute force"
+    );
     // Only `a` self-eq, so exactly one row.
     assert_eq!(engine.len(), 1, "exactly the self-equal subject survives");
 }

@@ -190,16 +190,27 @@ fn worked_preference_yields_the_proof_discharge_obligations() {
     let policy = parse_policy_str(ttl, "turtle").expect("worked preference must parse");
 
     let requirements = discharge_requirements(&policy);
-    assert_eq!(requirements.len(), 1, "one rule asks for security properties");
+    assert_eq!(
+        requirements.len(),
+        1,
+        "one rule asks for security properties"
+    );
     assert_eq!(requirements[0].deontic, Deontic::Permission);
     // A rule's own constraints are conjoined — BOTH must hold, and the tree says so.
     let DischargeExpr::All(ref conjuncts) = requirements[0].requirement else {
-        panic!("expected a conjunction, got {:?}", requirements[0].requirement);
+        panic!(
+            "expected a conjunction, got {:?}",
+            requirements[0].requirement
+        );
     };
     assert_eq!(conjuncts.len(), 2);
 
     let obligations = requirements[0].requirement.obligations();
-    assert_eq!(obligations.len(), 2, "both secx: constraints are obligations");
+    assert_eq!(
+        obligations.len(),
+        2,
+        "both secx: constraints are obligations"
+    );
     for o in &obligations {
         assert_eq!(o.deontic, Deontic::Permission);
         assert_eq!(o.operator, Operator::Gteq);
@@ -262,10 +273,16 @@ fn an_or_preference_reads_back_as_alternatives_not_as_a_mandate() {
     let requirements = discharge_requirements(&policy);
     assert_eq!(requirements.len(), 1);
     let DischargeExpr::All(ref conjuncts) = requirements[0].requirement else {
-        panic!("expected the rule conjunction, got {:?}", requirements[0].requirement);
+        panic!(
+            "expected the rule conjunction, got {:?}",
+            requirements[0].requirement
+        );
     };
     let DischargeExpr::Any(ref alternatives) = conjuncts[0] else {
-        panic!("`odrl:or` must survive as alternatives, got {:?}", conjuncts[0]);
+        panic!(
+            "`odrl:or` must survive as alternatives, got {:?}",
+            conjuncts[0]
+        );
     };
     assert_eq!(alternatives.len(), 2, "two independent ways to discharge");
     let mut alt_dims: Vec<&str> = alternatives

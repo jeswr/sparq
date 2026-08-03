@@ -13,8 +13,8 @@
 
 #![cfg(feature = "zk")]
 
-use sparq_engine::{query, zk, QueryResult};
 use sparq_core::Graph;
+use sparq_engine::{query, zk, QueryResult};
 
 /// Deterministic SplitMix64 (same as the sparq-bench fuzzer — reproducible).
 struct Rng(u64);
@@ -84,7 +84,16 @@ fn gen_filter(rng: &mut Rng, var: &str) -> String {
 fn gen_query(rng: &mut Rng) -> String {
     let pfx = "PREFIX ex: <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n";
     let cats = [
-        "bgp", "filter", "optional", "union", "minus", "limit", "distinct", "order", "ask", "count",
+        "bgp",
+        "filter",
+        "optional",
+        "union",
+        "minus",
+        "limit",
+        "distinct",
+        "order",
+        "ask",
+        "count",
         "graph_default",
     ];
     let cat = cats[rng.below(cats.len() as u64) as usize];
@@ -98,8 +107,16 @@ fn gen_query(rng: &mut Rng) -> String {
         },
         "filter" => {
             let var = if rng.chance(1, 2) { "?a" } else { "?v" };
-            let pat = if var == "?a" { "?s ex:age ?a" } else { "?s ex:val ?v" };
-            let extra = if rng.chance(1, 2) { " . ?s ex:name ?n" } else { "" };
+            let pat = if var == "?a" {
+                "?s ex:age ?a"
+            } else {
+                "?s ex:val ?v"
+            };
+            let extra = if rng.chance(1, 2) {
+                " . ?s ex:name ?n"
+            } else {
+                ""
+            };
             format!("{pat}{extra} {}", gen_filter(rng, var))
         }
         "optional" => match rng.below(3) {
@@ -112,7 +129,9 @@ fn gen_query(rng: &mut Rng) -> String {
         "limit" => {
             let k = rng.below(8);
             let off = rng.below(5);
-            return format!("{pfx}SELECT * WHERE {{ ?s ex:p ?o . ?o ex:age ?a }} LIMIT {k} OFFSET {off}");
+            return format!(
+                "{pfx}SELECT * WHERE {{ ?s ex:p ?o . ?o ex:age ?a }} LIMIT {k} OFFSET {off}"
+            );
         }
         "distinct" => return format!("{pfx}SELECT DISTINCT ?a WHERE {{ ?s ex:age ?a }}"),
         "order" => {

@@ -1,14 +1,20 @@
 # rustfmt configuration for the sparq workspace.
 #
-# The codebase predates this file, so a one-time `cargo fmt --all` reformat is still
-# pending — it was originally deferred until the in-flight branches (serve-wave-b, MPC M3,
-# neon-intersect) landed; `origin/serve-wave-b` and `origin/neon-intersect` have not moved
-# since 2026-06-13, so that specific blocker is stale. The reformat stays deferred for the
-# standing reason: a workspace-wide diff across every crate collides with every open PR, so
-# it has to be its own scheduled, reviewed change — not a drive-by inside an unrelated one.
-# Until then the CI `lint` job runs `cargo fmt --all --check` *informationally*
-# (continue-on-error); clippy is the hard gate. Pinning the config now means that
-# deferred reformat — and the eventual flip of fmt to a hard gate — is deterministic.
+# The codebase predates this file. The one-time `cargo fmt --all` reformat it was waiting on
+# has now LANDED (sq-0lk) as its own scheduled, reviewed change — 773 files across 61 crates,
+# entirely tool-generated. It was never allowed as a drive-by inside an unrelated PR for the
+# obvious reason: a workspace-wide diff collides with every open branch.
+#
+# Consequently the CI `lint` job now runs `cargo fmt --all --check` as a HARD GATE
+# (`clippy + fmt (gate)` in ci.yml; the `continue-on-error: true` is gone). The tree is a
+# rustfmt fixed point under this config + the pinned toolchain, so any diff the check
+# reports belongs to the change under review. Run `cargo fmt --all` before opening a PR.
+#
+# NOTE, measured during the sq-0lk reformat: rustfmt does not always converge in ONE pass
+# (`crates/sparq-cli/src/tabular.rs` needed two before it settled). The committed tree IS a
+# fixed point — verified by three consecutive clean `--check` runs — so the single pass CI
+# makes is correct. If `cargo fmt --all --check` ever still reports a diff immediately after
+# you ran `cargo fmt --all`, run it once more rather than hand-editing.
 #
 # FORMATTER VERSION (issue #2360). This file pins the rustfmt *config*; the rustfmt
 # *binary* used to be whatever the machine happened to carry, which is why the same
@@ -20,7 +26,8 @@
 # workspace with an ad-hoc `+nightly`/`+stable` rustfmt; it will not match the gate.
 #
 # STABLE options only: `cargo fmt` on the stable toolchain rejects unstable keys
-# (imports_granularity, group_imports, etc.), which would turn the informational
-# check into a confusing hard error. Keep everything here stable.
+# (imports_granularity, group_imports, etc.), which — now that the check GATES — would
+# fail the lint job on every PR for a reason that has nothing to do with the PR. Keep
+# everything here stable.
 edition = "2021"
 max_width = 100

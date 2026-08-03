@@ -232,12 +232,18 @@ pub enum Term {
 impl Term {
     /// An `xsd:integer` literal constant — convenience for facts/tests.
     pub fn int(n: i64) -> Term {
-        Term::Lit { lex: n.to_string(), datatype: format!("{}integer", XSD) }
+        Term::Lit {
+            lex: n.to_string(),
+            datatype: format!("{}integer", XSD),
+        }
     }
 
     /// An `xsd:string` literal constant.
     pub fn string(s: impl Into<String>) -> Term {
-        Term::Lit { lex: s.into(), datatype: format!("{}string", XSD) }
+        Term::Lit {
+            lex: s.into(),
+            datatype: format!("{}string", XSD),
+        }
     }
 
     /// Is this term a variable (`?v`)?
@@ -503,12 +509,16 @@ impl Atom {
     fn positive_to_n3(&self) -> Option<[N3Term; 3]> {
         match self {
             Atom::Frame { obj, pred, val } => Some([obj.to_n3(), pred.to_n3(), val.to_n3()]),
-            Atom::Member { obj, class } => {
-                Some([obj.to_n3(), N3Term::Iri(RDF_TYPE.to_string()), class.to_n3()])
-            }
-            Atom::Subclass { sub, sup } => {
-                Some([sub.to_n3(), N3Term::Iri(RDFS_SUBCLASS_OF.to_string()), sup.to_n3()])
-            }
+            Atom::Member { obj, class } => Some([
+                obj.to_n3(),
+                N3Term::Iri(RDF_TYPE.to_string()),
+                class.to_n3(),
+            ]),
+            Atom::Subclass { sub, sup } => Some([
+                sub.to_n3(),
+                N3Term::Iri(RDFS_SUBCLASS_OF.to_string()),
+                sup.to_n3(),
+            ]),
             Atom::Equal { .. } | Atom::Builtin { .. } => None,
         }
     }
@@ -527,7 +537,10 @@ pub struct Rule {
 impl Rule {
     /// A ground **fact** (empty body, single head atom).
     pub fn fact(head: Atom) -> Rule {
-        Rule { head: vec![head], body: Vec::new() }
+        Rule {
+            head: vec![head],
+            body: Vec::new(),
+        }
     }
 
     /// An implication `head :- body`.
@@ -815,7 +828,9 @@ impl Document {
             if rule.body.is_empty() {
                 // Fact(s): emit each head atom as a ground triple.
                 for h in &rule.head {
-                    let t = h.positive_to_n3().expect("validated head atoms are positive");
+                    let t = h
+                        .positive_to_n3()
+                        .expect("validated head atoms are positive");
                     out.push_str(&n3_triple(&t));
                     out.push_str(" .\n");
                 }
@@ -827,7 +842,9 @@ impl Document {
                 }
                 out.push_str("} => { ");
                 for h in &rule.head {
-                    let t = h.positive_to_n3().expect("validated head atoms are positive");
+                    let t = h
+                        .positive_to_n3()
+                        .expect("validated head atoms are positive");
                     out.push_str(&n3_triple(&t));
                     out.push_str(" . ");
                 }
@@ -972,14 +989,21 @@ fn resolve_body_equalities(rule: &Rule) -> Result<Resolved, RifError> {
     }
     // Build the resolved rule: apply the substitution to head + non-Equal body
     // atoms, DROPPING every body Equal (all now trivially true or substituted).
-    let head = rule.head.iter().map(|a| apply_subst_atom(a, &subst)).collect();
+    let head = rule
+        .head
+        .iter()
+        .map(|a| apply_subst_atom(a, &subst))
+        .collect();
     let body = rule
         .body
         .iter()
         .filter(|a| !matches!(a, Atom::Equal { .. }))
         .map(|a| apply_subst_atom(a, &subst))
         .collect();
-    Ok(Resolved { rule: Rule { head, body }, satisfiable })
+    Ok(Resolved {
+        rule: Rule { head, body },
+        satisfiable,
+    })
 }
 
 /// The inclusive `(min, max)` VALUE-SPACE bounds of a **derived** XSD integer datatype,
@@ -1147,14 +1171,13 @@ fn ground_value_equal(l: &Term, r: &Term) -> Option<bool> {
 /// that mentions `v` is rewritten to `t`). `t` must already be resolved w.r.t.
 /// `subst` (the caller applies `apply_subst_term` first). Occurs-check: a variable
 /// equated to a compound term containing itself is rejected. [OPUS-4.8] sq-26vwp
-fn bind_var(
-    subst: &mut BTreeMap<String, Term>,
-    v: String,
-    t: Term,
-) -> Result<(), RifError> {
+fn bind_var(subst: &mut BTreeMap<String, Term>, v: String, t: Term) -> Result<(), RifError> {
     if term_contains_var(&t, &v) {
         return Err(RifError::Nonmonotonic {
-            what: format!("cyclic RIF-Core equality (occurs-check failed): ?{} = {:?}", v, t),
+            what: format!(
+                "cyclic RIF-Core equality (occurs-check failed): ?{} = {:?}",
+                v, t
+            ),
         });
     }
     for val in subst.values_mut() {
@@ -1169,9 +1192,7 @@ fn bind_var(
 fn apply_subst_term(t: &Term, subst: &BTreeMap<String, Term>) -> Term {
     match t {
         Term::Var(v) => subst.get(v).cloned().unwrap_or_else(|| t.clone()),
-        Term::List(items) => {
-            Term::List(items.iter().map(|x| apply_subst_term(x, subst)).collect())
-        }
+        Term::List(items) => Term::List(items.iter().map(|x| apply_subst_term(x, subst)).collect()),
         other => other.clone(),
     }
 }
@@ -1180,15 +1201,27 @@ fn apply_subst_term(t: &Term, subst: &BTreeMap<String, Term>) -> Term {
 fn apply_subst_atom(a: &Atom, subst: &BTreeMap<String, Term>) -> Atom {
     let s = |t: &Term| apply_subst_term(t, subst);
     match a {
-        Atom::Frame { obj, pred, val } => {
-            Atom::Frame { obj: s(obj), pred: s(pred), val: s(val) }
-        }
-        Atom::Member { obj, class } => Atom::Member { obj: s(obj), class: s(class) },
-        Atom::Subclass { sub, sup } => Atom::Subclass { sub: s(sub), sup: s(sup) },
-        Atom::Equal { left, right } => Atom::Equal { left: s(left), right: s(right) },
-        Atom::Builtin { op, args } => {
-            Atom::Builtin { op: *op, args: args.iter().map(s).collect() }
-        }
+        Atom::Frame { obj, pred, val } => Atom::Frame {
+            obj: s(obj),
+            pred: s(pred),
+            val: s(val),
+        },
+        Atom::Member { obj, class } => Atom::Member {
+            obj: s(obj),
+            class: s(class),
+        },
+        Atom::Subclass { sub, sup } => Atom::Subclass {
+            sub: s(sub),
+            sup: s(sup),
+        },
+        Atom::Equal { left, right } => Atom::Equal {
+            left: s(left),
+            right: s(right),
+        },
+        Atom::Builtin { op, args } => Atom::Builtin {
+            op: *op,
+            args: args.iter().map(s).collect(),
+        },
     }
 }
 
@@ -1197,9 +1230,12 @@ fn apply_subst_atom(a: &Atom, subst: &BTreeMap<String, Term>) -> Atom {
 fn replace_var_in_term(t: &Term, v: &str, replacement: &Term) -> Term {
     match t {
         Term::Var(name) if name == v => replacement.clone(),
-        Term::List(items) => {
-            Term::List(items.iter().map(|x| replace_var_in_term(x, v, replacement)).collect())
-        }
+        Term::List(items) => Term::List(
+            items
+                .iter()
+                .map(|x| replace_var_in_term(x, v, replacement))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -1235,19 +1271,31 @@ fn lower_builtin(op: Builtin, args: &[Term]) -> String {
         Builtin::ListContains => bin(&n3(&args[0]), LIST, "member", &n3(&args[1])),
         // numeric functions: ( a b ) math:sum out
         Builtin::NumericAdd => func2(&n3(&args[0]), &n3(&args[1]), MATH, "sum", &n3(&args[2])),
-        Builtin::NumericSubtract => {
-            func2(&n3(&args[0]), &n3(&args[1]), MATH, "difference", &n3(&args[2]))
-        }
+        Builtin::NumericSubtract => func2(
+            &n3(&args[0]),
+            &n3(&args[1]),
+            MATH,
+            "difference",
+            &n3(&args[2]),
+        ),
         Builtin::NumericMultiply => {
             func2(&n3(&args[0]), &n3(&args[1]), MATH, "product", &n3(&args[2]))
         }
-        Builtin::NumericDivide => {
-            func2(&n3(&args[0]), &n3(&args[1]), MATH, "quotient", &n3(&args[2]))
-        }
+        Builtin::NumericDivide => func2(
+            &n3(&args[0]),
+            &n3(&args[1]),
+            MATH,
+            "quotient",
+            &n3(&args[2]),
+        ),
         // string functions
-        Builtin::StringConcat => {
-            func2(&n3(&args[0]), &n3(&args[1]), STRING, "concatenation", &n3(&args[2]))
-        }
+        Builtin::StringConcat => func2(
+            &n3(&args[0]),
+            &n3(&args[1]),
+            STRING,
+            "concatenation",
+            &n3(&args[2]),
+        ),
         Builtin::StringLength => bin(&n3(&args[0]), STRING, "length", &n3(&args[1])),
         // list function: list list:length out
         Builtin::ListLength => bin(&n3(&args[0]), LIST, "length", &n3(&args[1])),
@@ -1264,7 +1312,12 @@ fn lower_builtin(op: Builtin, args: &[Term]) -> String {
         Builtin::ListConcatenate => {
             let n_inputs = args.len() - 1;
             let input_terms: Vec<String> = args[..n_inputs].iter().map(n3).collect();
-            format!("( {} ) <{}append> {}", input_terms.join(" "), LIST, n3(&args[n_inputs]))
+            format!(
+                "( {} ) <{}append> {}",
+                input_terms.join(" "),
+                LIST,
+                n3(&args[n_inputs])
+            )
         }
     }
 }
@@ -1304,7 +1357,12 @@ fn n3_term(t: &N3Term) -> String {
         // RIF-Core has no frame/term form that lowers to an RDF-star quoted
         // triple, but render one faithfully if it ever flows through. [FABLE-5]
         N3Term::Triple(tr) => {
-            format!("<< {} {} {} >>", n3_term(&tr[0]), n3_term(&tr[1]), n3_term(&tr[2]))
+            format!(
+                "<< {} {} {} >>",
+                n3_term(&tr[0]),
+                n3_term(&tr[1]),
+                n3_term(&tr[2])
+            )
         }
     }
 }
@@ -1353,21 +1411,30 @@ mod tests {
     fn int_object(dict: &Dict, closure: &[[Id; 3]], s: &str, p: &str) -> Option<String> {
         use oxrdf::Term as OxT;
         let (a, b) = (id(dict, s), id(dict, p));
-        closure.iter().find(|t| t[0] == a && t[1] == b).map(|t| match dict.term(t[2]) {
-            OxT::Literal(l) => l.value().to_string(),
-            other => other.to_string(),
-        })
+        closure
+            .iter()
+            .find(|t| t[0] == a && t[1] == b)
+            .map(|t| match dict.term(t[2]) {
+                OxT::Literal(l) => l.value().to_string(),
+                other => other.to_string(),
+            })
     }
 
     #[test]
     fn term_constructors_and_vars() {
         assert_eq!(
             Term::int(7),
-            Term::Lit { lex: "7".into(), datatype: format!("{}integer", XSD) }
+            Term::Lit {
+                lex: "7".into(),
+                datatype: format!("{}integer", XSD)
+            }
         );
         assert_eq!(
             Term::string("hi"),
-            Term::Lit { lex: "hi".into(), datatype: format!("{}string", XSD) }
+            Term::Lit {
+                lex: "hi".into(),
+                datatype: format!("{}string", XSD)
+            }
         );
         assert!(var("x").is_var());
         assert!(!iri("u").is_var());
@@ -1387,20 +1454,39 @@ mod tests {
 
     #[test]
     fn atom_vars_and_positive() {
-        let f = Atom::Frame { obj: var("o"), pred: iri("p"), val: var("v") };
+        let f = Atom::Frame {
+            obj: var("o"),
+            pred: iri("p"),
+            val: var("v"),
+        };
         assert!(f.is_positive());
-        assert_eq!(f.vars(), ["o".to_string(), "v".to_string()].into_iter().collect());
-        let b = Atom::Builtin { op: Builtin::NumericLessThan, args: vec![var("a"), var("b")] };
+        assert_eq!(
+            f.vars(),
+            ["o".to_string(), "v".to_string()].into_iter().collect()
+        );
+        let b = Atom::Builtin {
+            op: Builtin::NumericLessThan,
+            args: vec![var("a"), var("b")],
+        };
         assert!(!b.is_positive());
     }
 
     #[test]
     fn rule_constructors() {
-        let fact = Rule::fact(Atom::Member { obj: iri("a"), class: iri("C") });
+        let fact = Rule::fact(Atom::Member {
+            obj: iri("a"),
+            class: iri("C"),
+        });
         assert!(fact.body.is_empty());
         let r = Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("C") }],
-            vec![Atom::Member { obj: var("x"), class: iri("D") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("C"),
+            }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("D"),
+            }],
         );
         assert_eq!(r.body.len(), 1);
     }
@@ -1409,7 +1495,10 @@ mod tests {
     fn document_new_and_push() {
         let mut d = Document::new();
         assert!(d.rules.is_empty());
-        d.push(Rule::fact(Atom::Member { obj: iri("a"), class: iri("C") }));
+        d.push(Rule::fact(Atom::Member {
+            obj: iri("a"),
+            class: iri("C"),
+        }));
         assert_eq!(d.rules.len(), 1);
     }
 
@@ -1418,10 +1507,19 @@ mod tests {
     fn closure_propagates_membership() {
         // Forall ?x ( ?x # C :- ?x # D ) ; a # D.
         let mut doc = Document::new();
-        doc.push(Rule::fact(Atom::Member { obj: iri("http://ex/a"), class: iri("http://ex/D") }));
+        doc.push(Rule::fact(Atom::Member {
+            obj: iri("http://ex/a"),
+            class: iri("http://ex/D"),
+        }));
         doc.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/D") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/C"),
+            }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/D"),
+            }],
         ));
         let mut dict = Dict::new();
         let closure = doc.closure(&mut dict).expect("safe document");
@@ -1435,8 +1533,16 @@ mod tests {
     #[test]
     fn closure_is_monotone() {
         let rule = Rule::implies(
-            vec![Atom::Frame { obj: var("x"), pred: iri("http://ex/q"), val: var("y") }],
-            vec![Atom::Frame { obj: var("x"), pred: iri("http://ex/p"), val: var("y") }],
+            vec![Atom::Frame {
+                obj: var("x"),
+                pred: iri("http://ex/q"),
+                val: var("y"),
+            }],
+            vec![Atom::Frame {
+                obj: var("x"),
+                pred: iri("http://ex/p"),
+                val: var("y"),
+            }],
         );
         let base_fact = Rule::fact(Atom::Frame {
             obj: iri("http://ex/a"),
@@ -1492,8 +1598,16 @@ mod tests {
                 val: var("z"),
             }],
             vec![
-                Atom::Frame { obj: iri("http://ex/a"), pred: iri("http://ex/x"), val: var("x") },
-                Atom::Frame { obj: iri("http://ex/a"), pred: iri("http://ex/y"), val: var("y") },
+                Atom::Frame {
+                    obj: iri("http://ex/a"),
+                    pred: iri("http://ex/x"),
+                    val: var("x"),
+                },
+                Atom::Frame {
+                    obj: iri("http://ex/a"),
+                    pred: iri("http://ex/y"),
+                    val: var("y"),
+                },
                 Atom::Builtin {
                     op: Builtin::NumericAdd,
                     args: vec![var("x"), var("y"), var("z")],
@@ -1525,9 +1639,16 @@ mod tests {
         }));
         // adult(?p) :- ?p age ?n , ?n > 18
         doc.push(Rule::implies(
-            vec![Atom::Member { obj: var("p"), class: iri("http://ex/Adult") }],
+            vec![Atom::Member {
+                obj: var("p"),
+                class: iri("http://ex/Adult"),
+            }],
             vec![
-                Atom::Frame { obj: var("p"), pred: iri("http://ex/age"), val: var("n") },
+                Atom::Frame {
+                    obj: var("p"),
+                    pred: iri("http://ex/age"),
+                    val: var("n"),
+                },
                 Atom::Builtin {
                     op: Builtin::NumericGreaterThan,
                     args: vec![var("n"), Term::int(18)],
@@ -1550,10 +1671,22 @@ mod tests {
     fn validate_rejects_unbound_head_var() {
         let mut doc = Document::new();
         doc.push(Rule::implies(
-            vec![Atom::Frame { obj: var("x"), pred: iri("http://ex/p"), val: var("y") }],
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
+            vec![Atom::Frame {
+                obj: var("x"),
+                pred: iri("http://ex/p"),
+                val: var("y"),
+            }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/C"),
+            }],
         ));
-        assert_eq!(doc.validate(), Err(RifError::UnboundHeadVar { var: "y".to_string() }));
+        assert_eq!(
+            doc.validate(),
+            Err(RifError::UnboundHeadVar {
+                var: "y".to_string()
+            })
+        );
         // And closure refuses to run it.
         let mut dict = Dict::new();
         assert!(doc.closure(&mut dict).is_err());
@@ -1563,16 +1696,27 @@ mod tests {
     fn validate_rejects_unbound_builtin_input() {
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: var("p"), class: iri("http://ex/C") }],
+            vec![Atom::Member {
+                obj: var("p"),
+                class: iri("http://ex/C"),
+            }],
             vec![
-                Atom::Member { obj: var("p"), class: iri("http://ex/D") },
+                Atom::Member {
+                    obj: var("p"),
+                    class: iri("http://ex/D"),
+                },
                 Atom::Builtin {
                     op: Builtin::NumericGreaterThan,
                     args: vec![var("n"), Term::int(0)],
                 },
             ],
         ));
-        assert_eq!(d.validate(), Err(RifError::UnboundBuiltinInput { var: "n".to_string() }));
+        assert_eq!(
+            d.validate(),
+            Err(RifError::UnboundBuiltinInput {
+                var: "n".to_string()
+            })
+        );
     }
 
     #[test]
@@ -1583,24 +1727,46 @@ mod tests {
                 op: Builtin::NumericLessThan,
                 args: vec![var("a"), var("b")],
             }],
-            vec![Atom::Frame { obj: var("a"), pred: iri("http://ex/p"), val: var("b") }],
+            vec![Atom::Frame {
+                obj: var("a"),
+                pred: iri("http://ex/p"),
+                val: var("b"),
+            }],
         ));
-        assert_eq!(d.validate(), Err(RifError::BuiltinInHead { op: Builtin::NumericLessThan }));
+        assert_eq!(
+            d.validate(),
+            Err(RifError::BuiltinInHead {
+                op: Builtin::NumericLessThan
+            })
+        );
     }
 
     #[test]
     fn validate_rejects_bad_arity() {
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/C"),
+            }],
             vec![
-                Atom::Member { obj: var("x"), class: iri("http://ex/D") },
-                Atom::Builtin { op: Builtin::NumericAdd, args: vec![var("x")] },
+                Atom::Member {
+                    obj: var("x"),
+                    class: iri("http://ex/D"),
+                },
+                Atom::Builtin {
+                    op: Builtin::NumericAdd,
+                    args: vec![var("x")],
+                },
             ],
         ));
         assert!(matches!(
             d.validate(),
-            Err(RifError::BadBuiltinArity { op: Builtin::NumericAdd, got: 1, want: 3 })
+            Err(RifError::BadBuiltinArity {
+                op: Builtin::NumericAdd,
+                got: 1,
+                want: 3
+            })
         ));
     }
 
@@ -1618,20 +1784,32 @@ mod tests {
         // Case A: a "fact" with an Equal head (Rule::fact wraps a single head atom;
         // an empty body makes it a fact, so the head IS the conclusion).
         let mut d = Document::new();
-        d.push(Rule::fact(Atom::Equal { left: iri("http://ex/a"), right: iri("http://ex/b") }));
+        d.push(Rule::fact(Atom::Equal {
+            left: iri("http://ex/a"),
+            right: iri("http://ex/b"),
+        }));
         assert_eq!(
             d.validate(),
             Err(RifError::EqualInConclusion),
             "Equal as a fact head (conclusion) must be rejected"
         );
         let mut dict = Dict::new();
-        assert!(d.closure(&mut dict).is_err(), "closure must refuse Equal-in-conclusion");
+        assert!(
+            d.closure(&mut dict).is_err(),
+            "closure must refuse Equal-in-conclusion"
+        );
 
         // Case B: an implication whose head contains an Equal.
         let mut d2 = Document::new();
         d2.push(Rule::implies(
-            vec![Atom::Equal { left: var("x"), right: iri("http://ex/b") }],
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
+            vec![Atom::Equal {
+                left: var("x"),
+                right: iri("http://ex/b"),
+            }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/C"),
+            }],
         ));
         assert_eq!(
             d2.validate(),
@@ -1655,11 +1833,21 @@ mod tests {
             val: Term::int(30),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/Adult") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/Adult"),
+            }],
             vec![
-                Atom::Frame { obj: var("x"), pred: iri("http://ex/age"), val: var("n") },
+                Atom::Frame {
+                    obj: var("x"),
+                    pred: iri("http://ex/age"),
+                    val: var("n"),
+                },
                 // ?n = ?n is trivially true; eliminated at lowering.
-                Atom::Equal { left: var("n"), right: var("n") },
+                Atom::Equal {
+                    left: var("n"),
+                    right: var("n"),
+                },
             ],
         ));
         doc.validate().expect("ground-identity body Equal is valid");
@@ -1681,25 +1869,46 @@ mod tests {
         // validate() must catch this and return UnboundHeadVar { var: "n" }.
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: var("n"), class: iri("http://ex/C") }],
-            vec![Atom::Equal { left: var("n"), right: var("n") }],
+            vec![Atom::Member {
+                obj: var("n"),
+                class: iri("http://ex/C"),
+            }],
+            vec![Atom::Equal {
+                left: var("n"),
+                right: var("n"),
+            }],
         ));
         assert_eq!(
             d.validate(),
-            Err(RifError::UnboundHeadVar { var: "n".to_string() }),
+            Err(RifError::UnboundHeadVar {
+                var: "n".to_string()
+            }),
             "head var solely bound by a ?n=?n (elided) atom must be rejected UnboundHeadVar"
         );
         let mut dict = Dict::new();
-        assert!(d.closure(&mut dict).is_err(), "closure must refuse sole-binder ?n=?n");
+        assert!(
+            d.closure(&mut dict).is_err(),
+            "closure must refuse sole-binder ?n=?n"
+        );
 
         // Contrast: ?n=?n alongside a real binder is VALID (existing test case).
         // Rule: ?x # Adult :- ?x age ?n , ?n = ?n   → OK (Frame binds x and n).
         let mut d2 = Document::new();
         d2.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/Adult") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/Adult"),
+            }],
             vec![
-                Atom::Frame { obj: var("x"), pred: iri("http://ex/age"), val: var("n") },
-                Atom::Equal { left: var("n"), right: var("n") },
+                Atom::Frame {
+                    obj: var("x"),
+                    pred: iri("http://ex/age"),
+                    val: var("n"),
+                },
+                Atom::Equal {
+                    left: var("n"),
+                    right: var("n"),
+                },
             ],
         ));
         assert_eq!(
@@ -1723,12 +1932,24 @@ mod tests {
             datatype: format!("{}{}", XSD, dt),
         };
         let mut d = Document::new();
-        d.push(Rule::fact(Atom::Member { obj: iri("http://ex/a"), class: iri("http://ex/D") }));
+        d.push(Rule::fact(Atom::Member {
+            obj: iri("http://ex/a"),
+            class: iri("http://ex/D"),
+        }));
         d.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/C"),
+            }],
             vec![
-                Atom::Member { obj: var("x"), class: iri("http://ex/D") },
-                Atom::Equal { left: lit(l), right: lit(r) },
+                Atom::Member {
+                    obj: var("x"),
+                    class: iri("http://ex/D"),
+                },
+                Atom::Equal {
+                    left: lit(l),
+                    right: lit(r),
+                },
             ],
         ));
         d
@@ -1748,7 +1969,10 @@ mod tests {
         ] {
             let d = distinct_ground_equal_doc(l, r);
             d.validate().unwrap_or_else(|e| {
-                panic!("value-equal numeric grounds {:?} = {:?} must validate: {}", l, r, e)
+                panic!(
+                    "value-equal numeric grounds {:?} = {:?} must validate: {}",
+                    l, r, e
+                )
             });
             let mut dict = Dict::new();
             let closure = d.closure(&mut dict).expect("closure succeeds");
@@ -1769,7 +1993,8 @@ mod tests {
     #[test]
     fn body_equal_value_unequal_numeric_grounds_make_the_rule_vacuous() {
         let d = distinct_ground_equal_doc(("1", "integer"), ("2", "integer"));
-        d.validate().expect("an unsatisfiable-but-safe rule is valid");
+        d.validate()
+            .expect("an unsatisfiable-but-safe rule is valid");
         let mut dict = Dict::new();
         let closure = d.closure(&mut dict).expect("closure succeeds");
         assert!(
@@ -1797,8 +2022,14 @@ mod tests {
         };
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: var("y"), class: iri("http://ex/C") }],
-            vec![Atom::Equal { left: lit("1"), right: lit("2") }],
+            vec![Atom::Member {
+                obj: var("y"),
+                class: iri("http://ex/C"),
+            }],
+            vec![Atom::Equal {
+                left: lit("1"),
+                right: lit("2"),
+            }],
         ));
         assert!(
             matches!(d.validate(), Err(RifError::UnboundHeadVar { .. })),
@@ -1826,13 +2057,19 @@ mod tests {
             (("abc", "integer"), ("1", "integer")),
             // Ill-formed BEYOND the tower too: a fraction part is invalid for
             // xsd:integer, so the exact-lexical fallback must not rescue it. [OPUS-5]
-            (("170141183460469231731687303715884105728.5", "integer"), ("1", "integer")),
+            (
+                ("170141183460469231731687303715884105728.5", "integer"),
+                ("1", "integer"),
+            ),
             // Numeric datatype on one side only.
             (("1", "integer"), ("1", "string")),
             // Out-of-tower exact value vs a BINARY float tier: deciding this needs the
             // float's exact decimal expansion, which this front-end does not do — so it
             // fails closed rather than promoting the huge integer to a lossy f64. [OPUS-5]
-            (("170141183460469231731687303715884105728", "integer"), ("1.0E0", "double")),
+            (
+                ("170141183460469231731687303715884105728", "integer"),
+                ("1.0E0", "double"),
+            ),
         ] {
             let d = distinct_ground_equal_doc(l, r);
             assert!(
@@ -1842,7 +2079,10 @@ mod tests {
                 r
             );
             let mut dict = Dict::new();
-            assert!(d.closure(&mut dict).is_err(), "closure must refuse DistinctGroundEqual");
+            assert!(
+                d.closure(&mut dict).is_err(),
+                "closure must refuse DistinctGroundEqual"
+            );
         }
     }
 
@@ -1870,7 +2110,10 @@ mod tests {
             (("32768", "short"), ("32768", "integer")),
             // Unsigned: negative, and past the width.
             (("-1", "unsignedLong"), ("-1", "integer")),
-            (("18446744073709551616", "unsignedLong"), ("18446744073709551616", "integer")),
+            (
+                ("18446744073709551616", "unsignedLong"),
+                ("18446744073709551616", "integer"),
+            ),
             (("256", "unsignedByte"), ("256", "integer")),
             // Out of tower AND out of facet range: the exact-lexical fallback must not
             // rescue what the tower path refused.
@@ -1883,7 +2126,10 @@ mod tests {
                 l
             );
             let mut dict = Dict::new();
-            assert!(d.closure(&mut dict).is_err(), "closure must refuse a facet violation");
+            assert!(
+                d.closure(&mut dict).is_err(),
+                "closure must refuse a facet violation"
+            );
         }
     }
 
@@ -1902,7 +2148,10 @@ mod tests {
             (("-128", "byte"), ("-128.0", "decimal")),
             (("255", "unsignedByte"), ("255", "integer")),
             (("0", "unsignedLong"), ("-0.0", "double")),
-            (("18446744073709551615", "unsignedLong"), ("18446744073709551615", "integer")),
+            (
+                ("18446744073709551615", "unsignedLong"),
+                ("18446744073709551615", "integer"),
+            ),
             // `xsd:integer` itself is unfaceted: an arbitrarily large value stays valid.
             (
                 ("170141183460469231731687303715884105728", "integer"),
@@ -1911,7 +2160,10 @@ mod tests {
         ] {
             let d = distinct_ground_equal_doc(l, r);
             d.validate().unwrap_or_else(|e| {
-                panic!("{:?} is inside its datatype's value space and must validate: {}", l, e)
+                panic!(
+                    "{:?} is inside its datatype's value space and must validate: {}",
+                    l, e
+                )
             });
             let mut dict = Dict::new();
             let closure = d.closure(&mut dict).expect("closure succeeds");
@@ -1946,11 +2198,17 @@ mod tests {
             // Cross-tier: the decimal spelling of the same huge integer.
             ((HUGE, "integer"), (as_decimal.as_str(), "decimal")),
             // Both sides out of tower, in the decimal tier.
-            ((frac.as_str(), "decimal"), (frac_padded.as_str(), "decimal")),
+            (
+                (frac.as_str(), "decimal"),
+                (frac_padded.as_str(), "decimal"),
+            ),
         ] {
             let d = distinct_ground_equal_doc(l, r);
             d.validate().unwrap_or_else(|e| {
-                panic!("value-equal out-of-tower numerics {:?} = {:?} must validate: {}", l, r, e)
+                panic!(
+                    "value-equal out-of-tower numerics {:?} = {:?} must validate: {}",
+                    l, r, e
+                )
             });
             let mut dict = Dict::new();
             let closure = d.closure(&mut dict).expect("closure succeeds");
@@ -1983,7 +2241,10 @@ mod tests {
         ] {
             let d = distinct_ground_equal_doc(l, r);
             d.validate().unwrap_or_else(|e| {
-                panic!("an unsatisfiable-but-safe out-of-tower rule is valid: {}", e)
+                panic!(
+                    "an unsatisfiable-but-safe out-of-tower rule is valid: {}",
+                    e
+                )
             });
             let mut dict = Dict::new();
             let closure = d.closure(&mut dict).expect("closure succeeds");
@@ -2008,7 +2269,9 @@ mod tests {
             "a NaN operand is a type error for cmp_relational -> fail closed"
         );
         let identical = distinct_ground_equal_doc(("NaN", "double"), ("NaN", "double"));
-        identical.validate().expect("identical terms are ground-identical (reflexivity)");
+        identical
+            .validate()
+            .expect("identical terms are ground-identical (reflexivity)");
     }
 
     /// (3e) Non-literal operands (IRIs, `List`s) are never numeric, so they keep the
@@ -2017,8 +2280,14 @@ mod tests {
     fn body_equal_iri_and_list_grounds_still_fail_closed() {
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
-            vec![Atom::Equal { left: iri("http://ex/a"), right: iri("http://ex/b") }],
+            vec![Atom::Member {
+                obj: iri("http://ex/s"),
+                class: iri("http://ex/C"),
+            }],
+            vec![Atom::Equal {
+                left: iri("http://ex/a"),
+                right: iri("http://ex/b"),
+            }],
         ));
         assert!(
             matches!(d.validate(), Err(RifError::DistinctGroundEqual { .. })),
@@ -2026,7 +2295,10 @@ mod tests {
         );
         let mut d2 = Document::new();
         d2.push(Rule::implies(
-            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
+            vec![Atom::Member {
+                obj: iri("http://ex/s"),
+                class: iri("http://ex/C"),
+            }],
             vec![Atom::Equal {
                 left: Term::List(vec![Term::int(1)]),
                 right: Term::int(1),
@@ -2050,14 +2322,27 @@ mod tests {
         };
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
+            vec![Atom::Member {
+                obj: iri("http://ex/s"),
+                class: iri("http://ex/C"),
+            }],
             vec![
-                Atom::Equal { left: var("x"), right: Term::int(1) },
-                Atom::Equal { left: var("y"), right: dec("1.0") },
-                Atom::Equal { left: var("x"), right: var("y") },
+                Atom::Equal {
+                    left: var("x"),
+                    right: Term::int(1),
+                },
+                Atom::Equal {
+                    left: var("y"),
+                    right: dec("1.0"),
+                },
+                Atom::Equal {
+                    left: var("x"),
+                    right: var("y"),
+                },
             ],
         ));
-        d.validate().expect("substitution-created 1 = 1.0 is value-space TRUE");
+        d.validate()
+            .expect("substitution-created 1 = 1.0 is value-space TRUE");
         let mut dict = Dict::new();
         let closure = d.closure(&mut dict).expect("closure succeeds");
         assert!(
@@ -2086,21 +2371,43 @@ mod tests {
             val: iri("http://ex/carol"),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/SelfManaged") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/SelfManaged"),
+            }],
             vec![
-                Atom::Frame { obj: var("x"), pred: iri("http://ex/manager"), val: var("y") },
-                Atom::Equal { left: var("x"), right: var("y") },
+                Atom::Frame {
+                    obj: var("x"),
+                    pred: iri("http://ex/manager"),
+                    val: var("y"),
+                },
+                Atom::Equal {
+                    left: var("x"),
+                    right: var("y"),
+                },
             ],
         ));
         doc.validate().expect("?x=?y unifies; rule is valid");
         let mut dict = Dict::new();
         let closure = doc.closure(&mut dict).expect("closure succeeds");
         assert!(
-            has(&dict, &closure, "http://ex/alice", RDF_TYPE, "http://ex/SelfManaged"),
+            has(
+                &dict,
+                &closure,
+                "http://ex/alice",
+                RDF_TYPE,
+                "http://ex/SelfManaged"
+            ),
             "alice manages herself (same node) -> SelfManaged, no owl:sameAs needed (V2 fixed)"
         );
         assert!(
-            !has(&dict, &closure, "http://ex/bob", RDF_TYPE, "http://ex/SelfManaged"),
+            !has(
+                &dict,
+                &closure,
+                "http://ex/bob",
+                RDF_TYPE,
+                "http://ex/SelfManaged"
+            ),
             "bob's manager is carol (distinct node) -> NOT SelfManaged"
         );
     }
@@ -2133,20 +2440,42 @@ mod tests {
             val: iri("http://ex/c"),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/SelfRel") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/SelfRel"),
+            }],
             vec![
-                Atom::Frame { obj: var("x"), pred: iri("http://ex/rel"), val: var("y") },
-                Atom::Equal { left: var("x"), right: var("y") },
+                Atom::Frame {
+                    obj: var("x"),
+                    pred: iri("http://ex/rel"),
+                    val: var("y"),
+                },
+                Atom::Equal {
+                    left: var("x"),
+                    right: var("y"),
+                },
             ],
         ));
         let mut dict = Dict::new();
         let closure = doc.closure(&mut dict).expect("closure succeeds");
         assert!(
-            !has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/SelfRel"),
+            !has(
+                &dict,
+                &closure,
+                "http://ex/a",
+                RDF_TYPE,
+                "http://ex/SelfRel"
+            ),
             "a rel b with an asserted a owl:sameAs b must NOT derive a # SelfRel (V1 fixed)"
         );
         assert!(
-            has(&dict, &closure, "http://ex/c", RDF_TYPE, "http://ex/SelfRel"),
+            has(
+                &dict,
+                &closure,
+                "http://ex/c",
+                RDF_TYPE,
+                "http://ex/SelfRel"
+            ),
             "c rel c (same node) DOES derive c # SelfRel -> the rule is non-vacuous"
         );
     }
@@ -2168,21 +2497,43 @@ mod tests {
             val: iri("http://ex/other"),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/Special") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/Special"),
+            }],
             vec![
-                Atom::Frame { obj: var("x"), pred: iri("http://ex/p"), val: var("v") },
-                Atom::Equal { left: var("v"), right: iri("http://ex/target") },
+                Atom::Frame {
+                    obj: var("x"),
+                    pred: iri("http://ex/p"),
+                    val: var("v"),
+                },
+                Atom::Equal {
+                    left: var("v"),
+                    right: iri("http://ex/target"),
+                },
             ],
         ));
         doc.validate().expect("?v=<target> substitutes; valid");
         let mut dict = Dict::new();
         let closure = doc.closure(&mut dict).expect("closure succeeds");
         assert!(
-            has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/Special"),
+            has(
+                &dict,
+                &closure,
+                "http://ex/a",
+                RDF_TYPE,
+                "http://ex/Special"
+            ),
             "a p target -> Special (substitution ?v:=target)"
         );
         assert!(
-            !has(&dict, &closure, "http://ex/b", RDF_TYPE, "http://ex/Special"),
+            !has(
+                &dict,
+                &closure,
+                "http://ex/b",
+                RDF_TYPE,
+                "http://ex/Special"
+            ),
             "b p other -> NOT Special"
         );
     }
@@ -2194,13 +2545,26 @@ mod tests {
     fn body_equal_var_ground_binds_head_var() {
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
-            vec![Atom::Equal { left: var("x"), right: iri("http://ex/a") }],
+            vec![Atom::Member {
+                obj: var("x"),
+                class: iri("http://ex/C"),
+            }],
+            vec![Atom::Equal {
+                left: var("x"),
+                right: iri("http://ex/a"),
+            }],
         ));
-        assert_eq!(d.validate(), Ok(()), "?x=<a> binds ?x by substitution -> valid");
+        assert_eq!(
+            d.validate(),
+            Ok(()),
+            "?x=<a> binds ?x by substitution -> valid"
+        );
         // to_n3 collapses the rule to a FACT (empty resolved body) and emits no sameAs.
         let src = d.to_n3_source().unwrap();
-        assert!(!src.contains("=>"), "rule with only ?x=<a> collapses to a fact (no `=>`)");
+        assert!(
+            !src.contains("=>"),
+            "rule with only ?x=<a> collapses to a fact (no `=>`)"
+        );
         assert!(!src.contains("sameAs"), "no owl:sameAs is ever emitted");
         let mut dict = Dict::new();
         let closure = d.closure(&mut dict).expect("closure succeeds");
@@ -2222,18 +2586,37 @@ mod tests {
             val: iri("http://ex/target"),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Member { obj: var("a"), class: iri("http://ex/Matched") }],
+            vec![Atom::Member {
+                obj: var("a"),
+                class: iri("http://ex/Matched"),
+            }],
             vec![
-                Atom::Frame { obj: var("a"), pred: iri("http://ex/p"), val: var("x") },
-                Atom::Equal { left: var("x"), right: var("y") },
-                Atom::Equal { left: var("y"), right: iri("http://ex/target") },
+                Atom::Frame {
+                    obj: var("a"),
+                    pred: iri("http://ex/p"),
+                    val: var("x"),
+                },
+                Atom::Equal {
+                    left: var("x"),
+                    right: var("y"),
+                },
+                Atom::Equal {
+                    left: var("y"),
+                    right: iri("http://ex/target"),
+                },
             ],
         ));
         doc.validate().expect("chained equalities resolve; valid");
         let mut dict = Dict::new();
         let closure = doc.closure(&mut dict).expect("closure succeeds");
         assert!(
-            has(&dict, &closure, "http://ex/s", RDF_TYPE, "http://ex/Matched"),
+            has(
+                &dict,
+                &closure,
+                "http://ex/s",
+                RDF_TYPE,
+                "http://ex/Matched"
+            ),
             "s p target -> Matched (chained ?x=?y, ?y=target both become target)"
         );
     }
@@ -2250,15 +2633,32 @@ mod tests {
             val: iri("http://ex/a"),
         }));
         doc.push(Rule::implies(
-            vec![Atom::Member { obj: var("z"), class: iri("http://ex/C") }],
+            vec![Atom::Member {
+                obj: var("z"),
+                class: iri("http://ex/C"),
+            }],
             vec![
-                Atom::Frame { obj: var("z"), pred: iri("http://ex/p"), val: var("x") },
-                Atom::Equal { left: var("x"), right: iri("http://ex/a") },
-                Atom::Equal { left: var("y"), right: iri("http://ex/a") },
-                Atom::Equal { left: var("x"), right: var("y") },
+                Atom::Frame {
+                    obj: var("z"),
+                    pred: iri("http://ex/p"),
+                    val: var("x"),
+                },
+                Atom::Equal {
+                    left: var("x"),
+                    right: iri("http://ex/a"),
+                },
+                Atom::Equal {
+                    left: var("y"),
+                    right: iri("http://ex/a"),
+                },
+                Atom::Equal {
+                    left: var("x"),
+                    right: var("y"),
+                },
             ],
         ));
-        doc.validate().expect("substitution-created ground identity eliminated; valid");
+        doc.validate()
+            .expect("substitution-created ground identity eliminated; valid");
         let mut dict = Dict::new();
         let closure = doc.closure(&mut dict).expect("closure succeeds");
         assert!(
@@ -2275,11 +2675,23 @@ mod tests {
     fn body_equal_subst_creates_distinct_ground_fail_closed() {
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
+            vec![Atom::Member {
+                obj: iri("http://ex/s"),
+                class: iri("http://ex/C"),
+            }],
             vec![
-                Atom::Equal { left: var("x"), right: iri("http://ex/a") },
-                Atom::Equal { left: var("y"), right: iri("http://ex/b") },
-                Atom::Equal { left: var("x"), right: var("y") },
+                Atom::Equal {
+                    left: var("x"),
+                    right: iri("http://ex/a"),
+                },
+                Atom::Equal {
+                    left: var("y"),
+                    right: iri("http://ex/b"),
+                },
+                Atom::Equal {
+                    left: var("x"),
+                    right: var("y"),
+                },
             ],
         ));
         assert!(
@@ -2299,23 +2711,44 @@ mod tests {
     fn body_equal_occurs_check_fails_closed() {
         let mut d = Document::new();
         d.push(Rule::implies(
-            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
-            vec![Atom::Equal { left: var("x"), right: Term::List(vec![var("x")]) }],
+            vec![Atom::Member {
+                obj: iri("http://ex/s"),
+                class: iri("http://ex/C"),
+            }],
+            vec![Atom::Equal {
+                left: var("x"),
+                right: Term::List(vec![var("x")]),
+            }],
         ));
-        assert!(d.validate().is_err(), "cyclic ?x = (?x) must fail closed (occurs-check)");
+        assert!(
+            d.validate().is_err(),
+            "cyclic ?x = (?x) must fail closed (occurs-check)"
+        );
     }
 
     #[test]
     fn rif_error_displays() {
-        let e = RifError::UnboundHeadVar { var: "y".to_string() };
+        let e = RifError::UnboundHeadVar {
+            var: "y".to_string(),
+        };
         assert!(e.to_string().contains("range-restricted"));
-        let e = RifError::Nonmonotonic { what: "Naf".to_string() };
+        let e = RifError::Nonmonotonic {
+            what: "Naf".to_string(),
+        };
         assert!(e.to_string().contains("monotone"));
-        let e = RifError::BadBuiltinArity { op: Builtin::NumericAdd, got: 1, want: 3 };
+        let e = RifError::BadBuiltinArity {
+            op: Builtin::NumericAdd,
+            got: 1,
+            want: 3,
+        };
         assert!(e.to_string().contains("argument"));
-        let e = RifError::BuiltinInHead { op: Builtin::NumericLessThan };
+        let e = RifError::BuiltinInHead {
+            op: Builtin::NumericLessThan,
+        };
         assert!(e.to_string().contains("body-only"));
-        let e = RifError::UnboundBuiltinInput { var: "n".to_string() };
+        let e = RifError::UnboundBuiltinInput {
+            var: "n".to_string(),
+        };
         assert!(e.to_string().contains("range-restricted"));
         // [SONNET-4.6] sq-pbz04.5.4 — new error variants
         let e = RifError::EqualInConclusion;
@@ -2342,21 +2775,38 @@ mod tests {
     #[test]
     fn to_n3_source_emits_facts_and_rules() {
         let mut d = Document::new();
-        d.push(Rule::fact(Atom::Member { obj: iri("http://ex/a"), class: iri("http://ex/C") }));
+        d.push(Rule::fact(Atom::Member {
+            obj: iri("http://ex/a"),
+            class: iri("http://ex/C"),
+        }));
         d.push(Rule::implies(
-            vec![Atom::Subclass { sub: var("c"), sup: iri("http://ex/Top") }],
-            vec![Atom::Subclass { sub: var("c"), sup: iri("http://ex/Mid") }],
+            vec![Atom::Subclass {
+                sub: var("c"),
+                sup: iri("http://ex/Top"),
+            }],
+            vec![Atom::Subclass {
+                sub: var("c"),
+                sup: iri("http://ex/Mid"),
+            }],
         ));
         let src = d.to_n3_source().unwrap();
         assert!(src.contains("=>"), "the rule lowers to an N3 implication");
-        assert!(src.contains("rdf-syntax-ns#type"), "membership lowers to rdf:type");
-        assert!(src.contains("subClassOf"), "subclass lowers to rdfs:subClassOf");
+        assert!(
+            src.contains("rdf-syntax-ns#type"),
+            "membership lowers to rdf:type"
+        );
+        assert!(
+            src.contains("subClassOf"),
+            "subclass lowers to rdfs:subClassOf"
+        );
     }
 
     #[test]
     fn unimplemented_lists_naf_exclusion() {
         assert!(
-            UNIMPLEMENTED.iter().any(|s| s.contains("Naf") && s.contains("monotone")),
+            UNIMPLEMENTED
+                .iter()
+                .any(|s| s.contains("Naf") && s.contains("monotone")),
             "the documented out-of-scope list names the NAF exclusion"
         );
     }

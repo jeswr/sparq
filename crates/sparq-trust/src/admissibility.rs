@@ -234,7 +234,10 @@ pub fn admissible(
         .map(|c| (*c).to_string())
         .collect();
 
-    Ok(Admissibility { admissible: unsatisfied.is_empty(), unsatisfied })
+    Ok(Admissibility {
+        admissible: unsatisfied.is_empty(),
+        unsatisfied,
+    })
 }
 
 /// The IRI string of a `sparq-reason` `n3::Term`, if it is one. The N3 closure

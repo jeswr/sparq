@@ -329,7 +329,10 @@ pub fn hidden_issuer_prover_toml(
     let mut s = String::new();
     s.push_str(&format!("challenge = \"{}\"\n", field_to_hex(challenge)));
     s.push_str(&format!("m = \"{}\"\n", field_to_hex(m)));
-    s.push_str(&format!("key_set_root = \"{}\"\n", field_to_hex(key_set_root)));
+    s.push_str(&format!(
+        "key_set_root = \"{}\"\n",
+        field_to_hex(key_set_root)
+    ));
     s.push_str(&format!("pk_x = \"{}\"\n", field_to_hex(&w.pk_x)));
     s.push_str(&format!("pk_y = \"{}\"\n", field_to_hex(&w.pk_y)));
     s.push_str(&format!("r_x = \"{}\"\n", field_to_hex(&w.r_x)));
@@ -353,7 +356,10 @@ mod tests {
     use sparq_zk::sig::{commitment_message, in_circuit_witness, signature_from_hex, SecretKey};
 
     fn keyset(seeds: &[u64]) -> Vec<PublicKey> {
-        seeds.iter().map(|s| SecretKey::from_seed(*s).public_key()).collect()
+        seeds
+            .iter()
+            .map(|s| SecretKey::from_seed(*s).public_key())
+            .collect()
     }
 
     // The Rust h2 mirrors the documented cross-vector (compose_core/tests.nr).
@@ -384,10 +390,17 @@ mod tests {
             let mut pos = index;
             for sib in &sibs {
                 let is_right = pos & 1 == 1;
-                node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+                node = if is_right {
+                    h2(*sib, node)
+                } else {
+                    h2(node, *sib)
+                };
                 pos /= 2;
             }
-            assert_eq!(node, expected_root, "fold for index {index} reaches the root");
+            assert_eq!(
+                node, expected_root,
+                "fold for index {index} reaches the root"
+            );
         }
     }
 
@@ -403,7 +416,11 @@ mod tests {
         let expected = h2(n01, n23);
         assert_eq!(key_set_root(&keys, depth), Some(expected));
         for leaf in &leaves {
-            assert_ne!(*leaf, padding_leaf(), "a key leaf is never the padding leaf");
+            assert_ne!(
+                *leaf,
+                padding_leaf(),
+                "a key leaf is never the padding leaf"
+            );
         }
     }
 
@@ -411,7 +428,7 @@ mod tests {
     fn out_of_range_index_and_overflow_are_none() {
         let keys = keyset(&[100, 101, 102, 103]);
         assert_eq!(key_membership_witness(&keys, 2, 4), None); // 4 leaves, idx 4 OOB
-        // 5 keys do not fit a depth-2 (4-slot) tree.
+                                                               // 5 keys do not fit a depth-2 (4-slot) tree.
         let big = keyset(&[1, 2, 3, 4, 5]);
         assert_eq!(key_set_root(&big, 2), None);
     }
@@ -435,10 +452,32 @@ mod tests {
         let leaf = h2(schnorr.pk_x, schnorr.pk_y);
         assert_eq!(leaf, key_set_leaf(&keys[signer_idx]).unwrap());
 
-        let w = HiddenIssuerWitness { schnorr, index: signer_idx as u64, siblings };
+        let w = HiddenIssuerWitness {
+            schnorr,
+            index: signer_idx as u64,
+            siblings,
+        };
         // The Prover.toml renders all 12 fields.
-        let toml = hidden_issuer_prover_toml(&Fr::from(0x2au64), &m, &key_set_root(&keys, depth).unwrap(), &w);
-        for field in ["challenge", "m", "key_set_root", "pk_x", "pk_y", "r_x", "r_y", "s", "e", "e_k", "index", "siblings"] {
+        let toml = hidden_issuer_prover_toml(
+            &Fr::from(0x2au64),
+            &m,
+            &key_set_root(&keys, depth).unwrap(),
+            &w,
+        );
+        for field in [
+            "challenge",
+            "m",
+            "key_set_root",
+            "pk_x",
+            "pk_y",
+            "r_x",
+            "r_y",
+            "s",
+            "e",
+            "e_k",
+            "index",
+            "siblings",
+        ] {
             assert!(toml.contains(field), "toml must render {field}");
         }
     }
@@ -595,7 +634,11 @@ mod tests {
         // ...and at the leaf-taking core, so the two `depth > 31` guards
         // (`sparse_key_leaves` and `sparse_fold_leaves`) cannot mask each other:
         // deleting EITHER one individually now reddens this test.
-        assert_eq!(sparse_key_leaves(&keys, 32), None, "sparse_key_leaves rejects depth 32");
+        assert_eq!(
+            sparse_key_leaves(&keys, 32),
+            None,
+            "sparse_key_leaves rejects depth 32"
+        );
         assert_eq!(
             sparse_fold_leaves(vec![], 32, padding_leaf()),
             None,
@@ -701,14 +744,25 @@ mod tests {
             let mut pos = index;
             for sib in &sibs {
                 let is_right = pos & 1 == 1;
-                node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+                node = if is_right {
+                    h2(*sib, node)
+                } else {
+                    h2(node, *sib)
+                };
                 pos /= 2;
             }
-            assert_eq!(node, root, "depth-31 path for index {index} re-folds to the root");
+            assert_eq!(
+                node, root,
+                "depth-31 path for index {index} re-folds to the root"
+            );
         }
         // The bound is exactly 31: 32 is still rejected, so this test pins the edge
         // from BOTH sides and cannot be satisfied by loosening the guard either way.
-        assert_eq!(key_set_root_sparse(&keys, 32), None, "depth 32 stays rejected");
+        assert_eq!(
+            key_set_root_sparse(&keys, 32),
+            None,
+            "depth 32 stays rejected"
+        );
         assert_eq!(
             key_membership_witness_sparse(&keys, 32, 0),
             None,
@@ -729,8 +783,7 @@ mod tests {
     // itself is NOT representable as an Fr (it reduces to 0), so the bound is the
     // canonical representative of -7L. These pin the soundness constants the in-
     // circuit no-wrap bound enforces; a drift invalidates the fix.
-    const BJJ_L_HEX: &str =
-        "0x060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
+    const BJJ_L_HEX: &str = "0x060c89ce5c263405370a08b6d0302b0bab3eedb83920ee0a677297dc392126f1";
     const REDUCTION_TOP_BOUND_HEX: &str =
         "0x060c89ce5c263405370a08b6d0302b0b797b683ee9d2ee486fbfce8e6017ef6a"; // q_base - 7L
 
@@ -747,12 +800,20 @@ mod tests {
         let top_bound = fr_from_hex(REDUCTION_TOP_BOUND_HEX);
         // top_bound == q_base - 7L: in the field q_base == 0, so 7L + top_bound == 0
         // (i.e. 7L + (q-7L) = q == 0 mod q). This pins top_bound to exactly q - 7L.
-        assert_eq!(l * Fr::from(7u64) + top_bound, Fr::from(0u64), "7L + (q-7L) == q == 0");
+        assert_eq!(
+            l * Fr::from(7u64) + top_bound,
+            Fr::from(0u64),
+            "7L + (q-7L) == q == 0"
+        );
         // The honest e_k==7 range is [0, q-7L); the excluded wrap window is
         // [q-7L, L). They partition [0, L): top_bound + (8L - q) == L, and 8L - q is
         // the field value 8L (since q == 0). So top_bound + 8L == L.
         let window_width = l * Fr::from(8u64); // 8L - q, since q == 0 in the field
-        assert_eq!(top_bound + window_width, l, "[0,q-7L) and [q-7L,L) partition [0,L)");
+        assert_eq!(
+            top_bound + window_width,
+            l,
+            "[0,q-7L) and [q-7L,L) partition [0,L)"
+        );
         // A real, narrowing exclusion: the bound is neither 0 nor all of L.
         assert_ne!(top_bound, Fr::from(0u64));
         assert_ne!(top_bound, l);
@@ -776,7 +837,10 @@ mod tests {
             let w = in_circuit_witness(&sk.public_key(), &m, &sig).unwrap();
             // e_k in {0..7}: a 3-bit quotient (the circuit's assert_max_bit_size::<3>).
             let k_ok = (0u64..=7).any(|k| w.e_k == Fr::from(k));
-            assert!(k_ok, "seed {seed}: e_k must be a 3-bit quotient in {{0..7}}");
+            assert!(
+                k_ok,
+                "seed {seed}: e_k must be a 3-bit quotient in {{0..7}}"
+            );
             // e is canonical (< L): e + (L-1-e) == L-1 with both representable, i.e.
             // the witnessed-difference range bind the circuit's assert_lt_l performs.
             // Confirm e != L and e is recovered by reducing e_base = e + e_k*L mod L.
@@ -784,4 +848,3 @@ mod tests {
         }
     }
 }
-

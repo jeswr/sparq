@@ -640,7 +640,11 @@ fn match_pos(p: &Pos, t: &T, row: &Row) -> Option<Option<(V, T)>> {
 
 fn match_tp(tp: &Tp, triple: &[T; 3], row: &Row) -> Option<Row> {
     let mut ext = row.clone();
-    for (pos, term) in [(&tp.s, &triple[0]), (&tp.p, &triple[1]), (&tp.o, &triple[2])] {
+    for (pos, term) in [
+        (&tp.s, &triple[0]),
+        (&tp.p, &triple[1]),
+        (&tp.o, &triple[2]),
+    ] {
         match match_pos(pos, term, &ext) {
             None => return None,
             Some(None) => {}
@@ -723,7 +727,9 @@ fn eval_bind(b: &Bind, row: &Row) -> Option<T> {
         },
         Bind::LtK(v, k) => {
             let t = row[*v as usize].as_ref()?;
-            cmp_int_spec(t, *k).ok().map(|o| T::Bool(o == std::cmp::Ordering::Less))
+            cmp_int_spec(t, *k)
+                .ok()
+                .map(|o| T::Bool(o == std::cmp::Ordering::Less))
         }
         Bind::StrLenOf(v) => {
             let t = row[*v as usize].as_ref()?;
@@ -799,7 +805,12 @@ fn oracle_eval(data: &[[T; 3]], q: &Q) -> Vec<Vec<Option<String>>> {
 fn to_ntriples(data: &[[T; 3]]) -> String {
     let mut s = String::new();
     for t in data {
-        s.push_str(&format!("{} {} {} .\n", t[0].render(), t[1].render(), t[2].render()));
+        s.push_str(&format!(
+            "{} {} {} .\n",
+            t[0].render(),
+            t[1].render(),
+            t[2].render()
+        ));
     }
     s
 }
@@ -807,7 +818,14 @@ fn to_ntriples(data: &[[T; 3]]) -> String {
 /// An RDF graph is a SET of triples: the oracle deduplicates exactly like the store.
 fn dedup_data(mut data: Vec<[T; 3]>) -> Vec<[T; 3]> {
     let mut seen = std::collections::HashSet::new();
-    data.retain(|t| seen.insert(format!("{} {} {}", t[0].render(), t[1].render(), t[2].render())));
+    data.retain(|t| {
+        seen.insert(format!(
+            "{} {} {}",
+            t[0].render(),
+            t[1].render(),
+            t[2].render()
+        ))
+    });
     data
 }
 
@@ -828,10 +846,15 @@ fn multiset(rows: &[Vec<Option<String>>]) -> Vec<String> {
 
 /// Run the engine end-to-end (parse → plan → execute) and render the rows.
 fn engine_rows(g: &Graph, qtext: &str) -> Vec<Vec<Option<String>>> {
-    let r = query(g, qtext).unwrap_or_else(|e| panic!("engine rejected generated query {:?}: {}", qtext, e));
+    let r = query(g, qtext)
+        .unwrap_or_else(|e| panic!("engine rejected generated query {:?}: {}", qtext, e));
     r.rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()))
+                .collect()
+        })
         .collect()
 }
 
@@ -843,7 +866,10 @@ fn engine_paths(g: &Graph, qtext: &str) -> Vec<(&'static str, Vec<Vec<Option<Str
     #[allow(unused_mut)] // mut is only needed when dp-planner pushes the second path
     let mut out = vec![("default", engine_rows(g, qtext))];
     #[cfg(feature = "dp-planner")]
-    out.push(("greedy(no-dp)", sparq_engine::without_dp_planner(|| engine_rows(g, qtext))));
+    out.push((
+        "greedy(no-dp)",
+        sparq_engine::without_dp_planner(|| engine_rows(g, qtext)),
+    ));
     out
 }
 
@@ -876,7 +902,9 @@ fn parse_rendered(s: &str) -> T {
         Some("decimal") => {
             let (int_part, frac) = lex.split_once('.').expect("decimal point");
             let neg = int_part.starts_with('-');
-            let digits: i128 = format!("{}{}", int_part.trim_start_matches('-'), frac).parse().expect("decimal digits");
+            let digits: i128 = format!("{}{}", int_part.trim_start_matches('-'), frac)
+                .parse()
+                .expect("decimal digits");
             T::Dec(if neg { -digits } else { digits }, frac.len() as u32)
         }
         Some("double") => {
@@ -920,20 +948,21 @@ fn check_sorted(keys: &[Option<T>], desc: bool, ctx: &str) -> Result<(), String>
         prev_rank = Some(r);
     }
     // (b) within-class subsequences must be monotone where the order is defined.
-    let check_sub = |label: &str, extract: &dyn Fn(&Option<T>) -> Option<Vec<u8>>| -> Result<(), String> {
-        let mut prev: Option<Vec<u8>> = None;
-        for k in keys {
-            if let Some(key) = extract(k) {
-                if let Some(p) = &prev {
-                    if oriented(p.cmp(&key)) == std::cmp::Ordering::Greater {
-                        return Err(format!("{} subsequence order violated in {}", label, ctx));
+    let check_sub =
+        |label: &str, extract: &dyn Fn(&Option<T>) -> Option<Vec<u8>>| -> Result<(), String> {
+            let mut prev: Option<Vec<u8>> = None;
+            for k in keys {
+                if let Some(key) = extract(k) {
+                    if let Some(p) = &prev {
+                        if oriented(p.cmp(&key)) == std::cmp::Ordering::Greater {
+                            return Err(format!("{} subsequence order violated in {}", label, ctx));
+                        }
                     }
+                    prev = Some(key);
                 }
-                prev = Some(key);
             }
-        }
-        Ok(())
-    };
+            Ok(())
+        };
     check_sub("iri", &|k| match k {
         Some(T::Iri(i)) => Some(i.as_bytes().to_vec()),
         _ => None,
@@ -987,7 +1016,12 @@ fn is_sub_multiset(sub: &[String], full: &[String]) -> bool {
 }
 
 /// The full family-1 check for one (data, query) case against one engine path.
-fn check_case(data: &[[T; 3]], q: &Q, label: &str, rows: &[Vec<Option<String>>]) -> Result<(), TestCaseError> {
+fn check_case(
+    data: &[[T; 3]],
+    q: &Q,
+    label: &str,
+    rows: &[Vec<Option<String>>],
+) -> Result<(), TestCaseError> {
     let oracle = oracle_eval(data, q);
     let en_ms = multiset(rows);
     let or_ms = multiset(&oracle);
@@ -1012,13 +1046,29 @@ fn check_case(data: &[[T; 3]], q: &Q, label: &str, rows: &[Vec<Option<String>>])
                 let after_offset = or_ms.len().saturating_sub(j);
                 l.map_or(after_offset, |k| after_offset.min(k))
             };
-            prop_assert_eq!(rows.len(), expected, "LIMIT/OFFSET cardinality mismatch: {}", ctx());
-            prop_assert!(is_sub_multiset(&en_ms, &or_ms), "sliced rows not a sub-multiset: {}", ctx());
+            prop_assert_eq!(
+                rows.len(),
+                expected,
+                "LIMIT/OFFSET cardinality mismatch: {}",
+                ctx()
+            );
+            prop_assert!(
+                is_sub_multiset(&en_ms, &or_ms),
+                "sliced rows not a sub-multiset: {}",
+                ctx()
+            );
         }
     }
     if let Some((v, desc)) = &q.order {
-        let col = q.project.iter().position(|p| p == v).expect("order var projected");
-        let keys: Vec<Option<T>> = rows.iter().map(|r| r[col].as_deref().map(parse_rendered)).collect();
+        let col = q
+            .project
+            .iter()
+            .position(|p| p == v)
+            .expect("order var projected");
+        let keys: Vec<Option<T>> = rows
+            .iter()
+            .map(|r| r[col].as_deref().map(parse_rendered))
+            .collect();
         if let Err(e) = check_sorted(&keys, *desc, &ctx()) {
             return Err(TestCaseError::fail(e));
         }
@@ -1038,7 +1088,12 @@ const SUBJ_IRIS: [&str; 6] = [
     "http://ex/s4",
     "http://ex/s5",
 ];
-const PRED_IRIS: [&str; 4] = ["http://ex/p0", "http://ex/p1", "http://ex/p2", "http://ex/p3"];
+const PRED_IRIS: [&str; 4] = [
+    "http://ex/p0",
+    "http://ex/p1",
+    "http://ex/p2",
+    "http://ex/p3",
+];
 const BNODE_LABELS: [&str; 3] = ["b0", "b1", "b2"];
 const STR_POOL: [&str; 6] = ["", "a", "b", "ab", "hi", "z9"];
 const LANG_TAGS: [&str; 2] = ["en", "fr"];
@@ -1063,7 +1118,10 @@ fn arb_literal() -> BoxedStrategy<T> {
         prop_oneof![Just(0i64), Just(1), Just(-1), Just(1000)].prop_map(T::Int),
         ((-3000i128..=3000), (1u32..=2)).prop_map(|(m, s)| T::Dec(m, s)),
         proptest::sample::select(&STR_POOL[..]).prop_map(|s| T::Str(s.to_string())),
-        (proptest::sample::select(&STR_POOL[..]), proptest::sample::select(&LANG_TAGS[..]))
+        (
+            proptest::sample::select(&STR_POOL[..]),
+            proptest::sample::select(&LANG_TAGS[..])
+        )
             .prop_map(|(s, t)| T::Lang(s.to_string(), t.to_string())),
         any::<bool>().prop_map(T::Bool),
         proptest::sample::select(&DBL_POOL[..]).prop_map(|(l, v)| T::Dbl(l.to_string(), v)),
@@ -1181,7 +1239,8 @@ fn arb_expr_seed() -> impl Strategy<Value = ExprSeed> {
     leaf.prop_recursive(2, 8, 2, |inner| {
         prop_oneof![
             inner.clone().prop_map(|e| ExprSeed::Not(Box::new(e))),
-            (inner.clone(), inner.clone()).prop_map(|(a, b)| ExprSeed::And(Box::new(a), Box::new(b))),
+            (inner.clone(), inner.clone())
+                .prop_map(|(a, b)| ExprSeed::And(Box::new(a), Box::new(b))),
             (inner.clone(), inner).prop_map(|(a, b)| ExprSeed::Or(Box::new(a), Box::new(b))),
         ]
     })
@@ -1248,16 +1307,18 @@ fn arb_qseed() -> impl Strategy<Value = QSeed> {
         proptest::option::weighted(0.2, 0usize..=8),
         proptest::option::weighted(0.2, 0usize..=5),
     )
-        .prop_map(|(body, bind, filter, distinct, proj_mask, order, limit, offset)| QSeed {
-            body,
-            bind,
-            filter,
-            distinct,
-            proj_mask,
-            order,
-            limit,
-            offset,
-        })
+        .prop_map(
+            |(body, bind, filter, distinct, proj_mask, order, limit, offset)| QSeed {
+                body,
+                bind,
+                filter,
+                distinct,
+                proj_mask,
+                order,
+                limit,
+                offset,
+            },
+        )
 }
 
 fn build_query(seed: QSeed) -> Q {
@@ -1287,7 +1348,9 @@ fn build_query(seed: QSeed) -> Q {
     if project.is_empty() {
         project = scope.clone();
     }
-    let order = seed.order.map(|(vs, desc)| (project[vs as usize % project.len()], desc));
+    let order = seed
+        .order
+        .map(|(vs, desc)| (project[vs as usize % project.len()], desc));
     Q {
         body: seed.body,
         bind,
@@ -1360,9 +1423,17 @@ fn instantiate(body: &Body, seed: &[u8]) -> Vec<[T; 3]> {
         .collect();
     let resolve = |p: &Pos| match p {
         Pos::Const(t) => t.clone(),
-        Pos::Var(v) => assignment.iter().find(|(av, _)| av == v).expect("assigned var").1.clone(),
+        Pos::Var(v) => assignment
+            .iter()
+            .find(|(av, _)| av == v)
+            .expect("assigned var")
+            .1
+            .clone(),
     };
-    all_tps.iter().map(|tp| [resolve(&tp.s), resolve(&tp.p), resolve(&tp.o)]).collect()
+    all_tps
+        .iter()
+        .map(|tp| [resolve(&tp.s), resolve(&tp.p), resolve(&tp.o)])
+        .collect()
 }
 
 /// A full family-1 case: the graph is a blend of independent random triples and
@@ -1414,23 +1485,26 @@ proptest! {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn arb_perm_case() -> impl Strategy<Value = (Vec<[T; 3]>, Vec<Tp>, Vec<Tp>, Option<ExprSeed>)> {
-    (arb_bgp(2, 4).prop_map(|b| match ensure_var(Body::Bgp(b)) { Body::Bgp(t) => t, _ => unreachable!() }))
-        .prop_flat_map(|tps| {
-            let nvars = Body::Bgp(tps.clone()).vars().len();
-            (
-                arb_data(14),
-                proptest::collection::vec(proptest::collection::vec(any::<u8>(), nvars), 0..=2),
-                Just(tps.clone()),
-                Just(tps).prop_shuffle(),
-                proptest::option::weighted(0.4, arb_expr_seed()),
-            )
-                .prop_map(|(mut data, seeds, tps, shuffled, fseed)| {
-                    for seed in &seeds {
-                        data.extend(instantiate(&Body::Bgp(tps.clone()), seed));
-                    }
-                    (dedup_data(data), tps, shuffled, fseed)
-                })
-        })
+    (arb_bgp(2, 4).prop_map(|b| match ensure_var(Body::Bgp(b)) {
+        Body::Bgp(t) => t,
+        _ => unreachable!(),
+    }))
+    .prop_flat_map(|tps| {
+        let nvars = Body::Bgp(tps.clone()).vars().len();
+        (
+            arb_data(14),
+            proptest::collection::vec(proptest::collection::vec(any::<u8>(), nvars), 0..=2),
+            Just(tps.clone()),
+            Just(tps).prop_shuffle(),
+            proptest::option::weighted(0.4, arb_expr_seed()),
+        )
+            .prop_map(|(mut data, seeds, tps, shuffled, fseed)| {
+                for seed in &seeds {
+                    data.extend(instantiate(&Body::Bgp(tps.clone()), seed));
+                }
+                (dedup_data(data), tps, shuffled, fseed)
+            })
+    })
 }
 
 proptest! {
@@ -1562,8 +1636,16 @@ fn oracle_known_answer_optional() {
     ];
     let q = Q {
         body: Body::Opt(
-            vec![Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) }],
-            vec![Tp { s: Pos::Var(1), p: Pos::Const(p(0)), o: Pos::Var(2) }],
+            vec![Tp {
+                s: Pos::Var(0),
+                p: Pos::Const(p(0)),
+                o: Pos::Var(1),
+            }],
+            vec![Tp {
+                s: Pos::Var(1),
+                p: Pos::Const(p(0)),
+                o: Pos::Var(2),
+            }],
         ),
         bind: None,
         filter: None,
@@ -1574,12 +1656,24 @@ fn oracle_known_answer_optional() {
         offset: None,
     };
     let expected = vec![
-        vec![Some(s(0).render()), Some(s(1).render()), Some(s(2).render())],
+        vec![
+            Some(s(0).render()),
+            Some(s(1).render()),
+            Some(s(2).render()),
+        ],
         vec![Some(s(1).render()), Some(s(2).render()), None],
     ];
-    assert_eq!(multiset(&oracle_eval(&data, &q)), multiset(&expected), "oracle vs hand-computed");
+    assert_eq!(
+        multiset(&oracle_eval(&data, &q)),
+        multiset(&expected),
+        "oracle vs hand-computed"
+    );
     let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
-    assert_eq!(multiset(&engine_rows(&g, &q.render())), multiset(&expected), "engine vs hand-computed");
+    assert_eq!(
+        multiset(&engine_rows(&g, &q.render())),
+        multiset(&expected),
+        "engine vs hand-computed"
+    );
 }
 
 /// UNION + DISTINCT + subset projection + FILTER, hand-computed. Data:
@@ -1599,8 +1693,16 @@ fn oracle_known_answer_union_distinct_filter() {
     ];
     let q = Q {
         body: Body::Union(
-            vec![Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) }],
-            vec![Tp { s: Pos::Var(0), p: Pos::Const(p(1)), o: Pos::Var(1) }],
+            vec![Tp {
+                s: Pos::Var(0),
+                p: Pos::Const(p(0)),
+                o: Pos::Var(1),
+            }],
+            vec![Tp {
+                s: Pos::Var(0),
+                p: Pos::Const(p(1)),
+                o: Pos::Var(1),
+            }],
         ),
         bind: None,
         filter: Some(Expr::LtVK(1, 2)),
@@ -1611,14 +1713,33 @@ fn oracle_known_answer_union_distinct_filter() {
         offset: None,
     };
     let expected = vec![vec![Some(s(0).render())]];
-    assert_eq!(multiset(&oracle_eval(&data, &q)), multiset(&expected), "oracle vs hand-computed");
+    assert_eq!(
+        multiset(&oracle_eval(&data, &q)),
+        multiset(&expected),
+        "oracle vs hand-computed"
+    );
     let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
-    assert_eq!(multiset(&engine_rows(&g, &q.render())), multiset(&expected), "engine vs hand-computed");
+    assert_eq!(
+        multiset(&engine_rows(&g, &q.render())),
+        multiset(&expected),
+        "engine vs hand-computed"
+    );
     // without DISTINCT the duplicate survives — pins multiset (not set) semantics.
-    let q_bag = Q { distinct: false, ..q };
+    let q_bag = Q {
+        distinct: false,
+        ..q
+    };
     let expected_bag = vec![vec![Some(s(0).render())], vec![Some(s(0).render())]];
-    assert_eq!(multiset(&oracle_eval(&data, &q_bag)), multiset(&expected_bag), "bag semantics");
-    assert_eq!(multiset(&engine_rows(&g, &q_bag.render())), multiset(&expected_bag), "engine bag semantics");
+    assert_eq!(
+        multiset(&oracle_eval(&data, &q_bag)),
+        multiset(&expected_bag),
+        "bag semantics"
+    );
+    assert_eq!(
+        multiset(&engine_rows(&g, &q_bag.render())),
+        multiset(&expected_bag),
+        "engine bag semantics"
+    );
 }
 
 /// BIND forms, hand-computed: PlusK over int/decimal/error, LtK boolean/error,
@@ -1634,7 +1755,11 @@ fn oracle_known_answer_bind_forms() {
     ];
     let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
     let mk = |bind: Bind| Q {
-        body: Body::Bgp(vec![Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) }]),
+        body: Body::Bgp(vec![Tp {
+            s: Pos::Var(0),
+            p: Pos::Const(p(0)),
+            o: Pos::Var(1),
+        }]),
         bind: Some(bind),
         filter: None,
         distinct: false,
@@ -1643,7 +1768,11 @@ fn oracle_known_answer_bind_forms() {
         limit: None,
         offset: None,
     };
-    for q in [mk(Bind::PlusK(1, 1)), mk(Bind::LtK(1, 42)), mk(Bind::StrLenOf(1))] {
+    for q in [
+        mk(Bind::PlusK(1, 1)),
+        mk(Bind::LtK(1, 42)),
+        mk(Bind::StrLenOf(1)),
+    ] {
         let oracle = oracle_eval(&data, &q);
         let engine = engine_rows(&g, &q.render());
         assert_eq!(multiset(&engine), multiset(&oracle), "BIND {:?}", q.bind);
@@ -1651,11 +1780,22 @@ fn oracle_known_answer_bind_forms() {
     // Spot-pin exact computed values so the oracle's arithmetic is itself checked:
     let q = mk(Bind::PlusK(1, 1));
     let oracle = oracle_eval(&data, &q);
-    let cells: std::collections::HashSet<String> =
-        oracle.iter().map(|r| r[2].clone().unwrap_or_else(|| "UNBOUND".to_string())).collect();
-    assert!(cells.contains(&format!("\"42\"^^<{}integer>", XSD)), "int + 1");
-    assert!(cells.contains(&format!("\"2.50\"^^<{}decimal>", XSD)), "decimal scale preserved");
-    assert!(cells.contains("UNBOUND"), "type-error BIND leaves the var unbound");
+    let cells: std::collections::HashSet<String> = oracle
+        .iter()
+        .map(|r| r[2].clone().unwrap_or_else(|| "UNBOUND".to_string()))
+        .collect();
+    assert!(
+        cells.contains(&format!("\"42\"^^<{}integer>", XSD)),
+        "int + 1"
+    );
+    assert!(
+        cells.contains(&format!("\"2.50\"^^<{}decimal>", XSD)),
+        "decimal scale preserved"
+    );
+    assert!(
+        cells.contains("UNBOUND"),
+        "type-error BIND leaves the var unbound"
+    );
 }
 
 /// Computed-double lexical rules, hand-computed (sq-ilweo — the "pin the engine's
@@ -1680,7 +1820,11 @@ fn oracle_known_answer_computed_double() {
         [s(5), p(0), d("NaN", f64::NAN)],
     ];
     let q = Q {
-        body: Body::Bgp(vec![Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) }]),
+        body: Body::Bgp(vec![Tp {
+            s: Pos::Var(0),
+            p: Pos::Const(p(0)),
+            o: Pos::Var(1),
+        }]),
         bind: Some(Bind::PlusK(1, 1)),
         filter: None,
         distinct: false,
@@ -1691,9 +1835,15 @@ fn oracle_known_answer_computed_double() {
     };
     let oracle = oracle_eval(&data, &q);
     let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
-    assert_eq!(multiset(&engine_rows(&g, &q.render())), multiset(&oracle), "engine vs oracle");
-    let cells: std::collections::HashSet<String> =
-        oracle.iter().map(|r| r[2].clone().expect("computed double is bound")).collect();
+    assert_eq!(
+        multiset(&engine_rows(&g, &q.render())),
+        multiset(&oracle),
+        "engine vs oracle"
+    );
+    let cells: std::collections::HashSet<String> = oracle
+        .iter()
+        .map(|r| r[2].clone().expect("computed double is bound"))
+        .collect();
     for expect in ["2.5E0", "101", "-1.5E0", "1", "INF", "NaN"] {
         assert!(
             cells.contains(&format!("\"{}\"^^<{}double>", expect, XSD)),
@@ -1705,11 +1855,20 @@ fn oracle_known_answer_computed_double() {
     // The single-digit-mantissa shape (-2.5 + 2 = -0.5 → "-5.0E-1", exercising the
     // mandatory fraction digit) is reachable but RARE in generation — pin it
     // end-to-end too.
-    let q2 = Q { bind: Some(Bind::PlusK(1, 2)), ..q };
+    let q2 = Q {
+        bind: Some(Bind::PlusK(1, 2)),
+        ..q
+    };
     let oracle2 = oracle_eval(&data, &q2);
-    assert_eq!(multiset(&engine_rows(&g, &q2.render())), multiset(&oracle2), "engine vs oracle, k=2");
-    let cells2: std::collections::HashSet<String> =
-        oracle2.iter().map(|r| r[2].clone().expect("computed double is bound")).collect();
+    assert_eq!(
+        multiset(&engine_rows(&g, &q2.render())),
+        multiset(&oracle2),
+        "engine vs oracle, k=2"
+    );
+    let cells2: std::collections::HashSet<String> = oracle2
+        .iter()
+        .map(|r| r[2].clone().expect("computed double is bound"))
+        .collect();
     assert!(
         cells2.contains(&format!("\"-5.0E-1\"^^<{}double>", XSD)),
         "-2.5 + 2 must render with the mandatory fraction digit: {:?}",
@@ -1735,7 +1894,11 @@ fn oracle_known_answer_nan() {
     ];
     let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
     let mk = |filter: Expr| Q {
-        body: Body::Bgp(vec![Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) }]),
+        body: Body::Bgp(vec![Tp {
+            s: Pos::Var(0),
+            p: Pos::Const(p(0)),
+            o: Pos::Var(1),
+        }]),
         bind: None,
         filter: Some(filter),
         distinct: false,
@@ -1749,7 +1912,10 @@ fn oracle_known_answer_nan() {
         // ?v = NaN keeps exactly the identical NaN term (sameTerm fast path).
         (Expr::EqVC(1, nan()), vec![row(0)]),
         // !(?v = NaN) keeps the OTHER numerics: their verdict is false, not error.
-        (Expr::Not(Box::new(Expr::EqVC(1, nan()))), vec![row(1), row(2)]),
+        (
+            Expr::Not(Box::new(Expr::EqVC(1, nan()))),
+            vec![row(1), row(2)],
+        ),
         // ?v < 7 drops NaN as a TYPE ERROR and keeps the comparable rows.
         (Expr::LtVK(1, 7), vec![row(1), row(2)]),
         // !(?v < 7) drops EVERYTHING: !err = err for NaN, !true = false for the rest.
@@ -1757,15 +1923,29 @@ fn oracle_known_answer_nan() {
     ];
     for (filter, expected) in cases {
         let q = mk(filter);
-        assert_eq!(multiset(&oracle_eval(&data, &q)), multiset(&expected), "oracle: {}", q.render());
-        assert_eq!(multiset(&engine_rows(&g, &q.render())), multiset(&expected), "engine: {}", q.render());
+        assert_eq!(
+            multiset(&oracle_eval(&data, &q)),
+            multiset(&expected),
+            "oracle: {}",
+            q.render()
+        );
+        assert_eq!(
+            multiset(&engine_rows(&g, &q.render())),
+            multiset(&expected),
+            "engine: {}",
+            q.render()
+        );
     }
     // ORDER BY: NaN totalised FIRST — before -INF (tie-free, exact sequence).
     let base = format!("SELECT ?o WHERE {{ ?s <{}> ?o }} ORDER BY ?o", PRED_IRIS[0]);
-    let expected_asc: Vec<Vec<Option<String>>> = [nan(), T::Dbl("-INF".to_string(), f64::NEG_INFINITY), T::Dbl("5.0E0".to_string(), 5.0)]
-        .iter()
-        .map(|t| vec![Some(t.render())])
-        .collect();
+    let expected_asc: Vec<Vec<Option<String>>> = [
+        nan(),
+        T::Dbl("-INF".to_string(), f64::NEG_INFINITY),
+        T::Dbl("5.0E0".to_string(), 5.0),
+    ]
+    .iter()
+    .map(|t| vec![Some(t.render())])
+    .collect();
     for (label, asc) in engine_paths(&g, &base) {
         assert_eq!(asc, expected_asc, "NaN-first ORDER BY, path {}", label);
     }
@@ -1804,8 +1984,16 @@ fn oracle_known_answer_var_var_relational() {
     let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
     let mk = |filter: Expr| Q {
         body: Body::Bgp(vec![
-            Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) },
-            Tp { s: Pos::Var(0), p: Pos::Const(p(1)), o: Pos::Var(2) },
+            Tp {
+                s: Pos::Var(0),
+                p: Pos::Const(p(0)),
+                o: Pos::Var(1),
+            },
+            Tp {
+                s: Pos::Var(0),
+                p: Pos::Const(p(1)),
+                o: Pos::Var(2),
+            },
         ]),
         bind: None,
         filter: Some(filter),
@@ -1830,9 +2018,20 @@ fn oracle_known_answer_var_var_relational() {
     ];
     for (filter, expected) in cases {
         let q = mk(filter);
-        assert_eq!(multiset(&oracle_eval(&data, &q)), multiset(&expected), "oracle: {}", q.render());
+        assert_eq!(
+            multiset(&oracle_eval(&data, &q)),
+            multiset(&expected),
+            "oracle: {}",
+            q.render()
+        );
         for (label, rows) in engine_paths(&g, &q.render()) {
-            assert_eq!(multiset(&rows), multiset(&expected), "engine ({}): {}", label, q.render());
+            assert_eq!(
+                multiset(&rows),
+                multiset(&expected),
+                "engine ({}): {}",
+                label,
+                q.render()
+            );
         }
     }
 }
@@ -1852,7 +2051,12 @@ fn oracle_known_answer_literal_kind_rank_and_lang_order() {
         T::Lang("a".to_string(), "fr".to_string()),
         T::Bool(true),
     ];
-    let data: Vec<[T; 3]> = objs.iter().cloned().enumerate().map(|(i, o)| [s(i), p(0), o]).collect();
+    let data: Vec<[T; 3]> = objs
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, o)| [s(i), p(0), o])
+        .collect();
     let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
     // numeric 5 < boolean true < string "z" < lang "a"@fr < lang "b"@en (lex-first
     // across tags) — tie-free, so the exact sequence is deterministic.
@@ -1866,13 +2070,19 @@ fn oracle_known_answer_literal_kind_rank_and_lang_order() {
     }
     let mut expected_desc = expected.clone();
     expected_desc.reverse();
-    let desc_q = format!("SELECT ?o WHERE {{ ?s <{}> ?o }} ORDER BY DESC(?o)", PRED_IRIS[0]);
+    let desc_q = format!(
+        "SELECT ?o WHERE {{ ?s <{}> ?o }} ORDER BY DESC(?o)",
+        PRED_IRIS[0]
+    );
     for (label, desc) in engine_paths(&g, &desc_q) {
         assert_eq!(desc, expected_desc, "kind-first DESC, path {}", label);
     }
     // And the family-1 sortedness checker accepts exactly this order and rejects
     // a kind-rank transposition (its own non-vacuity pin).
-    let keys: Vec<Option<T>> = [&objs[2], &objs[4], &objs[1], &objs[3], &objs[0]].iter().map(|t| Some((*t).clone())).collect();
+    let keys: Vec<Option<T>> = [&objs[2], &objs[4], &objs[1], &objs[3], &objs[0]]
+        .iter()
+        .map(|t| Some((*t).clone()))
+        .collect();
     assert!(check_sorted(&keys, false, "unit").is_ok());
     let bad: Vec<Option<T>> = vec![Some(objs[1].clone()), Some(objs[2].clone())]; // string before numeric
     assert!(check_sorted(&bad, false, "unit").is_err());
@@ -1897,8 +2107,17 @@ fn generator_diversity_floor() {
     let strategy = arb_case();
     let n = 300;
     let (mut nonempty, mut dups, mut unbound_cells, mut multi_row) = (0, 0, 0, 0);
-    let (mut bgp, mut opt, mut union, mut filt, mut bind, mut distinct, mut order, mut limit, mut offset) =
-        (0, 0, 0, 0, 0, 0, 0, 0, 0);
+    let (
+        mut bgp,
+        mut opt,
+        mut union,
+        mut filt,
+        mut bind,
+        mut distinct,
+        mut order,
+        mut limit,
+        mut offset,
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0);
     // sq-ilweo widening floors: PlusK binds actually meeting a double in the data
     // (the computed-double path), and graphs actually containing the NaN term.
     let (mut plusk_dbl, mut nan_data) = (0, 0);
@@ -1915,9 +2134,14 @@ fn generator_diversity_floor() {
         order += usize::from(q.order.is_some());
         limit += usize::from(q.limit.is_some());
         offset += usize::from(q.offset.is_some());
-        let has_dbl = data.iter().any(|t| t.iter().any(|x| matches!(x, T::Dbl(..))));
+        let has_dbl = data
+            .iter()
+            .any(|t| t.iter().any(|x| matches!(x, T::Dbl(..))));
         plusk_dbl += usize::from(matches!(q.bind, Some(Bind::PlusK(..))) && has_dbl);
-        nan_data += usize::from(data.iter().any(|t| t.iter().any(|x| matches!(x, T::Dbl(lex, _) if lex == "NaN"))));
+        nan_data += usize::from(data.iter().any(|t| {
+            t.iter()
+                .any(|x| matches!(x, T::Dbl(lex, _) if lex == "NaN"))
+        }));
         let rows = oracle_eval(&data, &q);
         nonempty += usize::from(!rows.is_empty());
         multi_row += usize::from(rows.len() > 1);
@@ -1930,18 +2154,44 @@ fn generator_diversity_floor() {
         nonempty, n, multi_row, dups, unbound_cells, bgp, opt, union, filt, bind, distinct, order, limit, offset, plusk_dbl, nan_data
     );
     // Conservative floors — deterministic because the seed is fixed.
-    assert!(nonempty * 100 >= n * 25, "nonempty results: {}/{}", nonempty, n);
-    assert!(multi_row * 100 >= n * 15, "multi-row results: {}/{}", multi_row, n);
+    assert!(
+        nonempty * 100 >= n * 25,
+        "nonempty results: {}/{}",
+        nonempty,
+        n
+    );
+    assert!(
+        multi_row * 100 >= n * 15,
+        "multi-row results: {}/{}",
+        multi_row,
+        n
+    );
     assert!(dups >= 5, "duplicate-containing multisets: {}", dups);
-    assert!(unbound_cells >= 5, "results with unbound cells: {}", unbound_cells);
+    assert!(
+        unbound_cells >= 5,
+        "results with unbound cells: {}",
+        unbound_cells
+    );
     assert!(plusk_dbl >= 5, "PlusK-over-double cases: {}", plusk_dbl);
     assert!(nan_data >= 5, "NaN-containing graphs: {}", nan_data);
     for (label, count) in [
-        ("bgp", bgp), ("optional", opt), ("union", union), ("filter", filt),
-        ("bind", bind), ("distinct", distinct), ("order", order), ("limit", limit),
+        ("bgp", bgp),
+        ("optional", opt),
+        ("union", union),
+        ("filter", filt),
+        ("bind", bind),
+        ("distinct", distinct),
+        ("order", order),
+        ("limit", limit),
         ("offset", offset),
     ] {
-        assert!(count >= 10, "query shape {} generated only {} times in {}", label, count, n);
+        assert!(
+            count >= 10,
+            "query shape {} generated only {} times in {}",
+            label,
+            count,
+            n
+        );
     }
 }
 
@@ -2030,7 +2280,12 @@ fn check_sorted_detects_violations() {
     assert!(check_sorted(&lang_tie, true, "unit").is_ok());
     // NaN is totalised FIRST among numerics (sq-ilweo),
     let nan = || Some(T::Dbl("NaN".to_string(), f64::NAN));
-    assert!(check_sorted(&[nan(), Some(T::Dbl("-INF".to_string(), f64::NEG_INFINITY))], false, "unit").is_ok());
+    assert!(check_sorted(
+        &[nan(), Some(T::Dbl("-INF".to_string(), f64::NEG_INFINITY))],
+        false,
+        "unit"
+    )
+    .is_ok());
     assert!(check_sorted(&[Some(T::Int(-100)), nan()], false, "unit").is_err());
     assert!(check_sorted(&[nan(), nan()], false, "unit").is_ok());
     // and value-equal cross-type numerics are a tie, not a violation.

@@ -241,7 +241,12 @@ fn analyze(upd: &Update) -> WriteReqs {
                     push_graph_name(&mut reqs, &q.graph_name, Need::Write);
                 }
             }
-            GraphUpdateOperation::DeleteInsert { delete, insert, using, pattern } => {
+            GraphUpdateOperation::DeleteInsert {
+                delete,
+                insert,
+                using,
+                pattern,
+            } => {
                 // Deletes always need Write; inserts need Write-or-Append. The WHERE
                 // pattern only READS, so it is not a write target. A `GRAPH ?var` slot is
                 // collected into `var_slots` and resolved precisely against this
@@ -252,7 +257,12 @@ fn analyze(upd: &Update) -> WriteReqs {
                     push_graph_name_pattern(&mut reqs, &mut var_slots, &d.graph_name, Need::Write);
                 }
                 for i in insert {
-                    push_graph_name_pattern(&mut reqs, &mut var_slots, &i.graph_name, Need::WriteOrAppend);
+                    push_graph_name_pattern(
+                        &mut reqs,
+                        &mut var_slots,
+                        &i.graph_name,
+                        Need::WriteOrAppend,
+                    );
                 }
                 if !var_slots.is_empty() {
                     reqs.var_graphs.push(VarGraphResolve {
@@ -265,7 +275,8 @@ fn analyze(upd: &Update) -> WriteReqs {
             GraphUpdateOperation::Load { destination, .. } => {
                 push_graph_name(&mut reqs, destination, Need::WriteOrAppend);
             }
-            GraphUpdateOperation::Clear { graph, .. } | GraphUpdateOperation::Drop { graph, .. } => {
+            GraphUpdateOperation::Clear { graph, .. }
+            | GraphUpdateOperation::Drop { graph, .. } => {
                 push_clear_drop_target(&mut reqs, graph);
             }
             GraphUpdateOperation::Create { graph, .. } => {
@@ -308,7 +319,10 @@ fn rescope_dataset(graph: &sparq_core::Graph, u: &QueryDataset) -> QueryDataset 
         // the SAME set `build_using(named: None)` keeps, auth view included.
         None => engine_using_named_graphs(graph),
     };
-    QueryDataset { default: u.default.clone(), named: Some(named) }
+    QueryDataset {
+        default: u.default.clone(),
+        named: Some(named),
+    }
 }
 
 /// Resolve a `DELETE/INSERT … WHERE` operation's `GRAPH ?var` template slots into the
@@ -376,7 +390,11 @@ fn resolve_var_graphs(
     // The strongest need across this operation's slots is the fallback level (and the
     // floor for any escalation): if we must give up, give up at the level that protects
     // every slot.
-    let fallback = r.slots.iter().map(|(_, n)| *n).fold(Need::WriteOrAppend, strongest);
+    let fallback = r
+        .slots
+        .iter()
+        .map(|(_, n)| *n)
+        .fold(Need::WriteOrAppend, strongest);
 
     // Build `SELECT ?v… { WHERE }` and evaluate it exactly as the engine instantiates the
     // templates. With no `USING`/`WITH` the active dataset is the full store
@@ -487,7 +505,9 @@ pub(crate) fn check(
     sparql: &str,
     group_docs: &FxHashSet<String>,
 ) -> Result<Permit, String> {
-    let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
+    let upd = SparqlParser::new()
+        .parse_update(sparql)
+        .map_err(|e| e.to_string())?;
     let mut reqs = analyze(&upd);
 
     if reqs.touches_default {
@@ -506,8 +526,11 @@ pub(crate) fn check(
     // so resolved targets are authorized on exactly the same footing as static ones.
     // (Resolve first, then fold in — `resolve_var_graphs` borrows `reqs.var_graphs`, the
     // folding mutates the rest of `reqs`.)
-    let resolutions: Vec<Result<Vec<(NamedNode, Need)>, Need>> =
-        reqs.var_graphs.iter().map(|r| resolve_var_graphs(graph, r)).collect();
+    let resolutions: Vec<Result<Vec<(NamedNode, Need)>, Need>> = reqs
+        .var_graphs
+        .iter()
+        .map(|r| resolve_var_graphs(graph, r))
+        .collect();
     for res in resolutions {
         match res {
             Ok(resolved) => {
@@ -565,7 +588,11 @@ pub(crate) fn check(
     // whole resolved set (static + precisely-resolved `GRAPH ?var` targets) rather than
     // per-push, so a group-document write triggers re-materialization on exactly the same
     // footing as an `.acl` write.
-    if reqs.graphs.iter().any(|(g, _)| affects_auth_view(g.as_str(), group_docs)) {
+    if reqs
+        .graphs
+        .iter()
+        .any(|(g, _)| affects_auth_view(g.as_str(), group_docs))
+    {
         reqs.rematerialize_hint = true;
     }
 
@@ -831,8 +858,8 @@ mod differential_writeset_tests {
                                 OPTIONAL { ?s <https://ex.dev/ns#aclPointer> ?p } } }";
 
         let graph = pss_dataset();
-        let precise =
-            resolve_var_graph_set(&graph, upd).expect("WITH re-scope now resolves precisely (sq-cnor)");
+        let precise = resolve_var_graph_set(&graph, upd)
+            .expect("WITH re-scope now resolves precisely (sq-cnor)");
 
         let mut applied = pss_dataset();
         let (written, default) = engine_write_set(&mut applied, upd);

@@ -313,8 +313,9 @@ fn spatial_object_graph_pattern() -> bool {
 fn feature_graph_pattern() -> bool {
     #[cfg(feature = "engine")]
     {
-        bound(&format!("{GEO_PREFIXES} SELECT ?f WHERE {{ ?f a geo:Feature }}"))
-            == vec!["http://example.org/london", "http://example.org/paris"]
+        bound(&format!(
+            "{GEO_PREFIXES} SELECT ?f WHERE {{ ?f a geo:Feature }}"
+        )) == vec!["http://example.org/london", "http://example.org/paris"]
     }
     // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
@@ -328,11 +329,12 @@ fn feature_graph_pattern() -> bool {
 fn geometry_graph_pattern() -> bool {
     #[cfg(feature = "engine")]
     {
-        bound(&format!("{GEO_PREFIXES} SELECT ?g WHERE {{ ?g a geo:Geometry }}"))
-            == vec![
-                "http://example.org/londonGeom",
-                "http://example.org/parisGeom",
-            ]
+        bound(&format!(
+            "{GEO_PREFIXES} SELECT ?g WHERE {{ ?g a geo:Geometry }}"
+        )) == vec![
+            "http://example.org/londonGeom",
+            "http://example.org/parisGeom",
+        ]
     }
     // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
@@ -395,7 +397,9 @@ fn as_gml_graph_pattern() -> bool {
         ));
         // `Ok(g) == Ok(w)` also rules out a parse failure on either side: an Err
         // never equals an Ok, so no separate is_ok() check is needed.
-        gmls.len() == 1 && wkt.len() == 1 && parse_gml_literal(&gmls[0]) == parse_wkt_literal(&wkt[0])
+        gmls.len() == 1
+            && wkt.len() == 1
+            && parse_gml_literal(&gmls[0]) == parse_wkt_literal(&wkt[0])
     }
     // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
@@ -1087,12 +1091,8 @@ fn distance_accuracy_boundary_is_as_documented() {
 
     // (2) Point↔geometry: exact spherical closest point. A point due west of a
     // small box equals the haversine to the box's nearest (west) edge.
-    let d_pg = lex::distance(
-        "POINT(0 0)",
-        "POLYGON((1 -1, 2 -1, 2 1, 1 1, 1 -1))",
-        METRE,
-    )
-    .expect("metric point-polygon");
+    let d_pg = lex::distance("POINT(0 0)", "POLYGON((1 -1, 2 -1, 2 1, 1 1, 1 -1))", METRE)
+        .expect("metric point-polygon");
     // Nearest edge point is (1,0); haversine (0,0)->(1,0) ≈ 1° of longitude at the
     // equator ≈ the same 1-degree arc. Must be finite and ~111 km.
     assert!(

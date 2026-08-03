@@ -169,5 +169,8 @@ fn one_shape_reports_its_strongest_rationale() {
             .map(|c| c.via)
     };
     assert_eq!(via_of("BothPredicates"), Some(ShapeVia::TargetSubjectsOf));
-    assert_eq!(via_of("DashAndPredicate"), Some(ShapeVia::ApplicableToClass));
+    assert_eq!(
+        via_of("DashAndPredicate"),
+        Some(ShapeVia::ApplicableToClass)
+    );
 }

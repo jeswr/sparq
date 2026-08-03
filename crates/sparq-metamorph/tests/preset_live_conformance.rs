@@ -103,8 +103,8 @@ fn blazegraph_preset_reaches_a_live_endpoint() {
     let Some(base) = endpoint("SPARQ_METAMORPH_BLAZEGRAPH") else {
         return;
     };
-    let namespace = std::env::var("SPARQ_METAMORPH_BLAZEGRAPH_NAMESPACE")
-        .unwrap_or_else(|_| "kb".to_string());
+    let namespace =
+        std::env::var("SPARQ_METAMORPH_BLAZEGRAPH_NAMESPACE").unwrap_or_else(|_| "kb".to_string());
     let confirmed = probe(EndpointConfig::blazegraph(&base, &namespace));
     assert_eq!(confirmed.evidence, PresetEvidence::LiveInstance);
 }

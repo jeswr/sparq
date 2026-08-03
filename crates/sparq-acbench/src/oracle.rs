@@ -198,8 +198,7 @@ fn audience_matches_wac(request: &Request, audience: &Audience) -> bool {
             request.agent.starts_with(g.as_str())
         }
         Audience::ClientRestricted { agent, client } => {
-            &request.agent == agent
-                && request.client.as_deref() == Some(client.as_str())
+            &request.agent == agent && request.client.as_deref() == Some(client.as_str())
         }
         Audience::AllExcept(excl) => {
             // WAC has no deny: AllExcept is approximated as "not in exclusion list".
@@ -270,12 +269,9 @@ fn audience_matches_acp(request: &Request, audience: &Audience) -> bool {
             request.agent.starts_with(g.as_str())
         }
         Audience::ClientRestricted { agent, client } => {
-            &request.agent == agent
-                && request.client.as_deref() == Some(client.as_str())
+            &request.agent == agent && request.client.as_deref() == Some(client.as_str())
         }
-        Audience::AllExcept(excl) => {
-            !excl.iter().any(|e| e == &request.agent)
-        }
+        Audience::AllExcept(excl) => !excl.iter().any(|e| e == &request.agent),
     }
 }
 
@@ -373,12 +369,9 @@ fn audience_matches_odrl(request: &Request, audience: &Audience) -> bool {
             request.agent.starts_with(g.as_str())
         }
         Audience::ClientRestricted { agent, client } => {
-            &request.agent == agent
-                && request.client.as_deref() == Some(client.as_str())
+            &request.agent == agent && request.client.as_deref() == Some(client.as_str())
         }
-        Audience::AllExcept(excl) => {
-            !excl.iter().any(|e| e == &request.agent)
-        }
+        Audience::AllExcept(excl) => !excl.iter().any(|e| e == &request.agent),
     }
 }
 
@@ -425,9 +418,7 @@ pub(crate) fn evaluate_condition(condition: &Condition, now: &str) -> bool {
         Condition::Temporal { start, end } => temporal_in_window(start, end, now),
         Condition::Purpose(p) => p == BENCH_GRANTED_PURPOSE,
         Condition::Count(n) => *n > 0,
-        Condition::And(a, b) => {
-            evaluate_condition(a, now) && evaluate_condition(b, now)
-        }
+        Condition::And(a, b) => evaluate_condition(a, now) && evaluate_condition(b, now),
     }
 }
 
@@ -500,12 +491,10 @@ pub(crate) fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::{
-        BENCH_EVAL_INSTANT, BENCH_GRANTED_PURPOSE, evaluate_condition, evaluate_wac,
-        temporal_in_window, wac_effective_acl, wac_is_member, wac_parent_container,
+        evaluate_condition, evaluate_wac, temporal_in_window, wac_effective_acl, wac_is_member,
+        wac_parent_container, BENCH_EVAL_INSTANT, BENCH_GRANTED_PURPOSE,
     };
-    use crate::{
-        AccessMode, Audience, Condition, Decision, Effect, IntentRow, Request, Scope,
-    };
+    use crate::{AccessMode, Audience, Condition, Decision, Effect, IntentRow, Request, Scope};
 
     // ── WAC nearest-ACL-document-wins helpers (bead `sq-o4orz` / `sq-kvvcl.2`) ────────
     //
@@ -539,10 +528,19 @@ mod tests {
 
     #[test]
     fn parent_container_walks_to_the_authority_root_and_stops() {
-        assert_eq!(wac_parent_container("https://pod.ex/a/b/doc"), Some("https://pod.ex/a/b/"));
+        assert_eq!(
+            wac_parent_container("https://pod.ex/a/b/doc"),
+            Some("https://pod.ex/a/b/")
+        );
         // A trailing slash is stripped exactly once, so a container parents ABOVE itself.
-        assert_eq!(wac_parent_container("https://pod.ex/a/b/"), Some("https://pod.ex/a/"));
-        assert_eq!(wac_parent_container("https://pod.ex/a/"), Some("https://pod.ex/"));
+        assert_eq!(
+            wac_parent_container("https://pod.ex/a/b/"),
+            Some("https://pod.ex/a/")
+        );
+        assert_eq!(
+            wac_parent_container("https://pod.ex/a/"),
+            Some("https://pod.ex/")
+        );
         // At/above the authority root there is no parent — the walk terminates.
         assert_eq!(wac_parent_container("https://pod.ex/"), None);
         // Fail-closed on shapes the walk cannot reason about.
@@ -553,7 +551,10 @@ mod tests {
     #[test]
     fn membership_excludes_the_container_itself_and_non_slash_containers() {
         assert!(wac_is_member("https://pod.ex/c/", "https://pod.ex/c/doc"));
-        assert!(wac_is_member("https://pod.ex/c/", "https://pod.ex/c/sub/doc"));
+        assert!(wac_is_member(
+            "https://pod.ex/c/",
+            "https://pod.ex/c/sub/doc"
+        ));
         // A container is NOT a member of itself (`acl:default` reaches members only).
         assert!(!wac_is_member("https://pod.ex/c/", "https://pod.ex/c/"));
         // A non-slash `resource_uri` names a plain resource; the parent chain, which only
@@ -578,7 +579,10 @@ mod tests {
             Some((POD, false))
         );
         // Nothing anywhere up the chain → fail-closed.
-        assert_eq!(wac_effective_acl("https://elsewhere.ex/x/y", &intents), None);
+        assert_eq!(
+            wac_effective_acl("https://elsewhere.ex/x/y", &intents),
+            None
+        );
     }
 
     #[test]
@@ -595,12 +599,24 @@ mod tests {
         // The closer ACL fully shadows the pod-root grant — alice is DENIED even though the
         // ancestor grant's URI is a prefix of the resource. This is the exact case a
         // `starts_with` union got wrong (oracle=Allow vs engine=Deny under-share).
-        assert_eq!(evaluate_wac(&read_req(ALICE, shadowed), &intents), Decision::Deny);
-        assert_eq!(evaluate_wac(&read_req(BOB, shadowed), &intents), Decision::Allow);
+        assert_eq!(
+            evaluate_wac(&read_req(ALICE, shadowed), &intents),
+            Decision::Deny
+        );
+        assert_eq!(
+            evaluate_wac(&read_req(BOB, shadowed), &intents),
+            Decision::Allow
+        );
 
         // A resource with NO own ACL still inherits the pod-root grant.
-        assert_eq!(evaluate_wac(&read_req(ALICE, inherited), &intents), Decision::Allow);
-        assert_eq!(evaluate_wac(&read_req(BOB, inherited), &intents), Decision::Deny);
+        assert_eq!(
+            evaluate_wac(&read_req(ALICE, inherited), &intents),
+            Decision::Allow
+        );
+        assert_eq!(
+            evaluate_wac(&read_req(BOB, inherited), &intents),
+            Decision::Deny
+        );
     }
 
     #[test]
@@ -608,7 +624,10 @@ mod tests {
         let doc = "https://pod.ex/u/a/doc";
         for inexpressible in [
             // WAC has no deny — `compile_wac` emits an EMPTY policy, so no ACL document.
-            IntentRow { effect: Effect::Deny, ..row(Audience::Public, Scope::Resource, doc) },
+            IntentRow {
+                effect: Effect::Deny,
+                ..row(Audience::Public, Scope::Resource, doc)
+            },
             // WAC has no usage conditions — likewise empty.
             IntentRow {
                 condition: Condition::Purpose("https://ex.dev/p".to_string()),
@@ -624,7 +643,10 @@ mod tests {
             ];
             // The row materializes nothing, so the pod-root ACL still governs `doc`.
             assert_eq!(wac_effective_acl(doc, &intents), Some((POD, false)));
-            assert_eq!(evaluate_wac(&read_req(ALICE, doc), &intents), Decision::Allow);
+            assert_eq!(
+                evaluate_wac(&read_req(ALICE, doc), &intents),
+                Decision::Allow
+            );
         }
     }
 
@@ -634,13 +656,20 @@ mod tests {
         // the container itself is reachable — otherwise a container-targeted request would
         // be denied for everyone and the U2 project-container lane would go vacuously Deny.
         let intents = vec![row(Audience::Agent(ALICE.to_string()), Scope::Subtree, POD)];
-        assert_eq!(evaluate_wac(&read_req(ALICE, POD), &intents), Decision::Allow);
+        assert_eq!(
+            evaluate_wac(&read_req(ALICE, POD), &intents),
+            Decision::Allow
+        );
         assert_eq!(evaluate_wac(&read_req(BOB, POD), &intents), Decision::Deny);
     }
 
     #[test]
     fn wac_is_fail_closed_when_no_acl_document_governs_the_resource() {
-        let intents = vec![row(Audience::Public, Scope::Resource, "https://pod.ex/u/a/doc")];
+        let intents = vec![row(
+            Audience::Public,
+            Scope::Resource,
+            "https://pod.ex/u/a/doc",
+        )];
         // Public grant exists, but it governs a DIFFERENT resource with no ancestry link.
         assert_eq!(
             evaluate_wac(&read_req(ALICE, "https://other.ex/z"), &intents),
@@ -690,7 +719,11 @@ mod tests {
     #[test]
     fn temporal_malformed_bound_fails_closed() {
         // A non-canonical width breaks the lexical⇔chronological equivalence ⇒ deny.
-        assert!(!temporal_in_window("2026", "2027-01-01T00:00:00Z", BENCH_EVAL_INSTANT));
+        assert!(!temporal_in_window(
+            "2026",
+            "2027-01-01T00:00:00Z",
+            BENCH_EVAL_INSTANT
+        ));
         assert!(!temporal_in_window(
             "2026-01-01T00:00:00Z",
             "not-a-date",
@@ -731,7 +764,10 @@ mod tests {
 
     #[test]
     fn count_condition_zero_denies_positive_admits() {
-        assert!(!evaluate_condition(&Condition::Count(0), BENCH_EVAL_INSTANT));
+        assert!(!evaluate_condition(
+            &Condition::Count(0),
+            BENCH_EVAL_INSTANT
+        ));
         assert!(evaluate_condition(&Condition::Count(1), BENCH_EVAL_INSTANT));
     }
 
@@ -758,7 +794,9 @@ mod tests {
 
         // Wrong purpose also makes it false.
         let wrong_purpose = Condition::And(
-            Box::new(Condition::Purpose("https://sparq.dev/vocab/purpose#other".to_string())),
+            Box::new(Condition::Purpose(
+                "https://sparq.dev/vocab/purpose#other".to_string(),
+            )),
             Box::new(Condition::Temporal {
                 start: "2026-01-01T00:00:00Z".to_string(),
                 end: "2027-01-01T00:00:00Z".to_string(),

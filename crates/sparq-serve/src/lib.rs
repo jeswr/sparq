@@ -7,19 +7,6 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod applier;
-/// [OPUS-4.8] sq-xa15c (#1248 items 1+2) — the **in-process embedding seam**: a small,
-/// documented facade over the engine's read/write/probe entry points
-/// ([`query_json`](embed::query_json) / [`ask`](embed::ask) /
-/// [`update_in_place`](embed::update_in_place) / [`apply_delta_nquads`](embed::apply_delta_nquads)
-/// / [`exists`](embed::exists)+[`metadata`](embed::metadata)) plus a re-export of the
-/// runtime-agnostic concurrency wrapper ([`GenerationRing`] + [`GraphApplier`] / [`Writer`]),
-/// so an external host can call sparq in-process instead of over HTTP. **API tier-1
-/// (proposed-stable)** — the proposed semver-stable embedding surface in the [API stability
-/// policy]; the formal freeze is **pending maintainer ratification on #1248** (see the module
-/// docs), not unilaterally frozen here. Thin re-exports only; no new behaviour.
-///
-/// [API stability policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
-pub mod embed;
 /// [OPUS-4.8] (sq-o5bi) ONLINE consistent-snapshot backup + restore for the serving store
 /// — export an already-immutable pinned [`Generation`] to a single self-describing artifact
 /// WHILE SERVING (no stop-the-world), and re-hydrate a [`sparq_core::Graph`] from one
@@ -38,16 +25,14 @@ pub mod backup;
 #[cfg(all(feature = "change-stream", not(feature = "backup")))]
 #[allow(dead_code)]
 pub(crate) mod backup;
-/// [OPUS-4.8] (sq-b4fns, gh-906) DURABLE, REPLAYABLE change-data-capture stream in the
-/// Neptune-Streams shape — each commit emits an ordered, monotonically-sequenced change
-/// record (op, quad(s), commit seq/generation, timestamp) persisted to a segmented, fsync'd
-/// append-only log so a consumer can [`poll`](change_stream::ChangeLog::poll) from a given
-/// offset and REPLAY after a restart ([`open`](change_stream::ChangeLog::open) re-reads the
-/// segments). Compiled only behind the opt-in `change-stream` feature (default OFF); the
-/// serving core is byte-identical without it. See the module docs for the segment format and
-/// the same-lineage / fail-closed boundaries.
-#[cfg(feature = "change-stream")]
-pub mod change_stream;
+/// [OPUS-4.8] (sq-bu1a) The INCREMENTAL DELTA-STREAM / point-in-time-recovery companion to the
+/// Option-A base backup ([`backup`]): export the change between two same-lineage generations as a
+/// self-describing delta artifact keyed off generation/writer-seq, and replay an ordered chain of
+/// deltas forward onto a restored base to reach a chosen recovery point (fail-closed on a corrupt
+/// or discontinuous stream). Compiled only behind the opt-in `backup` feature (default OFF). See
+/// the module docs for the delta artifact format and the same-lineage boundary.
+#[cfg(feature = "backup")]
+pub mod backup_delta;
 /// [OPUS-5] (sq-l6zks, gh-3216) The EXTERNAL-BROKER seam over that durable log — a
 /// [`ChangeSink`](change_sink::ChangeSink) trait, a stable JSON broker-message encoding, a
 /// resumable [`BrokerRelay`](change_sink::BrokerRelay) pump with a durable delivered-through
@@ -60,14 +45,29 @@ pub mod change_stream;
 /// module docs for the at-least-once contract and the off-the-writer-thread rationale.
 #[cfg(feature = "change-sink")]
 pub mod change_sink;
-/// [OPUS-4.8] (sq-bu1a) The INCREMENTAL DELTA-STREAM / point-in-time-recovery companion to the
-/// Option-A base backup ([`backup`]): export the change between two same-lineage generations as a
-/// self-describing delta artifact keyed off generation/writer-seq, and replay an ordered chain of
-/// deltas forward onto a restored base to reach a chosen recovery point (fail-closed on a corrupt
-/// or discontinuous stream). Compiled only behind the opt-in `backup` feature (default OFF). See
-/// the module docs for the delta artifact format and the same-lineage boundary.
-#[cfg(feature = "backup")]
-pub mod backup_delta;
+/// [OPUS-4.8] (sq-b4fns, gh-906) DURABLE, REPLAYABLE change-data-capture stream in the
+/// Neptune-Streams shape — each commit emits an ordered, monotonically-sequenced change
+/// record (op, quad(s), commit seq/generation, timestamp) persisted to a segmented, fsync'd
+/// append-only log so a consumer can [`poll`](change_stream::ChangeLog::poll) from a given
+/// offset and REPLAY after a restart ([`open`](change_stream::ChangeLog::open) re-reads the
+/// segments). Compiled only behind the opt-in `change-stream` feature (default OFF); the
+/// serving core is byte-identical without it. See the module docs for the segment format and
+/// the same-lineage / fail-closed boundaries.
+#[cfg(feature = "change-stream")]
+pub mod change_stream;
+/// [OPUS-4.8] sq-xa15c (#1248 items 1+2) — the **in-process embedding seam**: a small,
+/// documented facade over the engine's read/write/probe entry points
+/// ([`query_json`](embed::query_json) / [`ask`](embed::ask) /
+/// [`update_in_place`](embed::update_in_place) / [`apply_delta_nquads`](embed::apply_delta_nquads)
+/// / [`exists`](embed::exists)+[`metadata`](embed::metadata)) plus a re-export of the
+/// runtime-agnostic concurrency wrapper ([`GenerationRing`] + [`GraphApplier`] / [`Writer`]),
+/// so an external host can call sparq in-process instead of over HTTP. **API tier-1
+/// (proposed-stable)** — the proposed semver-stable embedding surface in the [API stability
+/// policy]; the formal freeze is **pending maintainer ratification on #1248** (see the module
+/// docs), not unilaterally frozen here. Thin re-exports only; no new behaviour.
+///
+/// [API stability policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
+pub mod embed;
 mod epoch;
 mod footprint;
 mod ring;
@@ -122,13 +122,13 @@ pub use backup_delta::{
 // [FABLE-5] (gh-2436) `ChangeStreamControl` (from `ChangeLog::into_commit_hook_with_control`)
 // runs that resync on a RUNNING recorder — no stop/re-open; `rebase_to_new_lineage` is the
 // post-restore variant for a replaced lineage whose generation numbering restarted.
+#[cfg(all(feature = "change-stream", not(feature = "backup")))]
+pub use backup::BackupError;
 #[cfg(feature = "change-stream")]
 pub use change_stream::{
     Change, ChangeLog, ChangeLogConfig, ChangeOp, ChangeRecord, ChangeStreamControl,
     RetentionPolicy, RetentionReport, DEFAULT_SEGMENT_TARGET_BYTES, SEGMENT_MAGIC,
 };
-#[cfg(all(feature = "change-stream", not(feature = "backup")))]
-pub use backup::BackupError;
 // [OPUS-5] (sq-l6zks, gh-3216) The external-broker sink surface (feature `change-sink`):
 // `ChangeSink` is the pluggable seam a host implements over its OWN broker client (Kafka via
 // `rdkafka`, a webhook, …); `BrokerMessage`/`encode_message`/`SinkConfig` are the stable
@@ -137,12 +137,12 @@ pub use backup::BackupError;
 // `RetentionPolicy::acked_through_seq`); `RecordingSink` is the in-memory test/dry-run sink;
 // `NatsSink`/`NatsOptions` is the one in-tree broker client (core-NATS publish over plain TCP,
 // std-only — no TLS). `SinkError` is the surface's fail-closed error type.
+pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 #[cfg(feature = "change-sink")]
 pub use change_sink::{
     encode_message, BrokerMessage, BrokerRelay, ChangeSink, NatsOptions, NatsSink, PumpReport,
     RecordingSink, SinkConfig, SinkError, DEFAULT_PUMP_MAX_BATCH, DEFAULT_SUBJECT,
 };
-pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};
 pub use ring::{Generation, GenerationRing, RingConfig, TimeTravelConfig, DEFAULT_RETAIN};

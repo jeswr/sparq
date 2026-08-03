@@ -103,7 +103,10 @@ async fn get_query_defaults_to_results_json_envelope() {
         "no-Accept default is the exact SPARQL Results JSON content type"
     );
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["head"]["vars"].is_array(), "SELECT envelope has head.vars: {v}");
+    assert!(
+        v["head"]["vars"].is_array(),
+        "SELECT envelope has head.vars: {v}"
+    );
     assert_eq!(
         v["results"]["bindings"].as_array().unwrap().len(),
         2,
@@ -167,7 +170,11 @@ async fn query_method_is_query_only() {
         .send()
         .await
         .unwrap();
-    assert_eq!(update.status().as_u16(), 415, "QUERY refuses an update body");
+    assert_eq!(
+        update.status().as_u16(),
+        415,
+        "QUERY refuses an update body"
+    );
     assert_error_envelope(update).await;
 }
 
@@ -187,11 +194,18 @@ async fn update_success_is_204_empty() {
 
     let form = client()
         .post(format!("{base}/sparql"))
-        .form(&[("update", "INSERT DATA { <http://ex/s2> <http://ex/p> <http://ex/o> }")])
+        .form(&[(
+            "update",
+            "INSERT DATA { <http://ex/s2> <http://ex/p> <http://ex/o> }",
+        )])
         .send()
         .await
         .unwrap();
-    assert_eq!(form.status().as_u16(), 204, "form-encoded update= also commits");
+    assert_eq!(
+        form.status().as_u16(),
+        204,
+        "form-encoded update= also commits"
+    );
 }
 
 // ===========================================================================
@@ -204,9 +218,15 @@ async fn update_success_is_204_empty() {
 async fn select_negotiation_emits_exact_content_types() {
     let base = spawn_default().await;
     for (accept, expect) in [
-        ("application/sparql-results+json", "application/sparql-results+json"),
+        (
+            "application/sparql-results+json",
+            "application/sparql-results+json",
+        ),
         ("application/json", "application/sparql-results+json"),
-        ("application/sparql-results+xml", "application/sparql-results+xml"),
+        (
+            "application/sparql-results+xml",
+            "application/sparql-results+xml",
+        ),
         ("text/csv", "text/csv; charset=utf-8"),
         (
             "text/tab-separated-values",
@@ -241,7 +261,11 @@ async fn ask_envelope_and_csv_fallback() {
     assert_eq!(content_type(&resp), "application/sparql-results+json");
     let v: serde_json::Value = resp.json().await.unwrap();
     assert!(v["head"].is_object(), "ASK envelope has head: {v}");
-    assert_eq!(v["boolean"], serde_json::Value::Bool(true), "ASK envelope has boolean: {v}");
+    assert_eq!(
+        v["boolean"],
+        serde_json::Value::Bool(true),
+        "ASK envelope has boolean: {v}"
+    );
 
     let csv = client()
         .get(format!("{base}/sparql"))
@@ -265,12 +289,21 @@ async fn graph_negotiation_emits_exact_content_types() {
     let mut cases = vec![
         (None, "application/n-triples; charset=utf-8"),
         (Some("*/*"), "application/n-triples; charset=utf-8"),
-        (Some("application/n-triples"), "application/n-triples; charset=utf-8"),
+        (
+            Some("application/n-triples"),
+            "application/n-triples; charset=utf-8",
+        ),
         (Some("text/turtle"), "text/turtle; charset=utf-8"),
-        (Some("application/rdf+xml"), "application/rdf+xml; charset=utf-8"),
+        (
+            Some("application/rdf+xml"),
+            "application/rdf+xml; charset=utf-8",
+        ),
     ];
     #[cfg(feature = "jsonld")]
-    cases.push((Some("application/ld+json"), "application/ld+json; charset=utf-8"));
+    cases.push((
+        Some("application/ld+json"),
+        "application/ld+json; charset=utf-8",
+    ));
     for (accept, expect) in cases {
         let mut req = client()
             .get(format!("{base}/sparql"))
@@ -305,7 +338,11 @@ async fn gsp_indirect_lifecycle_statuses() {
         .send()
         .await
         .unwrap();
-    assert_eq!(created.status().as_u16(), 201, "PUT of an absent graph creates → 201");
+    assert_eq!(
+        created.status().as_u16(),
+        201,
+        "PUT of an absent graph creates → 201"
+    );
 
     let read = cl.get(&graph).query(&iri).send().await.unwrap();
     assert_eq!(read.status().as_u16(), 200);
@@ -323,7 +360,11 @@ async fn gsp_indirect_lifecycle_statuses() {
         .send()
         .await
         .unwrap();
-    assert_eq!(replaced.status().as_u16(), 204, "PUT of an existing graph replaces → 204");
+    assert_eq!(
+        replaced.status().as_u16(),
+        204,
+        "PUT of an existing graph replaces → 204"
+    );
 
     let merged = cl
         .post(&graph)
@@ -333,19 +374,35 @@ async fn gsp_indirect_lifecycle_statuses() {
         .send()
         .await
         .unwrap();
-    assert_eq!(merged.status().as_u16(), 204, "POST merges into an existing graph → 204");
+    assert_eq!(
+        merged.status().as_u16(),
+        204,
+        "POST merges into an existing graph → 204"
+    );
 
     let dropped = cl.delete(&graph).query(&iri).send().await.unwrap();
-    assert_eq!(dropped.status().as_u16(), 204, "DELETE of an existing named graph → 204");
+    assert_eq!(
+        dropped.status().as_u16(),
+        204,
+        "DELETE of an existing named graph → 204"
+    );
 
     // As-implemented: a GET of an absent named graph serves the EMPTY graph (200), it does
     // not 404 (pinned since tests/protocol.rs `gsp_delete_then_get_and_404`); the absent-graph
     // 404 arises on DELETE.
     let empty = cl.get(&graph).query(&iri).send().await.unwrap();
-    assert_eq!(empty.status().as_u16(), 200, "GET of an absent named graph serves empty");
+    assert_eq!(
+        empty.status().as_u16(),
+        200,
+        "GET of an absent named graph serves empty"
+    );
     assert_eq!(empty.text().await.unwrap().trim(), "");
     let gone = cl.delete(&graph).query(&iri).send().await.unwrap();
-    assert_eq!(gone.status().as_u16(), 404, "DELETE of an absent named graph → 404");
+    assert_eq!(
+        gone.status().as_u16(),
+        404,
+        "DELETE of an absent named graph → 404"
+    );
     assert_error_envelope(gone).await;
 }
 
@@ -375,7 +432,11 @@ async fn gsp_patch_sparql_update_dialect() {
         .send()
         .await
         .unwrap();
-    assert_eq!(patch.status().as_u16(), 204, "sparql-update PATCH dialect is always-on → 204");
+    assert_eq!(
+        patch.status().as_u16(),
+        204,
+        "sparql-update PATCH dialect is always-on → 204"
+    );
 
     let bad = cl
         .patch(&graph)
@@ -385,7 +446,11 @@ async fn gsp_patch_sparql_update_dialect() {
         .send()
         .await
         .unwrap();
-    assert_eq!(bad.status().as_u16(), 415, "an unsupported PATCH body type → 415");
+    assert_eq!(
+        bad.status().as_u16(),
+        415,
+        "an unsupported PATCH body type → 415"
+    );
     assert_error_envelope(bad).await;
 }
 
@@ -479,12 +544,18 @@ async fn class_401_bearer_gate() {
     let missing = send(None).await;
     assert_eq!(missing.status().as_u16(), 401);
     assert_eq!(
-        missing.headers().get("www-authenticate").map(|v| v.to_str().unwrap()),
+        missing
+            .headers()
+            .get("www-authenticate")
+            .map(|v| v.to_str().unwrap()),
         Some("Bearer"),
         "401 carries WWW-Authenticate: Bearer"
     );
     assert_eq!(
-        missing.headers().get("cache-control").map(|v| v.to_str().unwrap()),
+        missing
+            .headers()
+            .get("cache-control")
+            .map(|v| v.to_str().unwrap()),
         Some("no-store"),
         "401 carries Cache-Control: no-store"
     );
@@ -519,8 +590,14 @@ async fn class_403_blocked_service_egress() {
     assert_eq!(resp.status().as_u16(), 403);
     let v = assert_error_envelope(resp).await;
     let msg = v["error"].as_str().unwrap().to_lowercase();
-    assert!(msg.contains("egress allowlist"), "documented sentinel: {msg}");
-    assert!(!msg.contains("127.0.0.1"), "refused host is sanitised out: {msg}");
+    assert!(
+        msg.contains("egress allowlist"),
+        "documented sentinel: {msg}"
+    );
+    assert!(
+        !msg.contains("127.0.0.1"),
+        "refused host is sanitised out: {msg}"
+    );
 }
 
 /// 404 — an unknown route answers the fixed, leak-free `not found` class.
@@ -541,7 +618,11 @@ async fn class_404_unknown_route() {
 #[tokio::test]
 async fn class_405_carries_allow() {
     let base = spawn_default().await;
-    let resp = client().post(format!("{base}/health")).send().await.unwrap();
+    let resp = client()
+        .post(format!("{base}/health"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 405);
     assert!(resp.headers().contains_key("allow"), "405 carries Allow");
 }
@@ -562,7 +643,11 @@ async fn class_406_unsatisfiable_accept() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status().as_u16(), 406, "unsatisfiable Accept on: {query}");
+        assert_eq!(
+            resp.status().as_u16(),
+            406,
+            "unsatisfiable Accept on: {query}"
+        );
         assert_error_envelope(resp).await;
         let ok = client()
             .get(format!("{base}/sparql"))
@@ -600,7 +685,10 @@ async fn class_410_aged_out_generation() {
     }
     let resp = cl
         .get(format!("{base}/sparql"))
-        .query(&[("query", "SELECT ?s WHERE { ?s ?p ?o }"), ("generation", "1")])
+        .query(&[
+            ("query", "SELECT ?s WHERE { ?s ?p ?o }"),
+            ("generation", "1"),
+        ])
         .send()
         .await
         .unwrap();
@@ -623,7 +711,10 @@ async fn class_413_body_cap() {
     let resp = client()
         .post(format!("{base}/sparql"))
         .header("content-type", "application/sparql-query")
-        .body(format!("SELECT * WHERE {{ ?s ?p ?o }} # {}", "x".repeat(512)))
+        .body(format!(
+            "SELECT * WHERE {{ ?s ?p ?o }} # {}",
+            "x".repeat(512)
+        ))
         .send()
         .await
         .unwrap();
@@ -650,7 +741,10 @@ async fn class_413_row_cap_honest_refusal() {
     let v = assert_error_envelope(resp).await;
     let msg = v["error"].as_str().unwrap();
     assert!(msg.contains("row limit"), "documented sentinel: {msg}");
-    assert!(!msg.contains("bindings"), "refusal, never truncation: {msg}");
+    assert!(
+        !msg.contains("bindings"),
+        "refusal, never truncation: {msg}"
+    );
 }
 
 /// 415 — an unsupported POST Content-Type on /sparql.
@@ -679,7 +773,8 @@ async fn class_429_concurrency_shed() {
             ttl.push_str(&format!("ex:n{i} ex:e ex:n{j} .\n"));
         }
     }
-    const SLOW: &str = "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?c ex:e ?d . ?e ex:e ?f }";
+    const SLOW: &str =
+        "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?c ex:e ?d . ?e ex:e ?f }";
     let config = ServerConfig {
         max_concurrent: 1,
         query_timeout: Some(Duration::from_secs(30)),

@@ -23,14 +23,21 @@ use sparq_engine::query;
 fn synthetic_nt(n: u32) -> String {
     let mut s = String::new();
     for i in 0..n {
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/name> \"unique value number {i} \\\"q\\\" \\u00e9\" .\n"));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/name> \"unique value number {i} \\\"q\\\" \\u00e9\" .\n"
+        ));
         s.push_str(&format!("<http://ex/s{i}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", i % 90));
         s.push_str(&format!("<http://ex/s{i}> <http://other.org/v#big> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", 9_007_199_254_740_000u64 + i as u64));
         s.push_str(&format!("<http://ex/s{i}> <http://ex/dec> \"{}.25\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n", i));
         s.push_str(&format!("<http://ex/s{i}> <http://ex/when> \"2026-01-{:02}T0{}:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .\n", 1 + i % 28, i % 10));
         s.push_str(&format!("<http://ex/s{i}> <http://ex/day> \"2026-02-{:02}\"^^<http://www.w3.org/2001/XMLSchema#date> .\n", 1 + i % 28));
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/label> \"étiquette {i}\"@fr .\n"));
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/follows> <http://ex/s{}> .\n", (i * 7 + 3) % n.max(1)));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/label> \"étiquette {i}\"@fr .\n"
+        ));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/follows> <http://ex/s{}> .\n",
+            (i * 7 + 3) % n.max(1)
+        ));
         s.push_str(&format!("_:b{i} <http://ex/about> <http://ex/s{i}> .\n"));
         if i % 3 == 0 {
             s.push_str(&format!("<urn:uuid:item-{i}> <http://ex/idx> \"{i}\" .\n"));
@@ -38,9 +45,13 @@ fn synthetic_nt(n: u32) -> String {
     }
     // Exact duplicates + shared terms across distant lines (cache-epoch crossers).
     s.push_str("<http://ex/s0> <http://ex/name> \"unique value number 0 \\\"q\\\" \\u00e9\" .\n");
-    s.push_str("<http://ex/s0> <http://ex/age> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n");
+    s.push_str(
+        "<http://ex/s0> <http://ex/age> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+    );
     for i in 0..n.min(50) {
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/name> \"unique value number {i} \\\"q\\\" \\u00e9\" .\n"));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/name> \"unique value number {i} \\\"q\\\" \\u00e9\" .\n"
+        ));
     }
     s
 }
@@ -70,7 +81,10 @@ fn spilled_dict_build_is_byte_identical_to_sharded() {
     // Spilled build with a TINY budget: per-shard caches floor at 4 KiB (constant
     // epoch clears), the variable-record sorter floors at 64 KiB runs (many runs),
     // and `chunk = 512` spills triples across many runs too.
-    let cfg = SpillConfig { mem_budget: 1, disk_floor: 0 };
+    let cfg = SpillConfig {
+        mem_budget: 1,
+        disk_floor: 0,
+    };
     Graph::build_external_spill(nt.as_bytes(), "ntriples", &spill_dir, 512, &cfg).unwrap();
 
     // Identical file SETS, identical BYTES.
@@ -80,7 +94,12 @@ fn spilled_dict_build_is_byte_identical_to_sharded() {
     for f in &files {
         let a = std::fs::read(sharded_dir.join(f)).unwrap();
         let b = std::fs::read(spill_dir.join(f)).unwrap();
-        assert!(a == b, "{f} differs between sharded and spilled builds ({} vs {} bytes)", a.len(), b.len());
+        assert!(
+            a == b,
+            "{f} differs between sharded and spilled builds ({} vs {} bytes)",
+            a.len(),
+            b.len()
+        );
     }
 
     // The spilled store answers like a plain in-memory load (semantic guard on top of
@@ -96,7 +115,12 @@ fn spilled_dict_build_is_byte_identical_to_sharded() {
             .iter()
             .map(|r| {
                 let spo = scan.to_spo(r);
-                format!("{} {} {}", g.dict.term(spo[0]), g.dict.term(spo[1]), g.dict.term(spo[2]))
+                format!(
+                    "{} {} {}",
+                    g.dict.term(spo[0]),
+                    g.dict.term(spo[1]),
+                    g.dict.term(spo[2])
+                )
             })
             .collect();
         v.sort();
@@ -131,7 +155,10 @@ fn spilled_dict_build_comfortable_budget_matches_too() {
     let sharded_dir = base.join("sharded");
     let spill_dir = base.join("spill");
     Graph::build_external_opts(nt.as_bytes(), "ntriples", &sharded_dir, 1 << 20, true).unwrap();
-    let cfg = SpillConfig { mem_budget: 256 << 20, disk_floor: 0 };
+    let cfg = SpillConfig {
+        mem_budget: 256 << 20,
+        disk_floor: 0,
+    };
     Graph::build_external_spill(nt.as_bytes(), "ntriples", &spill_dir, 1 << 20, &cfg).unwrap();
     for f in dir_files(&sharded_dir) {
         let a = std::fs::read(sharded_dir.join(&f)).unwrap();
@@ -144,8 +171,12 @@ fn spilled_dict_build_comfortable_budget_matches_too() {
 #[test]
 fn spilled_dict_build_rejects_non_ntriples() {
     let base = std::env::temp_dir().join(format!("sparq_dsp_fmt_{}", std::process::id()));
-    let cfg = SpillConfig { mem_budget: 1 << 20, disk_floor: 0 };
-    let err = Graph::build_external_spill("<a> <b> <c> .".as_bytes(), "turtle", &base, 16, &cfg).unwrap_err();
+    let cfg = SpillConfig {
+        mem_budget: 1 << 20,
+        disk_floor: 0,
+    };
+    let err = Graph::build_external_spill("<a> <b> <c> .".as_bytes(), "turtle", &base, 16, &cfg)
+        .unwrap_err();
     assert!(err.contains("N-Triples"), "unexpected error: {err}");
     std::fs::remove_dir_all(&base).ok();
 }
@@ -154,7 +185,10 @@ fn spilled_dict_build_rejects_non_ntriples() {
 fn spilled_dict_build_empty_input() {
     let base = std::env::temp_dir().join(format!("sparq_dsp_empty_{}", std::process::id()));
     std::fs::remove_dir_all(&base).ok();
-    let cfg = SpillConfig { mem_budget: 1 << 20, disk_floor: 0 };
+    let cfg = SpillConfig {
+        mem_budget: 1 << 20,
+        disk_floor: 0,
+    };
     Graph::build_external_spill("".as_bytes(), "ntriples", &base, 16, &cfg).unwrap();
     let g = Graph::open(&base).unwrap();
     assert_eq!(g.len(), 0);

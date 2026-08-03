@@ -40,7 +40,12 @@ const NOTE: &str = "https://pod.ex/notes/n1";
 const HAS_MEMBER: &str = "http://www.w3.org/2006/vcard/ns#hasMember";
 
 fn sess(agent: &str) -> Session<'_> {
-    Session { agent: Some(agent), client: None, issuer: None, now: None }
+    Session {
+        agent: Some(agent),
+        client: None,
+        issuer: None,
+        now: None,
+    }
 }
 
 /// A pod whose root `.acl` gives ADMIN Read+Write+Control over everything and gives the
@@ -90,9 +95,17 @@ fn can_read_note(store: &PodStore, agent: &str) -> bool {
         .iter()
         .any(|n| n.as_str() == NOTE);
     let via_query = store
-        .ask_as(&s, Mode::Read, &format!("ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}", NOTE))
+        .ask_as(
+            &s,
+            Mode::Read,
+            &format!("ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}", NOTE),
+        )
         .expect("ask evaluates");
-    assert_eq!(via_oracle, via_query, "oracle and query path must agree for <{}>", agent);
+    assert_eq!(
+        via_oracle, via_query,
+        "oracle and query path must agree for <{}>",
+        agent
+    );
     via_oracle
 }
 
@@ -106,12 +119,18 @@ fn member_triple(agent: &str) -> String {
 #[test]
 fn group_doc_membership_revoke_rematerializes() {
     let mut s = store();
-    assert!(can_read_note(&s, ALICE), "alice starts with a group-derived read grant");
+    assert!(
+        can_read_note(&s, ALICE),
+        "alice starts with a group-derived read grant"
+    );
 
     // ADMIN removes alice's membership through the enforced write path. NOTE: no
     // `materialize_wac()` call follows — the write path must trigger it.
-    s.update_as(&sess(ADMIN), &format!("DELETE DATA {{ {} }}", member_triple(ALICE)))
-        .expect("admin may write the group document");
+    s.update_as(
+        &sess(ADMIN),
+        &format!("DELETE DATA {{ {} }}", member_triple(ALICE)),
+    )
+    .expect("admin may write the group document");
 
     assert!(
         !can_read_note(&s, ALICE),
@@ -125,8 +144,11 @@ fn group_doc_membership_grant_rematerializes() {
     let mut s = store();
     assert!(!can_read_note(&s, BOB), "bob starts with no grant");
 
-    s.update_as(&sess(ADMIN), &format!("INSERT DATA {{ {} }}", member_triple(BOB)))
-        .expect("admin may write the group document");
+    s.update_as(
+        &sess(ADMIN),
+        &format!("INSERT DATA {{ {} }}", member_triple(BOB)),
+    )
+    .expect("admin may write the group document");
 
     assert!(
         can_read_note(&s, BOB),
@@ -141,8 +163,11 @@ fn ordinary_resource_write_leaves_grants_unchanged() {
     // test would still pass under a "re-materialize on every write" implementation, and it
     // is here to pin the observable contract (grants unchanged), not the trigger count.
     let mut s = store();
-    let before: Vec<String> =
-        s.accessible(&sess(ALICE), Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
+    let before: Vec<String> = s
+        .accessible(&sess(ALICE), Mode::Read)
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect();
 
     s.update_as(
         &sess(ADMIN),
@@ -151,10 +176,19 @@ fn ordinary_resource_write_leaves_grants_unchanged() {
     )
     .expect("admin may write an ordinary resource");
 
-    let after: Vec<String> =
-        s.accessible(&sess(ALICE), Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
-    assert_eq!(before, after, "an ordinary content write must not change any grant");
-    assert!(can_read_note(&s, ALICE), "alice keeps her group-derived grant");
+    let after: Vec<String> = s
+        .accessible(&sess(ALICE), Mode::Read)
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        before, after,
+        "an ordinary content write must not change any grant"
+    );
+    assert!(
+        can_read_note(&s, ALICE),
+        "alice keeps her group-derived grant"
+    );
 }
 
 #[test]
@@ -163,7 +197,10 @@ fn group_doc_write_still_requires_write_permission() {
     // document is an ordinary resource governed by its own ACL, and ALICE holds Read only.
     let mut s = store();
     let err = s
-        .update_as(&sess(ALICE), &format!("DELETE DATA {{ {} }}", member_triple(ALICE)))
+        .update_as(
+            &sess(ALICE),
+            &format!("DELETE DATA {{ {} }}", member_triple(ALICE)),
+        )
         .expect_err("alice has Read only on the group document");
     assert!(err.contains("update denied"), "unexpected error: {}", err);
     assert!(

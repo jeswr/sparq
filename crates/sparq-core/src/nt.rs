@@ -100,7 +100,9 @@ fn as_nquads_err(e: String) -> String {
 /// ranges — see the loader (`load_nquads_parallel`).
 #[cfg(feature = "parallel")]
 #[allow(clippy::type_complexity)]
-pub fn parse_quads_chunk(bytes: &[u8]) -> Result<Vec<(Option<GraphKey>, Dict, Vec<[Id; 3]>)>, String> {
+pub fn parse_quads_chunk(
+    bytes: &[u8],
+) -> Result<Vec<(Option<GraphKey>, Dict, Vec<[Id; 3]>)>, String> {
     // [OPUS-5] (sq-7d3dj.21) Establish the module's `CHUNK-UTF8` invariant ONCE, before any byte
     // is scanned — the safety precondition of every `str_of` span extraction below. See `str_of`.
     validate_chunk_utf8(bytes, "N-Quads")?;
@@ -174,7 +176,11 @@ fn graph_key(b: &[u8], i: usize) -> Result<GraphKey, String> {
     match b.get(i) {
         Some(b'<') => {
             let (start, end, esc, _next) = scan_delim(b, i, b'>').map_err(as_nquads_err)?;
-            Ok(GraphKey::Iri(decode(&b[start..end], esc).map_err(as_nquads_err)?.into_owned()))
+            Ok(GraphKey::Iri(
+                decode(&b[start..end], esc)
+                    .map_err(as_nquads_err)?
+                    .into_owned(),
+            ))
         }
         Some(b'_') => {
             if b.get(i + 1) != Some(&b':') {
@@ -184,7 +190,9 @@ fn graph_key(b: &[u8], i: usize) -> Result<GraphKey, String> {
             let j = blank_label_end(b, start);
             Ok(GraphKey::Blank(str_of(&b[start..j]).to_owned()))
         }
-        _ => Err(format!("N-Quads: graph name must be an IRI or blank node at byte {i}")),
+        _ => Err(format!(
+            "N-Quads: graph name must be an IRI or blank node at byte {i}"
+        )),
     }
 }
 
@@ -254,7 +262,9 @@ fn span_triple_term(b: &[u8], i: usize, depth: usize) -> Result<usize, String> {
     if b.get(j) == Some(&b')') && b.get(j + 1) == Some(&b'>') && b.get(j + 2) == Some(&b'>') {
         Ok(j + 3)
     } else {
-        Err(format!("N-Quads: expected ')>>' closing triple term at byte {j}"))
+        Err(format!(
+            "N-Quads: expected ')>>' closing triple term at byte {j}"
+        ))
     }
 }
 
@@ -356,8 +366,7 @@ pub fn parse_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String
             if cache_s_id != NO_ID
                 && s_after <= n
                 && bytes[s_start..s_after] == cache_s_buf[..cache_s_len]
-                && (s_after >= n
-                    || matches!(bytes[s_after], b' ' | b'\t' | b'\r' | b'\n'))
+                && (s_after >= n || matches!(bytes[s_after], b' ' | b'\t' | b'\r' | b'\n'))
             {
                 // Cache hit: same raw bytes → same interned id.
                 i = s_after;
@@ -387,8 +396,7 @@ pub fn parse_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String
             if cache_p_id != NO_ID
                 && p_after <= n
                 && bytes[p_start..p_after] == cache_p_buf[..cache_p_len]
-                && (p_after >= n
-                    || matches!(bytes[p_after], b' ' | b'\t' | b'\r' | b'\n'))
+                && (p_after >= n || matches!(bytes[p_after], b' ' | b'\t' | b'\r' | b'\n'))
             {
                 i = p_after;
                 cache_p_id
@@ -463,7 +471,11 @@ fn validate_chunk_utf8(bytes: &[u8], format: &str) -> Result<(), String> {
     if let Err(e) = std::str::from_utf8(bytes) {
         // Positional `format!` args: the CodeQL `rust/unused-variable` query false-positives on
         // inline captures. [OPUS-5]
-        return Err(format!("{}: invalid UTF-8 at byte {}", format, e.valid_up_to()));
+        return Err(format!(
+            "{}: invalid UTF-8 at byte {}",
+            format,
+            e.valid_up_to()
+        ));
     }
     Ok(())
 }
@@ -557,7 +569,12 @@ fn object_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), Strin
 /// pathologically nested `<<( … )>>` chain returns a clean parse error at `MAX_TRIPLE_TERM_DEPTH`
 /// instead of overflowing the stack. `depth` is the number of `<<(` openers already entered above
 /// this call (0 at the top-level object position).
-fn object_term_depth(b: &[u8], i: usize, dict: &mut Dict, depth: usize) -> Result<(Id, usize), String> {
+fn object_term_depth(
+    b: &[u8],
+    i: usize,
+    dict: &mut Dict,
+    depth: usize,
+) -> Result<(Id, usize), String> {
     if b.get(i) == Some(&b'<') && b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') {
         triple_term(b, i, dict, depth)
     } else {
@@ -591,7 +608,9 @@ fn triple_term(b: &[u8], i: usize, dict: &mut Dict, depth: usize) -> Result<(Id,
     if b.get(j) == Some(&b')') && b.get(j + 1) == Some(&b'>') && b.get(j + 2) == Some(&b'>') {
         Ok((dict.intern_triple_ids([s, p, o]), j + 3))
     } else {
-        Err(format!("N-Triples: expected ')>>' closing triple term at byte {j}"))
+        Err(format!(
+            "N-Triples: expected ')>>' closing triple term at byte {j}"
+        ))
     }
 }
 
@@ -608,7 +627,9 @@ fn scan_delim(b: &[u8], open: usize, close: u8) -> Result<(usize, usize, bool, u
         j += 1;
     }
     if j >= b.len() {
-        return Err(format!("N-Triples: unterminated delimiter from byte {open}"));
+        return Err(format!(
+            "N-Triples: unterminated delimiter from byte {open}"
+        ));
     }
     Ok((start, j, esc, j + 1))
 }
@@ -720,7 +741,11 @@ fn literal(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
             // RDF 1.2 `@lang--dir` keeps the combined slot (the dict's stored encoding)
             // but is typed rdf:dirLangString.
             let raw = str_of(&b[lstart..j]);
-            let dt = if raw.contains("--") { RDF_DIR_LANG_STRING } else { RDF_LANG_STRING };
+            let dt = if raw.contains("--") {
+                RDF_DIR_LANG_STRING
+            } else {
+                RDF_LANG_STRING
+            };
             // [OPUS-4.8] (sq-langcase / KamiQuasi #1119) NORMALISE the language tag to ASCII
             // lowercase, matching the oxttl/oxrdf paths (`Literal::new_language_tagged_literal`
             // lowercases via `make_ascii_lowercase`; oxttl's Turtle/N-Quads/TriG recognisers call
@@ -771,7 +796,10 @@ fn unescape(s: &str) -> Result<String, String> {
 fn hex(it: &mut std::str::Chars<'_>, n: usize) -> Result<char, String> {
     let mut cp = 0u32;
     for _ in 0..n {
-        let d = it.next().and_then(|c| c.to_digit(16)).ok_or("N-Triples: bad \\u escape")?;
+        let d = it
+            .next()
+            .and_then(|c| c.to_digit(16))
+            .ok_or("N-Triples: bad \\u escape")?;
         cp = cp * 16 + d;
     }
     char::from_u32(cp).ok_or_else(|| "N-Triples: invalid code point".into())
@@ -802,7 +830,10 @@ mod tests {
         let want = Term::Triple(Box::new(Triple::new(
             NamedNode::new_unchecked("http://ex/alice"),
             NamedNode::new_unchecked("http://ex/age"),
-            Term::Literal(Literal::new_typed_literal("30", NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"))),
+            Term::Literal(Literal::new_typed_literal(
+                "30",
+                NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
+            )),
         )));
         assert_eq!(d.term(o), want);
         // Content-addressed: re-interning the identical term shares the id.
@@ -832,12 +863,16 @@ mod tests {
     fn plain_triples_unaffected() {
         // A plain IRI object (`<…>`) must NOT be mistaken for a triple term, and a literal
         // object beginning with `<`-free bytes parses as before.
-        let nt = b"<http://ex/s> <http://ex/p> <http://ex/o> .\n<http://ex/s> <http://ex/p> \"v\" .\n";
+        let nt =
+            b"<http://ex/s> <http://ex/p> <http://ex/o> .\n<http://ex/s> <http://ex/p> \"v\" .\n";
         let mut d = Dict::new();
         let t = parse_chunk(nt, &mut d).unwrap();
         assert_eq!(t.len(), 2);
         assert_eq!(d.term(t[0][2]), iri("http://ex/o"));
-        assert_eq!(d.term(t[1][2]), Term::Literal(Literal::new_simple_literal("v")));
+        assert_eq!(
+            d.term(t[1][2]),
+            Term::Literal(Literal::new_simple_literal("v"))
+        );
     }
 
     // [OPUS-4.8] (sq-langcase / KamiQuasi #1119) The byte-level N-Triples/N-Quads parser
@@ -854,7 +889,9 @@ mod tests {
         let t = parse_chunk(nt, &mut d).unwrap();
         assert_eq!(t.len(), 1);
         // The stored term carries the lowercased tag — byte-identical to what oxttl produces.
-        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "en-us"));
+        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked(
+            "hi", "en-us",
+        ));
         assert_eq!(d.term(t[0][2]), want);
         // And it equals what the checked oxrdf constructor (which lowercases) yields from the
         // mixed-case tag, i.e. the byte parser and the oxttl/oxrdf paths agree.
@@ -871,7 +908,10 @@ mod tests {
         let mut d = Dict::new();
         let t = parse_chunk(nt, &mut d).unwrap();
         assert_eq!(t.len(), 2);
-        assert_eq!(t[0][2], t[1][2], "case-variant language tags must share one dict id");
+        assert_eq!(
+            t[0][2], t[1][2],
+            "case-variant language tags must share one dict id"
+        );
     }
 
     #[test]
@@ -882,13 +922,11 @@ mod tests {
         let mut d = Dict::new();
         let t = parse_chunk(nt, &mut d).unwrap();
         assert_eq!(t.len(), 1);
-        let want = Term::Literal(
-            Literal::new_directional_language_tagged_literal_unchecked(
-                "hi",
-                "en-us",
-                oxrdf::BaseDirection::Ltr,
-            ),
-        );
+        let want = Term::Literal(Literal::new_directional_language_tagged_literal_unchecked(
+            "hi",
+            "en-us",
+            oxrdf::BaseDirection::Ltr,
+        ));
         assert_eq!(d.term(t[0][2]), want);
     }
 
@@ -901,7 +939,9 @@ mod tests {
         let buckets = parse_quads_chunk(nq).unwrap();
         assert_eq!(buckets.len(), 1);
         let (_g, dict, triples) = &buckets[0];
-        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "en-us"));
+        let want = Term::Literal(Literal::new_language_tagged_literal_unchecked(
+            "hi", "en-us",
+        ));
         assert_eq!(dict.term(triples[0][2]), want);
     }
 
@@ -919,7 +959,10 @@ mod tests {
     fn unterminated_triple_term_errors() {
         let nt = b"<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/b> <http://ex/c> .\n";
         let mut d = Dict::new();
-        assert!(parse_chunk(nt, &mut d).is_err(), "missing )>> must error, not silently accept");
+        assert!(
+            parse_chunk(nt, &mut d).is_err(),
+            "missing )>> must error, not silently accept"
+        );
     }
 
     #[test]
@@ -932,16 +975,26 @@ mod tests {
         // RDF 1.2 dropped.
 
         // Subject position.
-        let subj = b"<<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/p> <http://ex/o> .\n";
+        let subj =
+            b"<<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/p> <http://ex/o> .\n";
         let mut d = Dict::new();
-        let e = parse_chunk(subj, &mut d).expect_err("triple term in subject position must be rejected");
-        assert!(e.contains("only valid in OBJECT position"), "message must explain the object-only rule, got: {e}");
+        let e = parse_chunk(subj, &mut d)
+            .expect_err("triple term in subject position must be rejected");
+        assert!(
+            e.contains("only valid in OBJECT position"),
+            "message must explain the object-only rule, got: {e}"
+        );
 
         // Predicate position.
-        let pred = b"<http://ex/s> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/o> .\n";
+        let pred =
+            b"<http://ex/s> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/o> .\n";
         let mut d = Dict::new();
-        let e = parse_chunk(pred, &mut d).expect_err("triple term in predicate position must be rejected");
-        assert!(e.contains("only valid in OBJECT position"), "message must explain the object-only rule, got: {e}");
+        let e = parse_chunk(pred, &mut d)
+            .expect_err("triple term in predicate position must be rejected");
+        assert!(
+            e.contains("only valid in OBJECT position"),
+            "message must explain the object-only rule, got: {e}"
+        );
 
         // A triple term's OWN subject must also be a plain term (recursion goes through
         // `term`, not `object_term`): a nested `<<( … )>>` in the inner subject is rejected.
@@ -954,9 +1007,13 @@ mod tests {
 
         // Sanity: the same triple term in OBJECT position parses fine (the rejection is
         // strictly position-driven, not a blanket ban).
-        let obj = b"<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
+        let obj =
+            b"<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> .\n";
         let mut d = Dict::new();
-        assert!(parse_chunk(obj, &mut d).is_ok(), "the same triple term in object position must parse");
+        assert!(
+            parse_chunk(obj, &mut d).is_ok(),
+            "the same triple term in object position must parse"
+        );
     }
 
     // [OPUS-4.8] (sq-53s1, ASVS V5.5.2) Builds one N-Triples line whose OBJECT is `depth` levels
@@ -981,14 +1038,18 @@ mod tests {
         // (which would abort the whole process); it must return a normal parse `Err`.
         let line = nested_triple_term_line(10_000);
         let mut d = Dict::new();
-        let e = parse_chunk(&line, &mut d).expect_err("deeply-nested triple terms must be rejected, not overflow the stack");
+        let e = parse_chunk(&line, &mut d)
+            .expect_err("deeply-nested triple terms must be rejected, not overflow the stack");
         assert!(
             e.contains("nested more than") && e.contains("levels deep"),
             "must be the depth-limit error, got: {e}"
         );
         // Sanitized per the #241 posture: the error reports the limit and a byte offset, never
         // echoes the (attacker-controlled) offending input.
-        assert!(!e.contains("http://ex/leaf"), "error must not echo the offending input");
+        assert!(
+            !e.contains("http://ex/leaf"),
+            "error must not echo the offending input"
+        );
     }
 
     #[test]
@@ -1048,7 +1109,10 @@ mod tests {
     #[cfg(feature = "parallel")]
     fn quad_graph_keys(line: &[u8]) -> Result<Vec<(Option<GraphKey>, usize)>, String> {
         parse_quads_chunk(line).map(|buckets| {
-            buckets.into_iter().map(|(g, _dict, triples)| (g, triples.len())).collect()
+            buckets
+                .into_iter()
+                .map(|(g, _dict, triples)| (g, triples.len()))
+                .collect()
         })
     }
 
@@ -1128,7 +1192,10 @@ mod tests {
         let mut nt = String::new();
         for i in 0..200 {
             nt.push_str(&format!("<http://ex/n{}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Person> .\n", i));
-            nt.push_str(&format!("<http://ex/n{}> <http://ex/name> \"name{}\"@en .\n", i, i));
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/name> \"name{}\"@en .\n",
+                i, i
+            ));
             nt.push_str(&format!("<http://ex/n{}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", i, i % 37));
             nt.push_str(&format!("_:b{} <http://ex/reifies> <<( <http://ex/n{}> <http://ex/knows> <http://ex/n{}> )>> .\n", i, i, (i + 1) % 200));
         }
@@ -1141,8 +1208,15 @@ mod tests {
         let mut d_big = Dict::with_capacity(10_000);
         let t_big = parse_chunk(bytes, &mut d_big).expect("presized parse");
 
-        assert_eq!(t_plain, t_big, "id-triples (and their order) diverge under a capacity hint");
-        assert_eq!(d_plain.len(), d_big.len(), "distinct-term count diverges under a capacity hint");
+        assert_eq!(
+            t_plain, t_big,
+            "id-triples (and their order) diverge under a capacity hint"
+        );
+        assert_eq!(
+            d_plain.len(),
+            d_big.len(),
+            "distinct-term count diverges under a capacity hint"
+        );
         for id in 1..=d_plain.len() as Id {
             assert_eq!(
                 d_plain.term(id),
@@ -1174,7 +1248,10 @@ mod tests {
         assert_eq!(triples.len(), 6);
         // All three triples whose subject is s1 share the same subject id.
         let s1_id = triples[0][0];
-        assert_eq!(triples[1][0], s1_id, "s1 second triple has wrong subject id");
+        assert_eq!(
+            triples[1][0], s1_id,
+            "s1 second triple has wrong subject id"
+        );
         assert_eq!(triples[2][0], s1_id, "s1 third triple has wrong subject id");
         // s2 and s3 have distinct ids from s1 and each other.
         let s2_id = triples[3][0];
@@ -1187,13 +1264,28 @@ mod tests {
         let p1_id_s1 = triples[0][1];
         let p1_id_s2 = triples[3][1];
         let p1_id_s3 = triples[5][1];
-        assert_eq!(p1_id_s1, p1_id_s2, "predicate p1 must have the same id across subjects");
-        assert_eq!(p1_id_s1, p1_id_s3, "predicate p1 must have the same id across subjects");
+        assert_eq!(
+            p1_id_s1, p1_id_s2,
+            "predicate p1 must have the same id across subjects"
+        );
+        assert_eq!(
+            p1_id_s1, p1_id_s3,
+            "predicate p1 must have the same id across subjects"
+        );
         // Verify via dict round-trip.
         use oxrdf::{NamedNode, Term};
-        assert_eq!(d.term(s1_id), Term::NamedNode(NamedNode::new_unchecked("http://ex/s1")));
-        assert_eq!(d.term(s2_id), Term::NamedNode(NamedNode::new_unchecked("http://ex/s2")));
-        assert_eq!(d.term(s3_id), Term::NamedNode(NamedNode::new_unchecked("http://ex/s3")));
+        assert_eq!(
+            d.term(s1_id),
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/s1"))
+        );
+        assert_eq!(
+            d.term(s2_id),
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/s2"))
+        );
+        assert_eq!(
+            d.term(s3_id),
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/s3"))
+        );
     }
 
     /// A blank-node subject run exercises the blank-node boundary check — `_:b0` must NOT
@@ -1212,9 +1304,15 @@ mod tests {
         let b0extra_id = triples[1][0];
         let b0_again_id = triples[2][0];
         // _:b0 and _:b0extra must be distinct.
-        assert_ne!(b0_id, b0extra_id, "_:b0 and _:b0extra must have different ids");
+        assert_ne!(
+            b0_id, b0extra_id,
+            "_:b0 and _:b0extra must have different ids"
+        );
         // The third line (_:b0) must re-use the first line's id (cache hit after eviction).
-        assert_eq!(b0_id, b0_again_id, "_:b0 in third line must share id with first line");
+        assert_eq!(
+            b0_id, b0_again_id,
+            "_:b0 in third line must share id with first line"
+        );
         // Dict round-trip.
         assert_eq!(
             d.term(b0_id),
@@ -1260,10 +1358,18 @@ mod tests {
         let t_shuffled = parse_chunk(shuffled.as_bytes(), &mut d_shuffled).unwrap();
 
         // Both must yield the same number of triples.
-        assert_eq!(t_grouped.len(), t_shuffled.len(), "triple counts must match");
+        assert_eq!(
+            t_grouped.len(),
+            t_shuffled.len(),
+            "triple counts must match"
+        );
 
         // Both dicts must contain the same terms (same count, same term set).
-        assert_eq!(d_grouped.len(), d_shuffled.len(), "distinct-term counts must match");
+        assert_eq!(
+            d_grouped.len(),
+            d_shuffled.len(),
+            "distinct-term counts must match"
+        );
 
         // All nine triples must appear in both outputs (order may differ due to dict internment
         // order, so compare via term reconstruction).
@@ -1286,8 +1392,14 @@ mod tests {
             Term::NamedNode(NamedNode::new_unchecked("http://ex/p2")),
             Term::NamedNode(NamedNode::new_unchecked("http://ex/o12")),
         ];
-        assert!(grouped_set.contains(&triple_s1_p2_o12), "grouped must contain s1/p2/o12");
-        assert!(shuffled_set.contains(&triple_s1_p2_o12), "shuffled must contain s1/p2/o12");
+        assert!(
+            grouped_set.contains(&triple_s1_p2_o12),
+            "grouped must contain s1/p2/o12"
+        );
+        assert!(
+            shuffled_set.contains(&triple_s1_p2_o12),
+            "shuffled must contain s1/p2/o12"
+        );
     }
 
     #[test]
@@ -1349,14 +1461,21 @@ mod tests {
             "<http://ex/𝔄> <http://ex/p> \"→\"^^<http://ex/dt𝔄> .\n",
         );
         let mut dict = Dict::new();
-        let triples = parse_chunk(input.as_bytes(), &mut dict).expect("multi-byte terms must parse");
+        let triples =
+            parse_chunk(input.as_bytes(), &mut dict).expect("multi-byte terms must parse");
         assert_eq!(triples.len(), 3);
         // Reconstruct every term and compare against the exact source text: a mis-cut span
         // would surface as a truncated / replacement-charred string, not just as UB.
         assert_eq!(dict.term(triples[0][0]), iri("http://ex/é"));
         assert_eq!(dict.term(triples[0][1]), iri("http://ex/→"));
-        assert_eq!(dict.term(triples[0][2]), Term::Literal(Literal::new_simple_literal("𝔄")));
-        assert_eq!(dict.term(triples[1][0]), Term::BlankNode(BlankNode::new_unchecked("é")));
+        assert_eq!(
+            dict.term(triples[0][2]),
+            Term::Literal(Literal::new_simple_literal("𝔄"))
+        );
+        assert_eq!(
+            dict.term(triples[1][0]),
+            Term::BlankNode(BlankNode::new_unchecked("é"))
+        );
         assert_eq!(
             dict.term(triples[1][2]),
             Term::Literal(Literal::new_language_tagged_literal_unchecked("é→𝔄", "en"))
@@ -1364,7 +1483,10 @@ mod tests {
         assert_eq!(dict.term(triples[2][0]), iri("http://ex/𝔄"));
         assert_eq!(
             dict.term(triples[2][2]),
-            Term::Literal(Literal::new_typed_literal("→", NamedNode::new_unchecked("http://ex/dt𝔄")))
+            Term::Literal(Literal::new_typed_literal(
+                "→",
+                NamedNode::new_unchecked("http://ex/dt𝔄")
+            ))
         );
     }
 
@@ -1375,7 +1497,8 @@ mod tests {
     fn escaped_and_multibyte_literal_span_round_trips() {
         let input = "<http://ex/s> <http://ex/p> \"caf\\u00E9 → \\\"é\\\"\" .\n";
         let mut dict = Dict::new();
-        let triples = parse_chunk(input.as_bytes(), &mut dict).expect("escaped multi-byte literal must parse");
+        let triples = parse_chunk(input.as_bytes(), &mut dict)
+            .expect("escaped multi-byte literal must parse");
         assert_eq!(
             dict.term(triples[0][2]),
             Term::Literal(Literal::new_simple_literal("café → \"é\""))
@@ -1390,7 +1513,8 @@ mod tests {
     fn language_tag_terminated_by_multibyte_errors_cleanly() {
         let input = "<http://ex/s> <http://ex/p> \"x\"@ené .\n";
         let mut dict = Dict::new();
-        let err = parse_chunk(input.as_bytes(), &mut dict).expect_err("a non-terminator after @lang must error");
+        let err = parse_chunk(input.as_bytes(), &mut dict)
+            .expect_err("a non-terminator after @lang must error");
         assert!(err.contains("expected '.'"), "unexpected error: {}", err);
     }
 
@@ -1405,11 +1529,26 @@ mod tests {
         // `prefix.len()`, derived rather than hand-counted so the cases cannot drift.
         let cases: [(&str, &[u8], u8, &[u8]); 3] = [
             // A byte that is never valid anywhere in UTF-8.
-            ("inside an IRI", b"<http://ex/", 0xFF, b"> <http://ex/p> <http://ex/o> .\n"),
+            (
+                "inside an IRI",
+                b"<http://ex/",
+                0xFF,
+                b"> <http://ex/p> <http://ex/o> .\n",
+            ),
             // A lone continuation byte with no lead byte.
-            ("inside a literal", b"<http://ex/s> <http://ex/p> \"a", 0x80, b"b\" .\n"),
+            (
+                "inside a literal",
+                b"<http://ex/s> <http://ex/p> \"a",
+                0x80,
+                b"b\" .\n",
+            ),
             // A truncated 2-byte sequence, OUTSIDE any term span — the deliberately stricter case.
-            ("inside a comment (outside every term span)", b"# note ", 0xC3, b"\n<http://ex/s> <http://ex/p> <http://ex/o> .\n"),
+            (
+                "inside a comment (outside every term span)",
+                b"# note ",
+                0xC3,
+                b"\n<http://ex/s> <http://ex/p> <http://ex/o> .\n",
+            ),
         ];
         for (label, prefix, bad, suffix) in cases {
             let at = prefix.len();
@@ -1425,7 +1564,11 @@ mod tests {
                 label
             );
             // Nothing may have been interned: validation runs before any byte is scanned.
-            assert!(dict.is_empty(), "chunk rejected for {} must not have interned anything", label);
+            assert!(
+                dict.is_empty(),
+                "chunk rejected for {} must not have interned anything",
+                label
+            );
         }
     }
 
@@ -1450,7 +1593,8 @@ mod tests {
     #[cfg(feature = "parallel")]
     #[test]
     fn parse_quads_chunk_multibyte_graph_and_terms_round_trip() {
-        let input = "<http://ex/s> <http://ex/p> \"é\" <http://ex/g𝔄> .\n_:é <http://ex/p> \"→\" _:g→ .\n";
+        let input =
+            "<http://ex/s> <http://ex/p> \"é\" <http://ex/g𝔄> .\n_:é <http://ex/p> \"→\" _:g→ .\n";
         let buckets = parse_quads_chunk(input.as_bytes()).expect("multi-byte quads must parse");
         let keys: Vec<Option<GraphKey>> = buckets.iter().map(|(g, _, _)| g.clone()).collect();
         assert_eq!(
@@ -1460,8 +1604,13 @@ mod tests {
                 Some(GraphKey::Blank("g→".to_string())),
             ]
         );
-        assert_eq!(buckets[0].1.term(buckets[0].2[0][2]), Term::Literal(Literal::new_simple_literal("é")));
-        assert_eq!(buckets[1].1.term(buckets[1].2[0][0]), Term::BlankNode(BlankNode::new_unchecked("é")));
+        assert_eq!(
+            buckets[0].1.term(buckets[0].2[0][2]),
+            Term::Literal(Literal::new_simple_literal("é"))
+        );
+        assert_eq!(
+            buckets[1].1.term(buckets[1].2[0][0]),
+            Term::BlankNode(BlankNode::new_unchecked("é"))
+        );
     }
 }
-

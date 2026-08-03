@@ -172,7 +172,13 @@ fn columnar_select_all_is_byte_identical_to_query_json() {
     for (proj, body) in [("?o", "?s ex:age ?o"), ("?s ?o", "?s ex:age ?o")] {
         // `Ge(0.0)` keeps every (non-negative) age → the columnar survivors ARE the whole
         // unfiltered batch, in scan order.
-        let (qr, sel) = columnar_selection(&g, proj, body, if proj == "?o" { 0 } else { 1 }, VecCmp::Ge(0.0));
+        let (qr, sel) = columnar_selection(
+            &g,
+            proj,
+            body,
+            if proj == "?o" { 0 } else { 1 },
+            VecCmp::Ge(0.0),
+        );
         assert_eq!(sel.len(), qr.rows.len(), "select-all keeps every row");
         let query_json_out =
             query_json(&g, &format!("{}SELECT {} WHERE {{ {} }}", PFX, proj, body)).unwrap();
@@ -199,7 +205,11 @@ fn non_numeric_column_is_byte_identical_empty_to_query_json() {
         (VecCmp::Eq(0.0), "?s ex:name ?o FILTER(?o = 0)"),
     ] {
         let (qr, sel) = columnar_selection(&g, "?o", "?s ex:name ?o", 0, cmp);
-        assert!(sel.is_empty(), "kernel rejects every non-numeric cell for {:?}", cmp);
+        assert!(
+            sel.is_empty(),
+            "kernel rejects every non-numeric cell for {:?}",
+            cmp
+        );
         let row_json = query_json(&g, &format!("{}SELECT ?o WHERE {{ {} }}", PFX, tail)).unwrap();
         assert_eq!(
             selection_json(&qr, &sel).as_bytes(),
@@ -212,7 +222,10 @@ fn non_numeric_column_is_byte_identical_empty_to_query_json() {
         // document (byte-identity alone would not catch an equal-but-non-empty regression).
         // `contains` rather than `ends_with` so a future trailing-whitespace tweak in the JSON
         // writer does not make this brittle while still asserting emptiness.
-        assert!(row_json.contains("\"bindings\":[]"), "the row result is empty too");
+        assert!(
+            row_json.contains("\"bindings\":[]"),
+            "the row result is empty too"
+        );
     }
 }
 
@@ -230,10 +243,17 @@ fn apply_selection_is_consistent_with_the_survivor_set() {
         .collect();
     let chunk = DataChunk::from_columns(vec![col.clone()], qr.rows.len()).unwrap();
     let gathered = chunk.apply_selection(&sel);
-    assert_eq!(gathered.len(), sel.len(), "gather row count == selection length");
+    assert_eq!(
+        gathered.len(),
+        sel.len(),
+        "gather row count == selection length"
+    );
     let gathered_ids: Vec<Id> = gathered.column(0).unwrap().to_vec();
     let survivor_ids: Vec<Id> = sel.iter().map(|&r| col[r]).collect();
-    assert_eq!(gathered_ids, survivor_ids, "gathered ids align with the survivor set");
+    assert_eq!(
+        gathered_ids, survivor_ids,
+        "gathered ids align with the survivor set"
+    );
 }
 
 /// GUARD for the serialiser anchor: the row evaluator's scan order for a single-pattern
@@ -245,7 +265,11 @@ fn unfiltered_scan_order_is_deterministic() {
     let q = "SELECT ?s ?o WHERE { ?s ex:age ?o }";
     let a = query_json(&g, &format!("{}{}", PFX, q)).unwrap();
     let b = query_json(&g, &format!("{}{}", PFX, q)).unwrap();
-    assert_eq!(a.as_bytes(), b.as_bytes(), "single-pattern scan order must be deterministic");
+    assert_eq!(
+        a.as_bytes(),
+        b.as_bytes(),
+        "single-pattern scan order must be deterministic"
+    );
 }
 
 // =================== T1-T4: Phase-5 dispatcher-seam acceptance tests (sq-pntvh.5) =====
@@ -301,8 +325,12 @@ fn t1_eligible_dispatch_engages_columnar_and_is_byte_identical_to_scalar() {
     let json_scalar = query_json_with_budget(
         &g,
         &q,
-        &QueryBudget { max_rows: Some(1_000_000), ..Default::default() },
-    ).expect("T1 scalar (budget-armed) query must succeed");
+        &QueryBudget {
+            max_rows: Some(1_000_000),
+            ..Default::default()
+        },
+    )
+    .expect("T1 scalar (budget-armed) query must succeed");
     let snap_sc = stats_snapshot();
     assert_eq!(
         snap_sc.chunks_built, 0,
@@ -333,8 +361,12 @@ fn t2_decline_paths_record_decline_and_produce_correct_result() {
     reset_stats();
     let json_small = query_json(
         &g_small,
-        &format!("{}SELECT (SUM(?age) AS ?total) WHERE {{ ?s ex:age ?age }}", PFX),
-    ).expect("T2a sub-threshold aggregate must succeed");
+        &format!(
+            "{}SELECT (SUM(?age) AS ?total) WHERE {{ ?s ex:age ?age }}",
+            PFX
+        ),
+    )
+    .expect("T2a sub-threshold aggregate must succeed");
     let snap_a = stats_snapshot();
     assert_eq!(
         snap_a.chunks_built, 0,
@@ -358,7 +390,8 @@ fn t2_decline_paths_record_decline_and_produce_correct_result() {
             "{}SELECT ?s WHERE {{ ?s ex:age ?age . FILTER(REGEX(STR(?age), \"5\")) }}",
             PFX
         ),
-    ).expect("T2b non-sargable query must succeed");
+    )
+    .expect("T2b non-sargable query must succeed");
     let snap_b = stats_snapshot();
     assert_eq!(
         snap_b.chunks_built, 0,
@@ -372,8 +405,14 @@ fn t2_decline_paths_record_decline_and_produce_correct_result() {
     );
 
     // Sanity: both results are valid SPARQL JSON.
-    assert!(json_small.contains("\"results\""), "T2a result must be valid SPARQL JSON");
-    assert!(json_nonsarg.contains("\"results\""), "T2b result must be valid SPARQL JSON");
+    assert!(
+        json_small.contains("\"results\""),
+        "T2a result must be valid SPARQL JSON"
+    );
+    assert!(
+        json_nonsarg.contains("\"results\""),
+        "T2b result must be valid SPARQL JSON"
+    );
 }
 
 /// T3 (sq-pntvh.5): ZK composition — when a ZK trace recorder is armed, the columnar
@@ -386,7 +425,10 @@ fn t3_zk_trace_armed_forces_scalar_path() {
 
     // Use a whole-dataset SUM: columnar_aggregate checks I2 first.
     let g = ages_graph(400);
-    let q = format!("{}SELECT (SUM(?age) AS ?total) WHERE {{ ?s ex:age ?age }}", PFX);
+    let q = format!(
+        "{}SELECT (SUM(?age) AS ?total) WHERE {{ ?s ex:age ?age }}",
+        PFX
+    );
 
     // Arm the ZK trace recorder (install() is pub; enabled() is pub(crate) so not callable here).
     let _zk_guard = sparq_engine::zk::install();
@@ -407,8 +449,14 @@ fn t3_zk_trace_armed_forces_scalar_path() {
     );
 
     // The result is still correct (scalar path ran): SUM result must be present.
-    assert!(json_zk.contains("\"total\""), "T3 ZK-armed result must bind ?total");
-    assert!(!json_zk.contains("\"bindings\":[]"), "T3: ZK-armed SUM result must be non-empty");
+    assert!(
+        json_zk.contains("\"total\""),
+        "T3 ZK-armed result must bind ?total"
+    );
+    assert!(
+        !json_zk.contains("\"bindings\":[]"),
+        "T3: ZK-armed SUM result must be non-empty"
+    );
 }
 
 /// T4 (sq-pntvh.5): budget parity — a budget-armed query (I3 decline => scalar) produces
@@ -440,8 +488,12 @@ fn t4_budget_parity_columnar_and_scalar_are_byte_identical() {
     let json_with_budget = query_json_with_budget(
         &g,
         &q,
-        &QueryBudget { max_rows: Some(1_000_000), ..Default::default() },
-    ).expect("T4 budget-armed query must succeed");
+        &QueryBudget {
+            max_rows: Some(1_000_000),
+            ..Default::default()
+        },
+    )
+    .expect("T4 budget-armed query must succeed");
     let snap_with_budget = stats_snapshot();
     assert_eq!(
         snap_with_budget.chunks_built, 0,

@@ -68,13 +68,13 @@ pub use n3::{
     reason_n3_stratified, reason_n3_terms, N3Closure, ProofStep, RuleKind, RuleVars,
     StratifiedN3Closure,
 };
-pub use owl::{inconsistencies, materialize_owl_rl};
 #[cfg(feature = "quoted-triples")]
 pub use owl::materialize_owl_rl_reify;
+pub use owl::{inconsistencies, materialize_owl_rl};
 pub use rdfs::materialize_rdfs;
+pub(crate) use rdfs::RdfsIndex;
 #[cfg(feature = "quoted-triples")]
 pub use reify::ReifyMode;
-pub(crate) use rdfs::RdfsIndex;
 
 /// Which entailment regime to materialize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

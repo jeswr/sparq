@@ -1046,11 +1046,13 @@ rdf:nil odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
 
 #[test]
 fn party_collection_members_reports_exactly_the_supplied_evidence() {
-    let req = Request::new(left("read")).on("http://example.org/x").with_party_memberships([
-        ("http://example.org/alice", "http://example.org/team"),
-        ("http://example.org/bob", "http://example.org/team"),
-        ("http://example.org/eve", "http://example.org/other"),
-    ]);
+    let req = Request::new(left("read"))
+        .on("http://example.org/x")
+        .with_party_memberships([
+            ("http://example.org/alice", "http://example.org/team"),
+            ("http://example.org/bob", "http://example.org/team"),
+            ("http://example.org/eve", "http://example.org/other"),
+        ]);
 
     // Members of a collection — deterministic sorted order, only that collection.
     assert_eq!(
@@ -1058,20 +1060,28 @@ fn party_collection_members_reports_exactly_the_supplied_evidence() {
         vec!["http://example.org/alice", "http://example.org/bob"],
         "both team members, and NOT the member of the other collection"
     );
-    assert_eq!(req.party_collection_members("http://example.org/other"), vec!["http://example.org/eve"]);
+    assert_eq!(
+        req.party_collection_members("http://example.org/other"),
+        vec!["http://example.org/eve"]
+    );
 
     // A collection with no supplied evidence, and a plain party IRI, are both empty —
     // membership is never inferred from IRI structure or from the reverse edge.
-    assert!(req.party_collection_members("http://example.org/unknown").is_empty());
+    assert!(req
+        .party_collection_members("http://example.org/unknown")
+        .is_empty());
     assert!(
-        req.party_collection_members("http://example.org/alice").is_empty(),
+        req.party_collection_members("http://example.org/alice")
+            .is_empty(),
         "the edge is directional: alice is a member, not a collection"
     );
 
     // A request that supplied NO evidence reports no members for anything (the base
     // case a consumer must fall back to — never widened on absent evidence).
     let bare = Request::new(left("read")).on("http://example.org/x");
-    assert!(bare.party_collection_members("http://example.org/team").is_empty());
+    assert!(bare
+        .party_collection_members("http://example.org/team")
+        .is_empty());
 }
 
 // ===========================================================================
@@ -1120,9 +1130,18 @@ fn party_collections_retains_declared_collection_identity() {
         p.party_collections
     );
     // Nothing else is: neither the member, nor the rule target, nor the policy IRI.
-    assert!(!p.party_collections.contains("http://example.org/alice"), "a member is not a collection");
-    assert!(!p.party_collections.contains("http://example.org/x"), "the rule target is not a collection");
-    assert!(!p.party_collections.contains("urn:pol/pc"), "the policy is not a collection");
+    assert!(
+        !p.party_collections.contains("http://example.org/alice"),
+        "a member is not a collection"
+    );
+    assert!(
+        !p.party_collections.contains("http://example.org/x"),
+        "the rule target is not a collection"
+    );
+    assert!(
+        !p.party_collections.contains("urn:pol/pc"),
+        "the policy is not a collection"
+    );
 }
 
 #[test]

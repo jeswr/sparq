@@ -186,7 +186,10 @@ mod tests {
     /// proof's committed public inputs.
     #[test]
     fn public_inputs_split_matches_field_to_hex() {
-        let fields: Vec<Fr> = [1u64, 25, 0, 0x132f_a587].into_iter().map(Fr::from).collect();
+        let fields: Vec<Fr> = [1u64, 25, 0, 0x132f_a587]
+            .into_iter()
+            .map(Fr::from)
+            .collect();
         let mut blob = Vec::new();
         for f in &fields {
             blob.extend_from_slice(&field_to_be_bytes_32(f));
@@ -220,8 +223,8 @@ mod tests {
             public_inputs: field_to_be_bytes_32(&Fr::from(42u64)).to_vec(),
             vk: vec![1, 2, 3], // must not leak into the captured shape
         };
-        let sp = CapturedSubProof::from_artifacts("filter_int_d2", "age >= 25", &art)
-            .expect("packages");
+        let sp =
+            CapturedSubProof::from_artifacts("filter_int_d2", "age >= 25", &art).expect("packages");
         assert_eq!(sp.member, "filter_int_d2");
         assert_eq!(sp.proof, vec![9, 8, 7, 6], "proof bytes verbatim");
         assert_eq!(sp.public_inputs, vec![field_to_hex(&Fr::from(42u64))]);
@@ -232,7 +235,11 @@ mod tests {
     /// A malformed-PI member surfaces the fail-closed error through `from_artifacts`.
     #[test]
     fn from_artifacts_rejects_malformed_public_inputs() {
-        let art = ProofArtifacts { proof: vec![1], public_inputs: vec![0u8; 5], vk: vec![] };
+        let art = ProofArtifacts {
+            proof: vec![1],
+            public_inputs: vec![0u8; 5],
+            vk: vec![],
+        };
         assert_eq!(
             CapturedSubProof::from_artifacts("scan_k1_n16_r4", "scan", &art),
             Err(CaptureError::MalformedPublicInputs { len: 5 }),
@@ -261,7 +268,9 @@ mod tests {
         // Honest note (privacy-claims gate): research-grade + sq-qhy4 + no soundness.
         assert!(m.note.contains("sq-qhy4"));
         assert!(m.note.contains("NOT externally audited"));
-        assert!(m.note.contains("NOT that the cross-credential composition is sound"));
+        assert!(m
+            .note
+            .contains("NOT that the cross-credential composition is sound"));
 
         let json = m.to_pretty_json();
         assert!(json.contains("\"type\": \"urn:sparq:zk:ProofManifest\""));
@@ -327,14 +336,20 @@ mod tests {
         let m = CapturedCarHireManifest::new("2026-07-19", vec![sp]);
         let json = m.to_pretty_json();
 
-        let parsed: BrowserManifest =
-            serde_json::from_str(&json).expect("crate output must deserialize as the browser schema");
+        let parsed: BrowserManifest = serde_json::from_str(&json)
+            .expect("crate output must deserialize as the browser schema");
         assert_eq!(parsed.sub_proofs.len(), 1);
 
         // And the old singular key the browser USED to require must NOT be emitted — that
         // was exactly the incompatibility (plural `subProofs` vs singular `subProof`).
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(v.get("subProof").is_none(), "must not emit the legacy singular key");
-        assert!(v.get("circuit").is_none(), "the browser no longer reads `circuit`");
+        assert!(
+            v.get("subProof").is_none(),
+            "must not emit the legacy singular key"
+        );
+        assert!(
+            v.get("circuit").is_none(),
+            "the browser no longer reads `circuit`"
+        );
     }
 }

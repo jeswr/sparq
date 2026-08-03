@@ -354,8 +354,7 @@ fn role_readoff_chain_closure_emits_all_three_pairs() {
 
     // Exactly 1 new triple (r⊑t is the only derived one; r⊑s and s⊑t were told).
     assert_eq!(
-        report.emitted_role_subsumptions,
-        1,
+        report.emitted_role_subsumptions, 1,
         "only the transitive r ⊑ t is a NEW triple (told pairs are already in the graph)"
     );
 }
@@ -397,8 +396,7 @@ fn role_readoff_mutual_inclusion_emits_both_directions() {
     );
     // Both were told — no new triples.
     assert_eq!(
-        report.emitted_role_subsumptions,
-        0,
+        report.emitted_role_subsumptions, 0,
         "both directions were told — readoff adds nothing new"
     );
 }
@@ -453,8 +451,7 @@ fn role_readoff_is_idempotent() {
     assert_eq!(r1.emitted_role_subsumptions, 1, "first call derives r ⊑ t");
     let r2 = classify_graph(&mut dict, &mut triples);
     assert_eq!(
-        r2.emitted_role_subsumptions,
-        0,
+        r2.emitted_role_subsumptions, 0,
         "second call adds nothing (idempotent)"
     );
 }
@@ -478,7 +475,10 @@ fn regular_rbox_is_not_flagged() {
     let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
     let (d2, t2) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
     let report = classify_graph(&mut dict, &mut triples);
-    assert!(!report.rbox_non_regular, "a regular RBox must not be flagged");
+    assert!(
+        !report.rbox_non_regular,
+        "a regular RBox must not be flagged"
+    );
     // The typed (non-mutating) entry reports identically.
     let h = Classifier::classify(&d2, &t2);
     assert!(!h.report().rbox_non_regular);

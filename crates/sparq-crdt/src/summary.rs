@@ -9,8 +9,8 @@
 //! at or below its replica's clock, so equal denotations have equal
 //! representations and `==` is denotation equality.
 
-use crate::CrdtError;
 use crate::id::{Dot, ReplicaId};
+use crate::CrdtError;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A compact, always-normalised set of observed dots.
@@ -31,10 +31,7 @@ impl CausalSummary {
     /// requires the interchange encoding to be the normalised one; accepting
     /// a second representation of the same denotation would break the
     /// byte-canonicality of every enclosing document).
-    pub fn from_parts(
-        clock: BTreeMap<ReplicaId, u64>,
-        cloud: Vec<Dot>,
-    ) -> Result<Self, CrdtError> {
+    pub fn from_parts(clock: BTreeMap<ReplicaId, u64>, cloud: Vec<Dot>) -> Result<Self, CrdtError> {
         if clock.values().any(|&n| n == 0) {
             return Err(CrdtError::NonCanonical {
                 reason: "a clock entry of 0 must be omitted".into(),

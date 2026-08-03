@@ -168,17 +168,16 @@ impl VectorDelta {
     pub(crate) fn to_bytes(&self, dim: usize) -> Vec<u8> {
         let append_count = self.appended.len();
         let tomb_count = self.tombstones.len();
-        let mut out = Vec::with_capacity(
-            SPQD_HEADER_LEN + append_count * (4 + dim * 4) + tomb_count * 4,
-        );
+        let mut out =
+            Vec::with_capacity(SPQD_HEADER_LEN + append_count * (4 + dim * 4) + tomb_count * 4);
         out.extend_from_slice(&SPQD_MAGIC);
         out.extend_from_slice(&SPQD_VERSION.to_le_bytes());
         out.extend_from_slice(&(dim as u32).to_le_bytes());
         out.extend_from_slice(&(append_count as u64).to_le_bytes());
         out.extend_from_slice(&(tomb_count as u64).to_le_bytes());
         out.extend_from_slice(&[0u8; 4]); // reserved
-        // The base generation tie: a zero block for an unbound (None) generation — decoded back to
-        // None by `Fingerprint::from_bytes_opt`, exactly as the `.spqv` fingerprint block is.
+                                          // The base generation tie: a zero block for an unbound (None) generation — decoded back to
+                                          // None by `Fingerprint::from_bytes_opt`, exactly as the `.spqv` fingerprint block is.
         match self.generation {
             Some(fp) => out.extend_from_slice(&fp.to_bytes()),
             None => out.extend_from_slice(&[0u8; FINGERPRINT_LEN]),
@@ -243,7 +242,10 @@ impl VectorDelta {
         // count cannot wrap the multiply/add into a small in-bounds value. Any mismatch (short =
         // truncation/partial write, long = trailing garbage) is rejected before any body read.
         let append_stride = 4usize
-            .checked_add(dim.checked_mul(4).ok_or_else(|| ".spqd: dim overflow".to_string())?)
+            .checked_add(
+                dim.checked_mul(4)
+                    .ok_or_else(|| ".spqd: dim overflow".to_string())?,
+            )
             .ok_or_else(|| ".spqd: append-stride overflow".to_string())?;
         let body_len = append_count
             .checked_mul(append_stride)
@@ -276,10 +278,16 @@ impl VectorDelta {
                 off += 4;
             }
             if vec.iter().any(|v| !v.is_finite()) {
-                return Err(format!(".spqd: appended vector for id {} has a non-finite component", id));
+                return Err(format!(
+                    ".spqd: appended vector for id {} has a non-finite component",
+                    id
+                ));
             }
             if appended.insert(id, vec).is_some() {
-                return Err(format!(".spqd: id {} appears twice in the append section", id));
+                return Err(format!(
+                    ".spqd: id {} appears twice in the append section",
+                    id
+                ));
             }
         }
         let mut tombstones: FxHashSet<Id> = FxHashSet::default();
@@ -288,16 +296,29 @@ impl VectorDelta {
             let id = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
             off += 4;
             if !tombstones.insert(id) {
-                return Err(format!(".spqd: id {} appears twice in the tombstone section", id));
+                return Err(format!(
+                    ".spqd: id {} appears twice in the tombstone section",
+                    id
+                ));
             }
             if appended.contains_key(&id) {
                 // The in-RAM invariant is "an id is in AT MOST one of appended/tombstones"; a file
                 // that violates it is corrupt, not a valid delta — reject rather than silently pick.
-                return Err(format!(".spqd: id {} is both appended and tombstoned (corrupt)", id));
+                return Err(format!(
+                    ".spqd: id {} is both appended and tombstoned (corrupt)",
+                    id
+                ));
             }
         }
         debug_assert_eq!(off, bytes.len());
-        Ok((VectorDelta { generation, appended, tombstones }, dim))
+        Ok((
+            VectorDelta {
+                generation,
+                appended,
+                tombstones,
+            },
+            dim,
+        ))
     }
 }
 
@@ -311,7 +332,11 @@ mod tests {
     use super::*;
 
     fn fp(d: u64, t: u64, h: u64) -> Fingerprint {
-        Fingerprint { dict_len: d, triple_count: t, content_hash: h }
+        Fingerprint {
+            dict_len: d,
+            triple_count: t,
+            content_hash: h,
+        }
     }
 
     fn sample(generation: Option<Fingerprint>) -> VectorDelta {
@@ -340,7 +365,11 @@ mod tests {
         // (the same convention as the `.spqv` fingerprint block) — never to Some(0,0,0).
         let d = sample(None);
         let (back, _) = VectorDelta::from_bytes(&d.to_bytes(4)).expect("round-trips");
-        assert_eq!(back.generation(), None, "an all-zero header decodes to an unbound generation");
+        assert_eq!(
+            back.generation(),
+            None,
+            "an all-zero header decodes to an unbound generation"
+        );
         assert_eq!(back.appended, d.appended);
         assert_eq!(back.tombstones, d.tombstones);
     }
@@ -349,7 +378,11 @@ mod tests {
     fn an_empty_delta_serializes_to_just_the_header() {
         let d = VectorDelta::new(Some(fp(1, 1, 1)));
         let bytes = d.to_bytes(8);
-        assert_eq!(bytes.len(), SPQD_HEADER_LEN, "no appends/tombstones ⇒ header-only");
+        assert_eq!(
+            bytes.len(),
+            SPQD_HEADER_LEN,
+            "no appends/tombstones ⇒ header-only"
+        );
         let (back, dim) = VectorDelta::from_bytes(&bytes).expect("round-trips");
         assert_eq!(dim, 8);
         assert!(back.is_empty());
@@ -370,7 +403,11 @@ mod tests {
         b.appended.insert(9, vec![1.0, 1.0]);
         b.tombstones.insert(4);
         b.tombstones.insert(8);
-        assert_eq!(a.to_bytes(2), b.to_bytes(2), "the serialization is order-independent");
+        assert_eq!(
+            a.to_bytes(2),
+            b.to_bytes(2),
+            "the serialization is order-independent"
+        );
     }
 
     #[test]
@@ -394,10 +431,14 @@ mod tests {
         let mut bytes = VectorDelta::new(Some(fp(1, 1, 1))).to_bytes(4);
         let good = bytes.clone();
         bytes[0] = b'Z';
-        assert!(VectorDelta::from_bytes(&bytes).unwrap_err().contains("bad magic"));
+        assert!(VectorDelta::from_bytes(&bytes)
+            .unwrap_err()
+            .contains("bad magic"));
         let mut v = good.clone();
         v[4..8].copy_from_slice(&999u32.to_le_bytes());
-        assert!(VectorDelta::from_bytes(&v).unwrap_err().contains("unsupported version"));
+        assert!(VectorDelta::from_bytes(&v)
+            .unwrap_err()
+            .contains("unsupported version"));
     }
 
     #[test]
@@ -420,7 +461,8 @@ mod tests {
         let mut bytes = sample(Some(fp(4, 2, 7))).to_bytes(4);
         let good_len = bytes.len();
         bytes.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // append trailing garbage
-        let err = VectorDelta::from_bytes(&bytes).expect_err("a longer-than-declared file must error");
+        let err =
+            VectorDelta::from_bytes(&bytes).expect_err("a longer-than-declared file must error");
         assert!(err.contains("length mismatch"), "err was: {err}");
         // Sanity: the un-extended bytes still decode, so it is the trailing bytes that are rejected.
         assert!(VectorDelta::from_bytes(&bytes[..good_len]).is_ok());
@@ -444,7 +486,9 @@ mod tests {
 
         // ...and +inf is rejected the same way.
         bytes[comp0..comp0 + 4].copy_from_slice(&f32::INFINITY.to_le_bytes());
-        assert!(VectorDelta::from_bytes(&bytes).unwrap_err().contains("non-finite"));
+        assert!(VectorDelta::from_bytes(&bytes)
+            .unwrap_err()
+            .contains("non-finite"));
     }
 
     #[test]
@@ -456,14 +500,18 @@ mod tests {
         // Set the header to declare 2 appends, 0 tombstones, dim 2.
         bytes[12..20].copy_from_slice(&2u64.to_le_bytes()); // append_count = 2
         bytes[20..28].copy_from_slice(&0u64.to_le_bytes()); // tomb_count   = 0
-        // Append id 5 twice with valid (finite) bodies.
+                                                            // Append id 5 twice with valid (finite) bodies.
         for _ in 0..2 {
             bytes.extend_from_slice(&5u32.to_le_bytes());
             bytes.extend_from_slice(&1.0f32.to_le_bytes());
             bytes.extend_from_slice(&2.0f32.to_le_bytes());
         }
-        let err = VectorDelta::from_bytes(&bytes).expect_err("a repeated append id must be rejected");
-        assert!(err.contains("twice in the append section"), "err was: {err}");
+        let err =
+            VectorDelta::from_bytes(&bytes).expect_err("a repeated append id must be rejected");
+        assert!(
+            err.contains("twice in the append section"),
+            "err was: {err}"
+        );
     }
 
     #[test]
@@ -474,8 +522,12 @@ mod tests {
         bytes[20..28].copy_from_slice(&2u64.to_le_bytes()); // tomb_count   = 2
         bytes.extend_from_slice(&8u32.to_le_bytes());
         bytes.extend_from_slice(&8u32.to_le_bytes()); // id 8 twice
-        let err = VectorDelta::from_bytes(&bytes).expect_err("a repeated tombstone id must be rejected");
-        assert!(err.contains("twice in the tombstone section"), "err was: {err}");
+        let err =
+            VectorDelta::from_bytes(&bytes).expect_err("a repeated tombstone id must be rejected");
+        assert!(
+            err.contains("twice in the tombstone section"),
+            "err was: {err}"
+        );
     }
 
     #[test]
@@ -490,7 +542,7 @@ mod tests {
         let mut bytes = VectorDelta::new(Some(fp(1, 1, 1))).to_bytes(2);
         bytes[12..20].copy_from_slice(&1u64.to_le_bytes()); // append_count = 1
         bytes[20..28].copy_from_slice(&1u64.to_le_bytes()); // tomb_count   = 1
-        // append id 5 with a finite body...
+                                                            // append id 5 with a finite body...
         bytes.extend_from_slice(&5u32.to_le_bytes());
         bytes.extend_from_slice(&1.0f32.to_le_bytes());
         bytes.extend_from_slice(&2.0f32.to_le_bytes());
@@ -498,6 +550,9 @@ mod tests {
         bytes.extend_from_slice(&5u32.to_le_bytes());
         let err = VectorDelta::from_bytes(&bytes)
             .expect_err("an id in both sections must be rejected as corrupt");
-        assert!(err.contains("both appended and tombstoned"), "err was: {err}");
+        assert!(
+            err.contains("both appended and tombstoned"),
+            "err was: {err}"
+        );
     }
 }

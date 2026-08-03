@@ -105,7 +105,10 @@ pub struct ObjectLayout {
 
 impl Default for ObjectLayout {
     fn default() -> Self {
-        ObjectLayout { chunk_size: DEFAULT_CHUNK_SIZE, arity: DEFAULT_ARITY }
+        ObjectLayout {
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            arity: DEFAULT_ARITY,
+        }
     }
 }
 
@@ -119,7 +122,9 @@ impl ObjectLayout {
         }
         let largest = *PAD_CLASSES.last().expect("PAD_CLASSES is non-empty");
         if self.chunk_size.saturating_add(4) > largest {
-            return Err(Error::LimitExceeded("object chunk size exceeds largest pad class"));
+            return Err(Error::LimitExceeded(
+                "object chunk size exceeds largest pad class",
+            ));
         }
         if self.arity < 2 {
             return Err(Error::Schema("object merkle arity must be at least 2"));
@@ -173,7 +178,10 @@ impl SealedObject {
     /// The Merkle root block, fail-closed if the set is empty or its first block
     /// is not the reserved root chunk.
     pub fn root(&self) -> Result<&BlockEnvelope> {
-        let root = self.blocks.first().ok_or(Error::Schema("sealed object has no blocks"))?;
+        let root = self
+            .blocks
+            .first()
+            .ok_or(Error::Schema("sealed object has no blocks"))?;
         if root.chunk_index != ROOT_CHUNK_INDEX {
             return Err(Error::Schema("sealed object root is not chunk 0"));
         }
@@ -396,7 +404,11 @@ pub fn seal_object_with(
         next_index += 1;
         let env = seal_block_random(k_read, ctx, object, index, chunk_count, data)?;
         lower.push((
-            ChildLink { block: env.block_id, chunk_index: index, digest: env.digest() },
+            ChildLink {
+                block: env.block_id,
+                chunk_index: index,
+                digest: env.digest(),
+            },
             data.len() as u64,
         ));
         blocks.push(env);
@@ -425,7 +437,11 @@ pub fn seal_object_with(
             };
             let env = seal_block_random(k_read, ctx, object, index, chunk_count, &node.encode())?;
             upper.push((
-                ChildLink { block: env.block_id, chunk_index: index, digest: env.digest() },
+                ChildLink {
+                    block: env.block_id,
+                    chunk_index: index,
+                    digest: env.digest(),
+                },
                 subtree_len,
             ));
             blocks.push(env);
@@ -435,7 +451,10 @@ pub fn seal_object_with(
 
     // The root is the last block sealed; move it to the front.
     blocks.rotate_right(1);
-    Ok(SealedObject { object_id: *object, blocks })
+    Ok(SealedObject {
+        object_id: *object,
+        blocks,
+    })
 }
 
 // ===========================================================================
@@ -463,14 +482,18 @@ pub fn open_object(
         return Err(Error::Schema("object root is not chunk 0"));
     }
     if root.chunk_count < 2 {
-        return Err(Error::Schema("object chunk count must include a root and a leaf"));
+        return Err(Error::Schema(
+            "object chunk count must include a root and a leaf",
+        ));
     }
     if root.chunk_count > limits.max_blocks {
         return Err(Error::LimitExceeded("object block count exceeds limit"));
     }
 
     if blocks.len() as u64 != root.chunk_count {
-        return Err(Error::Schema("object block set size does not match chunk count"));
+        return Err(Error::Schema(
+            "object block set size does not match chunk count",
+        ));
     }
 
     let mut index: BTreeMap<BlockId, &BlockEnvelope> = BTreeMap::new();
@@ -488,10 +511,13 @@ pub fn open_object(
     // other block to keep `blocks.len()` matching `chunk_count`, and still reach
     // `visited.len() == chunk_count` by traversing an externally supplied root —
     // accepting a set that is not exactly the object's blocks.
-    let indexed_root =
-        *index.get(&root.block_id).ok_or(Error::Schema("object root is not in the block set"))?;
+    let indexed_root = *index
+        .get(&root.block_id)
+        .ok_or(Error::Schema("object root is not in the block set"))?;
     if indexed_root != root {
-        return Err(Error::Schema("object root differs from the block set entry with its id"));
+        return Err(Error::Schema(
+            "object root differs from the block set entry with its id",
+        ));
     }
 
     let mut opener = Opener {
@@ -511,7 +537,9 @@ pub fn open_object(
 
     // Completeness: exactly the declared number of blocks was reachable.
     if opener.visited.len() as u64 != root.chunk_count {
-        return Err(Error::Schema("object block count does not match chunk count"));
+        return Err(Error::Schema(
+            "object block count does not match chunk count",
+        ));
     }
     Ok(opener.out)
 }
@@ -541,7 +569,9 @@ impl Opener<'_> {
         let level = match expected_level {
             Some(expected) => {
                 if node.level != expected {
-                    return Err(Error::Integrity("merkle node level does not match its parent"));
+                    return Err(Error::Integrity(
+                        "merkle node level does not match its parent",
+                    ));
                 }
                 expected
             }
@@ -586,7 +616,9 @@ impl Opener<'_> {
                 || child.chunk_count != self.chunk_count
                 || child.chunk_index != link.chunk_index
             {
-                return Err(Error::Integrity("child block does not match its merkle link"));
+                return Err(Error::Integrity(
+                    "child block does not match its merkle link",
+                ));
             }
             if child.digest() != link.digest {
                 return Err(Error::Integrity("merkle child digest mismatch"));

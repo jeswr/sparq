@@ -43,8 +43,30 @@ const TITLES: &str = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title 
 #[test]
 fn bare_default_graph_pattern_is_empty_by_default() {
     let s = store();
-    let alice = s.query_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
-    let carol = s.query_as(&Session { agent: Some(CAROL), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
+    let alice = s
+        .query_as(
+            &Session {
+                agent: Some(ALICE),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            TITLES,
+        )
+        .unwrap();
+    let carol = s
+        .query_as(
+            &Session {
+                agent: Some(CAROL),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            TITLES,
+        )
+        .unwrap();
     let anon = s.query_as(&Session::default(), Mode::Read, TITLES).unwrap();
     assert_eq!(alice.rows.len(), 0, "empty standing default graph");
     assert_eq!(carol.rows.len(), 0, "empty standing default graph");
@@ -56,14 +78,55 @@ fn bare_default_graph_pattern_is_empty_by_default() {
 #[test]
 fn same_query_different_agents_different_results() {
     let s = store();
-    let alice = s.query_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
-    let carol = s.query_as(&Session { agent: Some(CAROL), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
+    let alice = s
+        .query_as(
+            &Session {
+                agent: Some(ALICE),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            TITLES,
+        )
+        .unwrap();
+    let carol = s
+        .query_as(
+            &Session {
+                agent: Some(CAROL),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            TITLES,
+        )
+        .unwrap();
     let anon = s.query_as(&Session::default(), Mode::Read, TITLES).unwrap();
     assert_eq!(alice.rows.len(), 599, "alice sees her documents");
-    assert_eq!(carol.rows.len(), 407, "carol sees group + public + deep-override docs");
-    assert_eq!(anon.rows.len(), 144, "anonymous sees only the public subtree");
+    assert_eq!(
+        carol.rows.len(),
+        407,
+        "carol sees group + public + deep-override docs"
+    );
+    assert_eq!(
+        anon.rows.len(),
+        144,
+        "anonymous sees only the public subtree"
+    );
     // the kept v1 portability path (FROM NAMED rewrite) returns the same counts
-    let v1 = s.query_as_rewrite(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, TITLES).unwrap();
+    let v1 = s
+        .query_as_rewrite(
+            &Session {
+                agent: Some(ALICE),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            TITLES,
+        )
+        .unwrap();
     assert_eq!(v1.rows.len(), 599);
 }
 
@@ -84,14 +147,54 @@ fn graph_patterns_and_cross_document_joins_stay_inside_the_sandbox() {
     let join = "SELECT ?s ?child WHERE { \
                   ?s <https://ex.dev/ns#inSubtree> <https://pod.ex/team2/> . \
                   <https://pod.ex/team2/> <http://www.w3.org/ns/ldp#contains> ?child }";
-    let carol = s.query_as(&Session { agent: Some(CAROL), client: None, issuer: None, now: None }, Mode::Read, join).unwrap();
-    assert_eq!(carol.rows.len(), 144 * 6, "join across document + container graphs");
-    let bob_no_container =
-        s.query_as(&Session { agent: Some(BOB), client: None, issuer: None, now: None }, Mode::Read, join).unwrap();
+    let carol = s
+        .query_as(
+            &Session {
+                agent: Some(CAROL),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            join,
+        )
+        .unwrap();
+    assert_eq!(
+        carol.rows.len(),
+        144 * 6,
+        "join across document + container graphs"
+    );
+    let bob_no_container = s
+        .query_as(
+            &Session {
+                agent: Some(BOB),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            join,
+        )
+        .unwrap();
     // bob reads team2 docs too (group member) and the container via… also group
     assert_eq!(bob_no_container.rows.len(), 144 * 6);
-    let alice = s.query_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, join).unwrap();
-    assert_eq!(alice.rows.len(), 0, "alice is shadowed out of team2 entirely");
+    let alice = s
+        .query_as(
+            &Session {
+                agent: Some(ALICE),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            join,
+        )
+        .unwrap();
+    assert_eq!(
+        alice.rows.len(),
+        0,
+        "alice is shadowed out of team2 entirely"
+    );
 }
 
 #[test]
@@ -101,12 +204,25 @@ fn explicit_named_graph_query_cannot_escape() {
     let q = "SELECT ?o WHERE { GRAPH <https://pod.ex/priv0/c4/g0/d0.ttl> { ?s ?p ?o } }";
     let anon = s.query_as(&Session::default(), Mode::Read, q).unwrap();
     assert_eq!(anon.rows.len(), 0, "unauthorized graph behaves as absent");
-    let alice = s.query_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, q).unwrap();
+    let alice = s
+        .query_as(
+            &Session {
+                agent: Some(ALICE),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Mode::Read,
+            q,
+        )
+        .unwrap();
     assert!(!alice.rows.is_empty());
     // …and a pre-existing FROM NAMED is intersected, never widened
     let widened = "SELECT ?o FROM NAMED <https://pod.ex/priv0/c4/g0/d0.ttl> \
                    WHERE { GRAPH ?g { ?s ?p ?o } }";
-    let anon2 = s.query_as(&Session::default(), Mode::Read, widened).unwrap();
+    let anon2 = s
+        .query_as(&Session::default(), Mode::Read, widened)
+        .unwrap();
     assert_eq!(anon2.rows.len(), 0);
 }
 
@@ -166,9 +282,33 @@ fn view_path_and_rewrite_path_return_identical_json() {
 fn assert_paths_agree(queries: &[&str]) {
     let s = store();
     let sessions = [
-        ("alice", Session { agent: Some(ALICE), client: None, issuer: None, now: None }),
-        ("carol", Session { agent: Some(CAROL), client: None, issuer: None, now: None }),
-        ("bob+app (origin pair)", Session { agent: Some(BOB), client: Some(APP), issuer: None, now: None }),
+        (
+            "alice",
+            Session {
+                agent: Some(ALICE),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+        ),
+        (
+            "carol",
+            Session {
+                agent: Some(CAROL),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+        ),
+        (
+            "bob+app (origin pair)",
+            Session {
+                agent: Some(BOB),
+                client: Some(APP),
+                issuer: None,
+                now: None,
+            },
+        ),
         ("anonymous", Session::default()),
     ];
     for (label, session) in sessions {
@@ -186,6 +326,12 @@ fn assert_paths_agree(queries: &[&str]) {
 fn rewrite_shape() {
     let allowed = [oxrdf::NamedNode::new("https://pod.ex/pub1/c0/g0/d0.ttl").unwrap()];
     let out = rewrite_for(TITLES, &allowed).unwrap();
-    assert!(out.contains("FROM NAMED <https://pod.ex/pub1/c0/g0/d0.ttl>"), "{out}");
-    assert!(out.contains("GRAPH"), "default-graph pattern wrapped: {out}");
+    assert!(
+        out.contains("FROM NAMED <https://pod.ex/pub1/c0/g0/d0.ttl>"),
+        "{out}"
+    );
+    assert!(
+        out.contains("GRAPH"),
+        "default-graph pattern wrapped: {out}"
+    );
 }

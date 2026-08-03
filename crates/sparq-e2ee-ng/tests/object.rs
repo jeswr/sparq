@@ -26,7 +26,10 @@ fn ctx() -> BlockContext {
 /// A deliberately tiny layout so a few hundred bytes already build a multi-level
 /// Merkle tree (leaves of 8 bytes, fan-out 2).
 fn tiny() -> ObjectLayout {
-    ObjectLayout { chunk_size: 8, arity: 2 }
+    ObjectLayout {
+        chunk_size: 8,
+        arity: 2,
+    }
 }
 
 fn sample(len: usize) -> Vec<u8> {
@@ -44,7 +47,10 @@ fn object_roundtrip_spans_many_blocks() {
     let sealed = seal_object(&k, &c, &ObjectId::random(), &plaintext).unwrap();
 
     assert!(sealed.block_count() > 1, "a large object must span blocks");
-    assert_eq!(sealed.open(&k, &c, ObjectLimits::default()).unwrap(), plaintext);
+    assert_eq!(
+        sealed.open(&k, &c, ObjectLimits::default()).unwrap(),
+        plaintext
+    );
 }
 
 #[test]
@@ -54,19 +60,20 @@ fn object_roundtrip_across_sizes_and_depths() {
     // under `tiny()` (75 leaves, fan-out 2).
     for len in [0usize, 1, 7, 8, 9, 16, 17, 100, 600] {
         let plaintext = sample(len);
-        let sealed =
-            seal_object_with(&k, &c, &ObjectId::random(), &plaintext, tiny()).unwrap();
+        let sealed = seal_object_with(&k, &c, &ObjectId::random(), &plaintext, tiny()).unwrap();
         let got = sealed.open(&k, &c, ObjectLimits::default()).unwrap();
         assert_eq!(got, plaintext, "round-trip failed at len {len}");
-        assert!(sealed.block_count() >= 2, "an object always has a node root");
+        assert!(
+            sealed.block_count() >= 2,
+            "an object always has a node root"
+        );
     }
 }
 
 #[test]
 fn object_structure_invariants() {
     let (k, c) = (key(), ctx());
-    let sealed =
-        seal_object_with(&k, &c, &ObjectId::random(), &sample(300), tiny()).unwrap();
+    let sealed = seal_object_with(&k, &c, &ObjectId::random(), &sample(300), tiny()).unwrap();
 
     let root = sealed.root().unwrap();
     assert_eq!(root.chunk_index, ROOT_CHUNK_INDEX);
@@ -75,16 +82,26 @@ fn object_structure_invariants() {
     let mut positions: Vec<u64> = Vec::new();
     for b in &sealed.blocks {
         assert_eq!(b.object_id, sealed.object_id);
-        assert_eq!(b.chunk_count, root.chunk_count, "all blocks share chunk_count");
+        assert_eq!(
+            b.chunk_count, root.chunk_count,
+            "all blocks share chunk_count"
+        );
         positions.push(b.chunk_index);
     }
     positions.sort_unstable();
     let expected: Vec<u64> = (0..sealed.block_count() as u64).collect();
-    assert_eq!(positions, expected, "chunk positions are 0..n with no duplicates");
+    assert_eq!(
+        positions, expected,
+        "chunk positions are 0..n with no duplicates"
+    );
 
     // Only the root sits at the reserved position.
     assert_eq!(
-        sealed.blocks.iter().filter(|b| b.chunk_index == ROOT_CHUNK_INDEX).count(),
+        sealed
+            .blocks
+            .iter()
+            .filter(|b| b.chunk_index == ROOT_CHUNK_INDEX)
+            .count(),
         1
     );
 }
@@ -108,8 +125,7 @@ fn object_ids_are_random_not_content_derived() {
 #[test]
 fn object_merkle_root_is_the_root_block_digest() {
     let (k, c) = (key(), ctx());
-    let sealed =
-        seal_object_with(&k, &c, &ObjectId::random(), &sample(50), tiny()).unwrap();
+    let sealed = seal_object_with(&k, &c, &ObjectId::random(), &sample(50), tiny()).unwrap();
     let root = sealed.root().unwrap();
     assert_eq!(sealed.merkle_root().unwrap(), root.digest());
     assert_eq!(sealed.commit_id().unwrap().as_bytes(), &root.digest());
@@ -210,7 +226,12 @@ fn object_foreign_block_fails_closed() {
 fn object_leaf_presented_as_root_fails_closed() {
     let (k, c) = (key(), ctx());
     let sealed = sealed_sample();
-    let leaf = sealed.blocks.iter().find(|b| b.chunk_index == 1).unwrap().clone();
+    let leaf = sealed
+        .blocks
+        .iter()
+        .find(|b| b.chunk_index == 1)
+        .unwrap()
+        .clone();
     let got = open_object(&k, &c, &leaf, &sealed.blocks, ObjectLimits::default());
     assert!(matches!(got, Err(Error::Schema(_))), "got {got:?}");
 }
@@ -280,19 +301,31 @@ fn object_layout_is_validated() {
     let bad = |layout| seal_object_with(&k, &c, &o, b"x", layout);
 
     assert!(matches!(
-        bad(ObjectLayout { chunk_size: 0, arity: 2 }),
+        bad(ObjectLayout {
+            chunk_size: 0,
+            arity: 2
+        }),
         Err(Error::Schema(_))
     ));
     assert!(matches!(
-        bad(ObjectLayout { chunk_size: 8, arity: 1 }),
+        bad(ObjectLayout {
+            chunk_size: 8,
+            arity: 1
+        }),
         Err(Error::Schema(_))
     ));
     assert!(matches!(
-        bad(ObjectLayout { chunk_size: 8, arity: 100_000 }),
+        bad(ObjectLayout {
+            chunk_size: 8,
+            arity: 100_000
+        }),
         Err(Error::LimitExceeded(_))
     ));
     assert!(matches!(
-        bad(ObjectLayout { chunk_size: 1 << 30, arity: 2 }),
+        bad(ObjectLayout {
+            chunk_size: 1 << 30,
+            arity: 2
+        }),
         Err(Error::LimitExceeded(_))
     ));
     ObjectLayout::default().validate().unwrap();
@@ -304,19 +337,28 @@ fn object_limits_are_enforced() {
     let sealed = sealed_sample();
     let root = sealed.root().unwrap();
 
-    let few_blocks = ObjectLimits { max_blocks: 2, ..ObjectLimits::default() };
+    let few_blocks = ObjectLimits {
+        max_blocks: 2,
+        ..ObjectLimits::default()
+    };
     assert!(matches!(
         open_object(&k, &c, root, &sealed.blocks, few_blocks),
         Err(Error::LimitExceeded(_))
     ));
 
-    let short = ObjectLimits { max_plaintext_len: 16, ..ObjectLimits::default() };
+    let short = ObjectLimits {
+        max_plaintext_len: 16,
+        ..ObjectLimits::default()
+    };
     assert!(matches!(
         open_object(&k, &c, root, &sealed.blocks, short),
         Err(Error::LimitExceeded(_))
     ));
 
-    let shallow = ObjectLimits { max_level: 1, ..ObjectLimits::default() };
+    let shallow = ObjectLimits {
+        max_level: 1,
+        ..ObjectLimits::default()
+    };
     assert!(matches!(
         open_object(&k, &c, root, &sealed.blocks, shallow),
         Err(Error::LimitExceeded(_))

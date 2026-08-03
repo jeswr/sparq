@@ -67,8 +67,7 @@ const EXPECTED_PASS: &[&str] = &[
 ];
 
 fn corpus_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/shacl/data-shapes/shacl12-cs/tests/valid")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/shacl/data-shapes/shacl12-cs/tests/valid")
 }
 
 /// The base IRI a fixture's `.shaclc` `BASE` directive declares (first such

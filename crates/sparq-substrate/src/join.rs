@@ -467,7 +467,10 @@ impl<'a> TrieIter<'a> {
     /// A fresh cursor positioned above the root of `trie`.
     #[inline]
     pub fn new(trie: &'a Trie) -> Self {
-        TrieIter { trie, frames: Vec::new() }
+        TrieIter {
+            trie,
+            frames: Vec::new(),
+        }
     }
     /// The column currently being iterated (valid once at least one `open`).
     #[inline]
@@ -527,7 +530,10 @@ impl<'a> TrieIter<'a> {
     fn open(&mut self) {
         match self.frames.last() {
             None => {
-                self.frames.push(Frame { hi: self.trie.tuples.len(), cur: 0 });
+                self.frames.push(Frame {
+                    hi: self.trie.tuples.len(),
+                    cur: 0,
+                });
             }
             Some(&Frame { cur: plo, hi: phi }) => {
                 let pcol = self.frames.len() - 1;
@@ -716,7 +722,15 @@ pub fn lftj_recurse<B: Budget>(
             break;
         }
         current[level] = lf.key;
-        lftj_recurse(iters, parts_at_level, level + 1, n_levels, current, budget, out);
+        lftj_recurse(
+            iters,
+            parts_at_level,
+            level + 1,
+            n_levels,
+            current,
+            budget,
+            out,
+        );
         lf.next(iters);
     }
     for &i in parts {
@@ -738,7 +752,12 @@ pub fn compatible(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)]) -> bool {
 /// Combines two compatible rows: left's row extended with the right-only columns,
 /// filling any shared column that was unbound on the left from the right side.
 #[inline]
-pub fn merge_rows(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)], right_only: &[usize]) -> Row {
+pub fn merge_rows(
+    lrow: &[Id],
+    rrow: &[Id],
+    shared: &[(usize, usize)],
+    right_only: &[usize],
+) -> Row {
     let mut row = Row::from_slice(lrow);
     for &(lc, rc) in shared {
         if row[lc] == NO_ID {
@@ -807,7 +826,10 @@ pub mod delta {
         /// Equivalent to `DeltaTable::default()`.
         #[inline]
         pub fn new() -> Self {
-            DeltaTable { arena: Vec::new(), map: FxHashMap::default() }
+            DeltaTable {
+                arena: Vec::new(),
+                map: FxHashMap::default(),
+            }
         }
 
         /// Build the table from `rows` using the left-side key projection from `keys`.
@@ -929,8 +951,10 @@ pub mod delta {
 
     #[cfg(test)]
     mod tests {
+        use super::super::{
+            build_table, probe_emit as static_probe_emit, Budget, JoinKeys, NoBudget,
+        };
         use super::*;
-        use super::super::{Budget, NoBudget, JoinKeys, build_table, probe_emit as static_probe_emit};
         use crate::rows::Row;
 
         fn row(xs: &[u32]) -> Row {
@@ -939,7 +963,10 @@ pub mod delta {
 
         /// `JoinKeys` that joins on column 0 of both sides, no additional probe columns.
         fn keys_col0() -> JoinKeys {
-            JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] }
+            JoinKeys {
+                key_cols: vec![(0, 0)],
+                right_only: vec![],
+            }
         }
 
         // --- new() / Default ---
@@ -1137,8 +1164,14 @@ pub mod delta {
             let seq_rebuild = collect(&t_rebuild);
 
             let expected = vec![row(&[5, 1]), row(&[5, 2]), row(&[5, 3])];
-            assert_eq!(seq_incr, expected, "incremental build+extend must yield insertion order");
-            assert_eq!(seq_batch, expected, "batch build must yield insertion order");
+            assert_eq!(
+                seq_incr, expected,
+                "incremental build+extend must yield insertion order"
+            );
+            assert_eq!(
+                seq_batch, expected,
+                "batch build must yield insertion order"
+            );
             assert_eq!(seq_rebuild, expected, "rebuild must yield insertion order");
         }
 
@@ -1165,7 +1198,9 @@ pub mod delta {
 
             // Collect delta-table build rows.
             let mut dt_hits: Vec<Row> = Vec::new();
-            dt.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| dt_hits.push(b.clone()));
+            dt.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| {
+                dt_hits.push(b.clone())
+            });
 
             // Collect static build rows (probe_only=[] so output IS the build row).
             let mut st_hits: Vec<Row> = Vec::new();
@@ -1173,7 +1208,10 @@ pub mod delta {
                 static_probe_emit(prow, &keys, &all, &static_tables, &[], &mut st_hits);
             }
 
-            assert_eq!(dt_hits, st_hits, "DeltaTable must yield the same matches as static build_table");
+            assert_eq!(
+                dt_hits, st_hits,
+                "DeltaTable must yield the same matches as static build_table"
+            );
         }
 
         // --- Budget truncation ---
@@ -1237,7 +1275,11 @@ pub mod delta {
             t.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| {
                 full_output.push(b.clone());
             });
-            assert_eq!(full_output.len(), 5, "full NoBudget run must emit all 5 matches");
+            assert_eq!(
+                full_output.len(),
+                5,
+                "full NoBudget run must emit all 5 matches"
+            );
             let expected_full = vec![
                 row(&[1, 100]),
                 row(&[2, 200]),
@@ -1272,7 +1314,11 @@ pub mod delta {
             );
 
             // Verify truncation: budgeted_output is a proper prefix of full_output.
-            assert_eq!(&full_output[..2], &budgeted_output[..], "budgeted output must be a prefix of full");
+            assert_eq!(
+                &full_output[..2],
+                &budgeted_output[..],
+                "budgeted output must be a prefix of full"
+            );
             assert!(
                 budgeted_output.len() < full_output.len(),
                 "Budget must have truncated before completion"
@@ -1320,7 +1366,10 @@ mod tests {
         // build (?a ?b), probe (?a ?c); key (0,0); probe_only = [1].
         let build = vec![row(&[1, 10]), row(&[2, 20]), row(&[1, 11])];
         let probe = vec![row(&[1, 100]), row(&[3, 300])];
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![],
+        };
         let tables = vec![build_table(&build, &keys)];
         let mut out = Vec::new();
         hash_probe_serial(&probe, &keys, &build, &tables, &[1], &NoBudget, &mut out);
@@ -1348,14 +1397,26 @@ mod tests {
     fn lftj_two_relations_triangle_edge() {
         // Two relations over levels [0,1]: R(a,b) and S(a,b). Both share both
         // levels, so LFTJ yields the intersection of the tuple sets.
-        let r = Trie { tuples: vec![vec![1, 2], vec![1, 3], vec![2, 4]] };
-        let s = Trie { tuples: vec![vec![1, 2], vec![2, 4], vec![5, 6]] };
+        let r = Trie {
+            tuples: vec![vec![1, 2], vec![1, 3], vec![2, 4]],
+        };
+        let s = Trie {
+            tuples: vec![vec![1, 2], vec![2, 4], vec![5, 6]],
+        };
         let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
         // both relations participate at both levels.
         let parts_at_level = vec![vec![0, 1], vec![0, 1]];
         let mut current = vec![NO_ID, NO_ID];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 2, &mut current, &NoBudget, &mut out);
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            2,
+            &mut current,
+            &NoBudget,
+            &mut out,
+        );
         // Intersection: {(1,2),(2,4)}.
         assert_eq!(out.len(), 2);
         assert!(out.contains(&row(&[1, 2])));
@@ -1454,7 +1515,10 @@ mod tests {
         let partitioned: Vec<JoinTable> = (0..JOIN_PARTS).map(|_| JoinTable::default()).collect();
         for hash in 0..256_u64 {
             let expected = (hash % JOIN_PARTS as u64) as usize;
-            assert!(std::ptr::eq(probe_table(&partitioned, hash), &partitioned[expected]));
+            assert!(std::ptr::eq(
+                probe_table(&partitioned, hash),
+                &partitioned[expected]
+            ));
         }
 
         // Witness the decline path: a non-standard slice retains the prior indexed
@@ -1466,7 +1530,10 @@ mod tests {
     #[test]
     fn join_keys_project_left_and_right_to_the_same_shape() {
         // key_cols = [(0,1),(2,3)]: left picks cols 0,2 ; right picks cols 1,3.
-        let keys = JoinKeys { key_cols: vec![(0, 1), (2, 3)], right_only: vec![4] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 1), (2, 3)],
+            right_only: vec![4],
+        };
         let lrow = [10u32, 20, 30, 40];
         let rrow = [5u32, 10, 7, 30, 99];
         let lk = keys.left_key(&lrow);
@@ -1499,7 +1566,10 @@ mod tests {
 
     #[test]
     fn build_partitioned_covers_all_rows_across_the_radix_maps() {
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![],
+        };
         let build = vec![row(&[1, 10]), row(&[2, 20]), row(&[3, 30])];
         // The engine computes each row's partition as key_hash(left_key) % JOIN_PARTS.
         let parts: Vec<u8> = build
@@ -1509,7 +1579,10 @@ mod tests {
         let tables = build_partitioned(&build, &keys, &parts);
         assert_eq!(tables.len(), JOIN_PARTS);
         // Every build row lands in exactly one partition — the union covers all 3.
-        let total: usize = tables.iter().map(|t| t.values().map(|v| v.len()).sum::<usize>()).sum();
+        let total: usize = tables
+            .iter()
+            .map(|t| t.values().map(|v| v.len()).sum::<usize>())
+            .sum();
         assert_eq!(total, 3);
         // The row for key=1 is findable in its own partition.
         let part1 = (key_hash(&keys.left_key(&build[0])) % JOIN_PARTS as u64) as usize;
@@ -1520,7 +1593,10 @@ mod tests {
     #[test]
     fn probe_emit_multi_partition_finds_the_matching_build_row() {
         // A partitioned table (len != 1) exercises the radix branch of probe_emit.
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![],
+        };
         let build = vec![row(&[1, 10]), row(&[2, 20])];
         let parts: Vec<u8> = build
             .iter()
@@ -1546,7 +1622,10 @@ mod tests {
             }
         }
         let build = vec![row(&[1, 10]), row(&[2, 20]), row(&[3, 30])];
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![],
+        };
         let tables = vec![build_table(&build, &keys)];
         let probe = vec![row(&[1, 0]), row(&[2, 0]), row(&[3, 0])];
         let mut out = Vec::new();
@@ -1557,12 +1636,22 @@ mod tests {
     #[test]
     fn lftj_empty_trie_yields_no_output() {
         let r = Trie { tuples: vec![] };
-        let s = Trie { tuples: vec![vec![1, 2]] };
+        let s = Trie {
+            tuples: vec![vec![1, 2]],
+        };
         let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
         let parts_at_level = vec![vec![0, 1], vec![0, 1]];
         let mut current = vec![NO_ID, NO_ID];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 2, &mut current, &NoBudget, &mut out);
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            2,
+            &mut current,
+            &NoBudget,
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 
@@ -1576,13 +1665,25 @@ mod tests {
         }
         // Two identical relations over levels [0,1]; their intersection is all four tuples,
         // but the sticky Cap(1) budget truncates after the first full match.
-        let r = Trie { tuples: vec![vec![1, 2], vec![1, 3], vec![2, 4], vec![3, 5]] };
-        let s = Trie { tuples: vec![vec![1, 2], vec![1, 3], vec![2, 4], vec![3, 5]] };
+        let r = Trie {
+            tuples: vec![vec![1, 2], vec![1, 3], vec![2, 4], vec![3, 5]],
+        };
+        let s = Trie {
+            tuples: vec![vec![1, 2], vec![1, 3], vec![2, 4], vec![3, 5]],
+        };
         let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
         let parts_at_level = vec![vec![0, 1], vec![0, 1]];
         let mut current = vec![NO_ID, NO_ID];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 2, &mut current, &Cap(1), &mut out);
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            2,
+            &mut current,
+            &Cap(1),
+            &mut out,
+        );
         assert_eq!(out.len(), 1);
     }
 
@@ -1615,16 +1716,34 @@ mod tests {
         // All three tries participate at level 0 (k=3), exercising the monomorphized
         // search_k3 path directly. Results must match the manual intersection.
         // [SONNET-4.6] sq-7d3dj.20
-        let r = Trie { tuples: vec![vec![1], vec![2], vec![3], vec![5], vec![7]] };
-        let s = Trie { tuples: vec![vec![2], vec![3], vec![5], vec![6], vec![8]] };
-        let t = Trie { tuples: vec![vec![1], vec![3], vec![5], vec![7], vec![9]] };
+        let r = Trie {
+            tuples: vec![vec![1], vec![2], vec![3], vec![5], vec![7]],
+        };
+        let s = Trie {
+            tuples: vec![vec![2], vec![3], vec![5], vec![6], vec![8]],
+        };
+        let t = Trie {
+            tuples: vec![vec![1], vec![3], vec![5], vec![7], vec![9]],
+        };
         let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
         let parts_at_level = vec![vec![0usize, 1, 2]];
         let mut current = vec![NO_ID; 1];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            1,
+            &mut current,
+            &NoBudget,
+            &mut out,
+        );
         // Intersection: {3, 5} — values present in all three tries.
-        assert_eq!(out.len(), 2, "k=3 intersection must find exactly 2 common values");
+        assert_eq!(
+            out.len(),
+            2,
+            "k=3 intersection must find exactly 2 common values"
+        );
         assert!(out.contains(&row(&[3])));
         assert!(out.contains(&row(&[5])));
     }
@@ -1632,15 +1751,32 @@ mod tests {
     #[test]
     fn lftj_k3_intersection_empty_when_no_common_value() {
         // k=3 path: empty intersection. [SONNET-4.6] sq-7d3dj.20
-        let r = Trie { tuples: vec![vec![1], vec![2]] };
-        let s = Trie { tuples: vec![vec![3], vec![4]] };
-        let t = Trie { tuples: vec![vec![5], vec![6]] };
+        let r = Trie {
+            tuples: vec![vec![1], vec![2]],
+        };
+        let s = Trie {
+            tuples: vec![vec![3], vec![4]],
+        };
+        let t = Trie {
+            tuples: vec![vec![5], vec![6]],
+        };
         let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
         let parts_at_level = vec![vec![0usize, 1, 2]];
         let mut current = vec![NO_ID; 1];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
-        assert!(out.is_empty(), "k=3 path must produce empty output when no common value exists");
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            1,
+            &mut current,
+            &NoBudget,
+            &mut out,
+        );
+        assert!(
+            out.is_empty(),
+            "k=3 path must produce empty output when no common value exists"
+        );
     }
 
     #[test]
@@ -1659,19 +1795,36 @@ mod tests {
             .map(|&v| row(&[v]))
             .collect();
 
-        let r = Trie { tuples: vals_r.iter().map(|&v| vec![v]).collect() };
-        let s = Trie { tuples: vals_s.iter().map(|&v| vec![v]).collect() };
-        let t = Trie { tuples: vals_t.iter().map(|&v| vec![v]).collect() };
+        let r = Trie {
+            tuples: vals_r.iter().map(|&v| vec![v]).collect(),
+        };
+        let s = Trie {
+            tuples: vals_s.iter().map(|&v| vec![v]).collect(),
+        };
+        let t = Trie {
+            tuples: vals_t.iter().map(|&v| vec![v]).collect(),
+        };
         let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s), TrieIter::new(&t)];
         let parts_at_level = vec![vec![0usize, 1, 2]];
         let mut current = vec![NO_ID; 1];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            1,
+            &mut current,
+            &NoBudget,
+            &mut out,
+        );
         let mut out_sorted = out.clone();
         out_sorted.sort();
         let mut exp_sorted = expected.clone();
         exp_sorted.sort();
-        assert_eq!(out_sorted, exp_sorted, "k=3 result must match sequential pairwise intersection");
+        assert_eq!(
+            out_sorted, exp_sorted,
+            "k=3 result must match sequential pairwise intersection"
+        );
     }
 
     // [SONNET-4.6] sq-qcnn.40 — targeted tests killing the surviving mutants from
@@ -1691,8 +1844,16 @@ mod tests {
         let k3: Key = smallvec![100u32, 200u32];
         let k4: Key = smallvec![100u32, 201u32];
         // With a constant-0 hash, ALL of these would be equal — so assert they differ.
-        assert_ne!(key_hash(&k1), key_hash(&k2), "key [1] and [2] must hash differently");
-        assert_ne!(key_hash(&k3), key_hash(&k4), "key [100,200] and [100,201] must hash differently");
+        assert_ne!(
+            key_hash(&k1),
+            key_hash(&k2),
+            "key [1] and [2] must hash differently"
+        );
+        assert_ne!(
+            key_hash(&k3),
+            key_hash(&k4),
+            "key [100,200] and [100,201] must hash differently"
+        );
     }
 
     /// When a trie has multiple child rows for the same parent key, `TrieIter::open`
@@ -1706,14 +1867,30 @@ mod tests {
         // two identical tries must emit all three (a=1,b=1), (a=1,b=2), (a=1,b=3).
         // Under the mutation, open() uses column 1 (the b value) as the parent grouping
         // key, which confines each iterator to only the first child row → 1 row output.
-        let r = Trie { tuples: vec![vec![1, 1], vec![1, 2], vec![1, 3]] };
-        let s = Trie { tuples: vec![vec![1, 1], vec![1, 2], vec![1, 3]] };
+        let r = Trie {
+            tuples: vec![vec![1, 1], vec![1, 2], vec![1, 3]],
+        };
+        let s = Trie {
+            tuples: vec![vec![1, 1], vec![1, 2], vec![1, 3]],
+        };
         let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
         let parts_at_level = vec![vec![0usize, 1], vec![0usize, 1]];
         let mut current = vec![NO_ID; 2];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 2, &mut current, &NoBudget, &mut out);
-        assert_eq!(out.len(), 3, "must emit all 3 children; open() must use column 0 not 1");
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            2,
+            &mut current,
+            &NoBudget,
+            &mut out,
+        );
+        assert_eq!(
+            out.len(),
+            3,
+            "must emit all 3 children; open() must use column 0 not 1"
+        );
         assert!(out.contains(&row(&[1, 1])));
         assert!(out.contains(&row(&[1, 2])));
         assert!(out.contains(&row(&[1, 3])));
@@ -1733,13 +1910,25 @@ mod tests {
         // R starts at 3, S starts at 5; intersection is {7}.
         // `search` must seek R from 3 to 7 (via 5, then wrap) and S from 5 to 7,
         // going through the `p += 1` branch at least once.
-        let r = Trie { tuples: vec![vec![3], vec![7]] };
-        let s = Trie { tuples: vec![vec![5], vec![7]] };
+        let r = Trie {
+            tuples: vec![vec![3], vec![7]],
+        };
+        let s = Trie {
+            tuples: vec![vec![5], vec![7]],
+        };
         let mut iters = vec![TrieIter::new(&r), TrieIter::new(&s)];
         let parts_at_level = vec![vec![0usize, 1]];
         let mut current = vec![NO_ID; 1];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            1,
+            &mut current,
+            &NoBudget,
+            &mut out,
+        );
         assert_eq!(out, vec![row(&[7])]);
     }
 
@@ -1749,10 +1938,18 @@ mod tests {
     #[test]
     fn lftj_k4_intersection_via_generic_search_path() {
         // Four single-column tries; only value 10 is common to all.
-        let a = Trie { tuples: vec![vec![1], vec![5], vec![10]] };
-        let b = Trie { tuples: vec![vec![3], vec![7], vec![10]] };
-        let c = Trie { tuples: vec![vec![4], vec![8], vec![10]] };
-        let d = Trie { tuples: vec![vec![2], vec![6], vec![10]] };
+        let a = Trie {
+            tuples: vec![vec![1], vec![5], vec![10]],
+        };
+        let b = Trie {
+            tuples: vec![vec![3], vec![7], vec![10]],
+        };
+        let c = Trie {
+            tuples: vec![vec![4], vec![8], vec![10]],
+        };
+        let d = Trie {
+            tuples: vec![vec![2], vec![6], vec![10]],
+        };
         let mut iters = vec![
             TrieIter::new(&a),
             TrieIter::new(&b),
@@ -1762,8 +1959,20 @@ mod tests {
         let parts_at_level = vec![vec![0usize, 1, 2, 3]];
         let mut current = vec![NO_ID; 1];
         let mut out = Vec::new();
-        lftj_recurse(&mut iters, &parts_at_level, 0, 1, &mut current, &NoBudget, &mut out);
-        assert_eq!(out, vec![row(&[10])], "k=4 intersection must find the single common value");
+        lftj_recurse(
+            &mut iters,
+            &parts_at_level,
+            0,
+            1,
+            &mut current,
+            &NoBudget,
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            vec![row(&[10])],
+            "k=4 intersection must find the single common value"
+        );
     }
 
     // [SONNET-4.6] sq-7d3dj.19 — DIRECT tests for `probe_gather_indices` (M4 batch-emission
@@ -1774,14 +1983,21 @@ mod tests {
         // Serial table (len == 1): probe_gather_indices must return the correct build-row indices.
         // [SONNET-4.6] sq-7d3dj.19
         let build = vec![row(&[1, 10]), row(&[2, 20]), row(&[1, 11])];
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![],
+        };
         let tables = vec![build_table(&build, &keys)];
 
         // key=1 matches build rows 0 and 2 (ascending index order from build_table).
         let probe_row = row(&[1, 99]);
         let mut indices = Vec::new();
         probe_gather_indices(&probe_row, &keys, &tables, &mut indices);
-        assert_eq!(indices, vec![0usize, 2], "key=1 must yield build indices [0, 2] in insertion order");
+        assert_eq!(
+            indices,
+            vec![0usize, 2],
+            "key=1 must yield build indices [0, 2] in insertion order"
+        );
 
         // key=2 matches build row 1 only.
         let mut indices2 = Vec::new();
@@ -1799,7 +2015,10 @@ mod tests {
         // Partitioned table (len == JOIN_PARTS): exercises the radix branch and raw_entry lookup.
         // [SONNET-4.6] sq-7d3dj.19
         let build = vec![row(&[10, 100]), row(&[20, 200]), row(&[10, 101])];
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![],
+        };
         let parts: Vec<u8> = build
             .iter()
             .map(|r| (key_hash(&keys.left_key(r)) % JOIN_PARTS as u64) as u8)
@@ -1809,7 +2028,11 @@ mod tests {
 
         let mut indices = Vec::new();
         probe_gather_indices(&row(&[10, 0]), &keys, &tables, &mut indices);
-        assert_eq!(indices, vec![0usize, 2], "key=10 must yield build indices [0, 2] from partitioned table");
+        assert_eq!(
+            indices,
+            vec![0usize, 2],
+            "key=10 must yield build indices [0, 2] from partitioned table"
+        );
     }
 
     #[test]
@@ -1825,7 +2048,10 @@ mod tests {
             row(&[1, 11]),
             row(&[3, 31]),
         ];
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![1] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![1],
+        };
         let tables = vec![build_table(&build, &keys)];
 
         for probe_val in [1u32, 2, 3, 99] {
@@ -1864,7 +2090,10 @@ mod tests {
         for i in 0..20u32 {
             build.push(row(&[7, i])); // 20 build rows all share key=7
         }
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![],
+        };
         let tables = vec![build_table(&build, &keys)];
 
         let mut out: Vec<Row> = Vec::new();
@@ -1873,7 +2102,11 @@ mod tests {
         let cap_after = out.capacity();
         assert_eq!(out.len(), 20, "all 20 build rows must be emitted");
         // capacity must cover all 20 rows (reserve(20) was called); no under-allocation.
-        assert!(cap_after >= 20, "reserve(20) must have been called: cap_after={}", cap_after);
+        assert!(
+            cap_after >= 20,
+            "reserve(20) must have been called: cap_after={}",
+            cap_after
+        );
         // and the grow should have been exactly from 0 → ≥20 (no wasted double-grow on cold start)
         assert_eq!(cap_before, 0, "output was empty before probe_emit");
     }
@@ -1905,7 +2138,10 @@ mod tests {
         // deliberately-unbound (NO_ID) key value so the null-key case is covered.
         for &lc in &[0usize, 1, 2] {
             for &rc in &[0usize, 1, 2] {
-                let keys = JoinKeys { key_cols: vec![(lc, rc)], right_only: vec![] };
+                let keys = JoinKeys {
+                    key_cols: vec![(lc, rc)],
+                    right_only: vec![],
+                };
                 let r = row(&[10, NO_ID, 30]);
 
                 let fast_l = keys.left_key(&r);
@@ -1914,12 +2150,35 @@ mod tests {
                 let ref_r = reference(&keys.key_cols, &r, false);
 
                 assert_eq!(fast_l.len(), 1, "single-column left key must have length 1");
-                assert_eq!(fast_r.len(), 1, "single-column right key must have length 1");
-                assert_eq!(fast_l, ref_l, "left_key fast path must equal the general collect (lc={}, rc={})", lc, rc);
-                assert_eq!(fast_r, ref_r, "right_key fast path must equal the general collect (lc={}, rc={})", lc, rc);
-                assert_eq!(fast_l.as_slice(), &[r[lc]], "left key must be exactly [row[lc]]");
-                assert_eq!(fast_r.as_slice(), &[r[rc]], "right key must be exactly [row[rc]]");
-                assert!(!fast_l.spilled(), "a 1-element Key must stay inline (no heap spill)");
+                assert_eq!(
+                    fast_r.len(),
+                    1,
+                    "single-column right key must have length 1"
+                );
+                assert_eq!(
+                    fast_l, ref_l,
+                    "left_key fast path must equal the general collect (lc={}, rc={})",
+                    lc, rc
+                );
+                assert_eq!(
+                    fast_r, ref_r,
+                    "right_key fast path must equal the general collect (lc={}, rc={})",
+                    lc, rc
+                );
+                assert_eq!(
+                    fast_l.as_slice(),
+                    &[r[lc]],
+                    "left key must be exactly [row[lc]]"
+                );
+                assert_eq!(
+                    fast_r.as_slice(),
+                    &[r[rc]],
+                    "right key must be exactly [row[rc]]"
+                );
+                assert!(
+                    !fast_l.spilled(),
+                    "a 1-element Key must stay inline (no heap spill)"
+                );
             }
         }
     }
@@ -1928,18 +2187,27 @@ mod tests {
     /// A 2-column and a 3-column key still project all columns in `key_cols` order.
     #[test]
     fn multi_column_key_is_unaffected_by_the_fast_path() {
-        let keys2 = JoinKeys { key_cols: vec![(0, 1), (2, 3)], right_only: vec![] };
+        let keys2 = JoinKeys {
+            key_cols: vec![(0, 1), (2, 3)],
+            right_only: vec![],
+        };
         let lrow = [10u32, 20, 30, 40];
         let rrow = [5u32, 10, 7, 30];
         assert_eq!(keys2.left_key(&lrow).as_slice(), &[10u32, 30u32]);
         assert_eq!(keys2.right_key(&rrow).as_slice(), &[10u32, 30u32]);
 
         // 3-column key spills past the [Id; 2] inline width — the general path handles it.
-        let keys3 = JoinKeys { key_cols: vec![(0, 0), (1, 1), (2, 2)], right_only: vec![] };
+        let keys3 = JoinKeys {
+            key_cols: vec![(0, 0), (1, 1), (2, 2)],
+            right_only: vec![],
+        };
         let r = [1u32, 2, 3];
         let k = keys3.left_key(&r);
         assert_eq!(k.as_slice(), &[1u32, 2, 3]);
-        assert!(k.spilled(), "a 3-column Key spills, exercising the general (non-fast) path");
+        assert!(
+            k.spilled(),
+            "a 3-column Key spills, exercising the general (non-fast) path"
+        );
     }
 
     /// **Differential test (the HARD invariant).** For a whole single-column hash join,
@@ -1964,9 +2232,12 @@ mod tests {
             // Build a table keyed on the GENERAL collect (a 1-element collect, but via the
             // multi-column iterator, exactly the old pre-fast-path behaviour), so the ONLY
             // difference from `fast_join` is the single-column key derivation.
-            let general_left = |r: &[Id]| -> Key { [key_col].iter().map(|&(lc, _)| r[lc]).collect() };
-            let general_right = |r: &[Id]| -> Key { [key_col].iter().map(|&(_, rc)| r[rc]).collect() };
-            let mut table: std::collections::HashMap<Vec<Id>, Vec<usize>> = std::collections::HashMap::new();
+            let general_left =
+                |r: &[Id]| -> Key { [key_col].iter().map(|&(lc, _)| r[lc]).collect() };
+            let general_right =
+                |r: &[Id]| -> Key { [key_col].iter().map(|&(_, rc)| r[rc]).collect() };
+            let mut table: std::collections::HashMap<Vec<Id>, Vec<usize>> =
+                std::collections::HashMap::new();
             for (bi, br) in build.iter().enumerate() {
                 table.entry(general_left(br).to_vec()).or_default().push(bi);
             }
@@ -1990,11 +2261,21 @@ mod tests {
 
         // The real fast-path join via the substrate kernels (build_table posts in ascending
         // build-index order; the reference sorts its posting to match that order).
-        fn fast_join(build: &[Row], probe: &[Row], key_col: (usize, usize), probe_only: &[usize]) -> Vec<Row> {
-            let keys = JoinKeys { key_cols: vec![key_col], right_only: vec![] };
+        fn fast_join(
+            build: &[Row],
+            probe: &[Row],
+            key_col: (usize, usize),
+            probe_only: &[usize],
+        ) -> Vec<Row> {
+            let keys = JoinKeys {
+                key_cols: vec![key_col],
+                right_only: vec![],
+            };
             let tables = vec![build_table(build, &keys)];
             let mut out = Vec::new();
-            hash_probe_serial(probe, &keys, build, &tables, probe_only, &NoBudget, &mut out);
+            hash_probe_serial(
+                probe, &keys, build, &tables, probe_only, &NoBudget, &mut out,
+            );
             out
         }
 
@@ -2003,8 +2284,20 @@ mod tests {
         let empty: Vec<Row> = vec![];
         let cases: Vec<JoinCase> = vec![
             ("empty-both", empty.clone(), empty.clone(), (0, 0), vec![1]),
-            ("empty-build", empty.clone(), vec![row(&[1, 10])], (0, 0), vec![1]),
-            ("empty-probe", vec![row(&[1, 10])], empty.clone(), (0, 0), vec![1]),
+            (
+                "empty-build",
+                empty.clone(),
+                vec![row(&[1, 10])],
+                (0, 0),
+                vec![1],
+            ),
+            (
+                "empty-probe",
+                vec![row(&[1, 10])],
+                empty.clone(),
+                (0, 0),
+                vec![1],
+            ),
             (
                 "no-match",
                 vec![row(&[1, 10]), row(&[2, 20])],
@@ -2014,7 +2307,13 @@ mod tests {
             ),
             (
                 "many-duplicate-keys",
-                vec![row(&[7, 1]), row(&[7, 2]), row(&[7, 3]), row(&[7, 4]), row(&[3, 9])],
+                vec![
+                    row(&[7, 1]),
+                    row(&[7, 2]),
+                    row(&[7, 3]),
+                    row(&[7, 4]),
+                    row(&[3, 9]),
+                ],
                 vec![row(&[7, 100]), row(&[3, 200]), row(&[7, 101])],
                 (0, 0),
                 vec![1],
@@ -2050,7 +2349,10 @@ mod tests {
     /// (the delta join also routes its key projection through `JoinKeys::{left,right}_key`).
     #[test]
     fn single_column_delta_table_matches_static_build_under_the_fast_path() {
-        let keys = JoinKeys { key_cols: vec![(0, 0)], right_only: vec![] };
+        let keys = JoinKeys {
+            key_cols: vec![(0, 0)],
+            right_only: vec![],
+        };
         let build = vec![row(&[1, 10]), row(&[1, 11]), row(&[2, 20])];
         let probe = vec![row(&[1, 0]), row(&[2, 0]), row(&[9, 0])];
 
@@ -2064,8 +2366,13 @@ mod tests {
         // Delta path routes its key projection through the same fast `left_key`/`right_key`.
         let dt = delta::DeltaTable::build(&build, &keys);
         let mut delta_out: Vec<Row> = Vec::new();
-        dt.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| delta_out.push(b.clone()));
+        dt.probe_emit(&probe, &keys, &NoBudget, &mut |b, _p| {
+            delta_out.push(b.clone())
+        });
 
-        assert_eq!(static_out, delta_out, "delta and static single-column joins must agree under the fast path");
+        assert_eq!(
+            static_out, delta_out,
+            "delta and static single-column joins must agree under the fast path"
+        );
     }
 }

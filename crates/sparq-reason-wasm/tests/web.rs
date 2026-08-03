@@ -137,10 +137,15 @@ fn reason_n3_query_evaluates_a_premise_builtin() {
     let nt = Reasoner::reason_n3_query("@prefix : <http://ex/>. :a :age 21 . :b :age 12 .", q)
         .expect("builtin query filter in wasm");
     assert!(
-        nt.contains("<http://ex/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Adult> ."),
+        nt.contains(
+            "<http://ex/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Adult> ."
+        ),
         "{nt}"
     );
-    assert!(!nt.contains("<http://ex/b>"), ":b is 12 — the builtin must filter it out: {nt}");
+    assert!(
+        !nt.contains("<http://ex/b>"),
+        ":b is 12 — the builtin must filter it out: {nt}"
+    );
 }
 
 /// `why` (only compiled with the `explain` feature) returns a proof tree for the entailed
@@ -187,7 +192,10 @@ fn why_n3_proof_tree() {
         { ?x ex:knows ?y . } => { ?x ex:reaches ?y . } ."#;
     let json = Reasoner::why_n3(n3, "<http://ex/a>", "<http://ex/reaches>", "<http://ex/b>")
         .expect("whyN3 must succeed for a derived triple");
-    assert!(json.contains("n3-rule-"), "derivation names the rule: {json}");
+    assert!(
+        json.contains("n3-rule-"),
+        "derivation names the rule: {json}"
+    );
     assert!(json.contains("\"asserted\""), "leaves are asserted: {json}");
 
     let absent = Reasoner::why_n3(n3, "<http://ex/b>", "<http://ex/reaches>", "<http://ex/a>")

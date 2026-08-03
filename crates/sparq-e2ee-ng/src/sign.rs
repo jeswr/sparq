@@ -101,6 +101,10 @@ impl PublicVerifyingKey {
 impl core::fmt::Debug for PublicVerifyingKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let b = self.to_bytes();
-        write!(f, "PublicVerifyingKey({:02x}{:02x}{:02x}{:02x}…)", b[0], b[1], b[2], b[3])
+        write!(
+            f,
+            "PublicVerifyingKey({:02x}{:02x}{:02x}{:02x}…)",
+            b[0], b[1], b[2], b[3]
+        )
     }
 }

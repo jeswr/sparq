@@ -79,8 +79,8 @@ fn secprop_ext_ttl_declares_every_minted_term() {
 fn secprop_ext_ttl_declares_the_vendored_dimension_subjects() {
     use oxrdf::{NamedNode, NamedOrBlankNode, Term};
     use sparq_secprop_vocab::{
-        SEC_PROP_POST_QUANTUM_FORGERY, SEC_PROP_POST_QUANTUM_SNOOPING,
-        SEC_PROP_SECURITY_PROPERTY, SEC_PROP_SIGNATURE_TYPE_LEAKAGE,
+        SEC_PROP_POST_QUANTUM_FORGERY, SEC_PROP_POST_QUANTUM_SNOOPING, SEC_PROP_SECURITY_PROPERTY,
+        SEC_PROP_SIGNATURE_TYPE_LEAKAGE,
     };
 
     const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";

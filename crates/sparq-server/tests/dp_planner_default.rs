@@ -64,10 +64,17 @@ fn dp_planner_forwarded_and_default_on_without_explicit_install() {
         dp_planned, greedy,
         "the DPccp planner only reorders joins — it must never change the answer"
     );
-    assert_eq!(dp_planned.len(), 2, "expected two solutions: {dp_planned:?}");
+    assert_eq!(
+        dp_planned.len(),
+        2,
+        "expected two solutions: {dp_planned:?}"
+    );
     let joined = dp_planned.join("\n");
     assert!(joined.contains("Acme"), "org name Acme expected: {joined}");
-    assert!(joined.contains("Umbrella"), "org name Umbrella expected: {joined}");
+    assert!(
+        joined.contains("Umbrella"),
+        "org name Umbrella expected: {joined}"
+    );
 }
 
 /// The tri-state install is scoped, not sticky: after a `without_dp_planner` scope ends
@@ -86,7 +93,10 @@ fn opt_out_scope_does_not_leak_into_later_queries() {
     let _ = sparq_engine::without_dp_planner(|| rows(&graph, q));
     let after = rows(&graph, q);
 
-    assert_eq!(before, after, "the opt-out scope must restore the previous install state");
+    assert_eq!(
+        before, after,
+        "the opt-out scope must restore the previous install state"
+    );
     assert_eq!(after.len(), 2, "expected two solutions: {after:?}");
 }
 

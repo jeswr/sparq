@@ -75,7 +75,7 @@ From the **CI** workflow (`.github/workflows/ci.yml`):
 | Job name | What it gates |
 |---|---|
 | `build + test (workspace)` | `cargo build --workspace --all-targets` + `cargo test --workspace`. |
-| `clippy (gate) + fmt (non-blocking)` | `cargo clippy --workspace --all-targets -- -D warnings` (the clippy gate; fmt is non-blocking until the one-time reformat lands). |
+| `clippy + fmt (gate)` | `cargo clippy --workspace --all-targets -- -D warnings` plus `cargo fmt --all --check` — both hard gates since sq-0lk. |
 | `MSRV check (Rust 1.88, declared floor)` | `cargo check` on the pinned MSRV toolchain. |
 | `W3C SPARQL conformance (ratchet >= 1229 pass+divergence)` | The W3C SPARQL conformance ratchet (never lower). |
 | `W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)` | The W3C SHACL core + SHACL-SPARQL ratchets. |

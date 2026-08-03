@@ -37,12 +37,12 @@
 // Iterator-collect style: allow collect() without type annotation where inference works.
 #![allow(clippy::missing_panics_doc)] // stubs will panic; full impls document.
 
+pub mod consortium;
+pub mod financial;
+pub mod oracle;
 pub mod personal;
 pub mod project_mgmt;
-pub mod financial;
-pub mod consortium;
 pub mod workload;
-pub mod oracle;
 
 // ── GenParams ───────────────────────────────────────────────────────────────────────
 
@@ -114,7 +114,11 @@ impl GenParams {
             acl_coverage: 0.3,
             group_nesting_depth: 1,
             members_per_group: 4,
-            mix: AudienceMix { public: 0.3, private: 0.5, shared: 0.2 },
+            mix: AudienceMix {
+                public: 0.3,
+                private: 0.5,
+                shared: 0.2,
+            },
             policies_per_resource: 2,
             constraint_complexity: ConstraintComplexity::None,
             n_agents: 10,
@@ -266,13 +270,21 @@ impl AccessMode {
     /// Read-only access.
     #[must_use]
     pub fn read_only() -> Self {
-        Self { read: true, write: false, control: false }
+        Self {
+            read: true,
+            write: false,
+            control: false,
+        }
     }
 
     /// Full access (read + write + control).
     #[must_use]
     pub fn full() -> Self {
-        Self { read: true, write: true, control: true }
+        Self {
+            read: true,
+            write: true,
+            control: true,
+        }
     }
 }
 
@@ -567,7 +579,11 @@ pub fn compile_wac(row: &IntentRow) -> CompiledPolicy {
         }
     }
 
-    CompiledPolicy { model: AcModel::Wac, nquads: triples, expressibility }
+    CompiledPolicy {
+        model: AcModel::Wac,
+        nquads: triples,
+        expressibility,
+    }
 }
 
 /// Compile one [`IntentRow`] to ACP triples (`acp:Policy` + matcher shape).
@@ -639,8 +655,14 @@ pub fn compile_acp(row: &IntentRow, group_members: &[String]) -> CompiledPolicy 
         Audience::ClientRestricted { agent, client } => format!("cl:{agent}:{client}"),
         Audience::AllExcept(excl) => format!("ex:{}", excl.join(",")),
     };
-    let scope_byte: u8 = match row.scope { Scope::Resource => b'r', Scope::Subtree => b's' };
-    let effect_byte: u8 = match row.effect { Effect::Allow => b'a', Effect::Deny => b'd' };
+    let scope_byte: u8 = match row.scope {
+        Scope::Resource => b'r',
+        Scope::Subtree => b's',
+    };
+    let effect_byte: u8 = match row.effect {
+        Effect::Allow => b'a',
+        Effect::Deny => b'd',
+    };
 
     // FNV-1a 32-bit: offset-basis 2166136261, prime 16777619.
     let mut h: u32 = 2_166_136_261u32;
@@ -776,7 +798,11 @@ pub fn compile_acp(row: &IntentRow, group_members: &[String]) -> CompiledPolicy 
         }
     }
 
-    CompiledPolicy { model: AcModel::Acp, nquads: triples, expressibility }
+    CompiledPolicy {
+        model: AcModel::Acp,
+        nquads: triples,
+        expressibility,
+    }
 }
 
 /// Compile one [`IntentRow`] to ODRL triples (Permission/Prohibition shape).
@@ -882,7 +908,9 @@ pub fn compile_odrl(row: &IntentRow) -> CompiledPolicy {
             triples.push(format!(
                 "{cst_id} <http://www.w3.org/ns/odrl/2/rightOperand> <{client}> ."
             ));
-            triples.push(format!("{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_id} ."));
+            triples.push(format!(
+                "{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_id} ."
+            ));
         }
         Audience::AllExcept(excl) => {
             // ODRL Prohibition naturally expresses all-except.
@@ -918,8 +946,12 @@ pub fn compile_odrl(row: &IntentRow) -> CompiledPolicy {
             triples.push(format!(
                 "{cst_end} <http://www.w3.org/ns/odrl/2/rightOperand> \"{end}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> ."
             ));
-            triples.push(format!("{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_start} ."));
-            triples.push(format!("{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_end} ."));
+            triples.push(format!(
+                "{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_start} ."
+            ));
+            triples.push(format!(
+                "{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_end} ."
+            ));
         }
         Condition::Purpose(purpose) => {
             let cst_id = format!("<{}#odrl-cst-purpose>", row.resource_uri);
@@ -932,7 +964,9 @@ pub fn compile_odrl(row: &IntentRow) -> CompiledPolicy {
             triples.push(format!(
                 "{cst_id} <http://www.w3.org/ns/odrl/2/rightOperand> <{purpose}> ."
             ));
-            triples.push(format!("{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_id} ."));
+            triples.push(format!(
+                "{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_id} ."
+            ));
         }
         Condition::Count(n) => {
             let cst_id = format!("<{}#odrl-cst-count>", row.resource_uri);
@@ -945,7 +979,9 @@ pub fn compile_odrl(row: &IntentRow) -> CompiledPolicy {
             triples.push(format!(
                 "{cst_id} <http://www.w3.org/ns/odrl/2/rightOperand> \"{n}\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
             ));
-            triples.push(format!("{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_id} ."));
+            triples.push(format!(
+                "{rule_id} <http://www.w3.org/ns/odrl/2/constraint> {cst_id} ."
+            ));
         }
         Condition::And(a, b) => {
             // Compound constraint: emit both sub-conditions as separate constraints.
@@ -965,7 +1001,11 @@ pub fn compile_odrl(row: &IntentRow) -> CompiledPolicy {
         }
     }
 
-    CompiledPolicy { model: AcModel::Odrl, nquads: triples, expressibility: Expressibility::Native }
+    CompiledPolicy {
+        model: AcModel::Odrl,
+        nquads: triples,
+        expressibility: Expressibility::Native,
+    }
 }
 
 // ── Decision Oracle ──────────────────────────────────────────────────────────────────

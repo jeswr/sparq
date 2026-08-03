@@ -575,13 +575,25 @@ mod tests {
         // A hand-built decoded column mixing real values with the NaN sentinel: the kernel
         // keeps exactly the passing NON-NaN positions, ascending, and never the NaN cells.
         let decoded = [1.0, f64::NAN, 5.0, 5.0, f64::NAN, 9.0];
-        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Ge(5.0)), vec![2, 3, 5]);
-        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Eq(5.0)), vec![2, 3]);
-        assert_eq!(DataChunk::select_decoded(&decoded, VecCmp::Lt(5.0)), vec![0]);
+        assert_eq!(
+            DataChunk::select_decoded(&decoded, VecCmp::Ge(5.0)),
+            vec![2, 3, 5]
+        );
+        assert_eq!(
+            DataChunk::select_decoded(&decoded, VecCmp::Eq(5.0)),
+            vec![2, 3]
+        );
+        assert_eq!(
+            DataChunk::select_decoded(&decoded, VecCmp::Lt(5.0)),
+            vec![0]
+        );
         // No comparison ever selects a NaN-sentinel position (1 and 4).
         for cmp in [VecCmp::Gt(-1e18), VecCmp::Ge(-1e18), VecCmp::Le(1e18)] {
             let sel = DataChunk::select_decoded(&decoded, cmp);
-            assert!(!sel.contains(&1) && !sel.contains(&4), "{cmp:?} must skip NaN cells");
+            assert!(
+                !sel.contains(&1) && !sel.contains(&4),
+                "{cmp:?} must skip NaN cells"
+            );
         }
     }
 

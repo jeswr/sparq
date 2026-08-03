@@ -35,9 +35,9 @@ use rand::{Rng, SeedableRng};
 
 use crate::project_mgmt::ChurnStep;
 use crate::{
-    AcModel, AccessMode, Audience, CompiledPolicy, Condition, Decision, Effect,
-    ExpectedDecision, Expressibility, GenParams, IntentRow, QueryClass, QueryFixture, Request,
-    Scope, compile_acp, compile_odrl, compile_wac,
+    compile_acp, compile_odrl, compile_wac, AcModel, AccessMode, Audience, CompiledPolicy,
+    Condition, Decision, Effect, ExpectedDecision, Expressibility, GenParams, IntentRow,
+    QueryClass, QueryFixture, Request, Scope,
 };
 
 // ── Pinned epoch ─────────────────────────────────────────────────────────────────────
@@ -203,13 +203,18 @@ pub fn generate(params: &GenParams) -> ConsortiumDataset {
         let group_uri = roll.group_uri.clone();
         for p_idx in 0..papers_per_institution {
             let uri = format!("{base}inst{inst_idx}/papers/p{p_idx}");
-            papers.push(PaperResource { uri, group_uri: group_uri.clone() });
+            papers.push(PaperResource {
+                uri,
+                group_uri: group_uri.clone(),
+            });
         }
     }
 
     // ── 5. Build instrument resources ─────────────────────────────────────────────────
     let instruments: Vec<InstrumentResource> = (0..n_instruments)
-        .map(|i| InstrumentResource { uri: format!("{base}instruments/inst{i}") })
+        .map(|i| InstrumentResource {
+            uri: format!("{base}instruments/inst{i}"),
+        })
         .collect();
 
     // ── 6. Build N-Quads data graph ───────────────────────────────────────────────────
@@ -228,14 +233,20 @@ pub fn generate(params: &GenParams) -> ConsortiumDataset {
     for ds in &datasets {
         let r = format!("<{}>", ds.uri);
         data_nquads.push(format!("{r} {rdf_type} {schema_dataset} {data_graph} ."));
-        data_nquads.push(format!("{r} {dcterms_title} \"Dataset {}\" {data_graph} .", ds.uri));
+        data_nquads.push(format!(
+            "{r} {dcterms_title} \"Dataset {}\" {data_graph} .",
+            ds.uri
+        ));
     }
 
     // Papers.
     for paper in &papers {
         let r = format!("<{}>", paper.uri);
         data_nquads.push(format!("{r} {rdf_type} {schema_article} {data_graph} ."));
-        data_nquads.push(format!("{r} {dcterms_title} \"Paper {}\" {data_graph} .", paper.uri));
+        data_nquads.push(format!(
+            "{r} {dcterms_title} \"Paper {}\" {data_graph} .",
+            paper.uri
+        ));
     }
 
     // Instruments.
@@ -285,7 +296,11 @@ pub fn generate(params: &GenParams) -> ConsortiumDataset {
                 intents.push(IntentRow {
                     audience: Audience::Group(ds.group_uri.clone()),
                     scope: Scope::Resource,
-                    mode: AccessMode { read: true, write: true, control: false },
+                    mode: AccessMode {
+                        read: true,
+                        write: true,
+                        control: false,
+                    },
                     condition: Condition::None,
                     effect: Effect::Allow,
                     resource_uri: ds.uri.clone(),
@@ -353,7 +368,8 @@ pub fn generate(params: &GenParams) -> ConsortiumDataset {
     for row in &intents {
         // Group members for ACP expansion: flatten the roll for this group.
         let group_members: Vec<String> = if let Audience::Group(ref g) = row.audience {
-            rolls.iter()
+            rolls
+                .iter()
                 .find(|r| &r.group_uri == g)
                 .map(|r| r.members.clone())
                 .unwrap_or_default()
@@ -507,29 +523,36 @@ pub fn generate(params: &GenParams) -> ConsortiumDataset {
             "SELECT ?paper ?instr WHERE {{ GRAPH <{}> {{ ?paper <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Article> . ?instr <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Instrument> . }} }}",
             "https://consortium.example/data"
         );
-        let expected_rows: Vec<String> = instruments.iter().flat_map(|instr| {
-            papers.iter().filter_map(|paper| {
-                let instr_req = Request {
-                    agent: agent.clone(),
-                    client: None,
-                    resource: instr.uri.clone(),
-                    mode: AccessMode::read_only(),
-                };
-                let paper_req = Request {
-                    agent: agent.clone(),
-                    client: None,
-                    resource: paper.uri.clone(),
-                    mode: AccessMode::read_only(),
-                };
-                if oracle_for_model(&instr_req, &intents, &AcModel::Acp) == Decision::Allow
-                    && oracle_for_model(&paper_req, &intents, &AcModel::Acp) == Decision::Allow
-                {
-                    Some(format!("?paper=<{}> ?instr=<{}>", paper.uri, instr.uri))
-                } else {
-                    None
-                }
-            }).collect::<Vec<_>>()
-        }).collect();
+        let expected_rows: Vec<String> = instruments
+            .iter()
+            .flat_map(|instr| {
+                papers
+                    .iter()
+                    .filter_map(|paper| {
+                        let instr_req = Request {
+                            agent: agent.clone(),
+                            client: None,
+                            resource: instr.uri.clone(),
+                            mode: AccessMode::read_only(),
+                        };
+                        let paper_req = Request {
+                            agent: agent.clone(),
+                            client: None,
+                            resource: paper.uri.clone(),
+                            mode: AccessMode::read_only(),
+                        };
+                        if oracle_for_model(&instr_req, &intents, &AcModel::Acp) == Decision::Allow
+                            && oracle_for_model(&paper_req, &intents, &AcModel::Acp)
+                                == Decision::Allow
+                        {
+                            Some(format!("?paper=<{}> ?instr=<{}>", paper.uri, instr.uri))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         queries.push(QueryFixture {
             class: QueryClass::Join,
             sparql,
@@ -844,7 +867,11 @@ fn oracle_odrl_with_embargo(request: &Request, intents: &[IntentRow]) -> Decisio
         }
     }
 
-    if any_permission { Decision::Allow } else { Decision::Deny }
+    if any_permission {
+        Decision::Allow
+    } else {
+        Decision::Deny
+    }
 }
 
 /// Check that the requested modes are all covered by the intent's modes.
@@ -888,12 +915,9 @@ fn audience_matches_odrl_u4(request: &Request, audience: &Audience) -> bool {
             request.agent.starts_with(g.as_str())
         }
         Audience::ClientRestricted { agent, client } => {
-            &request.agent == agent
-                && request.client.as_deref() == Some(client.as_str())
+            &request.agent == agent && request.client.as_deref() == Some(client.as_str())
         }
-        Audience::AllExcept(excl) => {
-            !excl.iter().any(|e| e == &request.agent)
-        }
+        Audience::AllExcept(excl) => !excl.iter().any(|e| e == &request.agent),
     }
 }
 
@@ -911,9 +935,7 @@ fn evaluate_condition_pinned(condition: &Condition) -> bool {
             PINNED_EPOCH_SECS >= start_secs && PINNED_EPOCH_SECS < end_secs
         }
         Condition::Count(n) => *n > 0,
-        Condition::And(a, b) => {
-            evaluate_condition_pinned(a) && evaluate_condition_pinned(b)
-        }
+        Condition::And(a, b) => evaluate_condition_pinned(a) && evaluate_condition_pinned(b),
         // None and Purpose are always satisfied in the U4 oracle.
         Condition::None | Condition::Purpose(_) => true,
     }
@@ -952,7 +974,9 @@ fn iso_to_epoch_secs(s: &str) -> i64 {
 
 /// Parse decimal digits from ASCII bytes.
 fn parse_dec(bytes: &[u8]) -> i64 {
-    bytes.iter().fold(0_i64, |acc, &b| acc * 10 + i64::from(b - b'0'))
+    bytes
+        .iter()
+        .fold(0_i64, |acc, &b| acc * 10 + i64::from(b - b'0'))
 }
 
 // ── Expressibility matrix note ────────────────────────────────────────────────────────

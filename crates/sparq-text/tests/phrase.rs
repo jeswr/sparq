@@ -53,7 +53,10 @@ fn adjacent_phrase_matches() {
         ["a quick brown dog", "the quick brown fox"]
     );
     // The full phrase narrows to the one document containing it adjacently.
-    assert_eq!(values(&g, &idx.phrase("quick brown fox")), ["the quick brown fox"]);
+    assert_eq!(
+        values(&g, &idx.phrase("quick brown fox")),
+        ["the quick brown fox"]
+    );
 }
 
 #[test]
@@ -67,7 +70,10 @@ fn non_adjacent_is_a_near_miss() {
     // which only requires co-occurrence.
     assert_eq!(idx.search("quick brown").len(), 1);
     // Adjacent sub-phrases that DO occur still match.
-    assert_eq!(values(&g, &idx.phrase("brown fox")), ["quick and brown fox"]);
+    assert_eq!(
+        values(&g, &idx.phrase("brown fox")),
+        ["quick and brown fox"]
+    );
 }
 
 #[test]
@@ -106,12 +112,18 @@ fn phrase_honours_the_analyzer() {
     let g = graph_of(&[r#""The Quick Brown Fox""#, r#""ΣΟΦΊΑ City""#]);
     let idx = TextIndex::build_with_positions(&g);
     // Casefolding: the query case is irrelevant.
-    assert_eq!(values(&g, &idx.phrase("QUICK brown")), ["The Quick Brown Fox"]);
+    assert_eq!(
+        values(&g, &idx.phrase("QUICK brown")),
+        ["The Quick Brown Fox"]
+    );
     // Unicode casefolding agrees with the document tokenization.
     assert_eq!(values(&g, &idx.phrase("σοφία city")), ["ΣΟΦΊΑ City"]);
     // Punctuation between words is segmentation, not a token: the phrase
     // "quick, brown" tokenizes to ["quick", "brown"] and still matches.
-    assert_eq!(values(&g, &idx.phrase("quick, brown")), ["The Quick Brown Fox"]);
+    assert_eq!(
+        values(&g, &idx.phrase("quick, brown")),
+        ["The Quick Brown Fox"]
+    );
 }
 
 #[test]
@@ -133,7 +145,11 @@ fn positions_off_by_default() {
     // positions are a pure add-on, never altering the existing query paths.
     let positional = TextIndex::build_with_positions(&g);
     for q in ["quick fox", "the", "br*", "dog", "missing"] {
-        assert_eq!(plain.search(q), positional.search(q), "search({q:?}) diverged");
+        assert_eq!(
+            plain.search(q),
+            positional.search(q),
+            "search({q:?}) diverged"
+        );
         assert_eq!(plain.search_any(q), positional.search_any(q));
     }
     // …but they are NOT equal as values (one carries positions, one does not).
@@ -158,7 +174,9 @@ fn parallel_positional_build_merges_shards() {
     // a handful carry the target phrase, each in a DISTINCT literal (a unique
     // suffix keeps them separate documents) at scattered doc ids, so the
     // matches must be assembled from several shards.
-    let mut lits: Vec<String> = (0..5000).map(|i| format!(r#""filler token number {i}""#)).collect();
+    let mut lits: Vec<String> = (0..5000)
+        .map(|i| format!(r#""filler token number {i}""#))
+        .collect();
     let seeded: Vec<usize> = (0..5000).step_by(900).collect();
     for &i in &seeded {
         lits[i] = format!(r#""the quick brown fox doc{i}""#);
@@ -177,7 +195,8 @@ fn parallel_positional_build_merges_shards() {
     // scramble offsets.
     let vals = values(&g, &hits);
     assert!(
-        vals.iter().all(|v| v.starts_with("the quick brown fox doc")),
+        vals.iter()
+            .all(|v| v.starts_with("the quick brown fox doc")),
         "got {vals:?}"
     );
 }
@@ -200,7 +219,10 @@ fn positions_via_apply_delta() {
     graph.apply_delta(&inserts, &[]).unwrap();
     idx.apply_delta(&graph, &inserts, &[]);
 
-    assert_eq!(values(&graph, &idx.phrase("quick brown")), ["the quick brown fox"]);
+    assert_eq!(
+        values(&graph, &idx.phrase("quick brown")),
+        ["the quick brown fox"]
+    );
     assert!(idx.phrase("brown quick").is_empty());
     // Equal to a from-scratch positional rebuild (the delta differential
     // property extends to positions).
@@ -237,8 +259,15 @@ fn near_slop_zero_is_exact_phrase() {
     ]);
     let idx = TextIndex::build_with_positions(&g);
     let near0 = idx.phrase_near("quick brown", 0);
-    assert_eq!(near_ids(&near0), idx.phrase("quick brown"), "slop 0 == phrase()");
-    assert!(near0.iter().all(|h| h.score == 1.0), "adjacent hits score 1.0");
+    assert_eq!(
+        near_ids(&near0),
+        idx.phrase("quick brown"),
+        "slop 0 == phrase()"
+    );
+    assert!(
+        near0.iter().all(|h| h.score == 1.0),
+        "adjacent hits score 1.0"
+    );
     assert_eq!(
         sorted(near_values(&g, &near0)),
         ["a quick brown dog", "the quick brown fox"]
@@ -250,14 +279,17 @@ fn near_admits_a_bounded_gap_and_ranks_tighter_first() {
     // Three docs with the same two tokens at growing separation. Higher slop
     // admits looser docs; the result is ranked tightest-first.
     let g = graph_of(&[
-        r#""quick brown""#,            // gap 0
-        r#""quick the brown""#,        // gap 1
-        r#""quick the lazy brown""#,   // gap 2
+        r#""quick brown""#,          // gap 0
+        r#""quick the brown""#,      // gap 1
+        r#""quick the lazy brown""#, // gap 2
     ]);
     let idx = TextIndex::build_with_positions(&g);
 
     // slop 0: only the adjacent doc.
-    assert_eq!(near_values(&g, &idx.phrase_near("quick brown", 0)), ["quick brown"]);
+    assert_eq!(
+        near_values(&g, &idx.phrase_near("quick brown", 0)),
+        ["quick brown"]
+    );
     // slop 1: the adjacent + the gap-1 doc, tightest first.
     assert_eq!(
         near_values(&g, &idx.phrase_near("quick brown", 1)),
@@ -281,11 +313,11 @@ fn near_slop_n_is_a_superset_of_slop_zero() {
     // The defining monotonicity: slop 0 ⊆ slop 1 ⊆ slop 2 ⊆ … (a larger gap
     // budget only ever admits more documents, never drops one).
     let g = graph_of(&[
-        r#""alpha beta""#,             // gap 0
-        r#""alpha x beta""#,           // gap 1
-        r#""alpha x y beta""#,         // gap 2
-        r#""beta alpha""#,             // reversed: never matches
-        r#""alpha lonely""#,          // beta absent: never matches
+        r#""alpha beta""#,     // gap 0
+        r#""alpha x beta""#,   // gap 1
+        r#""alpha x y beta""#, // gap 2
+        r#""beta alpha""#,     // reversed: never matches
+        r#""alpha lonely""#,   // beta absent: never matches
     ]);
     let idx = TextIndex::build_with_positions(&g);
     let set = |slop| {
@@ -304,7 +336,11 @@ fn near_slop_n_is_a_superset_of_slop_zero() {
     assert_eq!(s0.len(), 1);
     assert_eq!(s1.len(), 2);
     assert_eq!(s2.len(), 3);
-    assert_eq!(s5.len(), 3, "no further docs to admit (the rest can't match in order)");
+    assert_eq!(
+        s5.len(),
+        3,
+        "no further docs to admit (the rest can't match in order)"
+    );
 }
 
 #[test]
@@ -313,7 +349,10 @@ fn near_slop_boundary_is_inclusive() {
     // right on the boundary at slop 2.
     let g = graph_of(&[r#""quick the lazy brown""#]); // "quick".."brown" gap = 2
     let idx = TextIndex::build_with_positions(&g);
-    assert!(idx.phrase_near("quick brown", 1).is_empty(), "gap 2 > slop 1: no match");
+    assert!(
+        idx.phrase_near("quick brown", 1).is_empty(),
+        "gap 2 > slop 1: no match"
+    );
     assert_eq!(
         near_values(&g, &idx.phrase_near("quick brown", 2)),
         ["quick the lazy brown"],
@@ -330,7 +369,10 @@ fn near_uses_the_tightest_occurrence_for_the_score() {
     // The first "quick … brown" has gap 2; the second is adjacent (gap 0).
     let hits = idx.phrase_near("quick brown", 5);
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].score, 1.0, "scored by the adjacent (gap 0) occurrence");
+    assert_eq!(
+        hits[0].score, 1.0,
+        "scored by the adjacent (gap 0) occurrence"
+    );
 }
 
 #[test]
@@ -338,8 +380,14 @@ fn near_order_is_significant() {
     // No slop, however large, makes a reversed phrase match.
     let g = graph_of(&[r#""foo bar baz""#]);
     let idx = TextIndex::build_with_positions(&g);
-    assert!(!idx.phrase_near("foo baz", 100).is_empty(), "in order within slop");
-    assert!(idx.phrase_near("baz foo", 100).is_empty(), "reversed never matches");
+    assert!(
+        !idx.phrase_near("foo baz", 100).is_empty(),
+        "in order within slop"
+    );
+    assert!(
+        idx.phrase_near("baz foo", 100).is_empty(),
+        "reversed never matches"
+    );
 }
 
 #[test]
@@ -348,7 +396,10 @@ fn near_single_token_is_presence_at_score_one() {
     let idx = TextIndex::build_with_positions(&g);
     let hits = idx.phrase_near("beta", 3);
     assert_eq!(sorted(near_values(&g, &hits)), ["alpha beta", "beta gamma"]);
-    assert!(hits.iter().all(|h| h.score == 1.0), "presence is a perfect gap-0 match");
+    assert!(
+        hits.iter().all(|h| h.score == 1.0),
+        "presence is a perfect gap-0 match"
+    );
     assert!(idx.phrase_near("missing", 9).is_empty());
 }
 
@@ -368,7 +419,10 @@ fn near_honours_the_analyzer() {
     // Casefolding + a gap of 1 ("lazy" between).
     let hits = idx.phrase_near("QUICK, brown", 1);
     assert_eq!(near_values(&g, &hits), ["The Quick Lazy Brown Fox"]);
-    assert_eq!(hits[0].score, 0.5, "one intervening token = gap 1 = score 0.5");
+    assert_eq!(
+        hits[0].score, 0.5,
+        "one intervening token = gap 1 = score 0.5"
+    );
 }
 
 #[test]

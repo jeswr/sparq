@@ -20,7 +20,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_sparq-cli")).args(args).output().expect("spawning sparq-cli")
+    Command::new(env!("CARGO_BIN_EXE_sparq-cli"))
+        .args(args)
+        .output()
+        .expect("spawning sparq-cli")
 }
 
 /// (exit code, stdout, stderr) from the built binary; a signal death reports as -1.
@@ -52,7 +55,11 @@ fn s(p: &Path) -> &str {
 
 /// Sorted, deduplicated non-empty lines — triple SET comparison.
 fn triple_set(nt: &str) -> Vec<String> {
-    let mut v: Vec<String> = nt.lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect();
+    let mut v: Vec<String> = nt
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
     v.sort();
     v.dedup();
     v
@@ -80,7 +87,10 @@ fn direct_one_shot_query() {
         "tsv",
     ]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(err.contains("loaded 6 triples"), "2 rows x (2 cols + rdf:type): {err}");
+    assert!(
+        err.contains("loaded 6 triples"),
+        "2 rows x (2 cols + rdf:type): {err}"
+    );
     assert!(out.contains("\"alice\""), "{out}");
     assert!(!out.contains("\"bob\""), "{out}");
 }
@@ -142,11 +152,15 @@ fn direct_flags_template_class_none_no_infer() {
 fn direct_compressed_inputs_gz_and_zst() {
     let dir = scratch("direct-compressed");
     let gz = dir.join("people.csv.gz");
-    let mut enc = flate2::write::GzEncoder::new(std::fs::File::create(&gz).unwrap(), flate2::Compression::default());
+    let mut enc = flate2::write::GzEncoder::new(
+        std::fs::File::create(&gz).unwrap(),
+        flate2::Compression::default(),
+    );
     enc.write_all(PEOPLE_CSV.as_bytes()).unwrap();
     enc.finish().unwrap();
     let zst = dir.join("people.csv.zst");
-    let mut enc = zstd::stream::write::Encoder::new(std::fs::File::create(&zst).unwrap(), 0).unwrap();
+    let mut enc =
+        zstd::stream::write::Encoder::new(std::fs::File::create(&zst).unwrap(), 0).unwrap();
     enc.write_all(PEOPLE_CSV.as_bytes()).unwrap();
     enc.finish().unwrap();
     for path in [&gz, &zst] {
@@ -179,7 +193,9 @@ fn direct_out_gz_roundtrip() {
     std::io::Read::read_to_string(&mut dec, &mut nt).unwrap();
     assert_eq!(
         triple_set(&nt),
-        triple_set(r#"<http://example.com/t/row/1> <http://example.com/t#a> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ."#)
+        triple_set(
+            r#"<http://example.com/t/row/1> <http://example.com/t#a> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ."#
+        )
     );
 }
 
@@ -199,7 +215,11 @@ fn r2rml_fixture_suite() {
         .filter(|p| p.is_dir())
         .collect();
     cases.sort();
-    assert!(cases.len() >= 10, "expected the full fixture suite, found {}", cases.len());
+    assert!(
+        cases.len() >= 10,
+        "expected the full fixture suite, found {}",
+        cases.len()
+    );
     for case in cases {
         let name = case.file_name().unwrap().to_str().unwrap().to_owned();
         let mapping = case.join("mapping.ttl");
@@ -213,7 +233,12 @@ fn r2rml_fixture_suite() {
         let out_nt = scratch.join(format!("{name}.nt"));
         let mut args: Vec<String> = vec!["tabular".into()];
         args.extend(csvs.iter().map(|p| s(p).to_owned()));
-        args.extend(["--mapping".into(), s(&mapping).to_owned(), "--out".into(), s(&out_nt).to_owned()]);
+        args.extend([
+            "--mapping".into(),
+            s(&mapping).to_owned(),
+            "--out".into(),
+            s(&out_nt).to_owned(),
+        ]);
         let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
         let (code, _, err) = run3(&argrefs);
         assert_eq!(code, 0, "case {name}: stderr: {err}");
@@ -225,7 +250,8 @@ fn r2rml_fixture_suite() {
 /// The R2RML path also LOADS and queries in one shot (not just `--out`).
 #[test]
 fn r2rml_one_shot_query() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml/tc0002a-columns-typed");
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml/tc0002a-columns-typed");
     let (code, out, err) = run3(&[
         "tabular",
         s(&root.join("student.csv")),
@@ -244,14 +270,21 @@ fn r2rml_one_shot_query() {
 #[test]
 fn r2rml_explicit_table_binding() {
     let dir = scratch("r2rml-binding");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml/tc0001a-template-class");
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml/tc0001a-template-class");
     // Copy the CSV under a NON-matching name; bind it explicitly to the `student` table.
     let renamed = dir.join("other-name.csv");
     std::fs::copy(root.join("student.csv"), &renamed).unwrap();
     let binding = format!("student={}", s(&renamed));
     let out_nt = dir.join("out.nt");
-    let (code, _, err) =
-        run3(&["tabular", &binding, "--mapping", s(&root.join("mapping.ttl")), "--out", s(&out_nt)]);
+    let (code, _, err) = run3(&[
+        "tabular",
+        &binding,
+        "--mapping",
+        s(&root.join("mapping.ttl")),
+        "--out",
+        s(&out_nt),
+    ]);
     assert_eq!(code, 0, "stderr: {err}");
     let got = triple_set(&std::fs::read_to_string(&out_nt).unwrap());
     assert_eq!(got.len(), 1, "{got:?}");
@@ -297,7 +330,14 @@ fn r2rml_graph_map_out_nquads() {
     let csv = write(&dir, "t.csv", "id,v,cat\n1,x,red\n2,y,blue\n");
     let mapping = write(&dir, "m.ttl", GRAPH_MAPPING);
     let out_nq = dir.join("out.nq");
-    let (code, _, err) = run3(&["tabular", s(&csv), "--mapping", s(&mapping), "--out", s(&out_nq)]);
+    let (code, _, err) = run3(&[
+        "tabular",
+        s(&csv),
+        "--mapping",
+        s(&mapping),
+        "--out",
+        s(&out_nq),
+    ]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(err.contains("wrote 2 quads"), "quad wording: {err}");
     let got = triple_set(&std::fs::read_to_string(&out_nq).unwrap());
@@ -327,7 +367,10 @@ fn r2rml_graph_map_loads_named_graphs() {
     ]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(err.contains("loaded 2 quads"), "{err}");
-    assert!(out.contains("<http://example.com/g/red>"), "named graph must survive the load: {out}");
+    assert!(
+        out.contains("<http://example.com/g/red>"),
+        "named graph must survive the load: {out}"
+    );
     assert!(!out.contains("g/blue"), "{out}");
 }
 
@@ -367,8 +410,15 @@ fn row_provenance_direct_and_r2rml() {
            rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column \"name\" ] ] .\n",
     );
     let out_nt = dir.join("r2rml.nt");
-    let (code, _, err) =
-        run3(&["tabular", s(&csv), "--mapping", s(&mapping), "--row-provenance", "--out", s(&out_nt)]);
+    let (code, _, err) = run3(&[
+        "tabular",
+        s(&csv),
+        "--mapping",
+        s(&mapping),
+        "--row-provenance",
+        "--out",
+        s(&out_nt),
+    ]);
     assert_eq!(code, 0, "stderr: {err}");
     let got = triple_set(&std::fs::read_to_string(&out_nt).unwrap());
     assert_eq!(
@@ -394,7 +444,11 @@ fn errors_are_loud_and_typed() {
     assert_eq!(code, 2, "no files is a usage error");
     let (code, _, err) = run3(&["tabular", s(&csv), "--bogus"]);
     assert_eq!(code, 2, "unknown flag: {err}");
-    let mapping = write(&dir, "m.ttl", "@prefix rr: <http://www.w3.org/ns/r2rml#> .\n");
+    let mapping = write(
+        &dir,
+        "m.ttl",
+        "@prefix rr: <http://www.w3.org/ns/r2rml#> .\n",
+    );
     let (code, _, err) = run3(&["tabular", s(&csv), "--mapping", s(&mapping), "--no-infer"]);
     assert_eq!(code, 2, "direct-mapping flag with --mapping: {err}");
     assert!(err.contains("direct-mapping"), "{err}");
@@ -410,7 +464,14 @@ fn errors_are_loud_and_typed() {
         "bad.ttl",
         "@prefix rr: <http://www.w3.org/ns/r2rml#> .\n<#T> rr:logicalTable [ rr:tableName \"t\" ] ;\n rr:subjectMap [ rr:template \"http://e/{missing}\" ] .\n",
     );
-    let (code, _, err) = run3(&["tabular", s(&csv), "--mapping", s(&bad_map), "--out", s(&dir.join("y.nt"))]);
+    let (code, _, err) = run3(&[
+        "tabular",
+        s(&csv),
+        "--mapping",
+        s(&bad_map),
+        "--out",
+        s(&dir.join("y.nt")),
+    ]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("not found"), "{err}");
 
@@ -419,7 +480,14 @@ fn errors_are_loud_and_typed() {
         "sql.ttl",
         "@prefix rr: <http://www.w3.org/ns/r2rml#> .\n<#T> rr:logicalTable [ rr:sqlQuery \"SELECT 1\" ] ;\n rr:subjectMap [ rr:template \"http://e/x\" ] .\n",
     );
-    let (code, _, err) = run3(&["tabular", s(&csv), "--mapping", s(&sql_map), "--out", s(&dir.join("z.nt"))]);
+    let (code, _, err) = run3(&[
+        "tabular",
+        s(&csv),
+        "--mapping",
+        s(&sql_map),
+        "--out",
+        s(&dir.join("z.nt")),
+    ]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("rr:sqlQuery"), "{err}");
 }

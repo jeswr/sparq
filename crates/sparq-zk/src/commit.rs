@@ -103,9 +103,7 @@ impl CommitmentMethod {
     /// [`RegistryEntry`]: crate::registry::RegistryEntry
     pub const fn scheme_iri(self) -> &'static str {
         match self {
-            CommitmentMethod::StringCanonicalV1 => {
-                crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1
-            }
+            CommitmentMethod::StringCanonicalV1 => crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1,
             CommitmentMethod::DualLeafV1 => crate::registry::ZK_SCHEME_POSEIDON2_DUALLEAF_V1,
             #[cfg(feature = "commitment-value-only")]
             CommitmentMethod::ValueOnlyV1 => crate::registry::ZK_SCHEME_POSEIDON2_VALUEHOOK_V1,
@@ -220,7 +218,10 @@ impl GraphCommitment {
     /// Leaf index of a canonical-form triple (bnode labels must be the
     /// RDFC10 canonical labels). `None` if the triple is not in the graph.
     pub fn leaf_index(&self, canonical_triple: &Triple) -> Option<usize> {
-        self.canonical.triples.iter().position(|t| t == canonical_triple)
+        self.canonical
+            .triples
+            .iter()
+            .position(|t| t == canonical_triple)
     }
 
     /// An index from canonical triple to leaf position, for bulk resolution
@@ -242,7 +243,10 @@ pub fn commit_triples(triples: &[Triple], salt: Fr) -> Result<GraphCommitment, C
 }
 
 /// Commits the content of a `sparq_core::Graph` under `salt`.
-pub fn commit_graph_content(g: &sparq_core::Graph, salt: Fr) -> Result<GraphCommitment, CommitError> {
+pub fn commit_graph_content(
+    g: &sparq_core::Graph,
+    salt: Fr,
+) -> Result<GraphCommitment, CommitError> {
     let canonical = canon::canonicalize_graph_content(g)?;
     commit_canonical(canonical, salt)
 }
@@ -255,7 +259,12 @@ fn commit_canonical(canonical: CanonicalGraph, salt: Fr) -> Result<GraphCommitme
         leaves.push(leaf);
     }
     let commitment = poseidon2::hash(&leaves);
-    Ok(GraphCommitment { canonical, leaves, commitment, salt })
+    Ok(GraphCommitment {
+        canonical,
+        leaves,
+        commitment,
+        salt,
+    })
 }
 
 #[cfg(test)]
@@ -300,7 +309,10 @@ mod tests {
         let g = bnode_graph("x", "v");
         let c1 = commit_triples(&g, salt_from_bytes(&[1u8; 32])).unwrap();
         let c2 = commit_triples(&g, salt_from_bytes(&[2u8; 32])).unwrap();
-        assert_eq!(c1.canonical.lines, c2.canonical.lines, "canonical form is salt-free");
+        assert_eq!(
+            c1.canonical.lines, c2.canonical.lines,
+            "canonical form is salt-free"
+        );
         for (l1, l2) in c1.leaves.iter().zip(&c2.leaves) {
             assert_ne!(l1, l2, "every bnode-bearing leaf must be salt-separated");
         }
@@ -313,8 +325,14 @@ mod tests {
     fn method_default_is_string_canonical() {
         // §10 default: string-canonical is THE default (back-compat anchor); the
         // byte-unchanged pipeline. Neither dual-leaf nor value-only is ever default.
-        assert_eq!(CommitmentMethod::default(), CommitmentMethod::StringCanonicalV1);
-        assert_eq!(CommitmentMethod::DEFAULT, CommitmentMethod::StringCanonicalV1);
+        assert_eq!(
+            CommitmentMethod::default(),
+            CommitmentMethod::StringCanonicalV1
+        );
+        assert_eq!(
+            CommitmentMethod::DEFAULT,
+            CommitmentMethod::StringCanonicalV1
+        );
     }
 
     #[test]
@@ -338,11 +356,18 @@ mod tests {
         // Each method MUST carry a DISTINCT zk:scheme IRI so a registry entry
         // records exactly how it was committed and a verifier can fail closed on
         // a mismatch (design §2.1).
-        let iris: Vec<&str> = commitment_methods_in_build().iter().map(|m| m.scheme_iri()).collect();
+        let iris: Vec<&str> = commitment_methods_in_build()
+            .iter()
+            .map(|m| m.scheme_iri())
+            .collect();
         let mut sorted = iris.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), iris.len(), "scheme IRIs must be pairwise distinct");
+        assert_eq!(
+            sorted.len(),
+            iris.len(),
+            "scheme IRIs must be pairwise distinct"
+        );
     }
 
     #[test]
@@ -364,12 +389,19 @@ mod tests {
     fn method_parse_is_fail_closed_on_unknown() {
         // §10 default (1): an unknown / unrecognized zk:scheme IRI returns None,
         // NEVER a default — the closed-enum, fail-closed discipline.
-        assert_eq!(CommitmentMethod::from_scheme_iri("https://sparq.dev/ns/zk#poseidon2-bogus"), None);
+        assert_eq!(
+            CommitmentMethod::from_scheme_iri("https://sparq.dev/ns/zk#poseidon2-bogus"),
+            None
+        );
         assert_eq!(CommitmentMethod::from_scheme_iri(""), None);
         assert_eq!(CommitmentMethod::from_scheme_iri("not-an-iri"), None);
         // The signature cryptosuite IRI is a DIFFERENT axis — not a commitment method.
         assert_eq!(
-            CommitmentMethod::from_scheme_iri(crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1.replace("rdfc10", "schnorr").as_str()),
+            CommitmentMethod::from_scheme_iri(
+                crate::registry::ZK_SCHEME_POSEIDON2_RDFC10_V1
+                    .replace("rdfc10", "schnorr")
+                    .as_str()
+            ),
             None
         );
     }
@@ -394,9 +426,15 @@ mod tests {
     #[test]
     fn value_only_is_research_dial_only() {
         let m = CommitmentMethod::ValueOnlyV1;
-        assert!(!m.is_production_selectable(), "value-only must never be production-selectable");
+        assert!(
+            !m.is_production_selectable(),
+            "value-only must never be production-selectable"
+        );
         assert!(m.removes_inv_vl());
-        assert_eq!(m.scheme_iri(), "https://sparq.dev/ns/zk#poseidon2-valuehook-v1");
+        assert_eq!(
+            m.scheme_iri(),
+            "https://sparq.dev/ns/zk#poseidon2-valuehook-v1"
+        );
         assert_eq!(CommitmentMethod::from_scheme_iri(m.scheme_iri()), Some(m));
     }
 
@@ -416,7 +454,10 @@ mod tests {
     /// feature-state-aware set the round-trip/distinctness tests sweep).
     fn commitment_methods_in_build() -> Vec<CommitmentMethod> {
         #[allow(unused_mut)]
-        let mut v = vec![CommitmentMethod::StringCanonicalV1, CommitmentMethod::DualLeafV1];
+        let mut v = vec![
+            CommitmentMethod::StringCanonicalV1,
+            CommitmentMethod::DualLeafV1,
+        ];
         #[cfg(feature = "commitment-value-only")]
         v.push(CommitmentMethod::ValueOnlyV1);
         v
@@ -452,7 +493,13 @@ mod tests {
         assert_eq!(map.len(), c.canonical.triples.len());
         assert!(!map.is_empty());
         for (i, t) in c.canonical.triples.iter().enumerate() {
-            assert_eq!(map.get(t), Some(&i), "map must resolve triple {} to leaf {}", i, i);
+            assert_eq!(
+                map.get(t),
+                Some(&i),
+                "map must resolve triple {} to leaf {}",
+                i,
+                i
+            );
             assert_eq!(c.leaf_index(t), Some(i), "map must agree with leaf_index");
         }
         let absent = Triple::new(
@@ -493,7 +540,10 @@ mod tests {
             .iter()
             .map(|t| crate::encode::encode_triple(t, &salt).unwrap())
             .collect();
-        assert_eq!(c.leaves, recomputed_leaves, "leaves must be encode_triple per canonical triple");
+        assert_eq!(
+            c.leaves, recomputed_leaves,
+            "leaves must be encode_triple per canonical triple"
+        );
         assert_eq!(
             c.commitment,
             poseidon2::hash(&recomputed_leaves),

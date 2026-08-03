@@ -74,7 +74,8 @@ pub mod vocab {
     /// `geo:hasGeometry` — feature -> geometry node (GeoSPARQL 8.3).
     pub const HAS_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasGeometry";
     /// `geo:hasDefaultGeometry` — feature -> default geometry node (GeoSPARQL 8.3).
-    pub const HAS_DEFAULT_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasDefaultGeometry";
+    pub const HAS_DEFAULT_GEOMETRY: &str =
+        "http://www.opengis.net/ont/geosparql#hasDefaultGeometry";
     // ---- geometry-METADATA properties (GeoSPARQL 8.4; OGC R9). [OPUS-4.8] sq-mzmh ----
     /// `geo:dimension` — topological dimension of a geometry (`xsd:integer`).
     pub const DIMENSION: &str = "http://www.opengis.net/ont/geosparql#dimension";
@@ -126,7 +127,10 @@ impl std::fmt::Display for GeoError {
             GeoError::Parse(m) => write!(f, "geometry parse error: {m}"),
             GeoError::CrsMismatch(a, b) => write!(f, "CRS mismatch: <{a}> vs <{b}>"),
             GeoError::NonGeographicCrs(c) => {
-                write!(f, "operation requires a geographic CRS (CRS84/EPSG:4326), got <{c}>")
+                write!(
+                    f,
+                    "operation requires a geographic CRS (CRS84/EPSG:4326), got <{c}>"
+                )
             }
             GeoError::UnknownUnit(u) => write!(f, "unknown unit of measure: <{u}>"),
             GeoError::Unsupported(m) => write!(f, "unsupported: {m}"),
@@ -152,10 +156,16 @@ mod error_display_tests {
         assert!(crs.contains("urn:a") && crs.contains("urn:b"), "{crs}");
 
         let non_geo = GeoError::NonGeographicCrs("urn:proj".to_string()).to_string();
-        assert!(non_geo.contains("urn:proj") && non_geo.contains("geographic"), "{non_geo}");
+        assert!(
+            non_geo.contains("urn:proj") && non_geo.contains("geographic"),
+            "{non_geo}"
+        );
 
         let unit = GeoError::UnknownUnit("urn:furlong".to_string()).to_string();
-        assert!(unit.contains("urn:furlong") && unit.contains("unit"), "{unit}");
+        assert!(
+            unit.contains("urn:furlong") && unit.contains("unit"),
+            "{unit}"
+        );
 
         let unsup = GeoError::Unsupported("no can do".to_string()).to_string();
         assert!(unsup.contains("no can do"), "{unsup}");

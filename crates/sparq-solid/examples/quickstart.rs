@@ -6,7 +6,7 @@
 //! (debug works too; the N3 materialization just takes ~10x longer)
 
 use sparq_core::Graph;
-use sparq_solid::fixture::{wac_fixture, ALICE, BOB, CAROL, APP};
+use sparq_solid::fixture::{wac_fixture, ALICE, APP, BOB, CAROL};
 use sparq_solid::{Mode, PodStore, Session};
 
 fn main() -> Result<(), String> {
@@ -19,18 +19,42 @@ fn main() -> Result<(), String> {
     //    auth view — the N3 rules run and install <urn:sparq:auth>.
     let mut store = PodStore::new(graph);
     let stats = store.materialize_wac()?;
-    println!("materialized {} auth triples in {:.0} ms", stats.auth_triples, stats.millis);
+    println!(
+        "materialized {} auth triples in {:.0} ms",
+        stats.auth_triples, stats.millis
+    );
 
     // 3. Open sessions and run the same query as each of them. `query_as` is the
     //    fast path: it evaluates through the engine's zero-copy DatasetView — graph
     //    visibility is an O(1) hash check, nothing is copied per query.
     let query = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
     for (label, session) in [
-        ("alice (pod owner)", Session { agent: Some(ALICE), client: None, issuer: None, now: None }),
-        ("carol (team member)", Session { agent: Some(CAROL), client: None, issuer: None, now: None }),
+        (
+            "alice (pod owner)",
+            Session {
+                agent: Some(ALICE),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+        ),
+        (
+            "carol (team member)",
+            Session {
+                agent: Some(CAROL),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+        ),
         (
             "bob via app.ex (acl:origin pair)",
-            Session { agent: Some(BOB), client: Some(APP), issuer: None, now: None },
+            Session {
+                agent: Some(BOB),
+                client: Some(APP),
+                issuer: None,
+                now: None,
+            },
         ),
         ("anonymous", Session::default()),
     ] {
@@ -45,11 +69,22 @@ fn main() -> Result<(), String> {
         "SELECT (COUNT(*) AS ?grants) WHERE { GRAPH <urn:sparq:auth> {
            ?principal <https://sparq.dev/ns/auth#read> ?graph } }",
     )?;
-    println!("auth view: {:?} read grants", who.rows[0][0].as_ref().map(|t| t.to_string()));
+    println!(
+        "auth view: {:?} read grants",
+        who.rows[0][0].as_ref().map(|t| t.to_string())
+    );
 
     // sanity: the fixture's hand-derived counts (same as tests/e2e.rs)
-    let alice =
-        store.query_as(&Session { agent: Some(ALICE), client: None, issuer: None, now: None }, Mode::Read, query)?;
+    let alice = store.query_as(
+        &Session {
+            agent: Some(ALICE),
+            client: None,
+            issuer: None,
+            now: None,
+        },
+        Mode::Read,
+        query,
+    )?;
     let anon = store.query_as(&Session::default(), Mode::Read, query)?;
     assert_eq!(alice.rows.len(), 599);
     assert_eq!(anon.rows.len(), 144);

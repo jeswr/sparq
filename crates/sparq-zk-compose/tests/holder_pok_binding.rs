@@ -34,9 +34,7 @@ use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use sparq_zk::commit::commit_triples;
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk::field::Fr;
-use sparq_zk::sig::{
-    holder_key_digest, public_key_to_hex, PublicKey, SecretKey, SignatureScheme,
-};
+use sparq_zk::sig::{holder_key_digest, public_key_to_hex, PublicKey, SecretKey, SignatureScheme};
 use sparq_zk_compose::build::{build_scan, Pattern, Slot};
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::holder::holder_pok_witness;
@@ -336,7 +334,9 @@ fn holder_pok_malformed_commitment_rejected() {
         &InMemorySeenNonces::new(),
     ) {
         Err(CheckError::HolderPokMalformedProof) => {}
-        other => panic!("a malformed PoK commitment must be HolderPokMalformedProof, got {other:?}"),
+        other => {
+            panic!("a malformed PoK commitment must be HolderPokMalformedProof, got {other:?}")
+        }
     }
 }
 
@@ -433,7 +433,9 @@ fn prove_scan(prover: &CircuitProver, salt: Fr, tag: &str) -> (ProofInputs, Stri
     )
     .unwrap();
     let out = scratch(&format!("{tag}_scan"));
-    let art = prover.prove_in(&id, &toml, &out, tag).expect("scan prove succeeds");
+    let art = prover
+        .prove_in(&id, &toml, &out, tag)
+        .expect("scan prove succeeds");
     (scan.inputs, encode_artifacts(&art))
 }
 
@@ -448,10 +450,8 @@ fn prove_holder_pok(
     tag: &str,
 ) -> String {
     let witness = holder_pok_witness(hsk).expect("non-identity holder has a witness");
-    let toml = sparq_zk_compose::holder::holder_pok_prover_toml(
-        &challenge.to_field().unwrap(),
-        &witness,
-    );
+    let toml =
+        sparq_zk_compose::holder::holder_pok_prover_toml(&challenge.to_field().unwrap(), &witness);
     let out = scratch(&format!("{tag}_pok"));
     let art = prover
         .prove_in(&CircuitId::HolderPok, &toml, &out, tag)
@@ -595,8 +595,12 @@ fn holder_pok_wrong_holder_rejected_digest_mismatch() {
     // A genuinely VALID holder_pok proof, but for the WRONG holder (other_holder):
     // its public digest is holder_key_digest(other_holder), not the issuer-attested
     // holder_key_digest(bound_holder).
-    let pok_hex =
-        prove_holder_pok(&prover, &other_holder, &FieldHex(CHALLENGE_HEX.into()), "pok_wrong");
+    let pok_hex = prove_holder_pok(
+        &prover,
+        &other_holder,
+        &FieldHex(CHALLENGE_HEX.into()),
+        "pok_wrong",
+    );
     // The presenter is the bound holder (so the B1 clear gate + PoP pass), but the
     // in-circuit PoK proves possession of the wrong key.
     let m = full_manifest(
@@ -636,7 +640,12 @@ fn holder_pok_tampered_proof_rejected() {
     let prover = CircuitProver::from_crate_root();
 
     let (scan_inputs, scan_hex) = prove_scan(&prover, salt, "pok_tamper");
-    let pok_hex = prove_holder_pok(&prover, &holder, &FieldHex(CHALLENGE_HEX.into()), "pok_tamper");
+    let pok_hex = prove_holder_pok(
+        &prover,
+        &holder,
+        &FieldHex(CHALLENGE_HEX.into()),
+        "pok_tamper",
+    );
     // Flip one hex nibble INSIDE the proof bytes (the blob layout is
     // `len(4) | proof | len(4) | pi | vk`; the verifier ignores the prover vk and
     // recomputes the canonical one, so a tail/vk byte would NOT change the verdict).

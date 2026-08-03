@@ -165,7 +165,9 @@ mod tests {
             );
         }
         // The fold target itself, the other primitive numerics, and non-XSD datatypes: unchanged.
-        for kept in ["integer", "decimal", "double", "float", "string", "dateTime", "boolean"] {
+        for kept in [
+            "integer", "decimal", "double", "float", "string", "dateTime", "boolean",
+        ] {
             let dt = format!("{XSD}{kept}");
             assert_eq!(fold_derived_integer(&dt), dt, "xsd:{kept} must NOT fold");
         }
@@ -207,7 +209,9 @@ mod tests {
     /// Every term kind crosses structurally, and the kinds stay distinguishable from each other.
     #[test]
     fn neutral_term_carries_every_kind() {
-        assert!(matches!(neutral_term(&iri("http://ex/n0")), NeutralTerm::Iri(s) if s == "http://ex/n0"));
+        assert!(
+            matches!(neutral_term(&iri("http://ex/n0")), NeutralTerm::Iri(s) if s == "http://ex/n0")
+        );
         assert!(
             matches!(neutral_term(&Term::BlankNode(BlankNode::new("b0").unwrap())), NeutralTerm::Blank(s) if s == "b0")
         );
@@ -220,18 +224,24 @@ mod tests {
         ));
         assert_ne!(
             canonical_key(&neutral_term(&lang)),
-            canonical_key(&neutral_term(&Term::Literal(Literal::new_simple_literal("nm0"))))
+            canonical_key(&neutral_term(&Term::Literal(Literal::new_simple_literal(
+                "nm0"
+            ))))
         );
         // A simple literal folds to xsd:string in the neutral key (RDF 1.1), so it keys the same
         // as the explicitly typed form.
         assert_eq!(
-            canonical_key(&neutral_term(&Term::Literal(Literal::new_simple_literal("s1")))),
+            canonical_key(&neutral_term(&Term::Literal(Literal::new_simple_literal(
+                "s1"
+            )))),
             canonical_key(&neutral_term(&typed("s1", "string")))
         );
         // An IRI and a blank node are different KINDS of term, never interchangeable.
         assert_ne!(
             canonical_key(&neutral_term(&iri("http://ex/b0"))),
-            canonical_key(&neutral_term(&Term::BlankNode(BlankNode::new("b0").unwrap())))
+            canonical_key(&neutral_term(&Term::BlankNode(
+                BlankNode::new("b0").unwrap()
+            )))
         );
     }
 
@@ -248,7 +258,10 @@ mod tests {
         assert!(matches!(&n[0], NeutralTerm::Iri(s) if s == "http://ex/s"));
         assert!(matches!(&n[1], NeutralTerm::Iri(s) if s == "http://ex/p"));
         // The object's derived integer datatype folded, so it keys as xsd:integer.
-        assert_eq!(canonical_key(&n[2]), canonical_key(&neutral_term(&typed("1", "integer"))));
+        assert_eq!(
+            canonical_key(&n[2]),
+            canonical_key(&neutral_term(&typed("1", "integer")))
+        );
         // A blank-node subject stays a blank node (not an IRI), and a nested triple term nests.
         let bnode_subject = Triple::new(
             BlankNode::new("b1").unwrap(),

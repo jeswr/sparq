@@ -70,7 +70,10 @@ fn plain_lit(value: &str) -> Term {
 }
 
 fn typed_lit(value: &str, datatype: &str) -> Term {
-    Term::Literal(Literal::new_typed_literal(value, NamedNode::new_unchecked(datatype)))
+    Term::Literal(Literal::new_typed_literal(
+        value,
+        NamedNode::new_unchecked(datatype),
+    ))
 }
 
 fn lang_lit(value: &str, lang: &str) -> Term {
@@ -179,21 +182,24 @@ fn arb_plain_lit() -> impl Strategy<Value = Term> {
 /// A typed literal with a non-string datatype (xsd:integer is tested via inline-id path,
 /// xsd:boolean exercises the "non-string typed" code path in the NT serializer).
 fn arb_typed_lit() -> impl Strategy<Value = Term> {
-    (arb_lit_value(), prop_oneof![
-        Just("http://www.w3.org/2001/XMLSchema#boolean"),
-        Just("http://www.w3.org/2001/XMLSchema#integer"),
-        Just("http://ex/mytype"),
-    ]).prop_map(|(v, dt)| typed_lit(&v, dt))
+    (
+        arb_lit_value(),
+        prop_oneof![
+            Just("http://www.w3.org/2001/XMLSchema#boolean"),
+            Just("http://www.w3.org/2001/XMLSchema#integer"),
+            Just("http://ex/mytype"),
+        ],
+    )
+        .prop_map(|(v, dt)| typed_lit(&v, dt))
 }
 
 /// A language-tagged literal.
 fn arb_lang_lit() -> impl Strategy<Value = Term> {
-    (arb_lit_value(), prop_oneof![
-        Just("en"),
-        Just("fr"),
-        Just("zh"),
-        Just("de"),
-    ]).prop_map(|(v, lang)| lang_lit(&v, lang))
+    (
+        arb_lit_value(),
+        prop_oneof![Just("en"), Just("fr"), Just("zh"), Just("de"),],
+    )
+        .prop_map(|(v, lang)| lang_lit(&v, lang))
 }
 
 /// Any object-position term: IRI, blank, plain/typed/lang literal.
@@ -219,8 +225,7 @@ fn arb_predicate() -> impl Strategy<Value = Term> {
 
 /// A single triple `[subject, predicate, object]`.
 fn arb_triple() -> impl Strategy<Value = [Term; 3]> {
-    (arb_subject(), arb_predicate(), arb_object())
-        .prop_map(|(s, p, o)| [s, p, o])
+    (arb_subject(), arb_predicate(), arb_object()).prop_map(|(s, p, o)| [s, p, o])
 }
 
 /// A graph: 1–12 triples.  Non-empty to avoid the vacuously-true empty case.
@@ -415,10 +420,13 @@ proptest! {
 fn escape_paths_are_exercised_by_generator() {
     // Run arb_lit_value() a fixed number of times under a deterministic seed
     // and assert we see each escape-challenging character at least once.
-    use proptest::test_runner::{Config, TestRunner};
     use proptest::strategy::ValueTree;
+    use proptest::test_runner::{Config, TestRunner};
 
-    let config = Config { cases: 200, ..Default::default() };
+    let config = Config {
+        cases: 200,
+        ..Default::default()
+    };
     let mut runner = TestRunner::new(config);
     let strat = arb_lit_value();
 
@@ -431,18 +439,43 @@ fn escape_paths_are_exercised_by_generator() {
     for _ in 0..200 {
         let tree = strat.new_tree(&mut runner).unwrap();
         let val = tree.current();
-        if val.contains('"') { saw_dquote = true; }
-        if val.contains('\n') { saw_newline = true; }
-        if val.contains('\t') { saw_tab = true; }
-        if val.contains('\\') { saw_backslash = true; }
-        if val.chars().any(|c| c as u32 > 127) { saw_non_ascii = true; }
+        if val.contains('"') {
+            saw_dquote = true;
+        }
+        if val.contains('\n') {
+            saw_newline = true;
+        }
+        if val.contains('\t') {
+            saw_tab = true;
+        }
+        if val.contains('\\') {
+            saw_backslash = true;
+        }
+        if val.chars().any(|c| c as u32 > 127) {
+            saw_non_ascii = true;
+        }
     }
 
-    assert!(saw_dquote, "generator never produced a literal with '\"' — C-4 escaping test is VACUOUS");
-    assert!(saw_newline, "generator never produced a literal with newline — C-4 escaping test is VACUOUS");
-    assert!(saw_tab, "generator never produced a literal with tab — C-4 escaping test is VACUOUS");
-    assert!(saw_backslash, "generator never produced a literal with backslash — C-4 escaping test is VACUOUS");
-    assert!(saw_non_ascii, "generator never produced a non-ASCII literal — C-4 escaping test is VACUOUS");
+    assert!(
+        saw_dquote,
+        "generator never produced a literal with '\"' — C-4 escaping test is VACUOUS"
+    );
+    assert!(
+        saw_newline,
+        "generator never produced a literal with newline — C-4 escaping test is VACUOUS"
+    );
+    assert!(
+        saw_tab,
+        "generator never produced a literal with tab — C-4 escaping test is VACUOUS"
+    );
+    assert!(
+        saw_backslash,
+        "generator never produced a literal with backslash — C-4 escaping test is VACUOUS"
+    );
+    assert!(
+        saw_non_ascii,
+        "generator never produced a non-ASCII literal — C-4 escaping test is VACUOUS"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +491,11 @@ fn dict_iri_roundtrip_unit() {
     let id = dict.intern(&t);
     assert_ne!(id, NO_ID, "IRI must intern to a non-zero id");
     assert_eq!(dict.lookup(&t), id, "lookup must return the interned id");
-    assert_eq!(dict.term(id).to_string(), t.to_string(), "term(intern(t)) must equal t");
+    assert_eq!(
+        dict.term(id).to_string(),
+        t.to_string(),
+        "term(intern(t)) must equal t"
+    );
 }
 
 /// dict.intern / dict.lookup / dict.term for a blank node.
@@ -493,7 +530,11 @@ fn dict_escaped_lit_roundtrip_unit() {
     assert_ne!(id, NO_ID, "escaped literal must intern");
     assert_eq!(dict.lookup(&t), id, "lookup must return the same id");
     let reconstructed = dict.term(id);
-    assert_eq!(reconstructed.to_string(), t.to_string(), "escaped literal round-trip failed");
+    assert_eq!(
+        reconstructed.to_string(),
+        t.to_string(),
+        "escaped literal round-trip failed"
+    );
 }
 
 /// dict.intern / dict.lookup / dict.term for a lang-tagged literal.
@@ -516,9 +557,16 @@ fn dict_inline_integer_unit() {
     let mut dict = Dict::new();
     let t = typed_lit("42", "http://www.w3.org/2001/XMLSchema#integer");
     let id = dict.intern(&t);
-    assert!(is_inline(id), "canonical small xsd:integer must intern to an inline id");
+    assert!(
+        is_inline(id),
+        "canonical small xsd:integer must intern to an inline id"
+    );
     assert_eq!(dict.lookup(&t), id, "lookup must return the inline id");
-    assert_eq!(dict.term(id).to_string(), t.to_string(), "inline integer round-trip failed");
+    assert_eq!(
+        dict.term(id).to_string(),
+        t.to_string(),
+        "inline integer round-trip failed"
+    );
 }
 
 /// N-Triples round-trip for a single triple with an escaped literal.
@@ -532,7 +580,8 @@ fn nt_roundtrip_escaped_literal_unit() {
         plain_lit(value),
     ]];
     let mut dict = Dict::new();
-    let ids: Vec<[Id; 3]> = triples.iter()
+    let ids: Vec<[Id; 3]> = triples
+        .iter()
         .map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)])
         .collect();
     let g = Graph::from_parts(dict, ids);
@@ -553,11 +602,16 @@ fn nt_roundtrip_escaped_literal_unit() {
 #[test]
 fn nt_roundtrip_blank_nodes_unit() {
     let triples = [
-        [iri_term("http://ex/s"), iri_term("http://ex/p"), blank_term("b1")],
+        [
+            iri_term("http://ex/s"),
+            iri_term("http://ex/p"),
+            blank_term("b1"),
+        ],
         [blank_term("b1"), iri_term("http://ex/q"), blank_term("b2")],
     ];
     let mut dict = Dict::new();
-    let ids: Vec<[Id; 3]> = triples.iter()
+    let ids: Vec<[Id; 3]> = triples
+        .iter()
         .map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)])
         .collect();
     let g = Graph::from_parts(dict, ids);
@@ -578,12 +632,25 @@ fn nt_roundtrip_blank_nodes_unit() {
 #[test]
 fn nt_serialize_fixpoint_unit() {
     let triples = [
-        [iri_term("http://ex/a"), iri_term("http://ex/b"), plain_lit("hello\n\"world\"")],
-        [iri_term("http://ex/c"), iri_term("http://ex/d"), lang_lit("bonjour\t", "fr")],
-        [iri_term("http://ex/e"), iri_term("http://ex/f"), typed_lit("true", "http://www.w3.org/2001/XMLSchema#boolean")],
+        [
+            iri_term("http://ex/a"),
+            iri_term("http://ex/b"),
+            plain_lit("hello\n\"world\""),
+        ],
+        [
+            iri_term("http://ex/c"),
+            iri_term("http://ex/d"),
+            lang_lit("bonjour\t", "fr"),
+        ],
+        [
+            iri_term("http://ex/e"),
+            iri_term("http://ex/f"),
+            typed_lit("true", "http://www.w3.org/2001/XMLSchema#boolean"),
+        ],
     ];
     let mut dict = Dict::new();
-    let ids: Vec<[Id; 3]> = triples.iter()
+    let ids: Vec<[Id; 3]> = triples
+        .iter()
         .map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)])
         .collect();
     let g = Graph::from_parts(dict, ids);
@@ -597,5 +664,8 @@ fn nt_serialize_fixpoint_unit() {
     let mut lines2: Vec<&str> = nt2.lines().collect();
     lines1.sort();
     lines2.sort();
-    assert_eq!(lines1, lines2, "serialize(parse(serialize(g))) != serialize(g)");
+    assert_eq!(
+        lines1, lines2,
+        "serialize(parse(serialize(g))) != serialize(g)"
+    );
 }

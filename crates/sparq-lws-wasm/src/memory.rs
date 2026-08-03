@@ -249,7 +249,11 @@ mod tests {
         assert_eq!(counters.peak(), 1_500, "the high-water mark is sticky");
 
         counters.record_alloc(100);
-        assert_eq!(counters.peak(), 1_500, "a smaller total does not raise the peak");
+        assert_eq!(
+            counters.peak(),
+            1_500,
+            "a smaller total does not raise the peak"
+        );
     }
 
     #[test]

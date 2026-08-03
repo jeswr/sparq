@@ -294,7 +294,10 @@ impl PublicGrant {
     /// [`Self::extra_branches`]. A single-branch grant yields one entry.
     pub fn branch_scope(&self) -> Vec<ScopedBranch> {
         let mut v = Vec::with_capacity(1 + self.extra_branches.len());
-        v.push(ScopedBranch { branch: self.branch, topic: self.topic });
+        v.push(ScopedBranch {
+            branch: self.branch,
+            topic: self.topic,
+        });
         v.extend_from_slice(&self.extra_branches);
         v
     }
@@ -353,7 +356,9 @@ impl PublicGrant {
 
     /// Verify the admin signature against a trusted admin public key.
     pub fn verify(&self, admin_pub: &PublicVerifyingKey) -> Result<()> {
-        let sig = self.admin_sig.ok_or(Error::Schema("missing admin signature"))?;
+        let sig = self
+            .admin_sig
+            .ok_or(Error::Schema("missing admin signature"))?;
         admin_pub.verify(&self.signing_bytes(), &sig)
     }
 
@@ -516,7 +521,9 @@ impl PublicGrant {
         // `signing_entries`, so only the wire form can be non-canonical.
         let authority = authority.ok_or(Error::Schema("missing authority"))?;
         if authority != canon_authorities(authority.clone()) {
-            return Err(Error::NonCanonical("authority array not sorted/deduplicated"));
+            return Err(Error::NonCanonical(
+                "authority array not sorted/deduplicated",
+            ));
         }
         // Likewise bytes-level: an ABSENT field 18 is the single-branch form, so
         // an empty array would be a second encoding of one logical grant —
@@ -575,7 +582,9 @@ impl PublicGrant {
         // without publish authority must not carry (and have authenticated) an
         // unrelated publisher key.
         if self.authority.contains(&Authority::Publish) != self.publisher_pub.is_some() {
-            return Err(Error::Separation("publisher key presence must match publish authority"));
+            return Err(Error::Separation(
+                "publisher key presence must match publish authority",
+            ));
         }
         // The ceiling is a forward bound on the grant's own scope: a grant whose
         // max_epoch precedes the epoch it is scoped to could never be exercised,
@@ -656,7 +665,10 @@ impl core::fmt::Debug for Capability {
         f.debug_struct("Capability")
             .field("grant", &self.grant)
             .field("read_secret", &self.read_secret)
-            .field("publisher_sk", &self.publisher_sk.as_ref().map(|_| Redacted))
+            .field(
+                "publisher_sk",
+                &self.publisher_sk.as_ref().map(|_| Redacted),
+            )
             .field("admin_sk", &self.admin_sk.as_ref().map(|_| Redacted))
             .finish()
     }
@@ -686,10 +698,14 @@ impl Capability {
         // still rejected.
         let publish = auth.contains(&Authority::Publish);
         if publish != self.publisher_sk.is_some() {
-            return Err(Error::Separation("publish authority <-> publisher secret mismatch"));
+            return Err(Error::Separation(
+                "publish authority <-> publisher secret mismatch",
+            ));
         }
         if publish != self.grant.publisher_pub.is_some() {
-            return Err(Error::Separation("publish authority <-> publisher_pub mismatch"));
+            return Err(Error::Separation(
+                "publish authority <-> publisher_pub mismatch",
+            ));
         }
         if let (Some(sk), Some(pk)) = (&self.publisher_sk, &self.grant.publisher_pub) {
             let derived = SecretSigningKey::from_seed(*sk).public().to_bytes();
@@ -1058,7 +1074,9 @@ pub fn delegate(
         None
     };
     if child_auth.contains(&Authority::Publish) && publisher_pub.is_none() {
-        return Err(Error::Delegation("cannot delegate publish without a publisher key"));
+        return Err(Error::Delegation(
+            "cannot delegate publish without a publisher key",
+        ));
     }
     let mut child = PublicGrant {
         repo: parent.repo,
@@ -1123,7 +1141,10 @@ mod tests {
             BranchId::from_bytes([2u8; 32]),
             Epoch(7),
             TopicId::from_bytes([3u8; 32]),
-            Validity { not_before: 100, not_after: 200 },
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
         );
         g.authority = vec![Authority::Read];
@@ -1173,12 +1194,16 @@ mod tests {
             BranchId::from_bytes([2u8; 32]),
             Epoch(7),
             TopicId::from_bytes([3u8; 32]),
-            Validity { not_before: 100, not_after: 200 },
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
         );
 
         let publisher = SecretSigningKey::from_seed([7u8; 32]);
-        let mut write = Capability::new_write(base.clone(), Secret32([9u8; 32]), &publisher).unwrap();
+        let mut write =
+            Capability::new_write(base.clone(), Secret32([9u8; 32]), &publisher).unwrap();
         assert_eq!(write.publisher_sk, Some([7u8; 32]));
         write.zeroize_secrets();
         assert_eq!(write.publisher_sk, Some([0u8; 32]));
@@ -1201,7 +1226,10 @@ mod tests {
             BranchId::from_bytes([2u8; 32]),
             Epoch(7),
             TopicId::from_bytes([3u8; 32]),
-            Validity { not_before: 100, not_after: 200 },
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
         );
         // Pin the otherwise-random nonce so the whole rendering is deterministic
@@ -1237,7 +1265,10 @@ mod tests {
             BranchId::from_bytes([2u8; 32]),
             Epoch(7),
             TopicId::from_bytes([3u8; 32]),
-            Validity { not_before: 100, not_after: 200 },
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
         );
         g.authority = vec![Authority::Read];
@@ -1270,7 +1301,10 @@ mod tests {
             BranchId::from_bytes([0x20; 32]),
             Epoch(7),
             TopicId::from_bytes([0xA2; 32]),
-            Validity { not_before: 100, not_after: 200 },
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
         );
         g.authority = vec![Authority::Read];
@@ -1325,7 +1359,10 @@ mod tests {
             BranchId::from_bytes([2u8; 32]),
             Epoch(7),
             TopicId::from_bytes([3u8; 32]),
-            Validity { not_before: 100, not_after: 200 },
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
         );
         g.authority = vec![Authority::Read];
@@ -1345,7 +1382,10 @@ mod tests {
             BranchId::from_bytes([2u8; 32]),
             Epoch(7),
             TopicId::from_bytes([3u8; 32]),
-            Validity { not_before: 100, not_after: 200 },
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
         );
         g.authority = vec![Authority::Read];

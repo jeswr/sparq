@@ -144,7 +144,9 @@ pub(crate) fn install(cfg: DpConfig) -> Guard {
 /// * `Install::Disabled` — returns `None` (greedy GOO).
 pub(crate) fn active() -> Option<DpConfig> {
     ACTIVE.with(|a| match *a.borrow() {
-        Install::Default => Some(DpConfig { max_subgraphs: DEFAULT_MAX_SUBGRAPHS }),
+        Install::Default => Some(DpConfig {
+            max_subgraphs: DEFAULT_MAX_SUBGRAPHS,
+        }),
         Install::Enabled(cfg) => Some(cfg),
         Install::Disabled => None,
     })
@@ -236,7 +238,11 @@ impl QueryGraph {
     ///
     /// `neigh` (pattern adjacency) is derived: two patterns are adjacent iff some
     /// variable appears in both.
-    pub(crate) fn build(est: Vec<f64>, var_pats: Vec<u64>, var_ndv: Vec<Vec<(usize, f64)>>) -> QueryGraph {
+    pub(crate) fn build(
+        est: Vec<f64>,
+        var_pats: Vec<u64>,
+        var_ndv: Vec<Vec<(usize, f64)>>,
+    ) -> QueryGraph {
         let n = est.len();
         let mut neigh = vec![0u64; n];
         let mut vars = Vec::new();
@@ -249,10 +255,18 @@ impl QueryGraph {
                     m &= m - 1;
                     neigh[p] |= pats & !(1u64 << p);
                 }
-                vars.push(VarEntry { pats, ndv: var_ndv[k].clone() });
+                vars.push(VarEntry {
+                    pats,
+                    ndv: var_ndv[k].clone(),
+                });
             }
         }
-        QueryGraph { n, est, neigh, vars }
+        QueryGraph {
+            n,
+            est,
+            neigh,
+            vars,
+        }
     }
 
     /// The union of the neighbours of every node in `s`, excluding `s` itself.
@@ -409,7 +423,14 @@ impl QueryGraph {
     /// Grows the connected subgraph `s` (whose minimum node fixed the outer seed),
     /// emitting the complements of each larger connected subgraph it reaches. Returns
     /// `false` once `*count` exceeds `cap`.
-    fn enumerate_csg_rec<F: FnMut(u64, u64)>(&self, s: u64, x: u64, cap: usize, count: &mut usize, emit: &mut F) -> bool {
+    fn enumerate_csg_rec<F: FnMut(u64, u64)>(
+        &self,
+        s: u64,
+        x: u64,
+        cap: usize,
+        count: &mut usize,
+        emit: &mut F,
+    ) -> bool {
         let n = self.neighborhood(s) & !x;
         let mut sub = n;
         while sub != 0 {
@@ -431,7 +452,13 @@ impl QueryGraph {
     /// For a connected subgraph `s1`, enumerates and emits all its connected
     /// complements (each with minimum node greater than `min(s1)`, so each unordered
     /// pair is emitted once). Returns `false` once `*count` exceeds `cap`.
-    fn emit_csg_cmp<F: FnMut(u64, u64)>(&self, s1: u64, cap: usize, count: &mut usize, emit: &mut F) -> bool {
+    fn emit_csg_cmp<F: FnMut(u64, u64)>(
+        &self,
+        s1: u64,
+        cap: usize,
+        count: &mut usize,
+        emit: &mut F,
+    ) -> bool {
         let min = s1.trailing_zeros() as usize;
         let x = s1 | self.b(min);
         let nbh = self.neighborhood(s1) & !x;
@@ -461,7 +488,15 @@ impl QueryGraph {
     /// Grows the connected complement `s2` of `s1`, emitting `(s1, s2∪s')` for each
     /// larger connected complement reachable within the allowed node set. Returns
     /// `false` once `*count` exceeds `cap`.
-    fn enumerate_cmp_rec<F: FnMut(u64, u64)>(&self, s1: u64, s2: u64, x: u64, cap: usize, count: &mut usize, emit: &mut F) -> bool {
+    fn enumerate_cmp_rec<F: FnMut(u64, u64)>(
+        &self,
+        s1: u64,
+        s2: u64,
+        x: u64,
+        cap: usize,
+        count: &mut usize,
+        emit: &mut F,
+    ) -> bool {
         let n = self.neighborhood(s2) & !x;
         let mut sub = n;
         while sub != 0 {
@@ -535,7 +570,13 @@ pub(crate) fn plan(qg: &QueryGraph, max_subgraphs: usize) -> Option<JoinTree> {
 
     let mut best: FxHashMap<u64, Entry> = FxHashMap::default();
     for v in 0..n {
-        best.insert(1u64 << v, Entry { cost: 0.0, tree: JoinTree::Leaf(v) });
+        best.insert(
+            1u64 << v,
+            Entry {
+                cost: 0.0,
+                tree: JoinTree::Leaf(v),
+            },
+        );
     }
     for (s1, s2) in pairs {
         let s = s1 | s2;
@@ -547,7 +588,13 @@ pub(crate) fn plan(qg: &QueryGraph, max_subgraphs: usize) -> Option<JoinTree> {
         if best.get(&s).is_none_or(|e| cost < e.cost) {
             let t1 = best[&s1].tree.clone();
             let t2 = best[&s2].tree.clone();
-            best.insert(s, Entry { cost, tree: JoinTree::Join(Box::new(t1), Box::new(t2)) });
+            best.insert(
+                s,
+                Entry {
+                    cost,
+                    tree: JoinTree::Join(Box::new(t1), Box::new(t2)),
+                },
+            );
         }
     }
     best.remove(&full).map(|e| e.tree)
@@ -602,9 +649,7 @@ mod tests {
             while sub != 0 {
                 let comp = s ^ sub;
                 // Both halves connected and connected to each other (share an edge).
-                if qg.is_connected(sub)
-                    && qg.is_connected(comp)
-                    && qg.neighborhood(sub) & comp != 0
+                if qg.is_connected(sub) && qg.is_connected(comp) && qg.neighborhood(sub) & comp != 0
                 {
                     let c = cost[sub as usize] + cost[comp as usize] + qg.card(s);
                     if c < cost[s as usize] {
@@ -641,7 +686,11 @@ mod tests {
         let tree = plan(&g, 4096).expect("connected 3-chain must plan");
         let (cost, span) = tree_cost(&g, &tree);
         assert_eq!(span, 0b111, "tree must span all patterns");
-        assert_eq!(Some(cost), ref_opt_cost(&g, 3), "DP must match brute-force optimum");
+        assert_eq!(
+            Some(cost),
+            ref_opt_cost(&g, 3),
+            "DP must match brute-force optimum"
+        );
     }
 
     #[test]
@@ -672,7 +721,10 @@ mod tests {
         // n=2 now returns None for any budget (n<3 threshold), and zero budget would
         // also trip for n>=3. Use n=3 to test the budget-zero guard specifically.
         let g = qg(&[10.0, 20.0, 30.0], &[(0b011, 4.0), (0b110, 4.0)]);
-        assert!(plan(&g, 0).is_none(), "a zero budget must always fall back to greedy");
+        assert!(
+            plan(&g, 0).is_none(),
+            "a zero budget must always fall back to greedy"
+        );
     }
 
     /// For n=2 connected BGPs, DPccp adds overhead without benefit — greedy GOO is
@@ -680,8 +732,14 @@ mod tests {
     #[test]
     fn two_pattern_bgp_falls_back_to_greedy() {
         let g = qg(&[10.0, 20.0], &[(0b11, 4.0)]);
-        assert!(plan(&g, 4096).is_none(), "n=2 connected BGP must fall back (n<3 threshold)");
-        assert!(plan(&g, DEFAULT_MAX_SUBGRAPHS).is_none(), "n=2 must fall back at default budget");
+        assert!(
+            plan(&g, 4096).is_none(),
+            "n=2 connected BGP must fall back (n<3 threshold)"
+        );
+        assert!(
+            plan(&g, DEFAULT_MAX_SUBGRAPHS).is_none(),
+            "n=2 must fall back at default budget"
+        );
     }
 
     #[test]
@@ -709,13 +767,24 @@ mod tests {
         let mut pairs = Vec::new();
         let completed = g.enumerate_csg_cmp_pairs(4, &mut |s1, s2| pairs.push((s1, s2)));
         assert!(!completed, "a tiny pair cap must abort the enumeration");
-        assert!(pairs.len() <= 5, "aborted enumeration must stay within cap+1, got {}", pairs.len());
+        assert!(
+            pairs.len() <= 5,
+            "aborted enumeration must stay within cap+1, got {}",
+            pairs.len()
+        );
 
         // With a generous cap the same enumeration completes and yields every pair.
         let mut all = Vec::new();
         let completed = g.enumerate_csg_cmp_pairs(usize::MAX, &mut |s1, s2| all.push((s1, s2)));
-        assert!(completed, "a generous cap must let the full enumeration complete");
-        assert_eq!(all.len(), 301, "6-clique has (3⁶−2⁷+1)/2 = 301 unordered csg/cmp pairs");
+        assert!(
+            completed,
+            "a generous cap must let the full enumeration complete"
+        );
+        assert_eq!(
+            all.len(),
+            301,
+            "6-clique has (3⁶−2⁷+1)/2 = 301 unordered csg/cmp pairs"
+        );
     }
 
     #[test]
@@ -769,10 +838,18 @@ mod tests {
                     checked += 1;
                 }
                 (None, None) => {} // both agree the graph is disconnected
-                (a, b) => panic!("DP/reference disagree on connectivity: {:?} vs {:?}", a.is_some(), b.is_some()),
+                (a, b) => panic!(
+                    "DP/reference disagree on connectivity: {:?} vs {:?}",
+                    a.is_some(),
+                    b.is_some()
+                ),
             }
         }
-        assert!(checked > 100, "expected many connected samples, got {}", checked);
+        assert!(
+            checked > 100,
+            "expected many connected samples, got {}",
+            checked
+        );
     }
 
     // ---- default-on and opt-out tests [SONNET-4.6] sq-7d3dj.30.5 ----------------
@@ -782,7 +859,10 @@ mod tests {
     #[test]
     fn disabled_state_makes_active_return_none() {
         without_dp_planner(|| {
-            assert!(active().is_none(), "active() must be None inside without_dp_planner");
+            assert!(
+                active().is_none(),
+                "active() must be None inside without_dp_planner"
+            );
         });
     }
 

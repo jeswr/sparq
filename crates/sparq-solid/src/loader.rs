@@ -183,8 +183,16 @@ pub(crate) fn assemble_facts(
     credentials: &VerifiedCredentials,
 ) -> Result<Vec<[Term; 3]>, String> {
     let mut out: Vec<[Term; 3]> = Vec::new();
-    let suffix = if system == System::Wac { ACL_SUFFIX } else { ACR_SUFFIX };
-    let own_pred = if system == System::Wac { "ownAcl" } else { "ownAcr" };
+    let suffix = if system == System::Wac {
+        ACL_SUFFIX
+    } else {
+        ACR_SUFFIX
+    };
+    let own_pred = if system == System::Wac {
+        "ownAcl"
+    } else {
+        "ownAcr"
+    };
     let is_resource = named(&format!("{SOLIDX_NS}isResource"));
     let owns = named(&format!("{SOLIDX_NS}{own_pred}"));
     let in_doc_p = named(&format!("{SOLIDX_NS}inDoc"));
@@ -304,7 +312,11 @@ pub(crate) fn assemble_facts(
             if let Some(o) = owner {
                 validate_principal_iri(o)?;
                 webids.insert(o.to_owned());
-                out.push([named(resource), named(&format!("{SOLIDX_NS}owner")), named(o)]);
+                out.push([
+                    named(resource),
+                    named(&format!("{SOLIDX_NS}owner")),
+                    named(o),
+                ]);
             }
         }
         // [SONNET-4.6] sq-ysv3u: TRUSTED `acp:vc` holdings (ACP only), on exactly the same
@@ -316,7 +328,11 @@ pub(crate) fn assemble_facts(
         for (agent, requirement) in credentials.iter() {
             validate_principal_iri(agent)?;
             webids.insert(agent.to_owned());
-            out.push([named(agent), named(&format!("{SOLIDX_NS}holdsVc")), named(requirement)]);
+            out.push([
+                named(agent),
+                named(&format!("{SOLIDX_NS}holdsVc")),
+                named(requirement),
+            ]);
         }
     }
     for a in &webids {
@@ -407,7 +423,9 @@ pub(crate) fn referenced_group_docs(graph: &Graph) -> FxHashSet<String> {
             continue;
         }
         for t in graph_triples(sub) {
-            let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) else { continue };
+            let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) else {
+                continue;
+            };
             if p.as_str() != ACL_AGENT_GROUP {
                 continue;
             }
@@ -429,7 +447,9 @@ fn collect_agents(
     groups: &mut FxHashSet<String>,
     principal_iris: &mut FxHashSet<String>,
 ) {
-    let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) else { return };
+    let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) else {
+        return;
+    };
     match p.as_str() {
         ACL_AGENT | ACP_AGENT | VCARD_MEMBER => {
             if !SPECIAL_AGENTS.contains(&o.as_str()) {
@@ -494,7 +514,10 @@ mod tests {
 
     #[test]
     fn parent_walks_to_root_and_stops() {
-        assert_eq!(parent_iri("https://pod.ex/a/b/doc.ttl"), Some("https://pod.ex/a/b/"));
+        assert_eq!(
+            parent_iri("https://pod.ex/a/b/doc.ttl"),
+            Some("https://pod.ex/a/b/")
+        );
         assert_eq!(parent_iri("https://pod.ex/a/b/"), Some("https://pod.ex/a/"));
         assert_eq!(parent_iri("https://pod.ex/a/"), Some("https://pod.ex/"));
         assert_eq!(parent_iri("https://pod.ex/"), None);
@@ -508,7 +531,7 @@ mod tests {
         assert_eq!(iri_origin("https://pod.ex/"), "https://pod.ex");
         assert_eq!(iri_origin("https://pod.ex"), "https://pod.ex"); // authority, no path
         assert_eq!(iri_origin("http://host:8080/x"), "http://host:8080"); // port kept
-        // Every graph a `.acl` at origin O governs shares O — the scoping soundness key.
+                                                                          // Every graph a `.acl` at origin O governs shares O — the scoping soundness key.
         let acl = "https://pod.ex/notes/.acl";
         assert_eq!(iri_origin(acl), iri_origin("https://pod.ex/notes/n1"));
         assert_ne!(iri_origin(acl), iri_origin("https://other.ex/notes/n1"));

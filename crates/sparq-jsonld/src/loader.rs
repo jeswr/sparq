@@ -105,10 +105,12 @@ impl FsLoader {
         let rel = rel.trim_start_matches('/');
         let rel_path = PathBuf::from(rel);
         // Fixture-escape guard: reject absolute paths and any parent-dir traversal.
-        if rel_path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
-        {
+        if rel_path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
             return None;
         }
         Some(dir.join(rel_path))
@@ -127,7 +129,9 @@ impl FsLoader {
 
 impl DocumentLoader for FsLoader {
     fn load_document(&self, url: &str) -> Result<RemoteDocument, JsonLdError> {
-        let deny = |detail: String| JsonLdError::with_detail(JsonLdErrorCode::LoadingDocumentFailed, detail);
+        let deny = |detail: String| {
+            JsonLdError::with_detail(JsonLdErrorCode::LoadingDocumentFailed, detail)
+        };
         let path = self
             .resolve(url)
             .ok_or_else(|| deny(format!("no fixture mapping for {}", url)))?;
@@ -172,7 +176,9 @@ mod tests {
     #[test]
     fn fs_loader_new_is_empty_and_denies_unmapped() {
         let loader = FsLoader::new();
-        let err = loader.load_document("https://example.org/a.jsonld").unwrap_err();
+        let err = loader
+            .load_document("https://example.org/a.jsonld")
+            .unwrap_err();
         assert_eq!(err.code(), JsonLdErrorCode::LoadingDocumentFailed);
     }
 

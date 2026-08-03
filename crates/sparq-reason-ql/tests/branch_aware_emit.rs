@@ -81,7 +81,11 @@ mod gated {
         }
     }
 
-    fn bind(sol: &BTreeMap<String, String>, slot: Slot, value: &str) -> Option<BTreeMap<String, String>> {
+    fn bind(
+        sol: &BTreeMap<String, String>,
+        slot: Slot,
+        value: &str,
+    ) -> Option<BTreeMap<String, String>> {
         match slot {
             Slot::Fixed(f) => (f == value).then(|| sol.clone()),
             Slot::Bind(k) => match sol.get(&k) {
@@ -97,7 +101,13 @@ mod gated {
 
     fn triples_as_strings(data: &[Triple]) -> Vec<(String, String, String)> {
         data.iter()
-            .map(|t| (t.subject.to_string(), t.predicate.to_string(), t.object.to_string()))
+            .map(|t| {
+                (
+                    t.subject.to_string(),
+                    t.predicate.to_string(),
+                    t.object.to_string(),
+                )
+            })
             .collect()
     }
 
@@ -138,8 +148,12 @@ mod gated {
                     let mut next = Vec::new();
                     for sol in &sols {
                         for (s, p, o) in data {
-                            let Some(a) = bind(sol, term_slot(&pat.subject), s) else { continue };
-                            let Some(b) = bind(&a, pred_slot(&pat.predicate), p) else { continue };
+                            let Some(a) = bind(sol, term_slot(&pat.subject), s) else {
+                                continue;
+                            };
+                            let Some(b) = bind(&a, pred_slot(&pat.predicate), p) else {
+                                continue;
+                            };
                             if let Some(c) = bind(&b, term_slot(&pat.object), o) {
                                 next.push(c);
                             }
@@ -184,7 +198,10 @@ mod gated {
                 .into_iter()
                 .filter(|sol| eval_bool(expr, sol))
                 .collect(),
-            GraphPattern::Values { variables, bindings } => bindings
+            GraphPattern::Values {
+                variables,
+                bindings,
+            } => bindings
                 .iter()
                 .map(|row| {
                     let mut sol = BTreeMap::new();
@@ -197,8 +214,10 @@ mod gated {
                 })
                 .collect(),
             GraphPattern::Project { inner, variables } => {
-                let keep: BTreeSet<String> =
-                    variables.iter().map(|v| format!("?{}", v.as_str())).collect();
+                let keep: BTreeSet<String> = variables
+                    .iter()
+                    .map(|v| format!("?{}", v.as_str()))
+                    .collect();
                 eval(inner, data)
                     .into_iter()
                     .map(|sol| sol.into_iter().filter(|(k, _)| keep.contains(k)).collect())
@@ -221,9 +240,12 @@ mod gated {
     fn projection(query: &Query) -> Vec<String> {
         fn find(gp: &GraphPattern) -> Option<Vec<String>> {
             match gp {
-                GraphPattern::Project { variables, .. } => {
-                    Some(variables.iter().map(|v| format!("?{}", v.as_str())).collect())
-                }
+                GraphPattern::Project { variables, .. } => Some(
+                    variables
+                        .iter()
+                        .map(|v| format!("?{}", v.as_str()))
+                        .collect(),
+                ),
                 GraphPattern::Distinct { inner }
                 | GraphPattern::Reduced { inner }
                 | GraphPattern::Slice { inner, .. } => find(inner),
@@ -268,7 +290,11 @@ mod gated {
             "RESULT DIVERGENCE between the two forms\n A: {}\n B: {}\n A answers: {:?}\n B answers: {:?}",
             ra.query, rb.query, aa, ab
         );
-        assert_eq!(aa, oracle, "form A must match the hand-derived oracle\n rewritten: {}\n got: {:?}", ra.query, aa);
+        assert_eq!(
+            aa, oracle,
+            "form A must match the hand-derived oracle\n rewritten: {}\n got: {:?}",
+            ra.query, aa
+        );
         // PARITY: the minimised production path returns the same answers.
         let rap = rewrite_production(&q(a), tbox).expect("form A must rewrite (production)");
         assert_eq!(
@@ -284,11 +310,13 @@ mod gated {
     #[test]
     fn alternation_filter_result_equivalent_to_hand_union() {
         // TBox `:sub ⊑ :p1` makes PerfectRef fire on the p1 branch (so the rewrite is non-trivial).
-        let tbox = nt(&["<http://ex/sub> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <http://ex/p1> ."]);
+        let tbox = nt(&[
+            "<http://ex/sub> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <http://ex/p1> .",
+        ]);
         let abox = nt(&[
-            "<http://ex/x1> <http://ex/p1> <http://ex/y1> .",  // p1 → x1
+            "<http://ex/x1> <http://ex/p1> <http://ex/y1> .", // p1 → x1
             "<http://ex/x2> <http://ex/sub> <http://ex/y2> .", // sub ⊑ p1 → x2 (FILTERED OUT)
-            "<http://ex/x3> <http://ex/p2> <http://ex/y3> .",  // p2 → x3
+            "<http://ex/x3> <http://ex/p2> <http://ex/y3> .", // p2 → x3
         ]);
         // `?x :p1|:p2 ?y FILTER(?x != :x2)` — the FILTER is distributed into BOTH branches by #1671.
         // Oracle: {x1, x3}; x2 (a certain p1 via sub) is removed by the per-branch FILTER.
@@ -325,7 +353,13 @@ mod gated {
                {{ ?x rdf:type :B FILTER(?x != :worse) }} }}"
         );
         // Equivalent to itself (self-consistency across rewrite + production) + oracle.
-        assert_equivalent(&query, &query, &[], &abox, singletons(&["good", "ok", "bad"]));
+        assert_equivalent(
+            &query,
+            &query,
+            &[],
+            &abox,
+            singletons(&["good", "ok", "bad"]),
+        );
     }
 
     // ---- 3. VALUES per branch ----
@@ -401,7 +435,9 @@ mod gated {
     fn recursive_path_with_filter_still_rejected() {
         // A RECURSIVE path is rejected at the gate BEFORE any emitter concern — even with a
         // distinguished-only FILTER. The branch-aware emitter does not weaken this. [OPUS-4.8]
-        let query = q(&format!("{PRE} SELECT ?x WHERE {{ ?x :r+ ?y FILTER(?x != :bad) }}"));
+        let query = q(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x :r+ ?y FILTER(?x != :bad) }}"
+        ));
         let err = rewrite(&query, &[]).unwrap_err();
         assert!(
             matches!(err, CqError::OutOfScope(ref r) if r.contains("property path")),

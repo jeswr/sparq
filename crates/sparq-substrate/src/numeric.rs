@@ -56,14 +56,19 @@ impl Dec {
         for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
             mag = mag.checked_mul(10)?.checked_add((ch - b'0') as i128)?;
         }
-        Some(Dec { mant: if neg { -mag } else { mag }, scale })
+        Some(Dec {
+            mant: if neg { -mag } else { mag },
+            scale,
+        })
     }
 
     /// Both mantissas scaled to the common (max) scale, or `None` on overflow.
     #[inline]
     fn align(self, o: Dec) -> Option<(i128, i128)> {
         let scale = self.scale.max(o.scale);
-        let a = self.mant.checked_mul(10i128.checked_pow(scale - self.scale)?)?;
+        let a = self
+            .mant
+            .checked_mul(10i128.checked_pow(scale - self.scale)?)?;
         let b = o.mant.checked_mul(10i128.checked_pow(scale - o.scale)?)?;
         Some((a, b))
     }
@@ -72,18 +77,27 @@ impl Dec {
     #[inline]
     pub fn checked_add(self, o: Dec) -> Option<Dec> {
         let (a, b) = self.align(o)?;
-        Some(Dec { mant: a.checked_add(b)?, scale: self.scale.max(o.scale) })
+        Some(Dec {
+            mant: a.checked_add(b)?,
+            scale: self.scale.max(o.scale),
+        })
     }
     /// EXACT subtraction, or `None` on overflow (the caller falls back to f64).
     #[inline]
     pub fn checked_sub(self, o: Dec) -> Option<Dec> {
         let (a, b) = self.align(o)?;
-        Some(Dec { mant: a.checked_sub(b)?, scale: self.scale.max(o.scale) })
+        Some(Dec {
+            mant: a.checked_sub(b)?,
+            scale: self.scale.max(o.scale),
+        })
     }
     /// EXACT multiplication, or `None` on overflow (the caller falls back to f64).
     #[inline]
     pub fn checked_mul(self, o: Dec) -> Option<Dec> {
-        Some(Dec { mant: self.mant.checked_mul(o.mant)?, scale: self.scale.checked_add(o.scale)? })
+        Some(Dec {
+            mant: self.mant.checked_mul(o.mant)?,
+            scale: self.scale.checked_add(o.scale)?,
+        })
     }
     /// EXACT ordering of two decimals, or `None` on a scale-alignment overflow.
     // Deliberately NOT `Ord::cmp`: this is the FALLIBLE total order (it returns
@@ -109,14 +123,19 @@ impl Dec {
             None => (false, s.strip_prefix('+').unwrap_or(s)),
         };
         let (int, frac) = s.split_once('.').unwrap_or((s, ""));
-        if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
+        if (int.is_empty() && frac.is_empty())
+            || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit())
+        {
             return None;
         }
         let mut mag: i128 = 0;
         for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
             mag = mag.checked_mul(10)?.checked_add((ch - b'0') as i128)?;
         }
-        Some(Dec { mant: if neg { -mag } else { mag }, scale: frac.len() as u32 })
+        Some(Dec {
+            mant: if neg { -mag } else { mag },
+            scale: frac.len() as u32,
+        })
     }
 
     /// EXACT decimal division. The result's scale is the SMALLEST `s >= 1` at which the
@@ -143,14 +162,20 @@ impl Dec {
             let (num, den) = num_den(s)?;
             if num % den == 0 {
                 let mant = i128::try_from(num / den).ok()?;
-                return Some(Dec { mant: if neg { -mant } else { mant }, scale: s });
+                return Some(Dec {
+                    mant: if neg { -mant } else { mant },
+                    scale: s,
+                });
             }
         }
         // Non-terminating: round half-up at the max scale.
         let (num, den) = num_den(MAX_SCALE)?;
         let q = num / den + u128::from(num % den * 2 >= den);
         let mant = i128::try_from(q).ok()?;
-        Some(Dec { mant: if neg { -mant } else { mant }, scale: MAX_SCALE })
+        Some(Dec {
+            mant: if neg { -mant } else { mant },
+            scale: MAX_SCALE,
+        })
     }
 
     /// Rounds to an integer-valued decimal (scale 0), preserving the decimal TYPE
@@ -158,7 +183,10 @@ impl Dec {
     #[inline]
     pub fn round_to_int(self, mode: RoundMode) -> Dec {
         if self.scale == 0 || self.mant == 0 {
-            return Dec { mant: self.mant, scale: 0 };
+            return Dec {
+                mant: self.mant,
+                scale: 0,
+            };
         }
         // [OPUS-4.8] `10i128.pow(self.scale)` overflows (debug panic / release wrap) for any
         // valid decimal whose scale is >= 39 (10^39 > i128::MAX). When the power exceeds i128
@@ -269,7 +297,9 @@ pub fn split_decimal(s: &str) -> Option<(bool, &str, &str)> {
         None => (false, s.strip_prefix('+').unwrap_or(s)),
     };
     let (int, frac) = s.split_once('.').unwrap_or((s, ""));
-    if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
+    if (int.is_empty() && frac.is_empty())
+        || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit())
+    {
         return None;
     }
     Some((neg, int.trim_start_matches('0'), frac.trim_end_matches('0')))
@@ -290,18 +320,22 @@ pub fn cmp_plain_decimal(a: &str, b: &str) -> Option<Ordering> {
     }
     // Magnitude: longer (normalised) integer part wins, then integer digits, then
     // fraction digits with implicit trailing-zero padding.
-    let mag = ia.len().cmp(&ib.len()).then_with(|| ia.cmp(ib)).then_with(|| {
-        let n = fa.len().max(fb.len());
-        (0..n)
-            .map(|i| {
-                (
-                    fa.as_bytes().get(i).copied().unwrap_or(b'0'),
-                    fb.as_bytes().get(i).copied().unwrap_or(b'0'),
-                )
-            })
-            .find_map(|(x, y)| if x != y { Some(x.cmp(&y)) } else { None })
-            .unwrap_or(Ordering::Equal)
-    });
+    let mag = ia
+        .len()
+        .cmp(&ib.len())
+        .then_with(|| ia.cmp(ib))
+        .then_with(|| {
+            let n = fa.len().max(fb.len());
+            (0..n)
+                .map(|i| {
+                    (
+                        fa.as_bytes().get(i).copied().unwrap_or(b'0'),
+                        fb.as_bytes().get(i).copied().unwrap_or(b'0'),
+                    )
+                })
+                .find_map(|(x, y)| if x != y { Some(x.cmp(&y)) } else { None })
+                .unwrap_or(Ordering::Equal)
+        });
     let neg_a = na && !a_zero;
     let neg_b = nb && !b_zero;
     Some(match (neg_a, neg_b) {
@@ -440,7 +474,10 @@ impl Num {
     #[inline]
     pub fn to_dec(self) -> Option<Dec> {
         match self {
-            Num::Int(i) => Some(Dec { mant: i as i128, scale: 0 }),
+            Num::Int(i) => Some(Dec {
+                mant: i as i128,
+                scale: 0,
+            }),
             Num::Dec(d) => Some(d),
             _ => None,
         }
@@ -575,7 +612,16 @@ impl Num {
         }
         if rank == 0 {
             // integer op integer -> integer (i64; on overflow fall back to double).
-            let (x, y) = (match self { Num::Int(i) => i, _ => unreachable!() }, match o { Num::Int(i) => i, _ => unreachable!() });
+            let (x, y) = (
+                match self {
+                    Num::Int(i) => i,
+                    _ => unreachable!(),
+                },
+                match o {
+                    Num::Int(i) => i,
+                    _ => unreachable!(),
+                },
+            );
             let r = match op {
                 ArithOp::Add => x.checked_add(y),
                 ArithOp::Sub => x.checked_sub(y),
@@ -607,8 +653,20 @@ impl Num {
     #[inline]
     pub fn neg(self) -> Num {
         match self {
-            Num::Int(i) => i.checked_neg().map(Num::Int).unwrap_or(Num::Double(-(i as f64))),
-            Num::Dec(d) => d.mant.checked_neg().map(|m| Num::Dec(Dec { mant: m, scale: d.scale })).unwrap_or(Num::Double(-d.f64())),
+            Num::Int(i) => i
+                .checked_neg()
+                .map(Num::Int)
+                .unwrap_or(Num::Double(-(i as f64))),
+            Num::Dec(d) => d
+                .mant
+                .checked_neg()
+                .map(|m| {
+                    Num::Dec(Dec {
+                        mant: m,
+                        scale: d.scale,
+                    })
+                })
+                .unwrap_or(Num::Double(-d.f64())),
             Num::Float(f) => Num::Float(-f),
             Num::Double(d) => Num::Double(-d),
         }
@@ -618,8 +676,20 @@ impl Num {
     #[inline]
     pub fn abs(self) -> Num {
         match self {
-            Num::Int(i) => i.checked_abs().map(Num::Int).unwrap_or(Num::Double((i as f64).abs())),
-            Num::Dec(d) => d.mant.checked_abs().map(|m| Num::Dec(Dec { mant: m, scale: d.scale })).unwrap_or(Num::Double(d.f64().abs())),
+            Num::Int(i) => i
+                .checked_abs()
+                .map(Num::Int)
+                .unwrap_or(Num::Double((i as f64).abs())),
+            Num::Dec(d) => d
+                .mant
+                .checked_abs()
+                .map(|m| {
+                    Num::Dec(Dec {
+                        mant: m,
+                        scale: d.scale,
+                    })
+                })
+                .unwrap_or(Num::Double(d.f64().abs())),
             Num::Float(f) => Num::Float(f.abs()),
             Num::Double(d) => Num::Double(d.abs()),
         }
@@ -902,7 +972,11 @@ pub fn parse_xsd_f32(v: &str) -> Option<f32> {
         return Some(f32::NAN);
     }
     if wide.is_infinite() {
-        return Some(if wide > 0.0 { f32::INFINITY } else { f32::NEG_INFINITY });
+        return Some(if wide > 0.0 {
+            f32::INFINITY
+        } else {
+            f32::NEG_INFINITY
+        });
     }
     v.parse::<f32>().ok()
 }
@@ -954,7 +1028,13 @@ mod tests {
         // 2^63 overflows i64 but fits an i128 mantissa with scale 0 — kept EXACT, not f64.
         let big = "9223372036854775808"; // i64::MAX + 1
         let n = as_numeric(&typed(big, xsd::INTEGER)).expect("a large integer is exact in Dec");
-        assert_eq!(n.to_dec(), Some(Dec { mant: 9_223_372_036_854_775_808i128, scale: 0 }));
+        assert_eq!(
+            n.to_dec(),
+            Some(Dec {
+                mant: 9_223_372_036_854_775_808i128,
+                scale: 0
+            })
+        );
         assert_eq!(n.rank(), 1);
     }
 
@@ -980,10 +1060,18 @@ mod tests {
     fn float_double_xsd_specials_parse() {
         // The XSD special spellings (INF / -INF / NaN) — the scaffold placeholder used
         // a bare v.parse::<f64>() which would REJECT "INF" and accept Rust's "inf".
-        assert!(matches!(as_numeric(&typed("INF", xsd::DOUBLE)), Some(Num::Double(d)) if d == f64::INFINITY));
-        assert!(matches!(as_numeric(&typed("-INF", xsd::DOUBLE)), Some(Num::Double(d)) if d == f64::NEG_INFINITY));
-        assert!(matches!(as_numeric(&typed("NaN", xsd::DOUBLE)), Some(Num::Double(d)) if d.is_nan()));
-        assert!(matches!(as_numeric(&typed("INF", xsd::FLOAT)), Some(Num::Float(f)) if f == f32::INFINITY));
+        assert!(
+            matches!(as_numeric(&typed("INF", xsd::DOUBLE)), Some(Num::Double(d)) if d == f64::INFINITY)
+        );
+        assert!(
+            matches!(as_numeric(&typed("-INF", xsd::DOUBLE)), Some(Num::Double(d)) if d == f64::NEG_INFINITY)
+        );
+        assert!(
+            matches!(as_numeric(&typed("NaN", xsd::DOUBLE)), Some(Num::Double(d)) if d.is_nan())
+        );
+        assert!(
+            matches!(as_numeric(&typed("INF", xsd::FLOAT)), Some(Num::Float(f)) if f == f32::INFINITY)
+        );
         // Rust-only spellings XSD forbids are rejected.
         assert!(as_numeric(&typed("inf", xsd::DOUBLE)).is_none());
         assert!(as_numeric(&typed("infinity", xsd::DOUBLE)).is_none());
@@ -992,7 +1080,9 @@ mod tests {
 
     #[test]
     fn float_double_exponent_forms_parse() {
-        assert!(matches!(as_numeric(&typed("1.5E2", xsd::DOUBLE)), Some(Num::Double(d)) if d == 150.0));
+        assert!(
+            matches!(as_numeric(&typed("1.5E2", xsd::DOUBLE)), Some(Num::Double(d)) if d == 150.0)
+        );
         assert!(matches!(as_numeric(&typed("1.5", xsd::FLOAT)), Some(Num::Float(f)) if f == 1.5));
     }
 
@@ -1052,7 +1142,11 @@ mod tests {
         let just_below_half = 0.49999999999999994_f64;
         assert!(just_below_half < 0.5);
         // Pin the exact defect the OLD formula exhibited so any regression is loud:
-        assert_eq!((just_below_half + 0.5).floor(), 1.0, "the naive formula rounds up");
+        assert_eq!(
+            (just_below_half + 0.5).floor(),
+            1.0,
+            "the naive formula rounds up"
+        );
         // The corrected helper and the xsd:double path both round DOWN to 0.
         assert_eq!(round_half_to_pos_inf(just_below_half), 0.0);
         let rd = Num::Double(just_below_half).round();
@@ -1094,7 +1188,10 @@ mod tests {
         assert!(round_half_to_pos_inf(f64::NAN).is_nan());
         assert!(Num::Double(f64::NAN).round().f64().is_nan());
         assert_eq!(Num::Double(f64::INFINITY).round().f64(), f64::INFINITY);
-        assert_eq!(Num::Double(f64::NEG_INFINITY).round().f64(), f64::NEG_INFINITY);
+        assert_eq!(
+            Num::Double(f64::NEG_INFINITY).round().f64(),
+            f64::NEG_INFINITY
+        );
         assert!(Num::Float(f32::NAN).round().f64().is_nan());
     }
 
@@ -1146,10 +1243,24 @@ mod tests {
         assert!(matches!(parse_xsd_f64("NaN"), Some(d) if d.is_nan()));
         assert_eq!(parse_xsd_f64("1.5E2"), Some(150.0));
         assert_eq!(parse_xsd_f64("6"), Some(6.0));
-        for bad in ["inf", "+inf", "infinity", "-infinity", "nan", "Infinity", "NAN", ""] {
+        for bad in [
+            "inf",
+            "+inf",
+            "infinity",
+            "-infinity",
+            "nan",
+            "Infinity",
+            "NAN",
+            "",
+        ] {
             // Positional arg (not inline `{bad}`) to dodge the CodeQL
             // `rust/unused-variable` false positive. [OPUS-4.8]
-            assert_eq!(parse_xsd_f64(bad), None, "parse_xsd_f64 must reject {:?}", bad);
+            assert_eq!(
+                parse_xsd_f64(bad),
+                None,
+                "parse_xsd_f64 must reject {:?}",
+                bad
+            );
         }
         // f32 narrows the same acceptance set.
         assert_eq!(parse_xsd_f32("INF"), Some(f32::INFINITY));
@@ -1200,8 +1311,20 @@ mod tests {
         // Leading-sign variants; parse_lexical PRESERVES the written scale (unlike Dec::parse,
         // which normalises trailing fraction zeros away).
         assert_eq!(Dec::parse_lexical("+5"), Some(Dec { mant: 5, scale: 0 }));
-        assert_eq!(Dec::parse_lexical("-3.0"), Some(Dec { mant: -30, scale: 1 }));
-        assert_eq!(Dec::parse_lexical("1.00"), Some(Dec { mant: 100, scale: 2 }));
+        assert_eq!(
+            Dec::parse_lexical("-3.0"),
+            Some(Dec {
+                mant: -30,
+                scale: 1
+            })
+        );
+        assert_eq!(
+            Dec::parse_lexical("1.00"),
+            Some(Dec {
+                mant: 100,
+                scale: 2
+            })
+        );
         // Negative flag with a zero mantissa stays a non-negative zero mantissa.
         assert_eq!(Dec::parse_lexical("-0.0"), Some(Dec { mant: 0, scale: 1 }));
         // A bare "." after a sign is still ill-formed.
@@ -1217,10 +1340,16 @@ mod tests {
         let c = Dec { mant: 12, scale: 1 }; // 1.2
         let d = Dec { mant: 2, scale: 1 }; // 0.2
         assert_eq!(c.checked_sub(d), Some(Dec { mant: 10, scale: 1 })); // 1.0
-        // checked_mul ADDS the scales and multiplies the mantissas exactly.
-        assert_eq!(c.checked_mul(Dec { mant: 2, scale: 0 }), Some(Dec { mant: 24, scale: 1 })); // 2.4
-        // Mantissa-add overflow -> None (the caller falls back to f64).
-        let big = Dec { mant: i128::MAX, scale: 0 };
+                                                                        // checked_mul ADDS the scales and multiplies the mantissas exactly.
+        assert_eq!(
+            c.checked_mul(Dec { mant: 2, scale: 0 }),
+            Some(Dec { mant: 24, scale: 1 })
+        ); // 2.4
+           // Mantissa-add overflow -> None (the caller falls back to f64).
+        let big = Dec {
+            mant: i128::MAX,
+            scale: 0,
+        };
         assert_eq!(big.checked_add(Dec { mant: 1, scale: 0 }), None);
         assert_eq!(big.checked_mul(Dec { mant: 2, scale: 0 }), None);
         // A scale-ALIGNMENT overflow (multiplying i128::MAX by 10 to line up scales) -> None.
@@ -1236,7 +1365,9 @@ mod tests {
             Some(Dec { mant: 25, scale: 2 })
         );
         // Non-terminating: 1/3 rounds half-up at the max scale 18.
-        let third = Dec { mant: 1, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        let third = Dec { mant: 1, scale: 0 }
+            .checked_div(Dec { mant: 3, scale: 0 })
+            .unwrap();
         assert_eq!(third.scale, 18);
         assert_eq!(third.mant, 333_333_333_333_333_333i128);
         // The e < 0 branch of num_den: dividend scale exceeds the trial scale, so the
@@ -1250,7 +1381,7 @@ mod tests {
             Dec { mant: -1, scale: 0 }.checked_div(Dec { mant: 2, scale: 0 }),
             Some(Dec { mant: -5, scale: 1 })
         ); // -0.5
-        // 0 / 5 terminates at scale 1 as 0.0.
+           // 0 / 5 terminates at scale 1 as 0.0.
         assert_eq!(
             Dec { mant: 0, scale: 0 }.checked_div(Dec { mant: 5, scale: 0 }),
             Some(Dec { mant: 0, scale: 1 })
@@ -1260,30 +1391,69 @@ mod tests {
     #[test]
     fn dec_round_to_int_early_return_and_overflow_scale() {
         // Early return: scale 0 is already integer-valued; a zero mantissa is too.
-        assert_eq!(Dec { mant: 5, scale: 0 }.round_to_int(RoundMode::Floor), Dec { mant: 5, scale: 0 });
-        assert_eq!(Dec { mant: 0, scale: 3 }.round_to_int(RoundMode::Ceil), Dec { mant: 0, scale: 0 });
+        assert_eq!(
+            Dec { mant: 5, scale: 0 }.round_to_int(RoundMode::Floor),
+            Dec { mant: 5, scale: 0 }
+        );
+        assert_eq!(
+            Dec { mant: 0, scale: 3 }.round_to_int(RoundMode::Ceil),
+            Dec { mant: 0, scale: 0 }
+        );
         // Ordinary scale: 2.5 floors to 2, ceils to 3, half-up to 3.
         let two_five = Dec { mant: 25, scale: 1 };
-        assert_eq!(two_five.round_to_int(RoundMode::Floor), Dec { mant: 2, scale: 0 });
-        assert_eq!(two_five.round_to_int(RoundMode::Ceil), Dec { mant: 3, scale: 0 });
-        assert_eq!(two_five.round_to_int(RoundMode::HalfUp), Dec { mant: 3, scale: 0 });
+        assert_eq!(
+            two_five.round_to_int(RoundMode::Floor),
+            Dec { mant: 2, scale: 0 }
+        );
+        assert_eq!(
+            two_five.round_to_int(RoundMode::Ceil),
+            Dec { mant: 3, scale: 0 }
+        );
+        assert_eq!(
+            two_five.round_to_int(RoundMode::HalfUp),
+            Dec { mant: 3, scale: 0 }
+        );
         // Scale >= 39: 10^scale exceeds i128, so |value| < 1 and the result is derived from
         // the sign alone WITHOUT constructing the overflowing power.
         let tiny_pos = Dec { mant: 1, scale: 40 };
-        assert_eq!(tiny_pos.round_to_int(RoundMode::Floor), Dec { mant: 0, scale: 0 });
-        assert_eq!(tiny_pos.round_to_int(RoundMode::Ceil), Dec { mant: 1, scale: 0 });
-        assert_eq!(tiny_pos.round_to_int(RoundMode::HalfUp), Dec { mant: 0, scale: 0 });
-        let tiny_neg = Dec { mant: -1, scale: 40 };
-        assert_eq!(tiny_neg.round_to_int(RoundMode::Floor), Dec { mant: -1, scale: 0 });
-        assert_eq!(tiny_neg.round_to_int(RoundMode::Ceil), Dec { mant: 0, scale: 0 });
-        assert_eq!(tiny_neg.round_to_int(RoundMode::HalfUp), Dec { mant: 0, scale: 0 });
+        assert_eq!(
+            tiny_pos.round_to_int(RoundMode::Floor),
+            Dec { mant: 0, scale: 0 }
+        );
+        assert_eq!(
+            tiny_pos.round_to_int(RoundMode::Ceil),
+            Dec { mant: 1, scale: 0 }
+        );
+        assert_eq!(
+            tiny_pos.round_to_int(RoundMode::HalfUp),
+            Dec { mant: 0, scale: 0 }
+        );
+        let tiny_neg = Dec {
+            mant: -1,
+            scale: 40,
+        };
+        assert_eq!(
+            tiny_neg.round_to_int(RoundMode::Floor),
+            Dec { mant: -1, scale: 0 }
+        );
+        assert_eq!(
+            tiny_neg.round_to_int(RoundMode::Ceil),
+            Dec { mant: 0, scale: 0 }
+        );
+        assert_eq!(
+            tiny_neg.round_to_int(RoundMode::HalfUp),
+            Dec { mant: 0, scale: 0 }
+        );
     }
 
     #[test]
     fn dec_cmp_total_order_across_scales() {
         let one = Dec { mant: 10, scale: 1 }; // 1.0
         let two = Dec { mant: 20, scale: 1 }; // 2.0
-        let one_padded = Dec { mant: 100, scale: 2 }; // 1.00
+        let one_padded = Dec {
+            mant: 100,
+            scale: 2,
+        }; // 1.00
         assert_eq!(one.cmp(two), Some(Ordering::Less));
         assert_eq!(two.cmp(one), Some(Ordering::Greater));
         assert_eq!(one.cmp(one_padded), Some(Ordering::Equal)); // 1.0 == 1.00
@@ -1292,7 +1462,16 @@ mod tests {
     #[test]
     fn dec_f64_projection() {
         assert!((Dec { mant: 15, scale: 1 }.f64() - 1.5).abs() < 1e-12);
-        assert!((Dec { mant: -25, scale: 2 }.f64() - (-0.25)).abs() < 1e-12);
+        assert!(
+            (Dec {
+                mant: -25,
+                scale: 2
+            }
+            .f64()
+                - (-0.25))
+                .abs()
+                < 1e-12
+        );
         assert_eq!(Dec { mant: 7, scale: 0 }.f64(), 7.0);
     }
 
@@ -1307,8 +1486,22 @@ mod tests {
         assert_eq!(Dec { mant: 0, scale: 1 }.lexical(), "0.0");
         // |mant| longer than the scale -> a non-zero integer part with a decimal point.
         assert_eq!(Dec { mant: 15, scale: 1 }.lexical(), "1.5");
-        assert_eq!(Dec { mant: 1234, scale: 2 }.lexical(), "12.34");
-        assert_eq!(Dec { mant: -1234, scale: 2 }.lexical(), "-12.34");
+        assert_eq!(
+            Dec {
+                mant: 1234,
+                scale: 2
+            }
+            .lexical(),
+            "12.34"
+        );
+        assert_eq!(
+            Dec {
+                mant: -1234,
+                scale: 2
+            }
+            .lexical(),
+            "-12.34"
+        );
     }
 
     #[test]
@@ -1339,13 +1532,28 @@ mod tests {
     #[test]
     fn num_binop_int_tier_exact_and_overflow_to_double() {
         // integer op integer stays integer and is exact.
-        assert!(matches!(Num::Int(2).binop(Num::Int(3), ArithOp::Add), Some(Num::Int(5))));
-        assert!(matches!(Num::Int(10).binop(Num::Int(4), ArithOp::Sub), Some(Num::Int(6))));
-        assert!(matches!(Num::Int(6).binop(Num::Int(7), ArithOp::Mul), Some(Num::Int(42))));
+        assert!(matches!(
+            Num::Int(2).binop(Num::Int(3), ArithOp::Add),
+            Some(Num::Int(5))
+        ));
+        assert!(matches!(
+            Num::Int(10).binop(Num::Int(4), ArithOp::Sub),
+            Some(Num::Int(6))
+        ));
+        assert!(matches!(
+            Num::Int(6).binop(Num::Int(7), ArithOp::Mul),
+            Some(Num::Int(42))
+        ));
         // i64::MAX + 1 overflows the exact tier -> falls back to Double.
-        assert!(matches!(Num::Int(i64::MAX).binop(Num::Int(1), ArithOp::Add), Some(Num::Double(_))));
+        assert!(matches!(
+            Num::Int(i64::MAX).binop(Num::Int(1), ArithOp::Add),
+            Some(Num::Double(_))
+        ));
         // i64::MAX * 2 likewise overflows -> Double.
-        assert!(matches!(Num::Int(i64::MAX).binop(Num::Int(2), ArithOp::Mul), Some(Num::Double(_))));
+        assert!(matches!(
+            Num::Int(i64::MAX).binop(Num::Int(2), ArithOp::Mul),
+            Some(Num::Double(_))
+        ));
     }
 
     #[test]
@@ -1353,10 +1561,17 @@ mod tests {
         // decimal op decimal stays exact decimal (no f64 rounding).
         let a = Num::Dec(Dec { mant: 12, scale: 1 }); // 1.2
         let b = Num::Dec(Dec { mant: 3, scale: 1 }); // 0.3
-        assert!(matches!(a.binop(b, ArithOp::Add), Some(Num::Dec(d)) if d == Dec { mant: 15, scale: 1 }));
-        assert!(matches!(a.binop(b, ArithOp::Sub), Some(Num::Dec(d)) if d == Dec { mant: 9, scale: 1 }));
+        assert!(
+            matches!(a.binop(b, ArithOp::Add), Some(Num::Dec(d)) if d == Dec { mant: 15, scale: 1 })
+        );
+        assert!(
+            matches!(a.binop(b, ArithOp::Sub), Some(Num::Dec(d)) if d == Dec { mant: 9, scale: 1 })
+        );
         // i128::MAX * 2 overflows the exact decimal multiply -> falls back to Double.
-        let big = Num::Dec(Dec { mant: i128::MAX, scale: 0 });
+        let big = Num::Dec(Dec {
+            mant: i128::MAX,
+            scale: 0,
+        });
         let two = Num::Dec(Dec { mant: 2, scale: 0 });
         assert!(matches!(big.binop(two, ArithOp::Mul), Some(Num::Double(_))));
     }
@@ -1369,19 +1584,31 @@ mod tests {
         assert_eq!(q.datatype(), xsd::DECIMAL);
         // x / 0 in the exact tier is a SPARQL type error (None), never INF.
         assert!(Num::Int(1).binop(Num::Int(0), ArithOp::Div).is_none());
-        assert!(Num::Dec(Dec { mant: 5, scale: 1 }).binop(Num::Dec(Dec { mant: 0, scale: 0 }), ArithOp::Div).is_none());
+        assert!(Num::Dec(Dec { mant: 5, scale: 1 })
+            .binop(Num::Dec(Dec { mant: 0, scale: 0 }), ArithOp::Div)
+            .is_none());
     }
 
     #[test]
     fn num_binop_float_tier_stays_float() {
         let a = Num::Float(2.0);
         let b = Num::Float(3.0);
-        assert!(matches!(a.binop(b, ArithOp::Add), Some(Num::Float(f)) if (f - 5.0f32).abs() < 1e-6));
-        assert!(matches!(a.binop(b, ArithOp::Sub), Some(Num::Float(f)) if (f - (-1.0f32)).abs() < 1e-6));
-        assert!(matches!(a.binop(b, ArithOp::Mul), Some(Num::Float(f)) if (f - 6.0f32).abs() < 1e-6));
-        assert!(matches!(a.binop(b, ArithOp::Div), Some(Num::Float(f)) if (f - (2.0f32 / 3.0f32)).abs() < 1e-6));
+        assert!(
+            matches!(a.binop(b, ArithOp::Add), Some(Num::Float(f)) if (f - 5.0f32).abs() < 1e-6)
+        );
+        assert!(
+            matches!(a.binop(b, ArithOp::Sub), Some(Num::Float(f)) if (f - (-1.0f32)).abs() < 1e-6)
+        );
+        assert!(
+            matches!(a.binop(b, ArithOp::Mul), Some(Num::Float(f)) if (f - 6.0f32).abs() < 1e-6)
+        );
+        assert!(
+            matches!(a.binop(b, ArithOp::Div), Some(Num::Float(f)) if (f - (2.0f32 / 3.0f32)).abs() < 1e-6)
+        );
         // A mixed float/int operation promotes to the float tier.
-        assert!(matches!(Num::Int(4).binop(Num::Float(2.0), ArithOp::Div), Some(Num::Float(f)) if (f - 2.0f32).abs() < 1e-6));
+        assert!(
+            matches!(Num::Int(4).binop(Num::Float(2.0), ArithOp::Div), Some(Num::Float(f)) if (f - 2.0f32).abs() < 1e-6)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1420,12 +1647,21 @@ mod tests {
         // ... and it is NOT the double-rounded value the f64 detour produces.
         assert_eq!((F32_UP_I64 as f64 as f32).to_bits(), F32_UP_DOUBLE_ROUNDED);
         assert_ne!(Num::Int(F32_UP_I64).f32().to_bits(), F32_UP_DOUBLE_ROUNDED);
-        assert_eq!((F32_DOWN_I64 as f64 as f32).to_bits(), F32_DOWN_DOUBLE_ROUNDED);
-        assert_ne!(Num::Int(F32_DOWN_I64).f32().to_bits(), F32_DOWN_DOUBLE_ROUNDED);
+        assert_eq!(
+            (F32_DOWN_I64 as f64 as f32).to_bits(),
+            F32_DOWN_DOUBLE_ROUNDED
+        );
+        assert_ne!(
+            Num::Int(F32_DOWN_I64).f32().to_bits(),
+            F32_DOWN_DOUBLE_ROUNDED
+        );
         // The other tiers of the helper: Float is the identity, Double narrows once,
         // and small exactly-representable values are unaffected.
         assert_eq!(Num::Float(1.5f32).f32().to_bits(), 1.5f32.to_bits());
-        assert_eq!(Num::Double(0.1f64).f32().to_bits(), (0.1f64 as f32).to_bits());
+        assert_eq!(
+            Num::Double(0.1f64).f32().to_bits(),
+            (0.1f64 as f32).to_bits()
+        );
         assert_eq!(Num::Int(42).f32().to_bits(), 42.0f32.to_bits());
     }
 
@@ -1433,8 +1669,14 @@ mod tests {
     fn num_f32_promotion_of_over_i64_integer_is_single_rounded_bit_exact() {
         // An xsd:integer beyond i64 is carried as a scale-0 `Dec`; the same midpoint
         // construction at 2^70 (so it cannot fit i64) witnesses the same defect.
-        let up = Dec { mant: 1_180_591_691_086_155_481_089, scale: 0 };
-        let down = Dec { mant: 1_180_591_831_823_643_836_415, scale: 0 };
+        let up = Dec {
+            mant: 1_180_591_691_086_155_481_089,
+            scale: 0,
+        };
+        let down = Dec {
+            mant: 1_180_591_831_823_643_836_415,
+            scale: 0,
+        };
         assert_eq!(Num::Dec(up).f32().to_bits(), 0x6280_0001);
         assert_eq!(Num::Dec(down).f32().to_bits(), 0x6280_0001);
         assert_eq!((up.f64() as f32).to_bits(), 0x6280_0000);
@@ -1445,11 +1687,25 @@ mod tests {
     fn dec_f32_is_single_rounded_bit_exact_at_both_scales() {
         // DIRECT unit test of the public `Dec::f32`.
         // scale 0 (exact integer) — the i128 -> f32 conversion.
-        assert_eq!(Dec { mant: 1_180_591_691_086_155_481_089, scale: 0 }.f32().to_bits(), 0x6280_0001);
+        assert_eq!(
+            Dec {
+                mant: 1_180_591_691_086_155_481_089,
+                scale: 0
+            }
+            .f32()
+            .to_bits(),
+            0x6280_0001
+        );
         // scale > 0 — `4611686293305294848.1` and `4611686843061108735.9`, each one tenth
         // off an f32 midpoint, so the exact value is unambiguously on one side.
-        let a = Dec { mant: 46_116_862_933_052_948_481, scale: 1 };
-        let b = Dec { mant: 46_116_868_430_611_087_359, scale: 1 };
+        let a = Dec {
+            mant: 46_116_862_933_052_948_481,
+            scale: 1,
+        };
+        let b = Dec {
+            mant: 46_116_868_430_611_087_359,
+            scale: 1,
+        };
         assert_eq!(a.lexical(), "4611686293305294848.1");
         assert_eq!(b.lexical(), "4611686843061108735.9");
         assert_eq!(a.f32().to_bits(), F32_UP_CORRECT);
@@ -1458,7 +1714,10 @@ mod tests {
         assert_eq!((b.f64() as f32).to_bits(), F32_DOWN_DOUBLE_ROUNDED);
         // Ordinary small decimals are untouched by the change.
         assert_eq!(Dec { mant: 15, scale: 1 }.f32().to_bits(), 1.5f32.to_bits());
-        assert_eq!(Dec { mant: -5, scale: 0 }.f32().to_bits(), (-5.0f32).to_bits());
+        assert_eq!(
+            Dec { mant: -5, scale: 0 }.f32().to_bits(),
+            (-5.0f32).to_bits()
+        );
     }
 
     #[test]
@@ -1466,7 +1725,10 @@ mod tests {
         // The reported impact: `SUM(?int, "0.0"^^xsd:float)` / `AVG` over a mixed
         // integer/float column. `Int + Float(0.0)` promotes to the float tier.
         let zero = Num::Float(0.0);
-        for (n, want) in [(F32_UP_I64, F32_UP_CORRECT), (F32_DOWN_I64, F32_DOWN_CORRECT)] {
+        for (n, want) in [
+            (F32_UP_I64, F32_UP_CORRECT),
+            (F32_DOWN_I64, F32_DOWN_CORRECT),
+        ] {
             let got = match Num::Int(n).binop(zero, ArithOp::Add) {
                 Some(Num::Float(f)) => f,
                 other => panic!("int + float must stay on the float tier, got {:?}", other),
@@ -1503,7 +1765,9 @@ mod tests {
         // correctly-rounded f32.
         for lex in ["4611686293305294849", "4.611686293305294849E18"] {
             assert_eq!(
-                parse_xsd_f32(lex).expect("well-formed xsd:float lexical").to_bits(),
+                parse_xsd_f32(lex)
+                    .expect("well-formed xsd:float lexical")
+                    .to_bits(),
                 F32_UP_CORRECT,
                 "parse_xsd_f32({:?})",
                 lex
@@ -1517,7 +1781,9 @@ mod tests {
         }
         for lex in ["4611686843061108735", "4.611686843061108735E18"] {
             assert_eq!(
-                parse_xsd_f32(lex).expect("well-formed xsd:float lexical").to_bits(),
+                parse_xsd_f32(lex)
+                    .expect("well-formed xsd:float lexical")
+                    .to_bits(),
                 F32_DOWN_CORRECT,
                 "parse_xsd_f32({:?})",
                 lex
@@ -1535,7 +1801,10 @@ mod tests {
         assert_eq!(parse_xsd_f32("INF"), Some(f32::INFINITY));
         assert_eq!(parse_xsd_f32("+INF"), Some(f32::INFINITY));
         assert_eq!(parse_xsd_f32("-INF"), Some(f32::NEG_INFINITY));
-        assert_eq!(parse_xsd_f32("-0.0").map(f32::to_bits), Some((-0.0f32).to_bits()));
+        assert_eq!(
+            parse_xsd_f32("-0.0").map(f32::to_bits),
+            Some((-0.0f32).to_bits())
+        );
         for bad in ["inf", "Infinity", "nan", "NAN", "0x1p3", "1.0f", "", "abc"] {
             assert_eq!(parse_xsd_f32(bad), None, "must reject {:?}", bad);
         }
@@ -1549,10 +1818,18 @@ mod tests {
         // End-to-end through the classifier the engine actually calls.
         let up = as_numeric(&typed("4611686293305294849", xsd::FLOAT))
             .expect("well-formed xsd:float literal");
-        assert!(matches!(up, Num::Float(f) if f.to_bits() == F32_UP_CORRECT), "got {:?}", up);
+        assert!(
+            matches!(up, Num::Float(f) if f.to_bits() == F32_UP_CORRECT),
+            "got {:?}",
+            up
+        );
         let down = as_numeric(&typed("4.611686843061108735E18", xsd::FLOAT))
             .expect("well-formed xsd:float literal");
-        assert!(matches!(down, Num::Float(f) if f.to_bits() == F32_DOWN_CORRECT), "got {:?}", down);
+        assert!(
+            matches!(down, Num::Float(f) if f.to_bits() == F32_DOWN_CORRECT),
+            "got {:?}",
+            down
+        );
         // The xsd:integer literal of the same digits promotes to the same f32.
         let as_int = as_numeric(&typed("4611686293305294849", xsd::INTEGER)).expect("integer");
         assert_eq!(as_int.f32().to_bits(), F32_UP_CORRECT);
@@ -1562,36 +1839,54 @@ mod tests {
     fn num_binop_double_tier_stays_double() {
         let a = Num::Double(10.0);
         let b = Num::Double(4.0);
-        assert!(matches!(a.binop(b, ArithOp::Add), Some(Num::Double(d)) if (d - 14.0).abs() < 1e-12));
-        assert!(matches!(a.binop(b, ArithOp::Sub), Some(Num::Double(d)) if (d - 6.0).abs() < 1e-12));
-        assert!(matches!(a.binop(b, ArithOp::Mul), Some(Num::Double(d)) if (d - 40.0).abs() < 1e-12));
-        assert!(matches!(a.binop(b, ArithOp::Div), Some(Num::Double(d)) if (d - 2.5).abs() < 1e-12));
+        assert!(
+            matches!(a.binop(b, ArithOp::Add), Some(Num::Double(d)) if (d - 14.0).abs() < 1e-12)
+        );
+        assert!(
+            matches!(a.binop(b, ArithOp::Sub), Some(Num::Double(d)) if (d - 6.0).abs() < 1e-12)
+        );
+        assert!(
+            matches!(a.binop(b, ArithOp::Mul), Some(Num::Double(d)) if (d - 40.0).abs() < 1e-12)
+        );
+        assert!(
+            matches!(a.binop(b, ArithOp::Div), Some(Num::Double(d)) if (d - 2.5).abs() < 1e-12)
+        );
         // The double tier dominates a decimal operand.
-        assert!(matches!(Num::Dec(Dec { mant: 5, scale: 0 }).binop(Num::Double(2.0), ArithOp::Add), Some(Num::Double(d)) if (d - 7.0).abs() < 1e-12));
+        assert!(
+            matches!(Num::Dec(Dec { mant: 5, scale: 0 }).binop(Num::Double(2.0), ArithOp::Add), Some(Num::Double(d)) if (d - 7.0).abs() < 1e-12)
+        );
     }
 
     #[test]
     fn num_neg_all_variants_and_overflow_to_double() {
         assert!(matches!(Num::Int(5).neg(), Num::Int(-5)));
-        assert!(matches!(Num::Dec(Dec { mant: 15, scale: 1 }).neg(), Num::Dec(d) if d == Dec { mant: -15, scale: 1 }));
+        assert!(
+            matches!(Num::Dec(Dec { mant: 15, scale: 1 }).neg(), Num::Dec(d) if d == Dec { mant: -15, scale: 1 })
+        );
         assert!(matches!(Num::Float(3.0).neg(), Num::Float(f) if f == -3.0));
         assert!(matches!(Num::Double(2.5).neg(), Num::Double(d) if d == -2.5));
         // i64::MIN has no i64 negation -> promotes to Double (never panics/wraps).
         assert!(matches!(Num::Int(i64::MIN).neg(), Num::Double(d) if d == (i64::MIN as f64).abs()));
         // i128::MIN mantissa negation overflows -> Double as well.
-        assert!(matches!(Num::Dec(Dec { mant: i128::MIN, scale: 0 }).neg(), Num::Double(d) if d > 0.0));
+        assert!(
+            matches!(Num::Dec(Dec { mant: i128::MIN, scale: 0 }).neg(), Num::Double(d) if d > 0.0)
+        );
     }
 
     #[test]
     fn num_abs_all_variants_and_overflow_to_double() {
         assert!(matches!(Num::Int(-5).abs(), Num::Int(5)));
-        assert!(matches!(Num::Dec(Dec { mant: -15, scale: 1 }).abs(), Num::Dec(d) if d == Dec { mant: 15, scale: 1 }));
+        assert!(
+            matches!(Num::Dec(Dec { mant: -15, scale: 1 }).abs(), Num::Dec(d) if d == Dec { mant: 15, scale: 1 })
+        );
         assert!(matches!(Num::Float(-3.0).abs(), Num::Float(f) if f == 3.0));
         assert!(matches!(Num::Double(-2.5).abs(), Num::Double(d) if d == 2.5));
         // i64::MIN has no i64 absolute value -> Double.
         assert!(matches!(Num::Int(i64::MIN).abs(), Num::Double(d) if d > 0.0));
         // i128::MIN likewise.
-        assert!(matches!(Num::Dec(Dec { mant: i128::MIN, scale: 0 }).abs(), Num::Double(d) if d > 0.0));
+        assert!(
+            matches!(Num::Dec(Dec { mant: i128::MIN, scale: 0 }).abs(), Num::Double(d) if d > 0.0)
+        );
     }
 
     #[test]
@@ -1703,9 +1998,16 @@ mod tests {
         use Ordering::*;
         let dbl = Num::Double(TWO53 as f64);
         let int_lo = Num::Int(TWO53);
-        let int_hi = Num::Dec(Dec { mant: TWO53 as i128 + 1, scale: 0 });
+        let int_hi = Num::Dec(Dec {
+            mant: TWO53 as i128 + 1,
+            scale: 0,
+        });
         assert_eq!(int_lo.cmp_total(dbl), Equal, "2^53 IS the double exactly");
-        assert_eq!(dbl.cmp_total(int_hi), Less, "the collapsed neighbour still orders");
+        assert_eq!(
+            dbl.cmp_total(int_hi),
+            Less,
+            "the collapsed neighbour still orders"
+        );
         assert_eq!(int_hi.cmp_total(dbl), Greater);
         assert_eq!(int_lo.cmp_total(int_hi), Less);
     }
@@ -1721,7 +2023,10 @@ mod tests {
         assert_eq!(dec.cmp_total(dbl), Less);
         assert_eq!(dbl.cmp_total(dec), Greater);
         assert_eq!(Num::Int(1).cmp_total(Num::Double(f64::INFINITY)), Less);
-        assert_eq!(Num::Int(1).cmp_total(Num::Double(f64::NEG_INFINITY)), Greater);
+        assert_eq!(
+            Num::Int(1).cmp_total(Num::Double(f64::NEG_INFINITY)),
+            Greater
+        );
         // Both-inexact: the value IS the f64; a float widens exactly.
         assert_eq!(Num::Float(0.5).cmp_total(Num::Double(0.5)), Equal);
         assert_eq!(Num::Double(-0.0).cmp_total(Num::Double(0.0)), Equal);
@@ -1732,8 +2037,14 @@ mod tests {
     #[test]
     fn cmp_plain_decimal_is_exact_and_total_on_decimals() {
         use Ordering::*;
-        assert_eq!(cmp_plain_decimal("9007199254740992", "9007199254740993"), Some(Less));
-        assert_eq!(cmp_plain_decimal("0.123456789012345678", "0.123456789012345679"), Some(Less));
+        assert_eq!(
+            cmp_plain_decimal("9007199254740992", "9007199254740993"),
+            Some(Less)
+        );
+        assert_eq!(
+            cmp_plain_decimal("0.123456789012345678", "0.123456789012345679"),
+            Some(Less)
+        );
         assert_eq!(cmp_plain_decimal("1.50", "1.5"), Some(Equal));
         assert_eq!(cmp_plain_decimal("-0.0", "0"), Some(Equal));
         assert_eq!(cmp_plain_decimal("-2", "-10"), Some(Greater));
@@ -1746,9 +2057,16 @@ mod tests {
     #[test]
     fn f64_exact_decimal_is_the_exact_expansion() {
         let exp = f64_exact_decimal(0.1).expect("finite");
-        assert!(exp.starts_with("0.1000000000000000055511151231257827"), "got {}", exp);
+        assert!(
+            exp.starts_with("0.1000000000000000055511151231257827"),
+            "got {}",
+            exp
+        );
         assert_eq!(
-            cmp_plain_decimal(&f64_exact_decimal(TWO53 as f64).unwrap(), "9007199254740992"),
+            cmp_plain_decimal(
+                &f64_exact_decimal(TWO53 as f64).unwrap(),
+                "9007199254740992"
+            ),
             Some(Ordering::Equal)
         );
         assert_eq!(f64_exact_decimal(f64::NAN), None);
@@ -1773,7 +2091,10 @@ mod tests {
         assert_eq!(dec1.cmp_relational(dec2), Some(Less));
         assert_eq!(Num::Int(1).cmp_relational(dec1), Some(Equal));
         // Float / double
-        assert_eq!(Num::Double(1.0).cmp_relational(Num::Double(2.0)), Some(Less));
+        assert_eq!(
+            Num::Double(1.0).cmp_relational(Num::Double(2.0)),
+            Some(Less)
+        );
         assert_eq!(Num::Float(3.0).cmp_relational(Num::Float(3.0)), Some(Equal));
     }
 
@@ -1783,10 +2104,22 @@ mod tests {
     fn cmp_relational_nan_is_type_error() {
         let nan = Num::Double(f64::NAN);
         let fnan = Num::Float(f32::NAN);
-        assert_eq!(nan.cmp_relational(Num::Int(0)), None, "NaN vs int is type error");
-        assert_eq!(Num::Int(0).cmp_relational(nan), None, "int vs NaN is type error");
+        assert_eq!(
+            nan.cmp_relational(Num::Int(0)),
+            None,
+            "NaN vs int is type error"
+        );
+        assert_eq!(
+            Num::Int(0).cmp_relational(nan),
+            None,
+            "int vs NaN is type error"
+        );
         assert_eq!(nan.cmp_relational(nan), None, "NaN vs NaN is type error");
-        assert_eq!(fnan.cmp_relational(Num::Double(1.0)), None, "float-NaN is type error");
+        assert_eq!(
+            fnan.cmp_relational(Num::Double(1.0)),
+            None,
+            "float-NaN is type error"
+        );
     }
 
     /// The XPath relational compare uses f64 promotion for mixed/inexact pairs — it does
@@ -1799,12 +2132,18 @@ mod tests {
         let int_lo = Num::Int(TWO53);
         let dbl = Num::Double(TWO53 as f64);
         // Int vs Int: exact dec path — distinct
-        let int_hi = Num::Dec(Dec { mant: TWO53 as i128 + 1, scale: 0 });
+        let int_hi = Num::Dec(Dec {
+            mant: TWO53 as i128 + 1,
+            scale: 0,
+        });
         assert_eq!(int_lo.cmp_relational(int_hi), Some(Less));
         // Int vs Double: f64 promotion — the double IS 2^53 exactly, so Equal
         assert_eq!(int_lo.cmp_relational(dbl), Some(Equal));
         // ±0.0 are equal (f64 comparison)
-        assert_eq!(Num::Double(-0.0).cmp_relational(Num::Double(0.0)), Some(Equal));
+        assert_eq!(
+            Num::Double(-0.0).cmp_relational(Num::Double(0.0)),
+            Some(Equal)
+        );
     }
 
     /// XPath promotes a mixed numeric pair to the LEAST common type, NOT always to
@@ -1830,25 +2169,50 @@ mod tests {
         assert_eq!(n.f32().to_bits(), 0x5E80_0001, "promotion fixture drifted");
 
         // THE case: least common type is xs:float, so these are equal.
-        assert_eq!(n.cmp_relational(f), Some(Equal), "integer vs float must promote to f32");
+        assert_eq!(
+            n.cmp_relational(f),
+            Some(Equal),
+            "integer vs float must promote to f32"
+        );
         assert_eq!(f.cmp_relational(n), Some(Equal), "and must be symmetric");
 
         // Pin the wrong answer the f64 route produces, so the fixture cannot silently
         // stop witnessing the defect.
-        assert_eq!(n.f64().partial_cmp(&f.f64()), Some(Less), "f64 route is the bug");
+        assert_eq!(
+            n.f64().partial_cmp(&f.f64()),
+            Some(Less),
+            "f64 route is the bug"
+        );
 
         // Ordering against the ADJACENT floats must still be strict, so an
         // everything-is-Equal implementation cannot pass.
-        assert_eq!(n.cmp_relational(Num::Float(f32::from_bits(0x5E80_0000))), Some(Greater));
-        assert_eq!(n.cmp_relational(Num::Float(f32::from_bits(0x5E80_0002))), Some(Less));
+        assert_eq!(
+            n.cmp_relational(Num::Float(f32::from_bits(0x5E80_0000))),
+            Some(Greater)
+        );
+        assert_eq!(
+            n.cmp_relational(Num::Float(f32::from_bits(0x5E80_0002))),
+            Some(Less)
+        );
 
         // xsd:decimal versus xsd:float takes the same tier (decimal -> float).
-        let d = Num::Dec(Dec { mant: 46_116_862_933_052_948_490, scale: 1 });
-        assert_eq!(d.cmp_relational(f), Some(Equal), "decimal vs float must promote to f32");
+        let d = Num::Dec(Dec {
+            mant: 46_116_862_933_052_948_490,
+            scale: 1,
+        });
+        assert_eq!(
+            d.cmp_relational(f),
+            Some(Equal),
+            "decimal vs float must promote to f32"
+        );
 
         // A DOUBLE operand genuinely does promote the pair to f64 — unchanged behaviour.
         let dbl = Num::Double(f32::from_bits(0x5E80_0001) as f64);
-        assert_eq!(n.cmp_relational(dbl), Some(Less), "double operand still uses the f64 tier");
+        assert_eq!(
+            n.cmp_relational(dbl),
+            Some(Less),
+            "double operand still uses the f64 tier"
+        );
 
         // Float-tier NaN is still a type error, and same-tier float ordering is intact.
         assert_eq!(n.cmp_relational(Num::Float(f32::NAN)), None);
@@ -1866,7 +2230,13 @@ mod tests {
     #[test]
     fn dec_parse_negative_mantissa_sign() {
         assert_eq!(Dec::parse("-3"), Some(Dec { mant: -3, scale: 0 }));
-        assert_eq!(Dec::parse("-1.5"), Some(Dec { mant: -15, scale: 1 }));
+        assert_eq!(
+            Dec::parse("-1.5"),
+            Some(Dec {
+                mant: -15,
+                scale: 1
+            })
+        );
         assert_eq!(Dec::parse("-0.07"), Some(Dec { mant: -7, scale: 2 }));
     }
 
@@ -1893,12 +2263,18 @@ mod tests {
         // Under mutation (−): e = s − 1 − 0 = s−1. At s=1: e=0, num=10, den=5 → 2.0. Wrong.
         assert_eq!(
             Dec { mant: 10, scale: 0 }.checked_div(Dec { mant: 5, scale: 1 }),
-            Some(Dec { mant: 200, scale: 1 })
+            Some(Dec {
+                mant: 200,
+                scale: 1
+            })
         );
         // 3 / 0.3 = 10.0: o.scale=1. At s=1: e=2, num=300, den=3 → 100 → scale=1 → 10.0.
         assert_eq!(
             Dec { mant: 3, scale: 0 }.checked_div(Dec { mant: 3, scale: 1 }),
-            Some(Dec { mant: 100, scale: 1 })
+            Some(Dec {
+                mant: 100,
+                scale: 1
+            })
         );
     }
 
@@ -1911,11 +2287,15 @@ mod tests {
     fn dec_checked_div_nonterminating_rounds_half_up() {
         // 2/3: non-terminating at every scale. Round half-up at scale 18.
         // rem = (2 * 10^18) % 3 = 2.  2*2=4 ≥ 3 → round UP.
-        let two_thirds = Dec { mant: 2, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        let two_thirds = Dec { mant: 2, scale: 0 }
+            .checked_div(Dec { mant: 3, scale: 0 })
+            .unwrap();
         assert_eq!(two_thirds.scale, 18);
         assert_eq!(two_thirds.mant, 666_666_666_666_666_667i128);
         // 1/3: rem = (1 * 10^18) % 3 = 1.  1*2=2 < 3 → round DOWN (no increment).
-        let one_third = Dec { mant: 1, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        let one_third = Dec { mant: 1, scale: 0 }
+            .checked_div(Dec { mant: 3, scale: 0 })
+            .unwrap();
         assert_eq!(one_third.scale, 18);
         assert_eq!(one_third.mant, 333_333_333_333_333_333i128);
     }
@@ -1926,7 +2306,9 @@ mod tests {
     #[test]
     fn dec_checked_div_nonterminating_negative_result() {
         // −2/3 is non-terminating; result must have a negative mantissa.
-        let r = Dec { mant: -2, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        let r = Dec { mant: -2, scale: 0 }
+            .checked_div(Dec { mant: 3, scale: 0 })
+            .unwrap();
         assert_eq!(r.scale, 18);
         assert_eq!(r.mant, -666_666_666_666_666_667i128);
     }
@@ -1943,12 +2325,20 @@ mod tests {
         );
         // 7.0 with a different scale.
         assert_eq!(
-            Dec { mant: 700, scale: 2 }.round_to_int(RoundMode::Ceil),
+            Dec {
+                mant: 700,
+                scale: 2
+            }
+            .round_to_int(RoundMode::Ceil),
             Dec { mant: 7, scale: 0 }
         );
         // Negative exact decimal: ceil(-3.0) = -3, not -2.
         assert_eq!(
-            Dec { mant: -30, scale: 1 }.round_to_int(RoundMode::Ceil),
+            Dec {
+                mant: -30,
+                scale: 1
+            }
+            .round_to_int(RoundMode::Ceil),
             Dec { mant: -3, scale: 0 }
         );
     }
@@ -1989,9 +2379,14 @@ mod tests {
         // i128::MAX / 0.1 overflows the exact Dec path (numerator would be ~1.7e40,
         // exceeding u128::MAX), so falls back to Double.
         // Expected: ~1.7e39. Mutation *: ~1.7e37. Mutation %: tiny value near 0.
-        let big = Num::Dec(Dec { mant: i128::MAX, scale: 0 });
+        let big = Num::Dec(Dec {
+            mant: i128::MAX,
+            scale: 0,
+        });
         let small = Num::Dec(Dec { mant: 1, scale: 1 }); // 0.1
-        let result = big.binop(small, ArithOp::Div).expect("never a type error here");
+        let result = big
+            .binop(small, ArithOp::Div)
+            .expect("never a type error here");
         assert!(
             matches!(result, Num::Double(d) if d > 1e38),
             "overflow fallback must use f64 DIVISION (got {:?})",
@@ -2045,31 +2440,31 @@ mod tests {
         let cases: &[(&str, oxrdf::NamedNodeRef<'_>)] = &[
             // ---- both accept (well-formed for datatype), same f64 image ----
             ("42", xsd::INTEGER),
-            (" 7 ", xsd::DECIMAL),      // whitespace collapse — both trim
+            (" 7 ", xsd::DECIMAL), // whitespace collapse — both trim
             ("+3", xsd::INTEGER),
-            (" 1 ", xsd::INTEGER),      // padded integer: both value-1 (sq-74oy4)
+            (" 1 ", xsd::INTEGER), // padded integer: both value-1 (sq-74oy4)
             ("1.5", xsd::DECIMAL),
             ("1.5E2", xsd::DOUBLE),
             ("INF", xsd::DOUBLE),
             ("3.0", xsd::FLOAT),
             // scale-0-after-normalisation integers `of_literal` accepts as `Dec` (mant, scale 0):
-            ("5.", xsd::INTEGER),        // trailing dot, no fraction -> value 5
-            ("5.0", xsd::INTEGER),       // trailing zero fraction -> normalised scale 0
-            ("5.00", xsd::INTEGER),      // ditto
-            ("-0", xsd::INTEGER),        // signed zero
-            (".5", xsd::DECIMAL),        // empty integer part
-            ("5.5", xsd::DECIMAL),       // ordinary decimal
-            ("007.50", xsd::DECIMAL),    // leading/trailing zeros
+            ("5.", xsd::INTEGER),     // trailing dot, no fraction -> value 5
+            ("5.0", xsd::INTEGER),    // trailing zero fraction -> normalised scale 0
+            ("5.00", xsd::INTEGER),   // ditto
+            ("-0", xsd::INTEGER),     // signed zero
+            (".5", xsd::DECIMAL),     // empty integer part
+            ("5.5", xsd::DECIMAL),    // ordinary decimal
+            ("007.50", xsd::DECIMAL), // leading/trailing zeros
             // ---- both reject (XSD f64 spellings) ----
-            ("inf", xsd::DOUBLE),       // Rust-only spelling: both reject
+            ("inf", xsd::DOUBLE), // Rust-only spelling: both reject
             ("nan", xsd::DOUBLE),
             ("abc", xsd::INTEGER),
             ("", xsd::INTEGER),
             // ---- both reject (per-datatype ill-formed) — the sq-6b1lj cases, now CLOSED ----
-            ("1.5", xsd::INTEGER),       // fraction on an integer (scale 1)
-            (".5", xsd::INTEGER),        // no integer part, scale 1 -> not an integer
-            ("1E2", xsd::DECIMAL),       // exponent on a decimal
-            ("1E2", xsd::INTEGER),       // exponent on an integer
+            ("1.5", xsd::INTEGER), // fraction on an integer (scale 1)
+            (".5", xsd::INTEGER),  // no integer part, scale 1 -> not an integer
+            ("1E2", xsd::DECIMAL), // exponent on a decimal
+            ("1E2", xsd::INTEGER), // exponent on an integer
             // 40-digit decimal: beyond i128 -> of_literal None AND cache miss now.
             ("9999999999999999999999999999999999999999.5", xsd::DECIMAL),
             // 40-digit integer: beyond i128 -> of_literal None AND cache miss now.
@@ -2103,7 +2498,10 @@ mod tests {
                 assert!(
                     cache_f64 == eval_f64 || (cache_f64 == 0.0 && eval_f64 == 0.0),
                     "f64 image mismatch for {:?}^^{:?}: cache={} eval={}",
-                    lex, dt.as_str(), cache_f64, eval_f64
+                    lex,
+                    dt.as_str(),
+                    cache_f64,
+                    eval_f64
                 );
             }
         }

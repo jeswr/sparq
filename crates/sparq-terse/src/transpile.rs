@@ -228,7 +228,9 @@ struct KSpan {
 ///
 /// `K:<name>` tokens inside string literals, IRIs and comments are *not* keywords (the same
 /// lexical-context discipline as the `V(...)` scanner) and pass through untouched.
-pub(crate) fn expand_keywords(src: &str) -> Result<(String, Vec<crate::keyword::KeywordExpansion>), TerseError> {
+pub(crate) fn expand_keywords(
+    src: &str,
+) -> Result<(String, Vec<crate::keyword::KeywordExpansion>), TerseError> {
     let spans = k_spans(src);
     if spans.is_empty() {
         return Ok((src.to_string(), Vec::new()));
@@ -308,7 +310,11 @@ fn k_spans(src: &str) -> Vec<KSpan> {
                 let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
                 if prev_ok && i + 1 < n && bytes[i + 1] == b':' {
                     if let Some((name, end)) = parse_k_name(bytes, i + 2) {
-                        out.push(KSpan { name, start: i, end });
+                        out.push(KSpan {
+                            name,
+                            start: i,
+                            end,
+                        });
                         i = end;
                         continue;
                     }
@@ -434,7 +440,9 @@ fn match_word_ci(bytes: &[u8], start: usize, word: &[u8]) -> Option<usize> {
 /// IRIs (`<...>`) so a `V(` appearing *inside* a literal/IRI is never mistaken for the
 /// construct — the construct is a top-level token, not text inside a value.
 pub(crate) fn find_first_v_phrase(src: &str) -> Option<String> {
-    scan_v_constructs(src, |phrase, _start, _end| Some(phrase.to_string())).into_iter().next()
+    scan_v_constructs(src, |phrase, _start, _end| Some(phrase.to_string()))
+        .into_iter()
+        .next()
 }
 
 /// Where a `V("phrase")` construct sits in the source: the inner phrase and the byte range
@@ -464,10 +472,7 @@ pub(crate) fn v_spans(src: &str) -> Vec<VSpan> {
 /// whether we are inside a string literal or IRI (where a `V(` must be ignored), and for
 /// each top-level `V(` immediately followed by a single quoted string and a `)`, invokes
 /// `f(phrase, start, end)`; non-`None` results are collected in source order.
-fn scan_v_constructs<T>(
-    src: &str,
-    mut f: impl FnMut(&str, usize, usize) -> Option<T>,
-) -> Vec<T> {
+fn scan_v_constructs<T>(src: &str, mut f: impl FnMut(&str, usize, usize) -> Option<T>) -> Vec<T> {
     let bytes = src.as_bytes();
     let n = bytes.len();
     let mut out = Vec::new();
@@ -755,15 +760,22 @@ mod tests {
             e.canonical_sparql
         );
         assert!(
-            e.canonical_sparql.contains("<https://sparq.dev/ns/pkg#Finding>"),
+            e.canonical_sparql
+                .contains("<https://sparq.dev/ns/pkg#Finding>"),
             "got: {}",
             e.canonical_sparql
         );
-        assert!(!e.canonical_sparql.contains("K:"), "no K: token must remain");
+        assert!(
+            !e.canonical_sparql.contains("K:"),
+            "no K: token must remain"
+        );
         // Echoed, in source order, with the legend version.
         let kws: Vec<&str> = e.keywords.iter().map(|k| k.keyword.as_str()).collect();
         assert_eq!(kws, vec!["type", "Finding", "derivedFrom"]);
-        assert!(e.keywords.iter().all(|k| k.legend_version == crate::keyword::LEGEND_VERSION));
+        assert!(e
+            .keywords
+            .iter()
+            .all(|k| k.legend_version == crate::keyword::LEGEND_VERSION));
     }
 
     #[test]
@@ -773,10 +785,17 @@ mod tests {
         let q = "SELECT ?f WHERE { ?f K:derived ?s }";
         let err = terse_to_sparql(q).expect_err("an unknown keyword must fail loudly");
         match err {
-            TerseError::UnknownKeyword { keyword, legend_version, suggestions } => {
+            TerseError::UnknownKeyword {
+                keyword,
+                legend_version,
+                suggestions,
+            } => {
                 assert_eq!(keyword, "derived");
                 assert_eq!(legend_version, crate::keyword::LEGEND_VERSION);
-                assert!(suggestions.contains(&"derivedFrom".to_string()), "got {suggestions:?}");
+                assert!(
+                    suggestions.contains(&"derivedFrom".to_string()),
+                    "got {suggestions:?}"
+                );
             }
             other => panic!("expected UnknownKeyword, got {other:?}"),
         }
@@ -788,7 +807,10 @@ mod tests {
         // keyword- and prefix-expansion: a hard error, never a silent guess (design §3.1).
         let q = "PREFIX K: <http://ex/> SELECT ?s WHERE { ?s K:type ?o }";
         let err = terse_to_sparql(q).expect_err("a real PREFIX K: collides with the sigil");
-        assert!(matches!(err, TerseError::KeywordPrefixCollision { .. }), "got {err:?}");
+        assert!(
+            matches!(err, TerseError::KeywordPrefixCollision { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -796,8 +818,13 @@ mod tests {
         // A `PREFIX ex:` is fine — only a prefix literally named `K` collides.
         let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s K:type ex:Thing }";
         let e = terse_to_sparql(q).expect("an unrelated prefix does not collide");
-        assert!(e.canonical_sparql.contains("<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"));
-        assert!(e.canonical_sparql.contains("ex:Thing"), "ordinary prefixed names pass through");
+        assert!(e
+            .canonical_sparql
+            .contains("<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"));
+        assert!(
+            e.canonical_sparql.contains("ex:Thing"),
+            "ordinary prefixed names pass through"
+        );
     }
 
     #[test]
@@ -813,7 +840,10 @@ mod tests {
     fn glued_k_is_not_a_keyword_token() {
         // `?xK:type` — the K is glued to an identifier; not a standalone sigil.
         let spans = k_spans("?xK:type");
-        assert!(spans.is_empty(), "glued K is not a keyword token, got {spans:?}");
+        assert!(
+            spans.is_empty(),
+            "glued K is not a keyword token, got {spans:?}"
+        );
     }
 
     #[test]
@@ -831,6 +861,9 @@ mod tests {
         let ok = terse_to_sparql("ASK { ?s K:type ?o }").expect("valid after expansion");
         assert!(ok.canonical_sparql.starts_with("ASK"));
         let bad = terse_to_sparql("ASK { ?s K:type"); // unbalanced even after expansion
-        assert!(matches!(bad, Err(TerseError::CanaryFailed { .. })), "got {bad:?}");
+        assert!(
+            matches!(bad, Err(TerseError::CanaryFailed { .. })),
+            "got {bad:?}"
+        );
     }
 }

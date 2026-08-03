@@ -474,8 +474,8 @@ fn parse_srx(xml: &str) -> Result<ResultSet, String> {
 /// `GSB_RDFS=0` runs the entailment-free configuration so both are measurable.
 fn load_dataset(dir: &Path, rdfs: bool) -> Graph {
     let path = dir.join("gsb_dataset/dataset.rdf");
-    let text = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let text =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     let (mut dict, mut triples) = Graph::parse_to_triples(&text, "rdfxml")
         .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     if rdfs {
@@ -514,7 +514,9 @@ fn expected_answers(dir: &Path, id: &str) -> Vec<ResultSet> {
     }
     for k in 1.. {
         let alt = dir.join(format!("gsb_answers/{}-alternative-{}.srx", id, k));
-        let Ok(text) = fs::read_to_string(&alt) else { break };
+        let Ok(text) = fs::read_to_string(&alt) else {
+            break;
+        };
         match parse_srx(&text) {
             Ok(rs) => out.push(rs),
             Err(e) => eprintln!("[gsb] WARN {}: {}", alt.display(), e),
@@ -620,7 +622,11 @@ mod tests {
         assert_eq!(tasks.len(), 206, "the benchmark is 206 queries");
         let total: f64 = tasks.iter().map(|t| t.weight).sum();
         // 29 requirements carry queries; R17 has none and is credited separately.
-        assert!((total - 29.0 / 30.0).abs() < 1e-12, "table sums to {}", total);
+        assert!(
+            (total - 29.0 / 30.0).abs() < 1e-12,
+            "table sums to {}",
+            total
+        );
 
         let w = |id: &str| {
             tasks
@@ -660,14 +666,20 @@ mod tests {
         assert_eq!(rs.vars, ["f", "wkt"]);
         assert_eq!(rs.rows.len(), 1);
         assert_eq!(rs.rows[0]["f"].kind, "uri");
-        assert_eq!(rs.rows[0]["f"].value, "http://example.org/ApplicationSchema#A");
+        assert_eq!(
+            rs.rows[0]["f"].value,
+            "http://example.org/ApplicationSchema#A"
+        );
         // The WKT normalisation: whitespace removed, lower-cased.
         assert_eq!(rs.rows[0]["wkt"].value, "polygon((-83.634.1,-83.234.1))");
     }
 
     #[test]
     fn wkt_answers_compare_modulo_whitespace_and_case_only() {
-        let spaced = SRX.replace("Polygon((-83.6 34.1, -83.2 34.1))", "POLYGON((-83.6  34.1,-83.2 34.1))");
+        let spaced = SRX.replace(
+            "Polygon((-83.6 34.1, -83.2 34.1))",
+            "POLYGON((-83.6  34.1,-83.2 34.1))",
+        );
         assert_eq!(parse_srx(SRX).unwrap(), parse_srx(&spaced).unwrap());
         // …but a different COORDINATE is a different answer.
         let moved = SRX.replace("-83.2 34.1", "-83.3 34.1");
@@ -687,7 +699,10 @@ mod tests {
             )
             .replace("#A", "#Z");
         assert_ne!(parse_srx(&two).unwrap(), parse_srx(&swapped).unwrap());
-        assert_ne!(parse_srx(&two).unwrap().rows.len(), parse_srx(SRX).unwrap().rows.len());
+        assert_ne!(
+            parse_srx(&two).unwrap().rows.len(),
+            parse_srx(SRX).unwrap().rows.len()
+        );
     }
 
     /// A GML literal, normalised — panics if it is out of `canonical_xml`'s
@@ -721,7 +736,10 @@ mod tests {
     #[test]
     fn empty_elements_normalise_to_the_start_end_pair() {
         assert_eq!(gml("<a><b/></a>"), gml("<a><b></b></a>"));
-        assert_eq!(gml("<a><b attr=\"v\"/></a>"), gml("<a><b attr=\"v\"></b></a>"));
+        assert_eq!(
+            gml("<a><b attr=\"v\"/></a>"),
+            gml("<a><b attr=\"v\"></b></a>")
+        );
         // An empty element is still not the same as an absent one.
         assert_ne!(gml("<a><b/></a>"), gml("<a></a>"));
     }
@@ -738,7 +756,10 @@ mod tests {
         // An attribute VALUE, name, or count is still a difference.
         assert_ne!(gml(a), gml(&a.replace(r#"srsName="S""#, r#"srsName="T""#)));
         assert_ne!(gml(a), gml(&a.replace("srsName", "srsname")));
-        assert_ne!(gml(a), gml(r#"<gml:Point xmlns:gml="G" srsDimension="2"/>"#));
+        assert_ne!(
+            gml(a),
+            gml(r#"<gml:Point xmlns:gml="G" srsDimension="2"/>"#)
+        );
     }
 
     #[test]
@@ -752,7 +773,10 @@ mod tests {
         // Re-escaping must not let escaped text pass for markup, nor an
         // attribute value break out of its quotes.
         assert_ne!(gml("<a>&lt;b/&gt;</a>"), gml("<a><b/></a>"));
-        assert_ne!(gml(r#"<a t="x&quot; u=&quot;y"/>"#), gml(r#"<a t="x" u="y"/>"#));
+        assert_ne!(
+            gml(r#"<a t="x&quot; u=&quot;y"/>"#),
+            gml(r#"<a t="x" u="y"/>"#)
+        );
     }
 
     #[test]
@@ -773,7 +797,10 @@ mod tests {
         // …while an out-of-bounds literal still equals ITSELF, so a corpus that
         // uses a construct outside the bound degrades to exact-string matching
         // rather than to a guaranteed failure.
-        assert_eq!(gml_binding("<a><!-- c --></a>"), gml_binding("<a><!-- c --></a>"));
+        assert_eq!(
+            gml_binding("<a><!-- c --></a>"),
+            gml_binding("<a><!-- c --></a>")
+        );
     }
 
     #[test]

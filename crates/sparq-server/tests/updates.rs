@@ -36,8 +36,12 @@ use tokio::net::TcpListener;
 fn synthetic_graph(n: usize) -> Graph {
     let nsubj = (n / 10).max(1);
     let mut dict = Dict::new();
-    let preds: Vec<_> = (0..10).map(|p| dict.intern_iri(&format!("http://ex/p{p}"))).collect();
-    let subjs: Vec<_> = (0..nsubj).map(|s| dict.intern_iri(&format!("http://ex/s{s}"))).collect();
+    let preds: Vec<_> = (0..10)
+        .map(|p| dict.intern_iri(&format!("http://ex/p{p}")))
+        .collect();
+    let subjs: Vec<_> = (0..nsubj)
+        .map(|s| dict.intern_iri(&format!("http://ex/s{s}")))
+        .collect();
     // Murmur-style mix so object indexes don't collapse under set dedup.
     let mix = |i: usize| -> usize {
         let mut h = i as u64;
@@ -46,7 +50,9 @@ fn synthetic_graph(n: usize) -> Graph {
         h ^= h >> 33;
         (h % nsubj as u64) as usize
     };
-    let triples: Vec<_> = (0..n).map(|i| [subjs[i % nsubj], preds[i % 10], subjs[mix(i)]]).collect();
+    let triples: Vec<_> = (0..n)
+        .map(|i| [subjs[i % nsubj], preds[i % 10], subjs[mix(i)]])
+        .collect();
     Graph::from_parts(dict, triples)
 }
 
@@ -103,14 +109,26 @@ async fn sequential_updates_are_all_visible() {
         let ins = format!("INSERT DATA {{ <http://ex/u{i}> <http://ex/seen> <http://ex/yes> }}");
         assert_eq!(post_update(&cl, &base, &ins).await, 204);
         let n = count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/seen> ?o }").await;
-        assert_eq!(n, i + 1, "update {i} (or an earlier one lost in lag replay) is not visible");
+        assert_eq!(
+            n,
+            i + 1,
+            "update {i} (or an earlier one lost in lag replay) is not visible"
+        );
     }
     // Deletes flow through the same path.
     assert_eq!(
-        post_update(&cl, &base, "DELETE DATA { <http://ex/u0> <http://ex/seen> <http://ex/yes> }").await,
+        post_update(
+            &cl,
+            &base,
+            "DELETE DATA { <http://ex/u0> <http://ex/seen> <http://ex/yes> }"
+        )
+        .await,
         204
     );
-    assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/seen> ?o }").await, 11);
+    assert_eq!(
+        count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/seen> ?o }").await,
+        11
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -127,8 +145,24 @@ async fn failed_update_is_atomic_and_server_recovers() {
     let cl = reqwest::Client::new();
 
     // Two good updates first, so the failure lands on a non-trivial published chain.
-    assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/a> <http://ex/q> <http://ex/b> }").await, 204);
-    assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/c> <http://ex/q> <http://ex/d> }").await, 204);
+    assert_eq!(
+        post_update(
+            &cl,
+            &base,
+            "INSERT DATA { <http://ex/a> <http://ex/q> <http://ex/b> }"
+        )
+        .await,
+        204
+    );
+    assert_eq!(
+        post_update(
+            &cl,
+            &base,
+            "INSERT DATA { <http://ex/c> <http://ex/q> <http://ex/d> }"
+        )
+        .await,
+        204
+    );
 
     // A request whose FIRST operation succeeds and SECOND fails at execution (LOAD from a
     // nonexistent file — named-graph ops themselves are supported since conformance round 3):
@@ -137,16 +171,43 @@ async fn failed_update_is_atomic_and_server_recovers() {
                    LOAD <file:///nonexistent/sparq-test-no-such-file.nt>";
     assert_eq!(post_update(&cl, &base, partial).await, 400);
     assert_eq!(
-        count_rows(&cl, &base, "SELECT ?s WHERE { <http://ex/leak> <http://ex/q> ?s }").await,
+        count_rows(
+            &cl,
+            &base,
+            "SELECT ?s WHERE { <http://ex/leak> <http://ex/q> ?s }"
+        )
+        .await,
         0,
         "a refused update leaked a partial application into the published graph"
     );
-    assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await, 2);
+    assert_eq!(
+        count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await,
+        2
+    );
 
     // The discarded working copy is re-forked transparently: further updates still work.
-    assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/e> <http://ex/q> <http://ex/f> }").await, 204);
-    assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/g> <http://ex/q> <http://ex/h> }").await, 204);
-    assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await, 4);
+    assert_eq!(
+        post_update(
+            &cl,
+            &base,
+            "INSERT DATA { <http://ex/e> <http://ex/q> <http://ex/f> }"
+        )
+        .await,
+        204
+    );
+    assert_eq!(
+        post_update(
+            &cl,
+            &base,
+            "INSERT DATA { <http://ex/g> <http://ex/q> <http://ex/h> }"
+        )
+        .await,
+        204
+    );
+    assert_eq!(
+        count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await,
+        4
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -188,11 +249,21 @@ async fn concurrent_queries_proceed_while_updates_commit() {
         max_read = max_read.max(dt);
         total_read += dt;
         samples += 1;
-        assert!(rows <= updates, "reader saw an uncommitted state: {rows} rows");
+        assert!(
+            rows <= updates,
+            "reader saw an uncommitted state: {rows} rows"
+        );
     }
     let updates_took = updater.await.unwrap();
-    assert_eq!(count_rows(&cl, &base, probe).await, updates, "an acked update is not visible");
-    assert!(samples > 3, "sampler barely ran ({samples} samples) — cannot judge stalling");
+    assert_eq!(
+        count_rows(&cl, &base, probe).await,
+        updates,
+        "an acked update is not visible"
+    );
+    assert!(
+        samples > 3,
+        "sampler barely ran ({samples} samples) — cannot judge stalling"
+    );
     eprintln!(
         "reads during {updates} committing updates ({updates_took:?} total): \
          {samples} samples, mean {:?}, max {max_read:?}",
@@ -222,7 +293,10 @@ async fn readers_are_not_blocked_during_a_slow_update() {
     let n = 200_000;
     let state = AppState::with_config(synthetic_graph(n), ServerConfig::default());
     let probe = "SELECT ?o WHERE { <http://ex/w> <http://ex/w> ?o }";
-    let before = sparq_engine::query(state.current().snapshot(), probe).unwrap().rows.len();
+    let before = sparq_engine::query(state.current().snapshot(), probe)
+        .unwrap()
+        .rows
+        .len();
     assert_eq!(before, 0);
 
     // One probe triple plus a 50k-triple bulk payload: the batch commits atomically,
@@ -230,7 +304,9 @@ async fn readers_are_not_blocked_during_a_slow_update() {
     // parse + apply gives the sampler a real window to observe during.
     let mut update = String::from("INSERT DATA { <http://ex/w> <http://ex/w> <http://ex/w> .\n");
     for i in 0..50_000 {
-        update.push_str(&format!("<http://ex/bulk/{i}> <http://ex/bulkp> <http://ex/bulko> .\n"));
+        update.push_str(&format!(
+            "<http://ex/bulk/{i}> <http://ex/bulkp> <http://ex/bulko> .\n"
+        ));
     }
     update.push('}');
 
@@ -249,17 +325,26 @@ async fn readers_are_not_blocked_during_a_slow_update() {
     while !committed && Instant::now() < deadline {
         let t = Instant::now();
         let gen = state.current();
-        let rows = sparq_engine::query(gen.snapshot(), probe).unwrap().rows.len();
+        let rows = sparq_engine::query(gen.snapshot(), probe)
+            .unwrap()
+            .rows
+            .len();
         let dt = t.elapsed();
         max_read = max_read.max(dt);
         samples += 1;
-        assert!(rows == 0 || rows == 1, "reader saw a state that was never committed: {rows} rows");
+        assert!(
+            rows == 0 || rows == 1,
+            "reader saw a state that was never committed: {rows} rows"
+        );
         committed = rows == 1;
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     let update_took = writer.await.unwrap();
     assert!(committed, "update did not become visible within 60s");
-    assert!(samples > 3, "sampler barely ran ({samples} samples) — cannot judge blocking");
+    assert!(
+        samples > 3,
+        "sampler barely ran ({samples} samples) — cannot judge blocking"
+    );
     // Pinning is a lock-free arc-swap load (~ns) and the publish is one pointer store;
     // 250ms is an enormous margin, while the batch fork itself takes much longer.
     assert!(
@@ -288,12 +373,24 @@ fn pinned_generations_stay_readable_after_commits() {
         state.apply_update(&upd).unwrap_or_else(|e| panic!("{e}"));
     }
     let fresh = state.current();
-    assert_eq!(fresh.number(), n0 + 6, "each sequentially acked update publishes one generation");
+    assert_eq!(
+        fresh.number(),
+        n0 + 6,
+        "each sequentially acked update publishes one generation"
+    );
     let new_rows = sparq_engine::query(fresh.snapshot(), probe).unwrap();
-    assert_eq!(new_rows.rows.len(), 6, "a fresh pin must see every acked update");
+    assert_eq!(
+        new_rows.rows.len(),
+        6,
+        "a fresh pin must see every acked update"
+    );
     // The old pin still answers from its own immutable snapshot — zero of the updates.
     let old_rows = sparq_engine::query(pinned.snapshot(), probe).unwrap();
-    assert_eq!(old_rows.rows.len(), 0, "a pinned generation changed under a reader");
+    assert_eq!(
+        old_rows.rows.len(),
+        0,
+        "a pinned generation changed under a reader"
+    );
     assert_eq!(pinned.number(), n0);
 }
 
@@ -313,10 +410,17 @@ fn pinned_generations_stay_readable_after_commits() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark — run explicitly in --release"]
 async fn bench_update_latency_1m() {
-    let n: usize = std::env::var("SPARQ_BENCH_TRIPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = std::env::var("SPARQ_BENCH_TRIPLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000_000);
     let t = Instant::now();
     let graph = synthetic_graph(n);
-    eprintln!("graph: {} triples, built in {:.2?}", graph.len(), t.elapsed());
+    eprintln!(
+        "graph: {} triples, built in {:.2?}",
+        graph.len(),
+        t.elapsed()
+    );
 
     // Reference: one engine-level rebuild — the same O(graph) cost the writer's
     // per-batch fork pays.
@@ -356,7 +460,9 @@ async fn bench_update_latency_1m() {
         tasks.push(tokio::spawn(async move {
             let cl = reqwest::Client::new();
             for i in 0..per_task {
-                let upd = format!("INSERT DATA {{ <http://ex/g{c}x{i}> <http://ex/q> <http://ex/g{c}x{i}> }}");
+                let upd = format!(
+                    "INSERT DATA {{ <http://ex/g{c}x{i}> <http://ex/q> <http://ex/g{c}x{i}> }}"
+                );
                 assert_eq!(post_update(&cl, &base, &upd).await, 204);
             }
         }));
@@ -370,7 +476,10 @@ async fn bench_update_latency_1m() {
         "concurrent {total} updates, {conc} submitters:        {took:.2?} total → {:.1} updates/s (group commit amortises the fork)",
         total as f64 / took.as_secs_f64()
     );
-    assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await, reps + total);
+    assert_eq!(
+        count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await,
+        reps + total
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -401,24 +510,50 @@ fn write_to_graph_a_does_not_invalidate_graph_b() {
     let pod_b = "http://ex/g/B";
 
     // Baseline: nothing touched yet.
-    let (a0, b0, g0) = (epoch_of(&state, pod_a), epoch_of(&state, pod_b), epoch_of(&state, GLOBAL_POD));
+    let (a0, b0, g0) = (
+        epoch_of(&state, pod_a),
+        epoch_of(&state, pod_b),
+        epoch_of(&state, GLOBAL_POD),
+    );
 
     // A write that names ONLY graph A.
     state
-        .apply_update("INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }")
+        .apply_update(
+            "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+        )
         .unwrap_or_else(|e| panic!("{e}"));
 
-    let (a1, b1, g1) = (epoch_of(&state, pod_a), epoch_of(&state, pod_b), epoch_of(&state, GLOBAL_POD));
+    let (a1, b1, g1) = (
+        epoch_of(&state, pod_a),
+        epoch_of(&state, pod_b),
+        epoch_of(&state, GLOBAL_POD),
+    );
     assert_eq!(a1, a0 + 1, "the write to A must bump A's epoch");
-    assert_eq!(b1, b0, "a write to A must NOT bump B's epoch — a B-scoped cache entry survives");
-    assert_eq!(g1, g0, "a single-named-graph write must NOT bump the global pod");
+    assert_eq!(
+        b1, b0,
+        "a write to A must NOT bump B's epoch — a B-scoped cache entry survives"
+    );
+    assert_eq!(
+        g1, g0,
+        "a single-named-graph write must NOT bump the global pod"
+    );
 
     // A subsequent write naming ONLY graph B bumps B, still leaving A where it was.
     state
-        .apply_update("INSERT DATA { GRAPH <http://ex/g/B> { <http://ex/s> <http://ex/p> <http://ex/o> } }")
+        .apply_update(
+            "INSERT DATA { GRAPH <http://ex/g/B> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+        )
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(epoch_of(&state, pod_b), b1 + 1, "the write to B must bump B's epoch");
-    assert_eq!(epoch_of(&state, pod_a), a1, "the write to B must NOT re-bump A");
+    assert_eq!(
+        epoch_of(&state, pod_b),
+        b1 + 1,
+        "the write to B must bump B's epoch"
+    );
+    assert_eq!(
+        epoch_of(&state, pod_a),
+        a1,
+        "the write to B must NOT re-bump A"
+    );
 }
 
 /// A cross-graph / unscopable write (here CLEAR ALL, and a default-graph INSERT) MUST bump
@@ -434,19 +569,33 @@ fn cross_graph_and_default_writes_bump_global() {
     state
         .apply_update("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }")
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(epoch_of(&state, GLOBAL_POD), g0 + 1, "a default-graph write must bump global");
+    assert_eq!(
+        epoch_of(&state, GLOBAL_POD),
+        g0 + 1,
+        "a default-graph write must bump global"
+    );
 
     // (2) A cross-graph CLEAR ALL is unbounded → global again.
     let g1 = epoch_of(&state, GLOBAL_POD);
-    state.apply_update("CLEAR ALL").unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(epoch_of(&state, GLOBAL_POD), g1 + 1, "CLEAR ALL must bump global");
+    state
+        .apply_update("CLEAR ALL")
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        epoch_of(&state, GLOBAL_POD),
+        g1 + 1,
+        "CLEAR ALL must bump global"
+    );
 
     // (3) A DELETE/INSERT WHERE with a VARIABLE graph target is not statically scopable → global.
     let g2 = epoch_of(&state, GLOBAL_POD);
     state
         .apply_update("INSERT { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }")
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(epoch_of(&state, GLOBAL_POD), g2 + 1, "a variable-graph-target write must bump global");
+    assert_eq!(
+        epoch_of(&state, GLOBAL_POD),
+        g2 + 1,
+        "a variable-graph-target write must bump global"
+    );
 }
 
 /// A write mixing a named-graph effect with a default-graph effect bumps BOTH the named pod
@@ -467,7 +616,19 @@ fn mixed_write_bumps_named_and_global_in_one_generation() {
         .unwrap_or_else(|e| panic!("{e}"));
 
     // One update => one published generation, but BOTH pods bumped within it.
-    assert_eq!(state.current().number(), n0 + 1, "one update publishes exactly one generation");
-    assert_eq!(epoch_of(&state, pod_a), a0 + 1, "the named-graph half must bump A");
-    assert_eq!(epoch_of(&state, GLOBAL_POD), g0 + 1, "the default-graph half must bump global");
+    assert_eq!(
+        state.current().number(),
+        n0 + 1,
+        "one update publishes exactly one generation"
+    );
+    assert_eq!(
+        epoch_of(&state, pod_a),
+        a0 + 1,
+        "the named-graph half must bump A"
+    );
+    assert_eq!(
+        epoch_of(&state, GLOBAL_POD),
+        g0 + 1,
+        "the default-graph half must bump global"
+    );
 }

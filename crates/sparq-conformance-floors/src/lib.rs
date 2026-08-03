@@ -150,7 +150,12 @@ mod tests {
             ("text::BM25_ORACLE_FLOOR", text::BM25_ORACLE_FLOOR),
             ("rsp::EXPRESSIVITY_FLOOR", rsp::EXPRESSIVITY_FLOOR),
         ] {
-            assert!(floor > 0, "counting ratchet {} must be > 0, got {}", name, floor);
+            assert!(
+                floor > 0,
+                "counting ratchet {} must be > 0, got {}",
+                name,
+                floor
+            );
         }
     }
 
@@ -160,7 +165,8 @@ mod tests {
     #[test]
     fn divergence_floor_is_exactly_zero() {
         assert_eq!(
-            solid::DIVERGENCE_FLOOR, 0,
+            solid::DIVERGENCE_FLOOR,
+            0,
             "a divergence-count floor above zero licenses a known engine/reference \
              disagreement — the WAC/ACP differential oracles must stay at 0"
         );

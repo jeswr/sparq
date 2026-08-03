@@ -23,7 +23,9 @@ const MEMBER: &str = "https://issuer.ex/req#ClinicMember";
 fn pod(combinator: &str, agents: &[&str], vc: &[&str]) -> String {
     let g = "https://pod.ex/clinic/.acr";
     let mut s = format!("<{DOC}#it> <https://ex.dev/ns#k> \"v\" <{DOC}> .\n");
-    s.push_str(&format!("<{g}> <{ACP}memberAccessControl> <{g}#c> <{g}> .\n"));
+    s.push_str(&format!(
+        "<{g}> <{ACP}memberAccessControl> <{g}#c> <{g}> .\n"
+    ));
     s.push_str(&format!("<{g}#c> <{ACP}apply> <{g}#pol> <{g}> .\n"));
     s.push_str(&format!("<{g}#pol> <{ACP}allow> <{ACL}Read> <{g}> .\n"));
     s.push_str(&format!("<{g}#pol> <{ACP}{combinator}> <{g}#m> <{g}> .\n"));
@@ -38,13 +40,21 @@ fn pod(combinator: &str, agents: &[&str], vc: &[&str]) -> String {
 
 fn store(nquads: &str, creds: &VerifiedCredentials) -> PodStore {
     let mut s = PodStore::new(Graph::load_dataset(nquads, "nquads").expect("dataset loads"));
-    s.materialize_acp_with_credentials(&AccessProvenance::new(), creds).expect("materializes");
+    s.materialize_acp_with_credentials(&AccessProvenance::new(), creds)
+        .expect("materializes");
     s
 }
 
 fn can_read(s: &PodStore, agent: Option<&str>) -> bool {
-    let session = Session { agent, client: None, issuer: None, now: None };
-    s.accessible(&session, Mode::Read).iter().any(|g| g.as_str() == DOC)
+    let session = Session {
+        agent,
+        client: None,
+        issuer: None,
+        now: None,
+    };
+    s.accessible(&session, Mode::Read)
+        .iter()
+        .any(|g| g.as_str() == DOC)
 }
 
 /// THE HEADLINE GUARD. A credential-gated policy with no credential presented grants
@@ -52,13 +62,22 @@ fn can_read(s: &PodStore, agent: Option<&str>) -> bool {
 #[test]
 fn vc_matcher_denies_when_no_credential_is_presented() {
     let s = store(&pod("allOf", &[], &[OVER_18]), &VerifiedCredentials::new());
-    assert!(!can_read(&s, None), "anonymous must not read a credential-gated resource");
-    assert!(!can_read(&s, Some(ALICE)), "an authenticated non-holder must not read either");
+    assert!(
+        !can_read(&s, None),
+        "anonymous must not read a credential-gated resource"
+    );
+    assert!(
+        !can_read(&s, Some(ALICE)),
+        "an authenticated non-holder must not read either"
+    );
     // …and the policy is not simply inert: the SAME policy grants once a holding exists.
     let mut creds = VerifiedCredentials::new();
     creds.hold(ALICE, OVER_18);
     let granted = store(&pod("allOf", &[], &[OVER_18]), &creds);
-    assert!(can_read(&granted, Some(ALICE)), "the fixture must be able to grant — else vacuous");
+    assert!(
+        can_read(&granted, Some(ALICE)),
+        "the fixture must be able to grant — else vacuous"
+    );
 }
 
 /// The grant is bound to the agent the credential was verified FOR: a second agent with no
@@ -69,7 +88,10 @@ fn vc_grant_is_scoped_to_the_holder() {
     creds.hold(ALICE, OVER_18);
     let s = store(&pod("allOf", &[], &[OVER_18]), &creds);
     assert!(can_read(&s, Some(ALICE)));
-    assert!(!can_read(&s, Some(BOB)), "a non-holder must not ride alice's credential");
+    assert!(
+        !can_read(&s, Some(BOB)),
+        "a non-holder must not ride alice's credential"
+    );
     assert!(!can_read(&s, None), "anonymous holds no credential");
 }
 
@@ -91,13 +113,19 @@ fn agent_and_vc_on_one_matcher_are_conjunctive() {
 
     // bob without the credential: rejected by the vc dimension.
     let s = store(&nq, &VerifiedCredentials::new());
-    assert!(!can_read(&s, Some(BOB)), "the acp:agent value alone must not satisfy acp:vc");
+    assert!(
+        !can_read(&s, Some(BOB)),
+        "the acp:agent value alone must not satisfy acp:vc"
+    );
 
     // alice holds the credential but is not the named agent: rejected by the agent dimension.
     let mut alice_only = VerifiedCredentials::new();
     alice_only.hold(ALICE, OVER_18);
     let s = store(&nq, &alice_only);
-    assert!(!can_read(&s, Some(ALICE)), "holding the credential must not bypass acp:agent");
+    assert!(
+        !can_read(&s, Some(ALICE)),
+        "holding the credential must not bypass acp:agent"
+    );
     assert!(!can_read(&s, Some(BOB)));
 
     // both together: granted.
@@ -121,13 +149,32 @@ fn vc_composes_conjunctively_with_client_and_issuer() {
     creds.hold(ALICE, OVER_18);
     let s = store(&nq, &creds);
     let read = |client, issuer| {
-        let session = Session { agent: Some(ALICE), client, issuer, now: None };
-        s.accessible(&session, Mode::Read).iter().any(|g| g.as_str() == DOC)
+        let session = Session {
+            agent: Some(ALICE),
+            client,
+            issuer,
+            now: None,
+        };
+        s.accessible(&session, Mode::Read)
+            .iter()
+            .any(|g| g.as_str() == DOC)
     };
-    assert!(read(Some("https://app.ex"), Some("https://idp.ex")), "all three dimensions met");
-    assert!(!read(Some("https://evil.ex"), Some("https://idp.ex")), "wrong client");
-    assert!(!read(Some("https://app.ex"), Some("https://evil.ex")), "wrong issuer");
-    assert!(!read(None, None), "the credential alone must not satisfy client/issuer");
+    assert!(
+        read(Some("https://app.ex"), Some("https://idp.ex")),
+        "all three dimensions met"
+    );
+    assert!(
+        !read(Some("https://evil.ex"), Some("https://idp.ex")),
+        "wrong client"
+    );
+    assert!(
+        !read(Some("https://app.ex"), Some("https://evil.ex")),
+        "wrong issuer"
+    );
+    assert!(
+        !read(None, None),
+        "the credential alone must not satisfy client/issuer"
+    );
 }
 
 /// Several `acp:vc` values on ONE matcher are disjunctive (ACP: within an attribute, any
@@ -138,9 +185,16 @@ fn multiple_vc_values_on_one_matcher_are_disjunctive() {
     for held in [OVER_18, MEMBER] {
         let mut creds = VerifiedCredentials::new();
         creds.hold(ALICE, held);
-        assert!(can_read(&store(&nq, &creds), Some(ALICE)), "holding {} should grant", held);
+        assert!(
+            can_read(&store(&nq, &creds), Some(ALICE)),
+            "holding {} should grant",
+            held
+        );
     }
-    assert!(!can_read(&store(&nq, &VerifiedCredentials::new()), Some(ALICE)));
+    assert!(!can_read(
+        &store(&nq, &VerifiedCredentials::new()),
+        Some(ALICE)
+    ));
 }
 
 /// An `acp:vc` matcher used as a `noneOf` EXCEPTION suppresses the grant for holders only —
@@ -149,12 +203,16 @@ fn multiple_vc_values_on_one_matcher_are_disjunctive() {
 fn vc_none_of_excepts_only_the_holder() {
     let g = "https://pod.ex/clinic/.acr";
     let mut nq = format!("<{DOC}#it> <https://ex.dev/ns#k> \"v\" <{DOC}> .\n");
-    nq.push_str(&format!("<{g}> <{ACP}memberAccessControl> <{g}#c> <{g}> .\n"));
+    nq.push_str(&format!(
+        "<{g}> <{ACP}memberAccessControl> <{g}#c> <{g}> .\n"
+    ));
     nq.push_str(&format!("<{g}#c> <{ACP}apply> <{g}#pol> <{g}> .\n"));
     nq.push_str(&format!("<{g}#pol> <{ACP}allow> <{ACL}Read> <{g}> .\n"));
     // public read …
     nq.push_str(&format!("<{g}#pol> <{ACP}anyOf> <{g}#pub> <{g}> .\n"));
-    nq.push_str(&format!("<{g}#pub> <{ACP}agent> <{ACP}PublicAgent> <{g}> .\n"));
+    nq.push_str(&format!(
+        "<{g}#pub> <{ACP}agent> <{ACP}PublicAgent> <{g}> .\n"
+    ));
     // … EXCEPT holders of the requirement.
     nq.push_str(&format!("<{g}#pol> <{ACP}noneOf> <{g}#no> <{g}> .\n"));
     nq.push_str(&format!("<{g}#no> <{ACP}vc> <{OVER_18}> <{g}> .\n"));
@@ -163,7 +221,10 @@ fn vc_none_of_excepts_only_the_holder() {
     creds.hold(ALICE, OVER_18);
     let s = store(&nq, &creds);
     assert!(!can_read(&s, Some(ALICE)), "the holder is excepted");
-    assert!(can_read(&s, Some(BOB)), "a non-holder keeps the public grant");
+    assert!(
+        can_read(&s, Some(BOB)),
+        "a non-holder keeps the public grant"
+    );
 }
 
 /// §2.4 trust boundary: a `solidx:holdsVc` triple FORGED inside the `.acr` (a document its
@@ -176,7 +237,10 @@ fn forged_holds_vc_in_the_acr_grants_nothing() {
         "<{ALICE}> <https://sparq.dev/ns/solidx#holdsVc> <{OVER_18}> <{g}> .\n"
     ));
     let s = store(&nq, &VerifiedCredentials::new());
-    assert!(!can_read(&s, Some(ALICE)), "a forged solidx:holdsVc must be dropped by the loader");
+    assert!(
+        !can_read(&s, Some(ALICE)),
+        "a forged solidx:holdsVc must be dropped by the loader"
+    );
 }
 
 /// A credential holder's WebID is a candidate agent principal, so it goes through the same
@@ -208,10 +272,21 @@ fn credentials_do_not_disturb_a_pod_without_acp_vc() {
 
     let target = "https://pod.ex/pub1/c2/g3/d1.ttl";
     for agent in [None, Some(ALICE), Some(BOB)] {
-        let session = Session { agent, client: None, issuer: None, now: None };
+        let session = Session {
+            agent,
+            client: None,
+            issuer: None,
+            now: None,
+        };
         assert_eq!(
-            plain.accessible(&session, Mode::Read).iter().any(|g| g.as_str() == target),
-            with_creds.accessible(&session, Mode::Read).iter().any(|g| g.as_str() == target),
+            plain
+                .accessible(&session, Mode::Read)
+                .iter()
+                .any(|g| g.as_str() == target),
+            with_creds
+                .accessible(&session, Mode::Read)
+                .iter()
+                .any(|g| g.as_str() == target),
             "credentials changed a non-acp:vc decision for {:?}",
             agent
         );

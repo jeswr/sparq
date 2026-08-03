@@ -74,10 +74,12 @@ struct Metrics {
 /// Parses `text` as `format`, runs the full classifier, and reads off the oracle metrics.
 fn classify_text(text: &str, format: &str) -> Result<Metrics, String> {
     let (mut dict, mut triples) = Graph::parse_to_triples(text, format)?;
-    let sco = dict.lookup(&oxrdf::Term::NamedNode(
-        oxrdf::NamedNode::new_unchecked(RDFS_SUBCLASSOF),
-    ));
-    let thing = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(OWL_THING)));
+    let sco = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+        RDFS_SUBCLASSOF,
+    )));
+    let thing = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+        OWL_THING,
+    )));
 
     let t = Instant::now();
     let report = classify_graph(&mut dict, &mut triples);

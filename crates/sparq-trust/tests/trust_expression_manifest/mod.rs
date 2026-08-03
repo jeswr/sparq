@@ -171,10 +171,14 @@ pub fn load_manifest() -> Vec<Case> {
     }
 
     let rdf_type = format!("{}type", RDF);
-    let manifest_class = Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!("{}Manifest", MF)));
+    let manifest_class =
+        Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!("{}Manifest", MF)));
     let manifests: Vec<String> = store
         .iter()
-        .filter(|(_, po)| po.iter().any(|(p, o)| *p == rdf_type && *o == manifest_class))
+        .filter(|(_, po)| {
+            po.iter()
+                .any(|(p, o)| *p == rdf_type && *o == manifest_class)
+        })
         .map(|(s, _)| s.clone())
         .collect();
     assert_eq!(
@@ -201,11 +205,8 @@ pub fn load_manifest() -> Vec<Case> {
                 .to_string();
             let key = entry.to_string();
             let action = object(&store, &key, &format!("{}action", MF)).to_string();
-            let expect = match iri_of(
-                &object(&store, &key, &format!("{}result", MF)),
-                "mf:result",
-            )
-            .as_str()
+            let expect = match iri_of(&object(&store, &key, &format!("{}result", MF)), "mf:result")
+                .as_str()
             {
                 x if x == format!("{}Admitted", TEC) => Expect::Admitted,
                 x if x == format!("{}NoBinding", TEC) => Expect::NoBinding,
@@ -221,10 +222,13 @@ pub fn load_manifest() -> Vec<Case> {
             );
             Case {
                 name: text_of(&object(&store, &key, &format!("{}name", MF)), "mf:name"),
-                case_class: class_text
-                    .parse()
-                    .unwrap_or_else(|_| panic!("manifest.ttl: {} has a non-integer tec:caseClass", id)),
-                query: relative(&object(&store, &action, &format!("{}query", QT)), "qt:query"),
+                case_class: class_text.parse().unwrap_or_else(|_| {
+                    panic!("manifest.ttl: {} has a non-integer tec:caseClass", id)
+                }),
+                query: relative(
+                    &object(&store, &action, &format!("{}query", QT)),
+                    "qt:query",
+                ),
                 data: relative(&object(&store, &action, &format!("{}data", QT)), "qt:data"),
                 requirements: relative(
                     &object(&store, &action, &format!("{}requirements", TEC)),
@@ -236,7 +240,10 @@ pub fn load_manifest() -> Vec<Case> {
                 ),
                 expect,
                 contributing: contributing_text.parse().unwrap_or_else(|_| {
-                    panic!("manifest.ttl: {} has a non-integer tec:contributingStatements", id)
+                    panic!(
+                        "manifest.ttl: {} has a non-integer tec:contributingStatements",
+                        id
+                    )
                 }),
                 id,
             }

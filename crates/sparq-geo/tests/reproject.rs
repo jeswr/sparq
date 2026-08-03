@@ -16,7 +16,9 @@ fn bng_matches_the_ordnance_survey_worked_example() {
     let g = parse_wkt_literal(&format!("<{BNG}> POINT(651409.903 313177.270)")).unwrap();
     let out = to_crs84(&g).unwrap();
     assert_eq!(out.crs, Crs::Crs84);
-    let geo_types::Geometry::Point(p) = out.geometry else { panic!("point in, point out") };
+    let geo_types::Geometry::Point(p) = out.geometry else {
+        panic!("point in, point out")
+    };
     assert!((p.x() - 1.716052).abs() < 1e-4, "lon {}", p.x());
     assert!((p.y() - 52.657979).abs() < 1e-4, "lat {}", p.y());
 }
@@ -26,8 +28,10 @@ fn reprojected_geometries_join_the_geographic_machinery() {
     // Two BNG points 1 km apart on the easting axis: after reprojection,
     // geof:distance in metres must report ~1 km (BNG's scale factor 0.9996
     // and the sphere/ellipsoid difference allow a few metres of slack).
-    let a = to_crs84(&parse_wkt_literal(&format!("<{BNG}> POINT(530000 180000)")).unwrap()).unwrap();
-    let b = to_crs84(&parse_wkt_literal(&format!("<{BNG}> POINT(531000 180000)")).unwrap()).unwrap();
+    let a =
+        to_crs84(&parse_wkt_literal(&format!("<{BNG}> POINT(530000 180000)")).unwrap()).unwrap();
+    let b =
+        to_crs84(&parse_wkt_literal(&format!("<{BNG}> POINT(531000 180000)")).unwrap()).unwrap();
     let d = geof::distance(&a, &b, Unit::Metre).unwrap();
     assert!((d - 1000.0).abs() < 5.0, "got {d}");
 }
@@ -41,16 +45,20 @@ fn web_mercator_and_utm_definitions_work() {
     )
     .unwrap();
     let out = to_crs84(&g).unwrap();
-    let geo_types::Geometry::Point(p) = out.geometry else { panic!("point") };
+    let geo_types::Geometry::Point(p) = out.geometry else {
+        panic!("point")
+    };
     assert!((p.x() - -0.1278).abs() < 1e-4, "lon {}", p.x());
     assert!((p.y() - 51.5074).abs() < 1e-4, "lat {}", p.y());
 
     // UTM 32N (EPSG:32632): 500000 E is the central meridian, 9°E. At the
     // equator northing 0 -> lat 0.
-    let g = parse_wkt_literal("<http://www.opengis.net/def/crs/EPSG/0/32632> POINT(500000 0)")
-        .unwrap();
+    let g =
+        parse_wkt_literal("<http://www.opengis.net/def/crs/EPSG/0/32632> POINT(500000 0)").unwrap();
     let out = to_crs84(&g).unwrap();
-    let geo_types::Geometry::Point(p) = out.geometry else { panic!("point") };
+    let geo_types::Geometry::Point(p) = out.geometry else {
+        panic!("point")
+    };
     assert!((p.x() - 9.0).abs() < 1e-6, "lon {}", p.x());
     assert!(p.y().abs() < 1e-6, "lat {}", p.y());
 }
@@ -60,10 +68,8 @@ fn geographic_inputs_pass_through_and_polygons_keep_their_shape() {
     // CRS84 / EPSG:4326 pass through (4326 was already axis-normalised on parse).
     let out = to_crs84_lex("POINT(1 2)").unwrap();
     assert_eq!(out, "POINT(1 2)");
-    let out = to_crs84_lex(
-        "<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(51.5074 -0.1278)",
-    )
-    .unwrap();
+    let out = to_crs84_lex("<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(51.5074 -0.1278)")
+        .unwrap();
     assert!(out.starts_with("POINT(-0.1278"), "got {out}");
 
     // A BNG polygon stays a polygon, and its reprojected envelope is sane
@@ -76,7 +82,10 @@ fn geographic_inputs_pass_through_and_polygons_keep_their_shape() {
     assert!(matches!(g.geometry, geo_types::Geometry::Polygon(_)));
     let within = geof::sf_within(
         &g,
-        &parse_wkt_literal("POLYGON((-0.25 51.45, 0.0 51.45, 0.0 51.56, -0.25 51.56, -0.25 51.45))").unwrap(),
+        &parse_wkt_literal(
+            "POLYGON((-0.25 51.45, 0.0 51.45, 0.0 51.56, -0.25 51.56, -0.25 51.45))",
+        )
+        .unwrap(),
     )
     .unwrap();
     assert!(within, "got {out}");
@@ -99,7 +108,12 @@ fn unsupported_crs_errors_are_explicit() {
     #[cfg(feature = "epsg_full")]
     assert!(proj4_definition(2056).is_some());
     assert!(proj4_definition(99999).is_none());
-    assert_eq!(epsg_code(&Crs::Other("http://www.opengis.net/def/crs/EPSG/0/27700".into())), Some(27700));
+    assert_eq!(
+        epsg_code(&Crs::Other(
+            "http://www.opengis.net/def/crs/EPSG/0/27700".into()
+        )),
+        Some(27700)
+    );
     assert_eq!(epsg_code(&Crs::Other("http://example.org/x".into())), None);
 }
 
@@ -113,7 +127,11 @@ const EPSG: &str = "http://www.opengis.net/def/crs/EPSG/0";
 fn geographic_axis_order_map_is_curated_and_paired_with_definitions() {
     // Direct unit coverage of the public map (one entry per curated code).
     for code in [4326, 4258, 4269, 4283, 4171, 4490] {
-        assert_eq!(geographic_axis_order(code), Some(AxisOrder::LatLong), "EPSG:{code}");
+        assert_eq!(
+            geographic_axis_order(code),
+            Some(AxisOrder::LatLong),
+            "EPSG:{code}"
+        );
         // Pairing invariant: every geographic axis-order entry has a proj4
         // definition (and it is a longlat one).
         let def = proj4_definition(code).unwrap_or_else(|| panic!("no proj4 def for {code}"));
@@ -134,7 +152,9 @@ fn nad83_lat_long_normalises_into_crs84_long_lat() {
     let g = parse_wkt_literal(&format!("<{EPSG}/4269> POINT(34.3 -83.4)")).unwrap();
     let out = to_crs84(&g).unwrap();
     assert_eq!(out.crs, Crs::Crs84);
-    let geo_types::Geometry::Point(p) = out.geometry else { panic!("point in, point out") };
+    let geo_types::Geometry::Point(p) = out.geometry else {
+        panic!("point in, point out")
+    };
     assert!((p.x() - -83.4).abs() < 1e-9, "lon {}", p.x());
     assert!((p.y() - 34.3).abs() < 1e-9, "lat {}", p.y());
 }
@@ -157,8 +177,18 @@ fn geographic_codes_agree_with_the_same_point_written_as_4326() {
         else {
             panic!("points in, points out")
         };
-        assert!((a.x() - b.x()).abs() < 1e-9, "EPSG:{code} lon {} vs {}", a.x(), b.x());
-        assert!((a.y() - b.y()).abs() < 1e-9, "EPSG:{code} lat {} vs {}", a.y(), b.y());
+        assert!(
+            (a.x() - b.x()).abs() < 1e-9,
+            "EPSG:{code} lon {} vs {}",
+            a.x(),
+            b.x()
+        );
+        assert!(
+            (a.y() - b.y()).abs() < 1e-9,
+            "EPSG:{code} lat {} vs {}",
+            a.y(),
+            b.y()
+        );
     }
 }
 
@@ -198,11 +228,12 @@ mod epsg_full {
     use sparq_geo::{parse_wkt_literal, Crs, GeoError};
 
     fn point(code: u32, x: f64, y: f64) -> (f64, f64) {
-        let g =
-            parse_wkt_literal(&format!("<{EPSG}/{code}> POINT({x} {y})")).unwrap();
+        let g = parse_wkt_literal(&format!("<{EPSG}/{code}> POINT({x} {y})")).unwrap();
         let out = to_crs84(&g).unwrap();
         assert_eq!(out.crs, Crs::Crs84);
-        let geo_types::Geometry::Point(p) = out.geometry else { panic!("point in, point out") };
+        let geo_types::Geometry::Point(p) = out.geometry else {
+            panic!("point in, point out")
+        };
         (p.x(), p.y())
     }
 
@@ -315,13 +346,19 @@ mod epsg_full {
         // the central meridian and the equator.
         let (westing, southing) = (-60_000.0, 2_900_000.0);
         let (lon, lat) = point(2052, westing, southing);
-        let (wlon, wlat) =
-            point(32735, 500_000.0 - 0.9996 * westing, 10_000_000.0 - 0.9996 * southing);
+        let (wlon, wlat) = point(
+            32735,
+            500_000.0 - 0.9996 * westing,
+            10_000_000.0 - 0.9996 * southing,
+        );
         assert!((lon - wlon).abs() < 1e-9, "lon {lon} vs witness {wlon}");
         assert!((lat - wlat).abs() < 1e-9, "lat {lat} vs witness {wlat}");
         // Sanity: a negative westing is EAST of the 27°E central meridian,
         // and a positive southing is south of the equator (Gauteng).
-        assert!((lon - 27.6).abs() < 0.01 && (lat - -26.21).abs() < 0.01, "({lon}, {lat})");
+        assert!(
+            (lon - 27.6).abs() < 0.01 && (lat - -26.21).abs() < 0.01,
+            "({lon}, {lat})"
+        );
     }
 
     #[test]
@@ -334,8 +371,11 @@ mod epsg_full {
         // algebraic relation holds and both sides carry the same datum shift.
         let (westing, southing) = (-60_000.0, 2_900_000.0);
         let (lon, lat) = point(22287, westing, southing);
-        let (wlon, wlat) =
-            point(22235, 500_000.0 - 0.9996 * westing, 10_000_000.0 - 0.9996 * southing);
+        let (wlon, wlat) = point(
+            22235,
+            500_000.0 - 0.9996 * westing,
+            10_000_000.0 - 0.9996 * southing,
+        );
         assert!((lon - wlon).abs() < 1e-9, "lon {lon} vs witness {wlon}");
         assert!((lat - wlat).abs() < 1e-9, "lat {lat} vs witness {wlat}");
     }
@@ -361,11 +401,25 @@ mod epsg_full {
         // pair as (easting, northing) would move each the opposite way, and
         // transposing them would swap which coordinate moves at all.
         let (lon_w, lat_w) = point(29375, 100_000.0, 0.0);
-        assert!(((lon0 - lon_w) - 0.969).abs() < 0.005, "westing lon delta {}", lon0 - lon_w);
-        assert!((lat_w - lat0).abs() < 0.01, "westing moved in latitude: {lat_w} vs {lat0}");
+        assert!(
+            ((lon0 - lon_w) - 0.969).abs() < 0.005,
+            "westing lon delta {}",
+            lon0 - lon_w
+        );
+        assert!(
+            (lat_w - lat0).abs() < 0.01,
+            "westing moved in latitude: {lat_w} vs {lat0}"
+        );
         let (lon_s, lat_s) = point(29375, 0.0, 100_000.0);
-        assert!(((lat0 - lat_s) - 0.903).abs() < 0.005, "southing lat delta {}", lat0 - lat_s);
-        assert!((lon_s - lon0).abs() < 0.01, "southing moved in longitude: {lon_s} vs {lon0}");
+        assert!(
+            ((lat0 - lat_s) - 0.903).abs() < 0.005,
+            "southing lat delta {}",
+            lat0 - lat_s
+        );
+        assert!(
+            (lon_s - lon0).abs() < 0.01,
+            "southing moved in longitude: {lon_s} vs {lon0}"
+        );
     }
 
     #[test]
@@ -377,7 +431,9 @@ mod epsg_full {
         // (`+axis=swu`).
         let wsu = [2046, 2047, 2048, 2049, 2050, 2051, 2052, 2053, 2054, 2055]
             .into_iter()
-            .chain([22275, 22277, 22279, 22281, 22283, 22285, 22287, 22289, 22291, 22293])
+            .chain([
+                22275, 22277, 22279, 22281, 22283, 22285, 22287, 22289, 22291, 22293,
+            ])
             .chain([29371, 29373, 29375, 29377, 29379, 29381, 29383, 29385]);
         for code in wsu {
             let def = proj4_definition(code).unwrap_or_else(|| panic!("EPSG:{code} refused"));

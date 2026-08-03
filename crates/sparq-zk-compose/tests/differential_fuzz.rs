@@ -138,10 +138,10 @@ const FILTER_DIGIT_BUCKETS: &[u32] = &[1, 2, 3, 4];
 /// (no leading zero for d>1).
 fn value_with_digits(rng: &mut Rng, d: u32) -> u64 {
     match d {
-        1 => rng.below(10),                       // 0..=9
-        2 => 10 + rng.below(90),                  // 10..=99
-        3 => 100 + rng.below(900),                // 100..=999 ([OPUS-4.8] sq-wto)
-        4 => 1000 + rng.below(9000),              // 1000..=9999
+        1 => rng.below(10),          // 0..=9
+        2 => 10 + rng.below(90),     // 10..=99
+        3 => 100 + rng.below(900),   // 100..=999 ([OPUS-4.8] sq-wto)
+        4 => 1000 + rng.below(9000), // 1000..=9999
         _ => unreachable!("only compiled buckets"),
     }
 }
@@ -167,7 +167,10 @@ fn generate(rng: &mut Rng) -> FuzzCase {
         // so the matched object is a provable FILTER operand.
         let d = FILTER_DIGIT_BUCKETS[rng.below(FILTER_DIGIT_BUCKETS.len() as u64) as usize];
         let value = value_with_digits(rng, d);
-        facts.push(Fact { pred: pred.clone(), value });
+        facts.push(Fact {
+            pred: pred.clone(),
+            value,
+        });
         triples.push(Triple::new(subject.clone(), iri(&pred), int_lit(value)));
     }
 
@@ -197,7 +200,12 @@ fn generate(rng: &mut Rng) -> FuzzCase {
         None
     };
 
-    FuzzCase { triples, facts, query_pred, filter }
+    FuzzCase {
+        triples,
+        facts,
+        query_pred,
+        filter,
+    }
 }
 
 // --- the CLEARTEXT oracle ---------------------------------------------------
@@ -230,7 +238,10 @@ fn cleartext_verdict(op: FilterOp, value: u64, bound: u64) -> bool {
 /// Build the scan over one committed graph. Returns the commitment + built scan,
 /// or `None` if the case does not fit a compiled member (caller skips it — not a
 /// soundness signal, just an out-of-family input).
-fn zk_build_scan(case: &FuzzCase, salt: Fr) -> Option<(GraphCommitment, sparq_zk_compose::build::BuiltScan)> {
+fn zk_build_scan(
+    case: &FuzzCase,
+    salt: Fr,
+) -> Option<(GraphCommitment, sparq_zk_compose::build::BuiltScan)> {
     let commit = commit_triples(&case.triples, salt).ok()?;
     let pattern = Pattern {
         s: Slot::Var,
@@ -249,7 +260,9 @@ fn zk_build_scan(case: &FuzzCase, salt: Fr) -> Option<(GraphCommitment, sparq_zk
 /// cleartext says should be disclosed".
 fn zk_scan_disclosed_encodings(scan: &ProofInputs) -> Vec<String> {
     match scan {
-        ProofInputs::Scan { rows, row_count, .. } => rows
+        ProofInputs::Scan {
+            rows, row_count, ..
+        } => rows
             .iter()
             .take(*row_count as usize)
             .map(|r| r[2].0.clone())
@@ -327,8 +340,11 @@ fn run_differential(iters: u64, full_prove: bool) -> u64 {
             &challenge,
             &scan.witness.counts,
             &scan.witness.enc,
-            &[], None, None
-        ).unwrap();
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
         let tag = format!("fuzz_scan_{i}");
         prover.compile(&scan_id).expect("scan compiles");
         prover
@@ -357,7 +373,8 @@ fn run_differential(iters: u64, full_prove: bool) -> u64 {
                     continue;
                 };
                 let (fid, ftoml) =
-                    prover_toml_for(&filter_inputs, &challenge, &[], &[], &digits, None, None).unwrap();
+                    prover_toml_for(&filter_inputs, &challenge, &[], &[], &digits, None, None)
+                        .unwrap();
                 let ftag = format!("fuzz_filter_{i}");
                 prover.compile(&fid).expect("filter compiles");
 
@@ -380,7 +397,8 @@ fn run_differential(iters: u64, full_prove: bool) -> u64 {
                     continue;
                 };
                 let (lid, ltoml) =
-                    prover_toml_for(&lie_inputs, &challenge, &[], &[], &lie_digits, None, None).unwrap();
+                    prover_toml_for(&lie_inputs, &challenge, &[], &[], &lie_digits, None, None)
+                        .unwrap();
                 let ltag = format!("fuzz_filter_lie_{i}");
                 let lie_witness = prover.gen_witness_tagged(&lid, &ltoml, &ltag);
                 assert!(
@@ -426,7 +444,10 @@ fn differential_fuzz_witness_path() {
     }
     let n = run_differential(DEFAULT_ITERS, false);
     eprintln!("differential_fuzz_witness_path: {n} in-family cases exercised");
-    assert!(n > 0, "no in-family fuzz cases were exercised — generator is broken");
+    assert!(
+        n > 0,
+        "no in-family fuzz cases were exercised — generator is broken"
+    );
 }
 
 /// sq-61g (heavy) — the full prove→verify→compare-to-cleartext fuzzer. Each case
@@ -447,7 +468,10 @@ fn differential_fuzz_full_prove() {
     }
     let n = run_differential(HEAVY_ITERS, true);
     eprintln!("differential_fuzz_full_prove: {n} in-family cases exercised (full bb prove)");
-    assert!(n > 0, "no in-family fuzz cases were exercised — generator is broken");
+    assert!(
+        n > 0,
+        "no in-family fuzz cases were exercised — generator is broken"
+    );
 }
 
 // --- sq-wto: the FILTER digit-bucket completeness fix --------------------------
@@ -483,7 +507,7 @@ fn sq_wto_three_digit_operand_proves_not_silently_unprovable() {
         return;
     }
     let value: u64 = 123; // 3 digits — the old smallest-bucket bug's witness.
-    // Derivation picks the EXACT d=3 member (not the old wrong d=4).
+                          // Derivation picks the EXACT d=3 member (not the old wrong d=4).
     assert_eq!(
         derive_filter_int_id(3),
         Some(CircuitId::FilterInt { d: 3 }),
@@ -499,7 +523,16 @@ fn sq_wto_three_digit_operand_proves_not_silently_unprovable() {
     let (inputs, digits) = build_filter_int(operand_enc.clone(), value, op, bound, expected)
         .expect("3-digit FILTER must be in-family (sq-wto: d=3 member exists)");
     assert_eq!(*inputs.circuit_id(), CircuitId::FilterInt { d: 3 });
-    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits, None, None).unwrap();
+    let (id, toml) = prover_toml_for(
+        &inputs,
+        &FieldHex("0x2a".into()),
+        &[],
+        &[],
+        &digits,
+        None,
+        None,
+    )
+    .unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("filter_int_d3 compiles");
     prover
@@ -512,7 +545,16 @@ fn sq_wto_three_digit_operand_proves_not_silently_unprovable() {
     // 2) Soundness preserved: the FLIPPED verdict must be UNprovable.
     let (lie_inputs, lie_digits) =
         build_filter_int(operand_enc, value, op, bound, !expected).expect("builds");
-    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits, None, None).unwrap();
+    let (lid, ltoml) = prover_toml_for(
+        &lie_inputs,
+        &FieldHex("0x2a".into()),
+        &[],
+        &[],
+        &lie_digits,
+        None,
+        None,
+    )
+    .unwrap();
     let lie = prover.gen_witness_tagged(&lid, &ltoml, "wto_d3_lie");
     assert!(
         lie.is_err(),

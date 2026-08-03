@@ -91,7 +91,10 @@ struct Shard {
 
 impl Shard {
     fn new() -> Shard {
-        Shard { map: FxHashMap::default(), recency: VecDeque::new() }
+        Shard {
+            map: FxHashMap::default(),
+            recency: VecDeque::new(),
+        }
     }
 
     /// Record `key` as most-recently-used (append to the back). Called under the shard's
@@ -128,7 +131,9 @@ impl Shard {
     /// the same key that is still the live back-most occurrence).
     fn evict_to_cap(&mut self) {
         while self.map.len() > SHARD_CAP {
-            let Some(candidate) = self.recency.pop_front() else { break };
+            let Some(candidate) = self.recency.pop_front() else {
+                break;
+            };
             // Skip a stale recency record: the key was already evicted, OR a more-recent
             // touch of the same key exists further back in the queue (so this front copy is
             // not its true LRU position).
@@ -154,7 +159,9 @@ pub(crate) struct SessionCache {
 
 impl SessionCache {
     pub(crate) fn new() -> SessionCache {
-        SessionCache { shards: (0..SHARDS).map(|_| RwLock::new(Shard::new())).collect() }
+        SessionCache {
+            shards: (0..SHARDS).map(|_| RwLock::new(Shard::new())).collect(),
+        }
     }
 
     /// The shard index for `key` (mask, not modulo — [`SHARDS`] is a power of two).
@@ -180,7 +187,9 @@ impl SessionCache {
         let idx = self.shard_of(key);
         // Fast path: shared read lock, clone the memo if warm.
         {
-            let shard = self.shards[idx].read().expect("session-cache shard poisoned");
+            let shard = self.shards[idx]
+                .read()
+                .expect("session-cache shard poisoned");
             if let Some(entry) = shard.map.get(key) {
                 if let Some(memo) = entry.memo.as_ref() {
                     return memo.clone();
@@ -189,7 +198,9 @@ impl SessionCache {
         }
         // Miss or stale memo: take the write lock, fill (re-checking under the lock in case
         // another writer filled it first), evict to cap, return the owned sets.
-        let mut shard = self.shards[idx].write().expect("session-cache shard poisoned");
+        let mut shard = self.shards[idx]
+            .write()
+            .expect("session-cache shard poisoned");
         // Double-check: a concurrent writer may have filled it between the two locks.
         if let Some(entry) = shard.map.get(key) {
             if let Some(memo) = entry.memo.as_ref() {
@@ -232,7 +243,10 @@ impl SessionCache {
     /// The current total number of cached entries across all shards (test/inspection only).
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.shards.iter().map(|s| s.read().expect("poisoned").map.len()).sum()
+        self.shards
+            .iter()
+            .map(|s| s.read().expect("poisoned").map.len())
+            .sum()
     }
 
     /// Read-only access to one cached entry for white-box tests (clones nothing observable;
@@ -257,8 +271,8 @@ mod tests {
     use super::*;
     use crate::Mode;
     use oxrdf::NamedNode;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn key(agent: &str, mode: Mode) -> SessionKey {
         (Some(agent.to_owned()), None, None, None, mode)
@@ -335,7 +349,10 @@ mod tests {
         }
         // Shard 0 is bounded to SHARD_CAP; the whole cache never exceeds SHARDS*SHARD_CAP.
         let shard0_len = cache.shards[0].read().unwrap().map.len();
-        assert!(shard0_len <= SHARD_CAP, "shard 0 bounded ({shard0_len} <= {SHARD_CAP})");
+        assert!(
+            shard0_len <= SHARD_CAP,
+            "shard 0 bounded ({shard0_len} <= {SHARD_CAP})"
+        );
         assert!(cache.len() <= SHARDS * SHARD_CAP, "whole cache bounded");
     }
 
@@ -394,8 +411,14 @@ mod tests {
         // Seed an entry with two origin buckets + a memo.
         cache.get_or_compute(&k, |e| {
             e.computed = true;
-            e.per_origin.insert("https://a.ex".to_owned(), vec![NamedNode::new("https://a.ex/g").unwrap()]);
-            e.per_origin.insert("https://b.ex".to_owned(), vec![NamedNode::new("https://b.ex/g").unwrap()]);
+            e.per_origin.insert(
+                "https://a.ex".to_owned(),
+                vec![NamedNode::new("https://a.ex/g").unwrap()],
+            );
+            e.per_origin.insert(
+                "https://b.ex".to_owned(),
+                vec![NamedNode::new("https://b.ex/g").unwrap()],
+            );
             let s = sets_with("https://a.ex/g");
             e.memo = Some(s.clone());
             s
@@ -403,8 +426,14 @@ mod tests {
         cache.invalidate_origin("https://a.ex");
         cache.with_entry(&k, |e| {
             let e = e.expect("entry present");
-            assert!(!e.per_origin.contains_key("https://a.ex"), "a.ex slice dropped");
-            assert!(e.per_origin.contains_key("https://b.ex"), "b.ex slice kept warm");
+            assert!(
+                !e.per_origin.contains_key("https://a.ex"),
+                "a.ex slice dropped"
+            );
+            assert!(
+                e.per_origin.contains_key("https://b.ex"),
+                "b.ex slice kept warm"
+            );
             assert!(e.dirty.contains("https://a.ex"), "a.ex marked dirty");
             assert!(e.memo.is_none(), "memo dropped so it re-assembles");
         });

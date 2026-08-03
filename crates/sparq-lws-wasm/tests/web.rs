@@ -11,7 +11,8 @@ const BASE_URL: &str = "https://pod.example";
 const OWNER: &str = "https://id.example/alice#me";
 const INTRUDER: &str = "https://id.example/mallory#me";
 const TURTLE: &[u8] = b"<https://pod.example/card> <http://xmlns.com/foaf/0.1/name> \"Ada\" .\n";
-const TURTLE_V2: &[u8] = b"<https://pod.example/card> <http://xmlns.com/foaf/0.1/name> \"Grace\" .\n";
+const TURTLE_V2: &[u8] =
+    b"<https://pod.example/card> <http://xmlns.com/foaf/0.1/name> \"Grace\" .\n";
 
 // [SONNET-4.6] sq-wubkf: the bounded allocator is only installed on wasm32, so this is the only
 // place the live-byte accounting and the 507 refusal can be exercised end to end. A ceiling below
@@ -229,7 +230,10 @@ async fn a_pod_restored_from_a_snapshot_serves_what_was_written_before_the_resta
 
     let (status, body, etag_after) = get_with_etag(&restored, "/card", OWNER).await;
     assert_eq!(status, 200, "the resource survived the restart");
-    assert_eq!(body, TURTLE_V2, "and carries the LATEST body, not the first");
+    assert_eq!(
+        body, TURTLE_V2,
+        "and carries the LATEST body, not the first"
+    );
     assert_eq!(
         etag_after, etag_before,
         "the ETag is derived from the body, so a restart does not invalidate a client's cache"
@@ -247,7 +251,10 @@ async fn a_pod_restored_from_a_snapshot_serves_what_was_written_before_the_resta
         .expect("a restored pod journals as the original did");
     let twice = SolidServer::with_snapshot(BASE_URL.to_owned(), OWNER.to_owned(), second)
         .expect("a second restart restores from the restored pod's own snapshot");
-    assert_eq!(get_as(&twice, "/card", OWNER).await, (200, TURTLE_V2.to_vec()));
+    assert_eq!(
+        get_as(&twice, "/card", OWNER).await,
+        (200, TURTLE_V2.to_vec())
+    );
 }
 
 // The owner ACL is provisioned only when the restored pod has none, so a restart must not revert

@@ -67,7 +67,9 @@ fn results_json(
     let mut s = String::new();
     s.push_str("{\n");
     s.push_str(&format!("  \"harness\": {},\n", json_str(harness)));
-    s.push_str(&format!("  \"n\": {n},\n  \"dim\": {dim},\n  \"k\": {k},\n  \"queries\": {queries},\n"));
+    s.push_str(&format!(
+        "  \"n\": {n},\n  \"dim\": {dim},\n  \"k\": {k},\n  \"queries\": {queries},\n"
+    ));
     s.push_str(
         "  \"note\": \"`n`/`dim`/`k`/`queries` are the fixed deterministic workload \
          dimensions; every timing/throughput metric below is best-effort, MEASURED on the \
@@ -121,14 +123,18 @@ fn throughput_50k() {
     const K: usize = 10;
     const QUERIES: usize = 200;
 
-    let path = std::env::temp_dir()
-        .join(format!("sparq-vectors-throughput-{}.spqv", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "sparq-vectors-throughput-{}.spqv",
+        std::process::id()
+    ));
 
     let t = Instant::now();
     let mut store = VectorStore::create(&path, DIM).unwrap();
     let mut state = 0xC0FFEE_u64;
     for i in 0..N {
-        store.put((i as u32) * 7 + 3, &rand_vec(&mut state, DIM)).unwrap();
+        store
+            .put((i as u32) * 7 + 3, &rand_vec(&mut state, DIM))
+            .unwrap();
     }
     let put = t.elapsed();
     let t = Instant::now();

@@ -61,7 +61,10 @@ impl Codebook {
                 ordered.push(m);
             }
         }
-        Codebook { slot_of, members: ordered }
+        Codebook {
+            slot_of,
+            members: ordered,
+        }
     }
 
     /// The number of **distinct** enum members (excludes the reserved invalid slot).
@@ -163,11 +166,23 @@ mod tests {
         // Every member round-trips through encode→decode (exactness, design §6.A).
         for m in cb.members() {
             let block = cb.encode(m);
-            assert_eq!(cb.decode(&block).as_ref(), Some(m), "member must round-trip: {m}");
+            assert_eq!(
+                cb.decode(&block).as_ref(),
+                Some(m),
+                "member must round-trip: {m}"
+            );
             // One-hot: exactly one slot is 1.0, and it is NOT the invalid slot.
-            let hot: Vec<usize> = block.iter().enumerate().filter(|(_, &v)| v == 1.0).map(|(i, _)| i).collect();
+            let hot: Vec<usize> = block
+                .iter()
+                .enumerate()
+                .filter(|(_, &v)| v == 1.0)
+                .map(|(i, _)| i)
+                .collect();
             assert_eq!(hot.len(), 1, "exactly one hot slot");
-            assert_ne!(hot[0], INVALID_SLOT, "a member must not use the invalid slot");
+            assert_ne!(
+                hot[0], INVALID_SLOT,
+                "a member must not use the invalid slot"
+            );
         }
     }
 
@@ -181,7 +196,10 @@ mod tests {
         // The invalid slot is hot, and decode reports None (not a member) — the reserved code a
         // closed-world SHACL `sh:in` shape rejects, never silently a member.
         assert_eq!(block[INVALID_SLOT], 1.0);
-        assert!(cb.decode(&block).is_none(), "out-of-enum decodes to None, not a member");
+        assert!(
+            cb.decode(&block).is_none(),
+            "out-of-enum decodes to None, not a member"
+        );
     }
 
     #[test]
@@ -192,13 +210,24 @@ mod tests {
         let red = cb.encode(&iri("http://ex/Red"));
         let green = cb.encode(&iri("http://ex/Green"));
         let dot: f32 = red.iter().zip(green.iter()).map(|(a, b)| a * b).sum();
-        assert_eq!(dot, 0.0, "distinct members are orthogonal — membership is exact, not fuzzy");
+        assert_eq!(
+            dot, 0.0,
+            "distinct members are orthogonal — membership is exact, not fuzzy"
+        );
     }
 
     #[test]
     fn duplicate_members_collapse() {
-        let cb = Codebook::new(vec![iri("http://ex/A"), iri("http://ex/A"), iri("http://ex/B")]);
-        assert_eq!(cb.member_count(), 2, "a repeated member does not widen the block");
+        let cb = Codebook::new(vec![
+            iri("http://ex/A"),
+            iri("http://ex/A"),
+            iri("http://ex/B"),
+        ]);
+        assert_eq!(
+            cb.member_count(),
+            2,
+            "a repeated member does not widen the block"
+        );
         assert_eq!(cb.dim(), 3);
     }
 
@@ -214,6 +243,9 @@ mod tests {
     #[test]
     fn all_zero_block_decodes_to_none() {
         let cb = sample();
-        assert!(cb.decode(&[0.0; 4]).is_none(), "an all-zero block is not a member");
+        assert!(
+            cb.decode(&[0.0; 4]).is_none(),
+            "an all-zero block is not a member"
+        );
     }
 }

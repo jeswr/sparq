@@ -64,7 +64,9 @@ fn results_json(
     let mut s = String::new();
     s.push_str("{\n");
     s.push_str(&format!("  \"harness\": {},\n", json_str(harness)));
-    s.push_str(&format!("  \"n\": {n},\n  \"dim\": {dim},\n  \"k\": {k},\n  \"queries\": {queries},\n"));
+    s.push_str(&format!(
+        "  \"n\": {n},\n  \"dim\": {dim},\n  \"k\": {k},\n  \"queries\": {queries},\n"
+    ));
     s.push_str(
         "  \"note\": \"`recall` is DETERMINISTIC at the pinned (N, seed) workload; the \
          build/query timings are best-effort, MEASURED on the running host — ADVISORY, \
@@ -143,8 +145,10 @@ fn diskann_recall_at_10_vs_brute_force_on_50k() {
     let t = Instant::now();
     for _ in 0..QUERIES {
         let q = rand_vec(&mut q_state, DIM);
-        let exact: Vec<u32> =
-            nearest_exact(&store, &q, K).into_iter().map(|(id, _)| id).collect();
+        let exact: Vec<u32> = nearest_exact(&store, &q, K)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         let approx: Vec<u32> = index.nearest(&q, K).into_iter().map(|(id, _)| id).collect();
         assert_eq!(exact.len(), K);
         assert_eq!(approx.len(), K);
@@ -166,7 +170,10 @@ fn diskann_recall_at_10_vs_brute_force_on_50k() {
         &[
             ("recall", recall),
             ("build_ms", build.as_secs_f64() * 1e3),
-            ("query_ms_per_query", query.as_secs_f64() * 1e3 / QUERIES as f64),
+            (
+                "query_ms_per_query",
+                query.as_secs_f64() * 1e3 / QUERIES as f64,
+            ),
         ],
     );
     maybe_write_json(&doc);
@@ -222,7 +229,9 @@ fn reopen_without_rebuild_returns_identical_neighbours() {
     let mut store = VectorStore::create(&store_path, DIM).unwrap();
     let mut state = 0x1234_5678_u64;
     for i in 0..N {
-        store.put((i as u32) * 3 + 1, &rand_vec(&mut state, DIM)).unwrap();
+        store
+            .put((i as u32) * 3 + 1, &rand_vec(&mut state, DIM))
+            .unwrap();
     }
     store.finalize().unwrap();
 
@@ -243,7 +252,10 @@ fn reopen_without_rebuild_returns_identical_neighbours() {
         let got = reopened.nearest(q, K);
         assert_eq!(got.len(), expected.len());
         for (g, e) in got.iter().zip(expected) {
-            assert_eq!(g.0, e.0, "reopened neighbour id differs from the built index");
+            assert_eq!(
+                g.0, e.0,
+                "reopened neighbour id differs from the built index"
+            );
             assert!(
                 (g.1 - e.1).abs() < 1e-6,
                 "reopened cosine {} differs from built {}",
@@ -284,7 +296,12 @@ fn diskann_parity_with_hnsw_on_separable_clusters() {
     store.finalize().unwrap();
 
     // Small graphs: degree must stay ≤ build_beam, and both ≤ the cluster sizes are fine.
-    let cfg = VamanaConfig { degree: 16, build_beam: 32, search_beam: 32, ..Default::default() };
+    let cfg = VamanaConfig {
+        degree: 16,
+        build_beam: 32,
+        search_beam: 32,
+        ..Default::default()
+    };
     let disk = DiskAnnIndex::build_with(&store, &graph_path, cfg).unwrap();
     let hnsw = VectorIndex::build(&store);
 
@@ -292,16 +309,26 @@ fn diskann_parity_with_hnsw_on_separable_clusters() {
         let exact = nearest_exact(&store, center, 5);
         let approx_disk = disk.nearest(center, 5);
         let approx_hnsw = hnsw.nearest(center, 5);
-        for &(id, sim) in exact.iter().chain(approx_disk.iter()).chain(approx_hnsw.iter()) {
+        for &(id, sim) in exact
+            .iter()
+            .chain(approx_disk.iter())
+            .chain(approx_hnsw.iter())
+        {
             assert_eq!((id - 1) / 100, c as u32, "neighbor {id} from wrong cluster");
-            assert!(sim > 0.99, "cluster member should be near-identical, got {sim}");
+            assert!(
+                sim > 0.99,
+                "cluster member should be near-identical, got {sim}"
+            );
         }
         // The on-disk index returns the same id set as the in-RAM HNSW on separable data.
         let disk_ids: std::collections::HashSet<u32> =
             approx_disk.iter().map(|&(id, _)| id).collect();
         let hnsw_ids: std::collections::HashSet<u32> =
             approx_hnsw.iter().map(|&(id, _)| id).collect();
-        assert_eq!(disk_ids, hnsw_ids, "on-disk and HNSW disagree on separable cluster {c}");
+        assert_eq!(
+            disk_ids, hnsw_ids,
+            "on-disk and HNSW disagree on separable cluster {c}"
+        );
     }
 
     // Degenerate: an all-zero query has no direction → empty, matching the other searchers.
@@ -336,7 +363,11 @@ fn empty_and_singleton_graphs_roundtrip() {
     let nn = idx1.nearest(&[1.0, 2.0, 3.0, 4.0], 5);
     assert_eq!(nn.len(), 1);
     assert_eq!(nn[0].0, 99);
-    assert!((nn[0].1 - 1.0).abs() < 1e-5, "self-similarity should be ~1, got {}", nn[0].1);
+    assert!(
+        (nn[0].1 - 1.0).abs() < 1e-5,
+        "self-similarity should be ~1, got {}",
+        nn[0].1
+    );
 
     for p in [&store_path, &graph_path, &store_path1, &graph_path1] {
         let _ = std::fs::remove_file(p);
@@ -356,7 +387,9 @@ fn pq_index_persists_and_reloads_the_candidate_cache() {
     let mut store = VectorStore::create(&store_path, DIM).unwrap();
     let mut state = 0xA11CE_u64;
     for i in 0..N {
-        store.put((i as u32) * 5 + 1, &rand_vec(&mut state, DIM)).unwrap();
+        store
+            .put((i as u32) * 5 + 1, &rand_vec(&mut state, DIM))
+            .unwrap();
     }
     store.finalize().unwrap();
 
@@ -367,12 +400,18 @@ fn pq_index_persists_and_reloads_the_candidate_cache() {
         PqConfig::default(),
     )
     .unwrap();
-    assert!(built.has_pq_cache(), "build_with_pq must produce a PQ candidate cache");
+    assert!(
+        built.has_pq_cache(),
+        "build_with_pq must produce a PQ candidate cache"
+    );
     assert_eq!(built.len(), N);
 
     // Reopen from the file alone — the PQ section must reload (no rebuild).
     let reopened = DiskAnnIndex::open(&graph_path).unwrap();
-    assert!(reopened.has_pq_cache(), "reopened index must carry the persisted PQ cache");
+    assert!(
+        reopened.has_pq_cache(),
+        "reopened index must carry the persisted PQ cache"
+    );
     assert_eq!(reopened.len(), N);
     assert_eq!(reopened.dim(), DIM);
 
@@ -393,7 +432,9 @@ fn pq_returned_cosines_are_exact_after_rerank() {
     let mut store = VectorStore::create(&store_path, DIM).unwrap();
     let mut state = 0xBEEF_u64;
     for i in 0..N {
-        store.put((i as u32) + 1, &rand_vec(&mut state, DIM)).unwrap();
+        store
+            .put((i as u32) + 1, &rand_vec(&mut state, DIM))
+            .unwrap();
     }
     store.finalize().unwrap();
 
@@ -444,12 +485,17 @@ fn pq_recall_at_10_stays_high() {
     let mut store = VectorStore::create(&store_path, DIM).unwrap();
     let mut state = 0xC0FFEE_u64;
     for i in 0..N {
-        store.put((i as u32) * 7 + 3, &rand_vec(&mut state, DIM)).unwrap();
+        store
+            .put((i as u32) * 7 + 3, &rand_vec(&mut state, DIM))
+            .unwrap();
     }
     store.finalize().unwrap();
 
     // A wider beam compensates for the lossy codes; M=16 gives 2 dims/subspace at DIM=32.
-    let cfg = VamanaConfig { search_beam: 200, ..Default::default() };
+    let cfg = VamanaConfig {
+        search_beam: 200,
+        ..Default::default()
+    };
     let idx = DiskAnnIndex::build_with_pq(&store, &graph_path, cfg, PqConfig::default()).unwrap();
     assert!(idx.has_pq_cache());
 
@@ -457,14 +503,20 @@ fn pq_recall_at_10_stays_high() {
     let mut hits = 0usize;
     for _ in 0..QUERIES {
         let q = rand_vec(&mut q_state, DIM);
-        let exact: Vec<u32> = nearest_exact(&store, &q, K).into_iter().map(|(id, _)| id).collect();
+        let exact: Vec<u32> = nearest_exact(&store, &q, K)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         let approx: Vec<u32> = idx.nearest(&q, K).into_iter().map(|(id, _)| id).collect();
         assert_eq!(approx.len(), K);
         hits += approx.iter().filter(|id| exact.contains(id)).count();
     }
     let recall = hits as f64 / (QUERIES * K) as f64;
     eprintln!("DiskANN+PQ recall@{K} over {QUERIES} queries on {N}x{DIM}: {recall:.4}");
-    assert!(recall >= 0.80, "PQ recall@{K} gate failed: {recall:.4} < 0.80");
+    assert!(
+        recall >= 0.80,
+        "PQ recall@{K} gate failed: {recall:.4} < 0.80"
+    );
 
     let _ = std::fs::remove_file(&store_path);
     let _ = std::fs::remove_file(&graph_path);
@@ -517,7 +569,12 @@ fn open_from_bytes_returns_identical_neighbours_to_mmap_open() {
         store.put(id, &v).unwrap();
     }
     store.finalize().unwrap();
-    let cfg = VamanaConfig { degree: 8, build_beam: 16, search_beam: 24, ..Default::default() };
+    let cfg = VamanaConfig {
+        degree: 8,
+        build_beam: 16,
+        search_beam: 24,
+        ..Default::default()
+    };
     let mapped = DiskAnnIndex::build_with(&store, &graph_path, cfg).unwrap();
 
     let bytes = std::fs::read(&graph_path).unwrap();
@@ -552,14 +609,25 @@ fn open_from_bytes_serves_the_pq_index_identically() {
         store.put(id, &v).unwrap();
     }
     store.finalize().unwrap();
-    let cfg = VamanaConfig { degree: 8, build_beam: 16, search_beam: 24, ..Default::default() };
+    let cfg = VamanaConfig {
+        degree: 8,
+        build_beam: 16,
+        search_beam: 24,
+        ..Default::default()
+    };
     // M (subspaces) must divide into the small test dimension; the default M=16 needs dim ≥ 16.
-    let pq_cfg = PqConfig { m: 4, ..Default::default() };
+    let pq_cfg = PqConfig {
+        m: 4,
+        ..Default::default()
+    };
     DiskAnnIndex::build_with_pq(&store, &graph_path, cfg, pq_cfg).unwrap();
 
     let reopened = DiskAnnIndex::open(&graph_path).unwrap();
     let owned = DiskAnnIndex::open_from_bytes(std::fs::read(&graph_path).unwrap()).unwrap();
-    assert!(owned.has_pq_cache(), "the PQ section must survive the owned-bytes open");
+    assert!(
+        owned.has_pq_cache(),
+        "the PQ section must survive the owned-bytes open"
+    );
     let mut state = 101_u64;
     for _ in 0..10 {
         let q = rand_vec(&mut state, DIM);

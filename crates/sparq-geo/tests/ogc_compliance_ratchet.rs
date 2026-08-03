@@ -132,7 +132,12 @@ struct Fixture {
 }
 
 const fn fx(a: &'static str, b: &'static str, relation: &'static str, expected: bool) -> Fixture {
-    Fixture { a, b, relation, expected }
+    Fixture {
+        a,
+        b,
+        relation,
+        expected,
+    }
 }
 
 // Reusable geometries (named so the assertion list reads like the OGC matrices).
@@ -197,35 +202,150 @@ const FIXTURES: &[Fixture] = &[
     fx(BIG, OVERLAP, "sfEquals", false),
     // ---- Simple Features: line / point operands ----------------------------
     // Line crossing a polygon interior (dim-1 vs dim-2): crosses.
-    fx("LINESTRING(-1 1, 3 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfCrosses", true),
-    fx("LINESTRING(-1 1, 3 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfIntersects", true),
-    fx("LINESTRING(-1 1, 3 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfWithin", false),
-    fx("LINESTRING(-1 1, 3 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfTouches", false),
+    fx(
+        "LINESTRING(-1 1, 3 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfCrosses",
+        true,
+    ),
+    fx(
+        "LINESTRING(-1 1, 3 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfIntersects",
+        true,
+    ),
+    fx(
+        "LINESTRING(-1 1, 3 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfWithin",
+        false,
+    ),
+    fx(
+        "LINESTRING(-1 1, 3 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfTouches",
+        false,
+    ),
     // Two lines crossing at one interior point: crosses.
-    fx("LINESTRING(0 0, 2 2)", "LINESTRING(0 2, 2 0)", "sfCrosses", true),
-    fx("LINESTRING(0 0, 2 2)", "LINESTRING(0 2, 2 0)", "sfIntersects", true),
-    fx("LINESTRING(0 0, 2 2)", "LINESTRING(0 2, 2 0)", "sfTouches", false),
-    fx("LINESTRING(0 0, 2 2)", "LINESTRING(0 2, 2 0)", "sfOverlaps", false),
+    fx(
+        "LINESTRING(0 0, 2 2)",
+        "LINESTRING(0 2, 2 0)",
+        "sfCrosses",
+        true,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 2)",
+        "LINESTRING(0 2, 2 0)",
+        "sfIntersects",
+        true,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 2)",
+        "LINESTRING(0 2, 2 0)",
+        "sfTouches",
+        false,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 2)",
+        "LINESTRING(0 2, 2 0)",
+        "sfOverlaps",
+        false,
+    ),
     // Two lines sharing only an endpoint: touch.
-    fx("LINESTRING(0 0, 1 1)", "LINESTRING(1 1, 2 0)", "sfTouches", true),
-    fx("LINESTRING(0 0, 1 1)", "LINESTRING(1 1, 2 0)", "sfCrosses", false),
-    fx("LINESTRING(0 0, 1 1)", "LINESTRING(1 1, 2 0)", "sfIntersects", true),
+    fx(
+        "LINESTRING(0 0, 1 1)",
+        "LINESTRING(1 1, 2 0)",
+        "sfTouches",
+        true,
+    ),
+    fx(
+        "LINESTRING(0 0, 1 1)",
+        "LINESTRING(1 1, 2 0)",
+        "sfCrosses",
+        false,
+    ),
+    fx(
+        "LINESTRING(0 0, 1 1)",
+        "LINESTRING(1 1, 2 0)",
+        "sfIntersects",
+        true,
+    ),
     // Collinear partially-overlapping lines: overlap (same dim, partial share).
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)", "sfOverlaps", true),
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)", "sfCrosses", false),
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)", "sfIntersects", true),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(1 0, 3 0)",
+        "sfOverlaps",
+        true,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(1 0, 3 0)",
+        "sfCrosses",
+        false,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(1 0, 3 0)",
+        "sfIntersects",
+        true,
+    ),
     // Line strictly within a polygon.
-    fx("LINESTRING(0.5 0.5, 1.5 1.5)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfWithin", true),
-    fx("LINESTRING(0.5 0.5, 1.5 1.5)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfCrosses", false),
+    fx(
+        "LINESTRING(0.5 0.5, 1.5 1.5)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfWithin",
+        true,
+    ),
+    fx(
+        "LINESTRING(0.5 0.5, 1.5 1.5)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfCrosses",
+        false,
+    ),
     // Point inside a polygon: within (interior).
-    fx("POINT(1 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfWithin", true),
-    fx("POINT(1 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfIntersects", true),
-    fx("POINT(1 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfTouches", false),
-    fx("POINT(1 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfDisjoint", false),
+    fx(
+        "POINT(1 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfWithin",
+        true,
+    ),
+    fx(
+        "POINT(1 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfIntersects",
+        true,
+    ),
+    fx(
+        "POINT(1 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfTouches",
+        false,
+    ),
+    fx(
+        "POINT(1 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfDisjoint",
+        false,
+    ),
     // Point ON a polygon boundary: touches, NOT within (interior rule).
-    fx("POINT(0 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfTouches", true),
-    fx("POINT(0 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfWithin", false),
-    fx("POINT(0 1)", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfIntersects", true),
+    fx(
+        "POINT(0 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfTouches",
+        true,
+    ),
+    fx(
+        "POINT(0 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfWithin",
+        false,
+    ),
+    fx(
+        "POINT(0 1)",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfIntersects",
+        true,
+    ),
     // Point vs same / different point.
     fx("POINT(3 4)", "POINT(3 4)", "sfEquals", true),
     fx("POINT(3 4)", "POINT(3 4)", "sfIntersects", true),
@@ -310,31 +430,76 @@ const FIXTURES: &[Fixture] = &[
     fx(OVERLAP, BIG, "sfOverlaps", true),
     fx(OVERLAP, BIG, "sfIntersects", true),
     // sfCrosses is symmetric — polygon-vs-line crossing, reverse order.
-    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "LINESTRING(-1 1, 3 1)", "sfCrosses", true),
+    fx(
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "LINESTRING(-1 1, 3 1)",
+        "sfCrosses",
+        true,
+    ),
     // Distinct points are disjoint either way (sfDisjoint symmetric).
     fx("POINT(3 5)", "POINT(3 4)", "sfDisjoint", true),
     // ---- sf: point / line / polygon, the CONTAINS (reverse-of-within) view --
     // A boundary point: polygon touches it but does not contain it (interior rule).
-    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POINT(0 1)", "sfTouches", true),
-    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POINT(0 1)", "sfContains", false),
+    fx(
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "POINT(0 1)",
+        "sfTouches",
+        true,
+    ),
+    fx(
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "POINT(0 1)",
+        "sfContains",
+        false,
+    ),
     // An interior point: the polygon contains it (reverse of point sfWithin polygon).
-    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POINT(1 1)", "sfContains", true),
-    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POINT(1 1)", "sfWithin", false),
+    fx(
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "POINT(1 1)",
+        "sfContains",
+        true,
+    ),
+    fx(
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "POINT(1 1)",
+        "sfWithin",
+        false,
+    ),
     // A line strictly interior: the polygon contains it.
-    fx("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "LINESTRING(0.5 0.5, 1.5 1.5)", "sfContains", true),
+    fx(
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "LINESTRING(0.5 0.5, 1.5 1.5)",
+        "sfContains",
+        true,
+    ),
     // Two identical points: equal => within AND contains (degenerate inclusion).
     fx("POINT(5 5)", "POINT(5 5)", "sfWithin", true),
     fx("POINT(5 5)", "POINT(5 5)", "sfContains", true),
     // ---- sf: MULTI* operands (collection topology) --------------------------
     // Both members of the MultiPoint lie strictly inside the polygon: within.
-    fx("MULTIPOINT((1 1),(0.5 0.5))", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfWithin", true),
-    fx("MULTIPOINT((1 1),(0.5 0.5))", "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "sfIntersects", true),
+    fx(
+        "MULTIPOINT((1 1),(0.5 0.5))",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfWithin",
+        true,
+    ),
+    fx(
+        "MULTIPOINT((1 1),(0.5 0.5))",
+        "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+        "sfIntersects",
+        true,
+    ),
     // A MultiPolygon contains a point in its first part / is disjoint from a
     // point in neither part.
     fx(MULTI_TWO_SQUARES, "POINT(1 1)", "sfContains", true),
     fx(MULTI_TWO_SQUARES, "POINT(5 5)", "sfDisjoint", true),
     // Collinear partially-overlapping lines: overlap is symmetric.
-    fx("LINESTRING(1 0, 3 0)", "LINESTRING(0 0, 2 0)", "sfOverlaps", true),
+    fx(
+        "LINESTRING(1 0, 3 0)",
+        "LINESTRING(0 0, 2 0)",
+        "sfOverlaps",
+        true,
+    ),
     // ---- eh: reverse direction / more region pairs (Req 25) -----------------
     // ehDisjoint / ehMeet / ehOverlap are SYMMETRIC — pin the reverse order.
     fx(FAR, BIG, "ehDisjoint", true),
@@ -404,21 +569,71 @@ const FIXTURES: &[Fixture] = &[
     fx(SMALL_INSIDE, ADJACENT_TO_SMALL, "rcc8po", false),
     // ---- (2) sf: line vs polygon — DISJOINT case ----------------------------
     // A line entirely to the LEFT of the polygon: disjoint, not crossing.
-    fx("LINESTRING(-5 0, -1 0)", "POLYGON((0 0,2 0,2 2,0 2,0 0))", "sfDisjoint", true),
-    fx("LINESTRING(-5 0, -1 0)", "POLYGON((0 0,2 0,2 2,0 2,0 0))", "sfIntersects", false),
-    fx("LINESTRING(-5 0, -1 0)", "POLYGON((0 0,2 0,2 2,0 2,0 0))", "sfCrosses", false),
+    fx(
+        "LINESTRING(-5 0, -1 0)",
+        "POLYGON((0 0,2 0,2 2,0 2,0 0))",
+        "sfDisjoint",
+        true,
+    ),
+    fx(
+        "LINESTRING(-5 0, -1 0)",
+        "POLYGON((0 0,2 0,2 2,0 2,0 0))",
+        "sfIntersects",
+        false,
+    ),
+    fx(
+        "LINESTRING(-5 0, -1 0)",
+        "POLYGON((0 0,2 0,2 2,0 2,0 0))",
+        "sfCrosses",
+        false,
+    ),
     // ---- (3) sf: line vs line — PARALLEL/DISJOINT and ENDPOINT-TOUCHING -----
     // Two horizontal lines at y=0 and y=1: parallel, no shared points.
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(0 1, 2 1)", "sfDisjoint", true),
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(0 1, 2 1)", "sfIntersects", false),
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(0 1, 2 1)", "sfCrosses", false),
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(0 1, 2 1)", "sfOverlaps", false),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(0 1, 2 1)",
+        "sfDisjoint",
+        true,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(0 1, 2 1)",
+        "sfIntersects",
+        false,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(0 1, 2 1)",
+        "sfCrosses",
+        false,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(0 1, 2 1)",
+        "sfOverlaps",
+        false,
+    ),
     // Two collinear lines that share only the endpoint (2,0): sfTouches.
     // I(first) ∩ I(second) = ∅ (their open interiors don't overlap),
     // ∂(first) ∩ ∂(second) = {(2,0)} ≠ ∅ → "F***T****" matches.
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(2 0, 4 0)", "sfTouches", true),
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(2 0, 4 0)", "sfIntersects", true),
-    fx("LINESTRING(0 0, 2 0)", "LINESTRING(2 0, 4 0)", "sfOverlaps", false),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(2 0, 4 0)",
+        "sfTouches",
+        true,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(2 0, 4 0)",
+        "sfIntersects",
+        true,
+    ),
+    fx(
+        "LINESTRING(0 0, 2 0)",
+        "LINESTRING(2 0, 4 0)",
+        "sfOverlaps",
+        false,
+    ),
     // ---- (4) sf: point vs line — interior vs endpoint -----------------------
     // An interior point on a line: sfWithin (I(point) ∩ I(line) = {(1,0)} ≠ ∅).
     fx("POINT(1 0)", "LINESTRING(0 0, 2 0)", "sfWithin", true),
@@ -445,8 +660,7 @@ const FIXTURES: &[Fixture] = &[
 /// A MultiPolygon of two disjoint unit-ish squares — exercises MULTI* operand
 /// topology (a point inside the first part is contained; one in neither part is
 /// disjoint). [OPUS-4.8] sq-cbe4t
-const MULTI_TWO_SQUARES: &str =
-    "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((6 6,8 6,8 8,6 8,6 6)))";
+const MULTI_TWO_SQUARES: &str = "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((6 6,8 6,8 8,6 8,6 6)))";
 
 /// A polygon that shares its LEFT edge with SMALL_INSIDE's RIGHT edge (at x=2,
 /// y=1..2). The two polygons are EXTERNALLY CONNECTED: their interiors are
@@ -479,7 +693,10 @@ fn run_fixtures(fixtures: &[Fixture]) -> (usize, usize, Vec<String>) {
             }
             Err(e) => {
                 fail += 1;
-                failures.push(format!("geof:{}({}, {}) errored: {e}", f.relation, f.a, f.b));
+                failures.push(format!(
+                    "geof:{}({}, {}) errored: {e}",
+                    f.relation, f.a, f.b
+                ));
             }
         }
     }
@@ -496,7 +713,12 @@ fn ogc_topology_compliance_ratchet() {
     }
     println!("pass {pass} / fail {fail} (floor {OGC_RATCHET_FLOOR})");
 
-    assert_eq!(fail, 0, "OGC topology compliance regressions:\n{}", failures.join("\n"));
+    assert_eq!(
+        fail,
+        0,
+        "OGC topology compliance regressions:\n{}",
+        failures.join("\n")
+    );
     assert!(
         pass >= OGC_RATCHET_FLOOR,
         "OGC compliance pass count regressed: {pass} < floor {OGC_RATCHET_FLOOR} — \
@@ -530,8 +752,18 @@ fn gml_equivalence_for_topology() {
 
     let fixtures = [
         // Point inside the GML square: within / intersects.
-        GmlFixture { a: "POINT(1 1)", b_gml: SQUARE_GML, relation: "sfWithin", expected: true },
-        GmlFixture { a: "POINT(1 1)", b_gml: SQUARE_GML, relation: "sfIntersects", expected: true },
+        GmlFixture {
+            a: "POINT(1 1)",
+            b_gml: SQUARE_GML,
+            relation: "sfWithin",
+            expected: true,
+        },
+        GmlFixture {
+            a: "POINT(1 1)",
+            b_gml: SQUARE_GML,
+            relation: "sfIntersects",
+            expected: true,
+        },
         GmlFixture {
             a: "POINT(9 9)",
             b_gml: SQUARE_GML,
@@ -549,7 +781,11 @@ fn gml_equivalence_for_topology() {
 
     let relations = all_relations();
     let lookup = |name: &str| -> Rel {
-        relations.iter().find(|(n, _)| *n == name).map(|(_, f)| *f).unwrap()
+        relations
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, f)| *f)
+            .unwrap()
     };
 
     for f in &fixtures {
@@ -578,11 +814,7 @@ fn gml_equivalence_for_topology() {
 
 /// Dispatch a relation by `geof:` local name over already-parsed geometries
 /// (used by the GML-equivalence test, whose `b` operand is parsed from GML).
-fn relate_via_name(
-    name: &str,
-    a: &sparq_geo::GeoGeometry,
-    b: &sparq_geo::GeoGeometry,
-) -> bool {
+fn relate_via_name(name: &str, a: &sparq_geo::GeoGeometry, b: &sparq_geo::GeoGeometry) -> bool {
     use sparq_geo::geof;
     match name {
         "sfEquals" => geof::sf_equals(a, b),

@@ -206,12 +206,7 @@ fn gen_triple_term(rng: &mut Rng, depth: u32) -> String {
     } else {
         gen_simple_object(rng)
     };
-    format!(
-        "<<( {} {} {} )>>",
-        gen_subject(rng),
-        gen_predicate(rng),
-        o
-    )
+    format!("<<( {} {} {} )>>", gen_subject(rng), gen_predicate(rng), o)
 }
 
 /// A POOLABLE ground object — ground, blank-node-free, and in canonical lexical
@@ -1166,7 +1161,10 @@ fn apply_sequence(
                     return Err(fail(
                         i,
                         op,
-                        format!("canonical dataset differs ({} vs oxigraph)\n{}", label, detail),
+                        format!(
+                            "canonical dataset differs ({} vs oxigraph)\n{}",
+                            label, detail
+                        ),
                     ))
                 }
             }
@@ -1380,8 +1378,7 @@ mod tests {
     #[test]
     fn injected_divergence_is_caught() {
         let allow = allowlist();
-        let err =
-            check_seed(0, Some(0), &allow).expect_err("an injected extra quad must diverge");
+        let err = check_seed(0, Some(0), &allow).expect_err("an injected extra quad must diverge");
         assert!(
             err.contains("canonical dataset differs"),
             "divergence must be reported by the canonical-dataset compare, got:\n{}",
@@ -1566,7 +1563,11 @@ mod tests {
             "<http://ex/s> <http://ex/p> \"7\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
         ];
         let g = sparq_engine::update(&Graph::new(), insert).expect("rebuild insert");
-        assert_eq!(sparq_nquads(&g), expected, "rebuild path lost a lexical form");
+        assert_eq!(
+            sparq_nquads(&g),
+            expected,
+            "rebuild path lost a lexical form"
+        );
         let mut gi = Graph::new();
         sparq_engine::update_in_place(&mut gi, insert).expect("in-place insert");
         assert_eq!(
@@ -1824,10 +1825,7 @@ mod tests {
         let loaded = sparq_engine::with_load_base(sandbox.path(), || {
             sparq_engine::update(
                 &Graph::new(),
-                &format!(
-                    "LOAD <file://{}> INTO GRAPH <http://ex/g0>",
-                    doc.name
-                ),
+                &format!("LOAD <file://{}> INTO GRAPH <http://ex/g0>", doc.name),
             )
             .expect("LOAD")
         });

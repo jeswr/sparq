@@ -33,7 +33,10 @@ fn keyword_expands_to_canonical_sparql() {
         "canonical SPARQL should carry the expanded IRI: {out}"
     );
     assert!(out.contains("\"keyword\":\"derivedFrom\""), "{out}");
-    assert!(out.contains("\"legendVersion\":\"pkg-keywords/v1\""), "{out}");
+    assert!(
+        out.contains("\"legendVersion\":\"pkg-keywords/v1\""),
+        "{out}"
+    );
     // The lean CLI build has no V() resolution, so resolutions is always empty.
     assert!(out.contains("\"resolutions\":[]"), "{out}");
 }

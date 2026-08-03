@@ -111,7 +111,11 @@ pub(crate) fn reduce_max_id(ids: &[Id]) -> Option<Id> {
             found = true;
         }
     }
-    if found { Some(best) } else { None }
+    if found {
+        Some(best)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -132,16 +136,26 @@ mod tests {
     fn t1_reduce_sum_exact_i128_result() {
         // Three distinct inline values; sum is exact and pinned.
         // 1_000_000_000 + 73_741_823 + 500_000 = 1_074_241_823
-        let ids = vec![mk_inline(1_000_000_000), mk_inline(73_741_823), mk_inline(500_000)];
+        let ids = vec![
+            mk_inline(1_000_000_000),
+            mk_inline(73_741_823),
+            mk_inline(500_000),
+        ];
         let sum = reduce_sum(&ids).unwrap();
-        assert_eq!(sum, 1_074_241_823_i128, "exact i128 sum must equal 1_074_241_823");
+        assert_eq!(
+            sum, 1_074_241_823_i128,
+            "exact i128 sum must equal 1_074_241_823"
+        );
 
         // Two max-inline values: 2 * (2^30 - 1) = 2^31 - 2 = 2_147_483_646
         let v_max = INLINE_MAX_I64 as u32;
         let ids2 = vec![mk_inline(v_max), mk_inline(v_max)];
         let sum2 = reduce_sum(&ids2).unwrap();
         let expected2: i128 = 2 * (INLINE_MAX_I64 as i128);
-        assert_eq!(sum2, expected2, "two max-inline values must sum to 2*(2^30-1)");
+        assert_eq!(
+            sum2, expected2,
+            "two max-inline values must sum to 2*(2^30-1)"
+        );
 
         // Empty sum = 0 (identity).
         assert_eq!(reduce_sum(&[]), Some(0_i128), "empty sum must be 0");
@@ -160,11 +174,21 @@ mod tests {
     /// T2b: Min/max order correctness across a spread of values.
     #[test]
     fn t2b_min_max_spread() {
-        let ids = vec![mk_inline(100), mk_inline(1), mk_inline(50), mk_inline(200), mk_inline(3)];
+        let ids = vec![
+            mk_inline(100),
+            mk_inline(1),
+            mk_inline(50),
+            mk_inline(200),
+            mk_inline(3),
+        ];
         assert_eq!(reduce_min_id(&ids), Some(mk_inline(1)));
         assert_eq!(reduce_max_id(&ids), Some(mk_inline(200)));
         // Mutation check: a MIN returning MAX would fail.
-        assert_ne!(reduce_min_id(&ids), reduce_max_id(&ids), "MIN != MAX over spread");
+        assert_ne!(
+            reduce_min_id(&ids),
+            reduce_max_id(&ids),
+            "MIN != MAX over spread"
+        );
     }
 
     /// T3: Empty / non-inline decline.
@@ -209,7 +233,11 @@ mod tests {
             "i64::MAX itself must succeed"
         );
         assert_eq!(narrow_sum_to_i64(0), Some(0));
-        assert_eq!(narrow_sum_to_i64(190), Some(190), "typical small SUM must succeed");
+        assert_eq!(
+            narrow_sum_to_i64(190),
+            Some(190),
+            "typical small SUM must succeed"
+        );
         // Negative sums can arise if the caller somehow passes a negative i128.
         // We do not currently generate these (all inline values are non-negative),
         // but try_from is still defined: any i128 in [i64::MIN, i64::MAX] succeeds.
@@ -437,15 +465,30 @@ mod kani_proofs {
     #[kani::unwind(12)]
     fn domain_reducer_slice_is_adversarial_and_survives_the_bound() {
         // (1) The domain constants are adversarial (concrete — cannot be unwind-pruned).
-        assert!(MAX_SLICE >= 2, "a singleton domain would not exercise the multi-element fold");
-        assert!(INLINE_MAX_I64 > 0, "a zero-width value range makes min == max == sum trivial");
-        assert!(INLINE_BASE > NO_ID, "the inline region must sit above the NO_ID sentinel");
-        assert!(is_inline(INLINE_BASE), "INLINE_BASE is the low end of the inline region");
+        assert!(
+            MAX_SLICE >= 2,
+            "a singleton domain would not exercise the multi-element fold"
+        );
+        assert!(
+            INLINE_MAX_I64 > 0,
+            "a zero-width value range makes min == max == sum trivial"
+        );
+        assert!(
+            INLINE_BASE > NO_ID,
+            "the inline region must sit above the NO_ID sentinel"
+        );
+        assert!(
+            is_inline(INLINE_BASE),
+            "INLINE_BASE is the low end of the inline region"
+        );
         assert!(
             is_inline(INLINE_BASE + INLINE_MAX_I64 as u32),
             "INLINE_BASE + INLINE_MAX_I64 is the high end of the inline region"
         );
-        assert!(!is_inline(NO_ID), "NO_ID must not be classed inline (reduce_count keys on it)");
+        assert!(
+            !is_inline(NO_ID),
+            "NO_ID must not be classed inline (reduce_count keys on it)"
+        );
 
         // (2) The maximal-length, value-varied slice SURVIVES unwind(12): a full MAX_SLICE
         // slice whose endpoints can differ is reachable, i.e. NOT assume(false)-pruned.

@@ -44,7 +44,10 @@ const SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfConta
 const REGION: &str = "DIAMOND(5 5 5)";
 
 fn parse_point(s: &str) -> Option<(f64, f64)> {
-    let (x, y) = s.strip_prefix("POINT(")?.strip_suffix(')')?.split_once(' ')?;
+    let (x, y) = s
+        .strip_prefix("POINT(")?
+        .strip_suffix(')')?
+        .split_once(' ')?;
     Some((x.parse().ok()?, y.parse().ok()?))
 }
 
@@ -66,7 +69,9 @@ fn wkt_term(v: &str) -> Term {
 /// for "how many residual exact checks ran".
 fn diamond_registry(counter: Arc<AtomicUsize>) -> FunctionRegistry {
     fn judge(geom: &Term) -> Result<Term, String> {
-        let Term::Literal(l) = geom else { return Err("geometry must be a literal".into()) };
+        let Term::Literal(l) = geom else {
+            return Err("geometry must be a literal".into());
+        };
         let (x, y) = parse_point(l.value()).ok_or_else(|| "unparsable point".to_string())?;
         Ok(Literal::from(in_diamond(x, y)).into())
     }
@@ -100,10 +105,15 @@ struct DiamondProvider {
 
 impl DiamondProvider {
     fn new(graph: &Graph, indexed: &[(&str, f64, f64)], serve_exact: bool, id_level: bool) -> Self {
-        let points: Vec<(Term, f64, f64)> =
-            indexed.iter().map(|(v, x, y)| (wkt_term(v), *x, *y)).collect();
+        let points: Vec<(Term, f64, f64)> = indexed
+            .iter()
+            .map(|(v, x, y)| (wkt_term(v), *x, *y))
+            .collect();
         let id_universe = id_level.then(|| {
-            let ids: FxHashSet<Id> = points.iter().filter_map(|(t, _, _)| graph.id_of(t)).collect();
+            let ids: FxHashSet<Id> = points
+                .iter()
+                .filter_map(|(t, _, _)| graph.id_of(t))
+                .collect();
             (std::ptr::from_ref(&graph.dict) as usize, Arc::new(ids))
         });
         Self {
@@ -120,7 +130,10 @@ impl SpatialProvider for DiamondProvider {
     fn candidates(&self, q: &SpatialQuery) -> Option<Vec<Term>> {
         match q {
             SpatialQuery::BboxIntersects { arg_wkt } => {
-                assert_eq!(*arg_wkt, REGION, "the engine forwards the constant's lexical form");
+                assert_eq!(
+                    *arg_wkt, REGION,
+                    "the engine forwards the constant's lexical form"
+                );
                 self.superset_calls.fetch_add(1, Ordering::Relaxed);
                 // The window SUPERSET: everything indexed inside the diamond's AABB.
                 Some(
@@ -151,7 +164,10 @@ impl SpatialProvider for DiamondProvider {
             return None;
         }
         let SpatialExactQuery::WithinRegion { region_wkt } = q;
-        assert_eq!(*region_wkt, REGION, "the engine forwards the constant's lexical form");
+        assert_eq!(
+            *region_wkt, REGION,
+            "the engine forwards the constant's lexical form"
+        );
         self.exact_calls.fetch_add(1, Ordering::Relaxed);
         // EXACT certification: precisely the indexed points inside the diamond.
         Some(
@@ -230,7 +246,11 @@ fn rows_sorted(r: &QueryResult) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = r
         .rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default())
+                .collect()
+        })
         .collect();
     out.sort();
     out
@@ -250,7 +270,8 @@ fn differential(
     let posthoc = with_functions(&reg, || query(graph, sparql)).unwrap();
     let checks_posthoc = counter.swap(0, Ordering::Relaxed);
 
-    let pushed = with_spatial_index(provider, || with_functions(&reg, || query(graph, sparql))).unwrap();
+    let pushed =
+        with_spatial_index(provider, || with_functions(&reg, || query(graph, sparql))).unwrap();
     let checks_pushed = counter.load(Ordering::Relaxed);
 
     let a = rows_sorted(&posthoc);
@@ -286,7 +307,10 @@ fn mixed_corpus_differential_both_orientations_and_retain_branches() {
                  (kept by the residual FILTER); i2 is the AABB false positive, u_out \
                  the not-indexed non-match (id_level={id_level})\nquery: {q}"
             );
-            assert!(exact_calls.load(Ordering::Relaxed) >= 1, "the exact certification was consulted");
+            assert!(
+                exact_calls.load(Ordering::Relaxed) >= 1,
+                "the exact certification was consulted"
+            );
             assert!(
                 checks_pushed >= 1,
                 "not-indexed bindings survive, so the residual FILTER MUST still run (Partial)"
@@ -351,7 +375,10 @@ fn declining_exact_certification_falls_back_to_the_superset_path() {
         let superset_calls = p.superset_calls.clone();
         let (rows, _, checks_pushed) = differential(&g, &q, p);
         assert_eq!(subjects(&rows), vec!["<http://ex/i0>", "<http://ex/i1>"]);
-        assert!(superset_calls.load(Ordering::Relaxed) >= 1, "superset path consulted");
+        assert!(
+            superset_calls.load(Ordering::Relaxed) >= 1,
+            "superset path consulted"
+        );
         assert!(
             checks_pushed >= 1,
             "without exact certification the residual FILTER must run\nquery: {q}"
@@ -383,7 +410,10 @@ fn provider_without_candidates_exact_inherits_the_declining_default() {
         vec!["<http://ex/i0>", "<http://ex/i1>", "<http://ex/u_in>"]
     );
     assert!(superset_calls.load(Ordering::Relaxed) >= 1);
-    assert!(checks_pushed >= 1, "no certification -> the residual FILTER always runs");
+    assert!(
+        checks_pushed >= 1,
+        "no certification -> the residual FILTER always runs"
+    );
 }
 
 /// The certified-exact restriction also EXCLUDES indexed rows outside the certified

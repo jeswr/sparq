@@ -213,7 +213,11 @@ pub enum Key {
 impl<'a> Reader<'a> {
     /// New reader over `data` with `limits`.
     pub fn new(data: &'a [u8], limits: Limits) -> Self {
-        Reader { data, pos: 0, limits }
+        Reader {
+            data,
+            pos: 0,
+            limits,
+        }
     }
 
     /// Assert the whole buffer was consumed (no trailing bytes). Trailing bytes
@@ -227,7 +231,10 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or(Error::Malformed("length overflow"))?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(Error::Malformed("length overflow"))?;
         if end > self.data.len() {
             return Err(Error::Malformed("truncated"));
         }

@@ -37,11 +37,16 @@ fn read_txn_is_isolated_from_later_commits() {
 
     // A writer commits AFTER the read txn began.
     let mut w = m.begin_write();
-    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
+    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+        .unwrap();
     w.commit().unwrap();
 
     // The read txn STILL sees its point-in-time state (snapshot isolation).
-    assert_eq!(count_all(&snap), 2, "read txn must not observe the later commit");
+    assert_eq!(
+        count_all(&snap),
+        2,
+        "read txn must not observe the later commit"
+    );
     // A fresh read sees the new state.
     assert_eq!(count_all(&m.begin_read()), 3);
 }
@@ -50,12 +55,16 @@ fn read_txn_is_isolated_from_later_commits() {
 fn write_txn_reads_its_own_writes_but_others_dont_until_commit() {
     let m = mgr();
     let mut w = m.begin_write();
-    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
+    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+        .unwrap();
 
     // Read-your-own-writes inside the txn.
     assert!(ask(w.graph(), "ASK { :x :p :y }"));
     // But the uncommitted write is invisible to a concurrent read txn.
-    assert!(!ask(&m.begin_read(), "ASK { :x :p :y }"), "uncommitted write must be invisible");
+    assert!(
+        !ask(&m.begin_read(), "ASK { :x :p :y }"),
+        "uncommitted write must be invisible"
+    );
 
     let v = w.commit().unwrap();
     assert!(v >= 1);
@@ -67,13 +76,21 @@ fn write_txn_reads_its_own_writes_but_others_dont_until_commit() {
 fn rollback_discards_the_whole_body() {
     let m = mgr();
     let mut w = m.begin_write();
-    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
-    w.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }").unwrap();
+    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+        .unwrap();
+    w.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }")
+        .unwrap();
     w.rollback(); // drop without commit
 
     let r = m.begin_read();
-    assert!(!ask(&r, "ASK { :x :p :y }"), "rolled-back insert must not persist");
-    assert!(ask(&r, "ASK { :a :p :b }"), "rolled-back delete must not persist");
+    assert!(
+        !ask(&r, "ASK { :x :p :y }"),
+        "rolled-back insert must not persist"
+    );
+    assert!(
+        ask(&r, "ASK { :a :p :b }"),
+        "rolled-back delete must not persist"
+    );
     assert_eq!(count_all(&r), 2);
 }
 
@@ -85,19 +102,27 @@ fn first_committer_wins_on_conflicting_write_set() {
     let mut w2 = m.begin_write();
 
     // They write OVERLAPPING triples (both touch :a :p :b).
-    w1.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }").unwrap();
-    w2.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b } ; INSERT DATA { :a :p :z }").unwrap();
+    w1.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }")
+        .unwrap();
+    w2.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b } ; INSERT DATA { :a :p :z }")
+        .unwrap();
 
     // First committer wins.
     w1.commit().unwrap();
     // Second committer is stale AND conflicting -> rejected.
     let err = w2.commit().unwrap_err();
-    assert!(matches!(err, CommitError::Conflict { .. }), "expected a write-write conflict, got {err:?}");
+    assert!(
+        matches!(err, CommitError::Conflict { .. }),
+        "expected a write-write conflict, got {err:?}"
+    );
 
     // The store reflects ONLY w1's effect.
     let r = m.begin_read();
     assert!(!ask(&r, "ASK { :a :p :b }"));
-    assert!(!ask(&r, "ASK { :a :p :z }"), "w2 must have been fully rolled back");
+    assert!(
+        !ask(&r, "ASK { :a :p :z }"),
+        "w2 must have been fully rolled back"
+    );
 }
 
 #[test]
@@ -107,12 +132,15 @@ fn stale_but_disjoint_writer_still_commits() {
     let mut w2 = m.begin_write();
 
     // DISJOINT write sets (different triples).
-    w1.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
-    w2.update("PREFIX : <http://ex/> INSERT DATA { :u :p :v }").unwrap();
+    w1.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+        .unwrap();
+    w2.update("PREFIX : <http://ex/> INSERT DATA { :u :p :v }")
+        .unwrap();
 
     w1.commit().unwrap();
     // w2 is stale but does not conflict -> first-committer-wins lets it through.
-    w2.commit().expect("a disjoint stale writer must still commit under SI");
+    w2.commit()
+        .expect("a disjoint stale writer must still commit under SI");
 
     let r = m.begin_read();
     assert!(ask(&r, "ASK { :x :p :y }"));
@@ -125,7 +153,8 @@ fn committed_version_advances_monotonically() {
     let m = mgr();
     let v0 = m.committed_version();
     let mut w = m.begin_write();
-    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
+    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+        .unwrap();
     let v1 = w.commit().unwrap();
     assert!(v1 > v0, "commit must advance the version");
     assert_eq!(m.committed_version(), v1);
@@ -138,7 +167,8 @@ fn empty_write_txn_commit_is_a_noop_and_never_conflicts() {
     // Two empty writers: neither has a write set, so neither can conflict.
     let w1 = m.begin_write();
     let mut w2 = m.begin_write();
-    w2.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
+    w2.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+        .unwrap();
     w2.commit().unwrap();
     // The empty writer commits fine even though it is now stale.
     w1.commit().expect("an empty txn never conflicts");
@@ -158,7 +188,8 @@ fn delete_insert_where_write_set_participates_in_conflict_detection() {
     )
     .unwrap();
     // w2 also deletes the same triple.
-    w2.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }").unwrap();
+    w2.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }")
+        .unwrap();
 
     w1.commit().unwrap();
     let err = w2.commit().unwrap_err();
@@ -172,7 +203,8 @@ fn delete_insert_where_write_set_participates_in_conflict_detection() {
 fn into_inner_returns_the_committed_graph() {
     let m = mgr();
     let mut w = m.begin_write();
-    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
+    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+        .unwrap();
     w.commit().unwrap();
     let g = m.into_inner();
     assert!(ask(&g, "ASK { :x :p :y }"));
@@ -185,18 +217,26 @@ fn named_graph_writes_conflict_only_within_the_same_graph() {
     let mut w2 = m.begin_write();
 
     // Same triple shape, but in DIFFERENT named graphs -> disjoint slots, no conflict.
-    w1.update("PREFIX : <http://ex/> INSERT DATA { GRAPH :g1 { :s :p :o } }").unwrap();
-    w2.update("PREFIX : <http://ex/> INSERT DATA { GRAPH :g2 { :s :p :o } }").unwrap();
+    w1.update("PREFIX : <http://ex/> INSERT DATA { GRAPH :g1 { :s :p :o } }")
+        .unwrap();
+    w2.update("PREFIX : <http://ex/> INSERT DATA { GRAPH :g2 { :s :p :o } }")
+        .unwrap();
     w1.commit().unwrap();
-    w2.commit().expect("writes to different named graphs do not conflict");
+    w2.commit()
+        .expect("writes to different named graphs do not conflict");
 
     // But same triple in the SAME named graph DOES conflict.
     let mut w3 = m.begin_write();
     let mut w4 = m.begin_write();
-    w3.update("PREFIX : <http://ex/> DELETE DATA { GRAPH :g1 { :s :p :o } }").unwrap();
-    w4.update("PREFIX : <http://ex/> DELETE DATA { GRAPH :g1 { :s :p :o } }").unwrap();
+    w3.update("PREFIX : <http://ex/> DELETE DATA { GRAPH :g1 { :s :p :o } }")
+        .unwrap();
+    w4.update("PREFIX : <http://ex/> DELETE DATA { GRAPH :g1 { :s :p :o } }")
+        .unwrap();
     w3.commit().unwrap();
-    assert!(matches!(w4.commit().unwrap_err(), CommitError::Conflict { .. }));
+    assert!(matches!(
+        w4.commit().unwrap_err(),
+        CommitError::Conflict { .. }
+    ));
 }
 
 #[test]
@@ -206,14 +246,19 @@ fn stale_disjoint_commit_preserves_both_writers_data() {
     let m = mgr();
     let mut w1 = m.begin_write();
     let mut w2 = m.begin_write();
-    w1.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b } ; INSERT DATA { :w1 :p :one }").unwrap();
-    w2.update("PREFIX : <http://ex/> INSERT DATA { :w2 :p :two }").unwrap();
+    w1.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b } ; INSERT DATA { :w1 :p :one }")
+        .unwrap();
+    w2.update("PREFIX : <http://ex/> INSERT DATA { :w2 :p :two }")
+        .unwrap();
     w1.commit().unwrap();
     w2.commit().unwrap();
 
     let r = m.begin_read();
     // w1's delete + insert survived w2's later commit; w2's insert is also present.
-    assert!(!ask(&r, "ASK { :a :p :b }"), "w1's delete must survive w2's stale commit");
+    assert!(
+        !ask(&r, "ASK { :a :p :b }"),
+        "w1's delete must survive w2's stale commit"
+    );
     assert!(ask(&r, "ASK { :w1 :p :one }"));
     assert!(ask(&r, "ASK { :w2 :p :two }"));
 }
@@ -231,11 +276,16 @@ fn concurrent_writers_are_serialized_one_wins_on_conflict() {
         let m = Arc::clone(&m);
         handles.push(thread::spawn(move || {
             let mut w = m.begin_write();
-            w.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }").unwrap();
+            w.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }")
+                .unwrap();
             w.commit().is_ok()
         }));
     }
-    let oks = handles.into_iter().map(|h| h.join().unwrap()).filter(|&ok| ok).count();
+    let oks = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .filter(|&ok| ok)
+        .count();
     assert!(oks >= 1, "at least one writer must commit");
     // The store is consistent: the triple is gone exactly once, no panic / no torn state.
     assert!(!ask(&m.begin_read(), "ASK { :a :p :b }"));
@@ -247,7 +297,8 @@ fn parse_error_in_update_is_reported_and_txn_stays_usable() {
     let mut w = m.begin_write();
     assert!(w.update("NOT VALID SPARQL").is_err());
     // The txn is still usable after a rejected statement (its working copy is unchanged).
-    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }").unwrap();
+    w.update("PREFIX : <http://ex/> INSERT DATA { :x :p :y }")
+        .unwrap();
     w.commit().unwrap();
     assert!(ask(&m.begin_read(), "ASK { :x :p :y }"));
 }

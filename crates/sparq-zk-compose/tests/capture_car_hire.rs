@@ -74,17 +74,30 @@ fn native_filter_proof_captures_into_manifest() {
     // 5 < 10 is true — the same minimal, known-satisfiable member the e2e suite proves.
     let operand_enc = encode_int_literal(5);
     let (filter, digits) = build_filter_int(operand_enc, 5, FilterOp::Lt, 10, true).unwrap();
-    let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits, None, None).unwrap();
+    let (id, toml) = prover_toml_for(
+        &filter,
+        &FieldHex("0x2a".into()),
+        &[],
+        &[],
+        &digits,
+        None,
+        None,
+    )
+    .unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
 
     let prover = CircuitProver::from_crate_root();
     let out = scratch("filter_d1");
-    let art = prover.prove_in(&id, &toml, &out, "capture_d1").expect("prove succeeds");
+    let art = prover
+        .prove_in(&id, &toml, &out, "capture_d1")
+        .expect("prove succeeds");
 
     let sp = CapturedSubProof::from_artifacts(id.package(), "5 < 10 over a hidden integer", &art)
         .expect("packages the native artifacts");
-    assert!(!sp.proof.is_empty(), "the captured proof carries the real transcript bytes");
+    assert!(
+        !sp.proof.is_empty(),
+        "the captured proof carries the real transcript bytes"
+    );
     assert!(
         !sp.public_inputs.is_empty()
             && sp

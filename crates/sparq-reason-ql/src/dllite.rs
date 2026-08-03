@@ -967,7 +967,11 @@ mod tests {
         let iri = |s: &str| NamedNode::new(s).unwrap();
         let c = BlankNode::new("c0").unwrap();
         let triples = vec![
-            Triple::new(iri("http://ex/A"), iri(&format!("{RDFS}subClassOf")), c.clone()),
+            Triple::new(
+                iri("http://ex/A"),
+                iri(&format!("{RDFS}subClassOf")),
+                c.clone(),
+            ),
             Triple::new(c, iri(&format!("{OWL}complementOf")), iri("http://ex/B")),
         ];
         let tbox = TBox::extract(&triples);
@@ -983,7 +987,10 @@ mod tests {
         assert_eq!(tbox.consistency_relevant, 1);
         assert_eq!(tbox.consistency_uncaptured, 0);
         assert_eq!(tbox.skipped, 0);
-        assert!(tbox.concept_incl.is_empty(), "¬B is not a positive superclass");
+        assert!(
+            tbox.concept_incl.is_empty(),
+            "¬B is not a positive superclass"
+        );
         assert!(tbox.fully_captured());
     }
 
@@ -1015,7 +1022,11 @@ mod tests {
             Triple::new(lhs, iri(&format!("{RDFS}subClassOf")), c0.clone()),
             Triple::new(c0, iri(&format!("{OWL}complementOf")), iri("http://ex/B")),
             // A ⊑ ¬∃s
-            Triple::new(iri("http://ex/A"), iri(&format!("{RDFS}subClassOf")), c1.clone()),
+            Triple::new(
+                iri("http://ex/A"),
+                iri(&format!("{RDFS}subClassOf")),
+                c1.clone(),
+            ),
             Triple::new(c1, iri(&format!("{OWL}complementOf")), rhs),
         ]);
         let tbox = TBox::extract(&triples);
@@ -1063,7 +1074,10 @@ mod tests {
             tbox.neg_incl.len() + tbox.consistency_uncaptured,
             "tally invariant (sq-p6yb7)"
         );
-        assert_eq!(tbox.skipped, 0, "a QL-legal negative axiom is never `skipped`");
+        assert_eq!(
+            tbox.skipped, 0,
+            "a QL-legal negative axiom is never `skipped`"
+        );
     }
 
     // An ORPHAN complement node (defined but never used as a subClassOf RHS) asserts no axiom
@@ -1098,10 +1112,22 @@ mod tests {
             Triple::new(c, iri(&format!("{OWL}complementOf")), iri("http://ex/C")),
         ];
         let tbox = TBox::extract(&ambiguous);
-        assert!(tbox.neg_incl.is_empty(), "ambiguous complement node: capture nothing");
-        assert_eq!(tbox.consistency_uncaptured, 2, "one per owl:complementOf triple");
-        assert_eq!(tbox.skipped, 1, "the subClassOf RHS resolves to neither shape");
-        assert!(!tbox.fully_captured(), "fail-closed on a malformed complement node");
+        assert!(
+            tbox.neg_incl.is_empty(),
+            "ambiguous complement node: capture nothing"
+        );
+        assert_eq!(
+            tbox.consistency_uncaptured, 2,
+            "one per owl:complementOf triple"
+        );
+        assert_eq!(
+            tbox.skipped, 1,
+            "the subClassOf RHS resolves to neither shape"
+        );
+        assert!(
+            !tbox.fully_captured(),
+            "fail-closed on a malformed complement node"
+        );
     }
 
     // [FABLE-5] sq-p6yb7 — a disjointness against an UNQUALIFIED ∃R restriction node resolves

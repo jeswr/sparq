@@ -115,11 +115,9 @@ mod tests {
     #[test]
     fn analyze_json_rejects_graph_valued_forms() {
         let g = Graph::load_str(DATA, "turtle").unwrap();
-        let err = sparq_engine::explain_plan_analyze(
-            &g,
-            "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
-        )
-        .unwrap_err();
+        let err =
+            sparq_engine::explain_plan_analyze(&g, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+                .unwrap_err();
         assert!(err.contains("EXPLAIN ANALYZE supports"), "got: {err}");
     }
 }

@@ -72,7 +72,11 @@ fn trusted_k(sk: &SecretKey) -> KeySet {
     KeySet::from_hex_keys([public_key_to_hex(&sk.public_key())])
 }
 fn fixture_snapshot() -> StatusListSnapshot {
-    StatusListSnapshot { status_list: STATUS_LIST.to_string(), version: STATUS_VERSION, bits: vec![0u8] }
+    StatusListSnapshot {
+        status_list: STATUS_LIST.to_string(),
+        version: STATUS_VERSION,
+        bits: vec![0u8],
+    }
 }
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
@@ -96,7 +100,9 @@ fn attest_full(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestatio
         commitment: FieldHex::from_field(&commitment),
         issuer_public_key: public_key_to_hex(&sk.public_key()),
         signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
-        cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        cryptosuite: SignatureScheme::Poseidon2SchnorrV1
+            .cryptosuite_iri()
+            .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
             ref_commitment: None,
@@ -155,10 +161,18 @@ fn scan_artifact(c: &GraphCommitment, pattern: Pattern) -> BuiltScan {
     build_scan(std::slice::from_ref(c), &pattern).expect("scan builds")
 }
 fn pattern_a() -> Pattern {
-    Pattern { s: Slot::Var, p: Slot::Const(Term::NamedNode(iri("http://ex/knows"))), o: Slot::Var }
+    Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/knows"))),
+        o: Slot::Var,
+    }
 }
 fn pattern_b() -> Pattern {
-    Pattern { s: Slot::Var, p: Slot::Const(Term::NamedNode(iri("http://ex/age"))), o: Slot::Var }
+    Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    }
 }
 fn scan_a_inputs(c: &GraphCommitment) -> ProofInputs {
     scan_artifact(c, pattern_a()).inputs
@@ -182,8 +196,10 @@ fn commitment_hex(inputs: &ProofInputs) -> FieldHex {
 /// IMAGE of the join value (and not a bare encoding of it); a constant here would
 /// make that assertion vacuous. Toolchain-free (no nargo/bb) — just the host hash.
 fn join_eq_inputs(commit_a: FieldHex, commit_b: FieldHex, slot_a: u32, slot_b: u32) -> ProofInputs {
-    let join_commitment =
-        FieldHex::from_field(&sparq_zk::sig::join_value_commitment(&join_value_enc(), &blinding()));
+    let join_commitment = FieldHex::from_field(&sparq_zk::sig::join_value_commitment(
+        &join_value_enc(),
+        &blinding(),
+    ));
     ProofInputs::JoinEq {
         id: CircuitId::JoinEq { n_a: 16, n_b: 16 },
         commit_a,
@@ -196,8 +212,14 @@ fn join_eq_inputs(commit_a: FieldHex, commit_b: FieldHex, slot_a: u32, slot_b: u
 
 /// The honest cross-scan join manifest (mirrors `join_gates::join_manifest`).
 fn join_manifest() -> ProofManifest {
-    let (ca, sa) = { let c = graph_a(); (c.commitment, c.salt) };
-    let (cb, sb) = { let c = graph_b(); (c.commitment, c.salt) };
+    let (ca, sa) = {
+        let c = graph_a();
+        (c.commitment, c.salt)
+    };
+    let (cb, sb) = {
+        let c = graph_b();
+        (c.commitment, c.salt)
+    };
     let scan_a = scan_a_inputs(&graph_a());
     let scan_b = scan_b_inputs(&graph_b());
     let commit_a = commitment_hex(&scan_a);
@@ -222,20 +244,37 @@ fn join_manifest() -> ProofManifest {
         join_obligations: vec![("p".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot()],
         sub_proofs: vec![
-            SubProof { inputs: scan_a, proof_hex: String::new() },
-            SubProof { inputs: scan_b, proof_hex: String::new() },
-            SubProof { inputs: join, proof_hex: String::new() },
+            SubProof {
+                inputs: scan_a,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: scan_b,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: join,
+                proof_hex: String::new(),
+            },
         ],
         binding_edges: vec![],
-        join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
+        join_edges: vec![JoinEdge {
+            scan_a: 0,
+            graph_a: 0,
+            scan_b: 1,
+            graph_b: 0,
+            join_proof: 2,
+        }],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     }
 }
 
@@ -269,7 +308,9 @@ fn structural_forge_spurious_edge_unrelated_columns_rejected() {
     }
     match prefilter(&m) {
         Err(CheckError::JoinSlotMismatch { edge: 0 }) => {}
-        other => panic!("a spurious join over unrelated columns must be JoinSlotMismatch, got {other:?}"),
+        other => {
+            panic!("a spurious join over unrelated columns must be JoinSlotMismatch, got {other:?}")
+        }
     }
 }
 
@@ -289,7 +330,9 @@ fn structural_forge_join_on_distinct_variables_rejected() {
     }
     match prefilter(&m) {
         Err(CheckError::JoinSlotMismatch { edge: 0 }) => {}
-        other => panic!("a join across two DISTINCT variables must be JoinSlotMismatch, got {other:?}"),
+        other => {
+            panic!("a join across two DISTINCT variables must be JoinSlotMismatch, got {other:?}")
+        }
     }
 }
 
@@ -310,8 +353,12 @@ fn structural_forge_join_on_distinct_variables_rejected() {
 #[test]
 fn structural_privacy_join_value_absent_from_public_inputs() {
     let m = join_manifest();
-    let ProofInputs::JoinEq { commit_a, commit_b, join_commitment, .. } =
-        &m.sub_proofs[2].inputs
+    let ProofInputs::JoinEq {
+        commit_a,
+        commit_b,
+        join_commitment,
+        ..
+    } = &m.sub_proofs[2].inputs
     else {
         unreachable!("join_eq inputs");
     };
@@ -369,7 +416,8 @@ fn toolchain_available() -> bool {
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("sparq_zk_join_forge_{name}_{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("sparq_zk_join_forge_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -396,8 +444,16 @@ fn honest_built_join() -> BuiltJoin {
 /// Render the honest join's `Prover.toml` via the HOST emitter (`prover_toml_for`'s
 /// JoinEq arm + `build_join`'s witness) — NOT a private renderer.
 fn honest_join_toml(built: &BuiltJoin) -> (CircuitId, String) {
-    prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness), None)
-        .expect("join toml emits with the host witness")
+    prover_toml_for(
+        &built.inputs,
+        &challenge(),
+        &[],
+        &[],
+        &[],
+        Some(&built.witness),
+        None,
+    )
+    .expect("join toml emits with the host witness")
 }
 
 /// FORGE — TAMPERED PROOF: flip a byte in a valid `join_eq` proof => bb REJECTS.
@@ -413,8 +469,12 @@ fn bb_forge_tampered_join_proof_rejected() {
     assert_eq!(id, JOIN_ID);
     let prover = CircuitProver::from_crate_root();
     let out = scratch("join_tamper");
-    let art = prover.prove_in(&id, &toml, &out, "join_tamper").expect("prove succeeds");
-    let vk = prover.canonical_vk(&id, &out.join("cvk")).expect("canonical vk");
+    let art = prover
+        .prove_in(&id, &toml, &out, "join_tamper")
+        .expect("prove succeeds");
+    let vk = prover
+        .canonical_vk(&id, &out.join("cvk"))
+        .expect("canonical vk");
     let mut bad = art.proof.clone();
     let mid = bad.len() / 2;
     bad[mid] ^= 0xff;
@@ -463,12 +523,22 @@ fn bb_forge_unequal_values_witness_unsatisfiable() {
     let honest = honest_built_join();
     let built_b = build_join(&gb_prime, SLOT_B, &gb_prime, SLOT_B, blinding())
         .expect("self-join of gb' builds (locates its own row)");
-    let ProofInputs::JoinEq { commit_a, join_commitment, slot_a, slot_b, id, .. } =
-        honest.inputs.clone()
+    let ProofInputs::JoinEq {
+        commit_a,
+        join_commitment,
+        slot_a,
+        slot_b,
+        id,
+        ..
+    } = honest.inputs.clone()
     else {
         unreachable!("join_eq inputs");
     };
-    let ProofInputs::JoinEq { commit_a: commit_b_prime, .. } = built_b.inputs.clone() else {
+    let ProofInputs::JoinEq {
+        commit_a: commit_b_prime,
+        ..
+    } = built_b.inputs.clone()
+    else {
         unreachable!("join_eq inputs");
     };
     let forged_inputs = ProofInputs::JoinEq {
@@ -518,9 +588,17 @@ fn bb_forge_join_commitment_not_binding_value_unsatisfiable() {
     // Replace the public join_commitment with a hiding commitment to a DIFFERENT
     // value (<ex/OTHER>) under the same blinder. The witness still proves the join
     // over <ex/p>, so the in-circuit recompute no longer matches the public field.
-    let wrong_value = encode_term(&Term::NamedNode(iri("http://ex/OTHER")), &Fr::from(0u64)).unwrap();
+    let wrong_value =
+        encode_term(&Term::NamedNode(iri("http://ex/OTHER")), &Fr::from(0u64)).unwrap();
     let forged_jc = sparq_zk::sig::join_value_commitment(&wrong_value, &blinding());
-    let ProofInputs::JoinEq { id, commit_a, commit_b, slot_a, slot_b, .. } = honest.inputs.clone()
+    let ProofInputs::JoinEq {
+        id,
+        commit_a,
+        commit_b,
+        slot_a,
+        slot_b,
+        ..
+    } = honest.inputs.clone()
     else {
         unreachable!("join_eq inputs");
     };
@@ -566,7 +644,9 @@ fn bb_forge_wrong_vk_rejected() {
     let (id, toml) = honest_join_toml(&built);
     let prover = CircuitProver::from_crate_root();
     let out = scratch("join_wrongvk");
-    let art = prover.prove_in(&id, &toml, &out, "join_wrongvk").expect("prove succeeds");
+    let art = prover
+        .prove_in(&id, &toml, &out, "join_wrongvk")
+        .expect("prove succeeds");
     // An ATTACKER vk = the vk of a DIFFERENT circuit member (a scan). Verifying the
     // join proof against it must fail.
     let scan_id = derive_smallest_scan_id();
@@ -574,9 +654,17 @@ fn bb_forge_wrong_vk_rejected() {
         .canonical_vk(&scan_id, &out.join("wrong_vk"))
         .expect("a different member's vk");
     let rejected = prover
-        .verify_with(&art.proof, &art.public_inputs, &wrong_vk, &out.join("verify_wrongvk"))
+        .verify_with(
+            &art.proof,
+            &art.public_inputs,
+            &wrong_vk,
+            &out.join("verify_wrongvk"),
+        )
         .expect("verify runs");
-    assert!(!rejected, "a join proof verified against a non-canonical (attacker) vk must be rejected");
+    assert!(
+        !rejected,
+        "a join proof verified against a non-canonical (attacker) vk must be rejected"
+    );
 }
 
 /// The smallest compiled scan member id (for the wrong-vk attacker case).
@@ -601,7 +689,9 @@ fn bb_join_value_absent_from_public_inputs() {
     let (id, toml) = honest_join_toml(&built);
     let prover = CircuitProver::from_crate_root();
     let out = scratch("join_privacy");
-    let art = prover.prove_in(&id, &toml, &out, "join_privacy").expect("prove succeeds");
+    let art = prover
+        .prove_in(&id, &toml, &out, "join_privacy")
+        .expect("prove succeeds");
     // The 32-byte big-endian word of the join value must not appear in the public
     // inputs blob. (bb serialises each public field as a 32-byte BE word.) We scan
     // on ALIGNED 32-byte word boundaries — not a sliding `windows(32)` — so a match

@@ -20,7 +20,10 @@ use sparq_vectors::{
 
 fn tmp(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("sparq_vec_costtest_{}_{name}.spqv", std::process::id()));
+    p.push(format!(
+        "sparq_vec_costtest_{}_{name}.spqv",
+        std::process::id()
+    ));
     p
 }
 
@@ -85,7 +88,8 @@ fn pre_and_post_filter_return_identical_results() {
             let pre = nearest_exact_filtered(&store, &query, &mask, k);
             let post = postfilter_exact(&store, &query, &mask, k);
             assert_eq!(
-                pre, post,
+                pre,
+                post,
                 "pre/post-filter must be identical (mask_len={}, k={k})",
                 mask.len()
             );

@@ -363,7 +363,10 @@ async fn pitr_base_plus_http_delta_recovers_the_moved_on_store() {
 
     // RESTORE base + replay delta into a fresh server (via the AppState PITR primitive the
     // binary's --restore + --restore-delta uses).
-    let state = AppState::with_config(Graph::load_str("", "turtle").unwrap(), ServerConfig::default());
+    let state = AppState::with_config(
+        Graph::load_str("", "turtle").unwrap(),
+        ServerConfig::default(),
+    );
     let recovered_gen = state
         .restore_from_with_deltas(&base_artifact, &[delta_artifact])
         .expect("base + delta restore");
@@ -382,7 +385,12 @@ async fn pitr_base_plus_http_delta_recovers_the_moved_on_store() {
         "PITR-recovered quad count equals the moved-on source"
     );
     assert_eq!(
-        count_rows(&cl, &dst, "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }").await,
+        count_rows(
+            &cl,
+            &dst,
+            "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }"
+        )
+        .await,
         1,
         "the named-graph insert was replayed"
     );
@@ -422,9 +430,15 @@ async fn pitr_rejects_corrupt_delta_in_chain() {
     let last = delta_artifact.len() - 1;
     delta_artifact[last] ^= 0xff;
 
-    let state = AppState::with_config(Graph::load_str("", "turtle").unwrap(), ServerConfig::default());
+    let state = AppState::with_config(
+        Graph::load_str("", "turtle").unwrap(),
+        ServerConfig::default(),
+    );
     let res = state.restore_from_with_deltas(&base_artifact, &[delta_artifact]);
-    assert!(res.is_err(), "a corrupt delta must fail the whole restore closed");
+    assert!(
+        res.is_err(),
+        "a corrupt delta must fail the whole restore closed"
+    );
 }
 
 /// [OPUS-4.8] (sq-bu1a) The delta route is WRITE-gated, POST-only, and 400s a missing/invalid
@@ -524,12 +538,20 @@ impl Drop for ScratchDir {
 }
 
 fn persist_config(dir: &std::path::Path) -> ServerConfig {
-    ServerConfig { persist_dir: Some(dir.to_path_buf()), ..ServerConfig::default() }
+    ServerConfig {
+        persist_dir: Some(dir.to_path_buf()),
+        ..ServerConfig::default()
+    }
 }
 
 /// POSTs a restore artifact to `/admin/restore`, optionally with `?persist=true`, returning the
 /// status. `persist == true` is the write-through opt-in (sq-ft7u).
-async fn post_restore(cl: &reqwest::Client, base: &str, artifact: Vec<u8>, persist: bool) -> reqwest::StatusCode {
+async fn post_restore(
+    cl: &reqwest::Client,
+    base: &str,
+    artifact: Vec<u8>,
+    persist: bool,
+) -> reqwest::StatusCode {
     let url = if persist {
         format!("{base}/admin/restore?persist=true")
     } else {
@@ -546,7 +568,11 @@ async fn post_restore(cl: &reqwest::Client, base: &str, artifact: Vec<u8>, persi
 async fn restore_refuses_on_persist_server_without_opt_in_accepts_with_it() {
     let scratch = ScratchDir::new();
     let cl = reqwest::Client::new();
-    let base = spawn_with(Graph::load_str("", "turtle").unwrap(), persist_config(scratch.path())).await;
+    let base = spawn_with(
+        Graph::load_str("", "turtle").unwrap(),
+        persist_config(scratch.path()),
+    )
+    .await;
 
     // WITHOUT the persist opt-in → 409 (an in-memory-only restore would be lost on restart).
     let resp = cl
@@ -577,7 +603,12 @@ async fn make_artifact(cl: &reqwest::Client) -> Vec<u8> {
         ServerConfig::default(),
     )
     .await;
-    post_update(cl, &src, "INSERT DATA { <http://ex/c> <http://ex/p> <http://ex/d> }").await;
+    post_update(
+        cl,
+        &src,
+        "INSERT DATA { <http://ex/c> <http://ex/p> <http://ex/d> }",
+    )
+    .await;
     post_update(
         cl,
         &src,
@@ -624,7 +655,11 @@ impl Server {
                 .await
                 .unwrap();
         });
-        Server { base: format!("http://{addr}"), shutdown: Some(tx), task: Some(task) }
+        Server {
+            base: format!("http://{addr}"),
+            shutdown: Some(tx),
+            task: Some(task),
+        }
     }
 
     async fn stop(mut self) {
@@ -652,10 +687,19 @@ async fn restore_persist_survives_restart() {
     // A fresh --persist server, initially with its OWN distinct data (proves the restore REPLACES).
     let s1 = Server::start(persist_config(scratch.path())).await;
     assert_eq!(
-        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/preexisting> <http://ex/p> <http://ex/o> }").await,
+        post_update(
+            &cl,
+            &s1.base,
+            "INSERT DATA { <http://ex/preexisting> <http://ex/p> <http://ex/o> }"
+        )
+        .await,
         reqwest::StatusCode::NO_CONTENT
     );
-    assert_eq!(count_all(&cl, &s1.base).await, 1, "the durable server starts with its own one triple");
+    assert_eq!(
+        count_all(&cl, &s1.base).await,
+        1,
+        "the durable server starts with its own one triple"
+    );
 
     // Restore WITH write-through → 200, and the restored content replaces the pre-existing data.
     assert_eq!(
@@ -664,24 +708,47 @@ async fn restore_persist_survives_restart() {
         "write-through restore must be accepted on a --persist server"
     );
     // make_artifact's source = 1 seed + 1 default insert + 1 named insert = 3 quads.
-    assert_eq!(count_all(&cl, &s1.base).await, 3, "the restored quad set is live after restore");
     assert_eq!(
-        count_rows(&cl, &s1.base, "SELECT * WHERE { <http://ex/preexisting> ?p ?o }").await,
+        count_all(&cl, &s1.base).await,
+        3,
+        "the restored quad set is live after restore"
+    );
+    assert_eq!(
+        count_rows(
+            &cl,
+            &s1.base,
+            "SELECT * WHERE { <http://ex/preexisting> ?p ?o }"
+        )
+        .await,
         0,
         "the restore REPLACED the pre-existing durable content"
     );
     assert_eq!(
-        count_rows(&cl, &s1.base, "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }").await,
+        count_rows(
+            &cl,
+            &s1.base,
+            "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }"
+        )
+        .await,
         1,
         "the named graph from the artifact is live after the restore"
     );
 
     // The restored durable server is still WRITABLE (the writer survived; new WAL on the new base).
     assert_eq!(
-        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/postrestore> <http://ex/p> <http://ex/o> }").await,
+        post_update(
+            &cl,
+            &s1.base,
+            "INSERT DATA { <http://ex/postrestore> <http://ex/p> <http://ex/o> }"
+        )
+        .await,
         reqwest::StatusCode::NO_CONTENT
     );
-    assert_eq!(count_all(&cl, &s1.base).await, 4, "a post-restore update is visible");
+    assert_eq!(
+        count_all(&cl, &s1.base).await,
+        4,
+        "a post-restore update is visible"
+    );
 
     // RESTART: drop the server (writer joins, WAL handle released), reopen the SAME dir.
     s1.stop().await;
@@ -694,12 +761,22 @@ async fn restore_persist_survives_restart() {
         "the restored dataset + the post-restore update must survive the restart (written through)"
     );
     assert_eq!(
-        count_rows(&cl, &s2.base, "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }").await,
+        count_rows(
+            &cl,
+            &s2.base,
+            "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }"
+        )
+        .await,
         1,
         "the restored named graph survives the restart"
     );
     assert_eq!(
-        count_rows(&cl, &s2.base, "SELECT * WHERE { <http://ex/preexisting> ?p ?o }").await,
+        count_rows(
+            &cl,
+            &s2.base,
+            "SELECT * WHERE { <http://ex/preexisting> ?p ?o }"
+        )
+        .await,
         0,
         "the replaced pre-existing content must NOT resurrect after a restart"
     );
@@ -716,7 +793,12 @@ async fn restore_persist_corrupt_artifact_leaves_durable_store_untouched() {
 
     let s1 = Server::start(persist_config(scratch.path())).await;
     assert_eq!(
-        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/keep> <http://ex/p> \"ORIGINAL\" }").await,
+        post_update(
+            &cl,
+            &s1.base,
+            "INSERT DATA { <http://ex/keep> <http://ex/p> \"ORIGINAL\" }"
+        )
+        .await,
         reqwest::StatusCode::NO_CONTENT
     );
     assert_eq!(count_all(&cl, &s1.base).await, 1);
@@ -731,18 +813,32 @@ async fn restore_persist_corrupt_artifact_leaves_durable_store_untouched() {
         "a corrupt write-through restore must fail closed (400)"
     );
     // The live durable store is unchanged (the import failed before any swap began).
-    assert_eq!(count_all(&cl, &s1.base).await, 1, "live durable store intact after a corrupt restore");
+    assert_eq!(
+        count_all(&cl, &s1.base).await,
+        1,
+        "live durable store intact after a corrupt restore"
+    );
 
     // No swap-sibling leftovers next to the persist dir (a stray .compact-new/-old could mis-heal).
     let new_sib = scratch.path().with_extension("compact-new");
     let old_sib = scratch.path().with_extension("compact-old");
-    assert!(!new_sib.exists(), "no .compact-new leftover after a failed restore");
-    assert!(!old_sib.exists(), "no .compact-old leftover after a failed restore");
+    assert!(
+        !new_sib.exists(),
+        "no .compact-new leftover after a failed restore"
+    );
+    assert!(
+        !old_sib.exists(),
+        "no .compact-old leftover after a failed restore"
+    );
 
     // And the original survives a restart (the corrupt restore truly touched nothing on disk).
     s1.stop().await;
     let s2 = Server::start(persist_config(scratch.path())).await;
-    assert_eq!(count_all(&cl, &s2.base).await, 1, "original durable data survives a restart");
+    assert_eq!(
+        count_all(&cl, &s2.base).await,
+        1,
+        "original durable data survives a restart"
+    );
     assert_eq!(
         count_rows(&cl, &s2.base, "SELECT * WHERE { <http://ex/keep> ?p ?o }").await,
         1,
@@ -757,7 +853,10 @@ async fn restore_persist_corrupt_artifact_leaves_durable_store_untouched() {
 async fn restore_persist_route_is_write_gated() {
     let scratch = ScratchDir::new();
     let cl = reqwest::Client::new();
-    let config = ServerConfig { auth_token: Some("s3cret".into()), ..persist_config(scratch.path()) };
+    let config = ServerConfig {
+        auth_token: Some("s3cret".into()),
+        ..persist_config(scratch.path())
+    };
     let s = Server::start(config).await;
 
     let resp = cl
@@ -779,7 +878,11 @@ async fn restore_persist_route_is_write_gated() {
 #[tokio::test]
 async fn restore_persist_on_in_memory_server_is_409() {
     let cl = reqwest::Client::new();
-    let base = spawn_with(Graph::load_str("", "turtle").unwrap(), ServerConfig::default()).await;
+    let base = spawn_with(
+        Graph::load_str("", "turtle").unwrap(),
+        ServerConfig::default(),
+    )
+    .await;
     let artifact = make_artifact(&cl).await;
     assert_eq!(
         post_restore(&cl, &base, artifact, true).await,
@@ -819,7 +922,10 @@ async fn spawn_with_state(graph: Graph, config: ServerConfig) -> (String, AppSta
 async fn try_begin_restore_permit_is_single_flight() {
     let state = AppState::new(Graph::load_str("", "turtle").unwrap());
     let first = state.try_begin_restore();
-    assert!(first.is_some(), "an idle server must grant the restore permit");
+    assert!(
+        first.is_some(),
+        "an idle server must grant the restore permit"
+    );
     assert!(
         state.clone().try_begin_restore().is_none(),
         "a second permit must be refused while the first is alive — including through a clone \
@@ -839,12 +945,17 @@ async fn try_begin_restore_permit_is_single_flight() {
 async fn concurrent_restore_is_rejected_409_then_succeeds_after_release() {
     let cl = reqwest::Client::new();
     let artifact = make_artifact(&cl).await; // 3 triples (default + named)
-    let (base, state) =
-        spawn_with_state(Graph::load_str("", "turtle").unwrap(), ServerConfig::default()).await;
+    let (base, state) = spawn_with_state(
+        Graph::load_str("", "turtle").unwrap(),
+        ServerConfig::default(),
+    )
+    .await;
     assert_eq!(count_all(&cl, &base).await, 0, "destination starts empty");
 
     // Deterministically simulate an in-flight restore: hold the route's own permit.
-    let permit = state.try_begin_restore().expect("idle server grants the permit");
+    let permit = state
+        .try_begin_restore()
+        .expect("idle server grants the permit");
     let resp = cl
         .post(format!("{base}/admin/restore"))
         .body(artifact.clone())

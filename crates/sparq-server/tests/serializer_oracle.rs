@@ -54,12 +54,17 @@ const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 /// each recovered solution back onto the declared variable list, materialising `None` for
 /// any variable the solution does not bind. This makes the round-trip directly comparable
 /// to the source `QueryResult`, unbound cells included.
-fn reparse_reference(bytes: &[u8], format: QueryResultsFormat) -> (Vec<Variable>, Vec<Vec<Option<Term>>>) {
+fn reparse_reference(
+    bytes: &[u8],
+    format: QueryResultsFormat,
+) -> (Vec<Variable>, Vec<Vec<Option<Term>>>) {
     let parser = QueryResultsParser::from_format(format);
-    match parser
-        .for_reader(bytes)
-        .unwrap_or_else(|e| panic!("reference parser REJECTED our {format:?} output: {e}\n--- output ---\n{}", String::from_utf8_lossy(bytes)))
-    {
+    match parser.for_reader(bytes).unwrap_or_else(|e| {
+        panic!(
+            "reference parser REJECTED our {format:?} output: {e}\n--- output ---\n{}",
+            String::from_utf8_lossy(bytes)
+        )
+    }) {
         ReaderQueryResultsParserOutput::Boolean(b) => {
             panic!("expected SELECT solutions from {format:?}, got boolean {b}")
         }
@@ -124,7 +129,13 @@ fn row_multiset(rows: &[Vec<Option<Term>>]) -> Vec<String> {
 /// parser recovers the SAME variable list (order included) and the SAME row multiset. When
 /// `ordered`, the row SEQUENCE must match exactly too (set equality is not enough for an
 /// ORDER BY result).
-fn assert_lossless_roundtrip(label: &str, r: &QueryResult, serialised: &str, format: QueryResultsFormat, ordered: bool) {
+fn assert_lossless_roundtrip(
+    label: &str,
+    r: &QueryResult,
+    serialised: &str,
+    format: QueryResultsFormat,
+    ordered: bool,
+) {
     let (got_vars, got_rows) = reparse_reference(serialised.as_bytes(), format);
 
     assert_eq!(
@@ -174,7 +185,10 @@ fn parse_rfc4180(input: &str) -> Vec<Vec<String>> {
         let b = bytes[i];
         if b == b'"' {
             // Quoted field — must be at the START of a field.
-            assert!(field.is_empty(), "RFC4180: quote not at field start at byte {i}");
+            assert!(
+                field.is_empty(),
+                "RFC4180: quote not at field start at byte {i}"
+            );
             i += 1;
             loop {
                 assert!(i < n, "RFC4180: unterminated quoted field");
@@ -201,7 +215,10 @@ fn parse_rfc4180(input: &str) -> Vec<Vec<String>> {
             record.push(take_field(&mut field));
             i += 1;
         } else if b == b'\r' {
-            assert!(i + 1 < n && bytes[i + 1] == b'\n', "RFC4180: bare CR (not CRLF) at byte {i}");
+            assert!(
+                i + 1 < n && bytes[i + 1] == b'\n',
+                "RFC4180: bare CR (not CRLF) at byte {i}"
+            );
             record.push(take_field(&mut field));
             records.push(std::mem::take(&mut record));
             i += 2;
@@ -209,14 +226,20 @@ fn parse_rfc4180(input: &str) -> Vec<Vec<String>> {
             panic!("RFC4180: bare LF (not CRLF) at byte {i}");
         } else {
             // Unquoted field byte: must NOT be one of the must-quote characters.
-            assert!(b != b'"', "RFC4180: bare quote in unquoted field at byte {i}");
+            assert!(
+                b != b'"',
+                "RFC4180: bare quote in unquoted field at byte {i}"
+            );
             field.push(b);
             i += 1;
         }
     }
     // A trailing unterminated record (no final CRLF) would be a serialiser bug for us,
     // since every row is CRLF-terminated; surface it.
-    assert!(field.is_empty() && record.is_empty(), "RFC4180: trailing data without CRLF terminator");
+    assert!(
+        field.is_empty() && record.is_empty(),
+        "RFC4180: trailing data without CRLF terminator"
+    );
     records
 }
 
@@ -239,13 +262,23 @@ fn csv_lexical(cell: &Option<Term>) -> String {
 /// variable names and every recovered field == the lexical projection of the source term.
 fn assert_csv_roundtrip(label: &str, r: &QueryResult, csv: &str) {
     let records = parse_rfc4180(csv);
-    assert!(!records.is_empty(), "[{label}/CSV] missing header row\n--- output ---\n{csv}");
+    assert!(
+        !records.is_empty(),
+        "[{label}/CSV] missing header row\n--- output ---\n{csv}"
+    );
 
     let header: Vec<String> = r.vars.iter().map(|v| v.as_str().to_string()).collect();
-    assert_eq!(records[0], header, "[{label}/CSV] header must be the bare variable names");
+    assert_eq!(
+        records[0], header,
+        "[{label}/CSV] header must be the bare variable names"
+    );
 
     let body = &records[1..];
-    assert_eq!(body.len(), r.rows.len(), "[{label}/CSV] row count must match\n--- output ---\n{csv}");
+    assert_eq!(
+        body.len(),
+        r.rows.len(),
+        "[{label}/CSV] row count must match\n--- output ---\n{csv}"
+    );
     for (ri, (got, src)) in body.iter().zip(&r.rows).enumerate() {
         let expected: Vec<String> = src.iter().map(csv_lexical).collect();
         assert_eq!(
@@ -305,22 +338,22 @@ fn oracle_adversarial_literals_roundtrip() {
         vars: vars(&["v"]),
         rows: vec![
             vec![Some(plain("plain"))],
-            vec![Some(plain("embedded\nnewline"))],          // CSV must quote, TSV must \n
-            vec![Some(plain("comma,separated"))],            // CSV must quote
-            vec![Some(plain("has\"double\"quote"))],         // CSV must double, TSV must \"
-            vec![Some(plain("  leading and trailing  "))],   // whitespace must survive verbatim
-            vec![Some(plain("tab\tinside"))],                // TSV must \t
-            vec![Some(plain("carriage\rreturn"))],           // CSV must quote, TSV must \r
-            vec![Some(plain("back\\slash"))],                // TSV must \\
-            vec![Some(plain("mix,\"\n\t\r\\end"))],          // all hazards at once
-            vec![Some(lang("colour", "en-GB"))],             // language tag (with subtag)
-            vec![Some(lang("Straße", "de"))],                // non-ASCII + lang
-            vec![Some(typed("42", XSD_INTEGER))],            // xsd:integer datatype
+            vec![Some(plain("embedded\nnewline"))], // CSV must quote, TSV must \n
+            vec![Some(plain("comma,separated"))],   // CSV must quote
+            vec![Some(plain("has\"double\"quote"))], // CSV must double, TSV must \"
+            vec![Some(plain("  leading and trailing  "))], // whitespace must survive verbatim
+            vec![Some(plain("tab\tinside"))],       // TSV must \t
+            vec![Some(plain("carriage\rreturn"))],  // CSV must quote, TSV must \r
+            vec![Some(plain("back\\slash"))],       // TSV must \\
+            vec![Some(plain("mix,\"\n\t\r\\end"))], // all hazards at once
+            vec![Some(lang("colour", "en-GB"))],    // language tag (with subtag)
+            vec![Some(lang("Straße", "de"))],       // non-ASCII + lang
+            vec![Some(typed("42", XSD_INTEGER))],   // xsd:integer datatype
             vec![Some(typed("2024-03-15T13:00:00Z", XSD_DATETIME))], // xsd:dateTime datatype
-            vec![Some(iri("http://ex/q?a=1&b=2&c=x"))],       // IRI with `&` — needs XML escaping
+            vec![Some(iri("http://ex/q?a=1&b=2&c=x"))], // IRI with `&` — needs XML escaping
             vec![Some(iri("http://ex/plain"))],
-            vec![Some(bnode("b0"))],                         // blank node
-            vec![None],                                      // unbound / OPTIONAL
+            vec![Some(bnode("b0"))], // blank node
+            vec![None],              // unbound / OPTIONAL
         ],
     };
     // Unordered: the writers preserve order, but the SET equality is the contract here.
@@ -334,10 +367,22 @@ fn oracle_multi_var_with_unbound_cells_roundtrip() {
     let r = QueryResult {
         vars: vars(&["s", "p", "o"]),
         rows: vec![
-            vec![Some(iri("http://ex/a")), Some(iri("http://ex/knows")), Some(iri("http://ex/b"))],
-            vec![Some(iri("http://ex/a")), None, Some(lang("hi, there\n", "en"))],
+            vec![
+                Some(iri("http://ex/a")),
+                Some(iri("http://ex/knows")),
+                Some(iri("http://ex/b")),
+            ],
+            vec![
+                Some(iri("http://ex/a")),
+                None,
+                Some(lang("hi, there\n", "en")),
+            ],
             vec![None, Some(iri("http://ex/p")), None],
-            vec![Some(bnode("x1")), Some(iri("http://ex/v")), Some(typed("-7", XSD_INTEGER))],
+            vec![
+                Some(bnode("x1")),
+                Some(iri("http://ex/v")),
+                Some(typed("-7", XSD_INTEGER)),
+            ],
             vec![None, None, None], // entirely unbound row
         ],
     };
@@ -357,7 +402,10 @@ fn oracle_rdf_star_triple_term_roundtrip() {
     let r = QueryResult {
         vars: vars(&["t", "c"]),
         rows: vec![
-            vec![Some(qt), Some(typed("0.9", "http://www.w3.org/2001/XMLSchema#decimal"))],
+            vec![
+                Some(qt),
+                Some(typed("0.9", "http://www.w3.org/2001/XMLSchema#decimal")),
+            ],
             vec![None, Some(plain("note"))],
         ],
     };
@@ -374,12 +422,18 @@ fn oracle_rdf_star_triple_term_roundtrip() {
 #[test]
 fn oracle_empty_and_no_var_results_roundtrip() {
     // Zero rows (header only).
-    let empty = QueryResult { vars: vars(&["a", "b"]), rows: vec![] };
+    let empty = QueryResult {
+        vars: vars(&["a", "b"]),
+        rows: vec![],
+    };
     check_all_formats("empty-rows", &empty, true);
 
     // SELECT with no projected variables but one solution (the unit row) — the empty-BGP
     // shape. Header is empty; one all-empty result row.
-    let unit = QueryResult { vars: vec![], rows: vec![vec![]] };
+    let unit = QueryResult {
+        vars: vec![],
+        rows: vec![vec![]],
+    };
     // XML round-trips (one <result/> element). TSV/CSV degenerate to empty lines; validate
     // XML for the structural contract and CSV for well-formedness.
     let xml = select_to_xml(&unit);
@@ -423,7 +477,9 @@ fn oracle_ask_boolean_roundtrip() {
 fn random_graph_ttl(seed0: u64, n_nodes: u32, n_edges: usize) -> String {
     let mut seed = seed0;
     let mut next = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (seed >> 33) as u32
     };
     // A pool of nasty literal lexical forms (already Turtle-escaped for the loader).
@@ -452,7 +508,10 @@ fn random_graph_ttl(seed0: u64, n_nodes: u32, n_edges: usize) -> String {
             }
             _ => {
                 // bnode object
-                ttl.push_str(&format!("ex:n{a} ex:has [ ex:tag \"t{}\" ] .\n", next() % 5));
+                ttl.push_str(&format!(
+                    "ex:n{a} ex:has [ ex:tag \"t{}\" ] .\n",
+                    next() % 5
+                ));
             }
         }
     }

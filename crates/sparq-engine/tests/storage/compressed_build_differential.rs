@@ -27,10 +27,15 @@ use sparq_engine::query;
 fn synthetic_nt(n: u32) -> String {
     let mut s = String::new();
     for i in 0..n {
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/name> \"value {i}\" .\n"));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/name> \"value {i}\" .\n"
+        ));
         s.push_str(&format!("<http://ex/s{i}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", i % 90));
         s.push_str(&format!("<http://ex/s{i}> <http://ex/when> \"2026-01-{:02}T0{}:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .\n", 1 + i % 28, i % 10));
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/follows> <http://ex/s{}> .\n", (i * 7 + 3) % n.max(1)));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/follows> <http://ex/s{}> .\n",
+            (i * 7 + 3) % n.max(1)
+        ));
     }
     s
 }
@@ -53,7 +58,12 @@ fn dump(g: &Graph) -> Vec<String> {
         .iter()
         .map(|r| {
             let spo = scan.to_spo(r);
-            format!("{} {} {}", g.dict.term(spo[0]), g.dict.term(spo[1]), g.dict.term(spo[2]))
+            format!(
+                "{} {} {}",
+                g.dict.term(spo[0]),
+                g.dict.term(spo[1]),
+                g.dict.term(spo[2])
+            )
         })
         .collect();
     v.sort();
@@ -81,7 +91,10 @@ fn one_pass_compressed_build_is_byte_identical_to_build_then_recompress() {
     Graph::build_external_opts(nt.as_bytes(), "ntriples", &raw_dir, 256, true).unwrap();
 
     // (2) The TWO-PASS reference: open the raw build and `recompress` it (save_compressed).
-    Graph::open(&raw_dir).unwrap().save_compressed(&recompressed_dir).unwrap();
+    Graph::open(&raw_dir)
+        .unwrap()
+        .save_compressed(&recompressed_dir)
+        .unwrap();
 
     // (3) The ONE-PASS compressed build (forced per-thread, no env mutation).
     sparq_core::with_build_compressed(true, || {
@@ -92,7 +105,11 @@ fn one_pass_compressed_build_is_byte_identical_to_build_then_recompress() {
     // files (dict/numerics/temporals/predstats) must match the raw build (the recompress
     // path rewrites them unchanged, so all three dirs agree).
     let files = dir_files(&compressed_dir);
-    assert_eq!(files, dir_files(&recompressed_dir), "compressed-build file set differs from recompress");
+    assert_eq!(
+        files,
+        dir_files(&recompressed_dir),
+        "compressed-build file set differs from recompress"
+    );
     let mut saw_compressed_perm = false;
     for f in &files {
         let one_pass = std::fs::read(compressed_dir.join(f)).unwrap();
@@ -110,19 +127,36 @@ fn one_pass_compressed_build_is_byte_identical_to_build_then_recompress() {
         // actually compressed, it didn't silently fall back to raw).
         if f.starts_with("perm") && !one_pass.is_empty() {
             let raw = std::fs::read(raw_dir.join(f)).unwrap();
-            assert!(one_pass != raw || raw.is_empty(), "{f}: compressed build produced a RAW perm");
-            assert!(one_pass.starts_with(b"SPQCPRM1"), "{f}: built perm is not SPQCPRM1");
+            assert!(
+                one_pass != raw || raw.is_empty(),
+                "{f}: compressed build produced a RAW perm"
+            );
+            assert!(
+                one_pass.starts_with(b"SPQCPRM1"),
+                "{f}: built perm is not SPQCPRM1"
+            );
         }
     }
-    assert!(saw_compressed_perm, "no SPQCPRM1 perm was produced — the gate did not engage");
+    assert!(
+        saw_compressed_perm,
+        "no SPQCPRM1 perm was produced — the gate did not engage"
+    );
 
     // OPEN/QUERY PARITY: in-memory load, raw build, and one-pass compressed build all agree.
     let mem = Graph::load_str(&nt, "ntriples").unwrap();
     let raw = Graph::open(&raw_dir).unwrap();
     let comp = Graph::open(&compressed_dir).unwrap();
     assert_eq!(mem.len(), comp.len(), "triple count differs");
-    assert_eq!(dump(&mem), dump(&comp), "term-level content differs (in-memory vs compressed)");
-    assert_eq!(dump(&raw), dump(&comp), "term-level content differs (raw vs compressed)");
+    assert_eq!(
+        dump(&mem),
+        dump(&comp),
+        "term-level content differs (in-memory vs compressed)"
+    );
+    assert_eq!(
+        dump(&raw),
+        dump(&comp),
+        "term-level content differs (raw vs compressed)"
+    );
 
     for q in QUERIES {
         let want = query(&mem, q).unwrap().rows.len();
@@ -145,10 +179,16 @@ fn one_pass_compressed_spill_build_matches_recompress() {
     let recompressed_dir = base.join("recompressed");
     let compressed_dir = base.join("compressed");
     // Tiny budget ⇒ many spill runs through the dict-spill external build's merge tail.
-    let cfg = SpillConfig { mem_budget: 1, disk_floor: 0 };
+    let cfg = SpillConfig {
+        mem_budget: 1,
+        disk_floor: 0,
+    };
 
     Graph::build_external_spill(nt.as_bytes(), "ntriples", &raw_dir, 128, &cfg).unwrap();
-    Graph::open(&raw_dir).unwrap().save_compressed(&recompressed_dir).unwrap();
+    Graph::open(&raw_dir)
+        .unwrap()
+        .save_compressed(&recompressed_dir)
+        .unwrap();
     sparq_core::with_build_compressed(true, || {
         Graph::build_external_spill(nt.as_bytes(), "ntriples", &compressed_dir, 128, &cfg).unwrap();
     });
@@ -156,14 +196,21 @@ fn one_pass_compressed_spill_build_matches_recompress() {
     for f in dir_files(&compressed_dir) {
         let a = std::fs::read(compressed_dir.join(&f)).unwrap();
         let b = std::fs::read(recompressed_dir.join(&f)).unwrap();
-        assert!(a == b, "{f}: one-pass spill compressed build differs from recompress");
+        assert!(
+            a == b,
+            "{f}: one-pass spill compressed build differs from recompress"
+        );
     }
 
     let mem = Graph::load_str(&nt, "ntriples").unwrap();
     let comp = Graph::open(&compressed_dir).unwrap();
     assert_eq!(dump(&mem), dump(&comp), "spill: term-level content differs");
     for q in QUERIES {
-        assert_eq!(query(&mem, q).unwrap().rows.len(), query(&comp, q).unwrap().rows.len(), "spill query differs for {q}");
+        assert_eq!(
+            query(&mem, q).unwrap().rows.len(),
+            query(&comp, q).unwrap().rows.len(),
+            "spill query differs for {q}"
+        );
     }
     std::fs::remove_dir_all(&base).ok();
 }
@@ -194,11 +241,17 @@ fn v2_saved_store_is_query_equivalent_to_v1() {
             .map(|b| b.starts_with(b"SPQCPRM2"))
             .unwrap_or(false)
     });
-    assert!(saw_v2, "V2 save produced no SPQCPRM2 perm — the emit gate did not engage");
+    assert!(
+        saw_v2,
+        "V2 save produced no SPQCPRM2 perm — the emit gate did not engage"
+    );
     // And the V1 dir must NOT carry any V2 magic (default stays SPQCPRM1).
     for i in 0..6 {
         if let Ok(b) = std::fs::read(v1_dir.join(format!("perm{i}.bin"))) {
-            assert!(!b.starts_with(b"SPQCPRM2"), "default save wrote a SPQCPRM2 perm{i} — V2 leaked into the default");
+            assert!(
+                !b.starts_with(b"SPQCPRM2"),
+                "default save wrote a SPQCPRM2 perm{i} — V2 leaked into the default"
+            );
         }
     }
 
@@ -206,12 +259,28 @@ fn v2_saved_store_is_query_equivalent_to_v1() {
     let v1 = Graph::open(&v1_dir).unwrap();
     let v2 = Graph::open(&v2_dir).unwrap();
     assert_eq!(v2.len(), mem.len(), "V2 triple count differs");
-    assert_eq!(dump(&v2), dump(&mem), "V2 term-level content differs from in-memory");
-    assert_eq!(dump(&v2), dump(&v1), "V2 term-level content differs from V1");
+    assert_eq!(
+        dump(&v2),
+        dump(&mem),
+        "V2 term-level content differs from in-memory"
+    );
+    assert_eq!(
+        dump(&v2),
+        dump(&v1),
+        "V2 term-level content differs from V1"
+    );
     for q in QUERIES {
         let want = query(&mem, q).unwrap().rows.len();
-        assert_eq!(query(&v1, q).unwrap().rows.len(), want, "V1 query differs for {q}");
-        assert_eq!(query(&v2, q).unwrap().rows.len(), want, "V2 query differs for {q}");
+        assert_eq!(
+            query(&v1, q).unwrap().rows.len(),
+            want,
+            "V1 query differs for {q}"
+        );
+        assert_eq!(
+            query(&v2, q).unwrap().rows.len(),
+            want,
+            "V2 query differs for {q}"
+        );
     }
     std::fs::remove_dir_all(&base).ok();
 }
@@ -249,7 +318,10 @@ fn cross_version_resave_round_trips_losslessly() {
     assert_eq!(dump(&g_v1b), reference, "V2→V1 resave/open lost content");
     for i in 0..6 {
         if let Ok(b) = std::fs::read(d3.join(format!("perm{i}.bin"))) {
-            assert!(!b.starts_with(b"SPQCPRM2"), "V2→V1 resave wrote a SPQCPRM2 perm{i}");
+            assert!(
+                !b.starts_with(b"SPQCPRM2"),
+                "V2→V1 resave wrote a SPQCPRM2 perm{i}"
+            );
         }
     }
 
@@ -260,7 +332,11 @@ fn cross_version_resave_round_trips_losslessly() {
     // Query parity across the whole cycle.
     for q in QUERIES {
         let want = query(&mem, q).unwrap().rows.len();
-        assert_eq!(query(&g_v2b, q).unwrap().rows.len(), want, "cross-version cycle query differs for {q}");
+        assert_eq!(
+            query(&g_v2b, q).unwrap().rows.len(),
+            want,
+            "cross-version cycle query differs for {q}"
+        );
     }
     std::fs::remove_dir_all(&base).ok();
 }
@@ -276,6 +352,9 @@ fn default_build_stays_raw() {
     // perm0 (SPO) is non-empty here and must be RAW (no SPQCPRM1 magic).
     let spo = std::fs::read(dir.join("perm0.bin")).unwrap();
     assert!(!spo.is_empty());
-    assert!(!spo.starts_with(b"SPQCPRM1"), "default build must write RAW perms");
+    assert!(
+        !spo.starts_with(b"SPQCPRM1"),
+        "default build must write RAW perms"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

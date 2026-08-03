@@ -150,7 +150,10 @@ profile = "minimal"
 
 # clippy  — the `-D warnings` gate in ci.yml's `lint` job and in the registry's
 #           crate-scoped fix gate. This is the component the whole file is for.
-# rustfmt — `cargo fmt --all --check` (currently informational in `lint`).
+# rustfmt — the `cargo fmt --all --check` gate in ci.yml's `lint` job. [OPUS-5] sq-0lk made
+#           that check HARD-FAIL, so this component is now load-bearing in the same way
+#           clippy is: the pin is what stops an ambient rustfmt from reporting a diff on
+#           code the PR never touched (issue #2360).
 #
 # The 11 `rustup component add` lines in the workflows remain correct — with
 # this file active they add to the pinned toolchain — but the 7 that add only

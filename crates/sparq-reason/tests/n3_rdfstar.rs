@@ -13,9 +13,9 @@
 //! variables no longer bind), `differential_quoted_triples_vs_naive_reference`
 //! and the fixtures go red. See the PR body for the exact mutation.
 
+use sparq_core::dict::Dict;
 use sparq_reason::n3::{parser, Term};
 use sparq_reason::{reason_n3, reason_n3_terms};
-use sparq_core::dict::Dict;
 use std::collections::{HashMap, HashSet};
 
 fn iri(s: &str) -> Term {
@@ -28,7 +28,11 @@ fn qt(s: Term, p: Term, o: Term) -> Term {
 
 /// Engine closure as a set of ground triples.
 fn engine_closure(src: &str) -> HashSet<[Term; 3]> {
-    reason_n3_terms(src, None).expect("engine closure").facts.into_iter().collect()
+    reason_n3_terms(src, None)
+        .expect("engine closure")
+        .facts
+        .into_iter()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -38,15 +42,22 @@ fn engine_closure(src: &str) -> HashSet<[Term; 3]> {
 #[test]
 fn parser_quoted_triple_forms() {
     // `<< s p o >>` parses to a first-class quoted-triple term.
-    let p = parser::parse("<http://ex/s> <http://ex/p> << <http://ex/a> <http://ex/q> <http://ex/b> >> .")
-        .expect("classic form");
+    let p = parser::parse(
+        "<http://ex/s> <http://ex/p> << <http://ex/a> <http://ex/q> <http://ex/b> >> .",
+    )
+    .expect("classic form");
     assert_eq!(p.facts.len(), 1);
     assert_eq!(p.facts[0][2], qt(iri("a"), iri("q"), iri("b")));
 
     // The RDF 1.2 triple-term spelling `<<( s p o )>>` is the SAME term.
-    let p2 = parser::parse("<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/q> <http://ex/b> )>> .")
-        .expect("rdf 1.2 triple-term form");
-    assert_eq!(p2.facts[0][2], p.facts[0][2], "<<(…)>> and << … >> are one term");
+    let p2 = parser::parse(
+        "<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/q> <http://ex/b> )>> .",
+    )
+    .expect("rdf 1.2 triple-term form");
+    assert_eq!(
+        p2.facts[0][2], p.facts[0][2],
+        "<<(…)>> and << … >> are one term"
+    );
 
     // Nested quotation, and a quoted triple in SUBJECT position.
     let p3 = parser::parse(
@@ -60,8 +71,9 @@ fn parser_quoted_triple_forms() {
 
     // `<< (1 2) … >>` (whitespace before the paren) keeps its LIST subject —
     // only the literal token `<<(` selects the RDF 1.2 spelling.
-    let p4 = parser::parse("<< (1 2) <http://ex/q> <http://ex/o> >> <http://ex/meta> <http://ex/m> .")
-        .expect("list subject in classic form");
+    let p4 =
+        parser::parse("<< (1 2) <http://ex/q> <http://ex/o> >> <http://ex/meta> <http://ex/m> .")
+            .expect("list subject in classic form");
     match &p4.facts[0][0] {
         Term::Triple(t) => assert!(matches!(&t[0], Term::List(ms) if ms.len() == 2)),
         other => panic!("expected quoted triple subject, got {other:?}"),
@@ -73,7 +85,10 @@ fn parser_quoted_triple_forms() {
         "<http://ex/s> <http://ex/p> << <http://ex/a> <http://ex/q> <http://ex/b> .", // unterminated
         "<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/q> <http://ex/b> >> .", // missing )
     ] {
-        assert!(parser::parse(bad).is_err(), "expected parse error for {bad:?}");
+        assert!(
+            parser::parse(bad).is_err(),
+            "expected parse error for {bad:?}"
+        );
     }
 
     // STRICT W3C Turtle 1.1 mode keeps rejecting quoted triples.
@@ -98,8 +113,14 @@ fn match_quoted_triple_binds_inner_vars() {
          << :a :p :b >> :says :alice .\n\
          { << ?s :p ?o >> :says ?w } => { ?s :linked ?o . ?w :vouches ?s } .",
     );
-    assert!(facts.contains(&[iri("a"), iri("linked"), iri("b")]), "inner vars bound: {facts:?}");
-    assert!(facts.contains(&[iri("alice"), iri("vouches"), iri("a")]), "outer var joins inner");
+    assert!(
+        facts.contains(&[iri("a"), iri("linked"), iri("b")]),
+        "inner vars bound: {facts:?}"
+    );
+    assert!(
+        facts.contains(&[iri("alice"), iri("vouches"), iri("a")]),
+        "outer var joins inner"
+    );
 }
 
 #[test]
@@ -110,7 +131,11 @@ fn derive_quoted_triple() {
          { ?x :p ?y } => { << ?x :p ?y >> :derivedFrom :rule1 } .",
     );
     assert!(
-        facts.contains(&[qt(iri("a"), iri("p"), iri("b")), iri("derivedFrom"), iri("rule1")]),
+        facts.contains(&[
+            qt(iri("a"), iri("p"), iri("b")),
+            iri("derivedFrom"),
+            iri("rule1")
+        ]),
         "quoted triple derivable in a rule head: {facts:?}"
     );
 }
@@ -124,7 +149,10 @@ fn nested_quoted() {
          << << :a :q :b >> :r :c >> :meta :m .\n\
          { << << ?x :q ?y >> :r ?z >> :meta ?m } => { ?x :innerLinked ?y . << ?m :saw ?z >> :level :two } .",
     );
-    assert!(facts.contains(&[iri("a"), iri("innerLinked"), iri("b")]), "innermost vars bind");
+    assert!(
+        facts.contains(&[iri("a"), iri("innerLinked"), iri("b")]),
+        "innermost vars bind"
+    );
     assert!(
         facts.contains(&[qt(iri("m"), iri("saw"), iri("c")), iri("level"), iri("two")]),
         "nested derivation: {facts:?}"
@@ -181,7 +209,10 @@ fn blank_in_quote_premise_is_existential() {
          << :a :p :b >> :says :alice .\n\
          { << _:any :p ?o >> :says ?w } => { ?w :heardAbout ?o } .",
     );
-    assert!(facts.contains(&[iri("alice"), iri("heardAbout"), iri("b")]), "{facts:?}");
+    assert!(
+        facts.contains(&[iri("alice"), iri("heardAbout"), iri("b")]),
+        "{facts:?}"
+    );
 }
 
 #[test]
@@ -194,14 +225,20 @@ fn quoted_conclusion_existential_skolemizes_per_firing() {
          :c :p :d .\n\
          { ?x :p ?y } => { << _:w :witnessed ?y >> :meta :m } .",
     );
-    let minted: Vec<&[Term; 3]> = facts
-        .iter()
-        .filter(|f| f[1] == iri("meta"))
-        .collect();
-    assert_eq!(minted.len(), 2, "one skolemized quoted triple per firing: {minted:?}");
+    let minted: Vec<&[Term; 3]> = facts.iter().filter(|f| f[1] == iri("meta")).collect();
+    assert_eq!(
+        minted.len(),
+        2,
+        "one skolemized quoted triple per firing: {minted:?}"
+    );
     for f in &minted {
-        let Term::Triple(t) = &f[0] else { panic!("expected quoted subject") };
-        assert!(matches!(&t[0], Term::Blank(_)), "existential stays a blank: {t:?}");
+        let Term::Triple(t) = &f[0] else {
+            panic!("expected quoted subject")
+        };
+        assert!(
+            matches!(&t[0], Term::Blank(_)),
+            "existential stays a blank: {t:?}"
+        );
     }
 }
 
@@ -216,7 +253,10 @@ fn backward_rule_proves_quoted_goal() {
          { ?s :verified ?o } <= { << ?s :p ?o >> :says :alice } .\n\
          { ?s :verified ?o } => { ?s :out ?o } .",
     );
-    assert!(facts.contains(&[iri("a"), iri("out"), iri("b")]), "{facts:?}");
+    assert!(
+        facts.contains(&[iri("a"), iri("out"), iri("b")]),
+        "{facts:?}"
+    );
 }
 
 #[test]
@@ -262,7 +302,9 @@ fn id_level_closure_interns_quoted_triples_content_addressed() {
     )));
     let tid = dict.lookup(&expected);
     assert_ne!(tid, sparq_core::dict::NO_ID, "triple term interned");
-    let df = dict.lookup(&oxrdf::Term::from(oxrdf::NamedNode::new_unchecked("http://ex/derivedFrom")));
+    let df = dict.lookup(&oxrdf::Term::from(oxrdf::NamedNode::new_unchecked(
+        "http://ex/derivedFrom",
+    )));
     assert!(
         ids.iter().any(|t| t[0] == tid && t[1] == df),
         "closure row uses the content-addressed triple-term id"
@@ -280,9 +322,16 @@ fn id_level_closure_rejects_non_rdf12_quoted_shapes_loudly() {
         "@prefix : <http://ex/> . << \"lit\" :p :o >> :meta :m .",
     )
     .expect_err("literal quoted-triple subject has no RDF 1.2 representation");
-    assert!(err.contains("subject"), "error names the offending position: {err}");
     assert!(
-        reason_n3_terms("@prefix : <http://ex/> . << \"lit\" :p :o >> :meta :m .", None).is_ok(),
+        err.contains("subject"),
+        "error names the offending position: {err}"
+    );
+    assert!(
+        reason_n3_terms(
+            "@prefix : <http://ex/> . << \"lit\" :p :o >> :meta :m .",
+            None
+        )
+        .is_ok(),
         "term-level API still handles generalized quoted triples"
     );
 }
@@ -360,7 +409,11 @@ fn ref_closure(doc: &str) -> HashSet<[Term; 3]> {
             }
             for b in &stack {
                 for c in &rule.conclusion {
-                    let g = [ref_subst(&c[0], b), ref_subst(&c[1], b), ref_subst(&c[2], b)];
+                    let g = [
+                        ref_subst(&c[0], b),
+                        ref_subst(&c[1], b),
+                        ref_subst(&c[2], b),
+                    ];
                     if g.iter().all(ref_ground) {
                         new_facts.push(g);
                     }
@@ -487,10 +540,20 @@ fn incremental_graph_falls_back_and_stays_correct_with_quoted_rules() {
                  { << ?s :p ?o >> :says ?w } => { ?s :linked ?o } .";
     let base = vec![[qt(iri("a"), iri("p"), iri("b")), iri("says"), iri("alice")]];
     let mut g = MaterializedN3Graph::new(rules, &base).expect("graph builds");
-    assert_eq!(g.mode(), N3Mode::Fallback, "quoted-triple rules are outside the counting profile");
-    assert!(g.contains(&[iri("a"), iri("linked"), iri("b")]), "fallback closure is correct");
+    assert_eq!(
+        g.mode(),
+        N3Mode::Fallback,
+        "quoted-triple rules are outside the counting profile"
+    );
+    assert!(
+        g.contains(&[iri("a"), iri("linked"), iri("b")]),
+        "fallback closure is correct"
+    );
     // A mutation re-runs the batch engine — quoted-triple facts round-trip
     // through the serializer and keep deriving.
     g.insert(&[[qt(iri("c"), iri("p"), iri("d")), iri("says"), iri("bob")]]);
-    assert!(g.contains(&[iri("c"), iri("linked"), iri("d")]), "post-insert closure is correct");
+    assert!(
+        g.contains(&[iri("c"), iri("linked"), iri("d")]),
+        "post-insert closure is correct"
+    );
 }

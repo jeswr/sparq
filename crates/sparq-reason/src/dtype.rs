@@ -295,7 +295,12 @@ pub fn materialize_d(d: &Recognized, dict: &mut Dict, triples: &mut Vec<[Id; 3]>
                 }
                 continue;
             }
-            if let TermParts::Lit { value, datatype, lang } = dict.term_parts(lit_id) {
+            if let TermParts::Lit {
+                value,
+                datatype,
+                lang,
+            } = dict.term_parts(lit_id)
+            {
                 // A language-tagged literal's datatype is rdf:langString; rdfD1 adds
                 // no useful value-space typing for it, so skip.
                 if lang.is_some() {
@@ -346,7 +351,9 @@ pub fn has_value_mapping(dt: &str) -> bool {
         return true;
     }
     if let Some(local) = dt.strip_prefix(XSD) {
-        return DTYPE_TABLE.iter().any(|&(l, has_map)| l == local && has_map);
+        return DTYPE_TABLE
+            .iter()
+            .any(|&(l, has_map)| l == local && has_map);
     }
     false
 }
@@ -859,14 +866,44 @@ mod tests {
     #[test]
     fn integer_decimal_value_space_coincides() {
         // "1"^^xsd:integer is equivalent to "1.0"^^xsd:decimal — same value.
-        assert!(d_value_eq("1", &format!("{}integer", XSD), "1.0", &format!("{}decimal", XSD)));
+        assert!(d_value_eq(
+            "1",
+            &format!("{}integer", XSD),
+            "1.0",
+            &format!("{}decimal", XSD)
+        ));
         // leading zeros / signs / trailing fraction zeros are all the same value.
-        assert!(d_value_eq("01", &format!("{}integer", XSD), "+1", &format!("{}integer", XSD)));
-        assert!(d_value_eq("1", &format!("{}integer", XSD), "1.00", &format!("{}decimal", XSD)));
-        assert!(d_value_eq("-0", &format!("{}integer", XSD), "0", &format!("{}decimal", XSD)));
+        assert!(d_value_eq(
+            "01",
+            &format!("{}integer", XSD),
+            "+1",
+            &format!("{}integer", XSD)
+        ));
+        assert!(d_value_eq(
+            "1",
+            &format!("{}integer", XSD),
+            "1.00",
+            &format!("{}decimal", XSD)
+        ));
+        assert!(d_value_eq(
+            "-0",
+            &format!("{}integer", XSD),
+            "0",
+            &format!("{}decimal", XSD)
+        ));
         // distinct values are NOT equal.
-        assert!(!d_value_eq("1", &format!("{}integer", XSD), "2", &format!("{}decimal", XSD)));
-        assert!(!d_value_eq("1.5", &format!("{}decimal", XSD), "1", &format!("{}integer", XSD)));
+        assert!(!d_value_eq(
+            "1",
+            &format!("{}integer", XSD),
+            "2",
+            &format!("{}decimal", XSD)
+        ));
+        assert!(!d_value_eq(
+            "1.5",
+            &format!("{}decimal", XSD),
+            "1",
+            &format!("{}integer", XSD)
+        ));
     }
 
     /// f64 would silently alias these past the 53-bit mantissa; the canonical
@@ -893,10 +930,25 @@ mod tests {
     /// float and double are a SEPARATE value space from integer/decimal.
     #[test]
     fn float_double_distinct_from_decimal() {
-        assert!(!d_value_eq("1", &format!("{}integer", XSD), "1.0", &format!("{}double", XSD)));
-        assert!(!d_value_eq("1.0", &format!("{}decimal", XSD), "1.0", &format!("{}float", XSD)));
+        assert!(!d_value_eq(
+            "1",
+            &format!("{}integer", XSD),
+            "1.0",
+            &format!("{}double", XSD)
+        ));
+        assert!(!d_value_eq(
+            "1.0",
+            &format!("{}decimal", XSD),
+            "1.0",
+            &format!("{}float", XSD)
+        ));
         // but two double lexical forms of the same value are equal.
-        assert!(d_value_eq("1.0E0", &format!("{}double", XSD), "1.0", &format!("{}double", XSD)));
+        assert!(d_value_eq(
+            "1.0E0",
+            &format!("{}double", XSD),
+            "1.0",
+            &format!("{}double", XSD)
+        ));
     }
 
     #[test]
@@ -923,9 +975,13 @@ mod tests {
         let s = dict.intern(&Term::NamedNode(NamedNode::new_unchecked("http://e/s")));
         let p = dict.intern(&Term::NamedNode(NamedNode::new_unchecked("http://e/p")));
         let one = dict.intern(&lit("1", "integer"));
-        let ty = dict.intern(&Term::NamedNode(NamedNode::new_unchecked(rdf::TYPE.as_str())));
-        let xsd_integer =
-            dict.intern(&Term::NamedNode(NamedNode::new_unchecked(format!("{}integer", XSD))));
+        let ty = dict.intern(&Term::NamedNode(NamedNode::new_unchecked(
+            rdf::TYPE.as_str(),
+        )));
+        let xsd_integer = dict.intern(&Term::NamedNode(NamedNode::new_unchecked(format!(
+            "{}integer",
+            XSD
+        ))));
         let mut triples = vec![[s, p, one]];
 
         // Recognized: the literal is typed xsd:integer (rdfD1).
@@ -976,15 +1032,27 @@ mod tests {
     fn byte_out_of_range_not_typed() {
         // "200"^^xsd:byte is ill-formed: byte is [-128, 127]
         // Bug: pre-fix code returns Some (wrongly typed)
-        assert!(d_value_key("200", &format!("{}byte", XSD)).is_none(), "200 is outside xsd:byte");
+        assert!(
+            d_value_key("200", &format!("{}byte", XSD)).is_none(),
+            "200 is outside xsd:byte"
+        );
         assert!(
             d_value_key("-129", &format!("{}byte", XSD)).is_none(),
             "-129 is outside xsd:byte"
         );
         // In-range values are well-formed
-        assert!(d_value_key("127", &format!("{}byte", XSD)).is_some(), "127 is xsd:byte max");
-        assert!(d_value_key("-128", &format!("{}byte", XSD)).is_some(), "-128 is xsd:byte min");
-        assert!(d_value_key("0", &format!("{}byte", XSD)).is_some(), "0 is valid xsd:byte");
+        assert!(
+            d_value_key("127", &format!("{}byte", XSD)).is_some(),
+            "127 is xsd:byte max"
+        );
+        assert!(
+            d_value_key("-128", &format!("{}byte", XSD)).is_some(),
+            "-128 is xsd:byte min"
+        );
+        assert!(
+            d_value_key("0", &format!("{}byte", XSD)).is_some(),
+            "0 is valid xsd:byte"
+        );
     }
 
     #[test]
@@ -1130,8 +1198,14 @@ mod tests {
     #[test]
     fn language_value_key() {
         // Valid
-        assert!(d_value_key("en", &format!("{}language", XSD)).is_some(), "\"en\" is valid");
-        assert!(d_value_key("en-US", &format!("{}language", XSD)).is_some(), "\"en-US\" is valid");
+        assert!(
+            d_value_key("en", &format!("{}language", XSD)).is_some(),
+            "\"en\" is valid"
+        );
+        assert!(
+            d_value_key("en-US", &format!("{}language", XSD)).is_some(),
+            "\"en-US\" is valid"
+        );
         assert!(
             d_value_key("EN", &format!("{}language", XSD)).is_some(),
             "\"EN\" is valid (case-significant)"
@@ -1168,12 +1242,18 @@ mod tests {
     /// xsd:Name: starts with NameStartChar (letter, '_', ':'), colons allowed.
     #[test]
     fn xml_name_value_key() {
-        assert!(d_value_key("foo", &format!("{}Name", XSD)).is_some(), "\"foo\" is valid Name");
+        assert!(
+            d_value_key("foo", &format!("{}Name", XSD)).is_some(),
+            "\"foo\" is valid Name"
+        );
         assert!(
             d_value_key("foo:bar", &format!("{}Name", XSD)).is_some(),
             "colon allowed in Name"
         );
-        assert!(d_value_key("_foo", &format!("{}Name", XSD)).is_some(), "underscore start valid");
+        assert!(
+            d_value_key("_foo", &format!("{}Name", XSD)).is_some(),
+            "underscore start valid"
+        );
         assert!(
             d_value_key(":foo", &format!("{}Name", XSD)).is_some(),
             "colon start valid for Name"
@@ -1183,7 +1263,10 @@ mod tests {
             d_value_key("1foo", &format!("{}Name", XSD)).is_none(),
             "digit start invalid for Name"
         );
-        assert!(d_value_key("", &format!("{}Name", XSD)).is_none(), "empty invalid for Name");
+        assert!(
+            d_value_key("", &format!("{}Name", XSD)).is_none(),
+            "empty invalid for Name"
+        );
         assert!(
             d_value_key("a b", &format!("{}Name", XSD)).is_none(),
             "space invalid for Name"
@@ -1197,7 +1280,10 @@ mod tests {
             d_value_key("_foo", &format!("{}NCName", XSD)).is_some(),
             "underscore start valid NCName"
         );
-        assert!(d_value_key("foo", &format!("{}NCName", XSD)).is_some(), "\"foo\" valid NCName");
+        assert!(
+            d_value_key("foo", &format!("{}NCName", XSD)).is_some(),
+            "\"foo\" valid NCName"
+        );
         // Invalid
         assert!(
             d_value_key("foo:bar", &format!("{}NCName", XSD)).is_none(),
@@ -1220,7 +1306,10 @@ mod tests {
     /// xsd:NMTOKEN: one or more NameChar (can start with digit).
     #[test]
     fn xml_nmtoken_value_key() {
-        assert!(d_value_key("foo", &format!("{}NMTOKEN", XSD)).is_some(), "\"foo\" valid NMTOKEN");
+        assert!(
+            d_value_key("foo", &format!("{}NMTOKEN", XSD)).is_some(),
+            "\"foo\" valid NMTOKEN"
+        );
         assert!(
             d_value_key("123", &format!("{}NMTOKEN", XSD)).is_some(),
             "digit-start valid NMTOKEN"
@@ -1256,9 +1345,15 @@ mod tests {
             "hexBinary is case-insensitive"
         );
         // Single byte
-        assert!(d_value_key("0F", &format!("{}hexBinary", XSD)).is_some(), "single byte valid");
+        assert!(
+            d_value_key("0F", &format!("{}hexBinary", XSD)).is_some(),
+            "single byte valid"
+        );
         // Multi-byte
-        assert!(d_value_key("CAFE", &format!("{}hexBinary", XSD)).is_some(), "2-byte hex valid");
+        assert!(
+            d_value_key("CAFE", &format!("{}hexBinary", XSD)).is_some(),
+            "2-byte hex valid"
+        );
         // Empty = valid (empty octet sequence, per XSD 1.1 §3.3.15)
         assert!(
             d_value_key("", &format!("{}hexBinary", XSD)).is_some(),
@@ -1378,7 +1473,13 @@ mod tests {
     fn dtype_table_drives_standard_and_has_value_mapping() {
         let std = Recognized::standard();
         let new_types = [
-            "anyURI", "language", "Name", "NCName", "NMTOKEN", "hexBinary", "base64Binary",
+            "anyURI",
+            "language",
+            "Name",
+            "NCName",
+            "NMTOKEN",
+            "hexBinary",
+            "base64Binary",
         ];
         for local in new_types {
             let iri = format!("{}{}", XSD, local);
@@ -1549,7 +1650,7 @@ mod tests {
         let integer = format!("{}integer", XSD);
         let a = "9007199254740993"; // 2^53 + 1
         let b = "9007199254740992"; // 2^53
-        // dtype: distinct keys.
+                                    // dtype: distinct keys.
         assert!(
             !d_value_eq(a, &integer, b, &integer),
             "dtype must NOT alias 2^53+1 with 2^53"
@@ -1653,9 +1754,18 @@ mod tests {
     #[test]
     fn padded_decimal_lexical_rejected() {
         let decimal = format!("{}decimal", XSD);
-        assert!(d_value_key(" 1", &decimal).is_none(), "leading space rejected");
-        assert!(d_value_key("1 ", &decimal).is_none(), "trailing space rejected");
-        assert!(d_value_key("1\t", &decimal).is_none(), "trailing tab rejected");
+        assert!(
+            d_value_key(" 1", &decimal).is_none(),
+            "leading space rejected"
+        );
+        assert!(
+            d_value_key("1 ", &decimal).is_none(),
+            "trailing space rejected"
+        );
+        assert!(
+            d_value_key("1\t", &decimal).is_none(),
+            "trailing tab rejected"
+        );
         // A clean lexical still keys.
         assert!(d_value_key("1", &decimal).is_some());
     }
@@ -1676,7 +1786,9 @@ mod tests {
     // for "inf" but not for "Infinity" / mixed-case "NAN"); the evaluator correctly
     // returned None. After the migration both return the SAME verdict on every row below.
 
-    use sparq_substrate::numeric::{parse_xsd_f64 as sub_parse_f64, parse_xsd_f32 as sub_parse_f32};
+    use sparq_substrate::numeric::{
+        parse_xsd_f32 as sub_parse_f32, parse_xsd_f64 as sub_parse_f64,
+    };
 
     /// Parity table: dtype.rs d_value_key for xsd:double AGREES with the substrate
     /// parse_xsd_f64 on EVERY XSD-valid and XSD-invalid lexical form. [SONNET-4.6] sq-s3b10.
@@ -1687,30 +1799,30 @@ mod tests {
         // accepted = XSD-valid; rejected = XSD-invalid (Rust-FromStr-only or just garbage)
         let cases: &[(&str, bool)] = &[
             // XSD-valid specials
-            ("INF",    true),
-            ("+INF",   true),
-            ("-INF",   true),
-            ("NaN",    true),
+            ("INF", true),
+            ("+INF", true),
+            ("-INF", true),
+            ("NaN", true),
             // XSD-valid numbers
-            ("1.0E3",  true),
-            ("0",      true),
-            ("-0",     true),
-            ("1",      true),
-            ("+1",     true),
+            ("1.0E3", true),
+            ("0", true),
+            ("-0", true),
+            ("1", true),
+            ("+1", true),
             ("-1.5E2", true),
-            ("1.0",    true),
+            ("1.0", true),
             // Rust-FromStr-only spellings XSD REJECTS
-            ("Infinity",  false),
+            ("Infinity", false),
             ("-Infinity", false),
-            ("NAN",       false),
-            ("nan",       false),
-            ("inf",       false),
-            ("+inf",      false),
-            ("-inf",      false),
+            ("NAN", false),
+            ("nan", false),
+            ("inf", false),
+            ("+inf", false),
+            ("-inf", false),
             // Other ill-formed forms
-            ("",    false),
+            ("", false),
             ("abc", false),
-            ("1x",  false),
+            ("1x", false),
         ];
         for &(lex, expected) in cases {
             let dtype_some = d_value_key(lex, &double).is_some();
@@ -1718,11 +1830,13 @@ mod tests {
             // Both must agree with the expected verdict AND with each other.
             assert_eq!(
                 dtype_some, expected,
-                "dtype double key mismatch for {:?}: expected some={}", lex, expected
+                "dtype double key mismatch for {:?}: expected some={}",
+                lex, expected
             );
             assert_eq!(
                 substrate_some, expected,
-                "substrate parse_xsd_f64 mismatch for {:?}: expected some={}", lex, expected
+                "substrate parse_xsd_f64 mismatch for {:?}: expected some={}",
+                lex, expected
             );
             // Cross-parity: they must agree even if both differ from the expected column
             // (guards against the test fixture itself being wrong).
@@ -1741,22 +1855,22 @@ mod tests {
     fn float_dtype_key_parity_with_substrate_parse_xsd_f32() {
         let float = format!("{}float", XSD);
         let cases: &[(&str, bool)] = &[
-            ("INF",    true),
-            ("+INF",   true),
-            ("-INF",   true),
-            ("NaN",    true),
-            ("1.0E3",  true),
-            ("0",      true),
-            ("-0",     true),
-            ("1",      true),
+            ("INF", true),
+            ("+INF", true),
+            ("-INF", true),
+            ("NaN", true),
+            ("1.0E3", true),
+            ("0", true),
+            ("-0", true),
+            ("1", true),
             // Rust-FromStr-only spellings XSD REJECTS
-            ("Infinity",  false),
+            ("Infinity", false),
             ("-Infinity", false),
-            ("NAN",       false),
-            ("nan",       false),
-            ("inf",       false),
+            ("NAN", false),
+            ("nan", false),
+            ("inf", false),
             // Other ill-formed
-            ("",    false),
+            ("", false),
             ("abc", false),
         ];
         for &(lex, expected) in cases {
@@ -1764,11 +1878,13 @@ mod tests {
             let substrate_some = sub_parse_f32(lex).is_some();
             assert_eq!(
                 dtype_some, expected,
-                "dtype float key mismatch for {:?}: expected some={}", lex, expected
+                "dtype float key mismatch for {:?}: expected some={}",
+                lex, expected
             );
             assert_eq!(
                 substrate_some, expected,
-                "substrate parse_xsd_f32 mismatch for {:?}: expected some={}", lex, expected
+                "substrate parse_xsd_f32 mismatch for {:?}: expected some={}",
+                lex, expected
             );
             assert_eq!(
                 dtype_some, substrate_some,

@@ -66,8 +66,15 @@ fn names_registry() -> LocalServiceRegistry {
 }
 
 fn column(res: &sparq_engine::QueryResult, name: &str) -> Vec<String> {
-    let i = res.vars.iter().position(|v| v.as_str() == name).expect("projected variable");
-    res.rows.iter().filter_map(|r| r[i].as_ref().map(|t| t.to_string())).collect()
+    let i = res
+        .vars
+        .iter()
+        .position(|v| v.as_str() == name)
+        .expect("projected variable");
+    res.rows
+        .iter()
+        .filter_map(|r| r[i].as_ref().map(|t| t.to_string()))
+        .collect()
 }
 
 #[test]
@@ -80,7 +87,12 @@ fn handler_rows_join_with_the_surrounding_query() {
     );
     let res = with_local_services(&names_registry(), || query(&g, &q)).expect("local SERVICE");
     let names = column(&res, "name");
-    assert_eq!(names.len(), 2, "carol has no local ex:Person triple, so she is joined away: {:?}", names);
+    assert_eq!(
+        names.len(),
+        2,
+        "carol has no local ex:Person triple, so she is joined away: {:?}",
+        names
+    );
     assert!(names.iter().any(|n| n.contains("Alice")), "{:?}", names);
     assert!(names.iter().any(|n| n.contains("Bob")), "{:?}", names);
 }
@@ -104,8 +116,16 @@ fn unbound_cell_is_a_genuinely_unbound_solution() {
         HANDLER
     );
     let res = with_local_services(&reg, || query(&g, &q)).expect("local SERVICE");
-    assert_eq!(res.rows.len(), 2, "both people match; bob's ?nick is simply unbound");
-    assert_eq!(column(&res, "nick"), vec!["\"Ali\""], "only alice has a bound nick");
+    assert_eq!(
+        res.rows.len(),
+        2,
+        "both people match; bob's ?nick is simply unbound"
+    );
+    assert_eq!(
+        column(&res, "nick"),
+        vec!["\"Ali\""],
+        "only alice has a bound nick"
+    );
 }
 
 #[test]
@@ -115,10 +135,18 @@ fn request_exposes_the_groups_vars_query_and_prebound_terms() {
     let mut reg = LocalServiceRegistry::new();
     reg.register(HANDLER, |req: &LocalServiceRequest<'_>| {
         assert_eq!(req.service(), HANDLER);
-        assert!(req.query().starts_with("SELECT * WHERE {"), "{}", req.query());
+        assert!(
+            req.query().starts_with("SELECT * WHERE {"),
+            "{}",
+            req.query()
+        );
         assert!(req.query().contains("http://ex/name"), "{}", req.query());
         let vars: Vec<&str> = req.vars().iter().map(Variable::as_str).collect();
-        assert_eq!(vars, vec!["s", "name"], "in-scope vars in first-occurrence order");
+        assert_eq!(
+            vars,
+            vec!["s", "name"],
+            "in-scope vars in first-occurrence order"
+        );
         // Flat BGP => a full decomposition, with the predicate as a pre-bound argument.
         let pats: &[LocalServicePattern] = req.patterns();
         assert_eq!(pats.len(), 1);
@@ -150,7 +178,10 @@ fn non_bgp_group_decomposes_to_no_patterns() {
     // pattern list, never a partial view. `query()` still carries the whole group.
     let mut reg = LocalServiceRegistry::new();
     reg.register(HANDLER, |req: &LocalServiceRequest<'_>| {
-        assert!(req.patterns().is_empty(), "a UNION group must not decompose");
+        assert!(
+            req.patterns().is_empty(),
+            "a UNION group must not decompose"
+        );
         assert!(req.query().contains("UNION"), "{}", req.query());
         Ok(LocalServiceRows::empty(vec![var("s")]))
     });
@@ -161,13 +192,18 @@ fn non_bgp_group_decomposes_to_no_patterns() {
         HANDLER
     );
     let res = with_local_services(&reg, || query(&g, &q)).expect("local SERVICE");
-    assert!(res.rows.is_empty(), "the handler returned the empty relation");
+    assert!(
+        res.rows.is_empty(),
+        "the handler returned the empty relation"
+    );
 }
 
 #[test]
 fn empty_relation_makes_the_surrounding_join_empty() {
     let mut reg = LocalServiceRegistry::new();
-    reg.register(HANDLER, |_req| Ok(LocalServiceRows::empty(vec![var("name")])));
+    reg.register(HANDLER, |_req| {
+        Ok(LocalServiceRows::empty(vec![var("name")]))
+    });
     let g = local_graph();
     let q = format!(
         "PREFIX ex: <http://ex/>\n\
@@ -175,7 +211,10 @@ fn empty_relation_makes_the_surrounding_join_empty() {
         HANDLER
     );
     let res = with_local_services(&reg, || query(&g, &q)).expect("local SERVICE");
-    assert!(res.rows.is_empty(), "an empty relation is NOT the join identity");
+    assert!(
+        res.rows.is_empty(),
+        "an empty relation is NOT the join identity"
+    );
 }
 
 #[test]
@@ -198,20 +237,34 @@ fn handler_error_fails_the_query_and_silent_keeps_the_bindings() {
         HANDLER
     );
     let res = with_local_services(&reg, || query(&g, &silent)).expect("SILENT must not fail");
-    assert_eq!(res.rows.len(), 2, "SILENT yields the join identity, keeping both people");
+    assert_eq!(
+        res.rows.len(),
+        2,
+        "SILENT yields the join identity, keeping both people"
+    );
 }
 
 #[test]
 fn a_ragged_relation_is_reported_not_silently_mangled() {
     let mut reg = LocalServiceRegistry::new();
     reg.register(HANDLER, |_req| {
-        Ok(LocalServiceRows::new(vec![var("s"), var("name")], vec![vec![Some(lit("only one cell"))]]))
+        Ok(LocalServiceRows::new(
+            vec![var("s"), var("name")],
+            vec![vec![Some(lit("only one cell"))]],
+        ))
     });
     let g = local_graph();
-    let q = format!("SELECT ?s WHERE {{ SERVICE <{}> {{ ?s ?p ?name }} }}", HANDLER);
+    let q = format!(
+        "SELECT ?s WHERE {{ SERVICE <{}> {{ ?s ?p ?name }} }}",
+        HANDLER
+    );
     let err = with_local_services(&reg, || query(&g, &q)).expect_err("arity violation");
     assert!(err.contains("invalid relation"), "{}", err);
-    assert!(err.contains(HANDLER), "the message names the offending handler: {}", err);
+    assert!(
+        err.contains(HANDLER),
+        "the message names the offending handler: {}",
+        err
+    );
 }
 
 #[test]
@@ -235,7 +288,10 @@ fn a_header_variable_outside_the_group_is_reported() {
     reg.register(HANDLER, |_req| {
         Ok(LocalServiceRows::new(
             vec![var("o"), var("x")],
-            vec![vec![Some(lit("anything")), Some(Term::from(Literal::from(2)))]],
+            vec![vec![
+                Some(lit("anything")),
+                Some(Term::from(Literal::from(2))),
+            ]],
         ))
     });
     let g = local_graph();
@@ -256,7 +312,11 @@ fn a_header_variable_outside_the_group_is_reported() {
     let res = with_local_services(&reg, || query(&g, &silent)).expect("SILENT must not fail");
     let xs = column(&res, "x");
     assert_eq!(xs.len(), 1, "the outer ?x = 1 row survives: {:?}", xs);
-    assert!(xs[0].starts_with("\"1\""), "and still binds 1, not the handler's 2: {}", xs[0]);
+    assert!(
+        xs[0].starts_with("\"1\""),
+        "and still binds 1, not the handler's 2: {}",
+        xs[0]
+    );
 }
 
 #[test]
@@ -265,7 +325,10 @@ fn a_subset_of_the_groups_vars_is_accepted() {
     // scope is fine — those variables are simply unbound in the handler's solutions.
     let mut reg = LocalServiceRegistry::new();
     reg.register(HANDLER, |_req| {
-        Ok(LocalServiceRows::new(vec![var("s")], vec![vec![Some(iri("http://ex/alice"))]]))
+        Ok(LocalServiceRows::new(
+            vec![var("s")],
+            vec![vec![Some(iri("http://ex/alice"))]],
+        ))
     });
     let g = local_graph();
     let q = format!(
@@ -299,9 +362,17 @@ fn a_nested_install_restores_the_outer_registry() {
     });
 
     with_local_services(&names_registry(), || {
-        assert_eq!(column(&query(&g, &q).expect("outer"), "name").len(), 2, "before");
+        assert_eq!(
+            column(&query(&g, &q).expect("outer"), "name").len(),
+            2,
+            "before"
+        );
         let mid = with_local_services(&inner, || query(&g, &q).expect("inner"));
-        assert_eq!(column(&mid, "name"), vec!["\"INNER\""], "the inner registry shadows");
+        assert_eq!(
+            column(&mid, "name"),
+            vec!["\"INNER\""],
+            "the inner registry shadows"
+        );
         let after = query(&g, &q).expect("the outer registry must be restored");
         assert_eq!(column(&after, "name").len(), 2, "after");
     });
@@ -320,10 +391,15 @@ fn a_panicking_inner_install_restores_the_outer_registry() {
     );
     with_local_services(&names_registry(), || {
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            with_local_services(&LocalServiceRegistry::new(), || panic!("inner scope blew up"));
+            with_local_services(&LocalServiceRegistry::new(), || {
+                panic!("inner scope blew up")
+            });
         }));
         assert!(unwound.is_err(), "the inner closure must have panicked");
-        assert!(query(&g, &q).is_ok(), "unwinding the inner scope must not unregister the outer");
+        assert!(
+            query(&g, &q).is_ok(),
+            "unwinding the inner scope must not unregister the outer"
+        );
     });
 }
 
@@ -336,7 +412,10 @@ fn the_registry_is_scoped_to_the_install() {
         HANDLER
     );
     let reg = names_registry();
-    assert!(with_local_services(&reg, || query(&g, &q)).is_ok(), "installed");
+    assert!(
+        with_local_services(&reg, || query(&g, &q)).is_ok(),
+        "installed"
+    );
     // Outside the install the SERVICE is NOT locally handled. With the `service`
     // feature also on it falls through to the HTTP path (which refuses a `urn:` /
     // non-allowlisted endpoint); with `service` off it is an unsupported pattern.
@@ -357,7 +436,11 @@ fn handler_is_visible_under_filter_exists() {
         HANDLER
     );
     let res = with_local_services(&names_registry(), || query(&g, &q)).expect("local SERVICE");
-    assert_eq!(res.rows.len(), 2, "both people have a handler-supplied name");
+    assert_eq!(
+        res.rows.len(),
+        2,
+        "both people have a handler-supplied name"
+    );
 }
 
 #[test]

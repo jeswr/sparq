@@ -181,7 +181,10 @@ mod tests {
     fn rdf_direction_as_str() {
         assert_eq!(RdfDirection::None.as_str(), None);
         assert_eq!(RdfDirection::I18nDatatype.as_str(), Some("i18n-datatype"));
-        assert_eq!(RdfDirection::CompoundLiteral.as_str(), Some("compound-literal"));
+        assert_eq!(
+            RdfDirection::CompoundLiteral.as_str(),
+            Some("compound-literal")
+        );
     }
 
     #[test]

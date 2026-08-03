@@ -2150,9 +2150,7 @@ fn souffle_accepts_class_granular_negation() {
 /// too-permissive checker pass unnoticed.
 #[test]
 fn souffle_rejects_what_our_checker_rejects() {
-    let src = format!(
-        "{P}[?x, ex:win, \"y\"] :- [?x, ex:move, ?y], NOT [?y, ex:win, \"y\"] ."
-    );
+    let src = format!("{P}[?x, ex:win, \"y\"] :- [?x, ex:move, ?y], NOT [?y, ex:win, \"y\"] .");
     let mut d = Dict::new();
     let program = parse_program(&mut d, &src).expect("parse");
     assert!(
@@ -2179,7 +2177,9 @@ fn souffle_rejects_what_our_checker_rejects() {
 fn souffle_translation_rejects_out_of_fragment_constructs() {
     let cases = [
         (
-            format!("{P}[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) ."),
+            format!(
+                "{P}[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) ."
+            ),
             "AGGREGATE",
         ),
         (

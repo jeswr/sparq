@@ -33,7 +33,12 @@ fn column(result: &sparq_engine::QueryResult, name: &str) -> Vec<String> {
     result
         .rows
         .iter()
-        .map(|row| row[index].as_ref().expect("PATHS binds every column").to_string())
+        .map(|row| {
+            row[index]
+                .as_ref()
+                .expect("PATHS binds every column")
+                .to_string()
+        })
         .collect()
 }
 
@@ -76,10 +81,7 @@ fn end_graph_pattern_restricts_the_enumerated_end_set() {
     // `ex:m` is reachable from `ex:a` but is not a sink, so the only path is a -> m -> z.
     assert_eq!(distinct(column(&result, "e")), ["<http://ex/z>"]);
     assert_eq!(result.rows.len(), 2, "one two-hop path, one row per hop");
-    assert_eq!(
-        column(&result, "node"),
-        ["<http://ex/m>", "<http://ex/z>"]
-    );
+    assert_eq!(column(&result, "node"), ["<http://ex/m>", "<http://ex/z>"]);
 }
 
 #[test]
@@ -90,7 +92,11 @@ fn endpoint_pattern_must_bind_the_declared_endpoint_variable() {
          VIA ex:p",
     )
     .unwrap_err();
-    assert!(error.contains("must bind ?s"), "unexpected error: {}", error);
+    assert!(
+        error.contains("must bind ?s"),
+        "unexpected error: {}",
+        error
+    );
 }
 
 #[test]
@@ -136,12 +142,7 @@ fn programmatic_endpoint_pattern_enumerates_both_hub_paths() {
     assert_eq!(paths.len(), 2);
     assert!(paths.iter().all(|path| path.nodes.len() == 3));
     assert_eq!(
-        distinct(
-            paths
-                .iter()
-                .map(|path| path.nodes[0].to_string())
-                .collect()
-        ),
+        distinct(paths.iter().map(|path| path.nodes[0].to_string()).collect()),
         ["<http://ex/a>", "<http://ex/b>"]
     );
 }

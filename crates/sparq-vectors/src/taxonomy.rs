@@ -132,7 +132,12 @@ impl TaxonomyDag {
             }
         }
 
-        TaxonomyDag { classes, index_of, parents, children }
+        TaxonomyDag {
+            classes,
+            index_of,
+            parents,
+            children,
+        }
     }
 
     /// Number of classes in the DAG.
@@ -208,7 +213,10 @@ impl TaxonomyDag {
 
     /// The maximum depth over all classes (the DAG's height). `0` for an empty or flat DAG.
     pub fn max_depth(&self) -> usize {
-        (0..self.classes.len()).map(|i| self.depth(i)).max().unwrap_or(0)
+        (0..self.classes.len())
+            .map(|i| self.depth(i))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Length of the shortest **undirected** path between two classes over the `subClassOf` edges
@@ -275,7 +283,11 @@ impl<'a> EuclideanTaxonomyEncoder<'a> {
     /// Build the encoder over `dag`. The total block width is `bag_dim + 1` (the bag lanes plus the
     /// single normalised-depth lane); `bag_dim` is clamped to `>= 1`.
     pub fn new(dag: &'a TaxonomyDag, bag_dim: usize) -> EuclideanTaxonomyEncoder<'a> {
-        EuclideanTaxonomyEncoder { dag, bag_dim: bag_dim.max(1), max_depth: dag.max_depth() }
+        EuclideanTaxonomyEncoder {
+            dag,
+            bag_dim: bag_dim.max(1),
+            max_depth: dag.max_depth(),
+        }
     }
 
     /// The fixed block width this encoder occupies in a structured row (`bag_dim + 1`).
@@ -359,7 +371,10 @@ pub struct HyperbolicTaxonomyEncoder<'a> {
 impl<'a> HyperbolicTaxonomyEncoder<'a> {
     /// Build over `dag`.
     pub fn new(dag: &'a TaxonomyDag) -> HyperbolicTaxonomyEncoder<'a> {
-        HyperbolicTaxonomyEncoder { dag, max_depth: dag.max_depth() }
+        HyperbolicTaxonomyEncoder {
+            dag,
+            max_depth: dag.max_depth(),
+        }
     }
 
     /// The 2-D Poincaré-disc coordinate of class `idx` (`(x, y)` with `x² + y² < 1`). Returns the
@@ -372,7 +387,8 @@ impl<'a> HyperbolicTaxonomyEncoder<'a> {
         let depth = self.dag.depth(idx) as f64;
         let max = self.max_depth.max(1) as f64;
         let r = 0.95 * (depth / max); // root at centre, leaves near (but inside) the boundary
-        let theta = (hash_id(self.dag.classes()[idx]) as f64 / u64::MAX as f64) * std::f64::consts::TAU;
+        let theta =
+            (hash_id(self.dag.classes()[idx]) as f64 / u64::MAX as f64) * std::f64::consts::TAU;
         (r * theta.cos(), r * theta.sin())
     }
 
@@ -457,7 +473,10 @@ impl Default for GeometryGate {
         // A 5% required relative improvement: the default leans toward the safe Euclidean block,
         // matching the design's "adopt non-Euclidean only past a measured gate" posture. This is a
         // gate threshold, NOT a measured/canonical performance number.
-        GeometryGate { bag_dim: 16, margin: 0.05 }
+        GeometryGate {
+            bag_dim: 16,
+            margin: 0.05,
+        }
     }
 }
 
@@ -504,13 +523,12 @@ impl GeometryGate {
         };
 
         // Gate: adopt hyperbolic ONLY if it strictly beats Euclidean by the required margin.
-        let chosen = if pairs > 0
-            && hyperbolic_distortion <= euclidean_distortion * (1.0 - self.margin)
-        {
-            Geometry::Hyperbolic
-        } else {
-            Geometry::Euclidean
-        };
+        let chosen =
+            if pairs > 0 && hyperbolic_distortion <= euclidean_distortion * (1.0 - self.margin) {
+                Geometry::Hyperbolic
+            } else {
+                Geometry::Euclidean
+            };
 
         DistortionReport {
             euclidean_distortion,
@@ -702,7 +720,9 @@ impl DisjointnessOracle {
             .iter()
             .copied()
             .filter(|&(cand_class, _)| {
-                !query_types.iter().any(|&qt| self.is_disjoint(qt, cand_class))
+                !query_types
+                    .iter()
+                    .any(|&qt| self.is_disjoint(qt, cand_class))
             })
             .collect()
     }
@@ -720,7 +740,10 @@ fn named(iri: &str) -> oxrdf::Term {
 /// Is the id a class node (a named node or blank node) — the only thing that can sit on either side
 /// of a `subClassOf` / disjointWith axiom? Literals and inline values are excluded.
 fn is_class_node(graph: &Graph, id: Id) -> bool {
-    matches!(graph.dict.term_parts(id), TermParts::Iri { .. } | TermParts::Blank(_))
+    matches!(
+        graph.dict.term_parts(id),
+        TermParts::Iri { .. } | TermParts::Blank(_)
+    )
 }
 
 /// Walk an RDF list `(first/rest)` from `head` to `nil`, collecting members. Guarded against an
@@ -813,11 +836,20 @@ ex:Animal owl:disjointWith ex:Plant .
         let dag = TaxonomyDag::build(&c.graph);
         assert!(!dag.is_empty());
         let dog = dag.index_of(class(&c.graph, "Dog")).unwrap();
-        let ancestors: FxHashSet<Id> =
-            dag.ancestors(dog).iter().map(|&i| dag.classes()[i]).collect();
+        let ancestors: FxHashSet<Id> = dag
+            .ancestors(dog)
+            .iter()
+            .map(|&i| dag.classes()[i])
+            .collect();
         // After the RDFS closure, Dog ⊑ Animal ⊑ LivingThing — both must be ancestors.
-        assert!(ancestors.contains(&class(&c.graph, "Animal")), "Dog's ancestor Animal");
-        assert!(ancestors.contains(&class(&c.graph, "LivingThing")), "Dog's ancestor LivingThing");
+        assert!(
+            ancestors.contains(&class(&c.graph, "Animal")),
+            "Dog's ancestor Animal"
+        );
+        assert!(
+            ancestors.contains(&class(&c.graph, "LivingThing")),
+            "Dog's ancestor LivingThing"
+        );
         // Dog is not its own ancestor.
         assert!(!ancestors.contains(&class(&c.graph, "Dog")));
     }
@@ -847,7 +879,10 @@ ex:Animal owl:disjointWith ex:Plant .
         let oak = enc.encode(dag.index_of(class(&c.graph, "Oak")).unwrap());
         let d_sib = l2(&dog, &cat);
         let d_far = l2(&dog, &oak);
-        assert!(d_sib < d_far, "siblings {d_sib} should be closer than cross-branch {d_far}");
+        assert!(
+            d_sib < d_far,
+            "siblings {d_sib} should be closer than cross-branch {d_far}"
+        );
     }
 
     #[test]
@@ -869,8 +904,15 @@ ex:Animal owl:disjointWith ex:Plant .
         let c = closed();
         let dag = TaxonomyDag::build(&c.graph);
         let report = GeometryGate::default().choose(&dag);
-        assert!(report.pairs_measured > 0, "the gate must actually measure pairs");
-        assert_eq!(report.chosen, Geometry::Euclidean, "default must not adopt hyperbolic unmeasured");
+        assert!(
+            report.pairs_measured > 0,
+            "the gate must actually measure pairs"
+        );
+        assert_eq!(
+            report.chosen,
+            Geometry::Euclidean,
+            "default must not adopt hyperbolic unmeasured"
+        );
     }
 
     #[test]
@@ -886,9 +928,15 @@ ex:Animal owl:disjointWith ex:Plant .
             chosen: Geometry::Euclidean, // ignored; we re-decide below
         };
         // Re-apply the gate's rule with margin 0 → hyperbolic (0.5) beats euclidean (1.0).
-        let gate = GeometryGate { bag_dim: 16, margin: 0.0 };
+        let gate = GeometryGate {
+            bag_dim: 16,
+            margin: 0.0,
+        };
         let flips = win.hyperbolic_distortion <= win.euclidean_distortion * (1.0 - gate.margin);
-        assert!(flips, "the gate rule must adopt hyperbolic when it strictly wins");
+        assert!(
+            flips,
+            "the gate rule must adopt hyperbolic when it strictly wins"
+        );
     }
 
     #[test]
@@ -897,11 +945,18 @@ ex:Animal owl:disjointWith ex:Plant .
         let dag = TaxonomyDag::build(&c.graph);
         let hyp = HyperbolicTaxonomyEncoder::new(&dag);
         let b = hyp.block(0);
-        assert_eq!(b.metric, Metric::NonEuclidean, "hyperbolic block must be tagged non-Euclidean");
+        assert_eq!(
+            b.metric,
+            Metric::NonEuclidean,
+            "hyperbolic block must be tagged non-Euclidean"
+        );
         // And a SchemaHeader with that block must FAIL the whole-row Euclidean guard — proving a
         // cosine search on it is a detectable error, not silent corruption.
         let header = crate::encode::SchemaHeader::new(vec![b]).unwrap();
-        assert!(header.check_euclidean().is_err(), "cosine on a hyperbolic block must be rejected");
+        assert!(
+            header.check_euclidean().is_err(),
+            "cosine on a hyperbolic block must be rejected"
+        );
     }
 
     #[test]
@@ -917,13 +972,22 @@ ex:Animal owl:disjointWith ex:Plant .
         // Direct axiom.
         assert!(oracle.is_disjoint(animal, plant), "declared Animal⊥Plant");
         // Propagated down subclass: Dog ⊑ Animal, Oak ⊑ Plant ⇒ Dog ⊥ Oak.
-        assert!(oracle.is_disjoint(dog, oak), "propagated Dog⊥Oak via subclass closure");
+        assert!(
+            oracle.is_disjoint(dog, oak),
+            "propagated Dog⊥Oak via subclass closure"
+        );
         assert!(oracle.is_disjoint(cat, oak), "propagated Cat⊥Oak");
         // AllDisjointClasses: Dog ⊥ Cat.
         assert!(oracle.is_disjoint(dog, cat), "AllDisjointClasses Dog⊥Cat");
         // NOT disjoint: Dog and Animal (subclass, never disjoint); a class with itself.
-        assert!(!oracle.is_disjoint(dog, animal), "a subclass is not disjoint from its super");
-        assert!(!oracle.is_disjoint(dog, dog), "a class is never disjoint from itself");
+        assert!(
+            !oracle.is_disjoint(dog, animal),
+            "a subclass is not disjoint from its super"
+        );
+        assert!(
+            !oracle.is_disjoint(dog, dog),
+            "a class is never disjoint from itself"
+        );
         // Symmetric.
         assert!(oracle.is_disjoint(plant, animal));
     }
@@ -938,19 +1002,27 @@ ex:Animal owl:disjointWith ex:Plant .
         let oak = class(&c.graph, "Oak");
 
         // Query is a Dog; candidates carry their class + an opaque payload (here the node id).
-        let candidates: Vec<(Id, u32)> =
-            vec![(animal, 1), (cat, 2), (oak, 3), (dog, 4)];
+        let candidates: Vec<(Id, u32)> = vec![(animal, 1), (cat, 2), (oak, 3), (dog, 4)];
         let kept = oracle.mask_candidates(&[dog], &candidates);
 
         // Answer-safety: output is a strict subset of input order-preserved.
         assert!(kept.len() <= candidates.len());
         let kept_set: FxHashSet<(Id, u32)> = kept.iter().copied().collect();
         for k in &kept {
-            assert!(candidates.contains(k), "mask only ever removes, never invents");
+            assert!(
+                candidates.contains(k),
+                "mask only ever removes, never invents"
+            );
         }
         // Oak (Plant, disjoint from Dog⊑Animal) and Cat (AllDisjointClasses) must be dropped.
-        assert!(!kept_set.contains(&(oak, 3)), "provably-disjoint Oak dropped");
-        assert!(!kept_set.contains(&(cat, 2)), "provably-disjoint Cat dropped");
+        assert!(
+            !kept_set.contains(&(oak, 3)),
+            "provably-disjoint Oak dropped"
+        );
+        assert!(
+            !kept_set.contains(&(cat, 2)),
+            "provably-disjoint Cat dropped"
+        );
         // Animal (super-class, NOT disjoint) and Dog (same class) must be kept — the mask removes
         // ONLY provably-wrong neighbours, never a merely-different one.
         assert!(kept_set.contains(&(animal, 1)), "non-disjoint Animal kept");
@@ -1001,8 +1073,12 @@ ex:Animal owl:disjointWith ex:Plant .
     #[test]
     fn empty_graph_is_safe() {
         // No subClassOf, no disjointness → empty DAG + empty oracle; mask drops nothing.
-        let c = close_for_vectorise("<http://ex/a> <http://ex/p> <http://ex/b> .", "ntriples", Profile::Rdfs)
-            .unwrap();
+        let c = close_for_vectorise(
+            "<http://ex/a> <http://ex/p> <http://ex/b> .",
+            "ntriples",
+            Profile::Rdfs,
+        )
+        .unwrap();
         let dag = TaxonomyDag::build(&c.graph);
         assert!(dag.is_empty());
         let report = GeometryGate::default().choose(&dag);

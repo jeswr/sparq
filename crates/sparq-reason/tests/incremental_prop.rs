@@ -34,8 +34,8 @@ struct Onto {
     sp: Id,
     dom: Id,
     rng: Id,
-    classes: Vec<Id>,     // chained via subClassOf
-    props: Vec<Id>,       // chained via subPropertyOf, with domains/ranges
+    classes: Vec<Id>, // chained via subClassOf
+    props: Vec<Id>,   // chained via subPropertyOf, with domains/ranges
     individuals: Vec<Id>,
 }
 
@@ -58,8 +58,9 @@ fn build(dict: &mut Dict, rng: &mut Rng) -> (Onto, Vec<[Id; 3]>) {
     // 5 class chains of depth 6: C{i}_0 ⊑ C{i}_1 ⊑ … ⊑ C{i}_5.
     let mut classes = Vec::new();
     for i in 0..5 {
-        let chain: Vec<Id> =
-            (0..6).map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..6)
+            .map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], sc, w[1]]);
         }
@@ -68,8 +69,9 @@ fn build(dict: &mut Dict, rng: &mut Rng) -> (Onto, Vec<[Id; 3]>) {
     // 4 property chains of depth 3, each property with a random domain and range class.
     let mut props = Vec::new();
     for i in 0..4 {
-        let chain: Vec<Id> =
-            (0..3).map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..3)
+            .map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], sp, w[1]]);
         }
@@ -80,8 +82,9 @@ fn build(dict: &mut Dict, rng: &mut Rng) -> (Onto, Vec<[Id; 3]>) {
         props.extend(chain);
     }
     // 300 individuals: each gets a random type and two random property assertions.
-    let individuals: Vec<Id> =
-        (0..300).map(|i| dict.intern_iri(&format!("http://ex/ind{i}"))).collect();
+    let individuals: Vec<Id> = (0..300)
+        .map(|i| dict.intern_iri(&format!("http://ex/ind{i}")))
+        .collect();
     for &s in &individuals {
         base.push([s, ty, classes[rng.below(classes.len())]]);
         for _ in 0..2 {
@@ -90,7 +93,19 @@ fn build(dict: &mut Dict, rng: &mut Rng) -> (Onto, Vec<[Id; 3]>) {
             base.push([s, p, o]);
         }
     }
-    (Onto { ty, sc, sp, dom, rng: rng_p, classes, props, individuals }, base)
+    (
+        Onto {
+            ty,
+            sc,
+            sp,
+            dom,
+            rng: rng_p,
+            classes,
+            props,
+            individuals,
+        },
+        base,
+    )
 }
 
 /// A random ABox triple: a type assertion or a property assertion between individuals.
@@ -157,8 +172,11 @@ fn incremental_matches_from_scratch_over_random_mutations() {
         } else {
             // ABox delete batch: 1-10 triples, mixing currently-asserted ABox triples (drawn
             // from the mirror) with random ones (often absent or derived-only — no-ops).
-            let current: Vec<[Id; 3]> =
-                mirror.iter().copied().filter(|t| !onto.is_tbox(t)).collect();
+            let current: Vec<[Id; 3]> = mirror
+                .iter()
+                .copied()
+                .filter(|t| !onto.is_tbox(t))
+                .collect();
             let n = 1 + rng.below(10);
             let delta: Vec<[Id; 3]> = (0..n)
                 .map(|_| {
@@ -188,7 +206,10 @@ fn incremental_matches_from_scratch_over_random_mutations() {
         assert_eq!(inc, full, "closure content diverged at batch {batch}");
         assert_eq!(g.base_len(), mirror.len(), "base drifted at batch {batch}");
     }
-    assert!(tbox_batches > 0, "schedule should have exercised the TBox fallback");
+    assert!(
+        tbox_batches > 0,
+        "schedule should have exercised the TBox fallback"
+    );
     assert!(
         g.full_rebuilds() >= tbox_batches,
         "every TBox batch rebuilds (got {} rebuilds for {tbox_batches} TBox batches)",

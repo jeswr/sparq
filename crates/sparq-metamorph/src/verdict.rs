@@ -229,6 +229,8 @@ mod tests {
             detail: "3 vs 2 rows".into(),
         };
         let text = violation.to_string();
-        assert!(text.contains("differential") && text.contains("oxigraph") && text.contains("3 vs 2"));
+        assert!(
+            text.contains("differential") && text.contains("oxigraph") && text.contains("3 vs 2")
+        );
     }
 }

@@ -124,7 +124,10 @@ fn invalid_strategy_without_conflict_is_admissible() {
 fn unknown_strategy_is_refused() {
     let err = conflict_admissibility(&conflicting_policy("odrl:conflict <urn:custom:mediate> ;"))
         .expect_err("an unknown conflict strategy must be refused, not ignored");
-    assert!(err.contains("urn:custom:mediate"), "error names the offending IRI: {err}");
+    assert!(
+        err.contains("urn:custom:mediate"),
+        "error names the offending IRI: {err}"
+    );
 }
 
 /// **Fail-closed on ambiguity (sq-ihqbl).** A graph asserting *two* distinct

@@ -20,8 +20,9 @@
 use std::collections::HashSet;
 
 /// The exact CI reproducer from run 29152138161 (crash-24694f1d7701250710a0fec…).
-const REPRODUCER: &str =
-    include_str!("../../../fuzz/seeds/canonicalize_nquads/24694f1d7701250710a0fec7432dc1b8c562ee99");
+const REPRODUCER: &str = include_str!(
+    "../../../fuzz/seeds/canonicalize_nquads/24694f1d7701250710a0fec7432dc1b8c562ee99"
+);
 
 fn distinct<T: ToString>(quads: &[T]) -> HashSet<String> {
     quads.iter().map(ToString::to_string).collect()

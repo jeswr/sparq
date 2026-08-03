@@ -162,12 +162,18 @@ impl WidgetRegistry {
 
     /// Scores one editor widget by IRI (`None` when not registered).
     pub fn score_editor(&self, iri: &str, ctx: &WidgetContext) -> Option<Suitability> {
-        self.editors.iter().find(|(i, _)| i == iri).map(|(_, s)| s(ctx))
+        self.editors
+            .iter()
+            .find(|(i, _)| i == iri)
+            .map(|(_, s)| s(ctx))
     }
 
     /// Scores one viewer widget by IRI (`None` when not registered).
     pub fn score_viewer(&self, iri: &str, ctx: &WidgetContext) -> Option<Suitability> {
-        self.viewers.iter().find(|(i, _)| i == iri).map(|(_, s)| s(ctx))
+        self.viewers
+            .iter()
+            .find(|(i, _)| i == iri)
+            .map(|(_, s)| s(ctx))
     }
 
     /// Resolves the editor slot: best score wins, ties break on the IRI.
@@ -290,7 +296,11 @@ fn text_field(ctx: &WidgetContext) -> Suitability {
         && !iri_shaped(ctx)
         && ctx.constraints.in_values.is_empty()
         && ctx.constraints.node_shape.is_none()
-        && !ctx.constraints.node_kind.iter().any(|k| k.ends_with("BlankNode"))
+        && !ctx
+            .constraints
+            .node_kind
+            .iter()
+            .any(|k| k.ends_with("BlankNode"))
     {
         return Suitability::Score(2);
     }
@@ -600,33 +610,75 @@ mod tests {
     #[test]
     fn text_field_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, true, "TextFieldEditor", Some(&lit("x")), &c()), Suitability::Score(10));
-        assert_eq!(score(&r, true, "TextFieldEditor", Some(&lang("x")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, true, "TextFieldEditor", Some(&typed("true", XSD_BOOLEAN)), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, true, "TextFieldEditor", Some(&iri("http://x/a")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "TextFieldEditor", Some(&lit("x")), &c()),
+            Suitability::Score(10)
+        );
+        assert_eq!(
+            score(&r, true, "TextFieldEditor", Some(&lang("x")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "TextFieldEditor",
+                Some(&typed("true", XSD_BOOLEAN)),
+                &c()
+            ),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(&r, true, "TextFieldEditor", Some(&iri("http://x/a")), &c()),
+            Suitability::Unsuitable
+        );
         let mut dt = c();
         dt.datatype = vec!["http://www.w3.org/2001/XMLSchema#integer".into()];
-        assert_eq!(score(&r, true, "TextFieldEditor", None, &dt), Suitability::Score(10));
+        assert_eq!(
+            score(&r, true, "TextFieldEditor", None, &dt),
+            Suitability::Score(10)
+        );
         // (sparq) generic fallback: empty, wholly unconstrained field.
-        assert_eq!(score(&r, true, "TextFieldEditor", None, &c()), Suitability::Score(2));
+        assert_eq!(
+            score(&r, true, "TextFieldEditor", None, &c()),
+            Suitability::Score(2)
+        );
         let mut cls = c();
         cls.class = vec![crate::description::TermRef::from_term(&iri("http://x/C"))];
-        assert_eq!(score(&r, true, "TextFieldEditor", None, &cls), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "TextFieldEditor", None, &cls),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
     fn text_field_with_lang_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, true, "TextFieldWithLangEditor", Some(&lang("x")), &c()), Suitability::Score(11));
+        assert_eq!(
+            score(&r, true, "TextFieldWithLangEditor", Some(&lang("x")), &c()),
+            Suitability::Score(11)
+        );
         let mut both = c();
         both.datatype = vec![RDF_LANGSTRING.into(), XSD_STRING.into()];
-        assert_eq!(score(&r, true, "TextFieldWithLangEditor", None, &both), Suitability::Score(11));
+        assert_eq!(
+            score(&r, true, "TextFieldWithLangEditor", None, &both),
+            Suitability::Score(11)
+        );
         let mut lang_only = c();
         lang_only.datatype = vec![RDF_LANGSTRING.into()];
-        assert_eq!(score(&r, true, "TextFieldWithLangEditor", None, &lang_only), Suitability::Score(5));
+        assert_eq!(
+            score(&r, true, "TextFieldWithLangEditor", None, &lang_only),
+            Suitability::Score(5)
+        );
         lang_only.single_line = Some(false);
-        assert_eq!(score(&r, true, "TextFieldWithLangEditor", None, &lang_only), Suitability::Unsuitable);
-        assert_eq!(score(&r, true, "TextFieldWithLangEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "TextFieldWithLangEditor", None, &lang_only),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(&r, true, "TextFieldWithLangEditor", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
@@ -634,20 +686,47 @@ mod tests {
         let r = WidgetRegistry::dash();
         let mut sl_true = c();
         sl_true.single_line = Some(true);
-        assert_eq!(score(&r, true, "TextAreaEditor", Some(&lit("x")), &sl_true), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "TextAreaEditor", Some(&lit("x")), &sl_true),
+            Suitability::Unsuitable
+        );
         let mut sl_false = c();
         sl_false.single_line = Some(false);
-        assert_eq!(score(&r, true, "TextAreaEditor", Some(&lit("x")), &sl_false), Suitability::Score(20));
-        assert_eq!(score(&r, true, "TextAreaEditor", Some(&lit("x")), &c()), Suitability::Score(5));
+        assert_eq!(
+            score(&r, true, "TextAreaEditor", Some(&lit("x")), &sl_false),
+            Suitability::Score(20)
+        );
+        assert_eq!(
+            score(&r, true, "TextAreaEditor", Some(&lit("x")), &c()),
+            Suitability::Score(5)
+        );
         let mut s = c();
         s.datatype = vec![XSD_STRING.into()];
-        assert_eq!(score(&r, true, "TextAreaEditor", None, &s), Suitability::Score(2));
+        assert_eq!(
+            score(&r, true, "TextAreaEditor", None, &s),
+            Suitability::Score(2)
+        );
         s.single_line = Some(false);
-        assert_eq!(score(&r, true, "TextAreaEditor", None, &s), Suitability::Score(20));
+        assert_eq!(
+            score(&r, true, "TextAreaEditor", None, &s),
+            Suitability::Score(20)
+        );
         let mut custom = c();
         custom.datatype = vec!["http://example.org/customType".into()];
-        assert_eq!(score(&r, true, "TextAreaEditor", None, &custom), Suitability::Manual);
-        assert_eq!(score(&r, true, "TextAreaEditor", Some(&typed("1", "http://www.w3.org/2001/XMLSchema#integer")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "TextAreaEditor", None, &custom),
+            Suitability::Manual
+        );
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "TextAreaEditor",
+                Some(&typed("1", "http://www.w3.org/2001/XMLSchema#integer")),
+                &c()
+            ),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
@@ -655,50 +734,143 @@ mod tests {
         let r = WidgetRegistry::dash();
         let mut sl_false = c();
         sl_false.single_line = Some(false);
-        assert_eq!(score(&r, true, "TextAreaWithLangEditor", Some(&lang("x")), &sl_false), Suitability::Score(15));
-        assert_eq!(score(&r, true, "TextAreaWithLangEditor", Some(&lang("x")), &c()), Suitability::Score(5));
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "TextAreaWithLangEditor",
+                Some(&lang("x")),
+                &sl_false
+            ),
+            Suitability::Score(15)
+        );
+        assert_eq!(
+            score(&r, true, "TextAreaWithLangEditor", Some(&lang("x")), &c()),
+            Suitability::Score(5)
+        );
         let mut permits_lang = c();
         permits_lang.datatype = vec![RDF_LANGSTRING.into()];
-        assert_eq!(score(&r, true, "TextAreaWithLangEditor", None, &permits_lang), Suitability::Score(5));
+        assert_eq!(
+            score(&r, true, "TextAreaWithLangEditor", None, &permits_lang),
+            Suitability::Score(5)
+        );
         let mut sl_true = c();
         sl_true.single_line = Some(true);
-        assert_eq!(score(&r, true, "TextAreaWithLangEditor", Some(&lang("x")), &sl_true), Suitability::Unsuitable);
-        assert_eq!(score(&r, true, "TextAreaWithLangEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "TextAreaWithLangEditor",
+                Some(&lang("x")),
+                &sl_true
+            ),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(&r, true, "TextAreaWithLangEditor", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
     fn boolean_select_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, true, "BooleanSelectEditor", Some(&typed("true", XSD_BOOLEAN)), &c()), Suitability::Score(10));
-        assert_eq!(score(&r, true, "BooleanSelectEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, true, "BooleanSelectEditor", Some(&iri("http://x/a")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "BooleanSelectEditor",
+                Some(&typed("true", XSD_BOOLEAN)),
+                &c()
+            ),
+            Suitability::Score(10)
+        );
+        assert_eq!(
+            score(&r, true, "BooleanSelectEditor", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "BooleanSelectEditor",
+                Some(&iri("http://x/a")),
+                &c()
+            ),
+            Suitability::Unsuitable
+        );
         let mut b = c();
         b.datatype = vec![XSD_BOOLEAN.into()];
-        assert_eq!(score(&r, true, "BooleanSelectEditor", None, &b), Suitability::Score(10));
-        assert_eq!(score(&r, true, "BooleanSelectEditor", None, &c()), Suitability::Manual);
+        assert_eq!(
+            score(&r, true, "BooleanSelectEditor", None, &b),
+            Suitability::Score(10)
+        );
+        assert_eq!(
+            score(&r, true, "BooleanSelectEditor", None, &c()),
+            Suitability::Manual
+        );
         let mut cls = c();
         cls.class = vec![crate::description::TermRef::from_term(&iri("http://x/C"))];
-        assert_eq!(score(&r, true, "BooleanSelectEditor", None, &cls), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "BooleanSelectEditor", None, &cls),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
     fn date_picker_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, true, "DatePickerEditor", Some(&typed("2026-07-11", XSD_DATE)), &c()), Suitability::Score(10));
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "DatePickerEditor",
+                Some(&typed("2026-07-11", XSD_DATE)),
+                &c()
+            ),
+            Suitability::Score(10)
+        );
         let mut d = c();
         d.datatype = vec![XSD_DATE.into()];
-        assert_eq!(score(&r, true, "DatePickerEditor", None, &d), Suitability::Score(5));
-        assert_eq!(score(&r, true, "DatePickerEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "DatePickerEditor", None, &d),
+            Suitability::Score(5)
+        );
+        assert_eq!(
+            score(&r, true, "DatePickerEditor", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
     fn date_time_picker_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, true, "DateTimePickerEditor", Some(&typed("2026-07-11T00:00:00", XSD_DATETIME)), &c()), Suitability::Score(10));
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "DateTimePickerEditor",
+                Some(&typed("2026-07-11T00:00:00", XSD_DATETIME)),
+                &c()
+            ),
+            Suitability::Score(10)
+        );
         let mut d = c();
         d.datatype = vec![XSD_DATETIME.into()];
-        assert_eq!(score(&r, true, "DateTimePickerEditor", None, &d), Suitability::Score(5));
-        assert_eq!(score(&r, true, "DateTimePickerEditor", Some(&typed("2026-07-11", XSD_DATE)), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "DateTimePickerEditor", None, &d),
+            Suitability::Score(5)
+        );
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "DateTimePickerEditor",
+                Some(&typed("2026-07-11", XSD_DATE)),
+                &c()
+            ),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
@@ -706,18 +878,39 @@ mod tests {
         let r = WidgetRegistry::dash();
         let mut e = c();
         e.in_values = vec![crate::description::TermRef::from_term(&lit("a"))];
-        assert_eq!(score(&r, true, "EnumSelectEditor", None, &e), Suitability::Score(10));
-        assert_eq!(score(&r, true, "EnumSelectEditor", Some(&lit("a")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "EnumSelectEditor", None, &e),
+            Suitability::Score(10)
+        );
+        assert_eq!(
+            score(&r, true, "EnumSelectEditor", Some(&lit("a")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
     fn auto_complete_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, true, "AutoCompleteEditor", Some(&iri("http://x/a")), &c()), Suitability::Score(1));
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "AutoCompleteEditor",
+                Some(&iri("http://x/a")),
+                &c()
+            ),
+            Suitability::Score(1)
+        );
         let mut cls = c();
         cls.class = vec![crate::description::TermRef::from_term(&iri("http://x/C"))];
-        assert_eq!(score(&r, true, "AutoCompleteEditor", None, &cls), Suitability::Score(1));
-        assert_eq!(score(&r, true, "AutoCompleteEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "AutoCompleteEditor", None, &cls),
+            Suitability::Score(1)
+        );
+        assert_eq!(
+            score(&r, true, "AutoCompleteEditor", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
@@ -726,8 +919,14 @@ mod tests {
         let mut cls = c();
         cls.class = vec![crate::description::TermRef::from_term(&iri("http://x/C"))];
         // (sparq) 12 — DASH leaves this manual-only.
-        assert_eq!(score(&r, true, "InstancesSelectEditor", None, &cls), Suitability::Score(12));
-        assert_eq!(score(&r, true, "InstancesSelectEditor", None, &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "InstancesSelectEditor", None, &cls),
+            Suitability::Score(12)
+        );
+        assert_eq!(
+            score(&r, true, "InstancesSelectEditor", None, &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
@@ -735,22 +934,52 @@ mod tests {
         let r = WidgetRegistry::dash();
         let mut nk = c();
         nk.node_kind = vec![SH_IRI.into()];
-        assert_eq!(score(&r, true, "URIEditor", Some(&iri("http://x/a")), &nk), Suitability::Score(10));
-        assert_eq!(score(&r, true, "URIEditor", None, &nk), Suitability::Score(10));
+        assert_eq!(
+            score(&r, true, "URIEditor", Some(&iri("http://x/a")), &nk),
+            Suitability::Score(10)
+        );
+        assert_eq!(
+            score(&r, true, "URIEditor", None, &nk),
+            Suitability::Score(10)
+        );
         nk.class = vec![crate::description::TermRef::from_term(&iri("http://x/C"))];
-        assert_eq!(score(&r, true, "URIEditor", Some(&iri("http://x/a")), &nk), Suitability::Manual);
-        assert_eq!(score(&r, true, "URIEditor", Some(&iri("http://x/a")), &c()), Suitability::Manual);
-        assert_eq!(score(&r, true, "URIEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "URIEditor", Some(&iri("http://x/a")), &nk),
+            Suitability::Manual
+        );
+        assert_eq!(
+            score(&r, true, "URIEditor", Some(&iri("http://x/a")), &c()),
+            Suitability::Manual
+        );
+        assert_eq!(
+            score(&r, true, "URIEditor", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
     fn rich_text_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, true, "RichTextEditor", Some(&typed("<b>x</b>", RDF_HTML)), &c()), Suitability::Score(10));
+        assert_eq!(
+            score(
+                &r,
+                true,
+                "RichTextEditor",
+                Some(&typed("<b>x</b>", RDF_HTML)),
+                &c()
+            ),
+            Suitability::Score(10)
+        );
         let mut h = c();
         h.datatype = vec![RDF_HTML.into()];
-        assert_eq!(score(&r, true, "RichTextEditor", None, &h), Suitability::Score(10));
-        assert_eq!(score(&r, true, "RichTextEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "RichTextEditor", None, &h),
+            Suitability::Score(10)
+        );
+        assert_eq!(
+            score(&r, true, "RichTextEditor", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
@@ -759,9 +988,18 @@ mod tests {
         let mut rc = c();
         rc.root_class = Some(crate::description::TermRef::from_term(&iri("http://x/C")));
         // (sparq) 15 — DASH leaves this manual-only.
-        assert_eq!(score(&r, true, "SubClassEditor", None, &rc), Suitability::Score(15));
-        assert_eq!(score(&r, true, "SubClassEditor", Some(&iri("http://x/a")), &c()), Suitability::Manual);
-        assert_eq!(score(&r, true, "SubClassEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "SubClassEditor", None, &rc),
+            Suitability::Score(15)
+        );
+        assert_eq!(
+            score(&r, true, "SubClassEditor", Some(&iri("http://x/a")), &c()),
+            Suitability::Manual
+        );
+        assert_eq!(
+            score(&r, true, "SubClassEditor", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
@@ -770,46 +1008,142 @@ mod tests {
         let mut ns = c();
         ns.node_shape = Some(crate::description::TermRef::from_term(&iri("http://x/S")));
         // (sparq) 15 — nested sub-form via sh:node.
-        assert_eq!(score(&r, true, "DetailsEditor", Some(&bnode()), &ns), Suitability::Score(15));
-        assert_eq!(score(&r, true, "DetailsEditor", None, &ns), Suitability::Score(15));
-        assert_eq!(score(&r, true, "DetailsEditor", Some(&iri("http://x/a")), &c()), Suitability::Manual);
-        assert_eq!(score(&r, true, "DetailsEditor", Some(&lit("x")), &ns), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "DetailsEditor", Some(&bnode()), &ns),
+            Suitability::Score(15)
+        );
+        assert_eq!(
+            score(&r, true, "DetailsEditor", None, &ns),
+            Suitability::Score(15)
+        );
+        assert_eq!(
+            score(&r, true, "DetailsEditor", Some(&iri("http://x/a")), &c()),
+            Suitability::Manual
+        );
+        assert_eq!(
+            score(&r, true, "DetailsEditor", Some(&lit("x")), &ns),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
     fn blank_node_editor_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, true, "BlankNodeEditor", Some(&bnode()), &c()), Suitability::Score(1));
-        assert_eq!(score(&r, true, "BlankNodeEditor", Some(&iri("http://x/a")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, true, "BlankNodeEditor", Some(&bnode()), &c()),
+            Suitability::Score(1)
+        );
+        assert_eq!(
+            score(&r, true, "BlankNodeEditor", Some(&iri("http://x/a")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
     fn viewer_scores() {
         let r = WidgetRegistry::dash();
-        assert_eq!(score(&r, false, "LabelViewer", Some(&iri("http://x/a")), &c()), Suitability::Score(5));
-        assert_eq!(score(&r, false, "LabelViewer", Some(&lit("x")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, false, "LiteralViewer", Some(&lit("x")), &c()), Suitability::Score(1));
-        assert_eq!(score(&r, false, "LiteralViewer", Some(&iri("http://x/a")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, false, "ImageViewer", Some(&iri("http://x/a.PNG")), &c()), Suitability::Score(50));
-        assert_eq!(score(&r, false, "ImageViewer", Some(&lit("pic.jpeg")), &c()), Suitability::Score(50));
-        assert_eq!(score(&r, false, "ImageViewer", Some(&iri("http://x/a")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, false, "HyperlinkViewer", Some(&typed("http://x/", XSD_ANYURI)), &c()), Suitability::Score(50));
-        assert_eq!(score(&r, false, "HyperlinkViewer", Some(&lit("x")), &c()), Suitability::Manual);
-        assert_eq!(score(&r, false, "HyperlinkViewer", Some(&iri("http://x/a")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, false, "HTMLViewer", Some(&typed("<b>x</b>", RDF_HTML)), &c()), Suitability::Score(50));
-        assert_eq!(score(&r, false, "HTMLViewer", Some(&lit("x")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, false, "ValueTableViewer", None, &c()), Suitability::Manual);
-        assert_eq!(score(&r, false, "ValueTableViewer", Some(&lit("x")), &c()), Suitability::Manual);
-        assert_eq!(score(&r, false, "DetailsViewer", Some(&lit("x")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, false, "DetailsViewer", Some(&iri("http://x/a")), &c()), Suitability::Manual);
+        assert_eq!(
+            score(&r, false, "LabelViewer", Some(&iri("http://x/a")), &c()),
+            Suitability::Score(5)
+        );
+        assert_eq!(
+            score(&r, false, "LabelViewer", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(&r, false, "LiteralViewer", Some(&lit("x")), &c()),
+            Suitability::Score(1)
+        );
+        assert_eq!(
+            score(&r, false, "LiteralViewer", Some(&iri("http://x/a")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(&r, false, "ImageViewer", Some(&iri("http://x/a.PNG")), &c()),
+            Suitability::Score(50)
+        );
+        assert_eq!(
+            score(&r, false, "ImageViewer", Some(&lit("pic.jpeg")), &c()),
+            Suitability::Score(50)
+        );
+        assert_eq!(
+            score(&r, false, "ImageViewer", Some(&iri("http://x/a")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(
+                &r,
+                false,
+                "HyperlinkViewer",
+                Some(&typed("http://x/", XSD_ANYURI)),
+                &c()
+            ),
+            Suitability::Score(50)
+        );
+        assert_eq!(
+            score(&r, false, "HyperlinkViewer", Some(&lit("x")), &c()),
+            Suitability::Manual
+        );
+        assert_eq!(
+            score(&r, false, "HyperlinkViewer", Some(&iri("http://x/a")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(
+                &r,
+                false,
+                "HTMLViewer",
+                Some(&typed("<b>x</b>", RDF_HTML)),
+                &c()
+            ),
+            Suitability::Score(50)
+        );
+        assert_eq!(
+            score(&r, false, "HTMLViewer", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(&r, false, "ValueTableViewer", None, &c()),
+            Suitability::Manual
+        );
+        assert_eq!(
+            score(&r, false, "ValueTableViewer", Some(&lit("x")), &c()),
+            Suitability::Manual
+        );
+        assert_eq!(
+            score(&r, false, "DetailsViewer", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(&r, false, "DetailsViewer", Some(&iri("http://x/a")), &c()),
+            Suitability::Manual
+        );
         let mut ns = c();
         ns.node_shape = Some(crate::description::TermRef::from_term(&iri("http://x/S")));
-        assert_eq!(score(&r, false, "DetailsViewer", Some(&bnode()), &ns), Suitability::Score(15));
-        assert_eq!(score(&r, false, "URIViewer", Some(&iri("http://x/a")), &c()), Suitability::Score(1));
-        assert_eq!(score(&r, false, "LangStringViewer", Some(&lang("x")), &c()), Suitability::Score(10));
-        assert_eq!(score(&r, false, "LangStringViewer", Some(&lit("x")), &c()), Suitability::Unsuitable);
-        assert_eq!(score(&r, false, "BlankNodeViewer", Some(&bnode()), &c()), Suitability::Score(1));
-        assert_eq!(score(&r, false, "BlankNodeViewer", Some(&iri("http://x/a")), &c()), Suitability::Unsuitable);
+        assert_eq!(
+            score(&r, false, "DetailsViewer", Some(&bnode()), &ns),
+            Suitability::Score(15)
+        );
+        assert_eq!(
+            score(&r, false, "URIViewer", Some(&iri("http://x/a")), &c()),
+            Suitability::Score(1)
+        );
+        assert_eq!(
+            score(&r, false, "LangStringViewer", Some(&lang("x")), &c()),
+            Suitability::Score(10)
+        );
+        assert_eq!(
+            score(&r, false, "LangStringViewer", Some(&lit("x")), &c()),
+            Suitability::Unsuitable
+        );
+        assert_eq!(
+            score(&r, false, "BlankNodeViewer", Some(&bnode()), &c()),
+            Suitability::Score(1)
+        );
+        assert_eq!(
+            score(&r, false, "BlankNodeViewer", Some(&iri("http://x/a")), &c()),
+            Suitability::Unsuitable
+        );
     }
 
     #[test]
@@ -827,7 +1161,10 @@ mod tests {
             constraints: &e,
         };
         let res = r.resolve_editor(&ctx);
-        assert_eq!(res.selected.as_deref(), Some(&*format!("{DASH}EnumSelectEditor")));
+        assert_eq!(
+            res.selected.as_deref(),
+            Some(&*format!("{DASH}EnumSelectEditor"))
+        );
         assert_eq!(res.score, Some(10));
         // TextField(10) is the first runner-up; TextArea(5) follows.
         assert_eq!(res.alternatives[0], format!("{DASH}TextFieldEditor"));
@@ -846,7 +1183,9 @@ mod tests {
         assert_eq!(res.selected.as_deref(), Some(&*format!("{DASH}HTMLViewer")));
         assert_eq!(res.score, Some(50));
         // Manual-only widgets trail the scored runner-ups.
-        assert!(res.alternatives.contains(&format!("{DASH}ValueTableViewer")));
+        assert!(res
+            .alternatives
+            .contains(&format!("{DASH}ValueTableViewer")));
     }
 
     #[test]
@@ -860,14 +1199,23 @@ mod tests {
             value: None,
             constraints: &Constraints::default(),
         };
-        assert_eq!(r.score_editor("http://example.org/MyEditor", &ctx), Some(Suitability::Score(99)));
-        assert_eq!(r.resolve_editor(&ctx).selected.as_deref(), Some("http://example.org/MyEditor"));
+        assert_eq!(
+            r.score_editor("http://example.org/MyEditor", &ctx),
+            Some(Suitability::Score(99))
+        );
+        assert_eq!(
+            r.resolve_editor(&ctx).selected.as_deref(),
+            Some("http://example.org/MyEditor")
+        );
         // Replacement by IRI (not duplication).
         fn always_manual(_: &WidgetContext) -> Suitability {
             Suitability::Manual
         }
         r.register_editor("http://example.org/MyEditor", always_manual);
-        assert_eq!(r.score_editor("http://example.org/MyEditor", &ctx), Some(Suitability::Manual));
+        assert_eq!(
+            r.score_editor("http://example.org/MyEditor", &ctx),
+            Some(Suitability::Manual)
+        );
     }
 
     #[test]
@@ -882,8 +1230,14 @@ mod tests {
             value: Some(&v),
             constraints: &Constraints::default(),
         };
-        assert_eq!(r.score_viewer("http://example.org/MyViewer", &ctx), Some(Suitability::Score(60)));
-        assert_eq!(r.resolve_viewer(&ctx).selected.as_deref(), Some("http://example.org/MyViewer"));
+        assert_eq!(
+            r.score_viewer("http://example.org/MyViewer", &ctx),
+            Some(Suitability::Score(60))
+        );
+        assert_eq!(
+            r.resolve_viewer(&ctx).selected.as_deref(),
+            Some("http://example.org/MyViewer")
+        );
     }
 
     #[test]
@@ -904,6 +1258,8 @@ mod tests {
             value: None,
             constraints: &Constraints::default(),
         };
-        assert!(r.score_editor(&format!("{DASH}TextFieldEditor"), &ctx).is_some());
+        assert!(r
+            .score_editor(&format!("{DASH}TextFieldEditor"), &ctx)
+            .is_some());
     }
 }

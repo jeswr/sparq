@@ -135,11 +135,7 @@ impl WrappedSecret {
 /// a fresh ephemeral key and nonce from the OS CSPRNG. Fails closed with
 /// [`Error::BadKey`] if `recipient` is a low-order point (the exchange would be
 /// non-contributory: the "shared" secret would not depend on our ephemeral key).
-pub fn wrap(
-    recipient: &RecipientPublicKey,
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Result<WrappedSecret> {
+pub fn wrap(recipient: &RecipientPublicKey, plaintext: &[u8], aad: &[u8]) -> Result<WrappedSecret> {
     let mut eph_seed = [0u8; 32];
     OsRng.fill_bytes(&mut eph_seed);
     let mut nonce = [0u8; AEAD_NONCE_LEN];

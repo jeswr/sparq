@@ -7,8 +7,9 @@
 use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
 use sparq_engine::{
-    ask_view, count_view, query, query_json_view, query_view, query_view_with_budget, with_functions, with_view,
-    DatasetView, DefaultGraphMode, FunctionRegistry, FxHashSet, QueryBudget,
+    ask_view, count_view, query, query_json_view, query_view, query_view_with_budget,
+    with_functions, with_view, DatasetView, DefaultGraphMode, FunctionRegistry, FxHashSet,
+    QueryBudget,
 };
 use std::sync::Arc;
 
@@ -28,11 +29,19 @@ fn store() -> Graph {
 }
 
 fn names(iris: &[&str]) -> Arc<FxHashSet<Term>> {
-    Arc::new(iris.iter().map(|i| Term::NamedNode(NamedNode::new(*i).unwrap())).collect())
+    Arc::new(
+        iris.iter()
+            .map(|i| Term::NamedNode(NamedNode::new(*i).unwrap()))
+            .collect(),
+    )
 }
 
 fn view<'g>(g: &'g Graph, visible: &[&str], default: DefaultGraphMode) -> DatasetView<'g> {
-    DatasetView { base: g, named: names(visible), default }
+    DatasetView {
+        base: g,
+        named: names(visible),
+        default,
+    }
 }
 
 #[test]
@@ -45,16 +54,28 @@ fn graph_var_enumerates_only_visible_graphs() {
     let v = view(&g, &["http://ex/g1"], DefaultGraphMode::StoreDefault);
     let r = query_view(&v, q).unwrap();
     assert_eq!(r.len(), 2);
-    assert!(r.rows.iter().all(|row| row[0].as_ref().unwrap().to_string() == "<http://ex/g1>"));
+    assert!(r
+        .rows
+        .iter()
+        .all(|row| row[0].as_ref().unwrap().to_string() == "<http://ex/g1>"));
     // View {g1,g2}: three rows.
-    let v = view(&g, &["http://ex/g1", "http://ex/g2"], DefaultGraphMode::StoreDefault);
+    let v = view(
+        &g,
+        &["http://ex/g1", "http://ex/g2"],
+        DefaultGraphMode::StoreDefault,
+    );
     assert_eq!(query_view(&v, q).unwrap().len(), 3);
     // Empty view: GRAPH ?g matches nothing.
     let v = view(&g, &[], DefaultGraphMode::StoreDefault);
     assert_eq!(query_view(&v, q).unwrap().len(), 0);
     // GRAPH ?g {} unit-row-per-graph semantics restrict the same way.
     let v = view(&g, &["http://ex/g1"], DefaultGraphMode::StoreDefault);
-    assert_eq!(query_view(&v, "SELECT ?g WHERE { GRAPH ?g {} }").unwrap().len(), 1);
+    assert_eq!(
+        query_view(&v, "SELECT ?g WHERE { GRAPH ?g {} }")
+            .unwrap()
+            .len(),
+        1
+    );
     // The view never leaks past the entry point: the plain API sees everything.
     assert_eq!(query(&g, q).unwrap().len(), 4);
 }
@@ -100,28 +121,63 @@ fn default_graph_modes() {
     let g = store();
     // StoreDefault: today's behaviour — the store's default graph is visible.
     let v = view(&g, &["http://ex/g1"], DefaultGraphMode::StoreDefault);
-    assert_eq!(query_view(&v, "SELECT * WHERE { ?s ?p ?o }").unwrap().len(), 2);
-    assert_eq!(count_view(&v, "SELECT * WHERE { ?s <http://ex/p> ?o }").unwrap(), 2);
+    assert_eq!(
+        query_view(&v, "SELECT * WHERE { ?s ?p ?o }").unwrap().len(),
+        2
+    );
+    assert_eq!(
+        count_view(&v, "SELECT * WHERE { ?s <http://ex/p> ?o }").unwrap(),
+        2
+    );
     // Property path over the default chain d1->d2->d3: 3 pairs under p+.
-    assert_eq!(query_view(&v, "SELECT * WHERE { ?s <http://ex/p>+ ?o }").unwrap().len(), 3);
+    assert_eq!(
+        query_view(&v, "SELECT * WHERE { ?s <http://ex/p>+ ?o }")
+            .unwrap()
+            .len(),
+        3
+    );
 
     // Empty: the default graph has no data at top-level scope…
     let v = view(&g, &["http://ex/g1"], DefaultGraphMode::Empty);
-    assert_eq!(query_view(&v, "SELECT * WHERE { ?s ?p ?o }").unwrap().len(), 0);
-    assert_eq!(query_view(&v, "SELECT * WHERE { ?s <http://ex/p>+ ?o }").unwrap().len(), 0);
+    assert_eq!(
+        query_view(&v, "SELECT * WHERE { ?s ?p ?o }").unwrap().len(),
+        0
+    );
+    assert_eq!(
+        query_view(&v, "SELECT * WHERE { ?s <http://ex/p>+ ?o }")
+            .unwrap()
+            .len(),
+        0
+    );
     // …including the index fast paths (count / ASK / streaming JSON).
-    assert_eq!(count_view(&v, "SELECT * WHERE { ?s <http://ex/p> ?o }").unwrap(), 0);
+    assert_eq!(
+        count_view(&v, "SELECT * WHERE { ?s <http://ex/p> ?o }").unwrap(),
+        0
+    );
     assert!(!ask_view(&v, "ASK { ?s <http://ex/p> ?o }").unwrap());
     let json = query_json_view(&v, "SELECT ?s WHERE { ?s <http://ex/p> ?o }").unwrap();
     assert!(json.contains("\"bindings\":[]"), "got: {json}");
     // …but the empty group pattern keeps its unit row,
-    assert_eq!(query_view(&v, "SELECT (1 AS ?x) WHERE {}").unwrap().len(), 1);
+    assert_eq!(
+        query_view(&v, "SELECT (1 AS ?x) WHERE {}").unwrap().len(),
+        1
+    );
     assert!(ask_view(&v, "ASK {}").unwrap());
     // …and GRAPH evaluation is untouched (the suspend flag): BGPs, paths and
     // EXISTS inside a visible graph still see that graph's data.
-    assert_eq!(query_view(&v, "SELECT * WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }").unwrap().len(), 2);
     assert_eq!(
-        query_view(&v, "SELECT * WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p>+ ?o } }").unwrap().len(),
+        query_view(&v, "SELECT * WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }")
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        query_view(
+            &v,
+            "SELECT * WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p>+ ?o } }"
+        )
+        .unwrap()
+        .len(),
         3 // a->b, b->c, a->c
     );
     assert_eq!(
@@ -143,8 +199,18 @@ fn graph_unit_row_semantics_preserved() {
     let r = query_view(&v, "SELECT * WHERE { GRAPH <http://ex/g1> {} }").unwrap();
     assert_eq!((r.vars.len(), r.rows.len()), (0, 1));
     // A non-visible one behaves like an absent one: zero rows.
-    assert_eq!(query_view(&v, "SELECT * WHERE { GRAPH <http://ex/g2> {} }").unwrap().len(), 0);
-    assert_eq!(query_view(&v, "SELECT * WHERE { GRAPH <http://ex/nope> {} }").unwrap().len(), 0);
+    assert_eq!(
+        query_view(&v, "SELECT * WHERE { GRAPH <http://ex/g2> {} }")
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        query_view(&v, "SELECT * WHERE { GRAPH <http://ex/nope> {} }")
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -153,9 +219,15 @@ fn dataset_clause_intersects_with_view() {
     let v = view(&g, &["http://ex/g1"], DefaultGraphMode::StoreDefault);
     let n = |q: &str| query_view(&v, q).unwrap().len();
     // FROM NAMED of a visible graph: normal active-dataset behaviour.
-    assert_eq!(n("SELECT * FROM NAMED <http://ex/g1> WHERE { GRAPH ?g { ?s ?p ?o } }"), 2);
+    assert_eq!(
+        n("SELECT * FROM NAMED <http://ex/g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+        2
+    );
     // FROM NAMED of a non-visible graph contributes the EMPTY graph.
-    assert_eq!(n("SELECT * FROM NAMED <http://ex/g2> WHERE { GRAPH ?g { ?s ?p ?o } }"), 0);
+    assert_eq!(
+        n("SELECT * FROM NAMED <http://ex/g2> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+        0
+    );
     // Listing extra graphs cannot WIDEN the view: only g1 data appears.
     assert_eq!(
         n("SELECT * FROM NAMED <http://ex/g1> FROM NAMED <http://ex/g2> FROM NAMED <http://ex/g3> \
@@ -165,19 +237,38 @@ fn dataset_clause_intersects_with_view() {
     // FROM merges only visible graphs into the active default graph.
     assert_eq!(n("SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }"), 2);
     assert_eq!(n("SELECT * FROM <http://ex/g2> WHERE { ?s ?p ?o }"), 0);
-    assert_eq!(n("SELECT * FROM <http://ex/g1> FROM <http://ex/g2> WHERE { ?s ?p ?o }"), 2);
+    assert_eq!(
+        n("SELECT * FROM <http://ex/g1> FROM <http://ex/g2> WHERE { ?s ?p ?o }"),
+        2
+    );
     // In the ACTIVE dataset a named (even non-visible ≡ absent) FROM NAMED graph
     // exists as the empty graph, so `GRAPH <g> {}` has the unit row — identically
     // for non-visible and absent (covered byte-for-byte in the
     // indistinguishability test).
-    assert_eq!(n("SELECT * FROM NAMED <http://ex/g2> WHERE { GRAPH <http://ex/g2> {} }"), 1);
-    assert_eq!(n("SELECT * FROM NAMED <http://ex/nope> WHERE { GRAPH <http://ex/nope> {} }"), 1);
+    assert_eq!(
+        n("SELECT * FROM NAMED <http://ex/g2> WHERE { GRAPH <http://ex/g2> {} }"),
+        1
+    );
+    assert_eq!(
+        n("SELECT * FROM NAMED <http://ex/nope> WHERE { GRAPH <http://ex/nope> {} }"),
+        1
+    );
     // A dataset clause under DefaultGraphMode::Empty: FROM re-scopes the default
     // graph to (visible) named-graph data, which the view authorises — Empty
     // governs the STORE default graph only.
     let v_empty = view(&g, &["http://ex/g1"], DefaultGraphMode::Empty);
-    assert_eq!(query_view(&v_empty, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap().len(), 2);
-    assert_eq!(query_view(&v_empty, "SELECT * FROM <http://ex/g2> WHERE { ?s ?p ?o }").unwrap().len(), 0);
+    assert_eq!(
+        query_view(&v_empty, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }")
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        query_view(&v_empty, "SELECT * FROM <http://ex/g2> WHERE { ?s ?p ?o }")
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -185,16 +276,31 @@ fn composes_with_budget_and_functions() {
     let g = store();
     let v = view(&g, &["http://ex/g1"], DefaultGraphMode::StoreDefault);
     // Budget: refusal (not truncation) fires through the view entry point.
-    let tight = QueryBudget { max_rows: Some(1), ..QueryBudget::unlimited() };
-    let e = query_view_with_budget(&v, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }", &tight).map(|r| r.len()).unwrap_err();
+    let tight = QueryBudget {
+        max_rows: Some(1),
+        ..QueryBudget::unlimited()
+    };
+    let e = query_view_with_budget(&v, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }", &tight)
+        .map(|r| r.len())
+        .unwrap_err();
     assert!(e.contains("query budget exceeded"), "got: {e}");
-    let ok = QueryBudget { max_rows: Some(100), ..QueryBudget::unlimited() };
-    assert_eq!(query_view_with_budget(&v, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }", &ok).unwrap().len(), 2);
+    let ok = QueryBudget {
+        max_rows: Some(100),
+        ..QueryBudget::unlimited()
+    };
+    assert_eq!(
+        query_view_with_budget(&v, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }", &ok)
+            .unwrap()
+            .len(),
+        2
+    );
 
     // Extension functions: `ex:one(?x)` = 1, used inside a GRAPH pattern, with
     // the view installed — both nesting orders work.
     let mut reg = FunctionRegistry::new();
-    reg.register("http://ex/fn#one", |_args: &[Term]| Ok(Term::Literal(oxrdf::Literal::from(1))));
+    reg.register("http://ex/fn#one", |_args: &[Term]| {
+        Ok(Term::Literal(oxrdf::Literal::from(1)))
+    });
     let q = "PREFIX fn: <http://ex/fn#> SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(fn:one(?s) = 1) } }";
     let r = with_functions(&reg, || query_view(&v, q)).unwrap();
     assert_eq!(r.len(), 2); // only g1 is visible
@@ -213,7 +319,9 @@ fn view_holds_under_parallel_evaluation() {
     let n: usize = 50_001;
     let mut nq = String::with_capacity(n * 40);
     for i in 0..n {
-        nq.push_str(&format!("<http://ex/n{i}> <http://ex/v> <http://ex/w{i}> .\n"));
+        nq.push_str(&format!(
+            "<http://ex/n{i}> <http://ex/v> <http://ex/w{i}> .\n"
+        ));
     }
     nq.push_str("<http://ex/a> <http://ex/m> <http://ex/b> <http://ex/g1> .\n");
     nq.push_str("<http://ex/x> <http://ex/m> <http://ex/y> <http://ex/g2> .\n");
@@ -241,13 +349,20 @@ fn bench_view_vs_from_named_copy() {
     let mut nq = String::new();
     for gi in 0..graphs {
         for i in 0..per_graph {
-            nq.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{gi}x{i}> <http://ex/g{gi}> .\n"));
+            nq.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/o{gi}x{i}> <http://ex/g{gi}> .\n"
+            ));
         }
     }
     let g = Graph::load_dataset(&nq, "nquads").unwrap();
-    let named: FxHashSet<Term> =
-        (0..visible).map(|gi| Term::NamedNode(NamedNode::new(format!("http://ex/g{gi}")).unwrap())).collect();
-    let v = DatasetView { base: &g, named: Arc::new(named), default: DefaultGraphMode::Empty };
+    let named: FxHashSet<Term> = (0..visible)
+        .map(|gi| Term::NamedNode(NamedNode::new(format!("http://ex/g{gi}")).unwrap()))
+        .collect();
+    let v = DatasetView {
+        base: &g,
+        named: Arc::new(named),
+        default: DefaultGraphMode::Empty,
+    };
     let q = "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s <http://ex/p> ?o } }";
     let mut q_from = String::from("SELECT ?g ?s ?o\n");
     for gi in 0..visible {

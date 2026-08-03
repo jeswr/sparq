@@ -68,7 +68,10 @@ pub fn field_from_hash_bytes(bytes: &[u8; 32]) -> Fr {
 
 fn decode_hex(hex: &str) -> Vec<u8> {
     // [OPUS-4.8] sq-hbg7: stable-1.96 clippy `manual_is_multiple_of`.
-    assert!(hex.len().is_multiple_of(2), "hex string must have even length");
+    assert!(
+        hex.len().is_multiple_of(2),
+        "hex string must have even length"
+    );
     (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))

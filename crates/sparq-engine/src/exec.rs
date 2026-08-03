@@ -6,7 +6,6 @@
 //! `LocalVocab`, mirroring QLever's local vocabulary.
 
 use crate::QueryResult;
-use std::ops::ControlFlow;
 use oxrdf::vocab::xsd;
 use oxrdf::{BlankNode, Literal, NamedOrBlankNode, Term, Variable};
 use rustc_hash::FxHashMap;
@@ -14,13 +13,16 @@ use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
 use sparq_core::temporal::{Temporal, Timeline};
 use sparq_core::Graph;
+use std::ops::ControlFlow;
 // [OPUS-4.8] sq-ev41x (epic sq-qonbz): the id-level numeric value tower (`Num` / `Dec` /
 // `ArithOp` / `RoundMode` and the XSD lexical helpers) now lives in the `sparq-substrate`
 // leaf crate so the engine AND the reasoners share ONE definition with no `Box<dyn>` on the
 // hot path (research/shared-eval-substrate.md, Option C, Phase 2). This is a behaviour-neutral
 // code-move: the engine re-imports the same items here under the same names, so every call
 // site below is unchanged and the W3C conformance / ORDER BY / numeric tests are bit-identical.
-use sparq_substrate::numeric::{f64_exact_decimal, parse_xsd_f32, parse_xsd_f64, split_decimal, ArithOp, Dec, Num};
+use sparq_substrate::numeric::{
+    f64_exact_decimal, parse_xsd_f32, parse_xsd_f64, split_decimal, ArithOp, Dec, Num,
+};
 // [OPUS-4.8] sq-hknqs (epic sq-qonbz, Phase 3): the four id-tuple join kernels live in the
 // shared substrate now (merge / hash / bind / leapfrog-trie). The engine's planner, `Bindings`,
 // `LocalVocab` interning and `ScanCmp` pushdown stay private here; the thin adapters below build
@@ -37,13 +39,14 @@ use sparq_substrate::join as sjoin;
 // `Value` / `LitKind` / `value_compare_strict` stay engine-private (they also drive the
 // relational operators); only the algorithm moved. Behaviour-neutral: the W3C SPARQL / ORDER BY
 // / FILTER conformance is bit-identical.
-use sparq_substrate::compare::{compare_terms, CompareTerm, LiteralKind, TermClass};
 use rustc_hash::FxHashSet;
-use spargebra::algebra::{
-    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression, PropertyPathExpression,
-};
 use smallvec::SmallVec;
+use spargebra::algebra::{
+    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
+    PropertyPathExpression,
+};
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern};
+use sparq_substrate::compare::{compare_terms, CompareTerm, LiteralKind, TermClass};
 use std::cmp::Ordering;
 
 // [FABLE-5] (sq-7d3dj.30.7) Equality-FILTER → value-join unification, behind the opt-in
@@ -136,7 +139,8 @@ pub(crate) mod budget {
         /// byte size compared against `max_bytes`. [OPUS-4.8] (sq-s5is)
         #[inline]
         fn bytes(&self, rows: usize) -> usize {
-            rows.saturating_mul(self.byte_width).saturating_add(self.extra_bytes)
+            rows.saturating_mul(self.byte_width)
+                .saturating_add(self.extra_bytes)
         }
 
         /// WHY the limits are hit at `rows`, or `None` when they are not — the pure (no
@@ -158,7 +162,10 @@ pub(crate) mod budget {
                 return Some("max-bytes");
             }
             #[cfg(not(target_arch = "wasm32"))]
-            if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            if self
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+            {
                 return Some("timeout");
             }
             if let Some(cancel) = self.cancel {
@@ -347,7 +354,8 @@ pub(crate) mod budget {
     pub(crate) fn remaining_timeout() -> Option<std::time::Duration> {
         ACTIVE.with(|a| {
             let lim = a.get();
-            lim.deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()))
+            lim.deadline
+                .map(|d| d.saturating_duration_since(std::time::Instant::now()))
         })
     }
 
@@ -471,7 +479,9 @@ pub(crate) mod budget {
             .checked_div(a.byte_width.max(1))
             .unwrap_or(usize::MAX)
             .saturating_add(1);
-        cap.min(a.max_rows.saturating_add(1)).min(by_bytes).min(1 << 20)
+        cap.min(a.max_rows.saturating_add(1))
+            .min(by_bytes)
+            .min(1 << 20)
     }
 
     /// [SONNET-4.6] (sq-qk6ac) Direct tests for `Limits::why` — the pure gate the
@@ -489,7 +499,12 @@ pub(crate) mod budget {
         fn assert_reason(budget: &QueryBudget, rows: usize, want: &'static str) {
             let _guard = install(budget);
             let snap = snapshot();
-            assert_eq!(snap.why(rows), Some(want), "wrong snapshot reason for {}", want);
+            assert_eq!(
+                snap.why(rows),
+                Some(want),
+                "wrong snapshot reason for {}",
+                want
+            );
             assert!(snap.hit(rows), "hit must agree with why for {}", want);
             assert_eq!(
                 check(rows),
@@ -505,18 +520,31 @@ pub(crate) mod budget {
             let budget = QueryBudget::unlimited();
             let _guard = install(&budget);
             let snap = snapshot();
-            assert_eq!(snap.why(0), None, "an unlimited budget must report no reason");
-            assert_eq!(snap.why(usize::MAX), None, "no row cap ⇒ no reason at any row count");
+            assert_eq!(
+                snap.why(0),
+                None,
+                "an unlimited budget must report no reason"
+            );
+            assert_eq!(
+                snap.why(usize::MAX),
+                None,
+                "no row cap ⇒ no reason at any row count"
+            );
             assert!(!snap.hit(usize::MAX), "hit must agree with why");
         }
 
         /// Each limit reports ITS OWN reason, and the string matches `check`'s message.
         #[test]
         fn each_limit_reports_the_reason_check_would_raise() {
-            let rows_capped = QueryBudget { max_rows: Some(4), ..QueryBudget::unlimited() };
+            let rows_capped = QueryBudget {
+                max_rows: Some(4),
+                ..QueryBudget::unlimited()
+            };
             assert_reason(&rows_capped, 5, "max-rows");
-            let bytes_capped =
-                QueryBudget { max_bytes: Some(BYTES_PER_ID), ..QueryBudget::unlimited() };
+            let bytes_capped = QueryBudget {
+                max_bytes: Some(BYTES_PER_ID),
+                ..QueryBudget::unlimited()
+            };
             assert_reason(&bytes_capped, 2, "max-bytes");
             let cancelled = QueryBudget::cancelled_by(Arc::new(AtomicBool::new(true)));
             assert_reason(&cancelled, 0, "cancelled");
@@ -537,10 +565,17 @@ pub(crate) mod budget {
         /// snapshot clean, so the gate cannot abandon work a budget still admits.
         #[test]
         fn a_limit_not_yet_crossed_reports_nothing() {
-            let budget = QueryBudget { max_rows: Some(4), ..QueryBudget::unlimited() };
+            let budget = QueryBudget {
+                max_rows: Some(4),
+                ..QueryBudget::unlimited()
+            };
             let _guard = install(&budget);
             let snap = snapshot();
-            assert_eq!(snap.why(4), None, "a row count AT the cap is still admitted");
+            assert_eq!(
+                snap.why(4),
+                None,
+                "a row count AT the cap is still admitted"
+            );
             assert_eq!(snap.why(5), Some("max-rows"), "one past the cap trips");
         }
 
@@ -555,15 +590,24 @@ pub(crate) mod budget {
             let snap = snapshot();
 
             let (worker_poll, worker_reason) = std::thread::scope(|s| {
-                s.spawn(|| (check(0), snap.why(0))).join().expect("worker must not panic")
+                s.spawn(|| (check(0), snap.why(0)))
+                    .join()
+                    .expect("worker must not panic")
             });
-            assert_eq!(worker_poll, Ok(()), "the thread-local budget is invisible to a worker");
+            assert_eq!(
+                worker_poll,
+                Ok(()),
+                "the thread-local budget is invisible to a worker"
+            );
             assert_eq!(
                 worker_reason,
                 Some("cancelled"),
                 "the captured snapshot must carry the cancellation across threads"
             );
-            assert_eq!(check(0), Err("query budget exceeded (cancelled)".to_owned()));
+            assert_eq!(
+                check(0),
+                Err("query budget exceeded (cancelled)".to_owned())
+            );
         }
     }
 
@@ -580,12 +624,22 @@ pub(crate) mod budget {
             let budget = QueryBudget::unlimited().with_cancel(Arc::clone(&flag));
             let _guard = install(&budget);
 
-            assert!(!snapshot().hit(0), "false control must not trip the rayon snapshot");
-            assert_eq!(check(0), Ok(()), "false control must not trip the local poll");
+            assert!(
+                !snapshot().hit(0),
+                "false control must not trip the rayon snapshot"
+            );
+            assert_eq!(
+                check(0),
+                Ok(()),
+                "false control must not trip the local poll"
+            );
 
             flag.store(true, Ordering::Relaxed);
             assert!(snapshot().hit(0), "true flag must trip the rayon snapshot");
-            assert_eq!(check(0), Err("query budget exceeded (cancelled)".to_owned()));
+            assert_eq!(
+                check(0),
+                Err("query budget exceeded (cancelled)".to_owned())
+            );
             assert_eq!(EXCEEDED.with(Cell::get), Some("cancelled"));
         }
 
@@ -593,7 +647,9 @@ pub(crate) mod budget {
         fn cancel_from_another_thread_stops_large_query_promptly() {
             let mut nt = String::new();
             for i in 0..12_000 {
-                nt.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+                nt.push_str(&format!(
+                    "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"
+                ));
             }
             let graph = Graph::load_str(&nt, "ntriples").expect("test graph parses");
             let flag = Arc::new(AtomicBool::new(false));
@@ -638,7 +694,6 @@ pub(crate) mod budget {
             assert_eq!(clean.len(), 1);
         }
     }
-
 }
 
 // ---- EXPLAIN ANALYZE operator trace (T22) -------------------------------------
@@ -1056,15 +1111,21 @@ fn certain_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
     match p {
         G::Bgp { patterns } => {
             for tp in patterns {
-                for v in [real(&tp.subject), nnp_var_ref(&tp.predicate), real(&tp.object)]
-                    .into_iter()
-                    .flatten()
+                for v in [
+                    real(&tp.subject),
+                    nnp_var_ref(&tp.predicate),
+                    real(&tp.object),
+                ]
+                .into_iter()
+                .flatten()
                 {
                     out.insert(v.clone());
                 }
             }
         }
-        G::Path { subject, object, .. } => {
+        G::Path {
+            subject, object, ..
+        } => {
             for v in [real(subject), real(object)].into_iter().flatten() {
                 out.insert(v.clone());
             }
@@ -1097,16 +1158,25 @@ fn certain_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
         // BIND may evaluate to an error (leaving its target UNBOUND), so the extended
         // variable is NOT certain; only the inner pattern's certain vars are.
         G::Extend { inner, .. } => certain_vars(inner, out),
-        G::Values { variables, bindings } => {
+        G::Values {
+            variables,
+            bindings,
+        } => {
             for (i, v) in variables.iter().enumerate() {
-                if bindings.iter().all(|row| row.get(i).is_some_and(Option::is_some)) {
+                if bindings
+                    .iter()
+                    .all(|row| row.get(i).is_some_and(Option::is_some))
+                {
                     out.insert(v.clone());
                 }
             }
         }
         // Projection / grouping drop non-listed variables; keep the listed ones that
         // are certain in the inner pattern.
-        G::Project { inner, variables } | G::Group { inner, variables, .. } => {
+        G::Project { inner, variables }
+        | G::Group {
+            inner, variables, ..
+        } => {
             let mut inner_c = FxHashSet::default();
             certain_vars(inner, &mut inner_c);
             for v in variables {
@@ -1142,10 +1212,18 @@ fn certain_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
 /// snapshot-scoped: the caller must build it against the same `&Graph` the query executes on, and
 /// the whole analysis is re-run per evaluation (see `predicate_has_literal_object`).
 #[cfg(feature = "id-filter-fastpath")]
-fn nonliteral_vars(p: &GraphPattern, obj_may_be_literal: &dyn Fn(&oxrdf::NamedNode) -> bool) -> FxHashSet<Variable> {
+fn nonliteral_vars(
+    p: &GraphPattern,
+    obj_may_be_literal: &dyn Fn(&oxrdf::NamedNode) -> bool,
+) -> FxHashSet<Variable> {
     let mut nonlit_positioned = FxHashSet::default();
     let mut lit_possible = FxHashSet::default();
-    collect_kind_positions(p, &mut nonlit_positioned, &mut lit_possible, obj_may_be_literal);
+    collect_kind_positions(
+        p,
+        &mut nonlit_positioned,
+        &mut lit_possible,
+        obj_may_be_literal,
+    );
     nonlit_positioned.retain(|v| !lit_possible.contains(v));
     nonlit_positioned
 }
@@ -1225,7 +1303,9 @@ fn collect_kind_positions(
         // zero-length `ZeroOrMore`/`ZeroOrOne` match the SUBJECT end can equal a literal object.
         // So NEITHER endpoint is credited non-literal here — both are literal-risk. A path variable
         // is still proven non-literal if it appears in a subject/predicate slot of some BGP.
-        G::Path { subject, object, .. } => {
+        G::Path {
+            subject, object, ..
+        } => {
             poison_slot(subject, maybe_lit);
             poison_slot(object, maybe_lit);
         }
@@ -1254,7 +1334,9 @@ fn collect_kind_positions(
         | G::OrderBy { inner, .. }
         | G::Distinct { inner }
         | G::Reduced { inner }
-        | G::Slice { inner, .. } => collect_kind_positions(inner, nonlit, maybe_lit, obj_may_be_literal),
+        | G::Slice { inner, .. } => {
+            collect_kind_positions(inner, nonlit, maybe_lit, obj_may_be_literal)
+        }
         G::Graph { name, inner } => {
             // A GRAPH-name variable binds a graph IRI — non-literal.
             if let NamedNodePattern::Variable(v) = name {
@@ -1274,7 +1356,9 @@ fn collect_kind_positions(
             collect_kind_positions(inner, nonlit, maybe_lit, &|_| true);
         }
         // A BIND target can evaluate to a literal — literal-risk.
-        G::Extend { inner, variable, .. } => {
+        G::Extend {
+            inner, variable, ..
+        } => {
             maybe_lit.insert(variable.clone());
             collect_kind_positions(inner, nonlit, maybe_lit, obj_may_be_literal);
         }
@@ -1304,7 +1388,11 @@ fn collect_kind_positions(
         // (SUM/COUNT/… AS ?v) is a computed literal. Like PROJECT, only the OUTPUT columns
         // (group keys + aggregate targets) are visible, so analyse the inner locally and merge only
         // the group-key variables' verdicts; the aggregate targets are added as literal-risk.
-        G::Group { inner, variables, aggregates } => {
+        G::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
             let mut inner_nl = FxHashSet::default();
             let mut inner_ml = FxHashSet::default();
             collect_kind_positions(inner, &mut inner_nl, &mut inner_ml, obj_may_be_literal);
@@ -1339,13 +1427,23 @@ fn nnp_var_ref(p: &NamedNodePattern) -> Option<&Variable> {
 /// when substitution is not clearly sound (e.g. a `SERVICE`, a sub-`SELECT`/aggregate
 /// that projects a substituted variable, or a `BOUND(?v)` on a substituted variable) —
 /// in which case the caller falls back to cold evaluation.
-fn subst_pattern(p: &GraphPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<GraphPattern> {
+fn subst_pattern(
+    p: &GraphPattern,
+    sub: &FxHashMap<Variable, oxrdf::NamedNode>,
+) -> Option<GraphPattern> {
     use GraphPattern as G;
     Some(match p {
         G::Bgp { patterns } => G::Bgp {
-            patterns: patterns.iter().map(|tp| subst_triple(tp, sub)).collect::<Option<Vec<_>>>()?,
+            patterns: patterns
+                .iter()
+                .map(|tp| subst_triple(tp, sub))
+                .collect::<Option<Vec<_>>>()?,
         },
-        G::Path { subject, path, object } => G::Path {
+        G::Path {
+            subject,
+            path,
+            object,
+        } => G::Path {
             subject: subst_term(subject, sub)?,
             path: path.clone(),
             object: subst_term(object, sub)?,
@@ -1354,7 +1452,11 @@ fn subst_pattern(p: &GraphPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) 
             left: Box::new(subst_pattern(left, sub)?),
             right: Box::new(subst_pattern(right, sub)?),
         },
-        G::LeftJoin { left, right, expression } => G::LeftJoin {
+        G::LeftJoin {
+            left,
+            right,
+            expression,
+        } => G::LeftJoin {
             left: Box::new(subst_pattern(left, sub)?),
             right: Box::new(subst_pattern(right, sub)?),
             expression: match expression {
@@ -1378,7 +1480,11 @@ fn subst_pattern(p: &GraphPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) 
             left: Box::new(subst_pattern(left, sub)?),
             right: Box::new(subst_pattern(right, sub)?),
         },
-        G::Extend { inner, variable, expression } => {
+        G::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
             // A BIND target that is itself a substituted variable would shadow the
             // constant — bail conservatively.
             if sub.contains_key(variable) {
@@ -1390,19 +1496,36 @@ fn subst_pattern(p: &GraphPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) 
                 expression: subst_expr(expression, sub)?,
             }
         }
-        G::Values { variables, bindings } => {
+        G::Values {
+            variables,
+            bindings,
+        } => {
             if variables.iter().any(|v| sub.contains_key(v)) {
                 return None;
             }
-            G::Values { variables: variables.clone(), bindings: bindings.clone() }
+            G::Values {
+                variables: variables.clone(),
+                bindings: bindings.clone(),
+            }
         }
         G::OrderBy { inner, expression } => G::OrderBy {
             inner: Box::new(subst_pattern(inner, sub)?),
-            expression: expression.iter().map(|oe| subst_order(oe, sub)).collect::<Option<Vec<_>>>()?,
+            expression: expression
+                .iter()
+                .map(|oe| subst_order(oe, sub))
+                .collect::<Option<Vec<_>>>()?,
         },
-        G::Distinct { inner } => G::Distinct { inner: Box::new(subst_pattern(inner, sub)?) },
-        G::Reduced { inner } => G::Reduced { inner: Box::new(subst_pattern(inner, sub)?) },
-        G::Slice { inner, start, length } => G::Slice {
+        G::Distinct { inner } => G::Distinct {
+            inner: Box::new(subst_pattern(inner, sub)?),
+        },
+        G::Reduced { inner } => G::Reduced {
+            inner: Box::new(subst_pattern(inner, sub)?),
+        },
+        G::Slice {
+            inner,
+            start,
+            length,
+        } => G::Slice {
             inner: Box::new(subst_pattern(inner, sub)?),
             start: *start,
             length: *length,
@@ -1413,14 +1536,20 @@ fn subst_pattern(p: &GraphPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) 
             if variables.iter().any(|v| sub.contains_key(v)) {
                 return None;
             }
-            G::Project { inner: Box::new(subst_pattern(inner, sub)?), variables: variables.clone() }
+            G::Project {
+                inner: Box::new(subst_pattern(inner, sub)?),
+                variables: variables.clone(),
+            }
         }
         // Aggregation and everything else (Service, …): conservative bail.
         _ => return None,
     })
 }
 
-fn subst_triple(tp: &TriplePattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<TriplePattern> {
+fn subst_triple(
+    tp: &TriplePattern,
+    sub: &FxHashMap<Variable, oxrdf::NamedNode>,
+) -> Option<TriplePattern> {
     Some(TriplePattern {
         subject: subst_term(&tp.subject, sub)?,
         predicate: subst_nnp(&tp.predicate, sub),
@@ -1440,7 +1569,10 @@ fn subst_term(t: &TermPattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> O
     })
 }
 
-fn subst_nnp(p: &NamedNodePattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> NamedNodePattern {
+fn subst_nnp(
+    p: &NamedNodePattern,
+    sub: &FxHashMap<Variable, oxrdf::NamedNode>,
+) -> NamedNodePattern {
     match p {
         NamedNodePattern::Variable(v) => match sub.get(v) {
             Some(nn) => NamedNodePattern::NamedNode(nn.clone()),
@@ -1450,7 +1582,10 @@ fn subst_nnp(p: &NamedNodePattern, sub: &FxHashMap<Variable, oxrdf::NamedNode>) 
     }
 }
 
-fn subst_order(oe: &OrderExpression, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Option<OrderExpression> {
+fn subst_order(
+    oe: &OrderExpression,
+    sub: &FxHashMap<Variable, oxrdf::NamedNode>,
+) -> Option<OrderExpression> {
     Some(match oe {
         OrderExpression::Asc(e) => OrderExpression::Asc(subst_expr(e, sub)?),
         OrderExpression::Desc(e) => OrderExpression::Desc(subst_expr(e, sub)?),
@@ -1471,12 +1606,16 @@ fn subst_expr(e: &Expression, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Op
         E::Equal(a, b) => E::Equal(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
         E::SameTerm(a, b) => E::SameTerm(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
         E::Greater(a, b) => E::Greater(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
-        E::GreaterOrEqual(a, b) => E::GreaterOrEqual(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
+        E::GreaterOrEqual(a, b) => {
+            E::GreaterOrEqual(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?)
+        }
         E::Less(a, b) => E::Less(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
         E::LessOrEqual(a, b) => E::LessOrEqual(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
         E::In(a, list) => E::In(
             bx(subst_expr(a, sub))?,
-            list.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?,
+            list.iter()
+                .map(|x| subst_expr(x, sub))
+                .collect::<Option<Vec<_>>>()?,
         ),
         E::Add(a, b) => E::Add(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
         E::Subtract(a, b) => E::Subtract(bx(subst_expr(a, sub))?, bx(subst_expr(b, sub))?),
@@ -1490,10 +1629,16 @@ fn subst_expr(e: &Expression, sub: &FxHashMap<Variable, oxrdf::NamedNode>) -> Op
             bx(subst_expr(t, sub))?,
             bx(subst_expr(f, sub))?,
         ),
-        E::Coalesce(list) => E::Coalesce(list.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?),
+        E::Coalesce(list) => E::Coalesce(
+            list.iter()
+                .map(|x| subst_expr(x, sub))
+                .collect::<Option<Vec<_>>>()?,
+        ),
         E::FunctionCall(f, args) => E::FunctionCall(
             f.clone(),
-            args.iter().map(|x| subst_expr(x, sub)).collect::<Option<Vec<_>>>()?,
+            args.iter()
+                .map(|x| subst_expr(x, sub))
+                .collect::<Option<Vec<_>>>()?,
         ),
         E::Exists(gp) => E::Exists(Box::new(subst_pattern(gp, sub)?)),
         // `BOUND(?v)` on a substituted (certainly-bound) variable is always true, but
@@ -1551,7 +1696,9 @@ fn try_sip_join(
     // Group left rows by their pushed-value combination `C` (dedup for EVALUATION,
     // never for the join result). `key_of` builds the ordered IRI-string key.
     let key_of = |ri: usize| -> Vec<String> {
-        push.iter().map(|(_, _, iris)| iris[ri].as_str().to_string()).collect()
+        push.iter()
+            .map(|(_, _, iris)| iris[ri].as_str().to_string())
+            .collect()
     };
     let mut order: Vec<Vec<String>> = Vec::new();
     let mut groups: FxHashMap<Vec<String>, Vec<usize>> = FxHashMap::default();
@@ -2123,7 +2270,9 @@ pub(crate) mod view {
     pub(crate) fn worker_install(snap: &Option<State>) -> WorkerGuard {
         match snap {
             None => WorkerGuard(None),
-            Some(s) => WorkerGuard(Some(ACTIVE.with(|a| std::mem::replace(&mut *a.borrow_mut(), s.clone())))),
+            Some(s) => WorkerGuard(Some(
+                ACTIVE.with(|a| std::mem::replace(&mut *a.borrow_mut(), s.clone())),
+            )),
         }
     }
 }
@@ -2211,9 +2360,7 @@ fn local_term_bytes(t: &Term) -> usize {
         Term::NamedNode(n) => base + n.as_str().len(),
         Term::BlankNode(b) => base + b.as_str().len(),
         Term::Literal(l) => {
-            base + l.value().len()
-                + l.datatype().as_str().len()
-                + l.language().map_or(0, str::len)
+            base + l.value().len() + l.datatype().as_str().len() + l.language().map_or(0, str::len)
         }
         // RDF 1.2 triple terms: charge the struct + each component recursively.
         other => base + format!("{other}").len(),
@@ -2325,7 +2472,11 @@ impl Bindings {
         self.vars.iter().position(|x| x == v)
     }
     fn unsorted(vars: Vec<Variable>, rows: Vec<Row>) -> Self {
-        Bindings { vars, rows, sorted_by: None }
+        Bindings {
+            vars,
+            rows,
+            sorted_by: None,
+        }
     }
 }
 
@@ -2351,7 +2502,10 @@ pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult,
     // result — but every row is independent, so do it in parallel on native (the wasm
     // build has no threads and keeps the sequential path). Order is preserved.
     let materialise = |row: &Row| -> Vec<Option<Term>> {
-        col_of.iter().map(|c| c.and_then(|i| term_of(graph, &local, row[i]))).collect()
+        col_of
+            .iter()
+            .map(|c| c.and_then(|i| term_of(graph, &local, row[i])))
+            .collect()
     };
     #[cfg(feature = "parallel")]
     let rows: Vec<Vec<Option<Term>>> = if bindings.rows.len() >= PAR_THRESHOLD {
@@ -2362,7 +2516,10 @@ pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult,
     };
     #[cfg(not(feature = "parallel"))]
     let rows: Vec<Vec<Option<Term>>> = bindings.rows.iter().map(materialise).collect();
-    Ok(QueryResult { vars: out_vars, rows })
+    Ok(QueryResult {
+        vars: out_vars,
+        rows,
+    })
 }
 
 /// Writes one binding's JSON value directly from its id — no intermediate `oxrdf::Term`
@@ -2469,10 +2626,22 @@ fn single_pattern_scan_json_emit(
         return None; // a repeated variable needs the consistency check — use the general path
     }
     let out_vars: Vec<Variable> = match proj {
-        Some(vs) => vs.iter().filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX)).cloned().collect(),
-        None => pos_vars.iter().flatten().filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX)).cloned().collect(),
+        Some(vs) => vs
+            .iter()
+            .filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX))
+            .cloned()
+            .collect(),
+        None => pos_vars
+            .iter()
+            .flatten()
+            .filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX))
+            .cloned()
+            .collect(),
     };
-    let cols: Vec<Option<usize>> = out_vars.iter().map(|v| pos_vars.iter().position(|x| x.as_ref() == Some(v))).collect();
+    let cols: Vec<Option<usize>> = out_vars
+        .iter()
+        .map(|v| pos_vars.iter().position(|x| x.as_ref() == Some(v)))
+        .collect();
 
     let mut head = String::from("{\"head\":{\"vars\":[");
     for (i, v) in out_vars.iter().enumerate() {
@@ -2499,7 +2668,11 @@ fn single_pattern_scan_json_emit(
     let mut scan_rows: &[[Id; 3]] = scan.rows.as_ref();
     if let Some((fpos, cmp)) = filt {
         let actual_sort = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none());
-        if actual_sort == Some(fpos) && scan_rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
+        if actual_sort == Some(fpos)
+            && scan_rows
+                .first()
+                .is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos]))
+        {
             scan_rows = match inline_pass_values(cmp) {
                 Some((lo, hi)) => {
                     let (lo_id, hi_id) = (dict::INLINE_BASE + lo, dict::INLINE_BASE + hi);
@@ -2555,7 +2728,10 @@ fn single_pattern_scan_json_emit(
             // One string per chunk (≈ per worker), not per row — avoids one heap
             // allocation per result cell. Chunks stay in order, so on the success path
             // the bytes are identical to the serial path.
-            let chunk = scan_rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
+            let chunk = scan_rows
+                .len()
+                .div_ceil(rayon::current_num_threads() * 4)
+                .max(1);
             let frags: Vec<(usize, String)> = scan_rows
                 .par_chunks(chunk)
                 .map(|rows| {
@@ -2653,7 +2829,11 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
 /// re-copying); `flush = None` produces the single-string layout (one chunk on the
 /// sequential paths, head+fragments concatenated on the parallel path — exactly the
 /// old behaviour and allocation profile).
-pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Result<Vec<String>, String> {
+pub fn eval_select_json_chunks(
+    graph: &Graph,
+    pattern: &GraphPattern,
+    flush: Option<usize>,
+) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     eval_select_json_emit(graph, pattern, flush, &mut |c| {
         out.push(c);
@@ -2703,7 +2883,11 @@ pub fn eval_select_json_emit(
     let bindings = eval_modified(graph, &mut local, pattern)?;
     budget::check(bindings.rows.len())?; // final gate (see eval_select)
 
-    let out_vars: Vec<&Variable> = bindings.vars.iter().filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX)).collect();
+    let out_vars: Vec<&Variable> = bindings
+        .vars
+        .iter()
+        .filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX))
+        .collect();
     let col_of: Vec<Option<usize>> = out_vars.iter().map(|v| bindings.col(v)).collect();
 
     let mut head = String::from("{\"head\":{\"vars\":[");
@@ -2754,7 +2938,11 @@ pub fn eval_select_json_emit(
         // thread's sticky flag is out of reach inside rayon).
         let limits = budget::snapshot();
         // One string per chunk (≈ per worker), not per row. Chunks stay in order → identical bytes.
-        let chunk = bindings.rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
+        let chunk = bindings
+            .rows
+            .len()
+            .div_ceil(rayon::current_num_threads() * 4)
+            .max(1);
         let frags: Vec<String> = bindings
             .rows
             .par_chunks(chunk)
@@ -2838,14 +3026,22 @@ pub fn eval_ask(graph: &Graph, pattern: &GraphPattern) -> Result<bool, String> {
     // markers reference the unsimplified tree; every capped path below already
     // declines while recording, so the recorded evaluation is the full one).
     #[cfg(feature = "zk")]
-    let simplified = if crate::zk::enabled() { pattern.clone() } else { ask_simplify(pattern) };
+    let simplified = if crate::zk::enabled() {
+        pattern.clone()
+    } else {
+        ask_simplify(pattern)
+    };
     #[cfg(not(feature = "zk"))]
     let simplified = ask_simplify(pattern);
     // Exact-count fast path (a single-pattern BGP answers from the index).
     if let Some(n) = try_count(graph, &simplified) {
         return Ok(n > 0);
     }
-    let sliced = GraphPattern::Slice { inner: Box::new(simplified), start: 0, length: Some(1) };
+    let sliced = GraphPattern::Slice {
+        inner: Box::new(simplified),
+        start: 0,
+        length: Some(1),
+    };
     let mut local = LocalVocab::default();
     let b = eval_modified(graph, &mut local, &sliced)?;
     budget::check(b.rows.len())?;
@@ -2916,15 +3112,23 @@ fn try_count(graph: &Graph, p: &GraphPattern) -> Option<usize> {
         return None; // empty-default view: the index ranges are not the active dataset
     }
     match p {
-        GraphPattern::Project { inner, .. } | GraphPattern::Reduced { inner } => try_count(graph, inner),
-        GraphPattern::Slice { inner, start, length } => try_count(graph, inner).map(|n| {
+        GraphPattern::Project { inner, .. } | GraphPattern::Reduced { inner } => {
+            try_count(graph, inner)
+        }
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => try_count(graph, inner).map(|n| {
             let after_offset = n.saturating_sub(*start);
             length.map_or(after_offset, |l| after_offset.min(l))
         }),
         // OPTIONAL: count the left join without materialising (Σ over the join var).
-        GraphPattern::LeftJoin { left, right, expression } => {
-            count_leftjoin(graph, left, right, expression.as_ref())
-        }
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => count_leftjoin(graph, left, right, expression.as_ref()),
         // A single-pattern, filter-free BGP: the range size is the exact count.
         _ => count_pushdown(graph, p),
     }
@@ -2971,7 +3175,13 @@ fn count_leftjoin(
     let shared: Vec<(usize, usize)> = lpv
         .iter()
         .enumerate()
-        .filter_map(|(i, v)| v.as_ref().and_then(|v| rpv.iter().position(|x| x.as_ref() == Some(v)).map(|j| (i, j))))
+        .filter_map(|(i, v)| {
+            v.as_ref().and_then(|v| {
+                rpv.iter()
+                    .position(|x| x.as_ref() == Some(v))
+                    .map(|j| (i, j))
+            })
+        })
         .collect();
     let [(lpos, rpos)] = shared[..] else {
         return None;
@@ -3009,7 +3219,11 @@ fn count_leftjoin(
 
 // ---- Algebra dispatch ---------------------------------------------------------
 
-fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+fn eval_modified(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    p: &GraphPattern,
+) -> Result<Bindings, String> {
     // Pin NOW() for this execution (SPARQL 1.1 §17.4.5.1). Outermost call samples
     // the clock once; the recursive / EXISTS re-entries see it active and keep the
     // outer instant (a Cell read). [FABLE-5] sq-98w7z.1
@@ -3042,7 +3256,11 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             Ok(b)
         }
         GraphPattern::Reduced { inner } => eval_modified(graph, local, inner),
-        GraphPattern::Slice { inner, start, length } => {
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => {
             // LIMIT early-termination: a bare LIMIT (no ORDER BY / DISTINCT /
             // aggregation above it, which all need the full result) can stop after
             // start+length rows instead of materialising the whole relation — a
@@ -3078,7 +3296,11 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             order_bindings(graph, local, &mut b, expression, None)?;
             Ok(b)
         }
-        GraphPattern::Group { inner, variables, aggregates } => {
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
             // zk-trace: the enclosed pattern inputs are the PRE-AGGREGATION
             // input sets; the count pushdown below is disabled under an armed
             // recorder (inside `try_count`), so they are always captured.
@@ -3088,7 +3310,9 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             // scan range size — no need to materialise the solutions just to count
             // them (QLever counts lazily too; this is the q02-style win).
             if variables.is_empty() && aggregates.len() == 1 {
-                if let (av, AggregateExpression::CountSolutions { distinct: false }) = (&aggregates[0].0, &aggregates[0].1) {
+                if let (av, AggregateExpression::CountSolutions { distinct: false }) =
+                    (&aggregates[0].0, &aggregates[0].1)
+                {
                     // COUNT(*) == the inner pattern's solution count. Use `try_count`, not
                     // just `count_pushdown`: it also covers OPTIONAL (lazy left-join count,
                     // Σ over the join var) and LIMIT/OFFSET — so `COUNT(*)` over an OPTIONAL
@@ -3096,7 +3320,11 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
                     if let Some(n) = try_count(graph, inner) {
                         let id = value_to_id(graph, local, &Value::Num(Num::Int(n as i64)));
                         let row: Row = std::iter::once(id).collect();
-                        return Ok(Bindings { vars: vec![av.clone()], rows: vec![row], sorted_by: None });
+                        return Ok(Bindings {
+                            vars: vec![av.clone()],
+                            rows: vec![row],
+                            sorted_by: None,
+                        });
                     }
                 }
             }
@@ -3123,19 +3351,29 @@ fn try_topk_orderby(
     row_budget: usize,
 ) -> Result<Option<Bindings>, String> {
     match inner {
-        GraphPattern::Project { inner: proj_inner, variables } => {
-            Ok(try_topk_orderby(graph, local, proj_inner, row_budget)?
-                .map(|b| project_bindings(b, variables)))
-        }
+        GraphPattern::Project {
+            inner: proj_inner,
+            variables,
+        } => Ok(try_topk_orderby(graph, local, proj_inner, row_budget)?
+            .map(|b| project_bindings(b, variables))),
         GraphPattern::Reduced { inner: red_inner } => {
             try_topk_orderby(graph, local, red_inner, row_budget)
         }
-        GraphPattern::OrderBy { inner: ord_inner, expression } => {
+        GraphPattern::OrderBy {
+            inner: ord_inner,
+            expression,
+        } => {
             let mut b = eval_modified(graph, local, ord_inner)?;
             // Use the top-k path only when the budget is strictly less than n;
             // otherwise the heap adds overhead with no benefit.
             let use_topk = b.rows.len() > row_budget;
-            order_bindings(graph, local, &mut b, expression, if use_topk { Some(row_budget) } else { None })?;
+            order_bindings(
+                graph,
+                local,
+                &mut b,
+                expression,
+                if use_topk { Some(row_budget) } else { None },
+            )?;
             Ok(Some(b))
         }
         // Not an OrderBy under transparent wrappers: decline so the caller
@@ -3224,8 +3462,15 @@ fn try_distinct_pushdown(
     }
 
     distinct_pushdown::record(out_ids.len(), total_scanned);
-    let rows: Vec<Row> = out_ids.iter().map(|&id| std::iter::once(id).collect()).collect();
-    Ok(Some(Bindings { vars: vec![pvar.clone()], rows, sorted_by: None }))
+    let rows: Vec<Row> = out_ids
+        .iter()
+        .map(|&id| std::iter::once(id).collect())
+        .collect();
+    Ok(Some(Bindings {
+        vars: vec![pvar.clone()],
+        rows,
+        sorted_by: None,
+    }))
 }
 
 /// Flattens a (possibly nested) `UNION` into its branch patterns; a non-union pattern is
@@ -3244,7 +3489,9 @@ fn collect_union_branches<'a>(p: &'a GraphPattern, out: &mut Vec<&'a GraphPatter
 /// The canonical triple positions (0=subject, 1=predicate, 2=object) at which `var`
 /// appears in a prepared pattern's `pos_vars`.
 fn var_positions_of(pos_vars: &[Option<Variable>; 3], var: &Variable) -> Vec<usize> {
-    (0..3).filter(|&i| pos_vars[i].as_ref() == Some(var)).collect()
+    (0..3)
+        .filter(|&i| pos_vars[i].as_ref() == Some(var))
+        .collect()
 }
 
 /// The single query variable shared by both patterns' `pos_vars`, or `None` unless
@@ -3268,7 +3515,9 @@ fn single_shared_var<'a>(
 
 /// The built permutation whose canonical column order is exactly `order`, if any.
 fn perm_for_order(order: [usize; 3]) -> Option<sparq_core::store::Perm> {
-    sparq_core::store::Perm::ALL.into_iter().find(|p| p.order() == order)
+    sparq_core::store::Perm::ALL
+        .into_iter()
+        .find(|p| p.order() == order)
 }
 
 /// [FABLE-5] (sq-7d3dj.30.10) The distinct ids at canonical position `target_pos` of
@@ -3336,7 +3585,8 @@ fn block_intersects_anchor(block: &[[Id; 3]], jk: usize, anchor: &AnchorSet) -> 
     // A conservative proxy: anchor smaller than `block.len() / ilog2(block.len())`.
     let block_len = block.len();
     let log_block = usize::BITS as usize - block_len.leading_zeros() as usize; // ~ceil(log2)
-    let anchor_driven = block_len > 0 && anchor.sorted.len().saturating_mul(log_block.max(1)) < block_len;
+    let anchor_driven =
+        block_len > 0 && anchor.sorted.len().saturating_mul(log_block.max(1)) < block_len;
     if !anchor_driven {
         // Gallop the block's distinct join values; O(1) hash membership.
         let mut examined = 0usize;
@@ -3375,7 +3625,11 @@ fn block_intersects_anchor(block: &[[Id; 3]], jk: usize, anchor: &AnchorSet) -> 
 /// binary search rather than touching every row). Returns `(values, rows_touched)`, or
 /// `None` when no built permutation sorts the matching range by `target_pos` (conservative
 /// decline).
-fn skipscan_distinct(graph: &Graph, id_pat: &IdPattern, target_pos: usize) -> Option<(Vec<Id>, usize)> {
+fn skipscan_distinct(
+    graph: &Graph,
+    id_pat: &IdPattern,
+    target_pos: usize,
+) -> Option<(Vec<Id>, usize)> {
     let scan = graph.store.scan_sorted(id_pat, target_pos);
     let order = scan.perm.order();
     // The range's rows are sorted by `target_pos` only when it is the FIRST unbound
@@ -4044,7 +4298,10 @@ fn try_capped(
                 // The rows are genuine union solutions (right-only variables are
                 // unbound); align the header with the un-evaluated right branch's
                 // in-scope variables, exactly as `union_bindings` would have.
-                return Ok(Some(union_bindings(l, Bindings::unsorted(in_scope_vars(right), vec![]))));
+                return Ok(Some(union_bindings(
+                    l,
+                    Bindings::unsorted(in_scope_vars(right), vec![]),
+                )));
             }
             // Fewer than `cap` rows ⇒ `l` is the COMPLETE left result (the
             // contract): the union needs only `cap - |l|` further rows.
@@ -4064,7 +4321,10 @@ fn try_capped(
             let l_complete = l.rows.len() < cap;
             if l.rows.is_empty() {
                 // Empty complete left: the full join is empty.
-                return Ok(Some(union_bindings(l, Bindings::unsorted(in_scope_vars(right), vec![]))));
+                return Ok(Some(union_bindings(
+                    l,
+                    Bindings::unsorted(in_scope_vars(right), vec![]),
+                )));
             }
             // Correlated (SIP) evaluation of the right child seeded from the capped
             // left — the same machinery as the full Join arm (sq-7d3dj.30.3). Joins
@@ -4084,7 +4344,11 @@ fn try_capped(
             // rows might join: decline, the caller runs the full path.
             Ok(None)
         }
-        GraphPattern::LeftJoin { left, right, expression } => {
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
             // OPTIONAL never drops a left row (each yields >= 1 output row, joined
             // or kept with the right unbound), so capping the LEFT side caps the
             // output. The right side is still evaluated in full so every emitted row
@@ -4094,16 +4358,28 @@ fn try_capped(
                 None => return Ok(None),
             };
             let r = eval_graph_pattern(graph, local, right)?;
-            Ok(Some(left_outer_join(graph, local, l, r, expression.as_ref())?))
+            Ok(Some(left_outer_join(
+                graph,
+                local,
+                l,
+                r,
+                expression.as_ref(),
+            )?))
         }
-        GraphPattern::Extend { inner, variable, expression } => {
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
             // BIND is row-count preserving (an expression error leaves the variable
             // unbound, the row is kept), so extending a capped subset is sound.
             let b = match try_capped(graph, local, inner, cap)? {
                 Some(b) => b,
                 None => return Ok(None),
             };
-            Ok(Some(extend_bindings(graph, local, b, variable, expression)?))
+            Ok(Some(extend_bindings(
+                graph, local, b, variable, expression,
+            )?))
         }
         _ => Ok(None),
     }
@@ -4216,14 +4492,19 @@ fn eval_bgp_binary_capped(
         let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
         record_pattern_ndv(graph, &prepared, seed, cur_card, &mut var_ndv, &cs_ctx);
         for _ in 1..prepared.len() {
-            let (i, new_card, _connected) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+            let (i, new_card, _connected) =
+                goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
             cur_card = new_card;
             done[i] = true;
             cs_ctx.note_done(i);
             // Same step selection as `eval_bgp_binary`: bind-join when the running
             // block is much smaller than the pattern; else merge / hash / cross.
-            let connecting: Vec<Variable> =
-                result.vars.iter().filter(|v| prepared[i].var_pos(v).is_some()).cloned().collect();
+            let connecting: Vec<Variable> = result
+                .vars
+                .iter()
+                .filter(|v| prepared[i].var_pos(v).is_some())
+                .cloned()
+                .collect();
             if connecting.len() == 1
                 && distinct_pattern_vars(&prepared[i].pos_vars)
                 && result.rows.len().saturating_mul(8) < prepared[i].est
@@ -4231,11 +4512,26 @@ fn eval_bgp_binary_capped(
                 let jv = &connecting[0];
                 let rk = result.col(jv).unwrap();
                 let pp = prepared[i].var_pos(jv).unwrap();
-                result = bind_join(graph, result, &prepared[i].id_pat, &prepared[i].pos_vars, rk, pp, pfilter(i));
+                result = bind_join(
+                    graph,
+                    result,
+                    &prepared[i].id_pat,
+                    &prepared[i].pos_vars,
+                    rk,
+                    pp,
+                    pfilter(i),
+                );
             } else {
                 let filt = pfilter(i);
-                let merge_var = result.sorted_by.clone().filter(|sv| prepared[i].var_pos(sv).is_some());
-                let scan_sort = filt.map(|(c, _)| c).or_else(|| merge_var.as_ref().map(|jv| prepared[i].var_pos(jv).unwrap()));
+                let merge_var = result
+                    .sorted_by
+                    .clone()
+                    .filter(|sv| prepared[i].var_pos(sv).is_some());
+                let scan_sort = filt.map(|(c, _)| c).or_else(|| {
+                    merge_var
+                        .as_ref()
+                        .map(|jv| prepared[i].var_pos(jv).unwrap())
+                });
                 let rhs = scan_to_bindings(
                     graph,
                     &prepared[i].id_pat,
@@ -4246,7 +4542,11 @@ fn eval_bgp_binary_capped(
                     #[cfg(feature = "semijoin-bitmap")]
                     None,
                 );
-                let connected = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
+                let connected = prepared[i]
+                    .pos_vars
+                    .iter()
+                    .flatten()
+                    .any(|v| result.vars.contains(v));
                 if let Some(jv) = merge_var.filter(|jv| rhs.sorted_by.as_ref() == Some(jv)) {
                     result = merge_join(result, rhs, &jv);
                 } else if connected {
@@ -4268,7 +4568,9 @@ fn eval_bgp_binary_capped(
         // BGP+FILTER shapes too. Drain-safe as in `eval_flat_conjunctive`.
         #[cfg(feature = "id-filter-fastpath")]
         let idfast_cols = {
-            let bgp = GraphPattern::Bgp { patterns: patterns.to_vec() };
+            let bgp = GraphPattern::Bgp {
+                patterns: patterns.to_vec(),
+            };
             nonliteral_filter_cols(graph, &bgp, &result)
         };
         for f in &residual {
@@ -4276,7 +4578,9 @@ fn eval_bgp_binary_capped(
                 break;
             }
             #[cfg(feature = "id-filter-fastpath")]
-            with_idfast_nonlit_cols(idfast_cols.clone(), || apply_filter(graph, local, &mut result, f))?;
+            with_idfast_nonlit_cols(idfast_cols.clone(), || {
+                apply_filter(graph, local, &mut result, f)
+            })?;
             #[cfg(not(feature = "id-filter-fastpath"))]
             apply_filter(graph, local, &mut result, f)?;
         }
@@ -4292,7 +4596,9 @@ fn eval_bgp_binary_capped(
         }
         start = end;
     }
-    Ok(Some(acc.unwrap_or_else(|| Bindings::unsorted(collect_vars(patterns), vec![]))))
+    Ok(Some(acc.unwrap_or_else(|| {
+        Bindings::unsorted(collect_vars(patterns), vec![])
+    })))
 }
 
 /// Distinct (non-repeated) variable positions of a prepared pattern, or `None` if
@@ -4333,7 +4639,12 @@ impl<'a> GroupStream<'a> {
             v.sort_unstable();
             v
         });
-        GroupStream { scan, col, i: 0, sorted_vals }
+        GroupStream {
+            scan,
+            col,
+            i: 0,
+            sorted_vals,
+        }
     }
 
     /// The next `(value, run-length)` in ascending value order, or `None` at the end.
@@ -4392,8 +4703,14 @@ fn count_single_filtered(
     // count-scan below).
     if let [(fpos, cmp)] = cmps[..] {
         let scan = graph.store.scan_sorted(id_pat, fpos);
-        let sorted_by_f = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none()) == Some(fpos);
-        if sorted_by_f && scan.rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
+        let sorted_by_f =
+            scan.perm.order().into_iter().find(|&c| id_pat[c].is_none()) == Some(fpos);
+        if sorted_by_f
+            && scan
+                .rows
+                .first()
+                .is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos]))
+        {
             return Some(match inline_pass_values(cmp) {
                 Some((lo, hi)) => {
                     let (lo_id, hi_id) = (dict::INLINE_BASE + lo, dict::INLINE_BASE + hi);
@@ -4415,7 +4732,11 @@ fn count_single_filtered(
         [(pos, ScanCmp::Num(cmp))] => scan
             .rows
             .iter()
-            .filter(|row| graph.numeric_value(scan.to_spo(row)[pos]).is_some_and(|x| cmp.test(x)))
+            .filter(|row| {
+                graph
+                    .numeric_value(scan.to_spo(row)[pos])
+                    .is_some_and(|x| cmp.test(x))
+            })
             .count(),
         [(pos, ScanCmp::Temp(op, t))] => scan
             .rows
@@ -4499,7 +4820,10 @@ fn count_pushdown(graph: &Graph, inner: &GraphPattern) -> Option<usize> {
             *occ.entry(v).or_insert(0) += 1;
         }
     }
-    let center = *occ.iter().find(|(_, &n)| n == prepared.len()).map(|(v, _)| v)?;
+    let center = *occ
+        .iter()
+        .find(|(_, &n)| n == prepared.len())
+        .map(|(v, _)| v)?;
     if occ.iter().any(|(v, &n)| *v != center && n != 1) {
         return None;
     }
@@ -4591,7 +4915,9 @@ fn recognise_graph_prefix(expr: &Expression, gv: &Variable) -> Option<String> {
             }
             // arg1 must be a constant simple / xsd:string literal.
             match &args[1] {
-                Expression::Literal(l) if l.language().is_none() && l.datatype() == oxrdf::vocab::xsd::STRING => {
+                Expression::Literal(l)
+                    if l.language().is_none() && l.datatype() == oxrdf::vocab::xsd::STRING =>
+                {
                     Some(l.value().to_string())
                 }
                 _ => None,
@@ -4599,7 +4925,9 @@ fn recognise_graph_prefix(expr: &Expression, gv: &Variable) -> Option<String> {
         }
         // A top-level conjunction: a prefix from EITHER side is sound (the other conjunct is
         // still enforced by the surviving FILTER). Prefer the left, else the right.
-        Expression::And(l, r) => recognise_graph_prefix(l, gv).or_else(|| recognise_graph_prefix(r, gv)),
+        Expression::And(l, r) => {
+            recognise_graph_prefix(l, gv).or_else(|| recognise_graph_prefix(r, gv))
+        }
         _ => None,
     }
 }
@@ -4659,7 +4987,11 @@ fn eval_graph_named_pref(
             // branch below: non-visible must be INDISTINGUISHABLE from absent
             // (the L1 view's security property).
             let sub = if view::allows(&target) {
-                graph.named.iter().find(|(t, _)| *t == target).map(|(_, sub)| sub)
+                graph
+                    .named
+                    .iter()
+                    .find(|(t, _)| *t == target)
+                    .map(|(_, sub)| sub)
             } else {
                 None
             };
@@ -4678,8 +5010,8 @@ fn eval_graph_named_pref(
                 // any rows (an empty group pattern would otherwise produce one).
                 None => {
                     let _scope = view::enter_graph(); // schema eval matches the present-graph path
-                    // zk-trace: an absent graph still records the operator
-                    // boundary + (empty) pattern input sets under its name.
+                                                      // zk-trace: an absent graph still records the operator
+                                                      // boundary + (empty) pattern input sets under its name.
                     #[cfg(feature = "zk")]
                     let _zk = crate::zk::graph_scope(&target);
                     let empty = Graph::load_str("", "ntriples").map_err(|e| e.to_string())?;
@@ -4699,7 +5031,11 @@ fn eval_graph_named_pref(
             // `None`-branch insert order, so projected results are unchanged.
             let mut out_vars: Option<Vec<Variable>> = None;
             let mut out_rows: Vec<Row> = Vec::new();
-            let mut per_graph = |graph: &Graph, local: &mut LocalVocab, gname: &Term, sub: &Graph| -> Result<(), String> {
+            let mut per_graph = |graph: &Graph,
+                                 local: &mut LocalVocab,
+                                 gname: &Term,
+                                 sub: &Graph|
+             -> Result<(), String> {
                 // zk-trace: each iteration of `GRAPH ?g` tags the enclosed scans/filters with the
                 // iteration's named graph — the scope is installed INSIDE eval_translated (one
                 // place), so the operator boundary stream is not double-nested.
@@ -4802,7 +5138,11 @@ fn eval_graph_named_pref(
 /// routes through the `#[cold]` timing wrapper; otherwise it is a direct call into
 /// the evaluator — the only cost on the normal path is one thread-local flag read
 /// per *operator* (the same class of check `budget::check` already does here).
-fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+fn eval_graph_pattern(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    p: &GraphPattern,
+) -> Result<Bindings, String> {
     let b = if trace::enabled() {
         eval_graph_pattern_traced(graph, local, p)?
     } else {
@@ -4824,7 +5164,11 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
 /// row count and wall time. `#[cold]` keeps it (and the `Instant` plumbing) off
 /// the normal path entirely.
 #[cold]
-fn eval_graph_pattern_traced(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+fn eval_graph_pattern_traced(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    p: &GraphPattern,
+) -> Result<Bindings, String> {
     let idx = trace::enter(trace_label(p));
     // Structured EXPLAIN (`explain-json`): attach the planner's estimated output
     // cardinality to conjunctive (BGP) nodes so the q-error compares the engine's own
@@ -4863,8 +5207,16 @@ fn trace_label(p: &GraphPattern) -> String {
         let mut patterns = Vec::new();
         let mut filters = Vec::new();
         flatten_conjunction(p, &mut patterns, &mut filters);
-        let plan = if bgp_uses_binary(&patterns) { "binary GOO" } else { "worst-case-optimal (LFTJ)" };
-        return format!("BGP [{plan}] ({} patterns, {} filters)", patterns.len(), filters.len());
+        let plan = if bgp_uses_binary(&patterns) {
+            "binary GOO"
+        } else {
+            "worst-case-optimal (LFTJ)"
+        };
+        return format!(
+            "BGP [{plan}] ({} patterns, {} filters)",
+            patterns.len(),
+            filters.len()
+        );
     }
     match p {
         GraphPattern::Bgp { patterns } => format!("BGP ({} patterns)", patterns.len()),
@@ -4887,7 +5239,11 @@ fn trace_label(p: &GraphPattern) -> String {
     }
 }
 
-fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+fn eval_graph_pattern_inner(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    p: &GraphPattern,
+) -> Result<Bindings, String> {
     budget::check(0)?; // coarse cooperative cancellation: once per operator entry
     if is_conjunctive(p) {
         let mut patterns = Vec::new();
@@ -4915,7 +5271,11 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             // index (O(log G + matches)) instead of enumerating all G graphs. The FILTER below
             // STILL runs and is exact, so the result is unchanged — the pushdown only restricts
             // which graphs are visited.
-            if let GraphPattern::Graph { name: NamedNodePattern::Variable(gv), inner: ginner } = inner.as_ref() {
+            if let GraphPattern::Graph {
+                name: NamedNodePattern::Variable(gv),
+                inner: ginner,
+            } = inner.as_ref()
+            {
                 if let Some(prefix) = recognise_graph_prefix(expr, gv) {
                     let mut b = eval_graph_named_pref(
                         graph,
@@ -4989,7 +5349,11 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(join_bindings(l, r))
         }
-        GraphPattern::LeftJoin { left, right, expression } => {
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
             // zk-trace: operator boundary marker (one thread-local read; the
             // scope is a no-op when the recorder is disarmed). NOTE: the
             // embedded OPTIONAL condition is evaluated inside the join and is
@@ -5016,7 +5380,11 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(union_bindings(l, r))
         }
-        GraphPattern::Extend { inner, variable, expression } => {
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
             let b = eval_graph_pattern(graph, local, inner)?;
             extend_bindings(graph, local, b, variable, expression)
         }
@@ -5027,8 +5395,15 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(minus_bindings(l, r))
         }
-        GraphPattern::Values { variables, bindings } => Ok(values_bindings(graph, local, variables, bindings)),
-        GraphPattern::Path { subject, path, object } => {
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => Ok(values_bindings(graph, local, variables, bindings)),
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => {
             // zk-trace: property-path expansion scans the store without
             // per-pattern attribution — record an Op::Path marker so a
             // consumer fails closed (ZkTrace::first_uncaptured) rather than
@@ -5042,7 +5417,11 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         // off this falls through to the generic "unsupported" error below (and never
         // compiles the HTTP stack). [OPUS-4.8]
         #[cfg(feature = "service")]
-        GraphPattern::Service { name, inner, silent } => {
+        GraphPattern::Service {
+            name,
+            inner,
+            silent,
+        } => {
             // [OPUS-5] (sq-lsp7k.2.2) A registered LOCAL handler intercepts the IRI
             // BEFORE the transport is reached. A miss returns `None` and the HTTP path
             // below runs unchanged (egress allowlist and all). Compiled out entirely
@@ -5058,13 +5437,15 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         // handler keeps exactly the "unsupported" outcome the feature-off build gives
         // it (under SILENT, the join identity, matching how the HTTP path degrades).
         #[cfg(all(feature = "service-local", not(feature = "service")))]
-        GraphPattern::Service { name, inner, silent } => {
-            match try_local_service(graph, local, name, inner, *silent)? {
-                Some(b) => Ok(b),
-                None if *silent => Ok(Bindings::unsorted(Vec::new(), vec![Row::new()])),
-                None => Err(format!("unsupported graph pattern: {:?}", p)),
-            }
-        }
+        GraphPattern::Service {
+            name,
+            inner,
+            silent,
+        } => match try_local_service(graph, local, name, inner, *silent)? {
+            Some(b) => Ok(b),
+            None if *silent => Ok(Bindings::unsorted(Vec::new(), vec![Row::new()])),
+            None => Err(format!("unsupported graph pattern: {:?}", p)),
+        },
         GraphPattern::Project { .. }
         | GraphPattern::Distinct { .. }
         | GraphPattern::Reduced { .. }
@@ -5113,7 +5494,9 @@ fn eval_flat_conjunctive(
     // a nested EXISTS on a different layout sees the empty default. Built once (cheap) and reused.
     #[cfg(feature = "id-filter-fastpath")]
     let idfast_cols = {
-        let bgp = GraphPattern::Bgp { patterns: patterns.to_vec() };
+        let bgp = GraphPattern::Bgp {
+            patterns: patterns.to_vec(),
+        };
         nonliteral_filter_cols(graph, &bgp, &b)
     };
     for f in &residual {
@@ -5142,7 +5525,9 @@ fn eval_flat_conjunctive(
             apply_spatial_pushdown(graph, &mut b, &pd);
         }
         #[cfg(feature = "id-filter-fastpath")]
-        with_idfast_nonlit_cols(idfast_cols.clone(), || apply_filter(graph, local, &mut b, f))?;
+        with_idfast_nonlit_cols(idfast_cols.clone(), || {
+            apply_filter(graph, local, &mut b, f)
+        })?;
         #[cfg(not(feature = "id-filter-fastpath"))]
         apply_filter(graph, local, &mut b, f)?;
     }
@@ -5340,10 +5725,17 @@ fn try_local_service(
                 }
             })
             .map_err(|e| {
-                format!("local SERVICE <{}> returned an invalid relation: {}", iri.as_str(), e)
+                format!(
+                    "local SERVICE <{}> returned an invalid relation: {}",
+                    iri.as_str(),
+                    e
+                )
             })?;
-        let id_rows: Vec<Row> =
-            rows.rows.iter().map(|r| intern_remote_row(graph, local, r)).collect();
+        let id_rows: Vec<Row> = rows
+            .rows
+            .iter()
+            .map(|r| intern_remote_row(graph, local, r))
+            .collect();
         budget::check(id_rows.len())?;
         Ok(Bindings::unsorted(rows.vars, id_rows))
     });
@@ -5445,7 +5837,12 @@ fn try_bound_join_service(
     left: &Bindings,
     right: &GraphPattern,
 ) -> Result<Option<Bindings>, String> {
-    let GraphPattern::Service { name, inner, silent } = right else {
+    let GraphPattern::Service {
+        name,
+        inner,
+        silent,
+    } = right
+    else {
         return Ok(None);
     };
     let silent = *silent;
@@ -5516,7 +5913,10 @@ fn bound_join_to_endpoint(
     }
 
     // Column indices of the join vars in the left relation.
-    let key_cols: Vec<usize> = join_vars.iter().map(|v| left.col(v).expect("join var is a left var")).collect();
+    let key_cols: Vec<usize> = join_vars
+        .iter()
+        .map(|v| left.col(v).expect("join var is a left var"))
+        .collect();
 
     // Collect the DISTINCT, fully-bound, pushable join-key tuples from the left side.
     // A row with any unbound (`NO_ID`) join key, or a key bound to a non-pushable
@@ -5875,7 +6275,14 @@ fn collect_pattern_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
     match p {
         GraphPattern::Bgp { patterns } => {
             for tp in patterns {
-                for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)].into_iter().flatten() {
+                for v in [
+                    tp_var(&tp.subject),
+                    nnp_var(&tp.predicate),
+                    tp_var(&tp.object),
+                ]
+                .into_iter()
+                .flatten()
+                {
                     out.insert(v);
                 }
             }
@@ -5897,19 +6304,33 @@ fn filter_scope_ok(e: &Expression, bound: &FxHashSet<Variable>) -> bool {
         NamedNode(_) | Literal(_) => true,
         Variable(v) | Bound(v) => bound.contains(v),
         UnaryPlus(a) | UnaryMinus(a) | Not(a) => filter_scope_ok(a, bound),
-        And(a, b) | Or(a, b) | Equal(a, b) | SameTerm(a, b) | Greater(a, b) | GreaterOrEqual(a, b) | Less(a, b)
-        | LessOrEqual(a, b) | Add(a, b) | Subtract(a, b) | Multiply(a, b) | Divide(a, b) => {
-            filter_scope_ok(a, bound) && filter_scope_ok(b, bound)
-        }
+        And(a, b)
+        | Or(a, b)
+        | Equal(a, b)
+        | SameTerm(a, b)
+        | Greater(a, b)
+        | GreaterOrEqual(a, b)
+        | Less(a, b)
+        | LessOrEqual(a, b)
+        | Add(a, b)
+        | Subtract(a, b)
+        | Multiply(a, b)
+        | Divide(a, b) => filter_scope_ok(a, bound) && filter_scope_ok(b, bound),
         In(a, list) => filter_scope_ok(a, bound) && list.iter().all(|c| filter_scope_ok(c, bound)),
-        If(c, t, f) => filter_scope_ok(c, bound) && filter_scope_ok(t, bound) && filter_scope_ok(f, bound),
+        If(c, t, f) => {
+            filter_scope_ok(c, bound) && filter_scope_ok(t, bound) && filter_scope_ok(f, bound)
+        }
         Coalesce(es) => es.iter().all(|c| filter_scope_ok(c, bound)),
         FunctionCall(_, args) => args.iter().all(|c| filter_scope_ok(c, bound)),
         Exists(_) => false,
     }
 }
 
-pub(crate) fn flatten_conjunction(p: &GraphPattern, patterns: &mut Vec<TriplePattern>, filters: &mut Vec<Expression>) {
+pub(crate) fn flatten_conjunction(
+    p: &GraphPattern,
+    patterns: &mut Vec<TriplePattern>,
+    filters: &mut Vec<Expression>,
+) {
     match p {
         GraphPattern::Bgp { patterns: tps } => patterns.extend(tps.iter().cloned()),
         GraphPattern::Join { left, right } => {
@@ -6025,9 +6446,10 @@ impl ScanCmp {
     fn test_id(&self, graph: &Graph, id: Id) -> bool {
         match *self {
             ScanCmp::Num(c) => graph.numeric_value(id).is_some_and(|x| c.test(x)),
-            ScanCmp::Temp(op, t) => {
-                graph.temporal_value(id).and_then(|v| Temporal::cmp_t(v, t)).is_some_and(|o| op.eval(o))
-            }
+            ScanCmp::Temp(op, t) => graph
+                .temporal_value(id)
+                .and_then(|v| Temporal::cmp_t(v, t))
+                .is_some_and(|o| op.eval(o)),
         }
     }
 }
@@ -6163,7 +6585,11 @@ fn pattern_var_pos(tp: &TriplePattern, var: &Variable) -> Option<usize> {
 /// Splits FILTERs into per-pattern sargable numeric predicates (pushed into the
 /// scan of the first pattern that binds the variable) and the residual filters
 /// (applied normally afterwards).
-pub(crate) fn split_sargable(graph: &Graph, patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
+pub(crate) fn split_sargable(
+    graph: &Graph,
+    patterns: &[TriplePattern],
+    filters: &[Expression],
+) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
     // zk-trace: a sargable FILTER pushed into the scan would make the scan
     // record only the POST-filter rows (the rows that PASSED), losing the
     // FILTER obligation and under-capturing the input set — the proof must
@@ -6179,11 +6605,11 @@ pub(crate) fn split_sargable(graph: &Graph, patterns: &[TriplePattern], filters:
     let mut residual = Vec::new();
     for f in filters {
         if let Some((var, cmp)) = extract_sargable(graph, f) {
-            if let Some((i, pos)) = patterns
-                .iter()
-                .enumerate()
-                .find_map(|(i, tp)| pattern_var_pos(tp, &var).filter(|_| pat_filters[i].is_none()).map(|pos| (i, pos)))
-            {
+            if let Some((i, pos)) = patterns.iter().enumerate().find_map(|(i, tp)| {
+                pattern_var_pos(tp, &var)
+                    .filter(|_| pat_filters[i].is_none())
+                    .map(|pos| (i, pos))
+            }) {
                 pat_filters[i] = Some((pos, cmp));
                 continue;
             }
@@ -6221,7 +6647,12 @@ struct SpatialPushdown {
 }
 
 enum SpatialKind {
-    DistanceWithin { point_wkt: String, radius: f64, unit_iri: String, inclusive: bool },
+    DistanceWithin {
+        point_wkt: String,
+        radius: f64,
+        unit_iri: String,
+        inclusive: bool,
+    },
     BboxIntersects {
         arg_wkt: String,
         /// [FABLE-5] (sq-lk3aw.4) `true` iff the recognised FILTER is the
@@ -6287,21 +6718,32 @@ fn match_geof_distance(args: &[Expression]) -> Option<(Variable, String, String)
 fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
     use spargebra::algebra::Function;
     // distance(...) OP radius — match the comparison, then the distance call inside.
-    let distance_cmp = |call: &Expression, radius: &Expression, inclusive: bool| -> Option<SpatialPushdown> {
-        let Expression::FunctionCall(Function::Custom(nn), cargs) = call else { return None };
-        if nn.as_str() != GEOF_DISTANCE {
-            return None;
-        }
-        let r = match radius {
-            Expression::Literal(l) => l.value().parse::<f64>().ok()?,
-            _ => return None,
+    let distance_cmp =
+        |call: &Expression, radius: &Expression, inclusive: bool| -> Option<SpatialPushdown> {
+            let Expression::FunctionCall(Function::Custom(nn), cargs) = call else {
+                return None;
+            };
+            if nn.as_str() != GEOF_DISTANCE {
+                return None;
+            }
+            let r = match radius {
+                Expression::Literal(l) => l.value().parse::<f64>().ok()?,
+                _ => return None,
+            };
+            if !r.is_finite() || r < 0.0 {
+                return None;
+            }
+            let (geo_var, point_wkt, unit_iri) = match_geof_distance(cargs)?;
+            Some(SpatialPushdown {
+                geo_var,
+                kind: SpatialKind::DistanceWithin {
+                    point_wkt,
+                    radius: r,
+                    unit_iri,
+                    inclusive,
+                },
+            })
         };
-        if !r.is_finite() || r < 0.0 {
-            return None;
-        }
-        let (geo_var, point_wkt, unit_iri) = match_geof_distance(cargs)?;
-        Some(SpatialPushdown { geo_var, kind: SpatialKind::DistanceWithin { point_wkt, radius: r, unit_iri, inclusive } })
-    };
     match e {
         // A finite within-window needs distance on the SMALLER side: `distance(...) < r`
         // or the mirror `r > distance(...)`. The opposite orientation (`r < distance` /
@@ -6358,15 +6800,29 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
 /// is a no-op returning `false` — the residual FILTER then scans every row, unchanged.
 fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown) -> bool {
     use crate::SpatialQuery;
-    let Some(col) = b.col(&pd.geo_var) else { return false };
-    let Some(idx) = spatial::active() else { return false };
+    let Some(col) = b.col(&pd.geo_var) else {
+        return false;
+    };
+    let Some(idx) = spatial::active() else {
+        return false;
+    };
     let query = match &pd.kind {
-        SpatialKind::DistanceWithin { point_wkt, radius, unit_iri, inclusive } => {
-            SpatialQuery::DistanceWithin { point_wkt, radius: *radius, unit_iri, inclusive: *inclusive }
-        }
+        SpatialKind::DistanceWithin {
+            point_wkt,
+            radius,
+            unit_iri,
+            inclusive,
+        } => SpatialQuery::DistanceWithin {
+            point_wkt,
+            radius: *radius,
+            unit_iri,
+            inclusive: *inclusive,
+        },
         SpatialKind::BboxIntersects { arg_wkt, .. } => SpatialQuery::BboxIntersects { arg_wkt },
     };
-    let Some(cands) = idx.candidates(&query) else { return false };
+    let Some(cands) = idx.candidates(&query) else {
+        return false;
+    };
     // Map the candidate TERMS to dictionary ids for an O(1) membership test on the
     // scanned column. A candidate term absent from the dict can never bind here, so
     // dropping it from the id-set is safe (and keeps the set a superset of the matches).
@@ -6462,14 +6918,30 @@ enum ExactPushdown {
 /// provider asserts its exact refinement agrees with the registered `geof:` function
 /// semantics (sparq-geo pins that equivalence in its `topology_index` tests).
 #[cfg(feature = "spatial-exact-pushdown")]
-fn apply_spatial_pushdown_exact(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown) -> ExactPushdown {
-    let SpatialKind::BboxIntersects { arg_wkt, within_region: true } = &pd.kind else {
+fn apply_spatial_pushdown_exact(
+    graph: &Graph,
+    b: &mut Bindings,
+    pd: &SpatialPushdown,
+) -> ExactPushdown {
+    let SpatialKind::BboxIntersects {
+        arg_wkt,
+        within_region: true,
+    } = &pd.kind
+    else {
         return ExactPushdown::Declined;
     };
-    let Some(col) = b.col(&pd.geo_var) else { return ExactPushdown::Declined };
-    let Some(idx) = spatial::active() else { return ExactPushdown::Declined };
-    let query = crate::SpatialExactQuery::WithinRegion { region_wkt: arg_wkt };
-    let Some(exact) = idx.candidates_exact(&query) else { return ExactPushdown::Declined };
+    let Some(col) = b.col(&pd.geo_var) else {
+        return ExactPushdown::Declined;
+    };
+    let Some(idx) = spatial::active() else {
+        return ExactPushdown::Declined;
+    };
+    let query = crate::SpatialExactQuery::WithinRegion {
+        region_wkt: arg_wkt,
+    };
+    let Some(exact) = idx.candidates_exact(&query) else {
+        return ExactPushdown::Declined;
+    };
     // A certified term absent from the graph dict can never bind here, so dropping it
     // keeps `exact_ids` exactly the certified answers that can appear in `b` (mirrors
     // the superset path's `cand_ids` mapping).
@@ -6496,15 +6968,21 @@ fn apply_spatial_pushdown_exact(graph: &Graph, b: &mut Bindings, pd: &SpatialPus
             if exact_ids.contains(&id) {
                 return true;
             }
-            let keep = *verdict.entry(id).or_insert_with(|| match term_of_id(graph, id) {
-                Some(t) => !idx.is_indexed(&t),
-                None => true, // no term (synthetic / unbound) — the index can't rule it out
-            });
+            let keep = *verdict
+                .entry(id)
+                .or_insert_with(|| match term_of_id(graph, id) {
+                    Some(t) => !idx.is_indexed(&t),
+                    None => true, // no term (synthetic / unbound) — the index can't rule it out
+                });
             all_certified &= !keep;
             keep
         });
     }
-    if all_certified { ExactPushdown::AllCertified } else { ExactPushdown::Partial }
+    if all_certified {
+        ExactPushdown::AllCertified
+    } else {
+        ExactPushdown::Partial
+    }
 }
 
 /// The graph-dictionary term for `id`, if any. (A standalone helper so the spatial
@@ -6561,10 +7039,21 @@ fn eval_path(
     let (s_end, o_end) = (resolve(subject)?, resolve(object)?);
     // Paths that admit the ZERO-LENGTH solution connect every term to itself — even
     // terms that do not occur in the data (a constant endpoint on an empty graph).
-    let zero_len = matches!(path, PropertyPathExpression::ZeroOrMore(_) | PropertyPathExpression::ZeroOrOne(_));
+    let zero_len = matches!(
+        path,
+        PropertyPathExpression::ZeroOrMore(_) | PropertyPathExpression::ZeroOrOne(_)
+    );
 
-    let s_var = if let End::Var(v) = &s_end { Some(v.clone()) } else { None };
-    let o_var = if let End::Var(v) = &o_end { Some(v.clone()) } else { None };
+    let s_var = if let End::Var(v) = &s_end {
+        Some(v.clone())
+    } else {
+        None
+    };
+    let o_var = if let End::Var(v) = &o_end {
+        Some(v.clone())
+    } else {
+        None
+    };
     let same_var = matches!((&s_var, &o_var), (Some(a), Some(b)) if a == b);
     let mut vars: Vec<Variable> = Vec::new();
     if let Some(v) = &s_var {
@@ -6580,16 +7069,30 @@ fn eval_path(
     if !zero_len && (matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
         return Ok(Bindings::unsorted(vars, Vec::new()));
     }
-    let s_bound = if let End::Bound(id) = &s_end { Some(*id) } else { None };
-    let o_bound = if let End::Bound(id) = &o_end { Some(*id) } else { None };
+    let s_bound = if let End::Bound(id) = &s_end {
+        Some(*id)
+    } else {
+        None
+    };
+    let o_bound = if let End::Bound(id) = &o_end {
+        Some(*id)
+    } else {
+        None
+    };
 
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: FxHashSet<Row> = FxHashSet::default();
     // DefaultGraphMode::Empty (L1 dataset view): no data pairs at top-level graph
     // scope — exactly the empty-graph evaluation. The zero-length constant
     // solutions below still apply (`<s> p* <s>` holds even on an empty graph).
-    if !(view::default_is_empty() || matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
-        let ends = PathEnds { s: s_bound, o: o_bound };
+    if !(view::default_is_empty()
+        || matches!(s_end, End::Missing(_))
+        || matches!(o_end, End::Missing(_)))
+    {
+        let ends = PathEnds {
+            s: s_bound,
+            o: o_bound,
+        };
         // `?x p ?x` (same variable at both ends — necessarily both unbound): only
         // diagonal pairs survive the filter, and for the recursive operators the
         // diagonal is computable WITHOUT the all-pairs closure: the zero-length
@@ -6600,16 +7103,20 @@ fn eval_path(
                 PropertyPathExpression::ZeroOrMore(_) | PropertyPathExpression::ZeroOrOne(_) => {
                     graph_nodes(graph).into_iter().map(|n| (n, n)).collect()
                 }
-                PropertyPathExpression::OneOrMore(a) => {
-                    cyclic_nodes(graph, a)?.into_iter().map(|n| (n, n)).collect()
-                }
+                PropertyPathExpression::OneOrMore(a) => cyclic_nodes(graph, a)?
+                    .into_iter()
+                    .map(|n| (n, n))
+                    .collect(),
                 _ => path_pairs(graph, path, ends)?,
             }
         } else {
             path_pairs(graph, path, ends)?
         };
         for (s, o) in pairs {
-            if s_bound.is_some_and(|b| s != b) || o_bound.is_some_and(|b| o != b) || (same_var && s != o) {
+            if s_bound.is_some_and(|b| s != b)
+                || o_bound.is_some_and(|b| o != b)
+                || (same_var && s != o)
+            {
                 continue;
             }
             let mut row: Row = SmallVec::new();
@@ -6670,7 +7177,10 @@ impl PathEnds {
     /// The constraint seen through `^path` (endpoints exchange roles).
     #[inline]
     fn swapped(self) -> PathEnds {
-        PathEnds { s: self.o, o: self.s }
+        PathEnds {
+            s: self.o,
+            o: self.s,
+        }
     }
 }
 
@@ -6687,22 +7197,47 @@ const SEQ_MIDPOINT_FANOUT_LIMIT: usize = 1024;
 /// narrowed by any bound endpoints (see [`PathEnds`] for the exact contract).
 /// Bound endpoints reach the leaves as range-scan prefixes and turn the
 /// recursive operators into single-source directed traversals.
-fn path_pairs(graph: &Graph, path: &PropertyPathExpression, ends: PathEnds) -> Result<FxHashSet<(Id, Id)>, String> {
+fn path_pairs(
+    graph: &Graph,
+    path: &PropertyPathExpression,
+    ends: PathEnds,
+) -> Result<FxHashSet<(Id, Id)>, String> {
     use PropertyPathExpression as P;
     Ok(match path {
         P::NamedNode(p) => predicate_pairs(graph, p, ends),
-        P::Reverse(a) => path_pairs(graph, a, ends.swapped())?.into_iter().map(|(s, o)| (o, s)).collect(),
+        P::Reverse(a) => path_pairs(graph, a, ends.swapped())?
+            .into_iter()
+            .map(|(s, o)| (o, s))
+            .collect(),
         P::Sequence(a, c) => {
             if let Some(s) = ends.s {
                 // Bound start: evaluate the near hop from `s` only, then push each
                 // reached midpoint into the far hop (which also receives the bound
                 // object, enabling early exit deeper down).
-                let av = path_pairs(graph, a, PathEnds { s: Some(s), o: None })?;
-                let mids: FxHashSet<Id> = av.iter().filter(|&&(x, _)| x == s).map(|&(_, m)| m).collect();
+                let av = path_pairs(
+                    graph,
+                    a,
+                    PathEnds {
+                        s: Some(s),
+                        o: None,
+                    },
+                )?;
+                let mids: FxHashSet<Id> = av
+                    .iter()
+                    .filter(|&&(x, _)| x == s)
+                    .map(|&(_, m)| m)
+                    .collect();
                 if mids.len() <= SEQ_MIDPOINT_FANOUT_LIMIT {
                     let mut out = FxHashSet::default();
                     for &m in &mids {
-                        for (m2, o) in path_pairs(graph, c, PathEnds { s: Some(m), o: ends.o })? {
+                        for (m2, o) in path_pairs(
+                            graph,
+                            c,
+                            PathEnds {
+                                s: Some(m),
+                                o: ends.o,
+                            },
+                        )? {
                             if m2 == m {
                                 out.insert((s, o));
                             }
@@ -6717,12 +7252,30 @@ fn path_pairs(graph: &Graph, path: &PropertyPathExpression, ends: PathEnds) -> R
             } else if let Some(o) = ends.o {
                 // Bound object only: mirror image — far hop backwards from `o`,
                 // midpoints pushed into the near hop as bound objects.
-                let cv = path_pairs(graph, c, PathEnds { s: None, o: Some(o) })?;
-                let mids: FxHashSet<Id> = cv.iter().filter(|&&(_, y)| y == o).map(|&(m, _)| m).collect();
+                let cv = path_pairs(
+                    graph,
+                    c,
+                    PathEnds {
+                        s: None,
+                        o: Some(o),
+                    },
+                )?;
+                let mids: FxHashSet<Id> = cv
+                    .iter()
+                    .filter(|&&(_, y)| y == o)
+                    .map(|&(m, _)| m)
+                    .collect();
                 if mids.len() <= SEQ_MIDPOINT_FANOUT_LIMIT {
                     let mut out = FxHashSet::default();
                     for &m in &mids {
-                        for (s, m2) in path_pairs(graph, a, PathEnds { s: None, o: Some(m) })? {
+                        for (s, m2) in path_pairs(
+                            graph,
+                            a,
+                            PathEnds {
+                                s: None,
+                                o: Some(m),
+                            },
+                        )? {
                             if m2 == m {
                                 out.insert((s, o));
                             }
@@ -6733,7 +7286,10 @@ fn path_pairs(graph: &Graph, path: &PropertyPathExpression, ends: PathEnds) -> R
                     join_seq(path_pairs(graph, a, PathEnds::NONE)?, cv)
                 }
             } else {
-                join_seq(path_pairs(graph, a, PathEnds::NONE)?, path_pairs(graph, c, PathEnds::NONE)?)
+                join_seq(
+                    path_pairs(graph, a, PathEnds::NONE)?,
+                    path_pairs(graph, c, PathEnds::NONE)?,
+                )
             }
         }
         // Endpoints push into BOTH branches of an alternative unchanged.
@@ -6743,22 +7299,32 @@ fn path_pairs(graph: &Graph, path: &PropertyPathExpression, ends: PathEnds) -> R
             s
         }
         P::OneOrMore(a) => match (ends.s, ends.o) {
-            (Some(s), _) => directed_reach(graph, a, s, ends.o, Dir::Fwd)?.into_iter().map(|r| (s, r)).collect(),
-            (None, Some(o)) => directed_reach(graph, a, o, None, Dir::Rev)?.into_iter().map(|r| (r, o)).collect(),
+            (Some(s), _) => directed_reach(graph, a, s, ends.o, Dir::Fwd)?
+                .into_iter()
+                .map(|r| (s, r))
+                .collect(),
+            (None, Some(o)) => directed_reach(graph, a, o, None, Dir::Rev)?
+                .into_iter()
+                .map(|r| (r, o))
+                .collect(),
             (None, None) => transitive_closure_pairs(path_pairs(graph, a, PathEnds::NONE)?),
         },
         P::ZeroOrMore(a) => match (ends.s, ends.o) {
             // A bound endpoint needs only ITS reflexive pair, not the whole node
             // domain (`<s> p* <s>` holds for any term, see the zero-length rules).
             (Some(s), _) => {
-                let mut c: FxHashSet<(Id, Id)> =
-                    directed_reach(graph, a, s, ends.o, Dir::Fwd)?.into_iter().map(|r| (s, r)).collect();
+                let mut c: FxHashSet<(Id, Id)> = directed_reach(graph, a, s, ends.o, Dir::Fwd)?
+                    .into_iter()
+                    .map(|r| (s, r))
+                    .collect();
                 c.insert((s, s));
                 c
             }
             (None, Some(o)) => {
-                let mut c: FxHashSet<(Id, Id)> =
-                    directed_reach(graph, a, o, None, Dir::Rev)?.into_iter().map(|r| (r, o)).collect();
+                let mut c: FxHashSet<(Id, Id)> = directed_reach(graph, a, o, None, Dir::Rev)?
+                    .into_iter()
+                    .map(|r| (r, o))
+                    .collect();
                 c.insert((o, o));
                 c
             }
@@ -6854,8 +7420,14 @@ fn directed_reach(
             // "may return extra relation pairs" clause.
             None => {
                 let ends = match dir {
-                    Dir::Fwd => PathEnds { s: Some(node), o: None },
-                    Dir::Rev => PathEnds { s: None, o: Some(node) },
+                    Dir::Fwd => PathEnds {
+                        s: Some(node),
+                        o: None,
+                    },
+                    Dir::Rev => PathEnds {
+                        s: None,
+                        o: Some(node),
+                    },
                 };
                 for (s, o) in path_pairs(graph, sub, ends)? {
                     match dir {
@@ -6992,8 +7564,15 @@ fn predicate_pairs(graph: &Graph, p: &oxrdf::NamedNode, ends: PathEnds) -> FxHas
 /// walks a P-leading permutation and skips each excluded predicate's contiguous
 /// block wholesale (binary search to the block end — no per-triple set probe
 /// over the excluded mass).
-fn negated_property_pairs(graph: &Graph, props: &[oxrdf::NamedNode], ends: PathEnds) -> FxHashSet<(Id, Id)> {
-    let excluded: FxHashSet<Id> = props.iter().filter_map(|p| graph.id_of(&Term::NamedNode(p.clone()))).collect();
+fn negated_property_pairs(
+    graph: &Graph,
+    props: &[oxrdf::NamedNode],
+    ends: PathEnds,
+) -> FxHashSet<(Id, Id)> {
+    let excluded: FxHashSet<Id> = props
+        .iter()
+        .filter_map(|p| graph.id_of(&Term::NamedNode(p.clone())))
+        .collect();
     if ends.s.is_some() || ends.o.is_some() {
         let pat: IdPattern = [ends.s, None, ends.o];
         let scan = graph.store.scan(&pat);
@@ -7086,7 +7665,11 @@ fn transitive_closure_pairs(pairs: FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
 
 fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
     if patterns.is_empty() {
-        return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
+        return Ok(Bindings {
+            vars: vec![],
+            rows: vec![Row::new()],
+            sorted_by: None,
+        });
     }
     // DefaultGraphMode::Empty (L1 dataset view): a non-empty BGP at top-level
     // graph scope has ZERO rows, with its normal variable schema (the empty BGP
@@ -7156,7 +7739,9 @@ fn quoted_has_var(t: &TriplePattern) -> bool {
 /// Rewrites the BGP: every subject/object slot holding a variable-carrying triple-term
 /// pattern becomes a fresh synthetic variable, with the triple-term pattern recorded as a
 /// [`QuotedConstraint`]. Ground triple terms are untouched (they resolve to one id).
-fn extract_quoted_constraints(patterns: &[TriplePattern]) -> (Vec<TriplePattern>, Vec<QuotedConstraint>) {
+fn extract_quoted_constraints(
+    patterns: &[TriplePattern],
+) -> (Vec<TriplePattern>, Vec<QuotedConstraint>) {
     let mut out = Vec::with_capacity(patterns.len());
     let mut constraints: Vec<QuotedConstraint> = Vec::new();
     for tp in patterns {
@@ -7164,8 +7749,12 @@ fn extract_quoted_constraints(patterns: &[TriplePattern]) -> (Vec<TriplePattern>
         for s in [&mut tp.subject, &mut tp.object] {
             if let TermPattern::Triple(t) = s {
                 if quoted_has_var(t) {
-                    let var = Variable::new_unchecked(format!("{QT_VAR_PREFIX}{}", constraints.len()));
-                    constraints.push(QuotedConstraint { var: var.clone(), pattern: (**t).clone() });
+                    let var =
+                        Variable::new_unchecked(format!("{QT_VAR_PREFIX}{}", constraints.len()));
+                    constraints.push(QuotedConstraint {
+                        var: var.clone(),
+                        pattern: (**t).clone(),
+                    });
                     *s = TermPattern::Variable(var);
                 }
             }
@@ -7226,7 +7815,10 @@ fn quoted_relation(graph: &Graph, c: &QuotedConstraint) -> Bindings {
 /// Binds `v` to `id`, or checks consistency when the variable is already bound
 /// (the same variable repeated inside a quoted pattern must match the same id).
 fn bind_quoted_var(v: &Variable, id: Id, vars: &[Variable], binds: &mut [Id]) -> bool {
-    let i = vars.iter().position(|x| x == v).expect("quoted var collected");
+    let i = vars
+        .iter()
+        .position(|x| x == v)
+        .expect("quoted var collected");
     if binds[i] == NO_ID {
         binds[i] = id;
         true
@@ -7237,7 +7829,13 @@ fn bind_quoted_var(v: &Variable, id: Id, vars: &[Variable], binds: &mut [Id]) ->
 
 /// Structurally unifies a triple-term pattern against a stored triple term's
 /// component ids, recursing through nested triple-term patterns.
-fn unify_quoted(graph: &Graph, pat: &TriplePattern, comps: [Id; 3], vars: &[Variable], binds: &mut [Id]) -> bool {
+fn unify_quoted(
+    graph: &Graph,
+    pat: &TriplePattern,
+    comps: [Id; 3],
+    vars: &[Variable],
+    binds: &mut [Id],
+) -> bool {
     fn slot(graph: &Graph, tp: &TermPattern, id: Id, vars: &[Variable], binds: &mut [Id]) -> bool {
         match tp {
             TermPattern::Variable(v) => bind_quoted_var(v, id, vars, binds),
@@ -7286,9 +7884,17 @@ pub(crate) fn bgp_uses_binary(patterns: &[TriplePattern]) -> bool {
 /// Binary-join BGP plan: greedy cardinality ordering with sort-merge joins on the
 /// current sort variable (falling back to hash, then cross product). `pat_filters`
 /// holds an optional pushed-down numeric FILTER per pattern (by original index).
-fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Option<(usize, ScanCmp)>]) -> Result<Bindings, String> {
+fn eval_bgp_binary(
+    graph: &Graph,
+    patterns: &[TriplePattern],
+    pat_filters: &[Option<(usize, ScanCmp)>],
+) -> Result<Bindings, String> {
     if patterns.is_empty() {
-        return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
+        return Ok(Bindings {
+            vars: vec![],
+            rows: vec![Row::new()],
+            sorted_by: None,
+        });
     }
     // L1 dataset view: the conjunctive-flattening path calls this directly
     // (bypassing eval_bgp), so the empty-default short-circuit must be here too.
@@ -7357,7 +7963,11 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     // DECLINES (returns None → unchanged greedy plan) on any non-matching shape. The
     // whole block compiles away when the feature is off (default + wasm byte-identical).
     #[cfg(feature = "cluster-materialize")]
-    if let Some(plan) = crate::cluster::detect(&prepared, crate::cluster::active_thresholds(), |i| pfilter(i).is_some()) {
+    if let Some(plan) =
+        crate::cluster::detect(&prepared, crate::cluster::active_thresholds(), |i| {
+            pfilter(i).is_some()
+        })
+    {
         return eval_bgp_cluster(graph, patterns, pat_filters, &plan);
     }
 
@@ -7398,7 +8008,8 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
 
     for _ in 1..prepared.len() {
         // Pick the connected candidate with the smallest estimated output.
-        let (i, new_card, _connected) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+        let (i, new_card, _connected) =
+            goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
         cur_card = new_card;
         done[i] = true;
         cs_ctx.note_done(i);
@@ -7409,7 +8020,12 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         // (large) relation and merge/hash-joining. This is the win on a selective join —
         // e.g. a chain whose far end is selective — where the merge would scan millions
         // of rows to match a few thousand. Same result, validated differentially.
-        let connecting: Vec<Variable> = result.vars.iter().filter(|v| var_pos(i, v).is_some()).cloned().collect();
+        let connecting: Vec<Variable> = result
+            .vars
+            .iter()
+            .filter(|v| var_pos(i, v).is_some())
+            .cloned()
+            .collect();
         if connecting.len() == 1
             && distinct_pattern_vars(&prepared[i].pos_vars)
             && result.rows.len().saturating_mul(8) < prepared[i].est
@@ -7417,7 +8033,15 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
             let jv = &connecting[0];
             let rk = result.col(jv).unwrap();
             let pp = var_pos(i, jv).unwrap();
-            result = bind_join(graph, result, &prepared[i].id_pat, &prepared[i].pos_vars, rk, pp, pfilter(i));
+            result = bind_join(
+                graph,
+                result,
+                &prepared[i].id_pat,
+                &prepared[i].pos_vars,
+                rk,
+                pp,
+                pfilter(i),
+            );
             record_pattern_ndv(graph, &prepared, i, cur_card, &mut var_ndv, &cs_ctx);
             if result.rows.is_empty() {
                 break;
@@ -7428,8 +8052,13 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         // Execute: a pushed-down filter forces the scan into its own column order
         // (and filters inline); otherwise sort by the join variable for a merge.
         let filt = pfilter(i);
-        let merge_var = result.sorted_by.clone().filter(|sv| var_pos(i, sv).is_some());
-        let scan_sort = filt.map(|(c, _)| c).or_else(|| merge_var.as_ref().map(|jv| var_pos(i, jv).unwrap()));
+        let merge_var = result
+            .sorted_by
+            .clone()
+            .filter(|sv| var_pos(i, sv).is_some());
+        let scan_sort = filt
+            .map(|(c, _)| c)
+            .or_else(|| merge_var.as_ref().map(|jv| var_pos(i, jv).unwrap()));
 
         // [OPUS-4.8] (sq-gr8mb / §A3) Semi-join prefilter: build a membership filter over
         // ONE connecting variable's ids from the already-materialised `result`, and pass
@@ -7447,7 +8076,8 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
             .find_map(|v| var_pos(i, v).map(|pos| (v.clone(), pos)))
             .and_then(|(v, pos)| {
                 let rk = result.col(&v)?;
-                crate::semijoin::KeyFilter::build(result.rows.iter().map(|r| r[rk])).map(|kf| (pos, kf))
+                crate::semijoin::KeyFilter::build(result.rows.iter().map(|r| r[rk]))
+                    .map(|kf| (pos, kf))
             });
         #[cfg(feature = "semijoin-bitmap")]
         let prefilter = prefilter_keys.as_ref().map(|(pos, kf)| (*pos, kf));
@@ -7462,7 +8092,11 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
             #[cfg(feature = "semijoin-bitmap")]
             prefilter,
         );
-        let connected = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
+        let connected = prepared[i]
+            .pos_vars
+            .iter()
+            .flatten()
+            .any(|v| result.vars.contains(v));
         // Merge only when both sides are sorted on the join variable (a filter may
         // have forced the scan into a different order).
         if let Some(jv) = merge_var.filter(|jv| rhs.sorted_by.as_ref() == Some(jv)) {
@@ -7636,7 +8270,10 @@ fn eval_bgp_yannakakis(
                 var_id.entry(v.clone()).or_insert(next);
             }
         }
-        relations.push(SjRelation { bindings, join_cols });
+        relations.push(SjRelation {
+            bindings,
+            join_cols,
+        });
     }
 
     // Build the join tree over the relations' join-variable id sets (pure topology).
@@ -7731,8 +8368,10 @@ fn semijoin_reduce(relations: &mut [SjRelation], target: usize, source: usize) {
     let filters: Vec<(usize, crate::semijoin::KeyFilter)> = shared
         .iter()
         .filter_map(|&(tcol, scol)| {
-            crate::semijoin::KeyFilter::build(relations[source].bindings.rows.iter().map(|r| r[scol]))
-                .map(|kf| (tcol, kf))
+            crate::semijoin::KeyFilter::build(
+                relations[source].bindings.rows.iter().map(|r| r[scol]),
+            )
+            .map(|kf| (tcol, kf))
         })
         .collect();
     if filters.len() != shared.len() {
@@ -7772,12 +8411,24 @@ impl Prepared {
 }
 
 /// Prepares every pattern of a BGP for planning (constant resolution + estimates).
-pub(crate) fn prepare_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Vec<Prepared>, String> {
+pub(crate) fn prepare_bgp(
+    graph: &Graph,
+    patterns: &[TriplePattern],
+) -> Result<Vec<Prepared>, String> {
     let mut prepared: Vec<Prepared> = Vec::with_capacity(patterns.len());
     for tp in patterns {
         let (id_pat, pos_vars, unsat) = prepare_pattern(graph, tp)?;
-        let est = if unsat { 0 } else { graph.store.estimate(&id_pat) };
-        prepared.push(Prepared { id_pat, pos_vars, est, unsatisfiable: unsat });
+        let est = if unsat {
+            0
+        } else {
+            graph.store.estimate(&id_pat)
+        };
+        prepared.push(Prepared {
+            id_pat,
+            pos_vars,
+            est,
+            unsatisfiable: unsat,
+        });
     }
     Ok(prepared)
 }
@@ -7817,7 +8468,8 @@ pub(crate) fn bgp_estimate(graph: &Graph, p: &GraphPattern) -> Result<f64, Strin
     cs_ctx.note_done(seed);
     record_pattern_ndv(graph, &prepared, seed, cur_card, &mut var_ndv, &cs_ctx);
     for _ in 2..=prepared.len() {
-        let (i, new_card, _connected) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
+        let (i, new_card, _connected) =
+            goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
         cur_card = new_card;
         done[i] = true;
         cs_ctx.note_done(i);
@@ -7828,13 +8480,19 @@ pub(crate) fn bgp_estimate(graph: &Graph, p: &GraphPattern) -> Result<f64, Strin
 
 /// GOO seed choice: the pattern with the smallest single-pattern cardinality.
 pub(crate) fn goo_seed(prepared: &[Prepared]) -> usize {
-    (0..prepared.len()).min_by_key(|&i| prepared[i].est).unwrap()
+    (0..prepared.len())
+        .min_by_key(|&i| prepared[i].est)
+        .unwrap()
 }
 
 /// The seed scan's requested sort column: a pushed-down filter scans in its own
 /// column's order (sequential numeric access); otherwise sort by the first seed
 /// variable shared with another pattern, to enable a merge join.
-pub(crate) fn goo_seed_sort(prepared: &[Prepared], seed: usize, filter_col: Option<usize>) -> Option<usize> {
+pub(crate) fn goo_seed_sort(
+    prepared: &[Prepared],
+    seed: usize,
+    filter_col: Option<usize>,
+) -> Option<usize> {
     if filter_col.is_some() {
         return filter_col;
     }
@@ -7938,7 +8596,9 @@ pub(crate) fn record_pattern_ndv(
     for (pos, ov) in p.pos_vars.iter().enumerate() {
         if let Some(v) = ov {
             let raw = match pos {
-                0 => cs.subject_ndv(i).unwrap_or_else(|| pattern_var_ndv(graph, &p.id_pat, pos, p.est)),
+                0 => cs
+                    .subject_ndv(i)
+                    .unwrap_or_else(|| pattern_var_ndv(graph, &p.id_pat, pos, p.est)),
                 _ => pattern_var_ndv(graph, &p.id_pat, pos, p.est),
             };
             let ndv = raw.min(cur_card.max(1.0));
@@ -8001,7 +8661,10 @@ pub(crate) fn goo_pick(
         Some((i, out)) => (i, out.max(0.0), true),
         None => {
             // Disconnected: smallest-cardinality remaining (cross product).
-            let i = (0..prepared.len()).filter(|&j| !done[j]).min_by_key(|&j| prepared[j].est).unwrap();
+            let i = (0..prepared.len())
+                .filter(|&j| !done[j])
+                .min_by_key(|&j| prepared[j].est)
+                .unwrap();
             (i, cur_card * prepared[i].est as f64, false)
         }
     }
@@ -8110,7 +8773,9 @@ fn eval_bgp_cluster(
     let sub = |idxs: &[usize]| -> (Vec<TriplePattern>, Vec<Option<(usize, ScanCmp)>>) {
         (
             idxs.iter().map(|&i| patterns[i].clone()).collect(),
-            idxs.iter().map(|&i| pat_filters.get(i).copied().flatten()).collect(),
+            idxs.iter()
+                .map(|&i| pat_filters.get(i).copied().flatten())
+                .collect(),
         )
     };
     let (cluster_pats, cluster_filts) = sub(&plan.cluster);
@@ -8161,7 +8826,14 @@ fn eval_join_tree(
 pub(crate) fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
     let mut vars = Vec::new();
     for tp in patterns {
-        for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)].into_iter().flatten() {
+        for v in [
+            tp_var(&tp.subject),
+            nnp_var(&tp.predicate),
+            tp_var(&tp.object),
+        ]
+        .into_iter()
+        .flatten()
+        {
             if !vars.contains(&v) {
                 vars.push(v);
             }
@@ -8269,8 +8941,11 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
     let order_vars = wcoj_global_order(graph, patterns, &prepared);
     let n_levels = order_vars.len();
 
-    let var_levels: FxHashMap<Variable, usize> =
-        order_vars.iter().enumerate().map(|(i, v)| (v.clone(), i)).collect();
+    let var_levels: FxHashMap<Variable, usize> = order_vars
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.clone(), i))
+        .collect();
 
     // Build a trie per pattern that has variables; check constant-only patterns
     // for existence (empty range => empty BGP).
@@ -8293,7 +8968,11 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
 
     // No variables: BGP is a ground check that already succeeded.
     if n_levels == 0 {
-        return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
+        return Ok(Bindings {
+            vars: vec![],
+            rows: vec![Row::new()],
+            sorted_by: None,
+        });
     }
 
     // Participating tries per global level.
@@ -8310,11 +8989,23 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
     let mut iters: Vec<sjoin::TrieIter> = tries.iter().map(sjoin::TrieIter::new).collect();
     let mut out: Vec<Row> = Vec::new();
     let mut current = vec![NO_ID; n_levels];
-    sjoin::lftj_recurse(&mut iters, &parts_at_level, 0, n_levels, &mut current, &EngineBudget, &mut out);
+    sjoin::lftj_recurse(
+        &mut iters,
+        &parts_at_level,
+        0,
+        n_levels,
+        &mut current,
+        &EngineBudget,
+        &mut out,
+    );
 
     // Output rows are produced in global-order lexicographic order.
     let sorted_by = order_vars.first().cloned();
-    Ok(Bindings { vars: order_vars, rows: out, sorted_by })
+    Ok(Bindings {
+        vars: order_vars,
+        rows: out,
+        sorted_by,
+    })
 }
 
 /// The Leapfrog-Triejoin global variable order: most-constrained variables first
@@ -8325,7 +9016,12 @@ pub(crate) fn wcoj_global_order(
     patterns: &[TriplePattern],
     prepared: &[(IdPattern, [Option<Variable>; 3])],
 ) -> Vec<Variable> {
-    let degree = |v: &Variable| prepared.iter().filter(|(_, pv)| pv.iter().flatten().any(|x| x == v)).count();
+    let degree = |v: &Variable| {
+        prepared
+            .iter()
+            .filter(|(_, pv)| pv.iter().flatten().any(|x| x == v))
+            .count()
+    };
     let min_est = |v: &Variable| {
         prepared
             .iter()
@@ -8348,7 +9044,14 @@ fn bgp_is_cyclic(patterns: &[TriplePattern]) -> bool {
     let mut edges: Vec<std::collections::HashSet<u32>> = Vec::new();
     for tp in patterns {
         let mut e = std::collections::HashSet::new();
-        for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)].into_iter().flatten() {
+        for v in [
+            tp_var(&tp.subject),
+            nnp_var(&tp.predicate),
+            tp_var(&tp.object),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let id = *ids.entry(v).or_insert_with(|| {
                 let id = next_id;
                 next_id += 1;
@@ -8407,7 +9110,10 @@ fn bgp_is_cyclic(patterns: &[TriplePattern]) -> bool {
     !edges.is_empty()
 }
 
-fn prepare_pattern(graph: &Graph, tp: &TriplePattern) -> Result<(IdPattern, [Option<Variable>; 3], bool), String> {
+fn prepare_pattern(
+    graph: &Graph,
+    tp: &TriplePattern,
+) -> Result<(IdPattern, [Option<Variable>; 3], bool), String> {
     let mut id_pat: IdPattern = [None, None, None];
     let mut pos_vars: [Option<Variable>; 3] = [None, None, None];
     let mut unsat = false;
@@ -8485,7 +9191,11 @@ fn scan_to_bindings(
     // numeric in another datatype, scattered below INLINE_BASE, is skipped).
     let mut scan_rows: &[[Id; 3]] = scan.rows.as_ref();
     if let Some((fpos, cmp)) = filter {
-        if actual_sort == Some(fpos) && scan_rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
+        if actual_sort == Some(fpos)
+            && scan_rows
+                .first()
+                .is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos]))
+        {
             scan_rows = match inline_pass_values(cmp) {
                 Some((lo, hi)) => {
                     let (lo_id, hi_id) = (dict::INLINE_BASE + lo, dict::INLINE_BASE + hi);
@@ -8548,7 +9258,11 @@ fn scan_to_bindings(
     if limit.is_none() && scan_rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         let rows: Vec<Row> = scan_rows.par_iter().filter_map(build_row).collect();
-        return Bindings { vars, rows, sorted_by };
+        return Bindings {
+            vars,
+            rows,
+            sorted_by,
+        };
     }
 
     // Reserve only up to the LIMIT so a small LIMIT over a huge scan does not
@@ -8570,7 +9284,11 @@ fn scan_to_bindings(
             }
         }
     }
-    Bindings { vars, rows, sorted_by }
+    Bindings {
+        vars,
+        rows,
+        sorted_by,
+    }
 }
 
 fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
@@ -8592,13 +9310,29 @@ fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
     // The sorted-merge probe loop lives in the shared substrate (sq-hknqs); the engine supplies
     // the `Bindings`-derived key columns + its thread-local query budget, monomorphically.
     let mut rows = Vec::new();
-    sjoin::merge_join(&left.rows, lk, &right.rows, rk, &extra_shared, &right_only, &EngineBudget, &mut rows);
-    Bindings { vars: out_vars, rows, sorted_by: Some(jv.clone()) }
+    sjoin::merge_join(
+        &left.rows,
+        lk,
+        &right.rows,
+        rk,
+        &extra_shared,
+        &right_only,
+        &EngineBudget,
+        &mut rows,
+    );
+    Bindings {
+        vars: out_vars,
+        rows,
+        sorted_by: Some(jv.clone()),
+    }
 }
 
 /// Layout for combining two bindings: shared (left col, right col) pairs and the
 /// right-only columns appended after left's vars.
-fn join_layout(left: &Bindings, right: &Bindings) -> (Vec<Variable>, Vec<(usize, usize)>, Vec<usize>) {
+fn join_layout(
+    left: &Bindings,
+    right: &Bindings,
+) -> (Vec<Variable>, Vec<(usize, usize)>, Vec<usize>) {
     let mut out_vars = left.vars.clone();
     let mut shared = Vec::new();
     let mut right_only = Vec::new();
@@ -8654,7 +9388,10 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // shared-variable index pairs (the equi-join key); the probe-only columns are appended after
     // the build row. The build/probe phases below are the substrate's `build_*` / `probe_emit`
     // (sq-hknqs) — the engine only supplies this `Bindings`-derived layout and its budget.
-    let keys = sjoin::JoinKeys { key_cols: shared.clone(), right_only: Vec::new() };
+    let keys = sjoin::JoinKeys {
+        key_cols: shared.clone(),
+        right_only: Vec::new(),
+    };
     // Build phase. Above PAR_THRESHOLD the build is radix-partitioned (Tier-1 #5 of
     // research/parallelism-scaling.md): rows are tagged with their key-hash partition in
     // parallel, then each partition builds its private map lock-free. Within a partition rows
@@ -8702,7 +9439,15 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         return Bindings::unsorted(out_vars, rows);
     }
     let mut rows = Vec::new();
-    sjoin::hash_probe_serial(&probe.rows, &keys, &build.rows, &tables, &probe_only, &EngineBudget, &mut rows);
+    sjoin::hash_probe_serial(
+        &probe.rows,
+        &keys,
+        &build.rows,
+        &tables,
+        &probe_only,
+        &EngineBudget,
+        &mut rows,
+    );
     Bindings::unsorted(out_vars, rows)
 }
 
@@ -8722,7 +9467,9 @@ fn bind_join(
 ) -> Bindings {
     // The pattern's NEW variable columns (every variable position except the join one;
     // the only shared variable is the join variable, so the rest are new).
-    let new_positions: Vec<usize> = (0..3).filter(|&p| p != pp && pos_vars[p].is_some()).collect();
+    let new_positions: Vec<usize> = (0..3)
+        .filter(|&p| p != pp && pos_vars[p].is_some())
+        .collect();
     let mut out_vars = result.vars.clone();
     for &p in &new_positions {
         out_vars.push(pos_vars[p].clone().unwrap());
@@ -8776,7 +9523,9 @@ fn bind_join(
 fn cross_product(left: Bindings, right: Bindings) -> Bindings {
     let mut out_vars = left.vars.clone();
     out_vars.extend(right.vars.iter().cloned());
-    let mut rows = Vec::with_capacity(budget::cap_alloc(left.rows.len().saturating_mul(right.rows.len())));
+    let mut rows = Vec::with_capacity(budget::cap_alloc(
+        left.rows.len().saturating_mul(right.rows.len()),
+    ));
     for l in &left.rows {
         // Coarse budget check once per left row.
         if budget::exhausted(rows.len()) {
@@ -8828,7 +9577,13 @@ fn join_bindings(left: Bindings, right: Bindings) -> Bindings {
 
 // ---- OPTIONAL / UNION / MINUS / VALUES / BIND --------------------------------
 
-fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right: Bindings, expr: Option<&Expression>) -> Result<Bindings, String> {
+fn left_outer_join(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: Bindings,
+    right: Bindings,
+    expr: Option<&Expression>,
+) -> Result<Bindings, String> {
     let (out_vars, shared, right_only) = join_layout(&left, &right);
     let n_right_only = right_only.len();
 
@@ -8839,7 +9594,19 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
     if shared.len() == 1 {
         let (lk, rk) = shared[0];
         if !any_unbound(&left.rows, &[lk]) && !any_unbound(&right.rows, &[rk]) {
-            return left_outer_merge(graph, local, left, right, lk, rk, &shared, &right_only, n_right_only, out_vars, expr);
+            return left_outer_merge(
+                graph,
+                local,
+                left,
+                right,
+                lk,
+                rk,
+                &shared,
+                &right_only,
+                n_right_only,
+                out_vars,
+                expr,
+            );
         }
     }
 
@@ -8848,16 +9615,20 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
     // unbound, in which case they act as wildcards).
     let lcols: Vec<usize> = shared.iter().map(|&(lc, _)| lc).collect();
     let rcols: Vec<usize> = shared.iter().map(|&(_, rc)| rc).collect();
-    let table: Option<FxHashMap<Key, Posting>> =
-        if !shared.is_empty() && !any_unbound(&left.rows, &lcols) && !any_unbound(&right.rows, &rcols) {
-            let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
-            for (ri, row) in right.rows.iter().enumerate() {
-                t.entry(rcols.iter().map(|&c| row[c]).collect()).or_default().push(ri);
-            }
-            Some(t)
-        } else {
-            None
-        };
+    let table: Option<FxHashMap<Key, Posting>> = if !shared.is_empty()
+        && !any_unbound(&left.rows, &lcols)
+        && !any_unbound(&right.rows, &rcols)
+    {
+        let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
+        for (ri, row) in right.rows.iter().enumerate() {
+            t.entry(rcols.iter().map(|&c| row[c]).collect())
+                .or_default()
+                .push(ri);
+        }
+        Some(t)
+    } else {
+        None
+    };
 
     let mut rows = Vec::new();
     for lrow in &left.rows {
@@ -8871,9 +9642,13 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
         let candidates: SmallVec<[usize; 4]> = match &table {
             Some(t) => {
                 let key: Key = lcols.iter().map(|&c| lrow[c]).collect();
-                t.get(&key).map(|v| v.iter().copied().collect()).unwrap_or_default()
+                t.get(&key)
+                    .map(|v| v.iter().copied().collect())
+                    .unwrap_or_default()
             }
-            None => (0..right.rows.len()).filter(|&ri| compatible(lrow, &right.rows[ri], &shared)).collect(),
+            None => (0..right.rows.len())
+                .filter(|&ri| compatible(lrow, &right.rows[ri], &shared))
+                .collect(),
         };
         let mut matched = false;
         for ri in candidates {
@@ -8883,7 +9658,11 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
             let keep = match expr {
                 None => true,
                 Some(e) => {
-                    let tmp = Bindings { vars: out_vars.clone(), rows: vec![], sorted_by: None };
+                    let tmp = Bindings {
+                        vars: out_vars.clone(),
+                        rows: vec![],
+                        sorted_by: None,
+                    };
                     effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?)
                 }
             };
@@ -8948,7 +9727,11 @@ fn left_outer_merge(
                 let keep = match expr {
                     None => true,
                     Some(e) => {
-                        let tmp = Bindings { vars: out_vars.clone(), rows: vec![], sorted_by: None };
+                        let tmp = Bindings {
+                            vars: out_vars.clone(),
+                            rows: vec![],
+                            sorted_by: None,
+                        };
                         effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?)
                     }
                 };
@@ -8968,7 +9751,11 @@ fn left_outer_merge(
     }
     // Output is ordered by the join variable (at column lk of out_vars).
     let sorted_by = out_vars.get(lk).cloned();
-    Ok(Bindings { vars: out_vars, rows, sorted_by })
+    Ok(Bindings {
+        vars: out_vars,
+        rows,
+        sorted_by,
+    })
 }
 
 // ---- Correlated (theta) anti-join (sq-7d3dj.30.9) --------------------------------
@@ -9023,8 +9810,15 @@ fn try_theta_antijoin(
         return Ok(None);
     }
     // Shape: outer filter is exactly `!bound(?nb)` over a `LeftJoin` WITH a condition.
-    let Some(nb) = as_not_bound_var(filter_expr) else { return Ok(None) };
-    let GraphPattern::LeftJoin { left, right, expression: Some(cond) } = inner else {
+    let Some(nb) = as_not_bound_var(filter_expr) else {
+        return Ok(None);
+    };
+    let GraphPattern::LeftJoin {
+        left,
+        right,
+        expression: Some(cond),
+    } = inner
+    else {
         return Ok(None);
     };
 
@@ -9108,7 +9902,11 @@ fn try_theta_antijoin(
                 residual.push(c);
                 continue;
             };
-            correlations.push(Correlation { left_col, inner_var, kind });
+            correlations.push(Correlation {
+                left_col,
+                inner_var,
+                kind,
+            });
         } else {
             residual.push(c);
         }
@@ -9159,8 +9957,10 @@ fn try_theta_antijoin(
         let b_all = eval_graph_pattern(graph, local, right)?;
         total_child_rows += b_all.rows.len();
         // `?inner` id columns in `b_all` (certain in B ⇒ present and bound).
-        let inner_cols: Option<Vec<usize>> =
-            correlations.iter().map(|c| b_all.col(&c.inner_var)).collect();
+        let inner_cols: Option<Vec<usize>> = correlations
+            .iter()
+            .map(|c| b_all.col(&c.inner_var))
+            .collect();
         let Some(inner_cols) = inner_cols else {
             // A correlation `?inner` unexpectedly missing from B's header — decline.
             return Ok(None);
@@ -9184,8 +9984,10 @@ fn try_theta_antijoin(
         // Each conjunct uses ITS OWN relation: `=` for a value-equality correlation, but
         // `sameTerm` for a sameTerm correlation (they DIFFER on value-equal id-distinct
         // literals). [FABLE-5] (sq-3cmr4)
-        let corr_checks: Vec<Expression> =
-            correlations.iter().map(|c| corr_recheck_expr(c, &out_vars)).collect();
+        let corr_checks: Vec<Expression> = correlations
+            .iter()
+            .map(|c| corr_recheck_expr(c, &out_vars))
+            .collect();
         let mut value_checks: Vec<Expression> = corr_checks.clone();
         value_checks.extend(residual_owned.iter().cloned());
 
@@ -9205,15 +10007,22 @@ fn try_theta_antijoin(
             // hazard → value-correct scan. For a `sameTerm` correlation EVERY kind is
             // id-probeable (id-equality IS sameTerm for all term kinds, literals included).
             // [FABLE-5] (sq-3cmr4)
-            let id_hashable = correlations
-                .iter()
-                .all(|c| corr_id_probeable(c.kind, term_of(graph, local, lrow[c.left_col]).as_ref()));
+            let id_hashable = correlations.iter().all(|c| {
+                corr_id_probeable(c.kind, term_of(graph, local, lrow[c.left_col]).as_ref())
+            });
             if id_hashable {
                 let key: Vec<Id> = correlations.iter().map(|c| lrow[c.left_col]).collect();
                 match buckets.get(&key) {
                     None => Ok(false),
                     Some(cands) => antijoin_row_matches(
-                        graph, local, lrow, &b_all, cands, &shared, &out_src, &tmp_vars,
+                        graph,
+                        local,
+                        lrow,
+                        &b_all,
+                        cands,
+                        &shared,
+                        &out_src,
+                        &tmp_vars,
                         &residual_owned,
                     ),
                 }
@@ -9221,7 +10030,14 @@ fn try_theta_antijoin(
                 // Literal-keyed left row: value-correct full scan with the correlation
                 // relation re-checked (`=` or `sameTerm` per kind).
                 antijoin_row_matches(
-                    graph, local, lrow, &b_all, &all_b, &shared, &out_src, &tmp_vars,
+                    graph,
+                    local,
+                    lrow,
+                    &b_all,
+                    &all_b,
+                    &shared,
+                    &out_src,
+                    &tmp_vars,
                     &value_checks,
                 )
             }
@@ -9466,7 +10282,11 @@ fn antijoin_row_matches(
     tmp_vars: &[Variable],
     checks: &[Expression],
 ) -> Result<bool, String> {
-    let tmp = Bindings { vars: tmp_vars.to_vec(), rows: vec![], sorted_by: None };
+    let tmp = Bindings {
+        vars: tmp_vars.to_vec(),
+        rows: vec![],
+        sorted_by: None,
+    };
     for &bi in cands {
         let rrow = &b.rows[bi];
         if !compatible(lrow, rrow, shared) {
@@ -9514,20 +10334,29 @@ fn pattern_has_var(p: &GraphPattern, var: &Variable) -> bool {
         G::Bgp { patterns } => patterns
             .iter()
             .any(|tp| te(&tp.subject) || ne(&tp.predicate) || te(&tp.object)),
-        G::Path { subject, object, .. } => te(subject) || te(object),
-        G::Join { left, right } | G::Union { left, right } | G::Minus { left, right } | G::Lateral { left, right } => {
-            pattern_has_var(left, var) || pattern_has_var(right, var)
-        }
-        G::LeftJoin { left, right, expression } => {
+        G::Path {
+            subject, object, ..
+        } => te(subject) || te(object),
+        G::Join { left, right }
+        | G::Union { left, right }
+        | G::Minus { left, right }
+        | G::Lateral { left, right } => pattern_has_var(left, var) || pattern_has_var(right, var),
+        G::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
             pattern_has_var(left, var)
                 || pattern_has_var(right, var)
                 || expression.as_ref().is_some_and(|e| expr_has_var(e, var))
         }
         G::Filter { expr, inner } => expr_has_var(expr, var) || pattern_has_var(inner, var),
         G::Graph { name, inner } => ne(name) || pattern_has_var(inner, var),
-        G::Extend { inner, variable, expression } => {
-            variable == var || expr_has_var(expression, var) || pattern_has_var(inner, var)
-        }
+        G::Extend {
+            inner,
+            variable,
+            expression,
+        } => variable == var || expr_has_var(expression, var) || pattern_has_var(inner, var),
         G::Values { variables, .. } => variables.iter().any(|v| v == var),
         G::OrderBy { inner, expression } => {
             pattern_has_var(inner, var)
@@ -9535,9 +10364,10 @@ fn pattern_has_var(p: &GraphPattern, var: &Variable) -> bool {
                     OrderExpression::Asc(e) | OrderExpression::Desc(e) => expr_has_var(e, var),
                 })
         }
-        G::Project { inner, variables } | G::Group { inner, variables, .. } => {
-            variables.iter().any(|v| v == var) || pattern_has_var(inner, var)
-        }
+        G::Project { inner, variables }
+        | G::Group {
+            inner, variables, ..
+        } => variables.iter().any(|v| v == var) || pattern_has_var(inner, var),
         G::Distinct { inner } | G::Reduced { inner } | G::Slice { inner, .. } => {
             pattern_has_var(inner, var)
         }
@@ -9622,7 +10452,9 @@ fn cond_has_seedable_correlation(
 ) -> bool {
     let left_vars: FxHashSet<Variable> = in_scope_vars(left).into_iter().collect();
     split_and(cond).into_iter().any(|c| {
-        let Some((va, vb, _)) = as_correlation_pair(c) else { return false };
+        let Some((va, vb, _)) = as_correlation_pair(c) else {
+            return false;
+        };
         // Same orientation choice as the runtime partition: pick the certain-in-B side as
         // `inner` and the left side as `outer`; a seedable correlation additionally requires
         // the chosen `inner` NOT to be a left variable.
@@ -9730,7 +10562,13 @@ fn union_bindings(left: Bindings, right: Bindings) -> Bindings {
     let map_row = |src_vars: &[Variable], row: &[Id], out_vars: &[Variable]| -> Row {
         out_vars
             .iter()
-            .map(|v| src_vars.iter().position(|x| x == v).map(|i| row[i]).unwrap_or(NO_ID))
+            .map(|v| {
+                src_vars
+                    .iter()
+                    .position(|x| x == v)
+                    .map(|i| row[i])
+                    .unwrap_or(NO_ID)
+            })
             .collect()
     };
     for row in &left.rows {
@@ -9770,7 +10608,11 @@ fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
             .into_iter()
             .filter(|row| !table.contains_key(&lcols.iter().map(|&c| row[c]).collect::<Key>()))
             .collect();
-        return Bindings { vars: left.vars, rows, sorted_by: left.sorted_by };
+        return Bindings {
+            vars: left.vars,
+            rows,
+            sorted_by: left.sorted_by,
+        };
     }
 
     // General path: per-row compatibility with a bound-domain-overlap check.
@@ -9790,10 +10632,19 @@ fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
         })
     };
     let rows: Vec<Row> = left.rows.iter().filter(|r| keep(r)).cloned().collect();
-    Bindings { vars: left.vars, rows, sorted_by: left.sorted_by }
+    Bindings {
+        vars: left.vars,
+        rows,
+        sorted_by: left.sorted_by,
+    }
 }
 
-fn values_bindings(graph: &Graph, local: &mut LocalVocab, variables: &[Variable], bindings: &[Vec<Option<GroundTerm>>]) -> Bindings {
+fn values_bindings(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    variables: &[Variable],
+    bindings: &[Vec<Option<GroundTerm>>],
+) -> Bindings {
     let rows = bindings
         .iter()
         .map(|row| {
@@ -9814,7 +10665,13 @@ fn values_bindings(graph: &Graph, local: &mut LocalVocab, variables: &[Variable]
     Bindings::unsorted(variables.to_vec(), rows)
 }
 
-fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: &Variable, expr: &Expression) -> Result<Bindings, String> {
+fn extend_bindings(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    mut b: Bindings,
+    var: &Variable,
+    expr: &Expression,
+) -> Result<Bindings, String> {
     // Pre-resolve Variable → column index once before the row loop. [OPUS-4.8] sq-7d3dj.4.
     let compiled = compile_expr(expr, &b);
     // BIND was fully serial because each row's computed value was interned immediately. Split it
@@ -9836,8 +10693,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
-        // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
-        // a worker that missed the registry would dial the IRI instead of answering it.
+                                       // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+                                       // a worker that missed the registry would dial the IRI instead of answering it.
         #[cfg(feature = "service-local")]
         let lsv = local_services::snapshot();
         #[cfg(not(target_arch = "wasm32"))]
@@ -9932,7 +10789,10 @@ fn build_groups(b: &Bindings, key_cols: &[Option<usize>]) -> (Vec<Key>, Vec<Vec<
                     if parts[ri] as usize != p {
                         continue;
                     }
-                    let key: Key = key_cols.iter().map(|&c| c.map(|i| row[i]).unwrap_or(NO_ID)).collect();
+                    let key: Key = key_cols
+                        .iter()
+                        .map(|&c| c.map(|i| row[i]).unwrap_or(NO_ID))
+                        .collect();
                     match idx.get(&key) {
                         Some(&i) => out[i].2.push(ri),
                         None => {
@@ -9953,7 +10813,10 @@ fn build_groups(b: &Bindings, key_cols: &[Option<usize>]) -> (Vec<Key>, Vec<Vec<
     let mut order: Vec<Key> = Vec::new();
     let mut members: Vec<Vec<usize>> = Vec::new();
     for (ri, row) in b.rows.iter().enumerate() {
-        let key: Key = key_cols.iter().map(|&c| c.map(|i| row[i]).unwrap_or(NO_ID)).collect();
+        let key: Key = key_cols
+            .iter()
+            .map(|&c| c.map(|i| row[i]).unwrap_or(NO_ID))
+            .collect();
         match idx.get(&key) {
             Some(&i) => members[i].push(ri),
             None => {
@@ -9999,7 +10862,9 @@ fn group_aggregate(
     // per member, no term materialisation, byte-identical output to the scalar path.
     // Declines (→ scalar path below) for anything not provably identical.
     #[cfg(feature = "vectorized")]
-    if let Some(rows) = columnar_aggregate(graph, local, &b, group_vars, aggregates, &order, &members, &out_vars) {
+    if let Some(rows) = columnar_aggregate(
+        graph, local, &b, group_vars, aggregates, &order, &members, &out_vars,
+    ) {
         return Ok(Bindings::unsorted(out_vars, rows));
     }
 
@@ -10028,8 +10893,8 @@ fn group_aggregate(
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
-        // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
-        // a worker that missed the registry would dial the IRI instead of answering it.
+                                       // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+                                       // a worker that missed the registry would dial the IRI instead of answering it.
         #[cfg(feature = "service-local")]
         let lsv = local_services::snapshot();
         // [OPUS-4.8] (sq-5qz9) keep a custom-aggregate registry visible off-thread, like `fns`.
@@ -10038,10 +10903,13 @@ fn group_aggregate(
         let aggs = self::aggregates::snapshot();
         #[cfg(not(target_arch = "wasm32"))]
         let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
-        // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
-        // resolve each batch in parallel, then serially intern only that batch's genuinely
-        // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
-        for (key_chunk, member_chunk) in order.chunks(PAR_THRESHOLD).zip(members.chunks(PAR_THRESHOLD)) {
+                                        // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
+                                        // resolve each batch in parallel, then serially intern only that batch's genuinely
+                                        // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
+        for (key_chunk, member_chunk) in order
+            .chunks(PAR_THRESHOLD)
+            .zip(members.chunks(PAR_THRESHOLD))
+        {
             let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
             let bref = &b;
             let resolved: Vec<Vec<Result<Id, Term>>> = member_chunk
@@ -10058,7 +10926,10 @@ fn group_aggregate(
                     let _qn = query_now::worker_install(qn);
                     aggregates
                         .iter()
-                        .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg).map(|v| value_to_id_readonly(graph, lv, &v)))
+                        .map(|(_, agg)| {
+                            eval_aggregate(graph, lv, bref, members, agg)
+                                .map(|v| value_to_id_readonly(graph, lv, &v))
+                        })
                         .collect::<Result<Vec<_>, String>>()
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -10113,7 +10984,11 @@ pub(crate) const MULTIPLICITY_FN_IRI: &str = "urn:sparq:fn:multiplicity";
 /// `SUM(?x * MULTIPLICITY()) == SUM(?x)` (over the bag) holds. Solution identity is the
 /// whole row, matching `COUNT(DISTINCT *)`; BGP matching is bag semantics, so duplicate
 /// solutions are preserved as repeated rows up to this point.
-fn group_multiplicities(b: &Bindings, members: &[usize], expr: &Expression) -> Option<Vec<(usize, u64)>> {
+fn group_multiplicities(
+    b: &Bindings,
+    members: &[usize],
+    expr: &Expression,
+) -> Option<Vec<(usize, u64)>> {
     if !expr_uses_multiplicity(expr) {
         return None;
     }
@@ -10169,24 +11044,38 @@ fn expr_uses_multiplicity(expr: &Expression) -> bool {
     }
 }
 
-fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[usize], agg: &AggregateExpression) -> Result<Value, String> {
+fn eval_aggregate(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    members: &[usize],
+    agg: &AggregateExpression,
+) -> Result<Value, String> {
     match agg {
         AggregateExpression::CountSolutions { distinct } => {
             let n = if *distinct {
                 let mut seen = std::collections::HashSet::new();
-                members.iter().filter(|&&ri| seen.insert(b.rows[ri].clone())).count()
+                members
+                    .iter()
+                    .filter(|&&ri| seen.insert(b.rows[ri].clone()))
+                    .count()
             } else {
                 members.len()
             };
             Ok(Value::Num(Num::Int(n as i64)))
         }
-        AggregateExpression::FunctionCall { name, expr, distinct } => {
+        AggregateExpression::FunctionCall {
+            name,
+            expr,
+            distinct,
+        } => {
             // MIN/MAX over an all-temporal column: fold at the ID level through the
             // temporals cache — no term materialised, no per-comparison lexical
             // re-parse. Falls through to the general path on any non-temporal member.
             if let AggregateFunction::Min | AggregateFunction::Max = name {
                 let is_min = matches!(name, AggregateFunction::Min);
-                if let Some(v) = minmax_temporal(graph, local, b, members, expr, *distinct, is_min) {
+                if let Some(v) = minmax_temporal(graph, local, b, members, expr, *distinct, is_min)
+                {
                     return Ok(v);
                 }
             }
@@ -10199,7 +11088,15 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
             // works in `oxrdf::Term`, so the per-member value is materialised to a term.
             #[cfg(feature = "window-functions")]
             if let AggregateFunction::Custom(iri) = name {
-                return eval_custom_aggregate(graph, local, b, members, expr, *distinct, iri.as_str());
+                return eval_custom_aggregate(
+                    graph,
+                    local,
+                    b,
+                    members,
+                    expr,
+                    *distinct,
+                    iri.as_str(),
+                );
             }
             // Collect the per-member values of `expr`. [OPUS-4.8] An UNBOUND member (a variable
             // with no binding in that row, e.g. an OPTIONAL one) is SKIPPED for every aggregate,
@@ -10221,8 +11118,8 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                     for &ri in members {
                         let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
                         match v {
-                            Value::Unbound => {}             // skip: aggregate ignores unbound rows
-                            Value::Error => errored = true,  // fatal for SUM/AVG (-> unbound aggregate)
+                            Value::Unbound => {}            // skip: aggregate ignores unbound rows
+                            Value::Error => errored = true, // fatal for SUM/AVG (-> unbound aggregate)
                             _ => vals.push(v),
                         }
                     }
@@ -10247,7 +11144,9 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                 // SUM/AVG with operand-type promotion: int+int stays integer, decimals
                 // stay decimal (exact), floats/doubles promote. Any non-numeric or
                 // errored member makes the whole aggregate a type error (-> unbound).
-                AggregateFunction::Sum => Ok(sum_values(&vals, errored).map(num_canonical_term).unwrap_or(Value::Error)),
+                AggregateFunction::Sum => Ok(sum_values(&vals, errored)
+                    .map(num_canonical_term)
+                    .unwrap_or(Value::Error)),
                 AggregateFunction::Avg => {
                     if vals.is_empty() && !errored {
                         return Ok(Value::Num(Num::Int(0))); // AVG({}) = 0 per SPARQL
@@ -10264,8 +11163,14 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                 AggregateFunction::Max => Ok(minmax_values(vals, Ordering::Greater)),
                 AggregateFunction::GroupConcat { separator } => {
                     let sep = separator.clone().unwrap_or_else(|| " ".to_string());
-                    let joined = vals.iter().filter_map(value_str).collect::<Vec<_>>().join(&sep);
-                    Ok(Value::Term(Term::Literal(Literal::new_simple_literal(joined))))
+                    let joined = vals
+                        .iter()
+                        .filter_map(value_str)
+                        .collect::<Vec<_>>()
+                        .join(&sep);
+                    Ok(Value::Term(Term::Literal(Literal::new_simple_literal(
+                        joined,
+                    ))))
                 }
                 AggregateFunction::Sample => Ok(vals.into_iter().next().unwrap_or(Value::Unbound)),
                 _ => Err("M2: unsupported aggregate".into()),
@@ -10292,7 +11197,9 @@ fn eval_custom_aggregate(
     iri: &str,
 ) -> Result<Value, String> {
     let Some(f) = aggregates::lookup(iri) else {
-        return Err(format!("unsupported SPARQL function: no custom aggregate registered for <{iri}>"));
+        return Err(format!(
+            "unsupported SPARQL function: no custom aggregate registered for <{iri}>"
+        ));
     };
     let mut args: Vec<Option<Term>> = Vec::with_capacity(members.len());
     // [OPUS-4.8] (sq-v411r) `MULTIPLICITY()` works inside a custom aggregate's argument too:
@@ -10301,7 +11208,10 @@ fn eval_custom_aggregate(
     let mults = group_multiplicities(b, members, expr);
     let iter: Vec<(usize, Option<u64>)> = match &mults {
         None => members.iter().map(|&ri| (ri, None)).collect(),
-        Some(distinct) => distinct.iter().map(|&(ri, card)| (ri, Some(card))).collect(),
+        Some(distinct) => distinct
+            .iter()
+            .map(|&(ri, card)| (ri, Some(card)))
+            .collect(),
     };
     for (ri, card) in iter {
         let _mg = card.map(multiplicity::set);
@@ -10389,7 +11299,9 @@ fn minmax_temporal(
     distinct: bool,
     is_min: bool,
 ) -> Option<Value> {
-    let Expression::Variable(v) = expr else { return None };
+    let Expression::Variable(v) = expr else {
+        return None;
+    };
     let col = b.col(v)?;
     let mut seen: FxHashSet<Id> = FxHashSet::default();
     let mut best: Option<(Temporal, Id)> = None;
@@ -10415,7 +11327,11 @@ fn minmax_temporal(
                 // timeline order is TOTAL (instant, then timezone presence) — the former
                 // lexical fallback for the indeterminate window was intransitive.
                 let ord = Temporal::cmp_t_total(t, bt);
-                let replace = if is_min { ord == Ordering::Less } else { ord != Ordering::Less };
+                let replace = if is_min {
+                    ord == Ordering::Less
+                } else {
+                    ord != Ordering::Less
+                };
                 if replace {
                     (t, id)
                 } else {
@@ -10425,7 +11341,9 @@ fn minmax_temporal(
         });
     }
     Some(match best {
-        Some((_, id)) => Value::Term(term_of(graph, local, id).expect("aggregate member id resolves")),
+        Some((_, id)) => {
+            Value::Term(term_of(graph, local, id).expect("aggregate member id resolves"))
+        }
         None => Value::Unbound, // no bound members
     })
 }
@@ -10462,10 +11380,18 @@ fn project_bindings(b: Bindings, vars: &[Variable]) -> Bindings {
     let rows = b
         .rows
         .iter()
-        .map(|row| cols.iter().map(|c| c.map(|i| row[i]).unwrap_or(NO_ID)).collect())
+        .map(|row| {
+            cols.iter()
+                .map(|c| c.map(|i| row[i]).unwrap_or(NO_ID))
+                .collect()
+        })
         .collect();
     let sorted_by = b.sorted_by.filter(|sv| vars.contains(sv));
-    Bindings { vars: vars.to_vec(), rows, sorted_by }
+    Bindings {
+        vars: vars.to_vec(),
+        rows,
+        sorted_by,
+    }
 }
 
 fn distinct_bindings(b: &mut Bindings) {
@@ -10487,14 +11413,20 @@ fn slice_bindings(b: &mut Bindings, start: usize, length: Option<usize>) {
 /// re-parse (the q09-class fix: ORDER BY dateTime was re-parsing both lexicals on every
 /// comparison of the sort). Everything else keeps the identity-preserving `Value`.
 enum SortCell {
-    Temp { t: Temporal, id: Id },
+    Temp {
+        t: Temporal,
+        id: Id,
+    },
     /// A numeric GRAPH term: the cached f64 for the fast compare PLUS its dictionary id, so
     /// an f64 TIE can be rechecked EXACTLY from the id's exact lexical — distinct integers
     /// beyond 2^53 / high-precision decimals that share one f64 (the numerics cache stores
     /// only f64, so the fast path alone collapses them). This makes `ORDER BY ?v` over a
     /// numeric column agree with the relational `<` (`cmp_expr`) and MIN/MAX, which already
     /// recheck. [OPUS-4.8] sq-rikm7
-    Num { f: f64, id: Id },
+    Num {
+        f: f64,
+        id: Id,
+    },
     /// A named-node (IRI) GRAPH term: the IRI string precomputed once at key-build time,
     /// eliminating per-comparison `term_of` materialisation and `value_str` allocation for
     /// IRI-typed ORDER BY columns (the SP2Bench q11 case: all ?ee values are IRIs, so
@@ -10538,7 +11470,12 @@ enum SortCell {
     ///
     /// All ranks + the key are taken ONCE, from the very `CompareTerm` observations
     /// `compare_terms` would otherwise recompute on every comparison. [FABLE-5] sq-7d3dj.30.12
-    Val { class: u8, kind: u8, key: Option<Box<str>>, v: Value },
+    Val {
+        class: u8,
+        kind: u8,
+        key: Option<Box<str>>,
+        v: Value,
+    },
 }
 
 /// Builds a `SortCell::Val`, precomputing its `(TermClass, LiteralKind)` collation ranks
@@ -10552,7 +11489,11 @@ fn sort_cell_val(v: Value) -> SortCell {
     let class = v.term_class() as u8;
     // Only the literal class consults the kind rank; skip the (cheap but non-trivial)
     // `lit_kind` dispatch entirely for the non-literal classes.
-    let kind = if class == TermClass::Literal as u8 { v.literal_kind() as u8 } else { 0 };
+    let kind = if class == TermClass::Literal as u8 {
+        v.literal_kind() as u8
+    } else {
+        0
+    };
     // Precompute the lexical key for EXACTLY the kinds whose within-kind (and, for the
     // literal kinds, same-KIND) order is the `value_str` lexical order — so a same-kind
     // compare is a direct slice compare with NO per-comparison allocation, reproducing
@@ -10574,7 +11515,12 @@ fn sort_cell_val(v: Value) -> SortCell {
     } else {
         None
     };
-    SortCell::Val { class, kind, key, v }
+    SortCell::Val {
+        class,
+        kind,
+        key,
+        v,
+    }
 }
 
 /// Compares two ORDER BY key cells under the lenient total order, reproducing
@@ -10610,12 +11556,16 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
         // reconstruct the pre-change `Val(Num::Double)` representation and defer to the shared
         // `compare_values`, so the mixed-column order stays byte-identical to pre-change — only
         // the same-numeric-column (`Num`, `Num`) arm above adds the exact f64-tie recheck.
-        (SortCell::Num { f, .. }, SortCell::Temp { id, .. }) => {
-            compare_values(&Value::Num(Num::Double(*f)), &sort_cell_term(graph, local, *id)).unwrap_or(Ordering::Equal)
-        }
-        (SortCell::Temp { id, .. }, SortCell::Num { f, .. }) => {
-            compare_values(&sort_cell_term(graph, local, *id), &Value::Num(Num::Double(*f))).unwrap_or(Ordering::Equal)
-        }
+        (SortCell::Num { f, .. }, SortCell::Temp { id, .. }) => compare_values(
+            &Value::Num(Num::Double(*f)),
+            &sort_cell_term(graph, local, *id),
+        )
+        .unwrap_or(Ordering::Equal),
+        (SortCell::Temp { id, .. }, SortCell::Num { f, .. }) => compare_values(
+            &sort_cell_term(graph, local, *id),
+            &Value::Num(Num::Double(*f)),
+        )
+        .unwrap_or(Ordering::Equal),
         (SortCell::Num { f, .. }, SortCell::Val { v, .. }) => {
             compare_values(&Value::Num(Num::Double(*f)), v).unwrap_or(Ordering::Equal)
         }
@@ -10682,13 +11632,25 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
         // precomputed class/kind ranks against the fixed (Literal=3, String=4) ranks of a plain
         // string, then compare value bytes for the same-class-same-kind (String) case.
         #[cfg(feature = "topk-lazy-strkey")]
-        (SortCell::StrId(a), SortCell::Val { class: cb, kind: kb, key: kb_key, v: cv }) => {
-            cmp_strid_val(graph, *a, *cb, *kb, kb_key.as_deref(), cv)
-        }
+        (
+            SortCell::StrId(a),
+            SortCell::Val {
+                class: cb,
+                kind: kb,
+                key: kb_key,
+                v: cv,
+            },
+        ) => cmp_strid_val(graph, *a, *cb, *kb, kb_key.as_deref(), cv),
         #[cfg(feature = "topk-lazy-strkey")]
-        (SortCell::Val { class: ca, kind: ka, key: ka_key, v: av }, SortCell::StrId(b)) => {
-            cmp_strid_val(graph, *b, *ca, *ka, ka_key.as_deref(), av).reverse()
-        }
+        (
+            SortCell::Val {
+                class: ca,
+                kind: ka,
+                key: ka_key,
+                v: av,
+            },
+            SortCell::StrId(b),
+        ) => cmp_strid_val(graph, *b, *ca, *ka, ka_key.as_deref(), av).reverse(),
         // Two generic key values: compare the PRECOMPUTED class rank, then (within the
         // literal class) the PRECOMPUTED kind rank — both integer compares, no per-comparison
         // `lit_kind` / `is_numeric_dt` re-derivation. Only when the ranks tie (same class,
@@ -10699,8 +11661,18 @@ fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell)
         // byte-identical to `compare_values(av, cv)`, just with the cross-class / cross-kind
         // dispatch hoisted to construction time. [FABLE-5] sq-7d3dj.30.12
         (
-            SortCell::Val { class: ca, kind: ka, key: ka_key, v: av },
-            SortCell::Val { class: cb, kind: kb, key: kb_key, v: cv },
+            SortCell::Val {
+                class: ca,
+                kind: ka,
+                key: ka_key,
+                v: av,
+            },
+            SortCell::Val {
+                class: cb,
+                kind: kb,
+                key: kb_key,
+                v: cv,
+            },
         ) => match ca.cmp(cb) {
             Ordering::Equal => {
                 // Same class. Within the literal class, rank by kind first; other classes
@@ -10746,7 +11718,10 @@ fn cmp_sort_num(graph: &Graph, fa: f64, ia: Id, fb: f64, ib: Id) -> Ordering {
             if ia == ib {
                 return Ordering::Equal;
             }
-            match (graph.exact_numeric_lexical(ia), graph.exact_numeric_lexical(ib)) {
+            match (
+                graph.exact_numeric_lexical(ia),
+                graph.exact_numeric_lexical(ib),
+            ) {
                 (Some(la), Some(lb)) => cmp_decimal_str(&la, &lb).unwrap_or(Ordering::Equal),
                 (Some(la), None) => cmp_exact_lex_f64(&la, fb),
                 (None, Some(lb)) => cmp_exact_lex_f64(&lb, fa).reverse(),
@@ -10819,7 +11794,14 @@ fn str_id_value(graph: &Graph, id: Id) -> &str {
 /// `str_id_value(a)` reproduces the eager `(Some, Some) => la.cmp(lb)` order exactly.
 #[cfg(feature = "topk-lazy-strkey")]
 #[inline]
-fn cmp_strid_val(graph: &Graph, a: Id, vclass: u8, vkind: u8, vkey: Option<&str>, v: &Value) -> Ordering {
+fn cmp_strid_val(
+    graph: &Graph,
+    a: Id,
+    vclass: u8,
+    vkind: u8,
+    vkey: Option<&str>,
+    v: &Value,
+) -> Ordering {
     let str_class = TermClass::Literal as u8;
     let str_kind = LiteralKind::String as u8;
     match str_class.cmp(&vclass) {
@@ -11008,7 +11990,8 @@ fn order_bindings(
             // Strict total-order comparator: sort key first (descending as flagged),
             // then input_idx as tiebreaker (smaller index = appears earlier in the
             // stable sort, so it sorts LESS here — reproduces the stable sort exactly).
-            let cmp_total = |a: &(Vec<(bool, SortCell)>, usize), c: &(Vec<(bool, SortCell)>, usize)| {
+            let cmp_total = |a: &(Vec<(bool, SortCell)>, usize),
+                             c: &(Vec<(bool, SortCell)>, usize)| {
                 for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
                     let ord = cmp_sort_cells(graph, local, av, cv);
                     let ord = if *desc { ord.reverse() } else { ord };
@@ -11070,11 +12053,17 @@ fn order_bindings(
             })
             .collect::<Result<_, String>>()?
     } else {
-        b.rows.iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
+        b.rows
+            .iter()
+            .map(|row| Ok((key_of(row)?, row.clone())))
+            .collect::<Result<_, String>>()?
     };
     #[cfg(not(feature = "parallel"))]
-    let mut keyed: Vec<(Vec<(bool, SortCell)>, Row)> =
-        b.rows.iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?;
+    let mut keyed: Vec<(Vec<(bool, SortCell)>, Row)> = b
+        .rows
+        .iter()
+        .map(|row| Ok((key_of(row)?, row.clone())))
+        .collect::<Result<_, String>>()?;
 
     let cmp = |a: &(Vec<(bool, SortCell)>, Row), c: &(Vec<(bool, SortCell)>, Row)| {
         for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
@@ -11130,7 +12119,9 @@ mod sort_collation_key_differential {
         Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)))
     }
     fn lang(lex: &str, tag: &str) -> Value {
-        Value::Term(Term::Literal(Literal::new_language_tagged_literal(lex, tag).unwrap()))
+        Value::Term(Term::Literal(
+            Literal::new_language_tagged_literal(lex, tag).unwrap(),
+        ))
     }
     fn iri(s: &str) -> Value {
         Value::Term(Term::NamedNode(NamedNode::new(s).unwrap()))
@@ -11255,11 +12246,22 @@ mod sort_collation_key_differential {
         let l = LocalVocab::default();
         let vs = corpus();
         for a in &vs {
-            assert_eq!(keyed(a, a, &g, &l), Ordering::Equal, "reflexivity: {}", value_key(a));
+            assert_eq!(
+                keyed(a, a, &g, &l),
+                Ordering::Equal,
+                "reflexivity: {}",
+                value_key(a)
+            );
             for c in &vs {
                 let ac = keyed(a, c, &g, &l);
                 let ca = keyed(c, a, &g, &l);
-                assert_eq!(ac, ca.reverse(), "antisymmetry ({}, {})", value_key(a), value_key(c));
+                assert_eq!(
+                    ac,
+                    ca.reverse(),
+                    "antisymmetry ({}, {})",
+                    value_key(a),
+                    value_key(c)
+                );
             }
         }
     }
@@ -11274,7 +12276,9 @@ mod sort_collation_key_differential {
         // A tiny LCG — no external rand dep, fully deterministic.
         let mut state: u64 = 0x9E3779B97F4A7C15;
         let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             state >> 11
         };
         let dts = [xsd::INTEGER, xsd::DECIMAL, xsd::DOUBLE, xsd::FLOAT];
@@ -11302,7 +12306,8 @@ mod sort_collation_key_differential {
             let want = reference(&a, &c);
             let got = keyed(&a, &c, &g, &l);
             assert_eq!(
-                got, want,
+                got,
+                want,
                 "random numeric divergence ({}, {}): got {:?} want {:?}",
                 value_key(&a),
                 value_key(&c),
@@ -11334,10 +12339,21 @@ mod lazy_strkey_differential {
     /// The plain-`xsd:string` literals the lazy path handles — including the adversarial
     /// lexical-order cases (`"10" < "2"`), the empty string, and duplicates (ties).
     fn strings() -> Vec<Term> {
-        ["apple", "banana", "zebra", "", "10", "2", "apple", "Apple", "aardvark", "http://x/y"]
-            .iter()
-            .map(|s| Term::Literal(Literal::new_simple_literal(*s)))
-            .collect()
+        [
+            "apple",
+            "banana",
+            "zebra",
+            "",
+            "10",
+            "2",
+            "apple",
+            "Apple",
+            "aardvark",
+            "http://x/y",
+        ]
+        .iter()
+        .map(|s| Term::Literal(Literal::new_simple_literal(*s)))
+        .collect()
     }
 
     /// Non-string terms spanning every OTHER class + literal kind, to exercise the cross-type
@@ -11451,7 +12467,11 @@ mod lazy_strkey_differential {
             );
             if is_plain_string {
                 if let Term::Literal(l) = t {
-                    assert_eq!(g.dict.plain_string_value(*id), Some(l.value()), "value slice for {t}");
+                    assert_eq!(
+                        g.dict.plain_string_value(*id),
+                        Some(l.value()),
+                        "value slice for {t}"
+                    );
                 }
             }
         }
@@ -11464,7 +12484,12 @@ mod lazy_strkey_differential {
 /// eligible (see `columnar_filter`), a columnar vector-at-a-time path runs and the row loop is
 /// skipped; otherwise the scalar row path (`apply_filter_scalar`) runs verbatim. When the
 /// feature is OFF this compiles to exactly the scalar body — byte-identical, zero overhead.
-fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
+fn apply_filter(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &mut Bindings,
+    expr: &Expression,
+) -> Result<(), String> {
     // [SONNET-4.6] (sq-pntvh.5, M4 Phase 5 / sq-y5ew5, M4 hybrid tri-mask) Dispatcher-gated
     // columnar residual-FILTER seam (Seam A): the `columnar_filter` helper runs through the
     // shared `vec_dispatch` eligibility gate (VEC_MIN_BATCH threshold, I2/I3 checks) and
@@ -11604,11 +12629,26 @@ fn columnar_filter(
     // Decline a NaN threshold: all lanes would be Unknown → 100% delegation, no benefit.
     // Also ensures the tri-mask tie check (x == c) is well-defined (NaN == anything is false).
     let veccmp = match cmp {
-        NumCmp::Gt(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
-        NumCmp::Ge(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
-        NumCmp::Lt(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
-        NumCmp::Le(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
-        NumCmp::Eq(t) if t.is_nan() => { vec_dispatch::record_decline(); return Ok(None); }
+        NumCmp::Gt(t) if t.is_nan() => {
+            vec_dispatch::record_decline();
+            return Ok(None);
+        }
+        NumCmp::Ge(t) if t.is_nan() => {
+            vec_dispatch::record_decline();
+            return Ok(None);
+        }
+        NumCmp::Lt(t) if t.is_nan() => {
+            vec_dispatch::record_decline();
+            return Ok(None);
+        }
+        NumCmp::Le(t) if t.is_nan() => {
+            vec_dispatch::record_decline();
+            return Ok(None);
+        }
+        NumCmp::Eq(t) if t.is_nan() => {
+            vec_dispatch::record_decline();
+            return Ok(None);
+        }
         NumCmp::Gt(t) => VecCmp::Gt(t),
         NumCmp::Ge(t) => VecCmp::Ge(t),
         NumCmp::Lt(t) => VecCmp::Lt(t),
@@ -11685,7 +12725,10 @@ fn columnar_filter(
     }
 
     // Materialise survivors from the original rows (order-preserving, full-width).
-    let result: Vec<Row> = survivor_indices.iter().map(|&r| Row::from_slice(rows[r].as_ref())).collect();
+    let result: Vec<Row> = survivor_indices
+        .iter()
+        .map(|&r| Row::from_slice(rows[r].as_ref()))
+        .collect();
     Ok(Some(result))
 }
 
@@ -11756,7 +12799,11 @@ fn columnar_aggregate(
                 }
                 // CountSolutions needs no column — always eligible.
             }
-            AggregateExpression::FunctionCall { name, expr, distinct } => {
+            AggregateExpression::FunctionCall {
+                name,
+                expr,
+                distinct,
+            } => {
                 if *distinct {
                     vec_dispatch::record_decline();
                     return None; // DISTINCT requires per-group value dedup
@@ -11864,7 +12911,8 @@ fn columnar_aggregate(
                                 let sum_i64 = crate::reduce::narrow_sum_to_i64(sum_i128)?;
                                 // integer / integer → Decimal (SPARQL §17.4.4.3).
                                 // Mirrors: sum_values → binop(Div) → value_to_id.
-                                let result = Num::Int(sum_i64).binop(Num::Int(count_i64), ArithOp::Div)?;
+                                let result =
+                                    Num::Int(sum_i64).binop(Num::Int(count_i64), ArithOp::Div)?;
                                 value_to_id(graph, local, &Value::Num(result))
                             }
                         }
@@ -11927,7 +12975,12 @@ fn with_idfast_nonlit_cols<R>(cols: FxHashSet<usize>, f: impl FnOnce() -> R) -> 
     f()
 }
 
-fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
+fn apply_filter_scalar(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &mut Bindings,
+    expr: &Expression,
+) -> Result<(), String> {
     // Pre-resolve Variable → column index once before the row loop. [OPUS-4.8] sq-7d3dj.4.
     #[cfg_attr(not(feature = "id-filter-fastpath"), allow(unused_mut))]
     let mut compiled = compile_expr(expr, b);
@@ -11962,8 +13015,8 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
-        // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
-        // a worker that missed the registry would dial the IRI instead of answering it.
+                                       // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+                                       // a worker that missed the registry would dial the IRI instead of answering it.
         #[cfg(feature = "service-local")]
         let lsv = local_services::snapshot();
         #[cfg(not(target_arch = "wasm32"))]
@@ -11980,14 +13033,18 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
                 #[cfg(not(target_arch = "wasm32"))]
                 let _qn = query_now::worker_install(qn);
                 ROW_SCOPE.set((scope, i));
-                Ok(effective_boolean(&eval_compiled(graph, local, b, row, &compiled)?))
+                Ok(effective_boolean(&eval_compiled(
+                    graph, local, b, row, &compiled,
+                )?))
             })
             .collect::<Result<Vec<bool>, String>>()?
     } else {
         let mut keep = Vec::with_capacity(b.rows.len());
         for (i, row) in b.rows.iter().enumerate() {
             ROW_SCOPE.set((scope, i));
-            keep.push(effective_boolean(&eval_compiled(graph, local, b, row, &compiled)?));
+            keep.push(effective_boolean(&eval_compiled(
+                graph, local, b, row, &compiled,
+            )?));
         }
         keep
     };
@@ -11996,7 +13053,9 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
         let mut keep = Vec::with_capacity(b.rows.len());
         for (i, row) in b.rows.iter().enumerate() {
             ROW_SCOPE.set((scope, i));
-            keep.push(effective_boolean(&eval_compiled(graph, local, b, row, &compiled)?));
+            keep.push(effective_boolean(&eval_compiled(
+                graph, local, b, row, &compiled,
+            )?));
         }
         keep
     };
@@ -12130,9 +13189,10 @@ fn idfast_rewrite(e: &mut CompiledExpr, nonlit_cols: &FxHashSet<usize>) {
             // Equal are never themselves the (in)equality we fast-path, but keep the walk total).
             idfast_rewrite(a, nonlit_cols);
             idfast_rewrite(c, nonlit_cols);
-            if let (Some(l), Some(r)) =
-                (nonlit_operand(a, nonlit_cols), nonlit_operand(c, nonlit_cols))
-            {
+            if let (Some(l), Some(r)) = (
+                nonlit_operand(a, nonlit_cols),
+                nonlit_operand(c, nonlit_cols),
+            ) {
                 *e = C::IdEqNonLit(l, r);
             }
         }
@@ -12184,20 +13244,34 @@ fn compile_expr(e: &Expression, b: &Bindings) -> CompiledExpr {
         And(a, d) => CompiledExpr::And(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
         Or(a, d) => CompiledExpr::Or(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
         Not(a) => CompiledExpr::Not(Box::new(compile_expr(a, b))),
-        Equal(a, d) => CompiledExpr::Equal(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
-        SameTerm(a, d) => CompiledExpr::SameTerm(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
-        Greater(a, d) => CompiledExpr::Greater(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Equal(a, d) => {
+            CompiledExpr::Equal(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
+        SameTerm(a, d) => {
+            CompiledExpr::SameTerm(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
+        Greater(a, d) => {
+            CompiledExpr::Greater(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
         GreaterOrEqual(a, d) => {
             CompiledExpr::GreaterOrEqual(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
         }
-        Less(a, d) => CompiledExpr::Less(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Less(a, d) => {
+            CompiledExpr::Less(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
         LessOrEqual(a, d) => {
             CompiledExpr::LessOrEqual(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
         }
         Add(a, d) => CompiledExpr::Add(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
-        Subtract(a, d) => CompiledExpr::Subtract(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
-        Multiply(a, d) => CompiledExpr::Multiply(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
-        Divide(a, d) => CompiledExpr::Divide(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b))),
+        Subtract(a, d) => {
+            CompiledExpr::Subtract(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
+        Multiply(a, d) => {
+            CompiledExpr::Multiply(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
+        Divide(a, d) => {
+            CompiledExpr::Divide(Box::new(compile_expr(a, b)), Box::new(compile_expr(d, b)))
+        }
         UnaryPlus(a) => CompiledExpr::UnaryPlus(Box::new(compile_expr(a, b))),
         UnaryMinus(a) => CompiledExpr::UnaryMinus(Box::new(compile_expr(a, b))),
         If(cond, t, f) => CompiledExpr::If(
@@ -12206,12 +13280,14 @@ fn compile_expr(e: &Expression, b: &Bindings) -> CompiledExpr {
             Box::new(compile_expr(f, b)),
         ),
         Coalesce(es) => CompiledExpr::Coalesce(es.iter().map(|ce| compile_expr(ce, b)).collect()),
-        In(a, list) => {
-            CompiledExpr::In(Box::new(compile_expr(a, b)), list.iter().map(|ce| compile_expr(ce, b)).collect())
-        }
-        FunctionCall(f, args) => {
-            CompiledExpr::FunctionCall(f.clone(), args.iter().map(|ce| compile_expr(ce, b)).collect())
-        }
+        In(a, list) => CompiledExpr::In(
+            Box::new(compile_expr(a, b)),
+            list.iter().map(|ce| compile_expr(ce, b)).collect(),
+        ),
+        FunctionCall(f, args) => CompiledExpr::FunctionCall(
+            f.clone(),
+            args.iter().map(|ce| compile_expr(ce, b)).collect(),
+        ),
         Exists(inner) => CompiledExpr::Exists(inner.clone()),
     }
 }
@@ -12237,7 +13313,10 @@ fn compiled_expr_has_arith(e: &CompiledExpr) -> bool {
 /// Engine-side because it constructs the engine's `Value`; the value/lexical logic lives in
 /// the shared substrate.
 fn num_canonical_term(n: Num) -> Value {
-    Value::Term(Term::Literal(Literal::new_typed_literal(n.canonical_lexical(), n.datatype())))
+    Value::Term(Term::Literal(Literal::new_typed_literal(
+        n.canonical_lexical(),
+        n.datatype(),
+    )))
 }
 
 fn effective_boolean(v: &Value) -> bool {
@@ -12280,7 +13359,13 @@ fn ebv(v: &Value) -> Option<bool> {
     }
 }
 
-fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Result<Value, String> {
+fn eval_expr(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    e: &Expression,
+) -> Result<Value, String> {
     use Expression::*;
     match e {
         Variable(v) => match b.col(v) {
@@ -12319,8 +13404,13 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
         }),
         Equal(a, c) => equal_expr(graph, local, b, row, a, c),
         SameTerm(a, c) => {
-            let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
-            Ok(Value::Bool(matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q)))
+            let (x, y) = (
+                eval_expr(graph, local, b, row, a)?,
+                eval_expr(graph, local, b, row, c)?,
+            );
+            Ok(Value::Bool(
+                matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q),
+            ))
         }
         Greater(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o == Ordering::Greater),
         GreaterOrEqual(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o != Ordering::Less),
@@ -12335,9 +13425,13 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
             // Typed negation: the result keeps the argument's (promoted) numeric
             // datatype; a non-numeric operand is a type error.
             let v = eval_expr(graph, local, b, row, a)?;
-            Ok(as_numeric(&v).map(|n| Value::Num(n.neg())).unwrap_or(Value::Error))
+            Ok(as_numeric(&v)
+                .map(|n| Value::Num(n.neg()))
+                .unwrap_or(Value::Error))
         }
-        Bound(v) => Ok(Value::Bool(b.col(v).map(|c| row[c] != NO_ID).unwrap_or(false))),
+        Bound(v) => Ok(Value::Bool(
+            b.col(v).map(|c| row[c] != NO_ID).unwrap_or(false),
+        )),
         If(cond, t, f) => {
             // A type error in the condition propagates (it does NOT silently select
             // the else branch).
@@ -12373,7 +13467,11 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
                     None => errored = true,
                 }
             }
-            Ok(if errored { Value::Error } else { Value::Bool(false) })
+            Ok(if errored {
+                Value::Error
+            } else {
+                Value::Bool(false)
+            })
         }
         FunctionCall(f, args) => eval_function(graph, local, b, row, f, args),
         Exists(inner) => Ok(Value::Bool(eval_exists(graph, local, b, row, inner)?)),
@@ -12401,7 +13499,13 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
 /// first-solution-stop path as ASK (`Slice { LIMIT 1 }`, which the single-pattern
 /// scan / count pushdown answers without materialising the whole relation) instead
 /// of building every inner solution just to call `.any()` on it.
-fn eval_exists(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], inner: &GraphPattern) -> Result<bool, String> {
+fn eval_exists(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    inner: &GraphPattern,
+) -> Result<bool, String> {
     // [FABLE-5] (sq-7d3dj.30.11, PR #1785 review) Defence-in-depth against the id-fast column set
     // leaking into EXISTS re-entry: install an EMPTY set for the whole inner evaluation, so a
     // nested FILTER computes its OWN set against its OWN `Bindings` (via the wrapped dispatch) and
@@ -12417,7 +13521,13 @@ fn eval_exists(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], inne
     eval_exists_inner(graph, local, b, row, inner)
 }
 
-fn eval_exists_inner(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], inner: &GraphPattern) -> Result<bool, String> {
+fn eval_exists_inner(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    inner: &GraphPattern,
+) -> Result<bool, String> {
     // zk-trace: the inner pattern is re-run per outer row; tag its scans
     // `in_exists` and suppress their steps / filter obligations (EXISTS is
     // outside the stage-1 verifiable fragment — sparq-zk::verify rejects it;
@@ -12439,7 +13549,11 @@ fn eval_exists_inner(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id]
     if !correlated {
         // First-solution stop, reusing the ASK machinery (count pushdown / capped
         // single-pattern scan). zk-trace stays armed inside via the scope above.
-        let sliced = GraphPattern::Slice { inner: Box::new(inner.clone()), start: 0, length: Some(1) };
+        let sliced = GraphPattern::Slice {
+            inner: Box::new(inner.clone()),
+            start: 0,
+            length: Some(1),
+        };
         let mut inner_local = LocalVocab::default();
         let b1 = eval_modified(graph, &mut inner_local, &sliced)?;
         budget::check(b1.rows.len())?;
@@ -12468,7 +13582,13 @@ fn eval_exists_inner(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id]
 /// were produced against different local vocabs: unbound inner is compatible; ids in
 /// the shared spaces (graph dictionary / inline integers) compare directly; anything
 /// involving a local id falls back to term equality.
-fn exists_compatible(graph: &Graph, outer_local: &LocalVocab, o: Id, inner_local: &LocalVocab, i: Id) -> bool {
+fn exists_compatible(
+    graph: &Graph,
+    outer_local: &LocalVocab,
+    o: Id,
+    inner_local: &LocalVocab,
+    i: Id,
+) -> bool {
     if i == NO_ID {
         return true;
     }
@@ -12478,13 +13598,18 @@ fn exists_compatible(graph: &Graph, outer_local: &LocalVocab, o: Id, inner_local
     term_of(graph, outer_local, o) == term_of(graph, inner_local, i)
 }
 
-
 /// Fast numeric evaluation that never materialises a term: a numeric variable
 /// resolves to its value via the dictionary cache, a numeric literal via one
 /// parse, and arithmetic recurses. Returns `None` for anything non-numeric, so
 /// the caller falls back to the full (identity-preserving) `eval_expr` path.
 /// Used only where the value — not the term — matters (comparison / arithmetic).
-fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<f64> {
+fn eval_numeric(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    e: &Expression,
+) -> Option<f64> {
     use Expression::*;
     match e {
         Variable(v) => {
@@ -12504,10 +13629,18 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
         // (`numeric_cache_f64`), so a datatype-ill-formed literal constant (`"1.5"^^xsd:integer`)
         // is a type error on this fast comparison path exactly as the graph-term side is.
         Literal(l) => numeric_cache_f64(l),
-        Add(a, c) => Some(eval_numeric(graph, local, b, row, a)? + eval_numeric(graph, local, b, row, c)?),
-        Subtract(a, c) => Some(eval_numeric(graph, local, b, row, a)? - eval_numeric(graph, local, b, row, c)?),
-        Multiply(a, c) => Some(eval_numeric(graph, local, b, row, a)? * eval_numeric(graph, local, b, row, c)?),
-        Divide(a, c) => Some(eval_numeric(graph, local, b, row, a)? / eval_numeric(graph, local, b, row, c)?),
+        Add(a, c) => {
+            Some(eval_numeric(graph, local, b, row, a)? + eval_numeric(graph, local, b, row, c)?)
+        }
+        Subtract(a, c) => {
+            Some(eval_numeric(graph, local, b, row, a)? - eval_numeric(graph, local, b, row, c)?)
+        }
+        Multiply(a, c) => {
+            Some(eval_numeric(graph, local, b, row, a)? * eval_numeric(graph, local, b, row, c)?)
+        }
+        Divide(a, c) => {
+            Some(eval_numeric(graph, local, b, row, a)? / eval_numeric(graph, local, b, row, c)?)
+        }
         UnaryPlus(a) => eval_numeric(graph, local, b, row, a),
         UnaryMinus(a) => Some(-eval_numeric(graph, local, b, row, a)?),
         _ => None,
@@ -12521,7 +13654,13 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
 /// non-temporal or ill-formed, so the caller falls back to the general path (which
 /// yields the exact type-error semantics). Used only where the VALUE matters
 /// (comparison operators); term identity is never needed there.
-fn eval_temporal(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<Temporal> {
+fn eval_temporal(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    e: &Expression,
+) -> Option<Temporal> {
     use Expression::*;
     match e {
         Variable(v) => {
@@ -12560,7 +13699,13 @@ fn temporal_of_lit(l: &Literal) -> Option<Temporal> {
 /// integer subtype or xsd:decimal — NOT float/double). Used to re-check comparisons that
 /// the f64 fast path collapsed (integers > 2^53, high-precision decimals). Only reached
 /// when the f64 comparison was equal, so the allocation is rare.
-fn eval_exact_lexical(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<String> {
+fn eval_exact_lexical(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    e: &Expression,
+) -> Option<String> {
     use Expression::*;
     match e {
         Variable(v) => {
@@ -12573,15 +13718,19 @@ fn eval_exact_lexical(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id
                 graph.exact_numeric_lexical(id)
             }
         }
-        Literal(_) => exact_lexical_of_term(&eval_expr(graph, local, b, row, e).ok().and_then(|v| match v {
-            Value::Term(t) => Some(t),
-            _ => None,
-        })?),
+        Literal(_) => exact_lexical_of_term(&eval_expr(graph, local, b, row, e).ok().and_then(
+            |v| match v {
+                Value::Term(t) => Some(t),
+                _ => None,
+            },
+        )?),
         UnaryPlus(a) => eval_exact_lexical(graph, local, b, row, a),
-        UnaryMinus(a) => eval_exact_lexical(graph, local, b, row, a).map(|s| match s.strip_prefix('-') {
-            Some(r) => r.to_string(),
-            None => format!("-{s}"),
-        }),
+        UnaryMinus(a) => {
+            eval_exact_lexical(graph, local, b, row, a).map(|s| match s.strip_prefix('-') {
+                Some(r) => r.to_string(),
+                None => format!("-{s}"),
+            })
+        }
         _ => None,
     }
 }
@@ -12590,7 +13739,8 @@ fn exact_lexical_of_term(t: &Term) -> Option<String> {
     match t {
         Term::Literal(l)
             if l.language().is_none()
-                && (sparq_core::is_integer_datatype(l.datatype().as_str()) || l.datatype() == xsd::DECIMAL) =>
+                && (sparq_core::is_integer_datatype(l.datatype().as_str())
+                    || l.datatype() == xsd::DECIMAL) =>
         {
             Some(l.value().to_string())
         }
@@ -12604,26 +13754,43 @@ fn exact_lexical_of_term(t: &Term) -> Option<String> {
 // [OPUS-4.8] sq-7d3dj.4
 
 /// Fast numeric evaluation on a pre-compiled expression. Mirrors [`eval_numeric`]. [OPUS-4.8] sq-7d3dj.4.
-fn eval_compiled_numeric(graph: &Graph, local: &LocalVocab, row: &[Id], e: &CompiledExpr) -> Option<f64> {
+fn eval_compiled_numeric(
+    graph: &Graph,
+    local: &LocalVocab,
+    row: &[Id],
+    e: &CompiledExpr,
+) -> Option<f64> {
     use CompiledExpr::*;
     match e {
         Var(col) => {
             let c = (*col)?;
             let id = row[c];
-            if id == NO_ID { None } else if is_local(id) { local.numeric(id) } else { graph.numeric_value(id) }
+            if id == NO_ID {
+                None
+            } else if is_local(id) {
+                local.numeric(id)
+            } else {
+                graph.numeric_value(id)
+            }
         }
         // [FABLE-5] sq-6b1lj: datatype-aware/trimmed constant, matching `eval_numeric`.
         Literal(l) => numeric_cache_f64(l),
-        Add(a, d) => Some(eval_compiled_numeric(graph, local, row, a)? + eval_compiled_numeric(graph, local, row, d)?),
-        Subtract(a, d) => {
-            Some(eval_compiled_numeric(graph, local, row, a)? - eval_compiled_numeric(graph, local, row, d)?)
-        }
-        Multiply(a, d) => {
-            Some(eval_compiled_numeric(graph, local, row, a)? * eval_compiled_numeric(graph, local, row, d)?)
-        }
-        Divide(a, d) => {
-            Some(eval_compiled_numeric(graph, local, row, a)? / eval_compiled_numeric(graph, local, row, d)?)
-        }
+        Add(a, d) => Some(
+            eval_compiled_numeric(graph, local, row, a)?
+                + eval_compiled_numeric(graph, local, row, d)?,
+        ),
+        Subtract(a, d) => Some(
+            eval_compiled_numeric(graph, local, row, a)?
+                - eval_compiled_numeric(graph, local, row, d)?,
+        ),
+        Multiply(a, d) => Some(
+            eval_compiled_numeric(graph, local, row, a)?
+                * eval_compiled_numeric(graph, local, row, d)?,
+        ),
+        Divide(a, d) => Some(
+            eval_compiled_numeric(graph, local, row, a)?
+                / eval_compiled_numeric(graph, local, row, d)?,
+        ),
         UnaryPlus(a) => eval_compiled_numeric(graph, local, row, a),
         UnaryMinus(a) => Some(-eval_compiled_numeric(graph, local, row, a)?),
         _ => None,
@@ -12631,7 +13798,12 @@ fn eval_compiled_numeric(graph: &Graph, local: &LocalVocab, row: &[Id], e: &Comp
 }
 
 /// Fast temporal evaluation on a pre-compiled expression. Mirrors [`eval_temporal`]. [OPUS-4.8] sq-7d3dj.4.
-fn eval_compiled_temporal(graph: &Graph, local: &LocalVocab, row: &[Id], e: &CompiledExpr) -> Option<Temporal> {
+fn eval_compiled_temporal(
+    graph: &Graph,
+    local: &LocalVocab,
+    row: &[Id],
+    e: &CompiledExpr,
+) -> Option<Temporal> {
     use CompiledExpr::*;
     match e {
         Var(col) => {
@@ -12651,7 +13823,12 @@ fn eval_compiled_temporal(graph: &Graph, local: &LocalVocab, row: &[Id], e: &Com
 }
 
 /// Exact decimal evaluation on a pre-compiled expression. Mirrors [`eval_dec`]. [OPUS-4.8] sq-7d3dj.4.
-fn eval_compiled_dec(graph: &Graph, local: &LocalVocab, row: &[Id], e: &CompiledExpr) -> Option<Dec> {
+fn eval_compiled_dec(
+    graph: &Graph,
+    local: &LocalVocab,
+    row: &[Id],
+    e: &CompiledExpr,
+) -> Option<Dec> {
     use CompiledExpr::*;
     match e {
         Var(col) => {
@@ -12665,27 +13842,37 @@ fn eval_compiled_dec(graph: &Graph, local: &LocalVocab, row: &[Id], e: &Compiled
                 Dec::parse(&graph.exact_numeric_lexical(id)?)
             }
         }
-        Literal(l) if sparq_core::is_integer_datatype(l.datatype().as_str()) || l.datatype() == xsd::DECIMAL => {
+        Literal(l)
+            if sparq_core::is_integer_datatype(l.datatype().as_str())
+                || l.datatype() == xsd::DECIMAL =>
+        {
             Dec::parse(l.value())
         }
-        Add(a, d) => eval_compiled_dec(graph, local, row, a)?.checked_add(eval_compiled_dec(graph, local, row, d)?),
-        Subtract(a, d) => {
-            eval_compiled_dec(graph, local, row, a)?.checked_sub(eval_compiled_dec(graph, local, row, d)?)
-        }
-        Multiply(a, d) => {
-            eval_compiled_dec(graph, local, row, a)?.checked_mul(eval_compiled_dec(graph, local, row, d)?)
-        }
+        Add(a, d) => eval_compiled_dec(graph, local, row, a)?
+            .checked_add(eval_compiled_dec(graph, local, row, d)?),
+        Subtract(a, d) => eval_compiled_dec(graph, local, row, a)?
+            .checked_sub(eval_compiled_dec(graph, local, row, d)?),
+        Multiply(a, d) => eval_compiled_dec(graph, local, row, a)?
+            .checked_mul(eval_compiled_dec(graph, local, row, d)?),
         UnaryPlus(a) => eval_compiled_dec(graph, local, row, a),
         UnaryMinus(a) => {
             let d = eval_compiled_dec(graph, local, row, a)?;
-            Some(Dec { mant: d.mant.checked_neg()?, scale: d.scale })
+            Some(Dec {
+                mant: d.mant.checked_neg()?,
+                scale: d.scale,
+            })
         }
         _ => None,
     }
 }
 
 /// Exact lexical form for precise decimal/integer comparison. Mirrors [`eval_exact_lexical`]. [OPUS-4.8] sq-7d3dj.4.
-fn eval_compiled_exact_lexical(graph: &Graph, local: &LocalVocab, row: &[Id], e: &CompiledExpr) -> Option<String> {
+fn eval_compiled_exact_lexical(
+    graph: &Graph,
+    local: &LocalVocab,
+    row: &[Id],
+    e: &CompiledExpr,
+) -> Option<String> {
     use CompiledExpr::*;
     match e {
         Var(col) => {
@@ -12703,7 +13890,8 @@ fn eval_compiled_exact_lexical(graph: &Graph, local: &LocalVocab, row: &[Id], e:
             // Avoid a `Term` allocation: check directly whether the literal has an exact
             // integer/decimal lexical form (same condition as `exact_lexical_of_term`).
             if l.language().is_none()
-                && (sparq_core::is_integer_datatype(l.datatype().as_str()) || l.datatype() == xsd::DECIMAL)
+                && (sparq_core::is_integer_datatype(l.datatype().as_str())
+                    || l.datatype() == xsd::DECIMAL)
             {
                 Some(l.value().to_string())
             } else {
@@ -12711,10 +13899,12 @@ fn eval_compiled_exact_lexical(graph: &Graph, local: &LocalVocab, row: &[Id], e:
             }
         }
         UnaryPlus(a) => eval_compiled_exact_lexical(graph, local, row, a),
-        UnaryMinus(a) => eval_compiled_exact_lexical(graph, local, row, a).map(|s| match s.strip_prefix('-') {
-            Some(r) => r.to_string(),
-            None => format!("-{}", s),
-        }),
+        UnaryMinus(a) => {
+            eval_compiled_exact_lexical(graph, local, row, a).map(|s| match s.strip_prefix('-') {
+                Some(r) => r.to_string(),
+                None => format!("-{}", s),
+            })
+        }
         _ => None,
     }
 }
@@ -12737,7 +13927,12 @@ fn cmp_decimal_str(a: &str, b: &str) -> Option<Ordering> {
             let n = fa.len().max(fb.len());
             // Compare fractional digits with implicit trailing-zero padding.
             (0..n)
-                .map(|i| (fa.as_bytes().get(i).copied().unwrap_or(b'0'), fb.as_bytes().get(i).copied().unwrap_or(b'0')))
+                .map(|i| {
+                    (
+                        fa.as_bytes().get(i).copied().unwrap_or(b'0'),
+                        fb.as_bytes().get(i).copied().unwrap_or(b'0'),
+                    )
+                })
                 .find_map(|(x, y)| (x != y).then(|| x.cmp(&y)))
                 .unwrap_or(Ordering::Equal)
         });
@@ -12786,7 +13981,13 @@ fn expr_has_arith(e: &Expression) -> bool {
 /// Evaluates an expression EXACTLY as a fixed-point decimal, for integer/decimal operands
 /// and `+ - *`. `None` for anything not exactly representable this way (division, doubles,
 /// non-numeric operands, overflow) — the caller then uses the f64 path.
-fn eval_dec(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<Dec> {
+fn eval_dec(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    e: &Expression,
+) -> Option<Dec> {
     use Expression::*;
     match e {
         Variable(v) => {
@@ -12799,16 +14000,28 @@ fn eval_dec(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Exp
                 Dec::parse(&graph.exact_numeric_lexical(id)?)
             }
         }
-        Literal(l) if sparq_core::is_integer_datatype(l.datatype().as_str()) || l.datatype() == xsd::DECIMAL => {
+        Literal(l)
+            if sparq_core::is_integer_datatype(l.datatype().as_str())
+                || l.datatype() == xsd::DECIMAL =>
+        {
             Dec::parse(l.value())
         }
-        Add(a, c) => eval_dec(graph, local, b, row, a)?.checked_add(eval_dec(graph, local, b, row, c)?),
-        Subtract(a, c) => eval_dec(graph, local, b, row, a)?.checked_sub(eval_dec(graph, local, b, row, c)?),
-        Multiply(a, c) => eval_dec(graph, local, b, row, a)?.checked_mul(eval_dec(graph, local, b, row, c)?),
+        Add(a, c) => {
+            eval_dec(graph, local, b, row, a)?.checked_add(eval_dec(graph, local, b, row, c)?)
+        }
+        Subtract(a, c) => {
+            eval_dec(graph, local, b, row, a)?.checked_sub(eval_dec(graph, local, b, row, c)?)
+        }
+        Multiply(a, c) => {
+            eval_dec(graph, local, b, row, a)?.checked_mul(eval_dec(graph, local, b, row, c)?)
+        }
         UnaryPlus(a) => eval_dec(graph, local, b, row, a),
         UnaryMinus(a) => {
             let d = eval_dec(graph, local, b, row, a)?;
-            Some(Dec { mant: d.mant.checked_neg()?, scale: d.scale })
+            Some(Dec {
+                mant: d.mant.checked_neg()?,
+                scale: d.scale,
+            })
         }
         _ => None,
     }
@@ -12819,12 +14032,23 @@ fn eval_dec(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Exp
 /// same datatype); anything else is a TYPE ERROR (`Value::Error`), which a FILTER
 /// turns into "excluded". (Distinct from the lenient total order `compare_values`
 /// used by ORDER BY / MIN / MAX, which must order across every type.)
-fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(Ordering) -> bool) -> Result<Value, String> {
+fn cmp_expr(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    a: &Expression,
+    c: &Expression,
+    f: impl Fn(Ordering) -> bool,
+) -> Result<Value, String> {
     // EXACT path: integer/decimal arithmetic (`+ - *`) must not round through f64, which
     // can flip an ordering (`0.1 + 0.2` < `0.3` in f64). Only attempted when arithmetic is
     // present (the common, arithmetic-free comparison keeps the f64 fast path below).
     if expr_has_arith(a) || expr_has_arith(c) {
-        if let (Some(da), Some(db)) = (eval_dec(graph, local, b, row, a), eval_dec(graph, local, b, row, c)) {
+        if let (Some(da), Some(db)) = (
+            eval_dec(graph, local, b, row, a),
+            eval_dec(graph, local, b, row, c),
+        ) {
             if let Some(o) = da.cmp(db) {
                 return Ok(Value::Bool(f(o)));
             }
@@ -12833,12 +14057,18 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
     // Fast path: both sides numeric -> compare f64 directly, no term materialised.
     // Reaching here means BOTH operands are numeric, so a `None` partial_cmp is a
     // NaN value (op:numeric ordering of NaN is false) — NOT a cross-type error.
-    if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
+    if let (Some(x), Some(y)) = (
+        eval_numeric(graph, local, b, row, a),
+        eval_numeric(graph, local, b, row, c),
+    ) {
         // f64 rounding is monotonic — it only ever COLLAPSES distinct values to equal,
         // never flips an ordering. So re-check exactly ONLY when f64 says equal (catches
         // integers > 2^53 and high-precision decimals that share an f64).
         if x == y {
-            if let (Some(la), Some(lb)) = (eval_exact_lexical(graph, local, b, row, a), eval_exact_lexical(graph, local, b, row, c)) {
+            if let (Some(la), Some(lb)) = (
+                eval_exact_lexical(graph, local, b, row, a),
+                eval_exact_lexical(graph, local, b, row, c),
+            ) {
                 if let Some(ord) = cmp_decimal_str(&la, &lb) {
                     return Ok(Value::Bool(f(ord)));
                 }
@@ -12849,13 +14079,19 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
     // Fast path: both sides temporal -> compare cached/parsed timeline values, no term
     // materialised. `None` from `cmp_t` is exactly the strict path's type-error cases
     // (cross-family dateTime vs date, or mixed timezone presence inside the ±14h window).
-    if let (Some(ta), Some(tb)) = (eval_temporal(graph, local, b, row, a), eval_temporal(graph, local, b, row, c)) {
+    if let (Some(ta), Some(tb)) = (
+        eval_temporal(graph, local, b, row, a),
+        eval_temporal(graph, local, b, row, c),
+    ) {
         return Ok(match Temporal::cmp_t(ta, tb) {
             Some(o) => Value::Bool(f(o)),
             None => Value::Error,
         });
     }
-    let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
+    let (x, y) = (
+        eval_expr(graph, local, b, row, a)?,
+        eval_expr(graph, local, b, row, c)?,
+    );
     Ok(match value_compare_strict(&x, &y) {
         Some(o) => Value::Bool(f(o)),
         None => Value::Error,
@@ -12863,21 +14099,37 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
 }
 
 /// SPARQL `=` (and, negated, `!=`). See [`values_equal`].
-fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression) -> Result<Value, String> {
+fn equal_expr(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    a: &Expression,
+    c: &Expression,
+) -> Result<Value, String> {
     // EXACT integer/decimal arithmetic equality (see `cmp_expr`) — `0.1 + 0.2 = 0.3`.
     if expr_has_arith(a) || expr_has_arith(c) {
-        if let (Some(da), Some(db)) = (eval_dec(graph, local, b, row, a), eval_dec(graph, local, b, row, c)) {
+        if let (Some(da), Some(db)) = (
+            eval_dec(graph, local, b, row, a),
+            eval_dec(graph, local, b, row, c),
+        ) {
             if let Some(o) = da.cmp(db) {
                 return Ok(Value::Bool(o == Ordering::Equal));
             }
         }
     }
     // Fast path: both numeric (NaN == NaN is false, matching op:numeric-equal).
-    if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
+    if let (Some(x), Some(y)) = (
+        eval_numeric(graph, local, b, row, a),
+        eval_numeric(graph, local, b, row, c),
+    ) {
         // Re-check exactly when f64 says equal (see `cmp_expr`): distinct integers > 2^53
         // or high-precision decimals can share an f64 and must not be reported equal.
         if x == y {
-            if let (Some(la), Some(lb)) = (eval_exact_lexical(graph, local, b, row, a), eval_exact_lexical(graph, local, b, row, c)) {
+            if let (Some(la), Some(lb)) = (
+                eval_exact_lexical(graph, local, b, row, a),
+                eval_exact_lexical(graph, local, b, row, c),
+            ) {
                 if let Some(ord) = cmp_decimal_str(&la, &lb) {
                     return Ok(Value::Bool(ord == Ordering::Equal));
                 }
@@ -12888,7 +14140,10 @@ fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &E
     // Fast path: both temporal. Same-family operands decide by timeline (`None` =
     // the indeterminate mixed-timezone window -> type error); dateTime and date are
     // DISJOINT value spaces -> known different (matching `values_equal`).
-    if let (Some(ta), Some(tb)) = (eval_temporal(graph, local, b, row, a), eval_temporal(graph, local, b, row, c)) {
+    if let (Some(ta), Some(tb)) = (
+        eval_temporal(graph, local, b, row, a),
+        eval_temporal(graph, local, b, row, c),
+    ) {
         if ta.kind != tb.kind {
             return Ok(Value::Bool(false));
         }
@@ -12897,7 +14152,10 @@ fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &E
             None => Value::Error,
         });
     }
-    let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
+    let (x, y) = (
+        eval_expr(graph, local, b, row, a)?,
+        eval_expr(graph, local, b, row, c)?,
+    );
     Ok(match values_equal(&x, &y) {
         Some(eq) => Value::Bool(eq),
         None => Value::Error,
@@ -12979,7 +14237,10 @@ fn values_equal(x: &Value, y: &Value) -> Option<bool> {
             if a.subject != b.subject || a.predicate != b.predicate {
                 return Some(false);
             }
-            return values_equal(&Value::Term(a.object.clone()), &Value::Term(b.object.clone()));
+            return values_equal(
+                &Value::Term(a.object.clone()),
+                &Value::Term(b.object.clone()),
+            );
         }
         if !matches!(p, Term::Literal(_)) || !matches!(q, Term::Literal(_)) {
             return Some(false); // IRI / bnode: identity decides
@@ -12996,7 +14257,9 @@ fn values_equal(x: &Value, y: &Value) -> Option<bool> {
         (Str(a), Str(b)) => Some(a == b),
         (Bool(Some(a)), Bool(Some(b))) => Some(a == b),
         (Bool(_), Bool(_)) => None,
-        (DateTime(Some(a)), DateTime(Some(b))) => Timeline::cmp_tl(a, b).map(|o| o == Ordering::Equal),
+        (DateTime(Some(a)), DateTime(Some(b))) => {
+            Timeline::cmp_tl(a, b).map(|o| o == Ordering::Equal)
+        }
         (Date(Some(a)), Date(Some(b))) => Timeline::cmp_tl(a, b).map(|o| o == Ordering::Equal),
         (DateTime(_), DateTime(_)) | (Date(_), Date(_)) => None,
         // date and dateTime values are disjoint -> known different.
@@ -13081,8 +14344,19 @@ fn or3(x: Option<bool>, y: Option<bool>) -> Value {
 /// int/decimal value. Used for RESULT CONSTRUCTION (BIND / SELECT expressions /
 /// aggregates) — the comparison operators keep their f64 fast path (`eval_numeric`),
 /// where only the value matters.
-fn arith(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, op: ArithOp) -> Result<Value, String> {
-    let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
+fn arith(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    a: &Expression,
+    c: &Expression,
+    op: ArithOp,
+) -> Result<Value, String> {
+    let (x, y) = (
+        eval_expr(graph, local, b, row, a)?,
+        eval_expr(graph, local, b, row, c)?,
+    );
     Ok(match (as_numeric(&x), as_numeric(&y)) {
         (Some(p), Some(q)) => p.binop(q, op).map(Value::Num).unwrap_or(Value::Error),
         _ => Value::Error,
@@ -13283,10 +14557,11 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
     let simple = |s: String| Value::Term(Term::Literal(Literal::new_simple_literal(s)));
     // Both operands as ARGUMENT-COMPATIBLE string literals (second simple/xsd:string,
     // or same language tag as the first), else `Value::Error`.
-    let str_compat2 = |a: &Value, c: &Value, g: &dyn Fn(&str, &str) -> bool| match (str_lit(a), str_lit(c)) {
-        (Some((x, lx)), Some((y, ly))) if ly.is_none() || ly == lx => Value::Bool(g(&x, &y)),
-        _ => Value::Error,
-    };
+    let str_compat2 =
+        |a: &Value, c: &Value, g: &dyn Fn(&str, &str) -> bool| match (str_lit(a), str_lit(c)) {
+            (Some((x, lx)), Some((y, ly))) if ly.is_none() || ly == lx => Value::Bool(g(&x, &y)),
+            _ => Value::Error,
+        };
     Ok(match f {
         // [FABLE-5] (sq-qeltv) STR is defined over LITERALS and IRIs only, per SPARQL 1.1
         // §17.4.2.5 (`simple literal STR(literal ltrl)` / `simple literal STR(IRI rsrc)`).
@@ -13307,7 +14582,9 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         // xsd:string), per SPARQL 1.1 §17.4.3.2 `xsd:integer STRLEN(string literal)`.
         // An IRI / number / boolean is a TYPE ERROR — NOT its STR() length (the old
         // `value_str` coercion wrongly returned `STRLEN(<iri>)` = the IRI's length).
-        F::StrLen => str_lit(&ev(0)?).map(|(s, _)| Value::Num(Num::Int(s.chars().count() as i64))).unwrap_or(Value::Error),
+        F::StrLen => str_lit(&ev(0)?)
+            .map(|(s, _)| Value::Num(Num::Int(s.chars().count() as i64)))
+            .unwrap_or(Value::Error),
         // UCASE/LCASE/SUBSTR operate on string literals and preserve the language tag
         // of the argument (simple in, simple out; "bar"@en in, "BAR"@en out).
         F::UCase => match str_lit(&ev(0)?) {
@@ -13324,7 +14601,9 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
             _ => Value::Error,
         },
         F::Datatype => match ev(0)? {
-            Value::Term(Term::Literal(l)) => Value::Term(Term::NamedNode(l.datatype().into_owned())),
+            Value::Term(Term::Literal(l)) => {
+                Value::Term(Term::NamedNode(l.datatype().into_owned()))
+            }
             // A computed numeric knows its promoted XSD type (the type-promotion suite
             // checks `datatype(?l + ?r)` across the whole tower).
             Value::Num(n) => Value::Term(Term::NamedNode(n.datatype().into_owned())),
@@ -13397,13 +14676,17 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         // §17.4.3.12 `simple literal ENCODE_FOR_URI(string literal)`. A number / IRI /
         // boolean is a TYPE ERROR — the old `value_str` coercion wrongly encoded e.g.
         // `ENCODE_FOR_URI(123)` to the simple literal "123".
-        F::EncodeForUri => str_lit(&ev(0)?).map(|(s, _)| simple(encode_for_uri(&s))).unwrap_or(Value::Error),
+        F::EncodeForUri => str_lit(&ev(0)?)
+            .map(|(s, _)| simple(encode_for_uri(&s)))
+            .unwrap_or(Value::Error),
         F::Iri => match ev(0)? {
             // An IRI argument passes through unchanged.
             Value::Term(Term::NamedNode(n)) => Value::Term(Term::NamedNode(n)),
             v => match str_lit(&v) {
                 // String literal: absolute IRIs pass; relative ones resolve against BASE.
-                Some((s, None)) => resolve_iri(&s).map(|n| Value::Term(Term::NamedNode(n))).unwrap_or(Value::Error),
+                Some((s, None)) => resolve_iri(&s)
+                    .map(|n| Value::Term(Term::NamedNode(n)))
+                    .unwrap_or(Value::Error),
                 _ => Value::Error,
             },
         },
@@ -13422,7 +14705,10 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         },
         F::IsLiteral => match ev(0)? {
             Value::Unbound | Value::Error => Value::Error,
-            v => Value::Bool(matches!(v, Value::Term(Term::Literal(_)) | Value::Num(_) | Value::Bool(_))),
+            v => Value::Bool(matches!(
+                v,
+                Value::Term(Term::Literal(_)) | Value::Num(_) | Value::Bool(_)
+            )),
         },
         F::IsNumeric => match ev(0)? {
             Value::Unbound | Value::Error => Value::Error,
@@ -13432,10 +14718,18 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         },
         // ABS/CEIL/FLOOR/ROUND preserve the argument's numeric DATATYPE
         // (CEIL("2.5"^^xsd:decimal) is "3"^^xsd:decimal, not xsd:integer).
-        F::Abs => as_numeric(&ev(0)?).map(|n| Value::Num(n.abs())).unwrap_or(Value::Error),
-        F::Ceil => as_numeric(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
-        F::Floor => as_numeric(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
-        F::Round => as_numeric(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
+        F::Abs => as_numeric(&ev(0)?)
+            .map(|n| Value::Num(n.abs()))
+            .unwrap_or(Value::Error),
+        F::Ceil => as_numeric(&ev(0)?)
+            .map(|n| Value::Num(n.ceil()))
+            .unwrap_or(Value::Error),
+        F::Floor => as_numeric(&ev(0)?)
+            .map(|n| Value::Num(n.floor()))
+            .unwrap_or(Value::Error),
+        F::Round => as_numeric(&ev(0)?)
+            .map(|n| Value::Num(n.round()))
+            .unwrap_or(Value::Error),
         // STRDT(lexical, datatypeIRI) -> typed literal. The first argument must be a
         // SIMPLE literal (= xsd:string in RDF 1.1) — lang-tagged / typed input errors.
         F::StrDt => match (str_lit(&ev(0)?), ev(1)?) {
@@ -13447,10 +14741,12 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         // STRLANG(lexical, langTag) -> language-tagged literal; both arguments must be
         // simple literals.
         F::StrLang => match (str_lit(&ev(0)?), str_lit(&ev(1)?)) {
-            (Some((lex, None)), Some((lang, None))) => match Literal::new_language_tagged_literal(lex, lang) {
-                Ok(l) => Value::Term(Term::Literal(l)),
-                Err(_) => Value::Error,
-            },
+            (Some((lex, None)), Some((lang, None))) => {
+                match Literal::new_language_tagged_literal(lex, lang) {
+                    Ok(l) => Value::Term(Term::Literal(l)),
+                    Err(_) => Value::Error,
+                }
+            }
             _ => Value::Error,
         },
         // LANGMATCHES(tag, range) — RFC 4647 basic filtering (`*` matches any non-empty tag).
@@ -13487,7 +14783,10 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         F::Tz => datetime_arg_tz(&ev(0)?).map(simple).unwrap_or(Value::Error),
         // TIMEZONE(xsd:dateTime) -> xsd:dayTimeDuration; no timezone is a type error.
         F::Timezone => match datetime_arg_tz(&ev(0)?).as_deref().and_then(tz_to_duration) {
-            Some(d) => Value::Term(Term::Literal(Literal::new_typed_literal(d, xsd::DAY_TIME_DURATION))),
+            Some(d) => Value::Term(Term::Literal(Literal::new_typed_literal(
+                d,
+                xsd::DAY_TIME_DURATION,
+            ))),
             None => Value::Error,
         },
         F::BNode => {
@@ -13533,7 +14832,10 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         // [0, 1) from a per-thread splitmix64 seeded once from the OS RNG (see
         // `rand_unit`) — both native-only for the same reason as UUID()/STRUUID().
         #[cfg(not(target_arch = "wasm32"))]
-        F::Now => Value::Term(Term::Literal(Literal::new_typed_literal(now_lexical(), xsd::DATE_TIME))),
+        F::Now => Value::Term(Term::Literal(Literal::new_typed_literal(
+            now_lexical(),
+            xsd::DATE_TIME,
+        ))),
         #[cfg(not(target_arch = "wasm32"))]
         F::Rand => Value::Num(Num::Double(rand_unit::next())),
         #[cfg(not(target_arch = "wasm32"))]
@@ -13558,7 +14860,11 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                 (Some((t, _)), Some(p)) => (t, p),
                 _ => return Ok(Value::Error),
             };
-            let flags = if nargs >= 3 { value_str(&ev(2)?).unwrap_or_default() } else { String::new() };
+            let flags = if nargs >= 3 {
+                value_str(&ev(2)?).unwrap_or_default()
+            } else {
+                String::new()
+            };
             match regex_cache::get(&pat, &flags) {
                 Some(re) => Value::Bool(re.is_match(&text)),
                 None => Value::Error,
@@ -13566,13 +14872,21 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         }
         #[cfg(feature = "regex")]
         F::Replace => {
-            let (text, lang, pat, rep) = match (str_lit(&ev(0)?), value_str(&ev(1)?), value_str(&ev(2)?)) {
-                (Some((t, lang)), Some(p), Some(r)) => (t, lang, p, r),
-                _ => return Ok(Value::Error),
+            let (text, lang, pat, rep) =
+                match (str_lit(&ev(0)?), value_str(&ev(1)?), value_str(&ev(2)?)) {
+                    (Some((t, lang)), Some(p), Some(r)) => (t, lang, p, r),
+                    _ => return Ok(Value::Error),
+                };
+            let flags = if nargs >= 4 {
+                value_str(&ev(3)?).unwrap_or_default()
+            } else {
+                String::new()
             };
-            let flags = if nargs >= 4 { value_str(&ev(3)?).unwrap_or_default() } else { String::new() };
             match regex_cache::get(&pat, &flags) {
-                Some(re) => lit_with_lang(re.replace_all(&text, rep.as_str()).into_owned(), lang.as_deref()),
+                Some(re) => lit_with_lang(
+                    re.replace_all(&text, rep.as_str()).into_owned(),
+                    lang.as_deref(),
+                ),
                 None => Value::Error,
             }
         }
@@ -13591,7 +14905,9 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
             let Some(object) = value_as_term(&ev(2)?) else {
                 return Ok(Value::Error);
             };
-            Value::Term(Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, object))))
+            Value::Term(Term::Triple(Box::new(oxrdf::Triple::new(
+                subject, predicate, object,
+            ))))
         }
         F::IsTriple => match ev(0)? {
             Value::Term(Term::Triple(_)) => Value::Bool(true),
@@ -13629,7 +14945,9 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
         // LANGDIR mirrors LANG: "" for a literal without a base direction, type error
         // on non-literals.
         F::LangDir => match ev(0)? {
-            Value::Term(Term::Literal(l)) => simple(l.direction().map(|d| d.to_string()).unwrap_or_default()),
+            Value::Term(Term::Literal(l)) => {
+                simple(l.direction().map(|d| d.to_string()).unwrap_or_default())
+            }
             Value::Num(_) | Value::Bool(_) => simple(String::new()),
             _ => Value::Error,
         },
@@ -13698,7 +15016,10 @@ fn eval_function_inner<E: Fn(usize) -> Result<Value, String>>(
                     Err(_) => Value::Error,
                 });
             }
-            return Err(format!("unsupported SPARQL function: Custom({})", nn.as_str()));
+            return Err(format!(
+                "unsupported SPARQL function: Custom({})",
+                nn.as_str()
+            ));
         }
         // With every default feature on, the arms above are exhaustive (the
         // `F::Custom` arm is no longer guarded on arity); this arm is reached
@@ -13736,17 +15057,19 @@ fn cmp_compiled(
     f: impl Fn(Ordering) -> bool,
 ) -> Result<Value, String> {
     if compiled_expr_has_arith(a) || compiled_expr_has_arith(c) {
-        if let (Some(da), Some(db)) =
-            (eval_compiled_dec(graph, local, row, a), eval_compiled_dec(graph, local, row, c))
-        {
+        if let (Some(da), Some(db)) = (
+            eval_compiled_dec(graph, local, row, a),
+            eval_compiled_dec(graph, local, row, c),
+        ) {
             if let Some(o) = da.cmp(db) {
                 return Ok(Value::Bool(f(o)));
             }
         }
     }
-    if let (Some(x), Some(y)) =
-        (eval_compiled_numeric(graph, local, row, a), eval_compiled_numeric(graph, local, row, c))
-    {
+    if let (Some(x), Some(y)) = (
+        eval_compiled_numeric(graph, local, row, a),
+        eval_compiled_numeric(graph, local, row, c),
+    ) {
         if x == y {
             if let (Some(la), Some(lb)) = (
                 eval_compiled_exact_lexical(graph, local, row, a),
@@ -13759,15 +15082,19 @@ fn cmp_compiled(
         }
         return Ok(Value::Bool(x.partial_cmp(&y).map(&f).unwrap_or(false)));
     }
-    if let (Some(ta), Some(tb)) =
-        (eval_compiled_temporal(graph, local, row, a), eval_compiled_temporal(graph, local, row, c))
-    {
+    if let (Some(ta), Some(tb)) = (
+        eval_compiled_temporal(graph, local, row, a),
+        eval_compiled_temporal(graph, local, row, c),
+    ) {
         return Ok(match Temporal::cmp_t(ta, tb) {
             Some(o) => Value::Bool(f(o)),
             None => Value::Error,
         });
     }
-    let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
+    let (x, y) = (
+        eval_compiled(graph, local, b, row, a)?,
+        eval_compiled(graph, local, b, row, c)?,
+    );
     Ok(match value_compare_strict(&x, &y) {
         Some(o) => Value::Bool(f(o)),
         None => Value::Error,
@@ -13782,7 +15109,9 @@ fn cmp_compiled(
 fn operand_single_id(graph: &Graph, row: &[Id], e: &CompiledExpr) -> Option<Id> {
     match e {
         CompiledExpr::Var(Some(c)) => Some(row[*c]),
-        CompiledExpr::NamedNode(n) => Some(graph.id_of(&Term::NamedNode(n.clone())).unwrap_or(NO_ID)),
+        CompiledExpr::NamedNode(n) => {
+            Some(graph.id_of(&Term::NamedNode(n.clone())).unwrap_or(NO_ID))
+        }
         _ => None,
     }
 }
@@ -13801,7 +15130,10 @@ fn equal_idfast(graph: &Graph, row: &[Id], a: &IdOperand, c: &IdOperand) -> Valu
             // A column can be unbound (NO_ID); that is a type error in `=`.
             IdOperand::Col(col) => (row[*col], true),
             // A constant IRI is always "bound"; NO_ID here means the IRI is not in the dict.
-            IdOperand::ConstIri(n) => (graph.id_of(&Term::NamedNode(n.clone())).unwrap_or(NO_ID), false),
+            IdOperand::ConstIri(n) => (
+                graph.id_of(&Term::NamedNode(n.clone())).unwrap_or(NO_ID),
+                false,
+            ),
         }
     };
     let (ida, from_col_a) = resolve(a);
@@ -13828,23 +15160,28 @@ fn equal_compiled(
     // equal). UNEQUAL ids fall through to the exact path unchanged — crucially, unequal ids of
     // value-equal literals (`"1"^^integer` = `"1.0"^^decimal`, sq-lr2ii) must NOT be decided here.
     #[cfg(feature = "id-filter-fastpath")]
-    if let (Some(ida), Some(idc)) = (operand_single_id(graph, row, a), operand_single_id(graph, row, c)) {
+    if let (Some(ida), Some(idc)) = (
+        operand_single_id(graph, row, a),
+        operand_single_id(graph, row, c),
+    ) {
         if ida != NO_ID && ida == idc {
             return Ok(Value::Bool(true));
         }
     }
     if compiled_expr_has_arith(a) || compiled_expr_has_arith(c) {
-        if let (Some(da), Some(db)) =
-            (eval_compiled_dec(graph, local, row, a), eval_compiled_dec(graph, local, row, c))
-        {
+        if let (Some(da), Some(db)) = (
+            eval_compiled_dec(graph, local, row, a),
+            eval_compiled_dec(graph, local, row, c),
+        ) {
             if let Some(o) = da.cmp(db) {
                 return Ok(Value::Bool(o == Ordering::Equal));
             }
         }
     }
-    if let (Some(x), Some(y)) =
-        (eval_compiled_numeric(graph, local, row, a), eval_compiled_numeric(graph, local, row, c))
-    {
+    if let (Some(x), Some(y)) = (
+        eval_compiled_numeric(graph, local, row, a),
+        eval_compiled_numeric(graph, local, row, c),
+    ) {
         if x == y {
             if let (Some(la), Some(lb)) = (
                 eval_compiled_exact_lexical(graph, local, row, a),
@@ -13857,9 +15194,10 @@ fn equal_compiled(
         }
         return Ok(Value::Bool(x == y));
     }
-    if let (Some(ta), Some(tb)) =
-        (eval_compiled_temporal(graph, local, row, a), eval_compiled_temporal(graph, local, row, c))
-    {
+    if let (Some(ta), Some(tb)) = (
+        eval_compiled_temporal(graph, local, row, a),
+        eval_compiled_temporal(graph, local, row, c),
+    ) {
         if ta.kind != tb.kind {
             return Ok(Value::Bool(false));
         }
@@ -13868,7 +15206,10 @@ fn equal_compiled(
             None => Value::Error,
         });
     }
-    let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
+    let (x, y) = (
+        eval_compiled(graph, local, b, row, a)?,
+        eval_compiled(graph, local, b, row, c)?,
+    );
     Ok(match values_equal(&x, &y) {
         Some(eq) => Value::Bool(eq),
         None => Value::Error,
@@ -13884,7 +15225,10 @@ fn arith_compiled(
     c: &CompiledExpr,
     op: ArithOp,
 ) -> Result<Value, String> {
-    let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
+    let (x, y) = (
+        eval_compiled(graph, local, b, row, a)?,
+        eval_compiled(graph, local, b, row, c)?,
+    );
     Ok(match (as_numeric(&x), as_numeric(&y)) {
         (Some(p), Some(q)) => p.binop(q, op).map(Value::Num).unwrap_or(Value::Error),
         _ => Value::Error,
@@ -13934,8 +15278,13 @@ fn eval_compiled(
         #[cfg(feature = "id-filter-fastpath")]
         IdEqNonLit(a, c) => Ok(equal_idfast(graph, row, a, c)),
         SameTerm(a, c) => {
-            let (x, y) = (eval_compiled(graph, local, b, row, a)?, eval_compiled(graph, local, b, row, c)?);
-            Ok(Value::Bool(matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q)))
+            let (x, y) = (
+                eval_compiled(graph, local, b, row, a)?,
+                eval_compiled(graph, local, b, row, c)?,
+            );
+            Ok(Value::Bool(
+                matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q),
+            ))
         }
         Greater(a, c) => cmp_compiled(graph, local, b, row, a, c, |o| o == Ordering::Greater),
         GreaterOrEqual(a, c) => cmp_compiled(graph, local, b, row, a, c, |o| o != Ordering::Less),
@@ -13948,7 +15297,9 @@ fn eval_compiled(
         UnaryPlus(a) => eval_compiled(graph, local, b, row, a),
         UnaryMinus(a) => {
             let v = eval_compiled(graph, local, b, row, a)?;
-            Ok(as_numeric(&v).map(|n| Value::Num(n.neg())).unwrap_or(Value::Error))
+            Ok(as_numeric(&v)
+                .map(|n| Value::Num(n.neg()))
+                .unwrap_or(Value::Error))
         }
         If(cond, t, f) => match ebv3(&eval_compiled(graph, local, b, row, cond)?) {
             Some(true) => eval_compiled(graph, local, b, row, t),
@@ -13975,11 +15326,15 @@ fn eval_compiled(
                     None => errored = true,
                 }
             }
-            Ok(if errored { Value::Error } else { Value::Bool(false) })
+            Ok(if errored {
+                Value::Error
+            } else {
+                Value::Bool(false)
+            })
         }
-        FunctionCall(f, args) => {
-            eval_function_inner(f, args.len(), |i| eval_compiled(graph, local, b, row, &args[i]))
-        }
+        FunctionCall(f, args) => eval_function_inner(f, args.len(), |i| {
+            eval_compiled(graph, local, b, row, &args[i])
+        }),
         Exists(inner) => Ok(Value::Bool(eval_exists(graph, local, b, row, inner)?)),
     }
 }
@@ -14003,7 +15358,10 @@ fn dec_trim_min1(d: Dec) -> String {
         d.scale -= 1;
     }
     if d.scale == 0 {
-        d = Dec { mant: d.mant.saturating_mul(10), scale: 1 };
+        d = Dec {
+            mant: d.mant.saturating_mul(10),
+            scale: 1,
+        };
     }
     d.lexical()
 }
@@ -14033,7 +15391,9 @@ fn eval_cast(target: &str, v: &Value) -> Option<Value> {
         }
         _ => None,
     };
-    let typed = |lex: String, dt: oxrdf::NamedNodeRef<'_>| Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)));
+    let typed = |lex: String, dt: oxrdf::NamedNodeRef<'_>| {
+        Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)))
+    };
     // Classify a numeric SOURCE by its tower type (computed value or literal).
     let src_num = || as_numeric(v).filter(|_| !matches!(v, Value::Bool(_)));
     if target == xsd::STRING.as_str() {
@@ -14056,8 +15416,13 @@ fn eval_cast(target: &str, v: &Value) -> Option<Value> {
             return Some(typed(s, xsd::STRING));
         }
         return Some(match v {
-            Value::Term(Term::BlankNode(_)) | Value::Term(Term::Triple(_)) | Value::Unbound | Value::Error => Value::Error,
-            other => value_str(other).map(|s| typed(s, xsd::STRING)).unwrap_or(Value::Error),
+            Value::Term(Term::BlankNode(_))
+            | Value::Term(Term::Triple(_))
+            | Value::Unbound
+            | Value::Error => Value::Error,
+            other => value_str(other)
+                .map(|s| typed(s, xsd::STRING))
+                .unwrap_or(Value::Error),
         });
     }
     if target == xsd::BOOLEAN.as_str() {
@@ -14112,11 +15477,19 @@ fn eval_cast(target: &str, v: &Value) -> Option<Value> {
                 }
             });
         }
-        return Some(src_str().and_then(|s| s.parse::<i64>().ok()).map(|i| Value::Num(Num::Int(i))).unwrap_or(Value::Error));
+        return Some(
+            src_str()
+                .and_then(|s| s.parse::<i64>().ok())
+                .map(|i| Value::Num(Num::Int(i)))
+                .unwrap_or(Value::Error),
+        );
     }
     if is_dec {
         if let Some(b) = as_bool_val(v) {
-            return Some(typed(if b { "1.0" } else { "0.0" }.to_string(), xsd::DECIMAL));
+            return Some(typed(
+                if b { "1.0" } else { "0.0" }.to_string(),
+                xsd::DECIMAL,
+            ));
         }
         if let Some(n) = src_num() {
             return Some(match n {
@@ -14169,12 +15542,26 @@ fn eval_cast(target: &str, v: &Value) -> Option<Value> {
                 typed(s, dt)
             } else if is_flt {
                 match parse_xsd_f32(&s) {
-                    Some(f) if !f.is_nan() || s == "NaN" => typed(if f.is_finite() { format!("{f:E}") } else { Num::Float(f).lexical() }, dt),
+                    Some(f) if !f.is_nan() || s == "NaN" => typed(
+                        if f.is_finite() {
+                            format!("{f:E}")
+                        } else {
+                            Num::Float(f).lexical()
+                        },
+                        dt,
+                    ),
                     _ => Value::Error,
                 }
             } else {
                 match parse_xsd_f64(&s) {
-                    Some(f) if !f.is_nan() || s == "NaN" => typed(if f.is_finite() { format!("{f:E}") } else { Num::Double(f).lexical() }, dt),
+                    Some(f) if !f.is_nan() || s == "NaN" => typed(
+                        if f.is_finite() {
+                            format!("{f:E}")
+                        } else {
+                            Num::Double(f).lexical()
+                        },
+                        dt,
+                    ),
                     _ => Value::Error,
                 }
             }
@@ -14334,7 +15721,11 @@ fn lit_with_lang(s: String, lang: Option<&str>) -> Value {
             Some((tag, dir)) => Literal::new_directional_language_tagged_literal_unchecked(
                 s,
                 tag,
-                if dir == "rtl" { oxrdf::BaseDirection::Rtl } else { oxrdf::BaseDirection::Ltr },
+                if dir == "rtl" {
+                    oxrdf::BaseDirection::Rtl
+                } else {
+                    oxrdf::BaseDirection::Ltr
+                },
             ),
             None => Literal::new_language_tagged_literal_unchecked(s, l),
         },
@@ -14483,11 +15874,18 @@ mod regex_cache {
 /// Compile-per-call — go through [`regex_cache::get`] on any per-row path.
 #[cfg(feature = "regex")]
 fn build_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
-    if !flags.chars().all(|c| matches!(c, 'i' | 's' | 'm' | 'x' | 'q')) {
+    if !flags
+        .chars()
+        .all(|c| matches!(c, 'i' | 's' | 'm' | 'x' | 'q'))
+    {
         return None;
     }
     let literal = flags.contains('q');
-    let pattern = if literal { regex::escape(pattern) } else { pattern.to_string() };
+    let pattern = if literal {
+        regex::escape(pattern)
+    } else {
+        pattern.to_string()
+    };
     regex::RegexBuilder::new(&pattern)
         .case_insensitive(flags.contains('i'))
         // `q` suppresses the meaning of the OTHER flags' metacharacters too (per
@@ -14530,7 +15928,13 @@ fn datetime_field(v: &Value, idx: usize) -> Value {
         // Re-extract the seconds lexical (timezone stripped) for an exact decimal.
         let lex = s
             .split_once('T')
-            .map(|(_, t)| if let Some(i) = t.find(['Z', '+', '-']) { &t[..i] } else { t })
+            .map(|(_, t)| {
+                if let Some(i) = t.find(['Z', '+', '-']) {
+                    &t[..i]
+                } else {
+                    t
+                }
+            })
             .and_then(|t| t.rsplit_once(':').map(|(_, sec)| sec));
         return match lex.and_then(Dec::parse_lexical) {
             Some(d) => Value::Num(Num::Dec(d)),
@@ -14552,7 +15956,11 @@ fn parse_datetime(s: &str) -> Option<[f64; 6]> {
     let month: f64 = d.next()?.parse().ok()?;
     let day: f64 = d.next()?.parse().ok()?;
     // Strip the timezone (Z, or +hh:mm / -hh:mm after the seconds — the time part itself has no '-').
-    let time = if let Some(i) = time.find(['Z', '+', '-']) { &time[..i] } else { time };
+    let time = if let Some(i) = time.find(['Z', '+', '-']) {
+        &time[..i]
+    } else {
+        time
+    };
     let mut t = time.split(':');
     let hours: f64 = t.next()?.parse().ok()?;
     let minutes: f64 = t.next()?.parse().ok()?;
@@ -14710,7 +16118,9 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
                 }
             };
             let object = term_pattern_to_term(&t.object)?;
-            Ok(Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, object))))
+            Ok(Term::Triple(Box::new(oxrdf::Triple::new(
+                subject, predicate, object,
+            ))))
         }
     }
 }
@@ -14749,18 +16159,42 @@ mod exact_decimal_tests {
         use std::cmp::Ordering::*;
         let d = |s: &str| Dec::parse(s).unwrap();
         // The classic: 0.1 + 0.2 == 0.3 exactly (false in f64).
-        assert_eq!(d("0.1").checked_add(d("0.2")).unwrap().cmp(d("0.3")), Some(Equal));
+        assert_eq!(
+            d("0.1").checked_add(d("0.2")).unwrap().cmp(d("0.3")),
+            Some(Equal)
+        );
         // 0.3 - 0.1 == 0.2 exactly.
-        assert_eq!(d("0.3").checked_sub(d("0.1")).unwrap().cmp(d("0.2")), Some(Equal));
+        assert_eq!(
+            d("0.3").checked_sub(d("0.1")).unwrap().cmp(d("0.2")),
+            Some(Equal)
+        );
         // Mixed scales + integer/decimal.
-        assert_eq!(d("1").checked_add(d("0.5")).unwrap().cmp(d("1.5")), Some(Equal));
-        assert_eq!(d("83").checked_mul(d("0.5")).unwrap().cmp(d("41.5")), Some(Equal));
-        assert_eq!(d("0.1").checked_mul(d("0.1")).unwrap().cmp(d("0.01")), Some(Equal));
+        assert_eq!(
+            d("1").checked_add(d("0.5")).unwrap().cmp(d("1.5")),
+            Some(Equal)
+        );
+        assert_eq!(
+            d("83").checked_mul(d("0.5")).unwrap().cmp(d("41.5")),
+            Some(Equal)
+        );
+        assert_eq!(
+            d("0.1").checked_mul(d("0.1")).unwrap().cmp(d("0.01")),
+            Some(Equal)
+        );
         // Ordering across scales and signs.
         assert_eq!(d("0.30000000000000001").cmp(d("0.3")), Some(Greater));
-        assert_eq!(d("-2.5").checked_add(d("1")).unwrap().cmp(d("-1.5")), Some(Equal));
+        assert_eq!(
+            d("-2.5").checked_add(d("1")).unwrap().cmp(d("-1.5")),
+            Some(Equal)
+        );
         // Large integers beyond 2^53 stay exact.
-        assert_eq!(d("9007199254740992").checked_add(d("1")).unwrap().cmp(d("9007199254740993")), Some(Equal));
+        assert_eq!(
+            d("9007199254740992")
+                .checked_add(d("1"))
+                .unwrap()
+                .cmp(d("9007199254740993")),
+            Some(Equal)
+        );
         // Non-decimal lexical (exponent) -> not parseable here -> None.
         assert!(Dec::parse("1e5").is_none());
     }
@@ -14769,8 +16203,14 @@ mod exact_decimal_tests {
     fn cmp_decimal_str_is_exact() {
         use std::cmp::Ordering::*;
         // Integers beyond f64 precision, and high-precision decimals that share an f64.
-        assert_eq!(cmp_decimal_str("9007199254740992", "9007199254740993"), Some(Less));
-        assert_eq!(cmp_decimal_str("0.123456789012345678", "0.123456789012345679"), Some(Less));
+        assert_eq!(
+            cmp_decimal_str("9007199254740992", "9007199254740993"),
+            Some(Less)
+        );
+        assert_eq!(
+            cmp_decimal_str("0.123456789012345678", "0.123456789012345679"),
+            Some(Less)
+        );
         // Equality incl. non-canonical zeros / trailing zeros / signed zero.
         assert_eq!(cmp_decimal_str("1.50", "1.5"), Some(Equal));
         assert_eq!(cmp_decimal_str("007", "7"), Some(Equal));
@@ -14809,7 +16249,9 @@ mod wcoj_tests {
     /// Extracts the BGP triple patterns from a simple `SELECT * WHERE { ... }`.
     fn bgp(sparql: &str) -> Vec<TriplePattern> {
         let q = SparqlParser::new().parse_query(sparql).unwrap();
-        let spargebra::Query::Select { pattern, .. } = q else { panic!() };
+        let spargebra::Query::Select { pattern, .. } = q else {
+            panic!()
+        };
         let mut patterns = Vec::new();
         let mut filters = Vec::new();
         // unwrap Project -> inner
@@ -14831,8 +16273,12 @@ mod wcoj_tests {
             .rows
             .iter()
             .map(|r| {
-                let mut kv: Vec<(String, Id)> =
-                    b.vars.iter().zip(r).map(|(v, &id)| (v.as_str().to_string(), id)).collect();
+                let mut kv: Vec<(String, Id)> = b
+                    .vars
+                    .iter()
+                    .zip(r)
+                    .map(|(v, &id)| (v.as_str().to_string(), id))
+                    .collect();
                 kv.sort();
                 kv
             })
@@ -14844,7 +16290,9 @@ mod wcoj_tests {
     fn random_graph(seed0: u64, n_nodes: u32, n_edges: usize) -> Graph {
         let mut seed = seed0;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
@@ -14872,7 +16320,9 @@ mod wcoj_tests {
 
     #[test]
     fn cyclicity_classification() {
-        assert!(!bgp_is_cyclic(&bgp("PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }")));
+        assert!(!bgp_is_cyclic(&bgp(
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }"
+        )));
         assert!(bgp_is_cyclic(&bgp(
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?a }"
         )));
@@ -14890,7 +16340,10 @@ mod wcoj_tests {
         for seed in [0x1111u64, 0xACE1, 0xDEADBEEF, 0x5EED] {
             let g = random_graph(seed, 25, 120);
             // chain (acyclic)
-            assert_plans_agree("PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }", &g);
+            assert_plans_agree(
+                "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }",
+                &g,
+            );
             // triangle (cyclic) — the canonical WCOJ win
             assert_plans_agree(
                 "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?a }",
@@ -14956,8 +16409,16 @@ mod wcoj_tests {
 
         let prepass = eval_bgp_yannakakis(&g, &patterns, &[]).unwrap();
         let binary = eval_bgp_binary(&g, &patterns, &[]).unwrap();
-        assert_eq!(rowset(&prepass), rowset(&binary), "prepass must equal the binary plan");
-        assert_eq!(prepass.rows.len(), 10, "exactly the ten joining subjects survive");
+        assert_eq!(
+            rowset(&prepass),
+            rowset(&binary),
+            "prepass must equal the binary plan"
+        );
+        assert_eq!(
+            prepass.rows.len(),
+            10,
+            "exactly the ten joining subjects survive"
+        );
     }
 
     /// The cost-gate (pure-overhead guard): a tiny BGP below `YANNAKAKIS_MIN_REL` falls back
@@ -14976,7 +16437,11 @@ mod wcoj_tests {
         assert!(prepared.iter().map(|p| p.est).max().unwrap() < YANNAKAKIS_MIN_REL);
         let prepass = eval_bgp_yannakakis(&g, &patterns, &[]).unwrap();
         let binary = eval_bgp_binary(&g, &patterns, &[]).unwrap();
-        assert_eq!(rowset(&prepass), rowset(&binary), "fallback below the gate is result-identical");
+        assert_eq!(
+            rowset(&prepass),
+            rowset(&binary),
+            "fallback below the gate is result-identical"
+        );
         assert_eq!(prepass.rows.len(), 1); // only s1 has both a and b
     }
 }
@@ -15001,23 +16466,59 @@ mod function_tests {
 
     #[test]
     fn string_functions() {
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(STRLEN(?n) > 3) }"), 2); // Alice, Carol123
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(STRSTARTS(?n, \"A\")) }"), 1);
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(STRENDS(?n, \"3\")) }"), 1);
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(CONTAINS(LCASE(?n), \"o\")) }"), 2); // bob, carol
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(UCASE(?n) = \"BOB\") }"), 1);
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(STRLEN(?n) > 3) }"),
+            2
+        ); // Alice, Carol123
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(STRSTARTS(?n, \"A\")) }"),
+            1
+        );
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(STRENDS(?n, \"3\")) }"),
+            1
+        );
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(CONTAINS(LCASE(?n), \"o\")) }"),
+            2
+        ); // bob, carol
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(UCASE(?n) = \"BOB\") }"),
+            1
+        );
         // BIND never drops rows.
-        assert_eq!(n("SELECT ?g WHERE { ?s <http://ex/name> ?n BIND(CONCAT(?n, \"!\") AS ?g) }"), 3);
-        assert_eq!(n("SELECT ?g WHERE { ?s <http://ex/name> ?n BIND(SUBSTR(?n, 1, 2) AS ?g) }"), 3);
+        assert_eq!(
+            n("SELECT ?g WHERE { ?s <http://ex/name> ?n BIND(CONCAT(?n, \"!\") AS ?g) }"),
+            3
+        );
+        assert_eq!(
+            n("SELECT ?g WHERE { ?s <http://ex/name> ?n BIND(SUBSTR(?n, 1, 2) AS ?g) }"),
+            3
+        );
     }
 
     #[test]
     fn numeric_and_type_functions() {
-        assert_eq!(n("SELECT ?a WHERE { ?s <http://ex/age> ?a FILTER(ABS(?a) > 10) }"), 1); // |30|
-        assert_eq!(n("SELECT ?a WHERE { ?s <http://ex/age> ?a FILTER(isNumeric(?a)) }"), 2);
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(isLiteral(?n)) }"), 3);
-        assert_eq!(n("SELECT ?s WHERE { ?s <http://ex/name> ?n FILTER(isIRI(?s)) }"), 3);
-        assert_eq!(n("SELECT ?a WHERE { ?s <http://ex/age> ?a FILTER(FLOOR(?a) = ?a) }"), 2);
+        assert_eq!(
+            n("SELECT ?a WHERE { ?s <http://ex/age> ?a FILTER(ABS(?a) > 10) }"),
+            1
+        ); // |30|
+        assert_eq!(
+            n("SELECT ?a WHERE { ?s <http://ex/age> ?a FILTER(isNumeric(?a)) }"),
+            2
+        );
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(isLiteral(?n)) }"),
+            3
+        );
+        assert_eq!(
+            n("SELECT ?s WHERE { ?s <http://ex/name> ?n FILTER(isIRI(?s)) }"),
+            3
+        );
+        assert_eq!(
+            n("SELECT ?a WHERE { ?s <http://ex/age> ?a FILTER(FLOOR(?a) = ?a) }"),
+            2
+        );
     }
 
     #[test]
@@ -15029,18 +16530,36 @@ mod function_tests {
         .unwrap();
         let q = |s: &str| crate::query(&g, s).unwrap().len();
         // LANGMATCHES: "en" matches the en literal; "*" matches any non-empty tag (en, fr; not X).
-        assert_eq!(q("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(LANGMATCHES(LANG(?n), \"en\")) }"), 1);
-        assert_eq!(q("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(LANGMATCHES(LANG(?n), \"*\")) }"), 2);
+        assert_eq!(
+            q("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(LANGMATCHES(LANG(?n), \"en\")) }"),
+            1
+        );
+        assert_eq!(
+            q("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(LANGMATCHES(LANG(?n), \"*\")) }"),
+            2
+        );
         // STRLANG / STRDT construct literals (exercised via BIND — all 3 rows).
-        assert_eq!(q("SELECT ?x WHERE { ?s <http://ex/name> ?n BIND(STRLANG(STR(?n), \"de\") AS ?x) }"), 3);
+        assert_eq!(
+            q("SELECT ?x WHERE { ?s <http://ex/name> ?n BIND(STRLANG(STR(?n), \"de\") AS ?x) }"),
+            3
+        );
         assert_eq!(
             q("SELECT ?x WHERE { ?s <http://ex/name> ?n BIND(STRDT(STR(?n), <http://www.w3.org/2001/XMLSchema#string>) AS ?x) }"),
             3
         );
         // SAMPLE: one row per group.
-        let g2 = Graph::load_str("@prefix : <http://ex/> . :a :p :x . :a :p :y . :b :p :z .", "turtle").unwrap();
+        let g2 = Graph::load_str(
+            "@prefix : <http://ex/> . :a :p :x . :a :p :y . :b :p :z .",
+            "turtle",
+        )
+        .unwrap();
         assert_eq!(
-            crate::query(&g2, "SELECT ?s (SAMPLE(?o) AS ?v) WHERE { ?s <http://ex/p> ?o } GROUP BY ?s").unwrap().len(),
+            crate::query(
+                &g2,
+                "SELECT ?s (SAMPLE(?o) AS ?v) WHERE { ?s <http://ex/p> ?o } GROUP BY ?s"
+            )
+            .unwrap()
+            .len(),
             2
         );
     }
@@ -15061,9 +16580,18 @@ mod function_tests {
     #[cfg(feature = "regex")]
     #[test]
     fn regex_functions() {
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"^[A-Z]\")) }"), 2); // Alice, Carol123
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"BOB\", \"i\")) }"), 1);
-        assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[0-9]+\")) }"), 1); // Carol123
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"^[A-Z]\")) }"),
+            2
+        ); // Alice, Carol123
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"BOB\", \"i\")) }"),
+            1
+        );
+        assert_eq!(
+            n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[0-9]+\")) }"),
+            1
+        ); // Carol123
         assert_eq!(n("SELECT ?g WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[0-9]\", \"X\") AS ?g) }"), 3);
     }
 }
@@ -15090,8 +16618,9 @@ mod builtin_memo_tests {
     }
 
     fn wide_graph(rows: usize) -> Graph {
-        let ttl: String =
-            (0..rows).map(|i| format!("<http://ex/s{i}> <http://ex/p> <http://ex/o> .\n")).collect();
+        let ttl: String = (0..rows)
+            .map(|i| format!("<http://ex/s{i}> <http://ex/p> <http://ex/o> .\n"))
+            .collect();
         Graph::load_str(&ttl, "turtle").unwrap()
     }
 
@@ -15129,7 +16658,11 @@ mod builtin_memo_tests {
                 );
                 if let (Some(c), Some(f)) = (&cached, &fresh) {
                     for t in &texts {
-                        assert_eq!(c.is_match(t), f.is_match(t), "is_match diverged: ({pat:?}, {flags:?}) on {t:?}");
+                        assert_eq!(
+                            c.is_match(t),
+                            f.is_match(t),
+                            "is_match diverged: ({pat:?}, {flags:?}) on {t:?}"
+                        );
                         assert_eq!(
                             c.replace_all(t, "_").into_owned(),
                             f.replace_all(t, "_").into_owned(),
@@ -15152,18 +16685,28 @@ mod builtin_memo_tests {
     #[cfg(feature = "regex")]
     #[test]
     fn regex_compiles_once_not_per_row() {
-        let ttl: String =
-            (0..100).map(|i| format!("<http://ex/s{i}> <http://ex/name> \"name{i}A\" .\n")).collect();
+        let ttl: String = (0..100)
+            .map(|i| format!("<http://ex/s{i}> <http://ex/name> \"name{i}A\" .\n"))
+            .collect();
         let g = Graph::load_str(&ttl, "turtle").unwrap();
-        let filter_q = "SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"e9[0-9]A$\")) }";
+        let filter_q =
+            "SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"e9[0-9]A$\")) }";
 
         let c0 = regex_cache::compile_count();
         assert_eq!(crate::query(&g, filter_q).unwrap().len(), 10); // name90A..name99A
         let c1 = regex_cache::compile_count();
-        assert_eq!(c1 - c0, 1, "a constant-pattern FILTER over 100 rows must compile ONCE, not per row");
+        assert_eq!(
+            c1 - c0,
+            1,
+            "a constant-pattern FILTER over 100 rows must compile ONCE, not per row"
+        );
 
         assert_eq!(crate::query(&g, filter_q).unwrap().len(), 10);
-        assert_eq!(regex_cache::compile_count(), c1, "a second execution reuses the memoised compile");
+        assert_eq!(
+            regex_cache::compile_count(),
+            c1,
+            "a second execution reuses the memoised compile"
+        );
 
         assert_eq!(
             crate::query(&g, "SELECT ?r WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[0-9]+\", \"#\") AS ?r) }")
@@ -15171,21 +16714,40 @@ mod builtin_memo_tests {
                 .len(),
             100
         );
-        assert_eq!(regex_cache::compile_count(), c1 + 1, "REPLACE compiles its distinct pattern once");
+        assert_eq!(
+            regex_cache::compile_count(),
+            c1 + 1,
+            "REPLACE compiles its distinct pattern once"
+        );
 
         // Invalid pattern: the FAILURE is memoised (one compile attempt), and the
         // per-row semantics stay exactly the pre-memo ones.
         assert_eq!(
-            crate::query(&g, "SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[\")) }").unwrap().len(),
+            crate::query(
+                &g,
+                "SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[\")) }"
+            )
+            .unwrap()
+            .len(),
             0,
             "invalid pattern: type error per row -> FILTER drops every row"
         );
         assert_eq!(regex_cache::compile_count(), c1 + 2);
-        let r = crate::query(&g, "SELECT ?r WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[\", \"X\") AS ?r) }")
-            .unwrap();
+        let r = crate::query(
+            &g,
+            "SELECT ?r WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[\", \"X\") AS ?r) }",
+        )
+        .unwrap();
         assert_eq!(r.len(), 100, "invalid pattern under BIND keeps rows");
-        assert!(r.rows.iter().all(|row| row[0].is_none()), "…with ?r unbound on every row");
-        assert_eq!(regex_cache::compile_count(), c1 + 2, "the memoised failure is reused, not recompiled");
+        assert!(
+            r.rows.iter().all(|row| row[0].is_none()),
+            "…with ?r unbound on every row"
+        );
+        assert_eq!(
+            regex_cache::compile_count(),
+            c1 + 2,
+            "the memoised failure is reused, not recompiled"
+        );
     }
 
     /// Overflowing the memo cap stays bounded and correct (the memo clears and
@@ -15233,7 +16795,9 @@ mod builtin_memo_tests {
         assert_eq!(r.len(), 100);
         let mut seen = std::collections::HashSet::new();
         for row in &r.rows {
-            let Some(Term::Literal(l)) = &row[0] else { panic!("RAND() must bind a literal") };
+            let Some(Term::Literal(l)) = &row[0] else {
+                panic!("RAND() must bind a literal")
+            };
             assert_eq!(l.datatype(), xsd::DOUBLE);
             let v: f64 = l.value().parse().expect("xsd:double lexical");
             assert!((0.0..1.0).contains(&v), "RAND() out of [0,1): {v}");
@@ -15241,7 +16805,11 @@ mod builtin_memo_tests {
         }
         // splitmix64 collides over 100 draws with probability ~2^-46; a constant
         // or repeating stream (the failure mode this guards) collapses `seen`.
-        assert!(seen.len() >= 99, "RAND() must draw fresh per call; got {} distinct of 100", seen.len());
+        assert!(
+            seen.len() >= 99,
+            "RAND() must draw fresh per call; got {} distinct of 100",
+            seen.len()
+        );
         // Distinct executions draw from fresh state too (collision odds ~2^-53).
         let one = |q: &str| crate::query(&g, q).unwrap().rows[0][0].clone();
         assert_ne!(
@@ -15259,15 +16827,24 @@ mod builtin_memo_tests {
     #[test]
     fn nondeterministic_builtins_fresh_per_call_never_memoised() {
         let g = wide_graph(50);
-        for (expr, what) in
-            [("UUID()", "UUID"), ("STRUUID()", "STRUUID"), ("BNODE()", "no-arg BNODE")]
-        {
+        for (expr, what) in [
+            ("UUID()", "UUID"),
+            ("STRUUID()", "STRUUID"),
+            ("BNODE()", "no-arg BNODE"),
+        ] {
             let q = format!("SELECT ?v WHERE {{ ?s <http://ex/p> ?o BIND({expr} AS ?v) }}");
             let r = crate::query(&g, &q).unwrap();
             assert_eq!(r.len(), 50);
-            let distinct: std::collections::HashSet<String> =
-                r.rows.iter().map(|row| row[0].clone().unwrap().to_string()).collect();
-            assert_eq!(distinct.len(), 50, "{what} must be fresh per call, never memoised");
+            let distinct: std::collections::HashSet<String> = r
+                .rows
+                .iter()
+                .map(|row| row[0].clone().unwrap().to_string())
+                .collect();
+            assert_eq!(
+                distinct.len(),
+                50,
+                "{what} must be fresh per call, never memoised"
+            );
         }
     }
 
@@ -15282,18 +16859,34 @@ mod builtin_memo_tests {
         let v = query_now::snapshot().expect("outermost scope samples the clock");
         {
             let g2 = query_now::scope(); // nested (sub-select / EXISTS re-entry)
-            assert_eq!(query_now::snapshot(), Some(v), "nested scope keeps the outer instant");
+            assert_eq!(
+                query_now::snapshot(),
+                Some(v),
+                "nested scope keeps the outer instant"
+            );
             drop(g2);
-            assert_eq!(query_now::snapshot(), Some(v), "nested drop must NOT clear the outer instant");
+            assert_eq!(
+                query_now::snapshot(),
+                Some(v),
+                "nested drop must NOT clear the outer instant"
+            );
         }
         {
             let w = query_now::worker_install(Some(v + 999));
             assert_eq!(query_now::snapshot(), Some(v + 999));
             drop(w);
-            assert_eq!(query_now::snapshot(), Some(v), "worker guard restores the previous instant");
+            assert_eq!(
+                query_now::snapshot(),
+                Some(v),
+                "worker guard restores the previous instant"
+            );
         }
         drop(g1);
-        assert_eq!(query_now::snapshot(), None, "outermost drop clears: the next execution re-samples");
+        assert_eq!(
+            query_now::snapshot(),
+            None,
+            "outermost drop clears: the next execution re-samples"
+        );
     }
 
     /// A sleeping extension function forces a REAL ≥1 s clock advance INSIDE one
@@ -15307,19 +16900,29 @@ mod builtin_memo_tests {
         let mut reg = crate::FunctionRegistry::new();
         reg.register("http://test/sleep", |_args: &[Term]| {
             std::thread::sleep(std::time::Duration::from_millis(1200));
-            Ok(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)))
+            Ok(Term::Literal(Literal::new_typed_literal(
+                "true",
+                xsd::BOOLEAN,
+            )))
         });
         let q = "SELECT ?a ?b WHERE { ?s ?p ?o BIND(NOW() AS ?a) \
                  BIND(<http://test/sleep>() AS ?x) BIND(NOW() AS ?b) }";
         let r = crate::query_with_functions(&g, q, &reg).unwrap();
         assert_eq!(r.len(), 1);
         let (a, b) = (r.rows[0][0].clone().unwrap(), r.rows[0][1].clone().unwrap());
-        assert_eq!(a, b, "NOW() must be constant across a >=1s in-execution clock advance");
+        assert_eq!(
+            a, b,
+            "NOW() must be constant across a >=1s in-execution clock advance"
+        );
         // This execution starts >=1.2s after the first one PINNED its instant, so
         // its whole-second lexical is strictly later — a stale thread-local NOW
         // reused across queries would return `a` here.
         let r2 = crate::query(&g, "SELECT ?n WHERE { ?s ?p ?o BIND(NOW() AS ?n) }").unwrap();
-        assert_ne!(r2.rows[0][0].clone().unwrap(), a, "a NEW execution must sample a NEW instant");
+        assert_ne!(
+            r2.rows[0][0].clone().unwrap(),
+            a,
+            "a NEW execution must sample a NEW instant"
+        );
     }
 
     /// EXISTS re-entry across a REAL clock tick. The EXISTS body sleeps >=1.2s and
@@ -15342,7 +16945,10 @@ mod builtin_memo_tests {
         let mut reg = crate::FunctionRegistry::new();
         reg.register("http://test/sleep", |_args: &[Term]| {
             std::thread::sleep(std::time::Duration::from_millis(1200));
-            Ok(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)))
+            Ok(Term::Literal(Literal::new_typed_literal(
+                "true",
+                xsd::BOOLEAN,
+            )))
         });
         let q = "SELECT ?a ?b WHERE { ?s ?p ?o BIND(NOW() AS ?a) \
                  FILTER EXISTS { ?s ?p ?o2 BIND(<http://test/sleep>() AS ?x) FILTER(STR(NOW()) = STR(NOW())) } \
@@ -15350,7 +16956,10 @@ mod builtin_memo_tests {
         let r = crate::query_with_functions(&g, q, &reg).unwrap();
         assert_eq!(r.len(), 1);
         let (a, b) = (r.rows[0][0].clone().unwrap(), r.rows[0][1].clone().unwrap());
-        assert_eq!(a, b, "NOW() before and after a >=1.2s EXISTS re-entry must be the SAME pinned instant");
+        assert_eq!(
+            a, b,
+            "NOW() before and after a >=1.2s EXISTS re-entry must be the SAME pinned instant"
+        );
     }
 
     /// Parallel-threshold row count: a single NOW() instant across ALL rows AND a
@@ -15377,12 +16986,20 @@ mod builtin_memo_tests {
         let f0 = query_now::UNSCOPED_FALLBACKS.load(Ordering::Relaxed);
         let q = "SELECT ?n WHERE { ?s <http://ex/p> ?o BIND(NOW() AS ?n) FILTER(STR(?n) = STR(NOW())) }";
         let r = crate::query(&g, q).unwrap();
-        assert_eq!(r.len(), rows, "every row's FILTER NOW() must equal its BIND NOW()");
+        assert_eq!(
+            r.len(),
+            rows,
+            "every row's FILTER NOW() must equal its BIND NOW()"
+        );
         let mut distinct = std::collections::HashSet::new();
         for row in &r.rows {
             distinct.insert(row[0].clone().unwrap().to_string());
         }
-        assert_eq!(distinct.len(), 1, "NOW() must be one instant across all rows");
+        assert_eq!(
+            distinct.len(),
+            1,
+            "NOW() must be one instant across all rows"
+        );
         assert_eq!(
             query_now::UNSCOPED_FALLBACKS.load(Ordering::Relaxed) - f0,
             0,
@@ -15457,7 +17074,12 @@ mod builtin_error_paths {
     fn bind_out(g: &Graph, expr: &str) -> Option<String> {
         let q = format!("SELECT ?out WHERE {{ ?s <http://ex/p> ?o BIND({expr} AS ?out) }}");
         let r = crate::query(g, &q).unwrap_or_else(|e| panic!("query failed for `{expr}`: {e}"));
-        assert_eq!(r.rows.len(), 1, "BIND must keep exactly one row for `{expr}`, got {}", r.rows.len());
+        assert_eq!(
+            r.rows.len(),
+            1,
+            "BIND must keep exactly one row for `{expr}`, got {}",
+            r.rows.len()
+        );
         r.rows[0][0].as_ref().map(|t| t.to_string())
     }
 
@@ -15474,7 +17096,10 @@ mod builtin_error_paths {
             let (vexpr, vexp) = row.valid;
             match bind_out(&g, vexpr) {
                 Some(got) if got == vexp => valid_n += 1,
-                got => fails.push(format!("[{}] VALID `{vexpr}`: expected Some({vexp:?}), got {got:?}", row.builtin)),
+                got => fails.push(format!(
+                    "[{}] VALID `{vexpr}`: expected Some({vexp:?}), got {got:?}",
+                    row.builtin
+                )),
             }
             // (b) TYPE ERROR — must be unbound (the engine's expression-error outcome).
             match bind_out(&g, row.type_err) {
@@ -15488,7 +17113,10 @@ mod builtin_error_paths {
             if let Some((bexpr, bexp)) = row.boundary {
                 match bind_out(&g, bexpr) {
                     Some(got) if got == bexp => bound_n += 1,
-                    got => fails.push(format!("[{}] BOUNDARY `{bexpr}`: expected Some({bexp:?}), got {got:?}", row.builtin)),
+                    got => fails.push(format!(
+                        "[{}] BOUNDARY `{bexpr}`: expected Some({bexp:?}), got {got:?}",
+                        row.builtin
+                    )),
                 }
             }
         }
@@ -15500,7 +17128,10 @@ mod builtin_error_paths {
         );
         // The counts double as a coverage assertion: if a row is added/removed the
         // numbers move, so an accidental no-op table can't pass silently.
-        eprintln!("builtin_error_paths: {} builtins, valid={valid_n} type_err={err_n} boundary={bound_n}", table.len());
+        eprintln!(
+            "builtin_error_paths: {} builtins, valid={valid_n} type_err={err_n} boundary={bound_n}",
+            table.len()
+        );
     }
 
     const INT: &str = "^^<http://www.w3.org/2001/XMLSchema#integer>";
@@ -15523,11 +17154,17 @@ mod builtin_error_paths {
             },
             Row {
                 builtin: "STRLEN",
-                valid: ("STRLEN(\"abc\")", "\"3\"^^<http://www.w3.org/2001/XMLSchema#integer>"),
+                valid: (
+                    "STRLEN(\"abc\")",
+                    "\"3\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+                ),
                 // FIXED arm: an IRI is NOT a string literal → error (was wrongly 11).
                 type_err: "STRLEN(<http://ex/o>)",
                 // Counts CODEPOINTS, not bytes: "é" + a combining mark style multi-byte char.
-                boundary: Some(("STRLEN(\"naïve\")", "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>")),
+                boundary: Some((
+                    "STRLEN(\"naïve\")",
+                    "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+                )),
             },
             Row {
                 builtin: "UCASE",
@@ -15558,19 +17195,31 @@ mod builtin_error_paths {
             },
             Row {
                 builtin: "CONTAINS",
-                valid: ("CONTAINS(\"abc\", \"b\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"),
+                valid: (
+                    "CONTAINS(\"abc\", \"b\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                ),
                 type_err: "CONTAINS(\"abc\", 1)",
-                boundary: Some(("CONTAINS(\"abc\", \"z\")", "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>")),
+                boundary: Some((
+                    "CONTAINS(\"abc\", \"z\")",
+                    "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                )),
             },
             Row {
                 builtin: "STRSTARTS",
-                valid: ("STRSTARTS(\"abc\", \"ab\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"),
+                valid: (
+                    "STRSTARTS(\"abc\", \"ab\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                ),
                 type_err: "STRSTARTS(123, \"ab\")",
                 boundary: None,
             },
             Row {
                 builtin: "STRENDS",
-                valid: ("STRENDS(\"abc\", \"bc\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"),
+                valid: (
+                    "STRENDS(\"abc\", \"bc\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                ),
                 type_err: "STRENDS(\"abc\", 3)",
                 boundary: None,
             },
@@ -15620,27 +17269,51 @@ mod builtin_error_paths {
         let table = vec![
             Row {
                 builtin: "ABS",
-                valid: ("ABS(-3)", "\"3\"^^<http://www.w3.org/2001/XMLSchema#integer>"),
+                valid: (
+                    "ABS(-3)",
+                    "\"3\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+                ),
                 type_err: "ABS(\"foo\")",
-                boundary: Some(("ABS(0)", "\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>")),
+                boundary: Some((
+                    "ABS(0)",
+                    "\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+                )),
             },
             Row {
                 builtin: "CEIL",
-                valid: ("CEIL(2.1)", "\"3\"^^<http://www.w3.org/2001/XMLSchema#decimal>"),
+                valid: (
+                    "CEIL(2.1)",
+                    "\"3\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+                ),
                 type_err: "CEIL(\"foo\")",
-                boundary: Some(("CEIL(-2.1)", "\"-2\"^^<http://www.w3.org/2001/XMLSchema#decimal>")),
+                boundary: Some((
+                    "CEIL(-2.1)",
+                    "\"-2\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+                )),
             },
             Row {
                 builtin: "FLOOR",
-                valid: ("FLOOR(2.9)", "\"2\"^^<http://www.w3.org/2001/XMLSchema#decimal>"),
+                valid: (
+                    "FLOOR(2.9)",
+                    "\"2\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+                ),
                 type_err: "FLOOR(<http://ex/o>)",
-                boundary: Some(("FLOOR(-2.1)", "\"-3\"^^<http://www.w3.org/2001/XMLSchema#decimal>")),
+                boundary: Some((
+                    "FLOOR(-2.1)",
+                    "\"-3\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+                )),
             },
             Row {
                 builtin: "ROUND",
-                valid: ("ROUND(2.4)", "\"2\"^^<http://www.w3.org/2001/XMLSchema#decimal>"),
+                valid: (
+                    "ROUND(2.4)",
+                    "\"2\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+                ),
                 type_err: "ROUND(\"foo\")",
-                boundary: Some(("ROUND(2.5)", "\"3\"^^<http://www.w3.org/2001/XMLSchema#decimal>")),
+                boundary: Some((
+                    "ROUND(2.5)",
+                    "\"3\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+                )),
             },
         ];
         run_table(&table);
@@ -15663,7 +17336,10 @@ mod builtin_error_paths {
             },
             Row {
                 builtin: "DATATYPE",
-                valid: ("DATATYPE(\"x\")", "<http://www.w3.org/2001/XMLSchema#string>"),
+                valid: (
+                    "DATATYPE(\"x\")",
+                    "<http://www.w3.org/2001/XMLSchema#string>",
+                ),
                 type_err: "DATATYPE(<http://ex/o>)",
                 boundary: Some(("DATATYPE(42)", "<http://www.w3.org/2001/XMLSchema#integer>")),
             },
@@ -15703,11 +17379,17 @@ mod builtin_error_paths {
             },
             Row {
                 builtin: "LANGMATCHES",
-                valid: ("LANGMATCHES(\"en\", \"en\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"),
+                valid: (
+                    "LANGMATCHES(\"en\", \"en\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                ),
                 // FIXED arm: a non-string operand is a type error (was wrongly `false`).
                 type_err: "LANGMATCHES(123, \"en\")",
                 // "*" matches any non-empty tag.
-                boundary: Some(("LANGMATCHES(\"en-GB\", \"*\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>")),
+                boundary: Some((
+                    "LANGMATCHES(\"en-GB\", \"*\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                )),
             },
             Row {
                 builtin: "IRI",
@@ -15730,7 +17412,9 @@ mod builtin_error_paths {
             builtin: Box::leak(kw.to_string().into_boxed_str()),
             valid: (
                 Box::leak(format!("{kw}({valid_dt}{DT})").into_boxed_str()),
-                Box::leak(format!("\"{exp}\"^^<http://www.w3.org/2001/XMLSchema#{ty}>").into_boxed_str()),
+                Box::leak(
+                    format!("\"{exp}\"^^<http://www.w3.org/2001/XMLSchema#{ty}>").into_boxed_str(),
+                ),
             ),
             type_err: Box::leak(format!("{kw}(\"foo\")").into_boxed_str()),
             boundary: None,
@@ -15745,7 +17429,10 @@ mod builtin_error_paths {
             Row {
                 builtin: "TZ",
                 // No timezone in the lexical form → empty simple literal (NOT an error).
-                valid: (Box::leak(format!("TZ({valid_dt}{DT})").into_boxed_str()), "\"\""),
+                valid: (
+                    Box::leak(format!("TZ({valid_dt}{DT})").into_boxed_str()),
+                    "\"\"",
+                ),
                 type_err: "TZ(\"foo\")",
                 boundary: Some((
                     Box::leak(format!("TZ(\"2024-03-15T13:45:30Z\"{DT})").into_boxed_str()),
@@ -15761,7 +17448,9 @@ mod builtin_error_paths {
                 ),
                 type_err: Box::leak(format!("TIMEZONE({valid_dt}{DT})").into_boxed_str()),
                 boundary: Some((
-                    Box::leak(format!("TIMEZONE(\"2024-03-15T13:45:30+05:00\"{DT})").into_boxed_str()),
+                    Box::leak(
+                        format!("TIMEZONE(\"2024-03-15T13:45:30+05:00\"{DT})").into_boxed_str(),
+                    ),
                     "\"PT5H\"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>",
                 )),
             },
@@ -15827,22 +17516,34 @@ mod builtin_error_paths {
         let table = vec![
             Row {
                 builtin: "REGEX",
-                valid: ("REGEX(\"abc\", \"^a\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"),
+                valid: (
+                    "REGEX(\"abc\", \"^a\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                ),
                 // A non-string text operand is a type error.
                 type_err: "REGEX(123, \"a\")",
                 // Case-insensitive flag.
-                boundary: Some(("REGEX(\"ABC\", \"abc\", \"i\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>")),
+                boundary: Some((
+                    "REGEX(\"ABC\", \"abc\", \"i\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                )),
             },
             Row {
                 builtin: "REGEX (malformed pattern)",
-                valid: ("REGEX(\"abc\", \"[a-c]\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"),
+                valid: (
+                    "REGEX(\"abc\", \"[a-c]\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                ),
                 // An unclosed character class is a compile error → expression error.
                 type_err: "REGEX(\"abc\", \"[\")",
                 boundary: None,
             },
             Row {
                 builtin: "REGEX (illegal flag)",
-                valid: ("REGEX(\"abc\", \"a\", \"i\")", "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"),
+                valid: (
+                    "REGEX(\"abc\", \"a\", \"i\")",
+                    "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+                ),
                 // 'z' is not a SPARQL/XPath regex flag → error.
                 type_err: "REGEX(\"abc\", \"a\", \"z\")",
                 boundary: None,
@@ -15888,16 +17589,16 @@ mod path_tests {
         // OneOrMore (transitive): all reachable pairs over the chain = C(4,2) = 6.
         assert_eq!(n("SELECT ?x ?y WHERE { ?x :p+ ?y }"), 6);
         assert_eq!(n("SELECT ?y WHERE { :a :p+ ?y }"), 3); // b,c,d
-        // ZeroOrMore adds reflexive self-match: a,b,c,d.
+                                                           // ZeroOrMore adds reflexive self-match: a,b,c,d.
         assert_eq!(n("SELECT ?y WHERE { :a :p* ?y }"), 4);
         // Sequence / Alternative / ZeroOrOne.
         assert_eq!(n("SELECT ?y WHERE { :a :p/:p ?y }"), 1); // c
         assert_eq!(n("SELECT ?y WHERE { :a :p|:q ?y }"), 2); // b, x
         assert_eq!(n("SELECT ?y WHERE { :a :p? ?y }"), 2); // a (zero), b (one)
-        // Reverse (inverse), incl. inverse-transitive.
+                                                           // Reverse (inverse), incl. inverse-transitive.
         assert_eq!(n("SELECT ?x WHERE { :d ^:p ?x }"), 1); // c
         assert_eq!(n("SELECT ?x WHERE { :d ^:p+ ?x }"), 3); // c,b,a
-        // NegatedPropertySet: edges not via :p  ->  only a -q-> x.
+                                                            // NegatedPropertySet: edges not via :p  ->  only a -q-> x.
         assert_eq!(n("SELECT ?x ?y WHERE { ?x !:p ?y }"), 1);
     }
 
@@ -15916,9 +17617,15 @@ mod path_tests {
         assert_eq!(n("SELECT * WHERE { GRAPH <http://ex/g2> { ?s ?p ?o } }"), 1);
         // GRAPH ?g ranges over both named graphs (3 triples), binding ?g; an absent graph -> 0.
         assert_eq!(n("SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }"), 3);
-        assert_eq!(n("SELECT * WHERE { GRAPH <http://ex/absent> { ?s ?p ?o } }"), 0);
+        assert_eq!(
+            n("SELECT * WHERE { GRAPH <http://ex/absent> { ?s ?p ?o } }"),
+            0
+        );
         // Result ids are translated to the outer dict, so a join across GRAPH works.
-        assert_eq!(n("SELECT ?o WHERE { GRAPH ?g { <http://ex/b> <http://ex/p> ?o } }"), 1);
+        assert_eq!(
+            n("SELECT ?o WHERE { GRAPH ?g { <http://ex/b> <http://ex/p> ?o } }"),
+            1
+        );
     }
 
     /// [OPUS-4.8] (sq-zz8z, gh-51) The graph-IRI prefix range-scan index must return EXACTLY the
@@ -15973,7 +17680,10 @@ mod path_tests {
 
         // Oracle: STRSTARTS over the literal IRI set, computed in plain Rust.
         fn oracle(prefix: &str) -> BTreeSet<String> {
-            ALL.iter().filter(|g| g.starts_with(prefix)).map(|s| s.to_string()).collect()
+            ALL.iter()
+                .filter(|g| g.starts_with(prefix))
+                .map(|s| s.to_string())
+                .collect()
         }
 
         // Core API range scan, directly: the set the index yields for a prefix.
@@ -15991,16 +17701,16 @@ mod path_tests {
         fn indexed_matches_oracle_across_edge_cases() {
             let g = ds();
             let prefixes = [
-                "",                          // empty: matches every graph
-                "http://ex/tenantA",         // matches tenantA/* AND tenantAB/* (prefix of prefix)
-                "http://ex/tenantA/",        // matches only tenantA/* (the slash excludes tenantAB)
-                "http://ex/tenantA/g/1",     // exact-prefix that is itself a substring of .../10
-                "http://ex/tenantA/g/10",    // exact match of one graph IRI
-                "http://ex/tenantB/",        // single tenant
-                "http://ex/tenantC/",        // NO match
-                "http://ex/has%20space/",    // percent-encoded IRI
-                "zzz-nonexistent",           // no match, sorts after everything
-                "http://ex/",                // common ancestor: all six
+                "",                       // empty: matches every graph
+                "http://ex/tenantA",      // matches tenantA/* AND tenantAB/* (prefix of prefix)
+                "http://ex/tenantA/",     // matches only tenantA/* (the slash excludes tenantAB)
+                "http://ex/tenantA/g/1",  // exact-prefix that is itself a substring of .../10
+                "http://ex/tenantA/g/10", // exact match of one graph IRI
+                "http://ex/tenantB/",     // single tenant
+                "http://ex/tenantC/",     // NO match
+                "http://ex/has%20space/", // percent-encoded IRI
+                "zzz-nonexistent",        // no match, sorts after everything
+                "http://ex/",             // common ancestor: all six
             ];
             for p in prefixes {
                 let idx = indexed_graphs(&g, p);
@@ -16008,7 +17718,11 @@ mod path_tests {
                 assert_eq!(idx, orc, "indexed result != oracle for prefix {p:?}");
                 // The core range-scan API agrees with the oracle too (the index itself, not just
                 // the engine wiring).
-                assert_eq!(core_index_graphs(&g, p), orc, "core index != oracle for prefix {p:?}");
+                assert_eq!(
+                    core_index_graphs(&g, p),
+                    orc,
+                    "core index != oracle for prefix {p:?}"
+                );
             }
         }
 
@@ -16067,10 +17781,14 @@ mod path_tests {
             )
             .unwrap();
             let got = indexed_graphs(&g, "http://ex/tenantA/");
-            let want: BTreeSet<String> = ["http://ex/tenantA/g/0", "http://ex/tenantA/g/1", "http://ex/tenantA/g/2"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+            let want: BTreeSet<String> = [
+                "http://ex/tenantA/g/0",
+                "http://ex/tenantA/g/1",
+                "http://ex/tenantA/g/2",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
             assert_eq!(got, want);
         }
     }
@@ -16106,7 +17824,11 @@ mod path_tests {
                 let x = row[xi].as_ref().unwrap();
                 if let Some(yi) = yi {
                     // Zero-length diagonal: the two ends are the SAME term.
-                    assert_eq!(&row[yi], &Some(x.clone()), "expected reflexive bind, row {row:?}");
+                    assert_eq!(
+                        &row[yi],
+                        &Some(x.clone()),
+                        "expected reflexive bind, row {row:?}"
+                    );
                 }
                 let s = match x {
                     Term::NamedNode(n) => n.as_str().rsplit('/').next().unwrap().to_string(),
@@ -16124,13 +17846,17 @@ mod path_tests {
         //     default-graph nodes m,n and g2's e,f must NOT appear. -----------------
         // `?x :p* ?x` (same var) is purely the diagonal = the node domain of g1.
         assert_eq!(
-            diag(&format!("{P}SELECT ?x ?y WHERE {{ GRAPH :g1 {{ ?x :p* ?y FILTER(?x = ?y) }} }}")),
+            diag(&format!(
+                "{P}SELECT ?x ?y WHERE {{ GRAPH :g1 {{ ?x :p* ?y FILTER(?x = ?y) }} }}"
+            )),
             set(&["a", "b", "c", "d"]),
             "p* diagonal inside GRAPH <g1> must be g1's nodes only"
         );
         // g2 has a disjoint domain {e,f}: the wrong (union/default) scope would leak.
         assert_eq!(
-            diag(&format!("{P}SELECT ?x ?y WHERE {{ GRAPH :g2 {{ ?x :p* ?y FILTER(?x = ?y) }} }}")),
+            diag(&format!(
+                "{P}SELECT ?x ?y WHERE {{ GRAPH :g2 {{ ?x :p* ?y FILTER(?x = ?y) }} }}"
+            )),
             set(&["e", "f"]),
             "p* diagonal inside GRAPH <g2> must be g2's nodes only"
         );
@@ -16139,16 +17865,29 @@ mod path_tests {
         //     its own self-pair plus the one-step neighbour, scoped to the graph. ---
         // `<a> :p? ?y` in g1 -> {a (zero), b (one)}.
         let p_opt_g1: BTreeSet<String> = {
-            let r = crate::query(&g, &format!("{P}SELECT ?y WHERE {{ GRAPH :g1 {{ :a :p? ?y }} }}")).unwrap();
-            r.rows.iter().map(|row| match row[0].as_ref().unwrap() {
-                Term::NamedNode(n) => n.as_str().rsplit('/').next().unwrap().to_string(),
-                other => panic!("{other:?}"),
-            }).collect()
+            let r = crate::query(
+                &g,
+                &format!("{P}SELECT ?y WHERE {{ GRAPH :g1 {{ :a :p? ?y }} }}"),
+            )
+            .unwrap();
+            r.rows
+                .iter()
+                .map(|row| match row[0].as_ref().unwrap() {
+                    Term::NamedNode(n) => n.as_str().rsplit('/').next().unwrap().to_string(),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
         };
-        assert_eq!(p_opt_g1, set(&["a", "b"]), ":p? in GRAPH <g1> = self + one hop");
+        assert_eq!(
+            p_opt_g1,
+            set(&["a", "b"]),
+            ":p? in GRAPH <g1> = self + one hop"
+        );
         // `?x :p? ?x` (same var) inside GRAPH <g1>: the diagonal = g1's node domain.
         assert_eq!(
-            diag(&format!("{P}SELECT ?x ?y WHERE {{ GRAPH :g1 {{ ?x :p? ?y FILTER(?x = ?y) }} }}")),
+            diag(&format!(
+                "{P}SELECT ?x ?y WHERE {{ GRAPH :g1 {{ ?x :p? ?y FILTER(?x = ?y) }} }}"
+            )),
             set(&["a", "b", "c", "d"]),
             ":p? diagonal inside GRAPH <g1> must be g1's nodes only"
         );
@@ -16156,7 +17895,9 @@ mod path_tests {
         // --- The default graph's own zero-length diagonal is {m,n} — confirming the
         //     GRAPH scopes above genuinely excluded these nodes. -------------------
         assert_eq!(
-            diag(&format!("{P}SELECT ?x ?y WHERE {{ ?x :p* ?y FILTER(?x = ?y) }}")),
+            diag(&format!(
+                "{P}SELECT ?x ?y WHERE {{ ?x :p* ?y FILTER(?x = ?y) }}"
+            )),
             set(&["m", "n"]),
             "default-graph p* diagonal must be the default graph's nodes only"
         );
@@ -16181,15 +17922,26 @@ mod path_tests {
         let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
         for row in &r.rows {
             assert_eq!(&row[yi], &row[xi], "GRAPH ?g p* diagonal must be reflexive");
-            pairs.insert((local(row[gi].as_ref().unwrap()), local(row[xi].as_ref().unwrap())));
+            pairs.insert((
+                local(row[gi].as_ref().unwrap()),
+                local(row[xi].as_ref().unwrap()),
+            ));
         }
         let expected: BTreeSet<(String, String)> = [
-            ("g1", "a"), ("g1", "b"), ("g1", "c"), ("g1", "d"), ("g2", "e"), ("g2", "f"),
+            ("g1", "a"),
+            ("g1", "b"),
+            ("g1", "c"),
+            ("g1", "d"),
+            ("g2", "e"),
+            ("g2", "f"),
         ]
         .iter()
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
-        assert_eq!(pairs, expected, "GRAPH ?g zero-length nodes must be scoped per named graph");
+        assert_eq!(
+            pairs, expected,
+            "GRAPH ?g zero-length nodes must be scoped per named graph"
+        );
     }
 
     #[test]
@@ -16203,8 +17955,14 @@ mod path_tests {
         )
         .unwrap();
         let n = |q: &str| crate::query(&g, q).unwrap().len();
-        assert_eq!(n("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice :age 30 >> :certainty ?c }"), 1);
-        assert_eq!(n("PREFIX : <http://ex/> SELECT ?c WHERE { << :carol :age 99 >> :certainty ?c }"), 0);
+        assert_eq!(
+            n("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice :age 30 >> :certainty ?c }"),
+            1
+        );
+        assert_eq!(
+            n("PREFIX : <http://ex/> SELECT ?c WHERE { << :carol :age 99 >> :certainty ?c }"),
+            0
+        );
     }
 
     #[test]
@@ -16212,7 +17970,11 @@ mod path_tests {
         // Loading RDF 1.2 triple-term Turtle and selecting the triple term materialises a structural
         // `Term::Triple` (oxrdf formats it as `<<( … )>>`), NOT the old canonical-string
         // literal stopgap.
-        let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .",
+            "turtle",
+        )
+        .unwrap();
         let r = crate::query(
             &g,
             "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }",
@@ -16245,32 +18007,58 @@ mod path_tests {
     #[test]
     fn rdf_star_nested_triple_terms() {
         // A triple term nests through the OBJECT position; it round-trips structurally.
-        let g = Graph::load_str("PREFIX : <http://ex/>\n:x :p <<( :a :b <<( :c :d :e )>> )>> .", "turtle").unwrap();
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n:x :p <<( :a :b <<( :c :d :e )>> )>> .",
+            "turtle",
+        )
+        .unwrap();
         let r = crate::query(&g, "PREFIX : <http://ex/> SELECT ?o WHERE { :x :p ?o }").unwrap();
         assert_eq!(r.rows.len(), 1);
         let nn = oxrdf::NamedNode::new_unchecked;
-        let inner = Term::Triple(Box::new(oxrdf::Triple::new(nn("http://ex/c"), nn("http://ex/d"), Term::NamedNode(nn("http://ex/e")))));
-        let outer = Term::Triple(Box::new(oxrdf::Triple::new(nn("http://ex/a"), nn("http://ex/b"), inner)));
+        let inner = Term::Triple(Box::new(oxrdf::Triple::new(
+            nn("http://ex/c"),
+            nn("http://ex/d"),
+            Term::NamedNode(nn("http://ex/e")),
+        )));
+        let outer = Term::Triple(Box::new(oxrdf::Triple::new(
+            nn("http://ex/a"),
+            nn("http://ex/b"),
+            inner,
+        )));
         assert_eq!(r.rows[0][0], Some(outer.clone()));
         // The concrete nested pattern matches (1) and a non-matching one misses (0).
         let n = |q: &str| crate::query(&g, q).unwrap().len();
-        assert_eq!(n("PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p <<( :a :b <<( :c :d :e )>> )>> }"), 1);
-        assert_eq!(n("PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p <<( :a :b <<( :c :d :x )>> )>> }"), 0);
+        assert_eq!(
+            n("PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p <<( :a :b <<( :c :d :e )>> )>> }"),
+            1
+        );
+        assert_eq!(
+            n("PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p <<( :a :b <<( :c :d :x )>> )>> }"),
+            0
+        );
     }
 
     #[test]
     fn rdf_star_values_ground_triple_term() {
         // A ground triple term in VALUES binds and joins against stored triple terms.
-        let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .",
+            "turtle",
+        )
+        .unwrap();
         let n = |q: &str| crate::query(&g, q).unwrap().len();
         assert_eq!(
-            n("PREFIX : <http://ex/> SELECT ?c WHERE { VALUES ?t { <<( :alice :age 30 )>> } \
-               ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t . ?r :certainty ?c }"),
+            n(
+                "PREFIX : <http://ex/> SELECT ?c WHERE { VALUES ?t { <<( :alice :age 30 )>> } \
+               ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t . ?r :certainty ?c }"
+            ),
             1
         );
         assert_eq!(
-            n("PREFIX : <http://ex/> SELECT ?c WHERE { VALUES ?t { <<( :alice :age 31 )>> } \
-               ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t . ?r :certainty ?c }"),
+            n(
+                "PREFIX : <http://ex/> SELECT ?c WHERE { VALUES ?t { <<( :alice :age 31 )>> } \
+               ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t . ?r :certainty ?c }"
+            ),
             0
         );
     }
@@ -16290,16 +18078,31 @@ mod path_tests {
         assert_eq!(r.rows.len(), 1);
         assert!(r.rows[0][0].as_ref().unwrap().to_string().contains("alice"));
         // All slots variable: both reified statements match.
-        assert_eq!(q("PREFIX : <http://ex/> SELECT * WHERE { << ?s ?p ?o >> :certainty ?c }").rows.len(), 2);
+        assert_eq!(
+            q("PREFIX : <http://ex/> SELECT * WHERE { << ?s ?p ?o >> :certainty ?c }")
+                .rows
+                .len(),
+            2
+        );
         // Inner variable JOINS with an outer pattern (alice has a name, bob does not).
         assert_eq!(
             q("PREFIX : <http://ex/> SELECT ?n WHERE { << ?w :age ?a >> :certainty ?c . ?w :name ?n }").rows.len(),
             1
         );
         // A ground component inside the quoted pattern constrains the match.
-        assert_eq!(q("PREFIX : <http://ex/> SELECT ?c WHERE { << :bob :age ?a >> :certainty ?c }").rows.len(), 1);
+        assert_eq!(
+            q("PREFIX : <http://ex/> SELECT ?c WHERE { << :bob :age ?a >> :certainty ?c }")
+                .rows
+                .len(),
+            1
+        );
         // No match: nothing reifies :alice :age 31.
-        assert_eq!(q("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice :age 31 >> :certainty ?c }").rows.len(), 0);
+        assert_eq!(
+            q("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice :age 31 >> :certainty ?c }")
+                .rows
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -16319,15 +18122,26 @@ mod path_tests {
             let mut out: Vec<String> = r
                 .rows
                 .iter()
-                .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect::<Vec<_>>().join("|"))
+                .map(|row| {
+                    row.iter()
+                        .map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
                 .collect();
             out.sort();
             out
         };
         // Variable in SUBJECT slot — binds to the reified subject.
-        assert_eq!(sols("PREFIX : <http://ex/> SELECT ?s WHERE { << ?s :age 30 >> :certainty ?c }"), vec!["<http://ex/alice>"]);
+        assert_eq!(
+            sols("PREFIX : <http://ex/> SELECT ?s WHERE { << ?s :age 30 >> :certainty ?c }"),
+            vec!["<http://ex/alice>"]
+        );
         // Variable in PREDICATE slot — binds to the reified predicate.
-        assert_eq!(sols("PREFIX : <http://ex/> SELECT ?p WHERE { << :alice ?p 30 >> :certainty ?c }"), vec!["<http://ex/age>"]);
+        assert_eq!(
+            sols("PREFIX : <http://ex/> SELECT ?p WHERE { << :alice ?p 30 >> :certainty ?c }"),
+            vec!["<http://ex/age>"]
+        );
         // Variable in OBJECT slot — binds to the reified object (literal preserved).
         assert_eq!(
             sols("PREFIX : <http://ex/> SELECT ?o WHERE { << :alice :age ?o >> :certainty ?c }"),
@@ -16350,14 +18164,23 @@ mod path_tests {
         .unwrap();
         let q = |s: &str| crate::query(&g, s).unwrap();
         // Ground subject + ground predicate, variable object: two alice-age statements.
-        let r = q("PREFIX : <http://ex/> SELECT ?o ?c WHERE { << :alice :age ?o >> :certainty ?c }");
+        let r =
+            q("PREFIX : <http://ex/> SELECT ?o ?c WHERE { << :alice :age ?o >> :certainty ?c }");
         assert_eq!(r.rows.len(), 2);
         // Ground subject + ground object, variable predicate: exactly the :alice :age 30 row.
         let r = q("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice ?p 30 >> :certainty ?c }");
         assert_eq!(r.rows.len(), 1);
-        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"0.9\"^^<http://www.w3.org/2001/XMLSchema#decimal>");
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap().to_string(),
+            "\"0.9\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+        );
         // No ground match: nothing reifies :carol :age 30.
-        assert_eq!(q("PREFIX : <http://ex/> SELECT ?c WHERE { << :carol :age 30 >> :certainty ?c }").rows.len(), 0);
+        assert_eq!(
+            q("PREFIX : <http://ex/> SELECT ?c WHERE { << :carol :age 30 >> :certainty ?c }")
+                .rows
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -16373,13 +18196,27 @@ mod path_tests {
             "turtle",
         )
         .unwrap();
-        let r = crate::query(&g, "PREFIX : <http://ex/> SELECT ?s ?p ?o ?c WHERE { << ?s ?p ?o >> :certainty ?c }").unwrap();
+        let r = crate::query(
+            &g,
+            "PREFIX : <http://ex/> SELECT ?s ?p ?o ?c WHERE { << ?s ?p ?o >> :certainty ?c }",
+        )
+        .unwrap();
         assert_eq!(r.rows.len(), 3);
         // Every row binds all four variables (no NULLs), and the subjects cover all three.
-        let mut subjects: Vec<String> = r.rows.iter().map(|row| row[0].as_ref().unwrap().to_string()).collect();
+        let mut subjects: Vec<String> = r
+            .rows
+            .iter()
+            .map(|row| row[0].as_ref().unwrap().to_string())
+            .collect();
         subjects.sort();
-        assert_eq!(subjects, vec!["<http://ex/alice>", "<http://ex/bob>", "<http://ex/carol>"]);
-        assert!(r.rows.iter().all(|row| row.iter().take(4).all(|c| c.is_some())));
+        assert_eq!(
+            subjects,
+            vec!["<http://ex/alice>", "<http://ex/bob>", "<http://ex/carol>"]
+        );
+        assert!(r
+            .rows
+            .iter()
+            .all(|row| row.iter().take(4).all(|c| c.is_some())));
     }
 
     #[test]
@@ -16397,14 +18234,24 @@ mod path_tests {
         )
         .unwrap();
         assert_eq!(r.rows.len(), 1);
-        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/alice>");
-        assert_eq!(r.rows[0][1].as_ref().unwrap().to_string(), "<http://ex/bob>");
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap().to_string(),
+            "<http://ex/alice>"
+        );
+        assert_eq!(
+            r.rows[0][1].as_ref().unwrap().to_string(),
+            "<http://ex/bob>"
+        );
     }
 
     #[test]
     fn rdf_star_triple_builtins() {
         // F15: TRIPLE / isTRIPLE / SUBJECT / PREDICATE / OBJECT.
-        let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .",
+            "turtle",
+        )
+        .unwrap();
         let one = |s: &str| {
             let r = crate::query(&g, s).unwrap();
             r.rows[0][0].as_ref().map(|t| t.to_string())
@@ -16413,12 +18260,27 @@ mod path_tests {
             one("PREFIX : <http://ex/> SELECT (TRIPLE(:a, :b, 1) AS ?t) {}").unwrap(),
             "<<( <http://ex/a> <http://ex/b> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> )>>"
         );
-        assert_eq!(one("PREFIX : <http://ex/> SELECT (isTRIPLE(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
-        assert_eq!(one("PREFIX : <http://ex/> SELECT (SUBJECT(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "<http://ex/a>");
-        assert_eq!(one("PREFIX : <http://ex/> SELECT (PREDICATE(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "<http://ex/b>");
-        assert_eq!(one("PREFIX : <http://ex/> SELECT (OBJECT(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "<http://ex/c>");
+        assert_eq!(
+            one("PREFIX : <http://ex/> SELECT (isTRIPLE(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(),
+            "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+        );
+        assert_eq!(
+            one("PREFIX : <http://ex/> SELECT (SUBJECT(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(),
+            "<http://ex/a>"
+        );
+        assert_eq!(
+            one("PREFIX : <http://ex/> SELECT (PREDICATE(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(),
+            "<http://ex/b>"
+        );
+        assert_eq!(
+            one("PREFIX : <http://ex/> SELECT (OBJECT(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(),
+            "<http://ex/c>"
+        );
         // A literal subject is a type error -> unbound.
-        assert_eq!(one("PREFIX : <http://ex/> SELECT (TRIPLE(1, :b, :c) AS ?t) {}"), None);
+        assert_eq!(
+            one("PREFIX : <http://ex/> SELECT (TRIPLE(1, :b, :c) AS ?t) {}"),
+            None
+        );
     }
 }
 
@@ -16438,7 +18300,9 @@ mod ask_exists_tests {
     fn big(n: usize) -> Graph {
         let mut nt = String::new();
         for i in 0..n {
-            nt.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/Thing> .\n"));
+            nt.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/Thing> .\n"
+            ));
         }
         Graph::load_str(&nt, "ntriples").unwrap()
     }
@@ -16446,7 +18310,10 @@ mod ask_exists_tests {
     /// A `max_rows`-only budget (no deadline): the working-set bound used as the
     /// over-evaluation tripwire.
     fn rows_budget(max: usize) -> QueryBudget {
-        QueryBudget { max_rows: Some(max), ..QueryBudget::unlimited() }
+        QueryBudget {
+            max_rows: Some(max),
+            ..QueryBudget::unlimited()
+        }
     }
 
     #[test]
@@ -16466,7 +18333,7 @@ mod ask_exists_tests {
         // Join: ?x :p ?y . ?y :p ?z  (a-p->b-p->c exists).
         assert!(ask("ASK { ?x :p ?y . ?y :p ?z }"));
         assert!(!ask("ASK { ?x :p ?y . ?y :knows ?z }")); // b/c have no :knows
-        // FILTER.
+                                                          // FILTER.
         assert!(ask("ASK { ?s :p ?o FILTER(?o = :b) }"));
         assert!(!ask("ASK { ?s :p ?o FILTER(?o = :nope) }"));
     }
@@ -16480,19 +18347,38 @@ mod ask_exists_tests {
             "turtle",
         )
         .unwrap();
-        let n = |q: &str| crate::query(&g, &format!("PREFIX : <http://ex/> {q}")).unwrap().len();
+        let n = |q: &str| {
+            crate::query(&g, &format!("PREFIX : <http://ex/> {q}"))
+                .unwrap()
+                .len()
+        };
         // EXISTS: subjects that have an outgoing :p AND are :flagged -> a, c.
-        assert_eq!(n("SELECT ?s WHERE { ?s :flagged true FILTER EXISTS { ?s :p ?o } }"), 2);
+        assert_eq!(
+            n("SELECT ?s WHERE { ?s :flagged true FILTER EXISTS { ?s :p ?o } }"),
+            2
+        );
         // NOT EXISTS: flagged subjects with NO outgoing :p -> none (a,c both have :p).
-        assert_eq!(n("SELECT ?s WHERE { ?s :flagged true FILTER NOT EXISTS { ?s :p ?o } }"), 0);
+        assert_eq!(
+            n("SELECT ?s WHERE { ?s :flagged true FILTER NOT EXISTS { ?s :p ?o } }"),
+            0
+        );
         // Correlated EXISTS that is sometimes false: subjects with a :p whose object
         // is itself :flagged -> only :b's target :c is flagged... :a-p->:b (b not
         // flagged), :b-p->:c (c flagged), :c-p->:d (d not flagged) => 1 (the b row).
-        assert_eq!(n("SELECT ?s WHERE { ?s :p ?o FILTER EXISTS { ?o :flagged true } }"), 1);
+        assert_eq!(
+            n("SELECT ?s WHERE { ?s :p ?o FILTER EXISTS { ?o :flagged true } }"),
+            1
+        );
         // Uncorrelated EXISTS (constant) is true once -> keeps all 3 :p subjects.
-        assert_eq!(n("SELECT ?s WHERE { ?s :p ?o FILTER EXISTS { :a :flagged true } }"), 3);
+        assert_eq!(
+            n("SELECT ?s WHERE { ?s :p ?o FILTER EXISTS { :a :flagged true } }"),
+            3
+        );
         // Uncorrelated EXISTS that is false -> drops everything.
-        assert_eq!(n("SELECT ?s WHERE { ?s :p ?o FILTER EXISTS { :a :flagged false } }"), 0);
+        assert_eq!(
+            n("SELECT ?s WHERE { ?s :p ?o FILTER EXISTS { :a :flagged false } }"),
+            0
+        );
     }
 
     #[test]
@@ -16504,12 +18390,21 @@ mod ask_exists_tests {
         let g = big(10_000);
         // SELECT proves the budget genuinely bites on full materialisation.
         assert!(
-            crate::query_with_budget(&g, "SELECT * WHERE { ?s <http://ex/p> ?o }", &rows_budget(4)).is_err(),
+            crate::query_with_budget(
+                &g,
+                "SELECT * WHERE { ?s <http://ex/p> ?o }",
+                &rows_budget(4)
+            )
+            .is_err(),
             "control: full SELECT must breach the 4-row working-set budget"
         );
         // ASK must NOT breach it — it stops at the first solution / counts from the index.
         let got = crate::ask_with_budget(&g, "ASK { ?s <http://ex/p> ?o }", &rows_budget(4));
-        assert_eq!(got, Ok(true), "ASK over a large single-pattern match set must early-exit, got {got:?}");
+        assert_eq!(
+            got,
+            Ok(true),
+            "ASK over a large single-pattern match set must early-exit, got {got:?}"
+        );
         // And a FALSE ASK over the same large store still returns cleanly (no match,
         // nothing materialised).
         assert_eq!(
@@ -16526,14 +18421,21 @@ mod ask_exists_tests {
         // solution. (The probe is uncorrelated so any inner solution satisfies it.)
         let mut nt = String::from("<http://ex/probe> <http://ex/kind> <http://ex/q> .\n");
         for i in 0..10_000 {
-            nt.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/Thing> .\n"));
+            nt.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/Thing> .\n"
+            ));
         }
         let g = Graph::load_str(&nt, "ntriples").unwrap();
         let q = "SELECT ?x WHERE { ?x <http://ex/kind> <http://ex/q> \
                  FILTER EXISTS { ?y <http://ex/p> <http://ex/Thing> } }";
         // Control: the inner pattern as a standalone SELECT breaches the budget.
         assert!(
-            crate::query_with_budget(&g, "SELECT * WHERE { ?y <http://ex/p> <http://ex/Thing> }", &rows_budget(8)).is_err(),
+            crate::query_with_budget(
+                &g,
+                "SELECT * WHERE { ?y <http://ex/p> <http://ex/Thing> }",
+                &rows_budget(8)
+            )
+            .is_err(),
             "control: the inner 10k-row scan must breach an 8-row budget"
         );
         // The full query (1 outer row, EXISTS over 10k inner): must answer true
@@ -16561,7 +18463,9 @@ mod path_pushdown_tests {
     fn random_graph(seed0: u64, n_nodes: u32, n_edges: usize) -> Graph {
         let mut seed = seed0;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         let mut ttl = String::from("@prefix : <http://ex/> .\n");
@@ -16628,7 +18532,10 @@ mod path_pushdown_tests {
             let g = random_graph(seed, 12, 40);
             for path in PATHS {
                 // Reference: the full (both-unbound) relation, post-filtered here.
-                let full = rowset(&crate::query(&g, &format!("{PFX}SELECT ?x ?y WHERE {{ ?x {path} ?y }}")).unwrap());
+                let full = rowset(
+                    &crate::query(&g, &format!("{PFX}SELECT ?x ?y WHERE {{ ?x {path} ?y }}"))
+                        .unwrap(),
+                );
                 let pairs: Vec<(String, String)> = full
                     .iter()
                     .map(|r| {
@@ -16637,37 +18544,69 @@ mod path_pushdown_tests {
                     })
                     .collect();
                 // Same variable at both ends: the diagonal.
-                let diag = rowset(&crate::query(&g, &format!("{PFX}SELECT ?x WHERE {{ ?x {path} ?x }}")).unwrap());
-                let mut want_diag: Vec<String> =
-                    pairs.iter().filter(|(x, y)| x == y).map(|(x, _)| x.clone()).collect();
+                let diag = rowset(
+                    &crate::query(&g, &format!("{PFX}SELECT ?x WHERE {{ ?x {path} ?x }}")).unwrap(),
+                );
+                let mut want_diag: Vec<String> = pairs
+                    .iter()
+                    .filter(|(x, y)| x == y)
+                    .map(|(x, _)| x.clone())
+                    .collect();
                 want_diag.sort();
                 want_diag.dedup();
-                assert_eq!(diag, want_diag, "same-var disagrees for `{path}` (seed {seed:#x})");
+                assert_eq!(
+                    diag, want_diag,
+                    "same-var disagrees for `{path}` (seed {seed:#x})"
+                );
                 for node in NODES {
                     let iri = format!("<http://ex/{node}>");
                     // Subject bound.
-                    let got =
-                        rowset(&crate::query(&g, &format!("{PFX}SELECT ?y WHERE {{ :{node} {path} ?y }}")).unwrap());
-                    let mut want: Vec<String> =
-                        pairs.iter().filter(|(x, _)| *x == iri).map(|(_, y)| y.clone()).collect();
+                    let got = rowset(
+                        &crate::query(&g, &format!("{PFX}SELECT ?y WHERE {{ :{node} {path} ?y }}"))
+                            .unwrap(),
+                    );
+                    let mut want: Vec<String> = pairs
+                        .iter()
+                        .filter(|(x, _)| *x == iri)
+                        .map(|(_, y)| y.clone())
+                        .collect();
                     want.sort();
                     want.dedup();
-                    assert_eq!(got, want, "bound-subject :{node} disagrees for `{path}` (seed {seed:#x})");
+                    assert_eq!(
+                        got, want,
+                        "bound-subject :{node} disagrees for `{path}` (seed {seed:#x})"
+                    );
                     // Object bound.
-                    let got =
-                        rowset(&crate::query(&g, &format!("{PFX}SELECT ?x WHERE {{ ?x {path} :{node} }}")).unwrap());
-                    let mut want: Vec<String> =
-                        pairs.iter().filter(|(_, y)| *y == iri).map(|(x, _)| x.clone()).collect();
+                    let got = rowset(
+                        &crate::query(&g, &format!("{PFX}SELECT ?x WHERE {{ ?x {path} :{node} }}"))
+                            .unwrap(),
+                    );
+                    let mut want: Vec<String> = pairs
+                        .iter()
+                        .filter(|(_, y)| *y == iri)
+                        .map(|(x, _)| x.clone())
+                        .collect();
                     want.sort();
                     want.dedup();
-                    assert_eq!(got, want, "bound-object :{node} disagrees for `{path}` (seed {seed:#x})");
+                    assert_eq!(
+                        got, want,
+                        "bound-object :{node} disagrees for `{path}` (seed {seed:#x})"
+                    );
                 }
                 // Both bound: membership must match the full relation exactly.
-                for (a, b) in
-                    [("n0", "n1"), ("d0", "d3"), ("c0", "c0"), ("c0", "c2"), ("s0", "s0"), ("i0", "i1"), ("n0", "i0")]
-                {
+                for (a, b) in [
+                    ("n0", "n1"),
+                    ("d0", "d3"),
+                    ("c0", "c0"),
+                    ("c0", "c2"),
+                    ("s0", "s0"),
+                    ("i0", "i1"),
+                    ("n0", "i0"),
+                ] {
                     let row = format!("<http://ex/{a}>\t<http://ex/{b}>");
-                    let got = crate::query(&g, &format!("{PFX}SELECT * WHERE {{ :{a} {path} :{b} }}")).unwrap();
+                    let got =
+                        crate::query(&g, &format!("{PFX}SELECT * WHERE {{ :{a} {path} :{b} }}"))
+                            .unwrap();
                     assert_eq!(
                         !got.rows.is_empty(),
                         full.contains(&row),
@@ -16685,7 +18624,10 @@ mod path_pushdown_tests {
         for seed in [0x5EEDu64, 0xBEEF] {
             let g = random_graph(seed, 10, 60);
             for (path, cond) in [("!:e", "?p != :e"), ("!(:e|:f)", "?p != :e && ?p != :f")] {
-                let got = rowset(&crate::query(&g, &format!("{PFX}SELECT ?x ?y WHERE {{ ?x {path} ?y }}")).unwrap());
+                let got = rowset(
+                    &crate::query(&g, &format!("{PFX}SELECT ?x ?y WHERE {{ ?x {path} ?y }}"))
+                        .unwrap(),
+                );
                 let oracle = rowset(
                     &crate::query(
                         &g,
@@ -16693,7 +18635,10 @@ mod path_pushdown_tests {
                     )
                     .unwrap(),
                 );
-                assert_eq!(got, oracle, "`{path}` disagrees with filter oracle (seed {seed:#x})");
+                assert_eq!(
+                    got, oracle,
+                    "`{path}` disagrees with filter oracle (seed {seed:#x})"
+                );
             }
         }
     }
@@ -16710,9 +18655,18 @@ mod path_pushdown_tests {
     #[test]
     fn bound_endpoint_zero_length_and_negated_avoid_full_store_scan() {
         // :a -e-> :b ; :a -f-> :c .  :z occurs in NO triple.
-        let g = Graph::load_str("@prefix : <http://ex/> .\n:a :e :b . :a :f :c .\n", "turtle").unwrap();
+        let g = Graph::load_str(
+            "@prefix : <http://ex/> .\n:a :e :b . :a :f :c .\n",
+            "turtle",
+        )
+        .unwrap();
         let rows = |sparql: &str| rowset(&crate::query(&g, &format!("{PFX}{sparql}")).unwrap());
-        let ask = |sparql: &str| !crate::query(&g, &format!("{PFX}{sparql}")).unwrap().rows.is_empty();
+        let ask = |sparql: &str| {
+            !crate::query(&g, &format!("{PFX}{sparql}"))
+                .unwrap()
+                .rows
+                .is_empty()
+        };
         let want = |items: &[&str]| {
             let mut v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
             v.sort();
@@ -16721,16 +18675,34 @@ mod path_pushdown_tests {
         };
 
         // Bound-subject `p*`: reflexive self + the one `:e` hop (NOT the node domain).
-        assert_eq!(rows("SELECT ?y WHERE { :a :e* ?y }"), want(&["<http://ex/a>", "<http://ex/b>"]));
+        assert_eq!(
+            rows("SELECT ?y WHERE { :a :e* ?y }"),
+            want(&["<http://ex/a>", "<http://ex/b>"])
+        );
         // Bound-subject `p?`: reflexive self + the one `:e` hop.
-        assert_eq!(rows("SELECT ?y WHERE { :a :e? ?y }"), want(&["<http://ex/a>", "<http://ex/b>"]));
+        assert_eq!(
+            rows("SELECT ?y WHERE { :a :e? ?y }"),
+            want(&["<http://ex/a>", "<http://ex/b>"])
+        );
         // Constant endpoint ABSENT from the data still has its zero-length self-pair.
-        assert_eq!(rows("SELECT ?y WHERE { :z :e* ?y }"), want(&["<http://ex/z>"]));
-        assert!(ask("ASK WHERE { :z :e? :z }"), "absent-term :z must satisfy its own :e? self-pair");
+        assert_eq!(
+            rows("SELECT ?y WHERE { :z :e* ?y }"),
+            want(&["<http://ex/z>"])
+        );
+        assert!(
+            ask("ASK WHERE { :z :e? :z }"),
+            "absent-term :z must satisfy its own :e? self-pair"
+        );
         // Bound-subject negated set: only :a's non-:e edges (the :f hop), narrowed scan.
-        assert_eq!(rows("SELECT ?y WHERE { :a !:e ?y }"), want(&["<http://ex/c>"]));
+        assert_eq!(
+            rows("SELECT ?y WHERE { :a !:e ?y }"),
+            want(&["<http://ex/c>"])
+        );
         // Bound-OBJECT negated set: subjects reaching :c via a non-:e predicate (:a -f-> :c).
-        assert_eq!(rows("SELECT ?x WHERE { ?x !:e :c }"), want(&["<http://ex/a>"]));
+        assert_eq!(
+            rows("SELECT ?x WHERE { ?x !:e :c }"),
+            want(&["<http://ex/a>"])
+        );
     }
 
     /// The row budget must fire INSIDE a single-source traversal (not only
@@ -16742,10 +18714,20 @@ mod path_pushdown_tests {
             ttl.push_str(&format!(":m{k} :e :m{} .\n", k + 1));
         }
         let g = Graph::load_str(&ttl, "turtle").unwrap();
-        let budget = crate::QueryBudget { max_rows: Some(64), ..crate::QueryBudget::unlimited() };
-        let err = crate::query_with_budget(&g, "PREFIX : <http://ex/> SELECT ?y WHERE { :m0 :e+ ?y }", &budget)
-            .unwrap_err();
-        assert!(err.contains("budget"), "expected a budget error, got: {err}");
+        let budget = crate::QueryBudget {
+            max_rows: Some(64),
+            ..crate::QueryBudget::unlimited()
+        };
+        let err = crate::query_with_budget(
+            &g,
+            "PREFIX : <http://ex/> SELECT ?y WHERE { :m0 :e+ ?y }",
+            &budget,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("budget"),
+            "expected a budget error, got: {err}"
+        );
     }
 
     /// PAIRED micro-benchmark (same process, same graph) for bound-subject
@@ -16766,7 +18748,9 @@ mod path_pushdown_tests {
         const OUT_DEG: u32 = 10;
         let mut seed = 0x5EEDu64;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         let mut ttl = String::with_capacity(48 << 20);
@@ -16784,9 +18768,15 @@ mod path_pushdown_tests {
         let g = Graph::load_str(&ttl, "turtle").unwrap();
         eprintln!("loaded {} triples in {:.2?}", g.store.len(), t.elapsed());
 
-        let knows = PropertyPathExpression::NamedNode(oxrdf::NamedNode::new("http://ex/knows").unwrap());
+        let knows =
+            PropertyPathExpression::NamedNode(oxrdf::NamedNode::new("http://ex/knows").unwrap());
         let plus = PropertyPathExpression::OneOrMore(Box::new(knows.clone()));
-        let id = |k: u32| g.id_of(&Term::NamedNode(oxrdf::NamedNode::new(format!("http://ex/p{k}")).unwrap())).unwrap();
+        let id = |k: u32| {
+            g.id_of(&Term::NamedNode(
+                oxrdf::NamedNode::new(format!("http://ex/p{k}")).unwrap(),
+            ))
+            .unwrap()
+        };
 
         // AFTER: bound-subject pushdown, median over many random starts.
         let starts: Vec<Id> = (0..200).map(|_| id(next() % (CLUSTERS * SIZE))).collect();
@@ -16794,14 +18784,26 @@ mod path_pushdown_tests {
         let mut rows = 0usize;
         for &s in &starts {
             let t = Instant::now();
-            let r = path_pairs(&g, &plus, PathEnds { s: Some(s), o: None }).unwrap();
+            let r = path_pairs(
+                &g,
+                &plus,
+                PathEnds {
+                    s: Some(s),
+                    o: None,
+                },
+            )
+            .unwrap();
             times.push(t.elapsed().as_secs_f64());
             rows += r.len();
         }
         times.sort_by(f64::total_cmp);
         let after = times[times.len() / 2];
-        eprintln!("bound-subject pushdown: median {:.3?} over {} starts ({} total rows)",
-            std::time::Duration::from_secs_f64(after), starts.len(), rows);
+        eprintln!(
+            "bound-subject pushdown: median {:.3?} over {} starts ({} total rows)",
+            std::time::Duration::from_secs_f64(after),
+            starts.len(),
+            rows
+        );
 
         // BEFORE: the previous algorithm — full all-pairs closure, then filter.
         let t = Instant::now();
@@ -16809,28 +18811,68 @@ mod path_pushdown_tests {
         let before = t.elapsed().as_secs_f64();
         let s0 = starts[0];
         let filtered = full.iter().filter(|&&(x, _)| x == s0).count();
-        eprintln!("full closure (old algorithm): {:.3?} ({} pairs; {} for one start)",
-            std::time::Duration::from_secs_f64(before), full.len(), filtered);
-        eprintln!("PAIRED RATIO full-closure / single-source = {:.0}x", before / after);
+        eprintln!(
+            "full closure (old algorithm): {:.3?} ({} pairs; {} for one start)",
+            std::time::Duration::from_secs_f64(before),
+            full.len(),
+            filtered
+        );
+        eprintln!(
+            "PAIRED RATIO full-closure / single-source = {:.0}x",
+            before / after
+        );
 
         // Both-bound reachability with early exit (hit and miss), and bound object.
         let (a, hit, miss) = (id(0), id(SIZE - 1), id(SIZE)); // same cluster / next cluster
         let t = Instant::now();
         for _ in 0..100 {
-            let _ = path_pairs(&g, &plus, PathEnds { s: Some(a), o: Some(hit) }).unwrap();
+            let _ = path_pairs(
+                &g,
+                &plus,
+                PathEnds {
+                    s: Some(a),
+                    o: Some(hit),
+                },
+            )
+            .unwrap();
         }
-        eprintln!("both-bound (hit, early exit): {:.3?}/iter", t.elapsed() / 100);
+        eprintln!(
+            "both-bound (hit, early exit): {:.3?}/iter",
+            t.elapsed() / 100
+        );
         let t = Instant::now();
         for _ in 0..100 {
-            let r = path_pairs(&g, &plus, PathEnds { s: Some(a), o: Some(miss) }).unwrap();
+            let r = path_pairs(
+                &g,
+                &plus,
+                PathEnds {
+                    s: Some(a),
+                    o: Some(miss),
+                },
+            )
+            .unwrap();
             assert!(!r.iter().any(|&(_, y)| y == miss));
         }
-        eprintln!("both-bound (miss, cluster exhausted): {:.3?}/iter", t.elapsed() / 100);
+        eprintln!(
+            "both-bound (miss, cluster exhausted): {:.3?}/iter",
+            t.elapsed() / 100
+        );
         let t = Instant::now();
         for _ in 0..100 {
-            let _ = path_pairs(&g, &plus, PathEnds { s: None, o: Some(a) }).unwrap();
+            let _ = path_pairs(
+                &g,
+                &plus,
+                PathEnds {
+                    s: None,
+                    o: Some(a),
+                },
+            )
+            .unwrap();
         }
-        eprintln!("bound-object reverse traversal: {:.3?}/iter", t.elapsed() / 100);
+        eprintln!(
+            "bound-object reverse traversal: {:.3?}/iter",
+            t.elapsed() / 100
+        );
     }
 }
 
@@ -16847,7 +18889,9 @@ mod service_exec_tests {
     fn pattern(sparql: &str) -> spargebra::algebra::GraphPattern {
         use spargebra::SparqlParser;
         let q = SparqlParser::new().parse_query(sparql).unwrap();
-        let spargebra::Query::Select { pattern, .. } = q else { panic!("not a SELECT") };
+        let spargebra::Query::Select { pattern, .. } = q else {
+            panic!("not a SELECT")
+        };
         pattern
     }
 
@@ -16913,7 +18957,11 @@ mod service_exec_tests {
              { ?s a ex:T . SERVICE SILENT <http://remote/> { ?s ex:p ?o } }",
         );
         let res = eval_select(&g, &p).unwrap();
-        assert_eq!(res.rows.len(), 1, "SILENT -> identity -> local row survives");
+        assert_eq!(
+            res.rows.len(),
+            1,
+            "SILENT -> identity -> local row survives"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -16948,11 +18996,18 @@ mod service_exec_tests {
         );
         // A cap the ONE discarded remote literal (interned twice) blows, but the SILENT
         // fallback's own working set (one identity row) fits well under.
-        let b = crate::QueryBudget { max_bytes: Some(64), ..crate::QueryBudget::unlimited() };
+        let b = crate::QueryBudget {
+            max_bytes: Some(64),
+            ..crate::QueryBudget::unlimited()
+        };
         let _bg = budget::install(&b);
         let res = eval_select(&g, &p)
             .expect("SILENT mid-stream error must roll back the discarded row's byte charge");
-        assert_eq!(res.rows.len(), 1, "SILENT verbatim -> identity -> one (unbound ?o) row");
+        assert_eq!(
+            res.rows.len(),
+            1,
+            "SILENT verbatim -> identity -> one (unbound ?o) row"
+        );
     }
 
     #[test]
@@ -16970,11 +19025,19 @@ mod service_exec_tests {
             "PREFIX ex: <http://ex/> SELECT ?s ?o WHERE \
              { ?s a ex:T . SERVICE SILENT <http://remote/> { ?s ex:p ?o } }",
         );
-        let b = crate::QueryBudget { max_bytes: Some(64), ..crate::QueryBudget::unlimited() };
+        let b = crate::QueryBudget {
+            max_bytes: Some(64),
+            ..crate::QueryBudget::unlimited()
+        };
         let _bg = budget::install(&b);
-        let res = eval_select(&g, &p)
-            .expect("bind-join SILENT mid-stream error must roll back the discarded row's byte charge");
-        assert_eq!(res.rows.len(), 1, "SILENT block failure -> identity -> local ?s=ex:a row survives");
+        let res = eval_select(&g, &p).expect(
+            "bind-join SILENT mid-stream error must roll back the discarded row's byte charge",
+        );
+        assert_eq!(
+            res.rows.len(),
+            1,
+            "SILENT block failure -> identity -> local ?s=ex:a row survives"
+        );
     }
 
     #[test]
@@ -17017,7 +19080,11 @@ mod service_exec_tests {
         let mut rows: Vec<Vec<Option<String>>> = res
             .rows
             .iter()
-            .map(|r| r.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+            .map(|r| {
+                r.iter()
+                    .map(|c| c.as_ref().map(|t| t.to_string()))
+                    .collect()
+            })
             .collect();
         rows.sort();
         rows
@@ -17044,7 +19111,10 @@ mod service_exec_tests {
     /// Run a federated query with a remote-graph mock, returning (result, n_requests).
     fn run_fed(local: &Graph, q: &str, remote: Graph) -> (QueryResult, usize) {
         let seen = Rc::new(RefCell::new(Vec::new()));
-        let _g = service_transport::install(Box::new(RemoteGraph { remote, seen: Rc::clone(&seen) }));
+        let _g = service_transport::install(Box::new(RemoteGraph {
+            remote,
+            seen: Rc::clone(&seen),
+        }));
         let p = pattern(q);
         let res = eval_select(local, &p).unwrap();
         let n = seen.borrow().len();
@@ -17067,8 +19137,14 @@ mod service_exec_tests {
         // Reconstruct it locally to pin the expected multiset.
         let expect: Vec<Vec<Option<String>>> = {
             let mut v = vec![
-                vec![Some("<http://ex/alice>".to_string()), Some("\"Alice\"".to_string())],
-                vec![Some("<http://ex/bob>".to_string()), Some("\"Bob\"".to_string())],
+                vec![
+                    Some("<http://ex/alice>".to_string()),
+                    Some("\"Alice\"".to_string()),
+                ],
+                vec![
+                    Some("<http://ex/bob>".to_string()),
+                    Some("\"Bob\"".to_string()),
+                ],
             ];
             v.sort();
             v
@@ -17091,7 +19167,11 @@ mod service_exec_tests {
             eval_select(&three_persons(), &pattern(q)).unwrap()
         });
         assert_eq!(res.rows.len(), 2);
-        assert_eq!(seen.borrow().len(), 3, "block size 1 over 3 subjects => 3 requests");
+        assert_eq!(
+            seen.borrow().len(),
+            3,
+            "block size 1 over 3 subjects => 3 requests"
+        );
     }
 
     #[test]
@@ -17099,7 +19179,11 @@ mod service_exec_tests {
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
                  { ?s a ex:Person . OPTIONAL { SERVICE <http://r/> { ?s ex:name ?name } } }";
         let (res, _n) = run_fed(&three_persons(), q, remote_names());
-        assert_eq!(res.rows.len(), 3, "left-join: carol survives with an unbound name");
+        assert_eq!(
+            res.rows.len(),
+            3,
+            "left-join: carol survives with an unbound name"
+        );
         let name_i = res.vars.iter().position(|v| v.as_str() == "name").unwrap();
         let bound_names = res.rows.iter().filter(|r| r[name_i].is_some()).count();
         assert_eq!(bound_names, 2, "only alice/bob got a name");
@@ -17114,7 +19198,11 @@ mod service_exec_tests {
         let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE \
                  { ?s a ex:Person . SERVICE SILENT <http://r/> { ?s ex:name ?name } }";
         let res = eval_select(&three_persons(), &pattern(q)).unwrap();
-        assert_eq!(res.rows.len(), 3, "SILENT remote failure keeps all local persons");
+        assert_eq!(
+            res.rows.len(),
+            3,
+            "SILENT remote failure keeps all local persons"
+        );
     }
 
     #[test]
@@ -17138,7 +19226,11 @@ mod service_exec_tests {
                  { ex:alice ex:knows ?x . SERVICE <http://r/> { ?y ex:name ?name } }";
         let (res, _n) = run_fed(&local, q, remote);
         // No shared var => cross product of {?x=bob} with remote {bob,zzz} => 2 rows.
-        assert_eq!(res.rows.len(), 2, "no bound join var => verbatim cross-join");
+        assert_eq!(
+            res.rows.len(),
+            2,
+            "no bound join var => verbatim cross-join"
+        );
     }
 
     #[test]
@@ -17223,9 +19315,18 @@ mod service_exec_tests {
         let mut got = canon(&res);
         got.sort();
         let mut expect = vec![
-            vec![Some("<http://ex/alice>".to_string()), Some("\"Alice\"".to_string())],
-            vec![Some("<http://ex/bob>".to_string()), Some("\"Bob\"".to_string())],
-            vec![Some("<http://ex/carol>".to_string()), Some("\"Carol\"".to_string())],
+            vec![
+                Some("<http://ex/alice>".to_string()),
+                Some("\"Alice\"".to_string()),
+            ],
+            vec![
+                Some("<http://ex/bob>".to_string()),
+                Some("\"Bob\"".to_string()),
+            ],
+            vec![
+                Some("<http://ex/carol>".to_string()),
+                Some("\"Carol\"".to_string()),
+            ],
         ];
         expect.sort();
         assert_eq!(got, expect, "each person resolved against its own endpoint");
@@ -17263,7 +19364,10 @@ mod service_exec_tests {
         assert_eq!(res.rows.len(), 3, "all three persons survive the left join");
         let name_i = res.vars.iter().position(|v| v.as_str() == "name").unwrap();
         let named = res.rows.iter().filter(|r| r[name_i].is_some()).count();
-        assert_eq!(named, 2, "only alice/bob got a name; carol's endpoint lacked it");
+        assert_eq!(
+            named, 2,
+            "only alice/bob got a name; carol's endpoint lacked it"
+        );
     }
 
     #[test]
@@ -17274,7 +19378,11 @@ mod service_exec_tests {
         let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE \
                  { ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:name ?name } }";
         let res = eval_select(&persons_with_endpoints(), &pattern(q)).unwrap();
-        assert_eq!(res.rows.len(), 3, "SILENT remote failure keeps all three persons");
+        assert_eq!(
+            res.rows.len(),
+            3,
+            "SILENT remote failure keeps all three persons"
+        );
     }
 
     #[test]
@@ -17303,7 +19411,11 @@ mod service_exec_tests {
         let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
                  { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
         let res = eval_select(&local, &pattern(q)).unwrap();
-        assert_eq!(res.rows.len(), 1, "only the valid-IRI endpoint produced a row");
+        assert_eq!(
+            res.rows.len(),
+            1,
+            "only the valid-IRI endpoint produced a row"
+        );
         // The literal endpoint was never dialled.
         assert!(
             seen.borrow().iter().all(|(e, _)| e == "http://r1/"),
@@ -17378,7 +19490,10 @@ mod service_exec_tests {
             err.contains(sparq_engine_service::service::SERVICE_REMOTE_CAP_MARKER),
             "SILENT must not swallow the cap refusal, got: {err}"
         );
-        assert!(seen.borrow().is_empty(), "cap fires before dispatch even under SILENT");
+        assert!(
+            seen.borrow().is_empty(),
+            "cap fires before dispatch even under SILENT"
+        );
     }
 
     #[test]
@@ -17410,11 +19525,19 @@ mod service_exec_tests {
             eval_select(&persons_with_distinct_endpoints(2), &p)
         })
         .expect("at-cap query is allowed");
-        assert_eq!(res.rows.len(), 2, "both persons resolved against their own endpoint");
+        assert_eq!(
+            res.rows.len(),
+            2,
+            "both persons resolved against their own endpoint"
+        );
         // Exactly the two distinct endpoints were dialled.
         let dialled: std::collections::HashSet<String> =
             seen.borrow().iter().map(|(e, _)| e.clone()).collect();
-        assert_eq!(dialled.len(), 2, "dialled exactly the two permitted endpoints");
+        assert_eq!(
+            dialled.len(),
+            2,
+            "dialled exactly the two permitted endpoints"
+        );
     }
 
     #[test]
@@ -17441,10 +19564,18 @@ mod service_exec_tests {
                  { ?s ex:ep ?e . SERVICE ?e { ?s ex:name ?name } }";
         // No `with_service_remote_request_cap` scope => uncapped (the default).
         let res = eval_select(&persons_with_distinct_endpoints(5), &pattern(q)).unwrap();
-        assert_eq!(res.rows.len(), 5, "all five persons resolved (no cap by default)");
+        assert_eq!(
+            res.rows.len(),
+            5,
+            "all five persons resolved (no cap by default)"
+        );
         let dialled: std::collections::HashSet<String> =
             seen.borrow().iter().map(|(e, _)| e.clone()).collect();
-        assert_eq!(dialled.len(), 5, "all five distinct endpoints dialled by default");
+        assert_eq!(
+            dialled.len(),
+            5,
+            "all five distinct endpoints dialled by default"
+        );
     }
 
     #[test]
@@ -17464,7 +19595,11 @@ mod service_exec_tests {
             eval_select(&g, &pattern(q))
         })
         .expect("concrete-IRI SERVICE is unaffected by the variable-endpoint cap");
-        assert_eq!(res.rows.len(), 2, "alice + bob matched, cap did not interfere");
+        assert_eq!(
+            res.rows.len(),
+            2,
+            "alice + bob matched, cap did not interfere"
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -17487,7 +19622,10 @@ mod service_exec_tests {
         };
         let _g = budget::install(&b);
         let r = budget::remaining_timeout().expect("deadline installed");
-        assert!(r <= Duration::from_secs(10) && r > Duration::from_secs(8), "got {r:?}");
+        assert!(
+            r <= Duration::from_secs(10) && r > Duration::from_secs(8),
+            "got {r:?}"
+        );
         // An expired deadline saturates to ZERO (never panics / underflows).
         let b2 = crate::QueryBudget {
             deadline: Some(Instant::now() - Duration::from_millis(1)),
@@ -17545,26 +19683,43 @@ mod aggregate_empty_semantics {
     /// The single cell of a one-row, one-projected-variable result.
     fn one_cell(q: &str) -> Option<Term> {
         let r = run(q);
-        assert_eq!(r.rows.len(), 1, "expected exactly one solution row for: {q}");
-        assert_eq!(r.rows[0].len(), 1, "expected exactly one projected cell for: {q}");
+        assert_eq!(
+            r.rows.len(),
+            1,
+            "expected exactly one solution row for: {q}"
+        );
+        assert_eq!(
+            r.rows[0].len(),
+            1,
+            "expected exactly one projected cell for: {q}"
+        );
         r.rows[0][0].clone()
     }
 
     fn int_lit(n: i64) -> Term {
-        Term::Literal(oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER))
+        Term::Literal(oxrdf::Literal::new_typed_literal(
+            n.to_string(),
+            oxrdf::vocab::xsd::INTEGER,
+        ))
     }
 
     // ---- No GROUP BY over an empty match: ONE row, COUNT=0, others per the split above ----
 
     #[test]
     fn count_star_over_empty_is_zero_one_row() {
-        assert_eq!(one_cell("SELECT (COUNT(*) AS ?v) WHERE { ?s ex:nomatch ?o }"), Some(int_lit(0)));
+        assert_eq!(
+            one_cell("SELECT (COUNT(*) AS ?v) WHERE { ?s ex:nomatch ?o }"),
+            Some(int_lit(0))
+        );
     }
 
     #[test]
     fn count_var_over_empty_is_zero_one_row() {
         // COUNT(?x) and COUNT(*) coincide over an empty multiset: both 0.
-        assert_eq!(one_cell("SELECT (COUNT(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"), Some(int_lit(0)));
+        assert_eq!(
+            one_cell("SELECT (COUNT(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"),
+            Some(int_lit(0))
+        );
     }
 
     #[test]
@@ -17579,31 +19734,46 @@ mod aggregate_empty_semantics {
     fn sum_over_empty_is_integer_zero_one_row() {
         // §18.5.1.4: Sum({}) = "0"^^xsd:integer — a BOUND 0, NOT unbound. This is the cell
         // PSS usage() reads (directly, or via COALESCE(SUM(?size), 0) which still sees 0).
-        assert_eq!(one_cell("SELECT (SUM(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"), Some(int_lit(0)));
+        assert_eq!(
+            one_cell("SELECT (SUM(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"),
+            Some(int_lit(0))
+        );
     }
 
     #[test]
     fn avg_over_empty_is_integer_zero_one_row() {
         // §18.5.1.5: Avg({}) = "0"^^xsd:integer.
-        assert_eq!(one_cell("SELECT (AVG(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"), Some(int_lit(0)));
+        assert_eq!(
+            one_cell("SELECT (AVG(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"),
+            Some(int_lit(0))
+        );
     }
 
     #[test]
     fn min_over_empty_is_unbound_one_row() {
         // §18.5.1.6: Min over {} errors ⇒ unbound cell, but still ONE row.
-        assert_eq!(one_cell("SELECT (MIN(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"), None);
+        assert_eq!(
+            one_cell("SELECT (MIN(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"),
+            None
+        );
     }
 
     #[test]
     fn max_over_empty_is_unbound_one_row() {
         // §18.5.1.7. Mirrors the W3C `agg-empty-group-max-2` conformance test.
-        assert_eq!(one_cell("SELECT (MAX(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"), None);
+        assert_eq!(
+            one_cell("SELECT (MAX(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"),
+            None
+        );
     }
 
     #[test]
     fn sample_over_empty_is_unbound_one_row() {
         // §18.5.1.8: no element to sample ⇒ unbound cell, ONE row.
-        assert_eq!(one_cell("SELECT (SAMPLE(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"), None);
+        assert_eq!(
+            one_cell("SELECT (SAMPLE(?o) AS ?v) WHERE { ?s ex:nomatch ?o }"),
+            None
+        );
     }
 
     #[test]
@@ -17630,8 +19800,15 @@ mod aggregate_empty_semantics {
     #[test]
     fn mixed_aggregates_no_group_by_yield_one_row() {
         let r = run("SELECT (COUNT(?o) AS ?n) (SUM(?o) AS ?total) WHERE { ?s ex:nomatch ?o }");
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["n", "total"]);
-        assert_eq!(r.rows.len(), 1, "aggregates with no GROUP BY over empty must be ONE row");
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["n", "total"]
+        );
+        assert_eq!(
+            r.rows.len(),
+            1,
+            "aggregates with no GROUP BY over empty must be ONE row"
+        );
         assert_eq!(r.rows[0], vec![Some(int_lit(0)), Some(int_lit(0))]);
     }
 
@@ -17641,7 +19818,10 @@ mod aggregate_empty_semantics {
     fn count_star_with_group_by_over_empty_is_zero_rows() {
         // Mirrors W3C `agg-empty-group-count-1`.
         let r = run("SELECT ?s (COUNT(*) AS ?v) WHERE { ?s ex:nomatch ?o } GROUP BY ?s");
-        assert!(r.rows.is_empty(), "GROUP BY over empty input must yield zero groups (zero rows)");
+        assert!(
+            r.rows.is_empty(),
+            "GROUP BY over empty input must yield zero groups (zero rows)"
+        );
     }
 
     #[test]
@@ -17690,16 +19870,27 @@ mod group_by_unbound_var {
     }
 
     fn int_lit(n: i64) -> Term {
-        Term::Literal(oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER))
+        Term::Literal(oxrdf::Literal::new_typed_literal(
+            n.to_string(),
+            oxrdf::vocab::xsd::INTEGER,
+        ))
     }
 
     /// The bead's exact shape: GROUP BY an unbound var with a COUNT(DISTINCT). One group, the
     /// grouping var unbound, the count over the whole matched set. Must not panic.
     #[test]
     fn group_by_never_bound_var_is_one_unbound_group() {
-        let r = run("SELECT ?kind (COUNT(DISTINCT ?x) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?kind");
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["kind", "n"]);
-        assert_eq!(r.rows.len(), 1, "all rows share the unbound key ⇒ exactly one group");
+        let r =
+            run("SELECT ?kind (COUNT(DISTINCT ?x) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?kind");
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["kind", "n"]
+        );
+        assert_eq!(
+            r.rows.len(),
+            1,
+            "all rows share the unbound key ⇒ exactly one group"
+        );
         // `?kind` unbound, `?n` = number of distinct ?x (3).
         assert_eq!(r.rows[0], vec![None, Some(int_lit(3))]);
     }
@@ -17718,7 +19909,10 @@ mod group_by_unbound_var {
     #[test]
     fn mixed_bound_and_unbound_group_vars() {
         let r = run("SELECT ?x ?kind (COUNT(*) AS ?n) WHERE { ?x a ex:Thing } GROUP BY ?x ?kind");
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["x", "kind", "n"]);
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["x", "kind", "n"]
+        );
         assert_eq!(r.rows.len(), 3, "three distinct ?x ⇒ three groups");
         // Every row has `?kind` (the 2nd cell) unbound and a per-subject count of 1.
         for row in &r.rows {
@@ -17731,7 +19925,8 @@ mod group_by_unbound_var {
     /// numeric members) — and crucially, no panic.
     #[test]
     fn group_by_never_bound_var_with_sum() {
-        let r = run("SELECT ?kind (SUM(?missing) AS ?total) WHERE { ?x a ex:Thing } GROUP BY ?kind");
+        let r =
+            run("SELECT ?kind (SUM(?missing) AS ?total) WHERE { ?x a ex:Thing } GROUP BY ?kind");
         assert_eq!(r.rows.len(), 1);
         assert_eq!(r.rows[0][0], None, "?kind unbound");
         // SUM over an all-unbound column is "0"^^xsd:integer (Sum({}) = 0).
@@ -17770,7 +19965,10 @@ mod multiplicity_builtin {
     }
 
     fn int_lit(n: i64) -> Term {
-        Term::Literal(oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER))
+        Term::Literal(oxrdf::Literal::new_typed_literal(
+            n.to_string(),
+            oxrdf::vocab::xsd::INTEGER,
+        ))
     }
 
     /// The headline identity: over the DISTINCT solutions weighted by `MULTIPLICITY()`,
@@ -17779,23 +19977,23 @@ mod multiplicity_builtin {
     /// the survey §B2 / `research/sparql12-engine.md` §1.4.
     #[test]
     fn weighted_sum_equals_bag_sum() {
-        let r = run(
-            "SELECT (SUM(?x) AS ?bag) (SUM(?x * MULTIPLICITY()) AS ?w) \
-             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
-        );
+        let r = run("SELECT (SUM(?x) AS ?bag) (SUM(?x * MULTIPLICITY()) AS ?w) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }");
         assert_eq!(r.rows.len(), 1);
         assert_eq!(r.rows[0][0], Some(int_lit(70)), "plain SUM over the bag");
-        assert_eq!(r.rows[0][1], Some(int_lit(70)), "MULTIPLICITY-weighted SUM must match");
+        assert_eq!(
+            r.rows[0][1],
+            Some(int_lit(70)),
+            "MULTIPLICITY-weighted SUM must match"
+        );
     }
 
     /// Bare `SUM(MULTIPLICITY())` over the distinct members sums the bag cardinalities, i.e.
     /// recovers the total bag size: 3 + 2 = 5 = `COUNT(*)`.
     #[test]
     fn sum_of_multiplicities_is_bag_size() {
-        let r = run(
-            "SELECT (SUM(MULTIPLICITY()) AS ?n) (COUNT(*) AS ?c) \
-             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
-        );
+        let r = run("SELECT (SUM(MULTIPLICITY()) AS ?n) (COUNT(*) AS ?c) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } }");
         assert_eq!(r.rows.len(), 1);
         assert_eq!(r.rows[0][0], Some(int_lit(5)), "Σ multiplicity = bag size");
         assert_eq!(r.rows[0][1], Some(int_lit(5)), "COUNT(*) = bag size");
@@ -17806,10 +20004,8 @@ mod multiplicity_builtin {
     /// x=20). `MAX(MULTIPLICITY())` surfaces that count directly per group.
     #[test]
     fn per_group_multiplicity_in_grouped_select() {
-        let r = run(
-            "SELECT ?x (MAX(MULTIPLICITY()) AS ?m) \
-             WHERE { SELECT ?x WHERE { ?s ex:v ?x } } GROUP BY ?x ORDER BY ?x",
-        );
+        let r = run("SELECT ?x (MAX(MULTIPLICITY()) AS ?m) \
+             WHERE { SELECT ?x WHERE { ?s ex:v ?x } } GROUP BY ?x ORDER BY ?x");
         assert_eq!(r.rows.len(), 2, "two distinct values ⇒ two groups");
         // ORDER BY ?x: 10 then 20.
         assert_eq!(r.rows[0], vec![Some(int_lit(10)), Some(int_lit(3))]);
@@ -17832,7 +20028,11 @@ mod multiplicity_builtin {
         )
         .unwrap();
         assert_eq!(r.rows[0][0], Some(int_lit(6)), "1+2+3, each ×1");
-        assert_eq!(r.rows[0][1], Some(int_lit(3)), "three distinct members, each multiplicity 1");
+        assert_eq!(
+            r.rows[0][1],
+            Some(int_lit(3)),
+            "three distinct members, each multiplicity 1"
+        );
     }
 
     /// `MULTIPLICITY()` is only meaningful inside an aggregate argument. Used in a plain BIND
@@ -17844,7 +20044,10 @@ mod multiplicity_builtin {
         assert_eq!(r.rows.len(), 5, "one row per matching subject");
         for row in &r.rows {
             assert!(row[0].is_some(), "?s bound");
-            assert_eq!(row[1], None, "MULTIPLICITY() outside an aggregate is an error ⇒ ?m unbound");
+            assert_eq!(
+                row[1], None,
+                "MULTIPLICITY() outside an aggregate is an error ⇒ ?m unbound"
+            );
         }
     }
 
@@ -17853,8 +20056,14 @@ mod multiplicity_builtin {
     /// `SUM(?x)` over {10×3,20×2} stays 70 (NOT the distinct-set 30).
     #[test]
     fn aggregate_without_multiplicity_folds_full_bag() {
-        let r = run("SELECT (SUM(?x) AS ?bag) (COUNT(?x) AS ?c) WHERE { SELECT ?x WHERE { ?s ex:v ?x } }");
-        assert_eq!(r.rows[0][0], Some(int_lit(70)), "full bag sum, no distinct collapse");
+        let r = run(
+            "SELECT (SUM(?x) AS ?bag) (COUNT(?x) AS ?c) WHERE { SELECT ?x WHERE { ?s ex:v ?x } }",
+        );
+        assert_eq!(
+            r.rows[0][0],
+            Some(int_lit(70)),
+            "full bag sum, no distinct collapse"
+        );
         assert_eq!(r.rows[0][1], Some(int_lit(5)), "COUNT folds the full bag");
     }
 
@@ -17883,7 +20092,11 @@ mod multiplicity_builtin {
         );
         let table = group_multiplicities(&b, &members, &mult).expect("multiplicity present ⇒ Some");
         let cards: Vec<u64> = table.iter().map(|&(_, c)| c).collect();
-        assert_eq!(cards, vec![2, 1], "two distinct rows: first with cardinality 2, second 1");
+        assert_eq!(
+            cards,
+            vec![2, 1],
+            "two distinct rows: first with cardinality 2, second 1"
+        );
     }
 
     /// [OPUS-4.8] (sq-v411r) Direct unit coverage of `expr_uses_multiplicity` across EVERY
@@ -17913,10 +20126,12 @@ mod multiplicity_builtin {
         // --- Leaves: never contain MULTIPLICITY() on their own. ---
         assert!(!expr_uses_multiplicity(&var()));
         assert!(!expr_uses_multiplicity(&lit()));
-        assert!(!expr_uses_multiplicity(&Expression::NamedNode(oxrdf::NamedNode::new_unchecked(
-            "http://ex/p"
-        ))));
-        assert!(!expr_uses_multiplicity(&Expression::Bound(Variable::new_unchecked("y"))));
+        assert!(!expr_uses_multiplicity(&Expression::NamedNode(
+            oxrdf::NamedNode::new_unchecked("http://ex/p")
+        )));
+        assert!(!expr_uses_multiplicity(&Expression::Bound(
+            Variable::new_unchecked("y")
+        )));
 
         // A `MULTIPLICITY()` with arguments is NOT the reserved zero-arg builtin ⇒ false
         // (the `if args.is_empty()` guard), and a non-Custom function with no inner
@@ -17925,21 +20140,54 @@ mod multiplicity_builtin {
             Function::Custom(oxrdf::NamedNode::new_unchecked(MULTIPLICITY_FN_IRI)),
             vec![var()],
         );
-        assert!(!expr_uses_multiplicity(&mult_with_args), "zero-arg guard: args ⇒ not the builtin");
+        assert!(
+            !expr_uses_multiplicity(&mult_with_args),
+            "zero-arg guard: args ⇒ not the builtin"
+        );
 
         // --- The matching leaf. ---
-        assert!(expr_uses_multiplicity(&mult()), "the reserved zero-arg call IS detected");
+        assert!(
+            expr_uses_multiplicity(&mult()),
+            "the reserved zero-arg call IS detected"
+        );
 
         // --- Binary recursion (left and right branch). ---
-        assert!(expr_uses_multiplicity(&Expression::Multiply(bx(var()), bx(mult()))));
-        assert!(expr_uses_multiplicity(&Expression::Add(bx(mult()), bx(var()))));
-        assert!(expr_uses_multiplicity(&Expression::Or(bx(var()), bx(mult()))));
-        assert!(expr_uses_multiplicity(&Expression::And(bx(mult()), bx(var()))));
-        assert!(expr_uses_multiplicity(&Expression::Equal(bx(var()), bx(mult()))));
-        assert!(expr_uses_multiplicity(&Expression::SameTerm(bx(mult()), bx(var()))));
-        assert!(expr_uses_multiplicity(&Expression::Greater(bx(var()), bx(mult()))));
-        assert!(expr_uses_multiplicity(&Expression::Less(bx(mult()), bx(var()))));
-        assert!(!expr_uses_multiplicity(&Expression::Subtract(bx(var()), bx(lit()))));
+        assert!(expr_uses_multiplicity(&Expression::Multiply(
+            bx(var()),
+            bx(mult())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::Add(
+            bx(mult()),
+            bx(var())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::Or(
+            bx(var()),
+            bx(mult())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::And(
+            bx(mult()),
+            bx(var())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::Equal(
+            bx(var()),
+            bx(mult())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::SameTerm(
+            bx(mult()),
+            bx(var())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::Greater(
+            bx(var()),
+            bx(mult())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::Less(
+            bx(mult()),
+            bx(var())
+        )));
+        assert!(!expr_uses_multiplicity(&Expression::Subtract(
+            bx(var()),
+            bx(lit())
+        )));
 
         // --- Unary recursion. ---
         assert!(expr_uses_multiplicity(&Expression::UnaryMinus(bx(mult()))));
@@ -17947,19 +20195,56 @@ mod multiplicity_builtin {
         assert!(!expr_uses_multiplicity(&Expression::UnaryPlus(bx(var()))));
 
         // --- Ternary `If` (each of the three positions). ---
-        assert!(expr_uses_multiplicity(&Expression::If(bx(mult()), bx(var()), bx(lit()))));
-        assert!(expr_uses_multiplicity(&Expression::If(bx(var()), bx(mult()), bx(lit()))));
-        assert!(expr_uses_multiplicity(&Expression::If(bx(var()), bx(lit()), bx(mult()))));
-        assert!(!expr_uses_multiplicity(&Expression::If(bx(var()), bx(lit()), bx(var()))));
+        assert!(expr_uses_multiplicity(&Expression::If(
+            bx(mult()),
+            bx(var()),
+            bx(lit())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::If(
+            bx(var()),
+            bx(mult()),
+            bx(lit())
+        )));
+        assert!(expr_uses_multiplicity(&Expression::If(
+            bx(var()),
+            bx(lit()),
+            bx(mult())
+        )));
+        assert!(!expr_uses_multiplicity(&Expression::If(
+            bx(var()),
+            bx(lit()),
+            bx(var())
+        )));
 
         // --- List arms: `In` (head + list), `Coalesce`, `FunctionCall(_, args)`. ---
-        assert!(expr_uses_multiplicity(&Expression::In(bx(mult()), vec![var()])));
-        assert!(expr_uses_multiplicity(&Expression::In(bx(var()), vec![lit(), mult()])));
-        assert!(!expr_uses_multiplicity(&Expression::In(bx(var()), vec![lit()])));
-        assert!(expr_uses_multiplicity(&Expression::Coalesce(vec![var(), mult()])));
-        assert!(!expr_uses_multiplicity(&Expression::Coalesce(vec![var(), lit()])));
-        assert!(expr_uses_multiplicity(&Expression::FunctionCall(Function::Str, vec![mult()])));
-        assert!(!expr_uses_multiplicity(&Expression::FunctionCall(Function::Str, vec![var()])));
+        assert!(expr_uses_multiplicity(&Expression::In(
+            bx(mult()),
+            vec![var()]
+        )));
+        assert!(expr_uses_multiplicity(&Expression::In(
+            bx(var()),
+            vec![lit(), mult()]
+        )));
+        assert!(!expr_uses_multiplicity(&Expression::In(
+            bx(var()),
+            vec![lit()]
+        )));
+        assert!(expr_uses_multiplicity(&Expression::Coalesce(vec![
+            var(),
+            mult()
+        ])));
+        assert!(!expr_uses_multiplicity(&Expression::Coalesce(vec![
+            var(),
+            lit()
+        ])));
+        assert!(expr_uses_multiplicity(&Expression::FunctionCall(
+            Function::Str,
+            vec![mult()]
+        )));
+        assert!(!expr_uses_multiplicity(&Expression::FunctionCall(
+            Function::Str,
+            vec![var()]
+        )));
 
         // --- The `Exists` non-descent contract: a MULTIPLICITY() inside an EXISTS belongs to
         //     that sub-query's scope, so it must NOT be reported for THIS aggregate. ---
@@ -17973,7 +20258,10 @@ mod multiplicity_builtin {
         );
         // ...but a MULTIPLICITY() in the OUTER branch of an expression whose other branch is an
         // EXISTS is still detected (proves we recurse around, not into, the Exists).
-        assert!(expr_uses_multiplicity(&Expression::And(bx(exists_with_mult), bx(mult()))));
+        assert!(expr_uses_multiplicity(&Expression::And(
+            bx(exists_with_mult),
+            bx(mult())
+        )));
     }
 
     /// [OPUS-4.8] (sq-v411r) Direct unit coverage of the `multiplicity` thread-local context
@@ -17984,7 +20272,11 @@ mod multiplicity_builtin {
     /// clears the context back to `None`.
     #[test]
     fn multiplicity_context_guard_nests_and_restores() {
-        assert_eq!(multiplicity::current(), None, "no context outside an aggregate");
+        assert_eq!(
+            multiplicity::current(),
+            None,
+            "no context outside an aggregate"
+        );
         {
             let _outer = multiplicity::set(3);
             assert_eq!(multiplicity::current(), Some(3));
@@ -17992,9 +20284,17 @@ mod multiplicity_builtin {
                 let _inner = multiplicity::set(7);
                 assert_eq!(multiplicity::current(), Some(7), "inner set shadows outer");
             }
-            assert_eq!(multiplicity::current(), Some(3), "inner guard drop restores outer");
+            assert_eq!(
+                multiplicity::current(),
+                Some(3),
+                "inner guard drop restores outer"
+            );
         }
-        assert_eq!(multiplicity::current(), None, "outer guard drop clears the context");
+        assert_eq!(
+            multiplicity::current(),
+            None,
+            "outer guard drop clears the context"
+        );
     }
 }
 
@@ -18022,8 +20322,16 @@ mod f64_collapse_order_agreement {
     }
 
     fn order_by(g: &Graph, clause: &str) -> Vec<String> {
-        let q = format!("PREFIX ex: <http://ex/> SELECT ?v WHERE {{ ?s ex:v ?v }} ORDER BY {}", clause);
-        crate::query(g, &q).unwrap().rows.iter().map(|r| lex(&r[0])).collect()
+        let q = format!(
+            "PREFIX ex: <http://ex/> SELECT ?v WHERE {{ ?s ex:v ?v }} ORDER BY {}",
+            clause
+        );
+        crate::query(g, &q)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| lex(&r[0]))
+            .collect()
     }
 
     #[test]
@@ -18087,15 +20395,27 @@ mod f64_collapse_order_agreement {
         // Directly exercises the substrate `exact_cmp` hook the engine implements for `Value`
         // (the general `compare_values` path — the MIN/MAX mixed-type fallback and any consumer
         // that orders numeric Values). Two integers beyond 2^53 share an f64 yet must order.
-        let a = Value::Term(Term::Literal(Literal::new_typed_literal("9007199254740993", xsd::INTEGER)));
-        let b = Value::Term(Term::Literal(Literal::new_typed_literal("9007199254740992", xsd::INTEGER)));
+        let a = Value::Term(Term::Literal(Literal::new_typed_literal(
+            "9007199254740993",
+            xsd::INTEGER,
+        )));
+        let b = Value::Term(Term::Literal(Literal::new_typed_literal(
+            "9007199254740992",
+            xsd::INTEGER,
+        )));
         assert_eq!(as_num(&a), as_num(&b), "the f64 arm COLLAPSES the pair");
         assert_eq!(compare_values(&a, &b), Some(Ordering::Greater));
         assert_eq!(compare_values(&b, &a), Some(Ordering::Less));
 
         // High-precision decimals sharing one f64.
-        let c = Value::Term(Term::Literal(Literal::new_typed_literal("0.123456789012345679", xsd::DECIMAL)));
-        let d = Value::Term(Term::Literal(Literal::new_typed_literal("0.123456789012345678", xsd::DECIMAL)));
+        let c = Value::Term(Term::Literal(Literal::new_typed_literal(
+            "0.123456789012345679",
+            xsd::DECIMAL,
+        )));
+        let d = Value::Term(Term::Literal(Literal::new_typed_literal(
+            "0.123456789012345678",
+            xsd::DECIMAL,
+        )));
         assert_eq!(as_num(&c), as_num(&d));
         assert_eq!(compare_values(&c, &d), Some(Ordering::Greater));
 
@@ -18111,7 +20431,9 @@ mod f64_collapse_order_agreement {
         let dbl = Value::Num(Num::Double(9_007_199_254_740_992.0));
         assert_eq!(dbl.exact_cmp(&dbl), Some(Ordering::Equal));
         // A non-numeric operand has no exact recheck at all -> `None` (the f64 verdict stands).
-        let iri = Value::Term(Term::NamedNode(oxrdf::NamedNode::new("http://ex/x").unwrap()));
+        let iri = Value::Term(Term::NamedNode(
+            oxrdf::NamedNode::new("http://ex/x").unwrap(),
+        ));
         assert_eq!(dbl.exact_cmp(&iri), None, "non-numeric -> no exact recheck");
     }
 
@@ -18139,13 +20461,24 @@ mod f64_collapse_order_agreement {
         // `as_numeric` (before the fix `as_num` accepted them -> the two paths disagreed).
         for bad in ["inf", "+inf", "infinity", "-infinity", "nan", "Infinity"] {
             // Positional args dodge the CodeQL `rust/unused-variable` false positive. [OPUS-4.8]
-            assert_eq!(as_num(&dbl(bad)), None, "as_num must reject non-XSD spelling {:?}", bad);
-            assert!(as_numeric(&dbl(bad)).is_none(), "as_numeric already rejects {:?}", bad);
+            assert_eq!(
+                as_num(&dbl(bad)),
+                None,
+                "as_num must reject non-XSD spelling {:?}",
+                bad
+            );
+            assert!(
+                as_numeric(&dbl(bad)).is_none(),
+                "as_numeric already rejects {:?}",
+                bad
+            );
         }
 
         // The alignment invariant: the lenient and exact paths agree on presence for EVERY
         // lexical — valid specials, ordinary numbers, non-XSD spellings, and non-numerics.
-        for s in ["INF", "+INF", "-INF", "NaN", "6", "6.0E0", "2.0E-1", "inf", "nan", "hello"] {
+        for s in [
+            "INF", "+INF", "-INF", "NaN", "6", "6.0E0", "2.0E-1", "inf", "nan", "hello",
+        ] {
             assert_eq!(
                 as_num(&dbl(s)).is_some(),
                 as_numeric(&dbl(s)).is_some(),
@@ -18158,17 +20491,38 @@ mod f64_collapse_order_agreement {
         // well-formedness AND whitespace. `as_num` is datatype-aware and trimming, so it
         // agrees with `as_numeric` (`Num::of_literal`) on integer/decimal lexicals too — a
         // padded lexical is its trimmed value; a lexical ill-formed FOR its datatype is None.
-        let ints = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::INTEGER)));
-        let decs = |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DECIMAL)));
+        let ints =
+            |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::INTEGER)));
+        let decs =
+            |s: &str| Value::Term(Term::Literal(Literal::new_typed_literal(s, xsd::DECIMAL)));
         assert_eq!(as_num(&ints(" 1 ")), Some(1.0), "padded integer trims to 1");
-        assert_eq!(as_num(&decs(" 1.5 ")), Some(1.5), "padded decimal trims to 1.5");
-        assert_eq!(as_num(&ints("1.5")), None, "fraction on integer is a type error");
-        assert_eq!(as_num(&ints("1E2")), None, "exponent on integer is a type error");
-        assert_eq!(as_num(&decs("1E2")), None, "exponent on decimal is a type error");
+        assert_eq!(
+            as_num(&decs(" 1.5 ")),
+            Some(1.5),
+            "padded decimal trims to 1.5"
+        );
+        assert_eq!(
+            as_num(&ints("1.5")),
+            None,
+            "fraction on integer is a type error"
+        );
+        assert_eq!(
+            as_num(&ints("1E2")),
+            None,
+            "exponent on integer is a type error"
+        );
+        assert_eq!(
+            as_num(&decs("1E2")),
+            None,
+            "exponent on decimal is a type error"
+        );
         // Every one agrees with the exact `as_numeric` seam.
         for (v, _lbl) in [
-            (ints(" 1 "), "padded int"), (decs(" 1.5 "), "padded dec"),
-            (ints("1.5"), "int fraction"), (ints("1E2"), "int exp"), (decs("1E2"), "dec exp"),
+            (ints(" 1 "), "padded int"),
+            (decs(" 1.5 "), "padded dec"),
+            (ints("1.5"), "int fraction"),
+            (ints("1E2"), "int exp"),
+            (decs("1E2"), "dec exp"),
         ] {
             assert_eq!(
                 as_num(&v).is_some(),
@@ -18210,7 +20564,10 @@ mod f64_collapse_order_agreement {
         )
         .unwrap();
         assert_eq!(order_by(&g, "ASC(?v)"), vec!["NaN", "-INF", "5.0E0", "INF"]);
-        assert_eq!(order_by(&g, "DESC(?v)"), vec!["INF", "5.0E0", "-INF", "NaN"]);
+        assert_eq!(
+            order_by(&g, "DESC(?v)"),
+            vec!["INF", "5.0E0", "-INF", "NaN"]
+        );
     }
 
     #[test]
@@ -18240,7 +20597,10 @@ mod f64_collapse_order_agreement {
         sorted_asc.sort();
         let mut sorted_desc = desc.clone();
         sorted_desc.sort();
-        assert_eq!(sorted_asc, sorted_desc, "ASC and DESC are permutations of the same rows");
+        assert_eq!(
+            sorted_asc, sorted_desc,
+            "ASC and DESC are permutations of the same rows"
+        );
         // DESC is the exact reverse of ASC (total order over distinct-valued rows).
         let mut rev = asc.clone();
         rev.reverse();
@@ -18267,7 +20627,10 @@ mod f64_collapse_order_agreement {
         .unwrap();
         let asc = order_by(&g, "ASC(?v)");
         // The equal pair (2^53, 2^53E0) keeps input order (stable sort); both precede 2^53+1.
-        assert_eq!(asc[2], "9007199254740993", "the collapsed neighbour sorts strictly last");
+        assert_eq!(
+            asc[2], "9007199254740993",
+            "the collapsed neighbour sorts strictly last"
+        );
         assert!(asc[..2].contains(&"9007199254740992E0".to_string()));
         assert!(asc[..2].contains(&"9007199254740992".to_string()));
 
@@ -18292,7 +20655,17 @@ mod f64_collapse_order_agreement {
         .unwrap();
         assert_eq!(
             order_by(&g2, "ASC(?v)"),
-            vec!["NaN", "2", "10", "true", "2024-03-15T13:00:00Z", "2020-01-01", "11", "chat", "weird"]
+            vec![
+                "NaN",
+                "2",
+                "10",
+                "true",
+                "2024-03-15T13:00:00Z",
+                "2020-01-01",
+                "11",
+                "chat",
+                "weird"
+            ]
         );
     }
 }
@@ -18314,14 +20687,27 @@ mod columnar_filter_seam {
     fn ages_graph(n: u32) -> (Graph, Vec<Id>, Vec<Id>) {
         let mut nt = String::new();
         for i in 0..n {
-            nt.push_str(&format!("<http://ex/s{i}> <http://ex/age> \"{i}\"^^<{XSD_INT}> .\n"));
+            nt.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/age> \"{i}\"^^<{XSD_INT}> .\n"
+            ));
         }
         let g = Graph::load_str(&nt, "ntriples").unwrap();
         let subj = (0..n)
-            .map(|i| g.id_of(&Term::NamedNode(oxrdf::NamedNode::new(format!("http://ex/s{i}")).unwrap())).unwrap())
+            .map(|i| {
+                g.id_of(&Term::NamedNode(
+                    oxrdf::NamedNode::new(format!("http://ex/s{i}")).unwrap(),
+                ))
+                .unwrap()
+            })
             .collect();
         let age = (0..n)
-            .map(|i| g.id_of(&Term::Literal(Literal::new_typed_literal(i.to_string(), xsd::INTEGER))).unwrap())
+            .map(|i| {
+                g.id_of(&Term::Literal(Literal::new_typed_literal(
+                    i.to_string(),
+                    xsd::INTEGER,
+                )))
+                .unwrap()
+            })
             .collect();
         (g, subj, age)
     }
@@ -18350,7 +20736,9 @@ mod columnar_filter_seam {
 
     /// The numeric age values (inline column, index 1) of a result row set, in order.
     fn age_values(g: &Graph, rows: &[Row]) -> Vec<f64> {
-        rows.iter().map(|r| g.numeric_value(r[1]).unwrap()).collect()
+        rows.iter()
+            .map(|r| g.numeric_value(r[1]).unwrap())
+            .collect()
     }
 
     #[test]
@@ -18360,19 +20748,35 @@ mod columnar_filter_seam {
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
-        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let rows: Vec<Row> = (0..n as usize)
+            .map(|i| Row::from_slice(&[subj[i], age[i]]))
+            .collect();
         let local = LocalVocab::default();
         let age_var = var("age");
 
         for (op, t) in [
-            (">", "20"), (">=", "20"), ("<", "10"), ("<=", "10"),
-            ("=", "13"), (">", "39"), (">=", "0"), (">", "100"),
+            (">", "20"),
+            (">=", "20"),
+            ("<", "10"),
+            ("<=", "10"),
+            ("=", "13"),
+            (">", "39"),
+            (">=", "0"),
+            (">", "100"),
         ] {
             let expr = mk_filter(op, &age_var, int_lit(t));
 
             // The seam ENGAGES for an all-inline column: Result is Ok(Some(rows)).
-            let via_columnar = columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &expr);
-            assert!(via_columnar.as_ref().unwrap().is_some(), "all-inline column must be columnar-eligible ({op} {t})");
+            let via_columnar = columnar_filter(
+                &g,
+                &local,
+                &Bindings::unsorted(vars.clone(), rows.clone()),
+                &expr,
+            );
+            assert!(
+                via_columnar.as_ref().unwrap().is_some(),
+                "all-inline column must be columnar-eligible ({op} {t})"
+            );
 
             // Scalar reference (the real row path).
             let mut scalar = Bindings::unsorted(vars.clone(), rows.clone());
@@ -18383,8 +20787,15 @@ mod columnar_filter_seam {
             apply_filter(&g, &local, &mut disp, &expr).unwrap();
 
             // BYTE-IDENTICAL: same rows (incl. the NON-inline subject column), same order.
-            assert_eq!(disp.rows, scalar.rows, "dispatcher rows != scalar for {op} {t}");
-            assert_eq!(via_columnar.as_ref().unwrap().as_ref().unwrap(), &scalar.rows, "columnar_filter rows != scalar for {op} {t}");
+            assert_eq!(
+                disp.rows, scalar.rows,
+                "dispatcher rows != scalar for {op} {t}"
+            );
+            assert_eq!(
+                via_columnar.as_ref().unwrap().as_ref().unwrap(),
+                &scalar.rows,
+                "columnar_filter rows != scalar for {op} {t}"
+            );
         }
     }
 
@@ -18397,17 +20808,41 @@ mod columnar_filter_seam {
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
-        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let rows: Vec<Row> = (0..n as usize)
+            .map(|i| Row::from_slice(&[subj[i], age[i]]))
+            .collect();
         let local = LocalVocab::default();
         let age_var = var("age");
 
-        let out = columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &mk_filter(">", &age_var, int_lit("20"))).unwrap().unwrap();
+        let out = columnar_filter(
+            &g,
+            &local,
+            &Bindings::unsorted(vars.clone(), rows.clone()),
+            &mk_filter(">", &age_var, int_lit("20")),
+        )
+        .unwrap()
+        .unwrap();
         let expected: Vec<f64> = (21..300).map(f64::from).collect();
-        assert_eq!(age_values(&g, &out), expected, "age > 20 must keep 21..=299, ascending");
+        assert_eq!(
+            age_values(&g, &out),
+            expected,
+            "age > 20 must keep 21..=299, ascending"
+        );
 
         // A DIFFERENT filter must select a DIFFERENT set (the mask does real work).
-        let other = columnar_filter(&g, &local, &Bindings::unsorted(vars, rows), &mk_filter("<", &age_var, int_lit("20"))).unwrap().unwrap();
-        assert_ne!(age_values(&g, &other), expected, "distinct filters must select distinct rows");
+        let other = columnar_filter(
+            &g,
+            &local,
+            &Bindings::unsorted(vars, rows),
+            &mk_filter("<", &age_var, int_lit("20")),
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(
+            age_values(&g, &other),
+            expected,
+            "distinct filters must select distinct rows"
+        );
     }
 
     #[test]
@@ -18427,7 +20862,10 @@ mod columnar_filter_seam {
         let g = Graph::load_str(&nt, "ntriples").unwrap();
         let lit_id = |s: &str, dt: Option<&str>| -> Id {
             let t = match dt {
-                Some(d) => Term::Literal(Literal::new_typed_literal(s, oxrdf::NamedNode::new(d).unwrap())),
+                Some(d) => Term::Literal(Literal::new_typed_literal(
+                    s,
+                    oxrdf::NamedNode::new(d).unwrap(),
+                )),
                 None => Term::Literal(oxrdf::Literal::new_simple_literal(s)),
             };
             g.id_of(&t).unwrap()
@@ -18435,7 +20873,10 @@ mod columnar_filter_seam {
         let five = lit_id("5", Some(XSD_INT));
         assert!(dict::is_inline(five));
         let big_id = lit_id(&big, Some(XSD_INT));
-        assert!(!dict::is_inline(big_id), "2e9 must be a NON-inline dict integer");
+        assert!(
+            !dict::is_inline(big_id),
+            "2e9 must be a NON-inline dict integer"
+        );
         let neg = lit_id("-7", Some(XSD_INT));
         let hello = lit_id("hello", None);
 
@@ -18445,16 +20886,29 @@ mod columnar_filter_seam {
 
         for age_cell in [big_id, neg, hello, NO_ID] {
             // 2 rows < VEC_MIN_BATCH=256 → seam declines.
-            let rows: Vec<Row> = vec![Row::from_slice(&[five, five]), Row::from_slice(&[five, age_cell])];
+            let rows: Vec<Row> = vec![
+                Row::from_slice(&[five, five]),
+                Row::from_slice(&[five, age_cell]),
+            ];
             assert!(
-                columnar_filter(&g, &local, &Bindings::unsorted(vars.clone(), rows.clone()), &expr).unwrap().is_none(),
+                columnar_filter(
+                    &g,
+                    &local,
+                    &Bindings::unsorted(vars.clone(), rows.clone()),
+                    &expr
+                )
+                .unwrap()
+                .is_none(),
                 "batch of 2 rows must decline (VEC_MIN_BATCH)"
             );
             let mut disp = Bindings::unsorted(vars.clone(), rows.clone());
             let mut scalar = Bindings::unsorted(vars.clone(), rows);
             apply_filter(&g, &local, &mut disp, &expr).unwrap();
             apply_filter_scalar(&g, &local, &mut scalar, &expr).unwrap();
-            assert_eq!(disp.rows, scalar.rows, "row-path result must be identical on decline");
+            assert_eq!(
+                disp.rows, scalar.rows,
+                "row-path result must be identical on decline"
+            );
         }
     }
 
@@ -18464,7 +20918,9 @@ mod columnar_filter_seam {
         let n = 8u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
-        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let rows: Vec<Row> = (0..n as usize)
+            .map(|i| Row::from_slice(&[subj[i], age[i]]))
+            .collect();
         let b = Bindings::unsorted(vars, rows);
         let local = LocalVocab::default();
         let age_var = var("age");
@@ -18482,7 +20938,12 @@ mod columnar_filter_seam {
             oxrdf::NamedNode::new("http://www.w3.org/2001/XMLSchema#dateTime").unwrap(),
         ));
         let temporal = Expression::Greater(Box::new(Expression::Variable(age_var)), Box::new(dt));
-        assert!(columnar_filter(&g, &local, &b, &temporal).unwrap().is_none(), "temporal comparison has no vector kernel");
+        assert!(
+            columnar_filter(&g, &local, &b, &temporal)
+                .unwrap()
+                .is_none(),
+            "temporal comparison has no vector kernel"
+        );
     }
 
     #[cfg(feature = "zk")]
@@ -18496,17 +20957,25 @@ mod columnar_filter_seam {
         let n = 300u32;
         let (g, subj, age) = ages_graph(n);
         let vars = vec![var("s"), var("age")];
-        let rows: Vec<Row> = (0..n as usize).map(|i| Row::from_slice(&[subj[i], age[i]])).collect();
+        let rows: Vec<Row> = (0..n as usize)
+            .map(|i| Row::from_slice(&[subj[i], age[i]]))
+            .collect();
         let b = Bindings::unsorted(vars, rows);
         let local = LocalVocab::default();
         let expr = mk_filter(">", &var("age"), int_lit("0"));
 
         // Sanity: eligible (and firing) when zk is NOT armed.
-        assert!(columnar_filter(&g, &local, &b, &expr).unwrap().is_some(), "eligible without zk armed");
+        assert!(
+            columnar_filter(&g, &local, &b, &expr).unwrap().is_some(),
+            "eligible without zk armed"
+        );
         // Armed ⇒ decline (I2 fires before VEC_MIN_BATCH, so batch size is irrelevant here).
         let _guard = crate::zk::install();
         assert!(crate::zk::enabled());
-        assert!(columnar_filter(&g, &local, &b, &expr).unwrap().is_none(), "columnar seam must decline while zk is armed");
+        assert!(
+            columnar_filter(&g, &local, &b, &expr).unwrap().is_none(),
+            "columnar seam must decline while zk is armed"
+        );
     }
 }
 
@@ -18550,7 +21019,12 @@ mod minus_bindings_unit {
     fn id(g: &Graph, iri: &str) -> Id {
         use oxrdf::{NamedNode, Term};
         g.id_of(&Term::NamedNode(NamedNode::new(iri).unwrap()))
-            .unwrap_or_else(|| panic!("test-setup error: IRI {} is not present in the scratch graph", iri))
+            .unwrap_or_else(|| {
+                panic!(
+                    "test-setup error: IRI {} is not present in the scratch graph",
+                    iri
+                )
+            })
     }
 
     /// Disjoint variable domains: left has {?s} only, right has {?x} only (no overlap).
@@ -18558,12 +21032,23 @@ mod minus_bindings_unit {
     #[test]
     fn minus_disjoint_domains_returns_left_unchanged() {
         let g = scratch();
-        let (a, b, c) = (id(&g, "http://ex/a"), id(&g, "http://ex/b"), id(&g, "http://ex/c"));
-        let left = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a]), Row::from_slice(&[b])]);
+        let (a, b, c) = (
+            id(&g, "http://ex/a"),
+            id(&g, "http://ex/b"),
+            id(&g, "http://ex/c"),
+        );
+        let left = Bindings::unsorted(
+            vec![var("s")],
+            vec![Row::from_slice(&[a]), Row::from_slice(&[b])],
+        );
         let right = Bindings::unsorted(vec![var("x")], vec![Row::from_slice(&[c])]);
         let result = minus_bindings(left, right);
         // No shared variable → nothing removed.
-        assert_eq!(result.rows.len(), 2, "disjoint domains: MINUS is a no-op, expected 2 rows");
+        assert_eq!(
+            result.rows.len(),
+            2,
+            "disjoint domains: MINUS is a no-op, expected 2 rows"
+        );
     }
 
     /// Fully-bound shared variable (fast path: hash-table lookup).
@@ -18572,11 +21057,18 @@ mod minus_bindings_unit {
     fn minus_fast_path_removes_compatible_row() {
         let g = scratch();
         let (a, b) = (id(&g, "http://ex/a"), id(&g, "http://ex/b"));
-        let left = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a]), Row::from_slice(&[b])]);
+        let left = Bindings::unsorted(
+            vec![var("s")],
+            vec![Row::from_slice(&[a]), Row::from_slice(&[b])],
+        );
         let right = Bindings::unsorted(vec![var("s")], vec![Row::from_slice(&[a])]);
         let result = minus_bindings(left, right);
         // a is compatible → removed; b is not in right → kept.
-        assert_eq!(result.rows.len(), 1, "fast path must remove compatible row a");
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "fast path must remove compatible row a"
+        );
         // The remaining row should be b.
         assert_eq!(result.rows[0][0], b, "remaining row should have s=b");
     }
@@ -18599,7 +21091,11 @@ mod minus_bindings_unit {
         let result = minus_bindings(left, right);
         // Overlap on ?s (both bound, equal) ⇒ compatible ⇒ removed; the unbound ?t is
         // skipped by the "both sides bound" guard and neither blocks nor causes removal.
-        assert_eq!(result.rows.len(), 0, "bound overlap on ?s removes the row even though ?t is unbound on the left");
+        assert_eq!(
+            result.rows.len(),
+            0,
+            "bound overlap on ?s removes the row even though ?t is unbound on the left"
+        );
     }
 
     /// General path (unbound `?t` on the left forces the per-row compatibility scan off
@@ -18619,10 +21115,15 @@ mod minus_bindings_unit {
         // Left: {?s=a, ?t=NO_ID}; Right: {?s=b, ?t=NO_ID}.
         // ?s=a vs ?s=b: BOTH bound but NOT equal → incompatible → row KEPT.
         let left = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[a, NO_ID])]);
-        let right = Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[b, NO_ID])]);
+        let right =
+            Bindings::unsorted(vec![var("s"), var("t")], vec![Row::from_slice(&[b, NO_ID])]);
         let result = minus_bindings(left, right);
         // ?s=a != ?s=b → incompatible ⇒ NOT removed.
-        assert_eq!(result.rows.len(), 1, "incompatible bound ?s (a != b): left row must be kept");
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "incompatible bound ?s (a != b): left row must be kept"
+        );
     }
 }
 
@@ -18637,13 +21138,19 @@ mod effective_boolean_unit {
     fn ebv_error_is_none() {
         // SPARQL EBV: error → None (a type error in the expression).
         assert_eq!(ebv(&Value::Error), None, "ebv(Error) must be None");
-        assert!(!effective_boolean(&Value::Error), "effective_boolean(Error) must be false (drop row)");
+        assert!(
+            !effective_boolean(&Value::Error),
+            "effective_boolean(Error) must be false (drop row)"
+        );
     }
 
     #[test]
     fn ebv_unbound_is_none() {
         assert_eq!(ebv(&Value::Unbound), None, "ebv(Unbound) must be None");
-        assert!(!effective_boolean(&Value::Unbound), "effective_boolean(Unbound) must be false (drop row)");
+        assert!(
+            !effective_boolean(&Value::Unbound),
+            "effective_boolean(Unbound) must be false (drop row)"
+        );
     }
 
     #[test]
@@ -18674,7 +21181,10 @@ mod effective_boolean_unit {
         use oxrdf::NamedNode;
         let iri = Value::Term(Term::NamedNode(NamedNode::new_unchecked("http://ex/x")));
         assert_eq!(ebv(&iri), None, "EBV of IRI is a type error → None");
-        assert!(!effective_boolean(&iri), "effective_boolean(IRI) = false (drop row)");
+        assert!(
+            !effective_boolean(&iri),
+            "effective_boolean(IRI) = false (drop row)"
+        );
     }
 
     #[test]
@@ -18692,27 +21202,45 @@ mod effective_boolean_unit {
     #[test]
     fn ebv_lang_tagged_literal_is_none_type_error() {
         // rdf:langString is NOT xsd:string: its EBV is a type error.
-        let t = Value::Term(Term::Literal(Literal::new_language_tagged_literal_unchecked("hello", "en")));
-        assert_eq!(ebv(&t), None, "lang-tagged literal EBV is type error → None");
+        let t = Value::Term(Term::Literal(
+            Literal::new_language_tagged_literal_unchecked("hello", "en"),
+        ));
+        assert_eq!(
+            ebv(&t),
+            None,
+            "lang-tagged literal EBV is type error → None"
+        );
     }
 
     #[test]
     fn ebv_typed_boolean_true_false() {
-        let tt = Value::Term(Term::Literal(Literal::new_typed_literal("true", xsd::BOOLEAN)));
-        let ff = Value::Term(Term::Literal(Literal::new_typed_literal("false", xsd::BOOLEAN)));
+        let tt = Value::Term(Term::Literal(Literal::new_typed_literal(
+            "true",
+            xsd::BOOLEAN,
+        )));
+        let ff = Value::Term(Term::Literal(Literal::new_typed_literal(
+            "false",
+            xsd::BOOLEAN,
+        )));
         assert_eq!(ebv(&tt), Some(true));
         assert_eq!(ebv(&ff), Some(false));
     }
 
     #[test]
     fn ebv_ill_formed_boolean_is_type_error() {
-        let ill = Value::Term(Term::Literal(Literal::new_typed_literal("yes", xsd::BOOLEAN)));
+        let ill = Value::Term(Term::Literal(Literal::new_typed_literal(
+            "yes",
+            xsd::BOOLEAN,
+        )));
         assert_eq!(ebv(&ill), None, "ill-formed boolean EBV is type error");
     }
 
     #[test]
     fn ebv_xsd_string_nonempty_is_true() {
-        let s = Value::Term(Term::Literal(Literal::new_typed_literal("abc", xsd::STRING)));
+        let s = Value::Term(Term::Literal(Literal::new_typed_literal(
+            "abc",
+            xsd::STRING,
+        )));
         assert_eq!(ebv(&s), Some(true));
     }
 
@@ -18734,21 +21262,30 @@ mod sum_values_unit {
         // Sum({}) = 0^^xsd:integer (SPARQL 18.5.1.4).
         let result = sum_values(&[], false);
         // Num does not impl PartialEq; use matches! for the pattern.
-        assert!(matches!(result, Some(Num::Int(0))), "sum of empty set must be 0 integer");
+        assert!(
+            matches!(result, Some(Num::Int(0))),
+            "sum of empty set must be 0 integer"
+        );
     }
 
     #[test]
     fn sum_errored_is_none() {
         // A type error in ANY member makes the whole SUM None → unbound aggregate.
         let result = sum_values(&[Value::Num(Num::Int(5))], true);
-        assert!(result.is_none(), "sum_values with errored=true must return None");
+        assert!(
+            result.is_none(),
+            "sum_values with errored=true must return None"
+        );
     }
 
     #[test]
     fn sum_integers_stays_integer() {
         let vals = vec![Value::Num(Num::Int(3)), Value::Num(Num::Int(7))];
         let result = sum_values(&vals, false);
-        assert!(matches!(result, Some(Num::Int(10))), "sum of integers must be an integer");
+        assert!(
+            matches!(result, Some(Num::Int(10))),
+            "sum of integers must be an integer"
+        );
     }
 
     #[test]
@@ -18763,7 +21300,12 @@ mod sum_values_unit {
                 // Dec fields are (mant: i128, scale: u32). Any representation where
                 // mant as f64 / 10_f64.powi(scale as i32) ≈ 2.5 is acceptable.
                 let v = (d.mant as f64) / 10_f64.powi(d.scale as i32);
-                assert!((v - 2.5_f64).abs() < 1e-12_f64, "int+decimal must sum to 2.5, got mant={} scale={}", d.mant, d.scale);
+                assert!(
+                    (v - 2.5_f64).abs() < 1e-12_f64,
+                    "int+decimal must sum to 2.5, got mant={} scale={}",
+                    d.mant,
+                    d.scale
+                );
             }
             other => panic!("int+decimal sum must be Decimal, got {other:?}"),
         }
@@ -18778,7 +21320,10 @@ mod sum_values_unit {
         let iri = Value::Term(Term::NamedNode(NamedNode::new_unchecked("http://ex/x")));
         let result = sum_values(&[Value::Num(Num::Int(5)), iri], false);
         // as_numeric(IRI) = None → sum_values returns None.
-        assert!(result.is_none(), "non-numeric member (IRI) must make sum_values return None");
+        assert!(
+            result.is_none(),
+            "non-numeric member (IRI) must make sum_values return None"
+        );
     }
 }
 
@@ -18791,18 +21336,28 @@ mod minmax_values_unit {
     fn minmax_empty_is_unbound() {
         // Value does not impl PartialEq; use matches! for the pattern check.
         assert!(
-            matches!(minmax_values(vec![], std::cmp::Ordering::Less), Value::Unbound),
+            matches!(
+                minmax_values(vec![], std::cmp::Ordering::Less),
+                Value::Unbound
+            ),
             "MIN(empty set) must be Unbound"
         );
         assert!(
-            matches!(minmax_values(vec![], std::cmp::Ordering::Greater), Value::Unbound),
+            matches!(
+                minmax_values(vec![], std::cmp::Ordering::Greater),
+                Value::Unbound
+            ),
             "MAX(empty set) must be Unbound"
         );
     }
 
     #[test]
     fn min_over_integers_is_smallest() {
-        let vals = vec![Value::Num(Num::Int(5)), Value::Num(Num::Int(2)), Value::Num(Num::Int(8))];
+        let vals = vec![
+            Value::Num(Num::Int(5)),
+            Value::Num(Num::Int(2)),
+            Value::Num(Num::Int(8)),
+        ];
         let min = minmax_values(vals, std::cmp::Ordering::Less);
         // MIN over an all-integer set is the smallest member (2). `minmax_values` returns
         // it via `num_canonical_term`, i.e. a `Value::Term` carrying the canonical
@@ -18810,9 +21365,16 @@ mod minmax_values_unit {
         // substring `contains('2')`, which is vacuous because the xsd:integer datatype
         // IRI (…/2001/XMLSchema#integer) already contains '2' regardless of the value.
         match min {
-            Value::Num(Num::Int(n)) => assert_eq!(n, 2, "MIN of [5,2,8] must be exactly 2, got {}", n),
+            Value::Num(Num::Int(n)) => {
+                assert_eq!(n, 2, "MIN of [5,2,8] must be exactly 2, got {}", n)
+            }
             Value::Term(Term::Literal(ref l)) => {
-                assert_eq!(l.value(), "2", "MIN of [5,2,8] must have lexical value \"2\", got {}", l);
+                assert_eq!(
+                    l.value(),
+                    "2",
+                    "MIN of [5,2,8] must have lexical value \"2\", got {}",
+                    l
+                );
                 assert_eq!(
                     l.datatype(),
                     xsd::INTEGER,
@@ -18820,22 +21382,35 @@ mod minmax_values_unit {
                     l.datatype()
                 );
             }
-            other => panic!("MIN of integers must be the integer 2 (numeric or integer term), got {other:?}"),
+            other => panic!(
+                "MIN of integers must be the integer 2 (numeric or integer term), got {other:?}"
+            ),
         }
     }
 
     #[test]
     fn max_over_integers_is_largest() {
-        let vals = vec![Value::Num(Num::Int(5)), Value::Num(Num::Int(2)), Value::Num(Num::Int(8))];
+        let vals = vec![
+            Value::Num(Num::Int(5)),
+            Value::Num(Num::Int(2)),
+            Value::Num(Num::Int(8)),
+        ];
         let max = minmax_values(vals, std::cmp::Ordering::Greater);
         // MAX over an all-integer set is the largest member (8), returned as a canonical
         // xsd:integer `Value::Term`. Assert the EXACT lexical value AND datatype — a
         // substring `contains('8')` would also pass for wrong values like 18 or 80, so it
         // is not an acceptable check for the `Value::Term` representation.
         match max {
-            Value::Num(Num::Int(n)) => assert_eq!(n, 8, "MAX of [5,2,8] must be exactly 8, got {}", n),
+            Value::Num(Num::Int(n)) => {
+                assert_eq!(n, 8, "MAX of [5,2,8] must be exactly 8, got {}", n)
+            }
             Value::Term(Term::Literal(ref l)) => {
-                assert_eq!(l.value(), "8", "MAX of [5,2,8] must have lexical value \"8\", got {}", l);
+                assert_eq!(
+                    l.value(),
+                    "8",
+                    "MAX of [5,2,8] must have lexical value \"8\", got {}",
+                    l
+                );
                 assert_eq!(
                     l.datatype(),
                     xsd::INTEGER,
@@ -18843,7 +21418,9 @@ mod minmax_values_unit {
                     l.datatype()
                 );
             }
-            other => panic!("MAX of integers must be the integer 8 (numeric or integer term), got {other:?}"),
+            other => panic!(
+                "MAX of integers must be the integer 8 (numeric or integer term), got {other:?}"
+            ),
         }
     }
 
@@ -18879,14 +21456,27 @@ mod columnar_aggregate_seam {
     fn scores_graph(n: u32) -> (Graph, Vec<Id>, Vec<Id>) {
         let mut nt = String::new();
         for i in 0..n {
-            nt.push_str(&format!("<http://ex/s{i}> <http://ex/score> \"{i}\"^^<{XSD_INT}> .\n"));
+            nt.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/score> \"{i}\"^^<{XSD_INT}> .\n"
+            ));
         }
         let g = Graph::load_str(&nt, "ntriples").unwrap();
         let subj: Vec<Id> = (0..n)
-            .map(|i| g.id_of(&Term::NamedNode(oxrdf::NamedNode::new(format!("http://ex/s{i}")).unwrap())).unwrap())
+            .map(|i| {
+                g.id_of(&Term::NamedNode(
+                    oxrdf::NamedNode::new(format!("http://ex/s{i}")).unwrap(),
+                ))
+                .unwrap()
+            })
             .collect();
         let score: Vec<Id> = (0..n)
-            .map(|i| g.id_of(&Term::Literal(Literal::new_typed_literal(i.to_string(), xsd::INTEGER))).unwrap())
+            .map(|i| {
+                g.id_of(&Term::Literal(Literal::new_typed_literal(
+                    i.to_string(),
+                    xsd::INTEGER,
+                )))
+                .unwrap()
+            })
             .collect();
         (g, subj, score)
     }
@@ -19008,10 +21598,10 @@ mod columnar_aggregate_seam {
 
         // (expected_value, AggregateFunction label, aggregates)
         let cases: &[(f64, AggregateFunction)] = &[
-            (44850.0, AggregateFunction::Sum),   // 0+1+…+299 = 299*300/2 = 44850
-            (300.0,   AggregateFunction::Count),  // 300 rows
-            (0.0,     AggregateFunction::Min),    // minimum of 0..=299
-            (299.0,   AggregateFunction::Max),    // maximum
+            (44850.0, AggregateFunction::Sum), // 0+1+…+299 = 299*300/2 = 44850
+            (300.0, AggregateFunction::Count), // 300 rows
+            (0.0, AggregateFunction::Min),     // minimum of 0..=299
+            (299.0, AggregateFunction::Max),   // maximum
         ];
 
         for &(expected, ref name) in cases {
@@ -19021,7 +21611,14 @@ mod columnar_aggregate_seam {
             // (a) Call columnar_aggregate DIRECTLY — assert it returns Some (path engaged).
             let mut local_col = LocalVocab::default();
             let col_rows = columnar_aggregate(
-                &g, &mut local_col, &b2, &[], &aggregates, &order, &members, &[var("agg")],
+                &g,
+                &mut local_col,
+                &b2,
+                &[],
+                &aggregates,
+                &order,
+                &members,
+                &[var("agg")],
             );
             assert!(
                 col_rows.is_some(),
@@ -19029,7 +21626,12 @@ mod columnar_aggregate_seam {
                 name
             );
             let col_rows = col_rows.unwrap();
-            assert_eq!(col_rows.len(), 1, "whole-dataset agg must produce exactly 1 row for {:?}", name);
+            assert_eq!(
+                col_rows.len(),
+                1,
+                "whole-dataset agg must produce exactly 1 row for {:?}",
+                name
+            );
 
             // (b) Decode the result id and compare with the scalar expected value (value check).
             let result_id = col_rows[0][0];
@@ -19042,7 +21644,8 @@ mod columnar_aggregate_seam {
             });
             assert_eq!(
                 got, expected,
-                "aggregate {:?} over scores 0..=299 must equal {}", name, expected
+                "aggregate {:?} over scores 0..=299 must equal {}",
+                name, expected
             );
 
             // (c) FULL-TERM identity against the TRUE scalar oracle (catches datatype mutations).
@@ -19097,20 +21700,26 @@ mod columnar_aggregate_seam {
 
         let mut local = LocalVocab::default();
         let out = group_aggregate(&g, &mut local, b, &[], &aggregates).unwrap();
-        assert_eq!(out.rows.len(), 1, "whole-dataset aggregate must produce exactly 1 row");
+        assert_eq!(
+            out.rows.len(),
+            1,
+            "whole-dataset aggregate must produce exactly 1 row"
+        );
 
         // The aggregate result id must decode to the integer 190 (SUM 0..=19).
         let result_id = out.rows[0][0];
-        let num_val = g.numeric_value(result_id)
-            .unwrap_or_else(|| {
-                // Might be a local-vocab term (for sums > INLINE_MAX) — materialise it.
-                let term = term_of(&g, &local, result_id).unwrap();
-                match &term {
-                    Term::Literal(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
-                    _ => f64::NAN,
-                }
-            });
-        assert_eq!(num_val, 190.0_f64, "SUM(0..=19) must equal 190, not MIN=0 or MAX=19");
+        let num_val = g.numeric_value(result_id).unwrap_or_else(|| {
+            // Might be a local-vocab term (for sums > INLINE_MAX) — materialise it.
+            let term = term_of(&g, &local, result_id).unwrap();
+            match &term {
+                Term::Literal(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+                _ => f64::NAN,
+            }
+        });
+        assert_eq!(
+            num_val, 190.0_f64,
+            "SUM(0..=19) must equal 190, not MIN=0 or MAX=19"
+        );
     }
 
     /// T5c: AVG over inline-integer column — columnar path engaged, result FULL-TERM-identical
@@ -19138,8 +21747,16 @@ mod columnar_aggregate_seam {
 
         let mut local_col = LocalVocab::default();
         let col_rows = columnar_aggregate(
-            &g, &mut local_col, &b, &[], &aggregates, &order, &members, &[var("avg")],
-        ).expect("AVG over inline-integer column must engage (return Some)");
+            &g,
+            &mut local_col,
+            &b,
+            &[],
+            &aggregates,
+            &order,
+            &members,
+            &[var("avg")],
+        )
+        .expect("AVG over inline-integer column must engage (return Some)");
 
         // TRUE scalar oracle: calls eval_aggregate directly, bypassing the columnar seam.
         // Previously this called group_aggregate which under vectorized also went through
@@ -19166,7 +21783,9 @@ mod columnar_aggregate_seam {
         let avg_f64: f64 = avg_str.parse().expect("AVG lexical must be numeric");
         assert!(
             (avg_f64 - 149.5_f64).abs() < 1e-9,
-            "AVG(0..=299) = 44850/300 = 149.5, got {} (term = {:?})", avg_f64, term
+            "AVG(0..=299) = 44850/300 = 149.5, got {} (term = {:?})",
+            avg_f64,
+            term
         );
     }
 
@@ -19190,15 +21809,16 @@ mod columnar_aggregate_seam {
         );
         let g = Graph::load_str(&nt, "ntriples").unwrap();
         let lit = |v: &str| {
-            g.id_of(&Term::Literal(Literal::new_typed_literal(v, xsd::INTEGER))).unwrap()
+            g.id_of(&Term::Literal(Literal::new_typed_literal(v, xsd::INTEGER)))
+                .unwrap()
         };
         // Bindings: two columns [g_val, score], rows in order [group2→10, group2→20, group1→5, group1→15].
         let group_var = var("g");
         let score_var = var("score");
         let rows: Vec<Row> = vec![
-            Row::from_slice(&[lit("2"), lit("10")]),  // group "2" first
+            Row::from_slice(&[lit("2"), lit("10")]), // group "2" first
             Row::from_slice(&[lit("2"), lit("20")]),
-            Row::from_slice(&[lit("1"), lit("5")]),   // group "1" second
+            Row::from_slice(&[lit("1"), lit("5")]), // group "1" second
             Row::from_slice(&[lit("1"), lit("15")]),
         ];
         let b = Bindings::unsorted(vec![group_var.clone(), score_var.clone()], rows);
@@ -19236,11 +21856,22 @@ mod columnar_aggregate_seam {
             let id = rows[idx][1]; // [g_key, sum_val]
             g.numeric_value(id).unwrap_or_else(|| {
                 let t = term_of(&g, &local_c, id).unwrap();
-                match &t { Term::Literal(l) => l.value().parse().unwrap(), _ => f64::NAN }
+                match &t {
+                    Term::Literal(l) => l.value().parse().unwrap(),
+                    _ => f64::NAN,
+                }
             })
         };
-        assert_eq!(sum_val(&col_out.rows, 0), 30.0, "first group (key=2) SUM must be 30");
-        assert_eq!(sum_val(&col_out.rows, 1), 20.0, "second group (key=1) SUM must be 20");
+        assert_eq!(
+            sum_val(&col_out.rows, 0),
+            30.0,
+            "first group (key=2) SUM must be 30"
+        );
+        assert_eq!(
+            sum_val(&col_out.rows, 1),
+            20.0,
+            "second group (key=1) SUM must be 20"
+        );
     }
 
     /// T7 (decline gate): a non-inline column (negative integer) must make the seam DECLINE
@@ -19253,8 +21884,18 @@ mod columnar_aggregate_seam {
              <http://ex/b> <http://ex/score> \"2\"^^<{XSD_INT}> .\n"
         );
         let g = Graph::load_str(&nt, "ntriples").unwrap();
-        let neg_one = g.id_of(&Term::Literal(Literal::new_typed_literal("-1", xsd::INTEGER))).unwrap();
-        let two = g.id_of(&Term::Literal(Literal::new_typed_literal("2", xsd::INTEGER))).unwrap();
+        let neg_one = g
+            .id_of(&Term::Literal(Literal::new_typed_literal(
+                "-1",
+                xsd::INTEGER,
+            )))
+            .unwrap();
+        let two = g
+            .id_of(&Term::Literal(Literal::new_typed_literal(
+                "2",
+                xsd::INTEGER,
+            )))
+            .unwrap();
         assert!(!dict::is_inline(neg_one), "-1 must be a non-inline dict id");
         assert!(dict::is_inline(two), "2 must be inline");
 
@@ -19275,9 +21916,19 @@ mod columnar_aggregate_seam {
         let mut local = LocalVocab::default();
         let out_vars = vec![var("s")];
         let result = columnar_aggregate(
-            &g, &mut local, &b, &[], &aggregates, &order, &members, &out_vars
+            &g,
+            &mut local,
+            &b,
+            &[],
+            &aggregates,
+            &order,
+            &members,
+            &out_vars,
         );
-        assert!(result.is_none(), "non-inline column must make columnar_aggregate decline");
+        assert!(
+            result.is_none(),
+            "non-inline column must make columnar_aggregate decline"
+        );
     }
 
     /// T8 (DISTINCT decline): DISTINCT aggregate must always decline.
@@ -19301,9 +21952,19 @@ mod columnar_aggregate_seam {
         let mut local = LocalVocab::default();
         let out_vars = vec![var("c")];
         let result = columnar_aggregate(
-            &g, &mut local, &b, &[], &aggregates, &order, &members, &out_vars
+            &g,
+            &mut local,
+            &b,
+            &[],
+            &aggregates,
+            &order,
+            &members,
+            &out_vars,
         );
-        assert!(result.is_none(), "DISTINCT aggregate must make columnar_aggregate decline");
+        assert!(
+            result.is_none(),
+            "DISTINCT aggregate must make columnar_aggregate decline"
+        );
     }
 }
 
@@ -19332,7 +21993,12 @@ mod compiled_expr_tests {
     }
 
     /// `eval_expr` == `eval_compiled` for every row of `b` with expression `e`.
-    fn assert_compiled_matches_original(graph: &Graph, local: &LocalVocab, b: &Bindings, e: &Expression) {
+    fn assert_compiled_matches_original(
+        graph: &Graph,
+        local: &LocalVocab,
+        b: &Bindings,
+        e: &Expression,
+    ) {
         let compiled = compile_expr(e, b);
         for row in &b.rows {
             let expected = eval_expr(graph, local, b, row, e).expect("eval_expr error");
@@ -19497,7 +22163,14 @@ mod compiled_expr_tests {
 
         // Compiled path: order_bindings uses eval_compiled internally.
         let mut b = Bindings::unsorted(vec![n_var.clone()], pre_sort_rows.clone());
-        order_bindings(&g, &local, &mut b, &[OrderExpression::Asc(n_expr.clone())], None).unwrap();
+        order_bindings(
+            &g,
+            &local,
+            &mut b,
+            &[OrderExpression::Asc(n_expr.clone())],
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             reference_rows, b.rows,
@@ -19558,7 +22231,10 @@ mod compiled_expr_tests {
         let mut full = Bindings::unsorted(vars.clone(), input_rows.clone());
         order_bindings(&g, &local, &mut full, &order, None).unwrap();
         // Sanity: the full sort actually reorders (input was scrambled) — not vacuous.
-        assert_ne!(full.rows, input_rows, "full sort was a no-op — test is vacuous");
+        assert_ne!(
+            full.rows, input_rows,
+            "full sort was a no-op — test is vacuous"
+        );
 
         for k in 1..n {
             let mut topk = Bindings::unsorted(vars.clone(), input_rows.clone());
@@ -19622,7 +22298,11 @@ mod compiled_expr_tests {
         let local = LocalVocab::default();
 
         // Build a 3-column bindings with a bound IRI, a bound integer, and an unbound slot.
-        let iri_id = g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/s"))).unwrap();
+        let iri_id = g
+            .id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+                "http://ex/s",
+            )))
+            .unwrap();
         let num_id = sparq_core::dict::inline_id_of_int(7).unwrap();
         let va = oxrdf::Variable::new_unchecked("a");
         let vb = oxrdf::Variable::new_unchecked("b");
@@ -19636,8 +22316,8 @@ mod compiled_expr_tests {
         let exprs: Vec<Expression> = vec![
             var_expr("a"),
             var_expr("b"),
-            var_expr("c"),    // unbound → Value::Unbound
-            var_expr("zzz"),  // never in scope → Value::Unbound
+            var_expr("c"),   // unbound → Value::Unbound
+            var_expr("zzz"), // never in scope → Value::Unbound
             Expression::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/x")),
             int_expr("42"),
             str_expr("hello"),
@@ -19645,15 +22325,24 @@ mod compiled_expr_tests {
             Expression::Bound(vc.clone()),
             Expression::Greater(Box::new(var_expr("b")), Box::new(int_expr("3"))),
             Expression::Equal(Box::new(var_expr("b")), Box::new(int_expr("7"))),
-            Expression::Not(Box::new(Expression::Equal(Box::new(var_expr("b")), Box::new(int_expr("0"))))),
+            Expression::Not(Box::new(Expression::Equal(
+                Box::new(var_expr("b")),
+                Box::new(int_expr("0")),
+            ))),
             Expression::Add(Box::new(var_expr("b")), Box::new(int_expr("1"))),
             Expression::And(
                 Box::new(Expression::Bound(vb.clone())),
-                Box::new(Expression::Greater(Box::new(var_expr("b")), Box::new(int_expr("0")))),
+                Box::new(Expression::Greater(
+                    Box::new(var_expr("b")),
+                    Box::new(int_expr("0")),
+                )),
             ),
             Expression::Or(
                 Box::new(Expression::Bound(vc.clone())),
-                Box::new(Expression::Greater(Box::new(var_expr("b")), Box::new(int_expr("5")))),
+                Box::new(Expression::Greater(
+                    Box::new(var_expr("b")),
+                    Box::new(int_expr("5")),
+                )),
             ),
             Expression::FunctionCall(Function::IsNumeric, vec![var_expr("b")]),
             Expression::FunctionCall(Function::IsIri, vec![var_expr("a")]),
@@ -19689,20 +22378,34 @@ mod sip_unit {
     #[test]
     fn certain_vars_union_is_branch_intersection() {
         // left binds {x, y}; right binds {x, z}; only x is certain in the UNION.
-        let left = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
-        let right = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/q", "z")] };
-        let u = GraphPattern::Union { left: Box::new(left), right: Box::new(right) };
+        let left = GraphPattern::Bgp {
+            patterns: vec![tp("x", "http://e/p", "y")],
+        };
+        let right = GraphPattern::Bgp {
+            patterns: vec![tp("x", "http://e/q", "z")],
+        };
+        let u = GraphPattern::Union {
+            left: Box::new(left),
+            right: Box::new(right),
+        };
         let mut out = FxHashSet::default();
         certain_vars(&u, &mut out);
-        assert!(out.contains(&var("x")), "x certain (bound in both branches)");
+        assert!(
+            out.contains(&var("x")),
+            "x certain (bound in both branches)"
+        );
         assert!(!out.contains(&var("y")), "y bound in only one branch");
         assert!(!out.contains(&var("z")), "z bound in only one branch");
     }
 
     #[test]
     fn certain_vars_leftjoin_excludes_optional_side() {
-        let left = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
-        let right = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/q", "opt")] };
+        let left = GraphPattern::Bgp {
+            patterns: vec![tp("x", "http://e/p", "y")],
+        };
+        let right = GraphPattern::Bgp {
+            patterns: vec![tp("x", "http://e/q", "opt")],
+        };
         let lj = GraphPattern::LeftJoin {
             left: Box::new(left),
             right: Box::new(right),
@@ -19711,12 +22414,17 @@ mod sip_unit {
         let mut out = FxHashSet::default();
         certain_vars(&lj, &mut out);
         assert!(out.contains(&var("x")) && out.contains(&var("y")));
-        assert!(!out.contains(&var("opt")), "an OPTIONAL-right var is never certain");
+        assert!(
+            !out.contains(&var("opt")),
+            "an OPTIONAL-right var is never certain"
+        );
     }
 
     #[test]
     fn subst_pattern_replaces_variable_in_bgp_and_filter() {
-        let inner = GraphPattern::Bgp { patterns: vec![tp("doc", "http://e/creator", "prin")] };
+        let inner = GraphPattern::Bgp {
+            patterns: vec![tp("doc", "http://e/creator", "prin")],
+        };
         let filt = GraphPattern::Filter {
             expr: Expression::Not(Box::new(Expression::Equal(
                 Box::new(Expression::Variable(var("a"))),
@@ -19729,15 +22437,27 @@ mod sip_unit {
         let out = subst_pattern(&filt, &sub).expect("substitution should succeed");
         // The substituted variable must be fully gone (pattern positions AND filter).
         let dbg = format!("{:?}", out);
-        assert!(dbg.contains("paul"), "result must carry the substituted IRI");
-        assert!(!dbg.contains("prin"), "substituted variable ?prin must be gone: {}", dbg);
+        assert!(
+            dbg.contains("paul"),
+            "result must carry the substituted IRI"
+        );
+        assert!(
+            !dbg.contains("prin"),
+            "substituted variable ?prin must be gone: {}",
+            dbg
+        );
         assert!(dbg.contains("\"a\""), "the untouched ?a must remain");
     }
 
     #[test]
     fn subst_pattern_bails_on_bound_of_substituted_var() {
-        let inner = GraphPattern::Bgp { patterns: vec![tp("x", "http://e/p", "y")] };
-        let filt = GraphPattern::Filter { expr: Expression::Bound(var("x")), inner: Box::new(inner) };
+        let inner = GraphPattern::Bgp {
+            patterns: vec![tp("x", "http://e/p", "y")],
+        };
+        let filt = GraphPattern::Filter {
+            expr: Expression::Bound(var("x")),
+            inner: Box::new(inner),
+        };
         let mut sub = FxHashMap::default();
         sub.insert(var("x"), nn("http://e/c"));
         assert!(
@@ -19775,7 +22495,9 @@ mod theta_antijoin_unit {
         // Not a `!bound`: bare bound, bare not, equality.
         assert!(as_not_bound_var(&Expression::Bound(var("a"))).is_none());
         assert!(as_not_bound_var(&Expression::Not(Box::new(ev("a")))).is_none());
-        assert!(as_not_bound_var(&Expression::Equal(Box::new(ev("a")), Box::new(ev("b")))).is_none());
+        assert!(
+            as_not_bound_var(&Expression::Equal(Box::new(ev("a")), Box::new(ev("b")))).is_none()
+        );
     }
 
     #[test]
@@ -19809,10 +22531,13 @@ mod theta_antijoin_unit {
         .is_none());
         // A MULTI-element `IN` (even all-vars) is NOT the single-target seedable shape.
         assert!(
-            as_correlation_pair(&Expression::In(Box::new(ev("a")), vec![ev("b"), ev("c")])).is_none()
+            as_correlation_pair(&Expression::In(Box::new(ev("a")), vec![ev("b"), ev("c")]))
+                .is_none()
         );
         // An inequality is not a correlation.
-        assert!(as_correlation_pair(&Expression::Less(Box::new(ev("a")), Box::new(ev("b")))).is_none());
+        assert!(
+            as_correlation_pair(&Expression::Less(Box::new(ev("a")), Box::new(ev("b")))).is_none()
+        );
     }
 
     #[test]
@@ -19820,10 +22545,24 @@ mod theta_antijoin_unit {
         // An Eq correlation re-checks with `=`; a SameTerm correlation with `sameTerm`
         // (they DIFFER on value-equal id-distinct literals — the soundness point).
         let out = vec![var("outer"), var("inner")];
-        let eq = Correlation { left_col: 0, inner_var: var("inner"), kind: CorrKind::Eq };
-        assert!(matches!(corr_recheck_expr(&eq, &out), Expression::Equal(..)));
-        let st = Correlation { left_col: 0, inner_var: var("inner"), kind: CorrKind::SameTerm };
-        assert!(matches!(corr_recheck_expr(&st, &out), Expression::SameTerm(..)));
+        let eq = Correlation {
+            left_col: 0,
+            inner_var: var("inner"),
+            kind: CorrKind::Eq,
+        };
+        assert!(matches!(
+            corr_recheck_expr(&eq, &out),
+            Expression::Equal(..)
+        ));
+        let st = Correlation {
+            left_col: 0,
+            inner_var: var("inner"),
+            kind: CorrKind::SameTerm,
+        };
+        assert!(matches!(
+            corr_recheck_expr(&st, &out),
+            Expression::SameTerm(..)
+        ));
     }
 
     #[test]
@@ -19836,11 +22575,17 @@ mod theta_antijoin_unit {
         assert!(corr_id_probeable(CorrKind::SameTerm, Some(&iri)));
         assert!(corr_id_probeable(CorrKind::SameTerm, Some(&blank)));
         assert!(corr_id_probeable(CorrKind::SameTerm, Some(&lit)));
-        assert!(!corr_id_probeable(CorrKind::SameTerm, None), "unbound is not probeable");
+        assert!(
+            !corr_id_probeable(CorrKind::SameTerm, None),
+            "unbound is not probeable"
+        );
         // Eq: only NamedNode/BlankNode; a LITERAL is the value-equality hazard.
         assert!(corr_id_probeable(CorrKind::Eq, Some(&iri)));
         assert!(corr_id_probeable(CorrKind::Eq, Some(&blank)));
-        assert!(!corr_id_probeable(CorrKind::Eq, Some(&lit)), "literal Eq must take value scan");
+        assert!(
+            !corr_id_probeable(CorrKind::Eq, Some(&lit)),
+            "literal Eq must take value scan"
+        );
         assert!(!corr_id_probeable(CorrKind::Eq, None));
     }
 
@@ -19874,16 +22619,25 @@ mod theta_antijoin_unit {
             right: Box::new(bgp("c", "http://e/q", "d")),
             expression: Some(Expression::Less(Box::new(ev("yr2")), Box::new(ev("yr")))),
         };
-        assert!(pattern_has_var(&lj, &var("yr")), "outer var in the OPTIONAL condition");
+        assert!(
+            pattern_has_var(&lj, &var("yr")),
+            "outer var in the OPTIONAL condition"
+        );
         assert!(pattern_has_var(&lj, &var("d")), "right-side triple var");
         assert!(pattern_has_var(&lj, &var("a")), "left-side triple var");
-        assert!(!pattern_has_var(&lj, &var("absent")), "an unrelated var must not be found");
+        assert!(
+            !pattern_has_var(&lj, &var("absent")),
+            "an unrelated var must not be found"
+        );
         // EXISTS sub-pattern var.
         let filt = GraphPattern::Filter {
             expr: Expression::Exists(Box::new(bgp("e", "http://e/r", "f"))),
             inner: Box::new(bgp("a", "http://e/p", "b")),
         };
-        assert!(pattern_has_var(&filt, &var("f")), "var inside an EXISTS sub-pattern");
+        assert!(
+            pattern_has_var(&filt, &var("f")),
+            "var inside an EXISTS sub-pattern"
+        );
     }
 }
 
@@ -19951,18 +22705,26 @@ mod idfast_unit {
     fn table(rows: &[[Id; 2]]) -> Bindings {
         Bindings::unsorted(
             vec![var("a"), var("b")],
-            rows.iter().map(|r| Row::from_slice(&[r[0], r[1]])).collect(),
+            rows.iter()
+                .map(|r| Row::from_slice(&[r[0], r[1]]))
+                .collect(),
         )
     }
 
     fn eq_expr() -> Expression {
-        Expression::Equal(Box::new(Expression::Variable(var("a"))), Box::new(Expression::Variable(var("b"))))
+        Expression::Equal(
+            Box::new(Expression::Variable(var("a"))),
+            Box::new(Expression::Variable(var("b"))),
+        )
     }
     fn ne_expr() -> Expression {
         Expression::Not(Box::new(eq_expr()))
     }
     fn eq_expr_xy() -> Expression {
-        Expression::Equal(Box::new(Expression::Variable(var("x"))), Box::new(Expression::Variable(var("y"))))
+        Expression::Equal(
+            Box::new(Expression::Variable(var("x"))),
+            Box::new(Expression::Variable(var("y"))),
+        )
     }
 
     /// A literal-heavy, mixed graph: IRIs, blank nodes, and literals including numeric-promotion
@@ -19989,13 +22751,30 @@ mod idfast_unit {
         vec![
             mk(Term::NamedNode(nn("http://ex/o1"))),
             mk(Term::Literal(Literal::new_typed_literal("1", xsd::INTEGER))),
-            mk(Term::Literal(Literal::new_typed_literal("1.0", xsd::DECIMAL))),
-            mk(Term::Literal(Literal::new_typed_literal(" 1 ", xsd::INTEGER))),
+            mk(Term::Literal(Literal::new_typed_literal(
+                "1.0",
+                xsd::DECIMAL,
+            ))),
+            mk(Term::Literal(Literal::new_typed_literal(
+                " 1 ",
+                xsd::INTEGER,
+            ))),
             mk(Term::Literal(Literal::new_simple_literal("hi"))),
-            mk(Term::Literal(Literal::new_language_tagged_literal("hi", "en").unwrap())),
-            mk(Term::Literal(Literal::new_typed_literal("1.0", xsd::DOUBLE))),
-            mk(Term::Literal(Literal::new_typed_literal("01", xsd::INTEGER))),
-            mk(Term::Literal(Literal::new_typed_literal("foo", nn("http://ex/weird")))),
+            mk(Term::Literal(
+                Literal::new_language_tagged_literal("hi", "en").unwrap(),
+            )),
+            mk(Term::Literal(Literal::new_typed_literal(
+                "1.0",
+                xsd::DOUBLE,
+            ))),
+            mk(Term::Literal(Literal::new_typed_literal(
+                "01",
+                xsd::INTEGER,
+            ))),
+            mk(Term::Literal(Literal::new_typed_literal(
+                "foo",
+                nn("http://ex/weird"),
+            ))),
         ]
     }
 
@@ -20023,13 +22802,23 @@ mod idfast_unit {
             tp_svo("z", "http://ex/q", TermPattern::Variable(var("x"))),
         ]);
         let nl = nonliteral_vars(&p, &|_| true);
-        assert!(!nl.contains(&var("x")), "a var used as an OBJECT anywhere is literal-risk");
-        assert!(nl.contains(&var("z")), "?z only ever a subject -> non-literal");
+        assert!(
+            !nl.contains(&var("x")),
+            "a var used as an OBJECT anywhere is literal-risk"
+        );
+        assert!(
+            nl.contains(&var("z")),
+            "?z only ever a subject -> non-literal"
+        );
     }
 
     #[test]
     fn nonliteral_vars_bind_and_values_are_literal_risk() {
-        let inner = bgp(vec![tp_svo("s", "http://ex/p", TermPattern::Variable(var("o")))]);
+        let inner = bgp(vec![tp_svo(
+            "s",
+            "http://ex/p",
+            TermPattern::Variable(var("o")),
+        )]);
         let ext = GraphPattern::Extend {
             inner: Box::new(inner),
             variable: var("s"), // BIND target shadows the subject -> literal-risk wins.
@@ -20040,20 +22829,36 @@ mod idfast_unit {
 
         let values = GraphPattern::Values {
             variables: vec![var("v")],
-            bindings: vec![vec![Some(GroundTerm::Literal(Literal::new_simple_literal("x")))]],
+            bindings: vec![vec![Some(GroundTerm::Literal(
+                Literal::new_simple_literal("x"),
+            ))]],
         };
         let j = GraphPattern::Join {
-            left: Box::new(bgp(vec![tp_svo("v", "http://ex/p", TermPattern::Variable(var("o2")))])),
+            left: Box::new(bgp(vec![tp_svo(
+                "v",
+                "http://ex/p",
+                TermPattern::Variable(var("o2")),
+            )])),
             right: Box::new(values),
         };
         let nl2 = nonliteral_vars(&j, &|_| true);
-        assert!(!nl2.contains(&var("v")), "a VALUES column could be a literal");
+        assert!(
+            !nl2.contains(&var("v")),
+            "a VALUES column could be a literal"
+        );
     }
 
     #[test]
     fn nonliteral_vars_graph_name_is_nonliteral() {
-        let inner = bgp(vec![tp_svo("s", "http://ex/p", TermPattern::Variable(var("o")))]);
-        let g = GraphPattern::Graph { name: NamedNodePattern::Variable(var("g")), inner: Box::new(inner) };
+        let inner = bgp(vec![tp_svo(
+            "s",
+            "http://ex/p",
+            TermPattern::Variable(var("o")),
+        )]);
+        let g = GraphPattern::Graph {
+            name: NamedNodePattern::Variable(var("g")),
+            inner: Box::new(inner),
+        };
         let nl = nonliteral_vars(&g, &|_| true);
         assert!(nl.contains(&var("g")), "a GRAPH-name var binds an IRI");
     }
@@ -20076,7 +22881,10 @@ mod idfast_unit {
         };
         let nl = nonliteral_vars(&path, &|_| true);
         assert!(!nl.contains(&var("name")), "a path OBJECT can be a literal");
-        assert!(!nl.contains(&var("x")), "a path endpoint is not credited non-literal on its own");
+        assert!(
+            !nl.contains(&var("x")),
+            "a path endpoint is not credited non-literal on its own"
+        );
     }
 
     #[test]
@@ -20090,23 +22898,43 @@ mod idfast_unit {
             object: TermPattern::Variable(var("o")),
         };
         let nl = nonliteral_vars(&path, &|_| true);
-        assert!(!nl.contains(&var("s")), "a Reverse-path subject end can be a literal");
-        assert!(!nl.contains(&var("o")), "a Reverse-path object end can be a literal");
+        assert!(
+            !nl.contains(&var("s")),
+            "a Reverse-path subject end can be a literal"
+        );
+        assert!(
+            !nl.contains(&var("o")),
+            "a Reverse-path object end can be a literal"
+        );
     }
 
     #[test]
     fn nonliteral_vars_union_with_unanalysable_branch_poisons() {
         // ?x is a SUBJECT in the left branch but bound by an un-analysed SERVICE in the right —
         // the SERVICE could bind it to a literal, so the subject occurrence must NOT win.
-        let left = bgp(vec![tp_svo("x", "http://ex/p", TermPattern::Variable(var("o")))]);
+        let left = bgp(vec![tp_svo(
+            "x",
+            "http://ex/p",
+            TermPattern::Variable(var("o")),
+        )]);
         let service = GraphPattern::Service {
             name: NamedNodePattern::NamedNode(nn("http://remote/sparql")),
-            inner: Box::new(bgp(vec![tp_svo("y", "http://ex/q", TermPattern::Variable(var("x")))])),
+            inner: Box::new(bgp(vec![tp_svo(
+                "y",
+                "http://ex/q",
+                TermPattern::Variable(var("x")),
+            )])),
             silent: false,
         };
-        let u = GraphPattern::Union { left: Box::new(left), right: Box::new(service) };
+        let u = GraphPattern::Union {
+            left: Box::new(left),
+            right: Box::new(service),
+        };
         let nl = nonliteral_vars(&u, &|_| true);
-        assert!(!nl.contains(&var("x")), "a SERVICE-bound var must not be claimed non-literal via a sibling subject slot");
+        assert!(
+            !nl.contains(&var("x")),
+            "a SERVICE-bound var must not be claimed non-literal via a sibling subject slot"
+        );
     }
 
     #[test]
@@ -20124,8 +22952,14 @@ mod idfast_unit {
             object: TermPattern::Variable(var("o")),
         }]);
         let nl = nonliteral_vars(&p, &|_| true);
-        assert!(!nl.contains(&var("lit")), "an inner quoted-triple object can be a literal");
-        assert!(!nl.contains(&var("s")), "a quoted-triple inner subject is not credited here");
+        assert!(
+            !nl.contains(&var("lit")),
+            "an inner quoted-triple object can be a literal"
+        );
+        assert!(
+            !nl.contains(&var("s")),
+            "a quoted-triple inner subject is not credited here"
+        );
     }
 
     #[test]
@@ -20147,7 +22981,11 @@ mod idfast_unit {
         );
         let r = crate::query(&g, q).unwrap();
         // 1 = 1.0 by value -> every (a,b) pair over the two value-equal literals matches: 2x2 = 4.
-        assert_eq!(r.rows.len(), 4, "numeric-promotion `=` over path objects must stay value-true");
+        assert_eq!(
+            r.rows.len(),
+            4,
+            "numeric-promotion `=` over path objects must stay value-true"
+        );
     }
 
     #[test]
@@ -20178,7 +23016,11 @@ mod idfast_unit {
         );
         let r = crate::query(&g, q).unwrap();
         // EXISTS is TRUE (1 = 1.0 by value), so both UNION rows (?a = ex:a, ex:b) survive.
-        assert_eq!(r.rows.len(), 2, "EXISTS-nested numeric-promotion `=` must stay value-TRUE (no column-set leak)");
+        assert_eq!(
+            r.rows.len(),
+            2,
+            "EXISTS-nested numeric-promotion `=` must stay value-TRUE (no column-set leak)"
+        );
     }
 
     #[test]
@@ -20200,14 +23042,17 @@ mod idfast_unit {
         let ids = object_ids(&g); // ids[1]="1"^^integer, ids[2]="1.0"^^decimal (value-equal)
         let s1 = g.id_of(&Term::NamedNode(nn("http://ex/s1"))).unwrap();
 
-        let mut outer = Bindings::unsorted(vec![var("x"), var("y")], vec![Row::from_slice(&[s1, s1])]);
+        let mut outer =
+            Bindings::unsorted(vec![var("x"), var("y")], vec![Row::from_slice(&[s1, s1])]);
         with_idfast_nonlit_cols([0usize, 1usize].into_iter().collect(), || {
             // The OUTER consuming call drains the set to empty BEFORE its row loop.
             apply_filter_scalar(&g, &local, &mut outer, &eq_expr_xy()).unwrap();
             // Simulate an EXISTS re-entry that happens WHILE the guard is still live (i.e. before
             // the `with_` scope exits): a nested filter over literal columns at indices {0,1}.
-            let mut nested =
-                Bindings::unsorted(vec![var("x"), var("y")], vec![Row::from_slice(&[ids[1], ids[2]])]);
+            let mut nested = Bindings::unsorted(
+                vec![var("x"), var("y")],
+                vec![Row::from_slice(&[ids[1], ids[2]])],
+            );
             apply_filter_scalar(&g, &local, &mut nested, &eq_expr_xy()).unwrap();
             assert_eq!(
                 nested.rows.len(),
@@ -20226,7 +23071,10 @@ mod idfast_unit {
         let row = [NO_ID, 5u32];
         // A COLUMN holding NO_ID is unbound -> type error, not false.
         let v = equal_idfast(&g, &row, &IdOperand::Col(0), &IdOperand::Col(1));
-        assert!(matches!(v, Value::Error), "unbound operand must be a type error");
+        assert!(
+            matches!(v, Value::Error),
+            "unbound operand must be a type error"
+        );
     }
 
     #[test]
@@ -20234,10 +23082,13 @@ mod idfast_unit {
         let g = mixed_graph();
         let ids = object_ids(&g);
         let row = [ids[0], 0]; // ids[0] = <http://ex/o1>
-        // A constant IRI absent from the dict resolves to NO_ID but is NOT unbound -> "never equal".
+                               // A constant IRI absent from the dict resolves to NO_ID but is NOT unbound -> "never equal".
         let absent = IdOperand::ConstIri(nn("http://ex/NOT_IN_GRAPH"));
         let v = equal_idfast(&g, &row, &IdOperand::Col(0), &absent);
-        assert!(matches!(v, Value::Bool(false)), "absent const IRI compares as not-equal, not error");
+        assert!(
+            matches!(v, Value::Bool(false)),
+            "absent const IRI compares as not-equal, not error"
+        );
     }
 
     #[test]
@@ -20245,9 +23096,15 @@ mod idfast_unit {
         let g = mixed_graph();
         let ids = object_ids(&g);
         let row = [ids[0], ids[0]];
-        assert!(matches!(equal_idfast(&g, &row, &IdOperand::Col(0), &IdOperand::Col(1)), Value::Bool(true)));
+        assert!(matches!(
+            equal_idfast(&g, &row, &IdOperand::Col(0), &IdOperand::Col(1)),
+            Value::Bool(true)
+        ));
         let row2 = [ids[0], ids[7]]; // o1 vs "01"^^integer literal id — different ids
-        assert!(matches!(equal_idfast(&g, &row2, &IdOperand::Col(0), &IdOperand::Col(1)), Value::Bool(false)));
+        assert!(matches!(
+            equal_idfast(&g, &row2, &IdOperand::Col(0), &IdOperand::Col(1)),
+            Value::Bool(false)
+        ));
     }
 
     // ---- DIFFERENTIAL: fast path vs ground-truth exact semantics, every id pair --------------
@@ -20285,7 +23142,11 @@ mod idfast_unit {
                 if negated {
                     want = want.map(|x| !x);
                 }
-                assert_eq!(fast[i], want, "row {} ids ({},{}) negated={}", i, row[0], row[1], negated);
+                assert_eq!(
+                    fast[i], want,
+                    "row {} ids ({},{}) negated={}",
+                    i, row[0], row[1], negated
+                );
             }
         }
     }
@@ -20403,7 +23264,11 @@ mod idfast_unit {
     fn predrange_credits_iri_only_object_declines_literal() {
         let g = predrange_graph();
         // `?a` bound ONLY as the object of a constant literal-free predicate `creator`.
-        let inner = bgp(vec![tp_svo("doc", "http://ex/creator", TermPattern::Variable(var("a")))]);
+        let inner = bgp(vec![tp_svo(
+            "doc",
+            "http://ex/creator",
+            TermPattern::Variable(var("a")),
+        )]);
         let b = Bindings::unsorted(vec![var("doc"), var("a")], vec![]);
         // `?a` is column 1; the snapshot-aware analysis must prove it non-literal.
         assert!(
@@ -20411,14 +23276,22 @@ mod idfast_unit {
             "an object of a literal-free constant predicate must be credited non-literal"
         );
         // `?t` bound as object of `title` (has a literal object) must DECLINE.
-        let inner_t = bgp(vec![tp_svo("doc", "http://ex/title", TermPattern::Variable(var("t")))]);
+        let inner_t = bgp(vec![tp_svo(
+            "doc",
+            "http://ex/title",
+            TermPattern::Variable(var("t")),
+        )]);
         let bt = Bindings::unsorted(vec![var("doc"), var("t")], vec![]);
         assert!(
             !col_is_nonliteral(&g, &inner_t, &bt, bt.col(&var("t")).unwrap()),
             "an object of a literal-having predicate must NOT be credited"
         );
         // `?y` bound as object of `year` (inline-integer literal object) must DECLINE.
-        let inner_y = bgp(vec![tp_svo("doc", "http://ex/year", TermPattern::Variable(var("y")))]);
+        let inner_y = bgp(vec![tp_svo(
+            "doc",
+            "http://ex/year",
+            TermPattern::Variable(var("y")),
+        )]);
         let by = Bindings::unsorted(vec![var("doc"), var("y")], vec![]);
         assert!(
             !col_is_nonliteral(&g, &inner_y, &by, by.col(&var("y")).unwrap()),
@@ -20513,10 +23386,17 @@ mod idfast_unit {
         // UPDATE inserting a literal creator object publishes a new snapshot in which the same
         // analysis DECLINES. Proves the credit never outlives the snapshot it was computed against.
         let mut g = predrange_graph();
-        let inner = bgp(vec![tp_svo("doc", "http://ex/creator", TermPattern::Variable(var("a")))]);
+        let inner = bgp(vec![tp_svo(
+            "doc",
+            "http://ex/creator",
+            TermPattern::Variable(var("a")),
+        )]);
         let b = Bindings::unsorted(vec![var("doc"), var("a")], vec![]);
         let a_col = b.col(&var("a")).unwrap();
-        assert!(col_is_nonliteral(&g, &inner, &b, a_col), "literal-free before update -> credited");
+        assert!(
+            col_is_nonliteral(&g, &inner, &b, a_col),
+            "literal-free before update -> credited"
+        );
         // UPDATE: a literal object now exists for `creator`.
         g.apply_delta(
             &[[
@@ -20660,7 +23540,9 @@ mod order_bindings_worker_reinstall {
     fn par_dataset_with_hidden_graph(n: usize) -> sparq_core::Graph {
         let mut nq = String::with_capacity(n * 60 + 80);
         for i in 0..n {
-            nq.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+            nq.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"
+            ));
         }
         nq.push_str("<http://ex/hs> <http://ex/hp> <http://ex/ho> <http://ex/hidden> .\n");
         sparq_core::Graph::load_dataset(&nq, "nquads").unwrap()
@@ -20702,17 +23584,19 @@ mod order_bindings_worker_reinstall {
                      ORDER BY IF(EXISTS { GRAPH <http://ex/hidden> { ?a ?b ?c } }, \
                                  \"constant_key\", STR(?s))";
 
-        let result = crate::query_view_with_budget(
-            &view,
-            query,
-            &crate::QueryBudget::unlimited(),
-        )
-        .unwrap();
-        assert_eq!(result.len(), n, "all {n} default-graph rows must survive the query");
+        let result =
+            crate::query_view_with_budget(&view, query, &crate::QueryBudget::unlimited()).unwrap();
+        assert_eq!(
+            result.len(),
+            n,
+            "all {n} default-graph rows must survive the query"
+        );
 
         // Collect the subject IRIs in the ORDER BY result.
         // `term.to_string()` yields `<http://ex/sN>` (N3 notation, with angle brackets).
-        let subjects: Vec<String> = result.rows.iter()
+        let subjects: Vec<String> = result
+            .rows
+            .iter()
             .map(|row| row[0].clone().unwrap().to_string())
             .collect();
 
@@ -20727,7 +23611,11 @@ mod order_bindings_worker_reinstall {
         // (since `>` at the end of the shorter IRI is a higher byte than `0`).  Instead,
         // sort by the bare IRI value (strip angle brackets) to match STR(?s) collation.
         let iri_key = |s: &str| -> String {
-            s.strip_prefix('<').unwrap_or(s).strip_suffix('>').unwrap_or(s).to_owned()
+            s.strip_prefix('<')
+                .unwrap_or(s)
+                .strip_suffix('>')
+                .unwrap_or(s)
+                .to_owned()
         };
         let mut expected = subjects.clone();
         expected.sort_by_key(|s| iri_key(s));
@@ -20758,7 +23646,9 @@ mod order_bindings_worker_reinstall {
         let n = PAR_THRESHOLD + 100;
         let mut nq = String::with_capacity(n * 60);
         for i in 0..n {
-            nq.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+            nq.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"
+            ));
         }
         let g = sparq_core::Graph::load_dataset(&nq, "nquads").unwrap();
 
@@ -20779,7 +23669,7 @@ mod order_bindings_worker_reinstall {
         )
         .expect(
             "ORDER BY custom-function over >= PAR_THRESHOLD rows must not fail \
-             (worker FunctionRegistry reinstall missing?)"
+             (worker FunctionRegistry reinstall missing?)",
         );
 
         assert_eq!(

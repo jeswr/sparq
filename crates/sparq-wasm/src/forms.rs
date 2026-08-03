@@ -195,12 +195,10 @@ mod tests {
     /// The FormDescription JSON serialised straight from the sparq-forms API —
     /// the bridge must return exactly this document, never a reconstruction.
     fn direct_description(mode: sparq_forms::Mode, shape: Option<&str>) -> String {
-        let data =
-            sparq_core::Graph::load_dataset(DATA, "turtle").expect("data fixture parses");
+        let data = sparq_core::Graph::load_dataset(DATA, "turtle").expect("data fixture parses");
         let shapes =
             sparq_core::Graph::load_dataset(SHAPES, "turtle").expect("shapes fixture parses");
-        let focus =
-            oxrdf::Term::from(oxrdf::NamedNode::new_unchecked("http://example.org/alice"));
+        let focus = oxrdf::Term::from(oxrdf::NamedNode::new_unchecked("http://example.org/alice"));
         let options = sparq_forms::FormOptions {
             mode,
             shape: shape.map(|iri| oxrdf::Term::from(oxrdf::NamedNode::new_unchecked(iri))),
@@ -219,14 +217,9 @@ mod tests {
             ("view", sparq_forms::Mode::View),
         ] {
             let options = format!("{{\"mode\":\"{}\"}}", mode_text);
-            let actual = derive_form_json(
-                DATA,
-                SHAPES,
-                "http://example.org/alice",
-                "turtle",
-                &options,
-            )
-            .expect("applicable shape derives");
+            let actual =
+                derive_form_json(DATA, SHAPES, "http://example.org/alice", "turtle", &options)
+                    .expect("applicable shape derives");
             assert_eq!(actual, direct_description(mode, None));
 
             let json: serde_json::Value =
@@ -247,14 +240,8 @@ mod tests {
     fn explicit_shape_request_matches_direct_serialization() {
         const AUDIT_SHAPE: &str = "http://example.org/AuditShape";
         let options = format!("{{\"mode\":\"edit\",\"shape\":\"{}\"}}", AUDIT_SHAPE);
-        let actual = derive_form_json(
-            DATA,
-            SHAPES,
-            "http://example.org/alice",
-            "turtle",
-            &options,
-        )
-        .expect("explicit shape derives");
+        let actual = derive_form_json(DATA, SHAPES, "http://example.org/alice", "turtle", &options)
+            .expect("explicit shape derives");
         assert_eq!(
             actual,
             direct_description(sparq_forms::Mode::Edit, Some(AUDIT_SHAPE))
@@ -295,34 +282,46 @@ mod tests {
         assert!(derive(DATA, SHAPES, "http://example.org/alice", "[]")
             .unwrap_err()
             .contains("JSON object"));
+        assert!(derive(
+            DATA,
+            SHAPES,
+            "http://example.org/alice",
+            "{\"mode\":\"delete\"}"
+        )
+        .unwrap_err()
+        .contains("Unsupported form mode"));
         assert!(
-            derive(DATA, SHAPES, "http://example.org/alice", "{\"mode\":\"delete\"}")
+            derive(DATA, SHAPES, "http://example.org/alice", "{\"mode\":3}")
                 .unwrap_err()
                 .contains("Unsupported form mode")
         );
-        assert!(derive(DATA, SHAPES, "http://example.org/alice", "{\"mode\":3}")
-            .unwrap_err()
-            .contains("Unsupported form mode"));
         assert!(
             derive(DATA, SHAPES, "http://example.org/alice", "{\"shape\":3}")
                 .unwrap_err()
                 .contains("shape option")
         );
-        assert!(
-            derive(DATA, SHAPES, "http://example.org/alice", "{\"shape\":\"not an iri\"}")
-                .unwrap_err()
-                .contains("Invalid shape IRI")
-        );
+        assert!(derive(
+            DATA,
+            SHAPES,
+            "http://example.org/alice",
+            "{\"shape\":\"not an iri\"}"
+        )
+        .unwrap_err()
+        .contains("Invalid shape IRI"));
         // Bad focus node / unparseable graphs.
         assert!(derive(DATA, SHAPES, "not an iri", "{}")
             .unwrap_err()
             .contains("Invalid focus IRI"));
-        assert!(derive("@prefix broken", SHAPES, "http://example.org/alice", "{}")
-            .unwrap_err()
-            .contains("data graph"));
-        assert!(derive(DATA, "@prefix broken", "http://example.org/alice", "{}")
-            .unwrap_err()
-            .contains("shapes graph"));
+        assert!(
+            derive("@prefix broken", SHAPES, "http://example.org/alice", "{}")
+                .unwrap_err()
+                .contains("data graph")
+        );
+        assert!(
+            derive(DATA, "@prefix broken", "http://example.org/alice", "{}")
+                .unwrap_err()
+                .contains("shapes graph")
+        );
     }
 
     /// A `_:`-prefixed shape option parses as a blank node (the desktop bridge's
@@ -341,6 +340,9 @@ mod tests {
         let options = parse_options("{\"mode\":\"edit\"}").expect("bridge options parse");
         assert_eq!(options.mode, sparq_forms::Mode::Edit);
         assert!(options.shape.is_none());
-        assert_eq!(options.max_depth, sparq_forms::FormOptions::default().max_depth);
+        assert_eq!(
+            options.max_depth,
+            sparq_forms::FormOptions::default().max_depth
+        );
     }
 }
