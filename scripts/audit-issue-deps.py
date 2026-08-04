@@ -287,13 +287,33 @@ def removal_plan(have, have_mapped, want):
     return sorted(have_mapped - want), sorted(have - have_mapped)
 
 
+def nonneg_int(s):
+    """argparse type for --limit: a write cap must be an integer >= 0.
+
+    Guards the direction the slice fails in: `[: -1]` schedules every write BUT THE LAST, so a
+    negative limit would turn a safety canary into a near-full repository-scale mutation."""
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {s!r}")
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {v}); omit --limit for no cap")
+    return v
+
+
 def budget_split(to_add, removable, limit):
     """Apply ONE shared --limit budget across additions THEN removals, returning (adds, removes).
 
     `--limit` caps the writes performed in a run; a small limit is used as a safety canary, so it
-    must bound the DELETE requests too, not just the POST requests."""
-    if not limit:
+    must bound the DELETE requests too, not just the POST requests.
+
+    `None` is the SOLE unlimited sentinel: `--limit 0` means zero writes (a legitimate dry-run of
+    the apply path), not "no cap". A negative limit is rejected at the CLI boundary by
+    `nonneg_int` and clamped to zero here as well, so no caller can reach the `[: -1]` slice that
+    would schedule all-but-the-last write while claiming to cap them."""
+    if limit is None:
         return list(to_add), list(removable)
+    limit = max(0, limit)
     adds = list(to_add)[:limit]
     return adds, list(removable)[: max(0, limit - len(adds))]
 
@@ -397,6 +417,26 @@ def _self_test():
         ([("a", 1), ("a", 2)], []))
     chk("no limit means the whole plan runs",
         budget_split([("a", 1)], [("r", 1)], None), ([("a", 1)], [("r", 1)]))
+    # None is the SOLE unlimited sentinel; 0 must mean ZERO writes, not "falsy => no cap".
+    chk("--limit 0 performs no writes at all",
+        budget_split([("a", 1), ("a", 2)], [("r", 1)], 0), ([], []))
+    # A negative limit must never reach the `[: -1]` slice, which would schedule every write but
+    # the last -- the exact inversion of the cap the flag promises.
+    chk("a negative limit is clamped to zero, not an all-but-the-last slice",
+        budget_split([("a", 1), ("a", 2), ("a", 3)], [("r", 1), ("r", 2)], -1), ([], []))
+
+    # --- the CLI boundary itself rejects a negative cap (argparse accepts any int without this).
+    def _limit_rejects(s):
+        try:
+            nonneg_int(s)
+            return False
+        except argparse.ArgumentTypeError:
+            return True
+
+    chk("--limit -1 is rejected during argument parsing", _limit_rejects("-1"), True)
+    chk("--limit nonsense is rejected during argument parsing", _limit_rejects("all"), True)
+    chk("--limit 0 is accepted during argument parsing", nonneg_int("0"), 0)
+    chk("--limit 7 is accepted during argument parsing", nonneg_int("7"), 7)
     print("audit-issue-deps self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -415,8 +455,9 @@ def main():
                     help="also mirror edges whose blocker issue is already CLOSED (inert for "
                          "readiness — GitHub's issueDependenciesSummary.blockedBy excludes them)")
     ap.add_argument("--json-out", help="write the full audit record here")
-    ap.add_argument("--limit", type=int,
-                    help="cap the TOTAL writes this run, shared across additions and removals")
+    ap.add_argument("--limit", type=nonneg_int, metavar="N",
+                    help="cap the TOTAL writes this run (N >= 0), shared across additions and "
+                         "removals; 0 performs no writes, omit for no cap")
     args = ap.parse_args()
     if args.self_test:
         return _self_test()
