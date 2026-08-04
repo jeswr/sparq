@@ -241,11 +241,21 @@ def ensure_label() -> None:
 
 def select_open_issue(items: list[dict], lane: str) -> str | None:
     """PURE: the number of the first issue in `items` whose TITLE carries this filer's
-    marker AND this lane's key, else None. Split out from the gh call so the dedupe
-    predicate is exercised hermetically by --self-test."""
+    marker immediately followed by this lane's key AND the key's `:` delimiter, else
+    None. Split out from the gh call so the dedupe predicate is exercised hermetically
+    by --self-test.
+
+    [SONNET-4.6] review round 2 of #5860: the match is the STRUCTURED PREFIX
+    `"<MARKER> lane=<lane>:"`, not two independent substrings. Lane slugs are
+    prefix-dense (`fuzz-randomized` vs a future `fuzz-randomized-heavy`), so an
+    unanchored `f"lane={lane}" in title` would comment this lane's failure onto the
+    longer lane's open issue AND skip creating the issue for the real failure,
+    breaking one-rolling-issue-per-lane in both directions. Every title this filer
+    writes is `f"{MARKER} lane={lane}: ..."`, so requiring the delimiter pins the
+    key's right boundary and the space pins its left."""
     for item in items:
         title = item.get("title", "")
-        if MARKER in title and f"lane={lane}" in title:
+        if f"{MARKER} lane={lane}:" in title:
             return str(item["number"])
     return None
 
@@ -416,6 +426,21 @@ def self_test() -> int:
     # A title missing the key is not a match even when the marker is present.
     assert select_open_issue([{"number": 9, "title": f"{MARKER} no lane here"}],
                              "fuzz-randomized") is None
+    # [SONNET-4.6] review round 2 of #5860: KEY BOUNDARY. Lane slugs are prefix-dense,
+    # so a requested lane must NOT match a LONGER lane that merely starts with it —
+    # that would comment this lane's failure onto the other lane's issue AND skip
+    # filing the issue for the real failure. The `:` delimiter pins the right boundary.
+    prefixy = [{"number": 11,
+                "title": f"{MARKER} lane=fuzz-randomized-heavy: full-form CI run failed"}]
+    assert select_open_issue(prefixy, "fuzz-randomized") is None
+    assert select_open_issue(prefixy, "fuzz-randomized-heavy") == "11"   # exact still matches
+    # The same boundary protects the lane coverage-gate.py's alarm probe reads back
+    # (COVERAGE_ALARM_LANE there == this literal; a prefix hit would pause the ratchet
+    # on an alarm that belongs to a different lane).
+    assert select_open_issue(
+        [{"number": 12,
+          "title": f"{MARKER} lane=coverage-ratchet-main-legacy: full-form CI run failed"}],
+        "coverage-ratchet-main") is None
     # [OPUS-5] review of #5804: the LISTING must not silently truncate. "One open issue
     # per lane" does not bound the number of distinct lanes under the label, so the label
     # really can carry more than a page. The stub emulates BOTH gh shapes faithfully —

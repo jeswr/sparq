@@ -230,11 +230,21 @@ def ensure_label() -> None:
 
 def select_open_issue(items: list[dict], shard: str) -> str | None:
     """PURE: the number of the first issue in `items` whose TITLE carries this filer's
-    marker AND this shard's key, else None. Split out from the gh call so the dedupe
-    predicate is exercised hermetically by --self-test."""
+    marker immediately followed by this shard's key AND the key's `:` delimiter, else
+    None. Split out from the gh call so the dedupe predicate is exercised hermetically
+    by --self-test.
+
+    [SONNET-4.6] review round 2 of #5860: the match is the STRUCTURED PREFIX
+    `"<MARKER> shard=<shard>:"`, not two independent substrings. Shard names are
+    prefix-dense (`smoke` vs a future `smoke-extended`), so an unanchored
+    `f"shard={shard}" in title` would comment this shard's oracle failures onto the
+    longer shard's open issue AND skip creating the issue for the real failure,
+    breaking one-rolling-issue-per-shard in both directions. Every title this filer
+    writes is `f"{MARKER} shard={shard}: ..."`, so requiring the delimiter pins the
+    key's right boundary and the space pins its left."""
     for item in items:
         title = item.get("title", "")
-        if MARKER in title and f"shard={shard}" in title:
+        if f"{MARKER} shard={shard}:" in title:
             return str(item["number"])
     return None
 
@@ -410,6 +420,15 @@ def self_test() -> int:
     # A title missing the key is not a match even when the marker is present.
     assert select_open_issue([{"number": 9, "title": f"{MARKER} no shard here"}],
                              "nightly") is None
+    # [SONNET-4.6] review round 2 of #5860: KEY BOUNDARY. Shard names are prefix-dense
+    # (`smoke` vs a future `smoke-extended`), so a requested shard must NOT match a
+    # LONGER shard that merely starts with it — that would comment this shard's oracle
+    # failures onto the other shard's issue AND skip filing the issue for the real
+    # failure. The `:` delimiter pins the right boundary.
+    prefixy = [{"number": 11,
+                "title": f"{MARKER} shard=smoke-extended: 1 TLP/NoREC oracle failure(s)"}]
+    assert select_open_issue(prefixy, "smoke") is None
+    assert select_open_issue(prefixy, "smoke-extended") == "11"   # exact still matches
     # [OPUS-5] review of #5804: the LISTING must not silently truncate. "One open issue
     # per shard" does not bound the number of distinct shards under the label, so the label
     # really can carry more than a page. The stub emulates BOTH gh shapes faithfully —

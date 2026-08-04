@@ -536,9 +536,15 @@ def open_alarm_issue_state(lane=COVERAGE_ALARM_LANE, log=print, run=None):
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as e:
         log(f"  note: could not probe the post-merge coverage alarm ({e}) — fail-OPEN")
         return None
+    # [SONNET-4.6] review round 2 of #5860: match the STRUCTURED PREFIX
+    # `"<marker> lane=<lane>:"`, exactly as the filer's select_open_issue does — an
+    # unanchored `f"lane={lane}" in title` would read a DIFFERENT lane's open issue as
+    # this lane's alarm whenever one slug prefixes another, pausing the ratchet on a
+    # lane that is green (and, symmetrically, the two predicates must never disagree
+    # about which issue is "the alarm").
     for item in items:
         title = item.get("title", "")
-        if marker in title and f"lane={lane}" in title:
+        if f"{marker} lane={lane}:" in title:
             log(f"  OPEN post-merge coverage alarm: issue #{item['number']} — {title}")
             return True
     return False
@@ -1055,6 +1061,14 @@ def self_test():
         "the alarm probe must reach PAST the first page — a truncated listing reports "
         "'no alarm' and lets the ratchet advance while main is RED")
     assert open_alarm_issue_state(lane="never-filed", log=quiet, run=fake_gh) is False
+    # [SONNET-4.6] review round 2 of #5860: KEY BOUNDARY, matching the filer's own
+    # predicate. `lane=filler1` must NOT be satisfied by the open `lane=filler10` issue
+    # — a prefix hit would pause the ratchet on an alarm belonging to a DIFFERENT lane
+    # (and, on the other side of the same bug, could mask which lane is actually red).
+    # `filler2` is a real open row; the bare prefix `filler` is not, and must not be
+    # satisfied by `filler2`/`filler20`/… merely starting with it.
+    assert open_alarm_issue_state(lane="filler2", log=quiet, run=fake_gh) is True
+    assert open_alarm_issue_state(lane="filler", log=quiet, run=fake_gh) is False
     # A probe that cannot run at all must FAIL-OPEN (None), not assert "no alarm".
     def boom(argv, **kw):
         raise OSError("gh not installed")

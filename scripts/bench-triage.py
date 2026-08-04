@@ -399,12 +399,23 @@ def ensure_label(name: str, color: str, desc: str) -> None:
 
 
 def select_open_issue(items: list[dict], marker: str, key: str) -> str | None:
-    """PURE: the number of the first issue in `items` whose TITLE carries both `marker`
-    and `key`, else None. Split out from the gh call so the dedupe predicate is
-    exercised hermetically by --self-test."""
+    """PURE: the number of the first issue in `items` whose TITLE carries this
+    `marker` immediately followed by this `key` AND the key's `:` delimiter, else
+    None. Split out from the gh call so the dedupe predicate is exercised
+    hermetically by --self-test.
+
+    [SONNET-4.6] review round 2 of #5860: the match is the STRUCTURED PREFIX
+    `"<marker> <key>:"`, not two independent substrings. Both key spaces are
+    prefix-dense — suites and clusters are `+`-joined crate names — so an
+    unanchored `key in title` made `suite=sparq` match an open
+    `suite=sparq-engine` issue: the filer would comment the wrong suite's
+    regression onto an unrelated issue AND skip creating the issue for the real
+    failure, breaking one-rolling-issue-per-key in both directions. Every title
+    this filer writes is `f"{MARKER} {key}: ..."`, so requiring the delimiter
+    pins the key's right boundary and the space pins its left."""
     for item in items:
         title = item.get("title", "")
-        if marker in title and key in title:
+        if f"{marker} {key}:" in title:
             return str(item["number"])
     return None
 
@@ -1077,6 +1088,29 @@ def self_test() -> int:
     # hard-zone regression issue (they are different findings, and both lists are read
     # from the same shape of payload).
     assert select_open_issue(listed, REGRESSION_MARKER, suite_key) is None
+    # [SONNET-4.6] review round 2 of #5860: KEY BOUNDARY. Both key spaces are
+    # prefix-dense — suite_of() and the regression cluster join crate names that all
+    # begin `sparq-` — so a requested key must NOT match a LONGER key that merely
+    # starts with it. `suite=sparq` matching an open `suite=sparq-engine` issue would
+    # comment one suite's finding onto an unrelated issue AND skip filing the issue for
+    # the real failure: one-rolling-issue-per-key violated in both directions. The `:`
+    # delimiter is what pins the right boundary.
+    prefixy = [
+        {"number": 11,
+         "title": f"{FLAKE_MARKER} suite=sparq-engine: benchmarks in the soft zone"},
+        {"number": 12,
+         "title": f"{REGRESSION_MARKER} cluster=sparq-core+sparq-geo: nightly benchmark regression (P1)"},
+    ]
+    assert select_open_issue(prefixy, FLAKE_MARKER, "suite=sparq") is None
+    assert select_open_issue(prefixy, REGRESSION_MARKER, "cluster=sparq-core") is None
+    # ...while the EXACT keys still dedupe (the anchor must not break real matching).
+    assert select_open_issue(prefixy, FLAKE_MARKER, "suite=sparq-engine") == "11"
+    assert select_open_issue(prefixy, REGRESSION_MARKER,
+                             "cluster=sparq-core+sparq-geo") == "12"
+    # The marker must be ADJACENT to the key, not merely present somewhere in the title.
+    assert select_open_issue([{"number": 13,
+                               "title": f"{FLAKE_MARKER} suite=other: mentions {suite_key} in prose"}],
+                             FLAKE_MARKER, suite_key) is None
 
     # [OPUS-5] review of #5804: the LISTING must not silently truncate. "One open issue
     # per key" does not bound the number of KEYS under the label, so the label really can
