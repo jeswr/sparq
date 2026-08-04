@@ -508,6 +508,42 @@ class BeadsExportStaleTest(unittest.TestCase):
         _, newest = drift_scan.beads_export_records(self.root)
         self.assertEqual("2026-05-06T00:00:00Z", newest)
 
+    def test_a_malformed_stamp_cannot_outrank_a_valid_one(self):
+        # `zzzz` sorts ABOVE every ISO-8601 stamp lexicographically but parses to
+        # nothing, so a raw-string max() would elect it and then report the age
+        # as unavailable — suppressing the stale finding on an export that is
+        # provably months old. The valid stamp must win instead.
+        make_beads_export(
+            self.root,
+            [bead("sq-aaa1", "2026-06-01T00:00:00Z"), bead("sq-bbb2", "zzzz")],
+        )
+        _, newest = drift_scan.beads_export_records(self.root)
+        self.assertEqual("2026-06-01T00:00:00Z", newest)
+
+    def test_stale_still_fires_when_a_malformed_stamp_is_present(self):
+        # End to end, with NO missing references, so the freshness proxy is the
+        # only thing that can trip: one junk stamp must not poison the evidence.
+        make_beads_export(
+            self.root,
+            [bead("sq-aaa1", "2026-06-01T00:00:00Z"), bead("sq-bbb2", "zzzz")],
+        )
+        _write(self.root, "research/notes.md", "see sq-aaa1 and sq-bbb2")
+        self.assertEqual({KEY}, self._keys())
+
+    def test_newest_stamp_orders_by_instant_across_offsets(self):
+        # `2026-08-01T05:00:00+10:00` is 2026-07-31T19:00Z — EARLIER than
+        # `2026-08-01T00:00:00Z`, yet the LARGER of the two as raw text. Only
+        # instant-wise comparison picks the right record.
+        make_beads_export(
+            self.root,
+            [
+                bead("sq-aaa1", "2026-08-01T05:00:00+10:00"),
+                bead("sq-bbb2", "2026-08-01T00:00:00Z"),
+            ],
+        )
+        _, newest = drift_scan.beads_export_records(self.root)
+        self.assertEqual("2026-08-01T00:00:00Z", newest)
+
     def test_export_age_days(self):
         self.assertAlmostEqual(
             2.0, drift_scan.export_age_days("2026-08-01T00:00:00Z", NOW), places=3

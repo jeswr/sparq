@@ -579,16 +579,35 @@ def scan_conformance_split(root: Path) -> list[DriftItem]:
     return items
 
 
+def _parse_stamp(stamp: object) -> datetime | None:
+    """One record stamp as a timezone-aware datetime, or `None` if unusable.
+
+    Tolerant by design (this is an audit, not a validator): anything that is not
+    a parsable ISO-8601 string is simply not evidence. A naive stamp is read as
+    UTC so every candidate is directly comparable — bd writes Zulu, but a stamp
+    carrying a real offset must still order by INSTANT against it."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
 def beads_export_records(root: Path) -> tuple[set[str], str | None]:
     """Parse `.beads/issues.jsonl` -> (bead ids present, newest ISO-8601 stamp).
 
     Returns `(set(), None)` when the export is absent (fixture repos, a checkout
     without `.beads/`) so the scanner degrades to a no-op rather than a false
     positive. Malformed lines are skipped, not fatal: this is an audit, and a
-    half-parsable export is still evidence about the half that parsed."""
+    half-parsable export is still evidence about the half that parsed — and that
+    tolerance extends to the stamps themselves, which are compared as parsed
+    instants rather than raw strings (see the loop below)."""
     path = root / BEADS_EXPORT_REL
     ids: set[str] = set()
     newest: str | None = None
+    newest_at: datetime | None = None
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -608,10 +627,14 @@ def beads_export_records(root: Path) -> tuple[set[str], str | None]:
             ids.add(bead_id)
         for field in ("created_at", "updated_at", "closed_at"):
             stamp = rec.get(field)
-            # ISO-8601 Zulu stamps sort lexicographically, so max() is correct
-            # without parsing — and stays robust to an unexpected field shape.
-            if isinstance(stamp, str) and (newest is None or stamp > newest):
-                newest = stamp
+            # Compare PARSED instants, never the raw strings: a lexicographic
+            # max() lets one malformed field (`zzzz`) outrank every valid stamp
+            # and then fail to parse downstream, so a single junk value would
+            # silently destroy the whole age proxy. Unparsable candidates are
+            # skipped here instead; the raw winner is kept for reporting.
+            parsed = _parse_stamp(stamp)
+            if parsed is not None and (newest_at is None or parsed > newest_at):
+                newest_at, newest = parsed, stamp
     return ids, newest
 
 
@@ -645,14 +668,9 @@ def export_age_days(newest: str | None, now: datetime | None = None) -> float | 
 
     `None` when there is no parsable stamp. `now` is injectable so the tests are
     deterministic (the scanner otherwise reads the wall clock)."""
-    if not newest:
+    parsed = _parse_stamp(newest)
+    if parsed is None:
         return None
-    try:
-        parsed = datetime.fromisoformat(newest.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
