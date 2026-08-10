@@ -256,7 +256,7 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio", "server-auto", "server-graceful"] }
 http-body-util = "0.1"
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 url = "2"
 aws-lc-rs = "1"
 subtle = "2.6"
