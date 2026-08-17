@@ -24,7 +24,7 @@ RUN cargo auditable build --release --locked -p sparq-lws-core ${CARGO_FLAGS}
 
 # -------- runtime --------
 # Tag: gcr.io/distroless/cc-debian12:nonroot
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:adcd20c7b4c988b73cbfbddb26d2eee574571e6d7c9ffea29b3821e0690efb77
 
 LABEL org.opencontainers.image.title="sparq-lws-core" \
       org.opencontainers.image.description="Native experimental Solid/LDP server backed by the sparq RDF engine" \
