@@ -300,3 +300,34 @@ fn large_already_claimed_prefix_still_correct() {
         assert_eq!(actual, expected, "already_claimed={already_claimed}");
     }
 }
+
+#[test]
+fn fast_path_actually_engages_not_just_correct() {
+    // Every other test in this file checks CORRECTNESS, which the fallback
+    // path (eval_modified + order_bindings) also satisfies on its own -- none
+    // of them would fail if try_topk_orderby_indexed were deleted entirely.
+    // This test checks that the fast path actually FIRES for the shape it
+    // exists for, using the engine's own EXPLAIN ANALYZE instrumentation.
+    //
+    // The "Plan:" section is a STATIC description of the general planner's
+    // choice and always names a "BGP [...]" step regardless of which path
+    // actually runs -- checking for its absence would be a vacuous assertion
+    // (confirmed by first writing this test with exactly that check: it
+    // failed even with the fast path correctly firing, because the static
+    // plan text matched). The real signal is the "Execution trace" section,
+    // which only reports a "BGP [binary GOO] (... patterns ...) rows=N" line
+    // when the general BGP evaluator was ACTUALLY EXECUTED (it materializes
+    // and reports the touched row count) -- the indexed fast path bypasses
+    // that evaluator entirely, so this line is present iff the fallback ran.
+    let n = 800;
+    let graph = build_graph("X", &(0..n as i64).map(|i| (i, i)).collect::<Vec<_>>(), "");
+    let explained = sparq_engine::explain_analyze(
+        &graph,
+        &format!("{PFX}{CLAIM_QUERY}1"),
+    )
+    .unwrap();
+    assert!(
+        !explained.contains("BGP [binary GOO]"),
+        "expected the indexed fast path to fire (no BGP execution-trace line), got:\n{explained}"
+    );
+}
