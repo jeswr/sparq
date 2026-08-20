@@ -3333,6 +3333,17 @@ fn try_topk_orderby_indexed(
     // the resulting sorted slice per candidate removes that repeated cost.
     struct OtherPat<'g> {
         scan: sparq_core::store::Scan<'g>,
+        // Precomputed ONCE (not per candidate, not per binary-search
+        // comparison step): the subject id of every row in `scan`, in the
+        // SAME (subject-sorted) order. `partition_point` over this plain
+        // `&[Id]` does a trivial integer compare per step; searching `scan`
+        // directly would call `to_spo` (a permutation-order reconstruction)
+        // on EVERY comparison, i.e. ~log(m) reconstructions per candidate per
+        // pattern — measured as a real remaining cost for a long skip-prefix
+        // (many candidates probed and rejected in a row): reconstructing the
+        // full [S,P,O] triple just to read column 0 is wasted work when the
+        // search only ever needs that one column.
+        subject_ids: Vec<Id>,
         obj_var: Option<Variable>,
     }
     let mut other_pats: Vec<OtherPat> = Vec::with_capacity(patterns.len().saturating_sub(1));
@@ -3355,7 +3366,8 @@ fn try_topk_orderby_indexed(
             // decline rather than binary-search an unsorted range.
             return Ok(None);
         }
-        other_pats.push(OtherPat { scan: sub_scan, obj_var: pos_vars[2].clone() });
+        let subject_ids: Vec<Id> = sub_scan.rows.iter().map(|r| sub_scan.to_spo(r)[0]).collect();
+        other_pats.push(OtherPat { scan: sub_scan, subject_ids, obj_var: pos_vars[2].clone() });
     }
 
     // UPFRONT cost check, before touching a single candidate: each `other_pats`
@@ -3517,15 +3529,13 @@ fn try_topk_orderby_indexed(
             let mut fanout: Option<Vec<SmallVec<[Id; 8]>>> = None;
             let mut failed = false;
             for op in &other_pats {
-                // Binary-search the PRECOMPUTED subject-sorted range for this
-                // pattern (built once, above) instead of resolving a fresh
-                // scan per candidate — the `rows` slice is sorted by subject
-                // (canonical column 0), so the matching run for `hub_id` is
-                // contiguous and found in O(log n), with no repeated
-                // permutation/bound-selection overhead.
-                let op_rows: &[[Id; 3]] = op.scan.rows.as_ref();
-                let start = op_rows.partition_point(|r| op.scan.to_spo(r)[0] < hub_id);
-                let stop = start + op_rows[start..].partition_point(|r| op.scan.to_spo(r)[0] == hub_id);
+                // Binary-search the PRECOMPUTED, plain-`Id` subject list for
+                // this pattern (built once, above) — a trivial integer
+                // compare per step, no `to_spo` reconstruction during the
+                // search itself (that only happens below, per ACTUAL match,
+                // not per comparison step — see `subject_ids`'s doc comment).
+                let start = op.subject_ids.partition_point(|&id| id < hub_id);
+                let stop = start + op.subject_ids[start..].partition_point(|&id| id == hub_id);
                 if start == stop {
                     failed = true;
                     break;
@@ -3533,6 +3543,7 @@ fn try_topk_orderby_indexed(
                 let Some(_) = &op.obj_var else {
                     continue; // `obj_const` — existence-only, no column added
                 };
+                let op_rows: &[[Id; 3]] = op.scan.rows.as_ref();
                 let match_count = stop - start;
                 if let Some(rows_so_far) = fanout.as_mut() {
                     let mut next = Vec::with_capacity(rows_so_far.len() * match_count);
