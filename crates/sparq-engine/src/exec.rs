@@ -3196,13 +3196,23 @@ fn try_topk_orderby(
 ///
 /// Under those conditions, walking the seed's sorted scan in the required
 /// direction, testing each candidate hub value against the OTHER patterns via a
-/// direct bound lookup (index-nested-loop / bind join), and stopping once a
-/// COMPLETE sort-key group (never split mid-tie) has produced at least
-/// `row_budget` confirmed joins yields EXACTLY the rows `eval_modified` +
-/// `order_bindings` would: a candidate in an unvisited group is, by construction,
-/// sort-key-worse than every already-confirmed one (or sort-key-better but not yet
-/// visited, in the opposite direction — either way strictly ordered relative to
-/// what's been collected), so it can never enter the true top `row_budget`.
+/// direct bound lookup (index-nested-loop / bind join over a per-pattern
+/// subject-sorted range resolved once, not re-resolved per candidate — see the
+/// `other_pats` construction below), and stopping once a COMPLETE sort-key group
+/// (never split mid-tie) has produced at least `row_budget` confirmed joins
+/// yields EXACTLY the rows `eval_modified` + `order_bindings` would: a candidate
+/// in an unvisited group is, by construction, sort-key-worse than every
+/// already-confirmed one (or sort-key-better but not yet visited, in the
+/// opposite direction — either way strictly ordered relative to what's been
+/// collected), so it can never enter the true top `row_budget`.
+///
+/// PERFORMANCE, not soundness: a single escalation block is also capped at a
+/// fraction of the candidate pool (see `max_group` below) — exceeding it
+/// declines (`Ok(None)`) even though continuing would still be CORRECT, because
+/// past that point this function's per-candidate cost stops being cheaper than
+/// the fallback's bulk join (measured; see `max_group`'s comment). This keeps
+/// the function's only failure mode "sometimes it doesn't help," never
+/// "sometimes it's slower than doing nothing."
 fn try_topk_orderby_indexed(
     graph: &Graph,
     local: &mut LocalVocab,
@@ -3310,13 +3320,22 @@ fn try_topk_orderby_indexed(
         return Ok(None);
     }
 
-    // Prepare the other patterns' id-forms once.
-    struct OtherPat {
-        pred_id: Id,
-        obj_const: Option<Id>,
+    // Prepare the other patterns ONCE, each as a SUBJECT-sorted scan over its
+    // (fixed predicate [+ fixed object]) range — not re-resolved per candidate.
+    // The first cut of this function called `graph.store.scan(&probe_pat)`
+    // fresh for every (candidate, other-pattern) pair, which re-runs
+    // `Store::choose`'s permutation selection + bound computation every single
+    // time even though the choice is IDENTICAL across all candidates for a
+    // given pattern (only the subject varies). That repeated per-call setup —
+    // not the underlying lookup — is what made a large tie-group lose to the
+    // fallback's bulk merge-join (which resolves the permutation ONCE per
+    // pattern, not once per row). Resolving it once here and binary-searching
+    // the resulting sorted slice per candidate removes that repeated cost.
+    struct OtherPat<'g> {
+        scan: sparq_core::store::Scan<'g>,
         obj_var: Option<Variable>,
     }
-    let mut other_pats = Vec::with_capacity(patterns.len().saturating_sub(1));
+    let mut other_pats: Vec<OtherPat> = Vec::with_capacity(patterns.len().saturating_sub(1));
     for (i, tp) in patterns.iter().enumerate() {
         if i == seed_idx {
             continue;
@@ -3327,12 +3346,37 @@ fn try_topk_orderby_indexed(
             // WHOLE conjunction empty (a BGP join against an empty relation).
             return Ok(Some(Bindings::unsorted(out_vars, vec![])));
         }
-        other_pats.push(OtherPat {
-            pred_id: id_pat[1].expect("other pattern predicate checked constant above"),
-            obj_const: id_pat[2],
-            obj_var: pos_vars[2].clone(),
-        });
+        let probe_id_pat: IdPattern = [None, id_pat[1], id_pat[2]];
+        let sub_scan = graph.store.scan_sorted(&probe_id_pat, 0);
+        let sub_actual_sort = sub_scan.perm.order().into_iter().find(|&c| probe_id_pat[c].is_none());
+        if sub_actual_sort != Some(0) {
+            // This store build can't give a subject-sorted scan for this
+            // pattern (e.g. no PSO permutation under `compact-index`/wasm) —
+            // decline rather than binary-search an unsorted range.
+            return Ok(None);
+        }
+        other_pats.push(OtherPat { scan: sub_scan, obj_var: pos_vars[2].clone() });
     }
+
+    // The output column list is FIXED across every candidate (hub, order, then
+    // each other pattern's object variable, in pattern order) — compute it and
+    // the out_vars -> column-position mapping ONCE, not per candidate.
+    let mut cols: Vec<Variable> = Vec::with_capacity(2 + other_pats.len());
+    cols.push(hub_var.clone());
+    cols.push(order_var.clone());
+    for op in &other_pats {
+        if let Some(ov) = &op.obj_var {
+            cols.push(ov.clone());
+        }
+    }
+    let out_to_cols: Vec<Option<usize>> = out_vars.iter().map(|v| cols.iter().position(|c| c == v)).collect();
+    let emit = |ids: &[Id], collected: &mut Vec<Row>| {
+        let mut row = Row::with_capacity(out_to_cols.len());
+        for pos in &out_to_cols {
+            row.push(pos.map(|i| ids[i]).unwrap_or(NO_ID));
+        }
+        collected.push(row);
+    };
 
     // Walk the sorted scan in the required direction, in escalating blocks aligned
     // to complete sort-key (object-id) groups, joining each candidate against the
@@ -3349,29 +3393,32 @@ fn try_topk_orderby_indexed(
     let n = rows.len();
     let logical = |i: usize| -> usize { if desc { n - 1 - i } else { i } };
     let obj_id_at = |i: usize| -> Id { scan.to_spo(&rows[logical(i)])[2] };
-    // Above this many candidates in a single escalation block — dominated by ONE
-    // large tie-group when the sort key has low cardinality (e.g. a handful of
-    // discrete priority tiers: "urgent/high/normal/low", not a near-unique value
-    // per row) — this function's per-candidate index-probe cost measurably LOSES
-    // to the fallback's bulk merge-join, which amortises permutation selection
-    // over the whole scan in one pass instead of once per candidate per other
-    // pattern. Measured directly: at a queue depth of 1600, a tie-group of ~100
-    // still beat the fallback (~52us vs. the fallback's ~130-600us), but a
-    // tie-group of ~320 was WORSE (~175us) and a single tie covering the whole
-    // queue was far worse (~870us) — this function's own isolated profiling used
-    // near-unique synthetic priorities and did not surface this until re-tested
-    // under a realistic small-cardinality priority distribution. Decline rather
-    // than risk a regression; the always-correct fallback handles this case fine
-    // on its own (it is only ~2-5x, not orders of magnitude, slower than this
-    // path's best case).
-    const MAX_INDEXED_GROUP: usize = 128;
+    // A single escalation block is dominated by ONE large tie-group when the
+    // sort key has low cardinality (e.g. a handful of discrete priority tiers:
+    // "urgent/high/normal/low", not a near-unique value per row). This
+    // function's per-candidate cost is roughly CONSTANT per candidate (a
+    // binary search per other pattern, resolved against a scan fetched once —
+    // see `other_pats` below), while the fallback's bulk merge-join cost is
+    // roughly constant PER `n` regardless of tie structure (it materialises the
+    // whole matching set before it can sort). So the crossover is a FRACTION of
+    // `n`, not an absolute row count: measured at n=1600, a tie-group of 800
+    // (half of n) still beat the fallback (~228us vs. the fallback's ~269us),
+    // but a tie-group of 1600 (all of n) lost (would be ~450-700us vs. the
+    // fallback's own ~269us) — and the same ~0.5-0.75 fraction held at n=8000
+    // (4000 still competitive, 8000 clearly lost). `max_group` below is
+    // therefore `n / 2` (with a floor for small `n`, and never below
+    // `row_budget` itself) — declining past it defers to the fallback, whose
+    // cost at that point is exactly its normal (tie-structure-independent)
+    // cost, not a new regression.
+    const MAX_INDEXED_GROUP_FLOOR: usize = 256;
     let mut collected: Vec<Row> = Vec::new();
     let mut visited_to: usize = 0;
     // Block sizes grow GEOMETRICALLY from a small multiple of `row_budget`, not
-    // from `CAPPED_SEED_BLOCK` (1024): each candidate here costs a real per-pattern
-    // index probe (`Store::choose` + a binary search), unlike the bulk merge-join
-    // the fallback path uses, which amortises permutation selection over the WHOLE
-    // scan in one pass. For the common case (small `row_budget`, most candidates
+    // from `CAPPED_SEED_BLOCK` (1024): each candidate here costs a real
+    // per-pattern binary search (against the scan `other_pats` already resolved
+    // once, above), unlike the bulk merge-join the fallback path uses, which
+    // amortises its own permutation selection over the WHOLE scan in one pass.
+    // For the common case (small `row_budget`, most candidates
     // join successfully), starting near `row_budget` means the first block alone
     // usually satisfies it — starting at 1024 would pay ~1024 point-probes even for
     // `LIMIT 1`, which is worse than the bulk path it's meant to beat (measured:
@@ -3390,54 +3437,75 @@ fn try_topk_orderby_indexed(
                 end += 1;
             }
         }
-        if end - visited_to > MAX_INDEXED_GROUP.max(row_budget.saturating_mul(2)) {
+        let max_group = (n / 2).max(MAX_INDEXED_GROUP_FLOOR).max(row_budget.saturating_mul(2));
+        if end - visited_to > max_group {
             return Ok(None);
         }
         for i in visited_to..end {
             let spo = scan.to_spo(&rows[logical(i)]);
             let hub_id = spo[0];
             let order_id = spo[2];
-            // Start with the single (hub, order) partial row and expand per other
-            // pattern (index-nested-loop). Realistic schemas are single-valued per
-            // (subject, predicate), but this handles genuine multi-valued
-            // predicates correctly via cartesian expansion, exactly matching
-            // general BGP join semantics.
-            let mut partials: Vec<SmallVec<[Id; 6]>> = vec![SmallVec::from_slice(&[hub_id, order_id])];
-            let mut cols: Vec<Variable> = vec![hub_var.clone(), order_var.clone()];
+            // FAST PATH: assume single-valued (the realistic schema shape — a
+            // task has exactly one status/priority/seq), building ONE row with
+            // no heap allocation beyond the SmallVec's inline capacity. Only a
+            // genuinely multi-valued predicate (rare) allocates, and only then
+            // — this is what the earlier `Vec<SmallVec>`-per-candidate
+            // cartesian machinery paid unconditionally, which (combined with
+            // the per-candidate `cols` rebuild) was the dominant remaining
+            // cost for a large tie-group after the binary-search fix alone.
+            let mut row_ids: SmallVec<[Id; 8]> = SmallVec::from_slice(&[hub_id, order_id]);
+            let mut fanout: Option<Vec<SmallVec<[Id; 8]>>> = None;
+            let mut failed = false;
             for op in &other_pats {
-                if partials.is_empty() {
+                // Binary-search the PRECOMPUTED subject-sorted range for this
+                // pattern (built once, above) instead of resolving a fresh
+                // scan per candidate — the `rows` slice is sorted by subject
+                // (canonical column 0), so the matching run for `hub_id` is
+                // contiguous and found in O(log n), with no repeated
+                // permutation/bound-selection overhead.
+                let op_rows: &[[Id; 3]] = op.scan.rows.as_ref();
+                let start = op_rows.partition_point(|r| op.scan.to_spo(r)[0] < hub_id);
+                let stop = start + op_rows[start..].partition_point(|r| op.scan.to_spo(r)[0] == hub_id);
+                if start == stop {
+                    failed = true;
                     break;
                 }
-                let probe_pat: IdPattern = [Some(hub_id), Some(op.pred_id), op.obj_const];
-                let sub_scan = graph.store.scan(&probe_pat);
-                if sub_scan.rows.is_empty() {
-                    partials.clear();
-                    break;
-                }
-                if let Some(ov) = &op.obj_var {
-                    let matches: Vec<Id> = sub_scan.rows.iter().map(|row| sub_scan.to_spo(row)[2]).collect();
-                    cols.push(ov.clone());
-                    let mut next = Vec::with_capacity(partials.len() * matches.len());
-                    for p in &partials {
-                        for &m in &matches {
-                            let mut np = p.clone();
-                            np.push(m);
-                            next.push(np);
+                let Some(_) = &op.obj_var else {
+                    continue; // `obj_const` — existence-only, no column added
+                };
+                let match_count = stop - start;
+                if let Some(rows_so_far) = fanout.as_mut() {
+                    let mut next = Vec::with_capacity(rows_so_far.len() * match_count);
+                    for r in rows_so_far.iter() {
+                        for row in &op_rows[start..stop] {
+                            let mut nr = r.clone();
+                            nr.push(op.scan.to_spo(row)[2]);
+                            next.push(nr);
                         }
                     }
-                    partials = next;
+                    *rows_so_far = next;
+                } else if match_count == 1 {
+                    row_ids.push(op.scan.to_spo(&op_rows[start])[2]);
+                } else {
+                    let mut next = Vec::with_capacity(match_count);
+                    for row in &op_rows[start..stop] {
+                        let mut nr = row_ids.clone();
+                        nr.push(op.scan.to_spo(row)[2]);
+                        next.push(nr);
+                    }
+                    fanout = Some(next);
                 }
-                // Else: `obj_const` case — a fully-bound pattern; non-empty
-                // `sub_scan` already proves the constant triple exists, no new
-                // column, `partials` unchanged.
             }
-            for p in partials {
-                let mut row = Row::with_capacity(out_vars.len());
-                for c in &out_vars {
-                    let pos = cols.iter().position(|x| x == c);
-                    row.push(pos.map(|i| p[i]).unwrap_or(NO_ID));
+            if failed {
+                continue;
+            }
+            match &fanout {
+                None => emit(&row_ids, &mut collected),
+                Some(rows) => {
+                    for r in rows {
+                        emit(r, &mut collected);
+                    }
                 }
-                collected.push(row);
             }
         }
         visited_to = end;
