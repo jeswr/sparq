@@ -202,6 +202,21 @@ fn non_inline_priority_values_still_correct() {
 }
 
 #[test]
+fn large_tie_group_still_correct() {
+    // Low priority cardinality (a handful of tiers over many tasks) forces a
+    // large tie-group — the MAX_INDEXED_GROUP cap should decline the fast path
+    // here and defer to the fallback. This test only asserts correctness (the
+    // regression this cap fixes was a PERFORMANCE regression, not a correctness
+    // one — verified separately via profiling, not asserted here to avoid a
+    // flaky timing-based test).
+    for tiers in [1usize, 2, 5, 16] {
+        let n = 600;
+        let tasks: Vec<(i64, i64)> = (0..n).map(|i| (i as i64, (i as i64) % tiers as i64)).collect();
+        check(&tasks, &[1, 2, 10, 100, n as usize]);
+    }
+}
+
+#[test]
 fn randomized_sweep() {
     // A cheap xorshift so this test has no extra dependency and is fully
     // deterministic (fixed seed) across runs, while still covering a wide

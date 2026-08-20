@@ -3349,6 +3349,22 @@ fn try_topk_orderby_indexed(
     let n = rows.len();
     let logical = |i: usize| -> usize { if desc { n - 1 - i } else { i } };
     let obj_id_at = |i: usize| -> Id { scan.to_spo(&rows[logical(i)])[2] };
+    // Above this many candidates in a single escalation block — dominated by ONE
+    // large tie-group when the sort key has low cardinality (e.g. a handful of
+    // discrete priority tiers: "urgent/high/normal/low", not a near-unique value
+    // per row) — this function's per-candidate index-probe cost measurably LOSES
+    // to the fallback's bulk merge-join, which amortises permutation selection
+    // over the whole scan in one pass instead of once per candidate per other
+    // pattern. Measured directly: at a queue depth of 1600, a tie-group of ~100
+    // still beat the fallback (~52us vs. the fallback's ~130-600us), but a
+    // tie-group of ~320 was WORSE (~175us) and a single tie covering the whole
+    // queue was far worse (~870us) — this function's own isolated profiling used
+    // near-unique synthetic priorities and did not surface this until re-tested
+    // under a realistic small-cardinality priority distribution. Decline rather
+    // than risk a regression; the always-correct fallback handles this case fine
+    // on its own (it is only ~2-5x, not orders of magnitude, slower than this
+    // path's best case).
+    const MAX_INDEXED_GROUP: usize = 128;
     let mut collected: Vec<Row> = Vec::new();
     let mut visited_to: usize = 0;
     // Block sizes grow GEOMETRICALLY from a small multiple of `row_budget`, not
@@ -3373,6 +3389,9 @@ fn try_topk_orderby_indexed(
             while end < n && obj_id_at(end) == boundary_obj {
                 end += 1;
             }
+        }
+        if end - visited_to > MAX_INDEXED_GROUP.max(row_budget.saturating_mul(2)) {
+            return Ok(None);
         }
         for i in visited_to..end {
             let spo = scan.to_spo(&rows[logical(i)]);
