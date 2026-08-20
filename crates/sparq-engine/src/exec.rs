@@ -3131,6 +3131,17 @@ fn try_topk_orderby(
             try_topk_orderby(graph, local, red_inner, row_budget)
         }
         GraphPattern::OrderBy { inner: ord_inner, expression } => {
+            // [SONNET-5] (sq-artifact-keeper-topk) Try the index-ordered seed path
+            // first: for the narrow "star BGP, ORDER BY a variable bound by exactly
+            // one pattern's object" shape, it walks a value-sorted permutation scan
+            // directly instead of materialising every matching row — see
+            // `try_topk_orderby_indexed`'s doc comment for the soundness argument.
+            // Declines (`Ok(None)`) for any shape/datatype it can't prove safe, in
+            // which case the existing materialize-then-select path below runs
+            // unchanged.
+            if let Some(b) = try_topk_orderby_indexed(graph, local, ord_inner, expression, row_budget)? {
+                return Ok(Some(b));
+            }
             let mut b = eval_modified(graph, local, ord_inner)?;
             // Use the top-k path only when the budget is strictly less than n;
             // otherwise the heap adds overhead with no benefit.
@@ -3142,6 +3153,285 @@ fn try_topk_orderby(
         // falls through to the regular eval_modified path.
         _ => Ok(None),
     }
+}
+
+/// [SONNET-5] (sq-artifact-keeper-topk) Attempts INDEX-ORDERED top-k evaluation for a
+/// `Slice{OrderBy{BGP}}` shape whose primary sort key is bound by exactly one triple
+/// pattern's OBJECT. `try_topk_orderby`'s existing bounded-heap path still calls
+/// `eval_modified` to fully evaluate (and materialise) the WHOLE matching candidate
+/// set before selecting the top `row_budget` rows — `O(n)` in the number of rows
+/// CURRENTLY matching the BGP's equality filters, not in `row_budget`. That is fine
+/// when some pattern is selective, but when every pattern matches nearly the same
+/// rows (e.g. a job-queue "claim the next pending task for peer X, ordered by
+/// priority" query, where `peer` + `status` don't shrink the candidate set at all),
+/// there is no cheaper seed for the cardinality-based planner to pick, and the cost
+/// scales with the size of the whole pending queue on every single claim — profiled
+/// and confirmed via `EXPLAIN ANALYZE` (the BGP operator reports touching every
+/// matching row) in the sparq/artifact-keeper migration's claim-queue throughput
+/// investigation.
+///
+/// SOUNDNESS. Only activates for a narrow, syntactically-verified "star" shape, and
+/// declines (`Ok(None)`) at the first sign of anything it cannot prove safe — the
+/// caller's `eval_modified`-then-select path is always correct, just `O(n)`; this
+/// function's only job is to be a provably-equivalent shortcut, never a new source
+/// of results:
+/// - `ord_inner` is a plain triple-pattern conjunction with NO residual FILTER and
+///   no blank nodes (kept out of scope for this first cut).
+/// - The FIRST order key is a bare `Variable` (secondary tie-break keys, if any,
+///   are resolved by re-using `order_bindings` over the small collected set below —
+///   not reimplemented here).
+/// - Exactly one pattern (the "seed") binds that variable as its OBJECT, with a
+///   CONSTANT predicate and a VARIABLE subject (the join "hub").
+/// - Every OTHER pattern has that same hub variable as its SUBJECT and a CONSTANT
+///   predicate (a star join around the hub); any object variable it introduces must
+///   not appear anywhere else in the BGP. Any other shape (the hub appearing
+///   elsewhere, a variable predicate, a reused object variable) declines.
+/// - Every object id on the seed's sorted scan is an INLINE small integer
+///   (`dict::is_inline`) — the only case where ascending dictionary-id order is
+///   proven to equal ascending SPARQL `value()` order (the same guard
+///   `scan_to_bindings`'s range-pruning already relies on for the same reason).
+///   Checked for the WHOLE scan up front, before any result is built, so a
+///   non-inline id never leaks a partially-computed (and potentially
+///   wrongly-ordered) answer.
+///
+/// Under those conditions, walking the seed's sorted scan in the required
+/// direction, testing each candidate hub value against the OTHER patterns via a
+/// direct bound lookup (index-nested-loop / bind join), and stopping once a
+/// COMPLETE sort-key group (never split mid-tie) has produced at least
+/// `row_budget` confirmed joins yields EXACTLY the rows `eval_modified` +
+/// `order_bindings` would: a candidate in an unvisited group is, by construction,
+/// sort-key-worse than every already-confirmed one (or sort-key-better but not yet
+/// visited, in the opposite direction — either way strictly ordered relative to
+/// what's been collected), so it can never enter the true top `row_budget`.
+fn try_topk_orderby_indexed(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    ord_inner: &GraphPattern,
+    expression: &[OrderExpression],
+    row_budget: usize,
+) -> Result<Option<Bindings>, String> {
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return Ok(None);
+    }
+    if view::default_is_empty() {
+        return Ok(None);
+    }
+    let Some((desc, order_var)) = expression.first().and_then(|oe| match oe {
+        OrderExpression::Asc(Expression::Variable(v)) => Some((false, v.clone())),
+        OrderExpression::Desc(Expression::Variable(v)) => Some((true, v.clone())),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    if !is_conjunctive(ord_inner) {
+        return Ok(None);
+    }
+    let mut patterns = Vec::new();
+    let mut filters = Vec::new();
+    flatten_conjunction(ord_inner, &mut patterns, &mut filters);
+    if !filters.is_empty() || patterns.is_empty() {
+        return Ok(None);
+    }
+    // Out of scope for this first cut: blank nodes are treated as synthetic
+    // variables by `prepare_pattern` (`bnode_var`) but not necessarily by
+    // `collect_vars`'s header-construction — decline rather than risk a header
+    // mismatch.
+    let has_blank_node = patterns.iter().any(|tp| {
+        matches!(tp.subject, TermPattern::BlankNode(_)) || matches!(tp.object, TermPattern::BlankNode(_))
+    });
+    if has_blank_node {
+        return Ok(None);
+    }
+
+    // Locate the ONE seed pattern binding `order_var` as its object with a
+    // constant predicate and a variable subject.
+    let mut seed_idx = None;
+    for (i, tp) in patterns.iter().enumerate() {
+        if !matches!(&tp.object, TermPattern::Variable(v) if *v == order_var) {
+            continue;
+        }
+        if !matches!(&tp.predicate, NamedNodePattern::NamedNode(_)) {
+            return Ok(None);
+        }
+        if !matches!(&tp.subject, TermPattern::Variable(_)) {
+            return Ok(None);
+        }
+        if seed_idx.is_some() {
+            return Ok(None); // order_var bound by more than one pattern: not this shape
+        }
+        seed_idx = Some(i);
+    }
+    let Some(seed_idx) = seed_idx else { return Ok(None) };
+    let hub_var = match &patterns[seed_idx].subject {
+        TermPattern::Variable(v) => v.clone(),
+        _ => unreachable!("checked above"),
+    };
+
+    // Every OTHER pattern must be `hub_var <constant predicate> (var|const)` — a
+    // star around the hub — and any variable it introduces must be fresh.
+    let mut other_vars: FxHashSet<Variable> = FxHashSet::default();
+    for (i, tp) in patterns.iter().enumerate() {
+        if i == seed_idx {
+            continue;
+        }
+        if !matches!(&tp.subject, TermPattern::Variable(v) if *v == hub_var) {
+            return Ok(None);
+        }
+        if !matches!(&tp.predicate, NamedNodePattern::NamedNode(_)) {
+            return Ok(None);
+        }
+        if let TermPattern::Variable(v) = &tp.object {
+            if *v == hub_var || *v == order_var || !other_vars.insert(v.clone()) {
+                return Ok(None);
+            }
+        }
+    }
+
+    let out_vars = collect_vars(&patterns);
+    if row_budget == 0 {
+        return Ok(Some(Bindings::unsorted(out_vars, vec![])));
+    }
+
+    // Resolve + scan the seed pattern sorted by its OBJECT (canonical column 2).
+    let (seed_id_pat, _seed_pos_vars, seed_unsat) = prepare_pattern(graph, &patterns[seed_idx])?;
+    if seed_unsat {
+        return Ok(Some(Bindings::unsorted(out_vars, vec![])));
+    }
+    let scan = graph.store.scan_sorted(&seed_id_pat, 2);
+    let actual_sort = scan.perm.order().into_iter().find(|&c| seed_id_pat[c].is_none());
+    if actual_sort != Some(2) {
+        return Ok(None); // this store build can't give us an object-sorted scan
+    }
+    let rows: &[[Id; 3]] = scan.rows.as_ref();
+    // Guard: EVERY object id on this scan must be an inline integer, or ascending
+    // id order is not proven to be ascending value order.
+    if !rows.iter().all(|r| dict::is_inline(scan.to_spo(r)[2])) {
+        return Ok(None);
+    }
+
+    // Prepare the other patterns' id-forms once.
+    struct OtherPat {
+        pred_id: Id,
+        obj_const: Option<Id>,
+        obj_var: Option<Variable>,
+    }
+    let mut other_pats = Vec::with_capacity(patterns.len().saturating_sub(1));
+    for (i, tp) in patterns.iter().enumerate() {
+        if i == seed_idx {
+            continue;
+        }
+        let (id_pat, pos_vars, unsat) = prepare_pattern(graph, tp)?;
+        if unsat {
+            // A constant elsewhere in the BGP absent from the dictionary makes the
+            // WHOLE conjunction empty (a BGP join against an empty relation).
+            return Ok(Some(Bindings::unsorted(out_vars, vec![])));
+        }
+        other_pats.push(OtherPat {
+            pred_id: id_pat[1].expect("other pattern predicate checked constant above"),
+            obj_const: id_pat[2],
+            obj_var: pos_vars[2].clone(),
+        });
+    }
+
+    // Walk the sorted scan in the required direction, in escalating blocks aligned
+    // to complete sort-key (object-id) groups, joining each candidate against the
+    // other patterns via a direct bound lookup (index-nested-loop / bind join).
+    //
+    // `rows` is always ASCENDING by object id (the scan's actual sort order). For
+    // DESC, "best first" means walking it back-to-front. Rather than slicing from
+    // the front and reversing per block (which — subtly, and wrongly — visits the
+    // SMALLEST values first regardless of direction, since the slice bounds
+    // themselves were never flipped), define a single LOGICAL index `0..n` where
+    // position 0 is always the best candidate, via `logical`, and do all
+    // block/boundary arithmetic in that space. `logical` and `obj_id_at` are the
+    // only direction-aware code; everything below them is direction-agnostic.
+    let n = rows.len();
+    let logical = |i: usize| -> usize { if desc { n - 1 - i } else { i } };
+    let obj_id_at = |i: usize| -> Id { scan.to_spo(&rows[logical(i)])[2] };
+    let mut collected: Vec<Row> = Vec::new();
+    let mut visited_to: usize = 0;
+    // Block sizes grow GEOMETRICALLY from a small multiple of `row_budget`, not
+    // from `CAPPED_SEED_BLOCK` (1024): each candidate here costs a real per-pattern
+    // index probe (`Store::choose` + a binary search), unlike the bulk merge-join
+    // the fallback path uses, which amortises permutation selection over the WHOLE
+    // scan in one pass. For the common case (small `row_budget`, most candidates
+    // join successfully), starting near `row_budget` means the first block alone
+    // usually satisfies it — starting at 1024 would pay ~1024 point-probes even for
+    // `LIMIT 1`, which is worse than the bulk path it's meant to beat (measured:
+    // this was the actual cause of a regression at moderate `n`, not a win).
+    let mut block_target = row_budget.saturating_mul(4).max(16);
+    loop {
+        if visited_to >= n {
+            break;
+        }
+        let mut end = block_target.clamp(visited_to, n);
+        // Extend to the next object-id group boundary so a tie is never split
+        // across blocks (the early-stop check below requires a COMPLETE group).
+        if end < n && end > 0 {
+            let boundary_obj = obj_id_at(end - 1);
+            while end < n && obj_id_at(end) == boundary_obj {
+                end += 1;
+            }
+        }
+        for i in visited_to..end {
+            let spo = scan.to_spo(&rows[logical(i)]);
+            let hub_id = spo[0];
+            let order_id = spo[2];
+            // Start with the single (hub, order) partial row and expand per other
+            // pattern (index-nested-loop). Realistic schemas are single-valued per
+            // (subject, predicate), but this handles genuine multi-valued
+            // predicates correctly via cartesian expansion, exactly matching
+            // general BGP join semantics.
+            let mut partials: Vec<SmallVec<[Id; 6]>> = vec![SmallVec::from_slice(&[hub_id, order_id])];
+            let mut cols: Vec<Variable> = vec![hub_var.clone(), order_var.clone()];
+            for op in &other_pats {
+                if partials.is_empty() {
+                    break;
+                }
+                let probe_pat: IdPattern = [Some(hub_id), Some(op.pred_id), op.obj_const];
+                let sub_scan = graph.store.scan(&probe_pat);
+                if sub_scan.rows.is_empty() {
+                    partials.clear();
+                    break;
+                }
+                if let Some(ov) = &op.obj_var {
+                    let matches: Vec<Id> = sub_scan.rows.iter().map(|row| sub_scan.to_spo(row)[2]).collect();
+                    cols.push(ov.clone());
+                    let mut next = Vec::with_capacity(partials.len() * matches.len());
+                    for p in &partials {
+                        for &m in &matches {
+                            let mut np = p.clone();
+                            np.push(m);
+                            next.push(np);
+                        }
+                    }
+                    partials = next;
+                }
+                // Else: `obj_const` case — a fully-bound pattern; non-empty
+                // `sub_scan` already proves the constant triple exists, no new
+                // column, `partials` unchanged.
+            }
+            for p in partials {
+                let mut row = Row::with_capacity(out_vars.len());
+                for c in &out_vars {
+                    let pos = cols.iter().position(|x| x == c);
+                    row.push(pos.map(|i| p[i]).unwrap_or(NO_ID));
+                }
+                collected.push(row);
+            }
+        }
+        visited_to = end;
+        if collected.len() >= row_budget {
+            break; // a COMPLETE group boundary was just finished — safe to stop
+        }
+        block_target = block_target.saturating_mul(4).max(visited_to + 1);
+    }
+
+    let mut result = Bindings { vars: out_vars, rows: collected, sorted_by: None };
+    let use_topk = result.rows.len() > row_budget;
+    order_bindings(graph, local, &mut result, expression, if use_topk { Some(row_budget) } else { None })?;
+    Ok(Some(result))
 }
 
 /// [OPUS-4.8] (sq-7d3dj.30.4) Attempts the DISTINCT-projection loose skip-scan for the
