@@ -3358,6 +3358,31 @@ fn try_topk_orderby_indexed(
         other_pats.push(OtherPat { scan: sub_scan, obj_var: pos_vars[2].clone() });
     }
 
+    // UPFRONT cost check, before touching a single candidate: each `other_pats`
+    // scan's row count is the EXACT (not estimated) global cardinality of that
+    // pattern's own (predicate [+ object]) constraint. If any of them is
+    // already meaningfully smaller than the seed's own scan (`rows.len()`),
+    // the fallback's ordinary smallest-estimate seed selection will pick THAT
+    // pattern as ITS seed and materialize only that small set — beating this
+    // function's priority-ordered walk outright, with no reason to compete.
+    //
+    // This is exactly the realistic "claim strictly in priority order" shape:
+    // as such a queue drains, `ak:status="pending"` becomes highly selective
+    // while THIS function's seed (`ak:priority`, spanning the whole pool
+    // including now-claimed rows) does not shrink at all. Without this check,
+    // the only way to discover that is by actually walking past the
+    // ever-growing already-claimed prefix, probing (and rejecting) each one —
+    // real, wasted, unrecoverable cost. Measured directly: at n=1600 with
+    // 1000 of 1600 already claimed (600 truly pending), that reactive
+    // discovery cost ~237-272us total (wasted probes + the fallback anyway)
+    // vs. this upfront check's ~172-180us (matches a clean fallback-only
+    // cost, because it declines before doing ANY per-candidate work).
+    let seed_card = rows.len();
+    let min_other_card = other_pats.iter().map(|op| op.scan.rows.len()).min().unwrap_or(seed_card);
+    if min_other_card.saturating_mul(2) < seed_card {
+        return Ok(None);
+    }
+
     // The output column list is FIXED across every candidate (hub, order, then
     // each other pattern's object variable, in pattern order) — compute it and
     // the out_vars -> column-position mapping ONCE, not per candidate.
@@ -3423,6 +3448,42 @@ fn try_topk_orderby_indexed(
     // usually satisfies it — starting at 1024 would pay ~1024 point-probes even for
     // `LIMIT 1`, which is worse than the bulk path it's meant to beat (measured:
     // this was the actual cause of a regression at moderate `n`, not a win).
+    let max_group = (n / 2).max(MAX_INDEXED_GROUP_FLOOR).max(row_budget.saturating_mul(2));
+    // Cumulative count of candidates that failed an OTHER-pattern check, across
+    // ALL blocks in this call — distinct from `max_group`'s per-block width
+    // check. A workload that claims strictly in priority order (the realistic
+    // shape: highest priority first) leaves an ever-growing prefix of
+    // ALREADY-CLAIMED, high-priority-but-no-longer-`pending` rows at the head
+    // of the seed scan — each one still costs a real per-pattern probe before
+    // being rejected. That prefix is made of individually DISTINCT priority
+    // values, so it never forms one oversized tie-group `max_group` would
+    // catch; it spreads across many small geometric-growth blocks instead. The
+    // UPFRONT cost check above (comparing `other_pats`' exact cardinalities to
+    // the seed's) already declines the CLEAR case — an other-pattern that's
+    // globally selective enough for the fallback's own planner to prefer as
+    // ITS seed — before any candidate is even touched. This counter is a
+    // SAFETY NET for what that check can't see: the seed's global cardinality
+    // vs. an other-pattern's global cardinality doesn't capture every
+    // possible skip-prefix shape (e.g. a correlation between scan order and
+    // an other-pattern's matches that isn't visible from cardinality alone).
+    //
+    // The budget here must stay LARGE (matching `max_group`, not a small
+    // constant): every failed probe before declining is pure waste stacked ON
+    // TOP OF the fallback's full cost, but a SMALL budget bails on the far
+    // more common "moderate skip-prefix" case too — one that would have
+    // SUCCEEDED cheaply if allowed to keep going (a candidate ~100-800
+    // positions in costs only tens of us to walk to, vastly cheaper than a
+    // ~100-350us fallback). Measured directly: tightening this to a small
+    // constant (64) made the COMMON moderate case (already-claimed ~100-400)
+    // cost ~225-275us (forced into a fallback the upfront check didn't catch
+    // and completion would have avoided entirely) instead of the ~15-70us it
+    // gets by simply being allowed to finish. A large budget's own worst case
+    // (a skip-prefix near `n/2`, right at the edge) is bounded and modest by
+    // comparison (~30-50% over a clean fallback, not multiples of it) — an
+    // acceptable price for a case the upfront check should catch almost
+    // always in practice anyway.
+    let failure_budget = max_group;
+    let mut failed_count: usize = 0;
     let mut block_target = row_budget.saturating_mul(4).max(16);
     loop {
         if visited_to >= n {
@@ -3437,7 +3498,6 @@ fn try_topk_orderby_indexed(
                 end += 1;
             }
         }
-        let max_group = (n / 2).max(MAX_INDEXED_GROUP_FLOOR).max(row_budget.saturating_mul(2));
         if end - visited_to > max_group {
             return Ok(None);
         }
@@ -3497,6 +3557,10 @@ fn try_topk_orderby_indexed(
                 }
             }
             if failed {
+                failed_count += 1;
+                if failed_count > failure_budget {
+                    return Ok(None);
+                }
                 continue;
             }
             match &fanout {

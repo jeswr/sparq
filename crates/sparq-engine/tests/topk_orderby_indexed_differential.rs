@@ -276,3 +276,27 @@ fn extra_pattern_beyond_star_shape_still_correct() {
         panic!("expected a literal region");
     }
 }
+
+#[test]
+fn large_already_claimed_prefix_still_correct() {
+    // A queue drained strictly in priority order leaves a large CONTIGUOUS
+    // prefix of already-claimed (status != "pending") tasks at the head of
+    // the priority-sorted scan -- this must still return correct results
+    // (regardless of the upfront-selectivity / cumulative-failure guards'
+    // exact thresholds) across a range of already-claimed prefix sizes.
+    let n = 1600;
+    for already_claimed in [0usize, 50, 100, 400, 800, 1200, 1599] {
+        let mut ttl = String::from("@prefix ak: <http://example.org/ak#> .\n");
+        for i in 0..n {
+            // priority = i, so "top `already_claimed`" = highest-numbered tasks.
+            let status = if i >= n - already_claimed { "in_progress" } else { "pending" };
+            ttl.push_str(&format!(
+                "<urn:task:{i}> ak:peer <urn:peer:X> ; ak:status \"{status}\" ; ak:priority {i} ; ak:seq {i} .\n"
+            ));
+        }
+        let graph = Graph::load_str(&ttl, "turtle").unwrap();
+        let expected = expected_top_k(&graph, 5);
+        let actual = actual_top_k(&graph, 5);
+        assert_eq!(actual, expected, "already_claimed={already_claimed}");
+    }
+}
