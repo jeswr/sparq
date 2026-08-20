@@ -78,6 +78,11 @@ cargo run -p sparq-server -- --format turtle data.ttl
   thread), with one std-only `NatsSink` (core NATS, plain TCP, no TLS). Kafka / TLS / SASL: impl
   the trait over your own client — no broker client or async runtime enters this crate.
 - **Response-bytes result cache** *(opt-in `result-cache`, OFF by default)* — see below.
+- **Prepared-update applier** *(opt-in `params`, OFF by default)* — `PreparedGraphApplier`
+  applies `sparq_engine::PreparedUpdate` (parsed once, bound per submission) instead of raw
+  SPARQL Update text, for a caller resubmitting the same update template repeatedly (a
+  job-queue claim, an upsert): avoids `GraphApplier`'s per-commit text re-parse, measured
+  ~13.5 µs of a ~21.2 µs total per-update cost (~63%) on a representative claim template.
 
 ## 🗃️ Result cache (opt-in, `result-cache` feature)
 
