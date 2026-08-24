@@ -195,7 +195,7 @@ jobs:
         with:
           tool: nextest
       - name: Cache cargo + target
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # One cache shared by every shard (identical build artifacts — the shards differ
           # only in which tests they EXECUTE); Swatinem races on save are first-wins + benign.
@@ -268,7 +268,7 @@ jobs:
           toolchain: nightly-2026-06-11
           components: miri, rust-src
       - name: Cache cargo + target
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: miri
       - name: Build Miri sysroot

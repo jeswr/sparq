@@ -755,7 +755,7 @@ jobs:
           rustup default stable
           rustup component add clippy
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-4.8] sq-3sbrr — PER-CRATE cache key + save-only-on-main, unchanged
           # in strategy: rust-cache stores the DEPENDENCY build only, so keying by
@@ -894,7 +894,7 @@ jobs:
         run: |
           rustup default stable
           rustup component add clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         if: steps.legs.outputs.legs != '0'
         with:
           shared-key: feature-matrix-check-tier-${{ matrix.shard }}
@@ -963,7 +963,7 @@ jobs:
         run: |
           rustup default stable
           rustup component add clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: feature-matrix-sparq-lws-core-no-default-features
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -1032,7 +1032,7 @@ jobs:
         run: |
           rustup default stable
           rustup component add clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: feature-matrix-sparq-server-no-default-features
           # [OPUS-4.8] sq-3sbrr: restore-only off main so PR/merge_group runs don't
@@ -1109,7 +1109,7 @@ jobs:
         run: |
           rustup default stable
           rustup component add clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: feature-matrix-sparq-geo-no-default-features
           # [OPUS-4.8] sq-3sbrr: restore-only off main so PR/merge_group runs don't
@@ -1168,7 +1168,7 @@ jobs:
         # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
         # opt-in-features note); no extra component needed here.
         run: rustup default stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: fedclient-boundary
           # [OPUS-4.8] sq-3sbrr: restore-only off main (see the opt-in-features note).

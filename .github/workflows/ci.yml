@@ -417,7 +417,7 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - name: Cache cargo + target
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-4.8] Dep cache for THIS build-once job. The `test` shards no longer
           # restore a rust-cache entry at all — they download the prebuilt
@@ -1002,7 +1002,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -1343,7 +1343,7 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -1495,7 +1495,7 @@ jobs:
           rustup toolchain install 1.88 --profile minimal --no-self-update
           rustup default 1.88
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -1579,7 +1579,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -1715,7 +1715,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -1854,7 +1854,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -2002,7 +2002,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -2114,7 +2114,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -2222,7 +2222,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -2333,7 +2333,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -2449,7 +2449,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -2593,7 +2593,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -2756,7 +2756,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -3299,7 +3299,7 @@ jobs:
       # NOT affected: the shard PARTITION is chosen by the COVERAGE_SHARD env var below,
       # which coverage.sh maps to SHARD_GROUPS[n-1]. Nothing reads the cache key, so which
       # crates each shard measures is unchanged by this.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # REPLACES the former per-shard `key: coverage-shard-<n>` for the reason
           # spelled out in the note above this step — the two are mutually exclusive,
@@ -3509,7 +3509,7 @@ jobs:
         run: rustup component add llvm-tools-preview
       # Per-partition dep cache: each partition compiles the same instrumented engine, so a
       # shared-key cache warms the deps; keying by part avoids save-race clobbering.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -3582,7 +3582,7 @@ jobs:
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
       # Reuse a run partition's dep cache to warm the merge job's object compile.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -3933,7 +3933,7 @@ jobs:
       # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -4355,7 +4355,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
@@ -4508,7 +4508,7 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
