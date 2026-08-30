@@ -274,7 +274,7 @@ notes = "RustCrypto/dalek AEAD+X25519 stack pulled in by the opt-in, publish=fal
 [[exemptions.chacha20]]
 version = "0.10.2"
 criteria = "safe-to-deploy"
-notes = "Advisory-clearing patch upgrade; the prior 0.10.0 release is covered by the imported ISRG audit. [GPT-5.6]"
+notes = "Yank-clearing patch upgrade from chacha20 0.10.0; the prior release is covered by the imported ISRG audit. [GPT-5.6]"
 
 [[exemptions.chacha20poly1305]]
 version = "0.10.1"
