@@ -1410,11 +1410,15 @@ jobs:
         # check-run concluded failure, would wrongly block on this advisory job. Swallowing
         # at the step makes the job conclude success while the findings still print.
         continue-on-error: true
-        uses: errata-ai/vale-action@518a9136acc6e6668ce7c00d367051e0941e87ff # v3.0.0
+        uses: vale-cli/vale-action@518a9136acc6e6668ce7c00d367051e0941e87ff # v3.0.0
         with:
           version: 3.9.1
           files: README.md AGENTS.md CONTRIBUTING.md SECURITY.md skills docs crates
+          separator: " "
           fail_on_error: false
+          # Preserve the v2 reviewdog engine while adopting the v3 action bundle; the v3 default
+          # exits 1 in this local-reporter lane even though Vale findings remain advisory.
+          reviewdog_version: 0.17.0
           # `local` reporter prints to the job log — no PR-annotation write scope
           # needed (top-level permissions stay read-only). Advisory anyway.
           reporter: local
