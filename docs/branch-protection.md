@@ -517,6 +517,8 @@ The `merge_queue` rule's throughput parameters:
 | `grouping_strategy` | `ALLGREEN` | one red leg requeues the whole entry |
 | `check_response_timeout_minutes` | `60` | required-check reporting deadline |
 
+<!-- mergequeue-throughput-pin: max_entries_to_build=3 precondition=sq-6vshe.14 status=blocked steer=#5162 -->
+
 Provenance: `max_entries_to_merge`, `grouping_strategy` and
 `check_response_timeout_minutes` are in the verified live-ruleset table at the end of
 this document. The other three are read from the 2026-07-10 profile of ruleset
@@ -537,7 +539,20 @@ lands would worsen that contention, not relieve it. `sq-6vshe.14` (the `queue-va
 push-skip, §3.1 of the design record) has **not** landed — no such job exists anywhere in
 `.github/workflows/` as of this commit — so the ruleset edit stays **unrequested**.
 Agents cannot edit rulesets, so when the precondition clears the edit is carried as a
-maintainer steer issue, not applied from a PR.
+maintainer steer issue, not applied from a PR: that channel is **issue #5162**, which
+carries the exact edit (`max_entries_to_build` `3` → `5` on ruleset `17688455`, nothing
+else touched).
+
+That deferral is no longer prose alone. The
+`<!-- mergequeue-throughput-pin: … status=blocked … -->` marker above is checked against
+the live contents of `.github/workflows/` by
+`scripts/tests/test_mergequeue_throughput_posture.py` (gated in `docs-quality.yml`), which
+reds on either side of the hazard: if a `queue-validated` push-skip job appears while this
+section still says the precondition is unmet — the "no such job exists" sentence above is
+a claim about this repo, and that test is what rechecks it — or if the documented value is
+raised while the precondition is still unmet. The test reads the **repo** only; it makes
+no claim about the live ruleset, so the `gh api …/rulesets/<id>` re-dump below is still
+required before the edit is requested.
 
 **(b) `min_entries_to_merge_wait_minutes: 5` — AUDITED; verdict INERT, no edit needed.**
 The concern was that this is a flat ~5 minute tax on every quiet-period (single-entry)

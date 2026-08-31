@@ -973,6 +973,15 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] issue #5162: the approved-but-deferred `max_entries_to_build` 3 -> 5
+      # raise is gated on sq-6vshe.14 (the queue-validated push skip) landing first —
+      # raising queue parallelism while the redundant push waves still burn the runner
+      # pool worsens contention. Both failure modes are invisible: the raise is silently
+      # forgotten once .14 lands, or the doc is silently edited to the raised value while
+      # the precondition is still unmet. This couples the doc's status marker to the live
+      # contents of .github/workflows/ so either one reds. Hermetic + stdlib-only.
+      - name: "Merge-queue throughput posture (deferred max_entries_to_build raise — #5162)"
+        run: python3 scripts/tests/test_mergequeue_throughput_posture.py
       # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
       # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
       # outage there concluded `failure` with nothing measured and ejected an unrelated
