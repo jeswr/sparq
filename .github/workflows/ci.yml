@@ -3403,6 +3403,20 @@ jobs:
         # the sole gate). NB under enforce the outside-cone crates are not measured, so
         # divergence detection is structurally unavailable and the report says so instead
         # of implying the empty divergence list proves the cone sound.
+        #
+        # [OPUS-5] #5148 — the SHADOW divergence corpus is CLOSED, by decision, not by
+        # accident. The `--enforce` flag on the compute step above is unconditional, so no
+        # trigger still accrues cone-vs-full samples: under mode=cone the outside-cone
+        # crates are never measured, and every mode=full path (push / any non-PR event, a
+        # full-run trigger, ci-full, the shadow rollback, a selector error) puts every
+        # crate IN the cone, so the divergence list is empty by construction either way.
+        # The sq-6vshe.17 merge_group demotion therefore narrowed
+        # nothing that was still collecting — and it could not have, because the enforced
+        # cone only ever NARROWS on `pull_request` anyway (these legs do not run on
+        # merge_group at all, and push is mode=full). Batch-diff cones were never in the
+        # evidence base and are not missing from it. See docs/branch-protection.md
+        # §Coverage MEASUREMENT off the merge queue → "The cone shadow corpus is closed"
+        # for the live backstops that replaced it.
         if: always() && hashFiles('cone.json') != '' && hashFiles('target/coverage/coverage-summary.json') != ''
         run: |
           python3 scripts/cone_coverage.py \

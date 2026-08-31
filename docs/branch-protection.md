@@ -248,6 +248,43 @@ What is **not** risked: no committed floor is ever silently lowered (the monoton
 never left the queue, and a deliberate lowering stays a governed, loud re-baseline), and
 the nightly full-coverage tier (`coverage-nightly`) is untouched.
 
+**The cone shadow corpus is closed — an explicit decision, not a side effect** (issue
+#5148, 2026-08-31). The changed-cone selector (`scripts/cone_coverage.py`, sq-6vshe.8)
+landed in a SHADOW mode that measured everything and logged every case where an
+outside-cone crate came in below its floor — the corpus that existed so the cone could be
+validated against a real full measurement before being trusted to narrow one. **The
+ENFORCE flip has since landed** (sq-3dr4t), and the corpus stopped accruing then — on
+*every* trigger, not just on `merge_group`:
+
+- the compute step in `coverage-measure` passes `--enforce` **unconditionally**, so on a PR
+  (`mode=cone`) the outside-cone crates are never measured and there is nothing to compare
+  the cone against — `shadow_report()` reports `divergence_detection: unavailable` rather
+  than an empty divergence list that would read as evidence of soundness;
+- on every path that resolves to `mode=full` — `push`-to-`main` and any other non-PR event
+  (no PR diff), plus a full-run trigger, the `ci-full` label, the `CI_SELECT_MODE=shadow`
+  rollback, or any selector error on a PR — every crate counts as *inside* the cone, so the
+  divergence list is empty by construction there too.
+
+So the sq-6vshe.17 demotion narrowed nothing that was still collecting. It could not have:
+the enforced cone only ever **narrows on `pull_request`** — these legs do not run on
+`merge_group` at all (pinned by
+`test_ci_select_wiring.py::TestCoverageMergeGroupDemotion::test_measure_legs_skip_on_merge_group`)
+and `push` is `mode=full`. **Batch-diff cones were never part of the evidence base and are
+not missing from it.**
+
+Moving the cone computation into the cheap `coverage-floors` job was considered and
+**rejected**: the cone *computation* is a pure diff, but divergence *detection* is not — it
+needs a full instrumented measurement to compare the cone against, and `coverage-floors`
+does no instrumented build by design. Relocating it would emit a cone with nothing to
+compare it to.
+
+What guards the cone now that the corpus is closed: the full-run triggers (`Cargo.lock`,
+root `Cargo.toml`, `.github/`, `scripts/`, any unowned path) and any selector error still
+measure everything; the enforce-skipped crates are emitted as explicit `INHERITED` rows
+rather than an unexplained gap; and the nightly full run on `main` (`coverage-nightly`) is
+the drift backstop. Re-opening the corpus means dropping `--enforce` on a run — the
+report renders both modes — not adding a new lane.
+
 ## Draft-tier CI (reduced matrix on draft PR heads)
 
 <!-- [FABLE-5] Draft-tier CI design record (2026-07-17). Motivation: the autonomous
