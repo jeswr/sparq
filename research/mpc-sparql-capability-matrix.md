@@ -167,8 +167,12 @@ cells on the loopback tier; the shaped LAN/WAN multiplier awaits the privileged/
   `dealer()` is a stand-in. **Design + code seam landed** (bead **sq-yyro**:
   `research/mpc-distributed-randomness-design.md` + the `randomness` module —
   `DistributedRandomness` / `RandomnessModel`, current dealer reports
-  `TrustedDealerSim`, `deployable() == false`); the PRSS/coin-toss/VSS **impl** is
-  follow-on beads behind the seam (still OPEN).
+  `TrustedDealerSim`, `deployable() == false`). Two dealer-less GENERATORS have since landed
+  behind the seam — `prss::PrssRandomness` (#3531, non-interactive, small-`n`, simulated seed
+  setup) and `coin_toss::CoinTossRandomness` (#3532, setup-free any-`n`, one commit-open round
+  per batch) — both **semi-honest only** and neither `deployable()`; dealer-less **VSS** and the
+  `r = 0` active defense are still OPEN. The authoritative accounting of what each source does
+  and does not establish is `mpc-distributed-randomness-design.md` §4a.
 
 ### 1.3 The two-regime split (load-bearing; from architecture convention #4)
 
@@ -669,8 +673,10 @@ LANDED on `main`** — see the per-item ✅ DONE notes.
    for P4/P5 correlated randomness. **Design + seam DONE** (bead **sq-yyro**:
    `research/mpc-distributed-randomness-design.md` + the `randomness` module seam —
    PRSS-vs-coin-toss decision, dealer-less VSS, the `r = 0` threat; current dealer labelled
-   `RandomnessModel::TrustedDealerSim`). The PRSS/coin-toss/VSS **implementation** is follow-on
-   beads behind the `DistributedRandomness` trait (OPEN).
+   `RandomnessModel::TrustedDealerSim`). The PRSS (#3531) and coin-toss (#3532) **generators**
+   have since landed behind the `DistributedRandomness` trait — semi-honest only, neither
+   `deployable()`; dealer-less **VSS** and the `r = 0` active defense remain OPEN. See
+   `mpc-distributed-randomness-design.md` §4a for the authoritative per-source accounting.
 7. **Network transport + round/byte instrumentation (tier-1 modelled, tier-2/3 real).** Make
    the round-count/comm cost — the dominant real-world cost — observable; prerequisite for ANY
    per-config performance verdict. **DONE (CLOSED):** tier-1 modelled counters

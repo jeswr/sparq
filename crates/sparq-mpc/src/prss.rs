@@ -119,7 +119,10 @@
 use crate::chacha::ChaCha20Csprng;
 use crate::field::Fp;
 use crate::partial::MpcError;
-use crate::randomness::{DistributedRandomness, RandomnessModel};
+// `accept_if_nonzero` is the seam's shared `r != 0` acceptance predicate — the
+// coin-toss source (`crate::coin_toss`) rejects on the same one, so the test
+// every equality verdict depends on has a single implementation.
+use crate::randomness::{accept_if_nonzero, DistributedRandomness, RandomnessModel};
 use crate::rng::MpcRng;
 use crate::shamir::Share;
 use sha2::{Digest, Sha512};
@@ -469,21 +472,6 @@ impl PartyView<'_> {
             y = y.add(prf_fp(seed.key, ctr).mul(seed.coeff));
         }
         Share { x: self.party, y }
-    }
-}
-
-/// The `r ≠ 0` acceptance test of [`PrssRandomness::shared_nonzero_mask`],
-/// factored out so the rejection branch — which a live draw hits with probability
-/// `1/p ≈ 2^−61` — is directly testable.
-///
-/// Returns the sharing iff the shared value is nonzero; `None` means "redraw at a
-/// fresh counter". See the module note: evaluating `value` at all is the
-/// simulation artefact that a distributed zero-test must replace.
-fn accept_if_nonzero(value: Fp, shares: Vec<Share>) -> Option<Vec<Share>> {
-    if value == Fp::zero() {
-        None
-    } else {
-        Some(shares)
     }
 }
 

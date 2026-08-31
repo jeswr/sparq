@@ -250,6 +250,14 @@ pub mod randomness;
 // real; the SETUP is a simulated one-time trusted setup, dealer-less VSS is still
 // refused, and the source is still NOT `deployable()`. See the module docs.
 pub mod prss;
+// [OPUS-5] sq-yyro follow-on (#3532): the distributed COIN-TOSS — commit-then-share
+// joint randomness behind the `randomness` seam, and the general-n / setup-free
+// FALLBACK to `prss` (which refuses n >= 10 on seed count). No setup at any n; the
+// cost is interaction — ONE commit-open round per batch (`shared_masks` amortises,
+// `rounds()` counts). The commitment check runs IN THE CLEAR (a simulation artefact
+// where a deployment needs a committed VSS), dealer-less VSS is still refused, and
+// the source is still NOT `deployable()`. See the module docs.
+pub mod coin_toss;
 // [OPUS-4.8] sq-m34i (MPC WI-1): Reed-Solomon consistency-checked + robust
 // (Berlekamp-Welch) reconstruction over Fp — detect-and-abort / correct tampered
 // shares when redundancy is present. Closes malicious-security gap (D) at the

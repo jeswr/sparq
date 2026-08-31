@@ -45,14 +45,23 @@
 //! ## Status — no fake crypto
 //!
 //! The only implementor *in this module* is [`ShamirDealer`], which reports
-//! [`RandomnessModel::TrustedDealerSim`] (`deployable() == false`).
-//! [`crate::prss::PrssRandomness`] is the first dealer-less GENERATOR behind the
-//! trait ([`RandomnessModel::Prss`], sq-yyro follow-on): its
-//! `Σ_A PRF(k_A, ctr)·f_A` online generation is real and non-interactive, but its
-//! replicated-seed SETUP is a simulated one-time trusted setup, its `r ≠ 0` check
-//! is a simulation artefact, and it refuses `vss_own_input` — read that module's
-//! docs before relying on any of it. [`RandomnessModel::HonestMajorityCoinToss`]
-//! and dealer-less VSS remain follow-on beads.
+//! [`RandomnessModel::TrustedDealerSim`] (`deployable() == false`). Two
+//! dealer-less GENERATORS sit behind the trait (sq-yyro follow-ons), each with
+//! its own honest gaps — read the module's docs before relying on either:
+//!
+//! - [`crate::prss::PrssRandomness`] ([`RandomnessModel::Prss`]) — the
+//!   `Σ_A PRF(k_A, ctr)·f_A` online generation is real and *non-interactive*,
+//!   but its replicated-seed SETUP is a simulated one-time trusted setup, it is
+//!   small-`n` only, and its `r ≠ 0` check is a simulation artefact.
+//! - [`crate::coin_toss::CoinTossRandomness`]
+//!   ([`RandomnessModel::HonestMajorityCoinToss`]) — the commit-then-share
+//!   generation is real and needs *no setup* at any `n` (the PRSS fallback), but
+//!   it is *interactive* (one round per batch), its commitment check runs in the
+//!   clear where a deployment needs a committed VSS, and its `r ≠ 0` check is
+//!   the same simulation artefact.
+//!
+//! Both refuse `vss_own_input`; dealer-less VSS and the `r = 0` active-adversary
+//! defense remain follow-on beads.
 //!
 //! **NO variant is `deployable()` today.** The model is a self-reported
 //! description, so deployment acceptance stays fail-closed until a validated
@@ -88,7 +97,11 @@ pub enum RandomnessModel {
     /// **Distributed coin-toss** — commit-open (or VSS-summed) joint randomness.
     /// Interactive (≥1 round per batch) but needs no combinatorial setup, so it
     /// is the general-`n` / setup-free fallback and the malicious-with-abort
-    /// upgrade path. Dealer-less. Follow-on bead — not built.
+    /// upgrade path. Dealer-less. Implemented by
+    /// [`crate::coin_toss::CoinTossRandomness`] — the commit-then-share
+    /// *generation* is real and setup-free for any `n`, its commitment check
+    /// runs in the clear (a simulation artefact where a deployment needs a
+    /// committed VSS), and it is still not `deployable()`.
     HonestMajorityCoinToss,
 }
 
@@ -141,9 +154,12 @@ impl RandomnessModel {
 /// federation actually cares about (that *no `≤ t` parties know* a mask; that an
 /// input sharing is *VSS-verified* against a malicious holder) are **not** part of
 /// any method's contract, because no implementor satisfies them both:
-/// [`ShamirDealer`] is a simulation whose dealer knows every mask, and
+/// [`ShamirDealer`] is a simulation whose dealer knows every mask;
 /// [`crate::prss::PrssRandomness`] generates masks dealer-lessly but on a
-/// *simulated* seed setup and refuses `vss_own_input` outright. A generic caller
+/// *simulated* seed setup; [`crate::coin_toss::CoinTossRandomness`] generates
+/// them dealer-lessly with no setup but binds contributions only by an
+/// in-the-clear check no deployment can run; and both refuse `vss_own_input`
+/// outright. A generic caller
 /// must never infer those guarantees from the trait — they are capabilities of a
 /// **validated dealer-less implementation**, none of which ships yet.
 /// [`randomness_model`](Self::randomness_model) is an honest *description* of the
@@ -237,6 +253,25 @@ pub trait DistributedRandomness {
     /// guarantee MUST gate on [`require_deployable`](Self::require_deployable) —
     /// a necessary, not sufficient, check.
     fn vss_own_input(&mut self, secret: Fp) -> Result<Vec<Share>, MpcError>;
+}
+
+/// The `r ≠ 0` acceptance test shared by the dealer-less
+/// [`shared_nonzero_mask`](DistributedRandomness::shared_nonzero_mask)
+/// implementations ([`crate::prss`], [`crate::coin_toss`]), factored out so the
+/// rejection branch — which a live draw hits with probability `1/p ≈ 2^−61` —
+/// is directly testable, and so both sources share ONE implementation of a
+/// predicate the equality test's correctness rests on.
+///
+/// Returns the sharing iff the shared value is nonzero; `None` means "redraw".
+/// Note what evaluating `value` at all requires: it is the *simulation
+/// artefact* a real deployment must replace with a distributed zero-test on
+/// `[r]` (module note; design record §1 part 1 / §5 item 4).
+pub(crate) fn accept_if_nonzero(value: Fp, shares: Vec<Share>) -> Option<Vec<Share>> {
+    if value == Fp::zero() {
+        None
+    } else {
+        Some(shares)
+    }
 }
 
 /// The CURRENT single-trusted-dealer **SIMULATION** implements the seam.

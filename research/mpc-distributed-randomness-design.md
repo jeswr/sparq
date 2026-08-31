@@ -9,11 +9,12 @@ re-review when Fable returns. Date: 2026-07-19. Bead sq-yyro (parent MPC epic sq
 for re-review). Date: 2026-07-19. Bead **sq-yyro** (parent MPC epic **sq-pwr**; issue #2989,
 parent #2629).
 
-**Implementation status (updated 2026-08-01, issue #3531).** The record was authored *before* any
-dealer-less implementation existed and the tier statements below are written in that voice. Since
-then the **PRSS online generator has landed** (`crate::prss`, §5 item 1) on a **simulated** seed
-setup. §4a is the authoritative accounting of what is and is not implemented; where the
-"as authored" text below conflicts with it, §4a wins.
+**Implementation status (updated 2026-08-31, issues #3531 / #3532).** The record was authored
+*before* any dealer-less implementation existed and the tier statements below are written in that
+voice. Since then the **PRSS online generator has landed** (`crate::prss`, §5 item 1) on a
+**simulated** seed setup, and the **distributed coin-toss has landed** (`crate::coin_toss`,
+§5 item 2) as the setup-free any-`n` fallback. §4a is the authoritative accounting of what is and
+is not implemented; where the "as authored" text below conflicts with it, §4a wins.
 
 **Scope.** How sparq-mpc replaces its **single-trusted-dealer randomness simulation** with a
 **dealer-less** correlated-randomness layer suitable for a real federation: (1) the choice
@@ -278,7 +279,7 @@ same trait — swapped in by `RandomnessModel`, never by concrete type.
 
 ---
 
-## 4a. Implementation status (authoritative; updated 2026-08-01, issue #3531)
+## 4a. Implementation status (authoritative; updated 2026-08-31, issues #3531 / #3532)
 
 What has actually landed behind the seam, separated from what the sections above *specify*.
 
@@ -319,10 +320,46 @@ caveat of §2.1 cons 2 applies unchanged, and `sq-qhy4` external sign-off is pen
 - **In-process simulation.** All `n` shares are computed in one process, which holds every seed.
   What is demonstrated is protocol *structure* — which seed may enter which share, and that the
   output is a correct degree-`t` sharing — never process or network isolation.
-- **Coin-toss (§5 item 2) and caller wiring (§5 item 5) are untouched.**
+- **Caller wiring (§5 item 5) is untouched.**
 
-**Deployment status: unchanged.** `RandomnessModel::Prss.deployable()` is still `false`, so
-`require_deployable()` refuses this source exactly as it refuses the single-dealer simulation.
+**Implemented — the DISTRIBUTED COIN-TOSS (`crate::coin_toss`, §5 item 2, #3532).**
+`CoinTossRandomness: DistributedRandomness` reports `RandomnessModel::HonestMajorityCoinToss` and
+runs the **VSS-summed** variant of §2.2: in one commit-open round each party draws its own `r_i`
+from its own CSPRNG and broadcasts `H(DOMAIN ‖ ctr ‖ i ‖ nonce_i ‖ r_i)`; past that barrier each
+party secret-shares the value it committed to on a fresh degree-`t` polynomial; each party then
+locally sums the `n` shares addressed to it, yielding a degree-`t` sharing of `r = Σ_i r_i`. It is
+the promised **setup-free, any-`n` fallback** — it refuses no `n` (only `n < 2`), which is exactly
+what `prss::MAX_PRSS_SEEDS` points at for `n ≥ 10` — and it pays the interaction the design
+predicted: **one round per batch**, amortised by `shared_masks(count)` and *counted* by `rounds()`
+so the §2.3 trade against PRSS's zero rounds is a measurable number rather than a claim. Secrecy
+against `≤ t` parties rests on the Shamir threshold alone (no PRF assumption), so on that axis it
+is a step *up* from PRSS's computational argument — the local CSPRNG (sq-1vt) is the only
+assumption either way.
+
+**NOT implemented for the coin-toss — the gaps that keep it non-deployable.**
+- **The commitment binding is checked IN THE CLEAR — a simulation artefact.** `check_openings`
+  recomputes each party's commitment from its opening, which pins the round *ordering* (the value
+  entering the open phase is the value fixed in the commit phase) but is not a check any
+  federation can run: in the shared variant `r_i` is never opened, so binding the *sharing* to the
+  commitment requires a committed VSS (Feldman/Pedersen — §3 / §5 item 3, not built). A malicious
+  party that shares a value other than the one it committed to is therefore **undetected**, so the
+  commit round delivers biasing-resistance only against a semi-honest party here.
+- **The `r ≠ 0` check is CENTRAL, the same artefact as PRSS.** It sums every party's opening,
+  which only the in-process simulation holds. §1 part 1 / §5 item 4 is still the replacement, so
+  `shared_nonzero_mask` stays **semi-honest-only**.
+- **Dealer-less VSS is absent.** `CoinTossRandomness::vss_own_input` returns `NotYetImplemented`:
+  the sharing machinery is present but the *verification* is not, and an unverified plain sharing
+  under a dealer-less label would silently drop the guarantee (§3, §5 item 3).
+- **No malicious-tier property, and the same in-process caveat.** Nothing detects a wrong share or
+  a selective abort after the barrier; all `n` parties are objects in one process, so what is
+  demonstrated is protocol *structure* (which state a phase may touch; that the result is a
+  correct degree-`t` sharing of the sum of **all** `n` contributions), never process or network
+  isolation — the "commit before anyone sees anything" barrier is enforced by phase ordering, not
+  by a network.
+
+**Deployment status: unchanged.** `RandomnessModel::Prss.deployable()` and
+`RandomnessModel::HonestMajorityCoinToss.deployable()` are both still `false`, so
+`require_deployable()` refuses both sources exactly as it refuses the single-dealer simulation.
 Acceptance stays tied to a *validated* construction (§5 item 5), never to the self-reported label,
 and the crate remains research-grade and externally unaudited (`sq-qhy4` pending).
 
@@ -337,6 +374,10 @@ and the crate remains research-grade and externally unaudited (`sq-qhy4` pending
    replicated-seed *distribution* is still a simulated trusted setup. See §4a.
 2. **Distributed coin-toss** (general-`n` / setup-free fallback): commit-open (or VSS-summed)
    joint randomness; `CoinTossRandomness: DistributedRandomness`.
+   **Status: LANDED** (#3532) — the commit-then-share generation, the setup-free any-`n` property,
+   and the round accounting ship; the commitment binding is checked in the clear (a simulation
+   artefact where a deployment needs a committed VSS) and no malicious-tier property is claimed.
+   See §4a.
 3. **Dealer-less honest-majority VSS** for `vss_own_input` in the malicious tier (pairwise
    consistency / Feldman), composing with `crate::robust` on the output side.
 4. **`r = 0` active defense**: biasing-resistant joint generation **plus** a distributed nonzero
@@ -358,7 +399,8 @@ and the crate remains research-grade and externally unaudited (`sq-qhy4` pending
 1. **PRSS seed-count ceiling.** At what `n` does `C(n, t)` force the coin-toss fallback for THIS
    deployment? (Flatmates `n = 4` → `C(4,1) = 4` seeds; fine. `n = 9` → 126; borderline.)
    **Answered in code** (#3531): `prss::MAX_PRSS_SEEDS` puts the ceiling at the borderline case —
-   `n ≤ 9` builds, `n ≥ 10` (`C(10,4) = 210`) is refused fail-closed pointing at the coin-toss.
+   `n ≤ 9` builds, `n ≥ 10` (`C(10,4) = 210`) is refused fail-closed pointing at the coin-toss,
+   **which now exists** (`crate::coin_toss`, #3532), so that refusal names a real fallback.
    Whether the *federation* wants the ceiling that high is still a deployment question.
 2. **LAN vs WAN (shared with the security-models doc §9.2).** If v1 is WAN, PRSS's
    non-interactivity is decisive and the coin-toss round-cost is a real tax; if LAN, either works.
