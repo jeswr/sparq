@@ -348,11 +348,40 @@ export function nodeKeyOfRdfTerm(t: RdfTerm): string {
   }
 }
 
-/** The {@link nodeKeyOfRdfTerm} key for a SPARQL-JSON term binding. */
+/**
+ * SPARQL 1.2 encodes an RDF 1.2 triple term as
+ * `{"type":"triple","value":{"subject":…,"predicate":…,"object":…}}` — its `value` is a NESTED
+ * term triple, not a lexical string. `SparqlTerm` describes only the three LEAF kinds, so the
+ * shape is recognised structurally rather than by narrowing on `type`.
+ *
+ * This matters because {@link nodeKeyOfRdfTerm} ALREADY has a `"triple"` case: the CONSTRUCT
+ * side of the join can produce a triple term, so the SELECT side must not throw on one.
+ * Returns `null` for anything that is not that shape, so an unrecognised term still falls
+ * through to the leaf path instead of being mis-serialised.
+ */
+function asSparqlTripleTerm(
+  t: SparqlTerm,
+): { subject: SparqlTerm; predicate: SparqlTerm; object: SparqlTerm } | null {
+  if ((t as { type: string }).type !== "triple") return null;
+  const value = (t as { value: unknown }).value;
+  if (typeof value !== "object" || value === null) return null;
+  const { subject, predicate, object } = value as Record<string, SparqlTerm | undefined>;
+  return subject && predicate && object ? { subject, predicate, object } : null;
+}
+
+/**
+ * The {@link nodeKeyOfRdfTerm} key for a SPARQL-JSON term binding.
+ *
+ * CAVEAT on the triple-term key: the `RdfTerm` side keys on the parser's VERBATIM source slice
+ * while this side emits the canonical spelling, so the two agree only when the source document
+ * was written with the same spacing. A triple term therefore joins across the two sides on a
+ * best-effort basis; it never throws, and every leaf kind joins exactly.
+ */
 export function nodeKeyOfSparqlTerm(t: SparqlTerm | undefined): string | null {
   if (!t) return null;
   if (t.type === "uri") return `i:${t.value}`;
   if (t.type === "bnode") return `b:${t.value}`;
+  if (asSparqlTripleTerm(t)) return `t:${termToNTriples(t)}`;
   const lex = `"${escapeLiteral(t.value)}"`;
   const lang = t["xml:lang"];
   if (lang) return `l:${lex}@${lang}`;
@@ -363,11 +392,20 @@ export function nodeKeyOfSparqlTerm(t: SparqlTerm | undefined): string | null {
 /**
  * The exact N-Triples spelling of a SPARQL-JSON term binding — what {@link bindFocusNode}
  * substitutes for `?node`. Returns `null` for an unbound variable (there is nothing to bind).
+ *
+ * Handles the RDF 1.2 triple term the engine binds for a reified statement; treating its
+ * object `value` as a lexical string throws `value.replace is not a function`.
  */
 export function termToNTriples(t: SparqlTerm | undefined): string | null {
   if (!t) return null;
   if (t.type === "uri") return `<${t.value}>`;
   if (t.type === "bnode") return `_:${t.value}`;
+  const triple = asSparqlTripleTerm(t);
+  if (triple) {
+    // Object-position-only in RDF 1.2, which is exactly where the engine's N-Triples parser
+    // accepts `<<( … )>>`.
+    return `<<( ${termToNTriples(triple.subject)} ${termToNTriples(triple.predicate)} ${termToNTriples(triple.object)} )>>`;
+  }
   const lex = `"${escapeLiteral(t.value)}"`;
   const lang = t["xml:lang"];
   if (lang) return `${lex}@${lang}`;

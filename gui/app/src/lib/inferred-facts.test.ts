@@ -79,6 +79,35 @@ test("triple keys agree across the binding and parsed paths", () => {
   );
 });
 
+// A store holding ONE reifier (`?r rdf:reifies <<( s p o )>>`) makes the whole-dataset
+// snapshot query bind an RDF 1.2 TRIPLE TERM, which SPARQL 1.2 encodes with a NESTED object
+// in `value` rather than a lexical string. `termToNT` used to fall through to the literal
+// branch and call `value.replace`, throwing `value.replace is not a function` — an uncaught
+// error inside the snapshot/merge path, which tore down the whole app rather than just the
+// snapshot. The shape below is copied from what the engine actually returns.
+test("termToNT writes an RDF 1.2 triple term instead of throwing on its nested value", () => {
+  const tripleTerm = {
+    type: "triple",
+    value: {
+      subject: { type: "uri", value: "http://example.org/alice" },
+      predicate: { type: "uri", value: "http://xmlns.com/foaf/0.1/knows" },
+      object: { type: "uri", value: "http://example.org/bob" },
+    },
+  } as unknown as SparqlTerm;
+
+  const nt = termToNT(tripleTerm);
+  assert.equal(
+    nt,
+    "<<( <http://example.org/alice> <http://xmlns.com/foaf/0.1/knows> <http://example.org/bob> )>>",
+  );
+
+  // The snapshot is re-parsed after a merge, so the spelling must round-trip as an OBJECT.
+  const line = `<http://example.org/knowsClaim> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ${nt} .`;
+  const { statements } = parseNTriples(line);
+  assert.equal(statements.length, 1, `round-trip parse: ${line}`);
+  assert.equal(statements[0].o.kind, "triple");
+});
+
 test("tripleKeysOfNTriples folds named graphs and skips junk lines", () => {
   const doc = [
     "<http://ex/a> <http://ex/p> <http://ex/b> .",

@@ -54,14 +54,44 @@ export function escapeNTLiteral(value: string): string {
 }
 
 /**
- * Emit a single canonical N-Triples/N-Quads TERM (IRI / blank node / literal) from a
- * SPARQL-JSON term. Unlike a DISPLAY helper this writes the FULL datatype IRI and escapes
- * the lexical form, so it round-trips losslessly through the engine's parsers — and it is
- * exactly the term form the reasoner's `why()` expects for the clicked triple.
+ * SPARQL 1.2 encodes an RDF 1.2 triple term as
+ * `{"type":"triple","value":{"subject":…,"predicate":…,"object":…}}` — its `value` is a NESTED
+ * term triple, not a lexical string. `SparqlTerm` describes only the three LEAF kinds, so the
+ * shape is recognised structurally rather than by narrowing on `type`.
+ *
+ * Returns `null` for anything that is not that shape, so an unrecognised term still falls
+ * through to the leaf path instead of being mis-serialised.
+ */
+function asTripleTerm(
+  t: SparqlTerm,
+): { subject: SparqlTerm; predicate: SparqlTerm; object: SparqlTerm } | null {
+  if ((t as { type: string }).type !== "triple") return null;
+  const value = (t as { value: unknown }).value;
+  if (typeof value !== "object" || value === null) return null;
+  const { subject, predicate, object } = value as Record<string, SparqlTerm | undefined>;
+  return subject && predicate && object ? { subject, predicate, object } : null;
+}
+
+/**
+ * Emit a single canonical N-Triples/N-Quads TERM (IRI / blank node / literal / RDF 1.2 triple
+ * term) from a SPARQL-JSON term. Unlike a DISPLAY helper this writes the FULL datatype IRI and
+ * escapes the lexical form, so it round-trips losslessly through the engine's parsers — and it
+ * is exactly the term form the reasoner's `why()` expects for the clicked triple.
+ *
+ * The triple-term case is not decoration: a store holding ONE reifier (`?r rdf:reifies
+ * <<( s p o )>>`) binds a `"triple"` term in the whole-dataset snapshot query, and treating its
+ * object `value` as a lexical string throws `value.replace is not a function` — an uncaught
+ * error that tears down the whole app, not just the snapshot.
  */
 export function termToNT(t: SparqlTerm): string {
   if (t.type === "uri") return `<${t.value}>`;
   if (t.type === "bnode") return `_:${t.value}`;
+  const triple = asTripleTerm(t);
+  if (triple) {
+    // Object-position-only in RDF 1.2, which is exactly where the engine's N-Triples/N-Quads
+    // parser accepts `<<( … )>>`, so this round-trips through the re-load after a merge.
+    return `<<( ${termToNT(triple.subject)} ${termToNT(triple.predicate)} ${termToNT(triple.object)} )>>`;
+  }
   // Literal.
   const lex = `"${escapeNTLiteral(t.value)}"`;
   if (t["xml:lang"]) return `${lex}@${t["xml:lang"]}`;

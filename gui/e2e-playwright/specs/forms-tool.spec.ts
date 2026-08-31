@@ -15,7 +15,10 @@ test.describe("forms-tool (desktop persona)", () => {
   }) => {
     const panel = page.locator('[data-tool-panel="forms"]');
     const picker = panel.locator("[data-form-focus-picker]");
-    await expect(picker.locator("option")).toHaveCount(5);
+    // The placeholder + one option per subject in the seeded sample graph: alice, bob, carol,
+    // dan, and the RDF 1.2 reifier `ex:knowsClaim` (data/sample-graph.ts). Kept as an EXACT
+    // count so a subject appearing or vanishing from the fixture fails here rather than silently.
+    await expect(picker.locator("option")).toHaveCount(6);
 
     await picker.selectOption(JSON.stringify(["iri", `${EX}bob`, null, null]));
     await expect(panel.locator("[data-form-focus]")).toContainText(`${EX}bob`);

@@ -234,6 +234,22 @@ test("termToNTriples round-trips a binding back into the spelling bindFocusNode 
   );
   assert.equal(termToNTriples(lit('say "hi"\n')), '"say \\"hi\\"\\n"');
   assert.equal(termToNTriples(undefined), null);
+  // An RDF 1.2 triple term: SPARQL 1.2 nests a term triple in `value` instead of a lexical
+  // string, so the literal branch would call `value.replace` on an object and throw.
+  // `nodeKeyOfRdfTerm` already has a "triple" case, so this side must not throw on one.
+  const tripleTerm = {
+    type: "triple",
+    value: {
+      subject: uri("http://ex/a"),
+      predicate: uri("http://ex/p"),
+      object: uri("http://ex/b"),
+    },
+  };
+  assert.equal(
+    termToNTriples(tripleTerm),
+    "<<( <http://ex/a> <http://ex/p> <http://ex/b> )>>",
+  );
+  assert.equal(nodeKeyOfSparqlTerm(tripleTerm), "t:<<( <http://ex/a> <http://ex/p> <http://ex/b> )>>");
   // The spelling it produces re-parses to the SAME node key — the join the view depends on.
   const nt = termToNTriples(lit("hi", { "xml:lang": "en" }));
   const { statements } = parseNTriples(`<http://ex/a> <http://ex/p> ${nt} .\n`);
