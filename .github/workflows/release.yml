@@ -493,8 +493,36 @@ jobs:
       # (repointed off the marketing site by PR #1003 / sq-ixc3.8). Its `prebuild` hook
       # (gui/app/scripts/sync-wasm.mjs) needs the lean shacl,jsonld wasm bundle present in js/wasm/.
       # Mirror gui.yml's proven-green `gui-app`/`tauri-e2e` jobs: build the wasm bundle FIRST.
+      #
+      # [OPUS-5] #5849 — wasm-pack arrives as a PREBUILT binary, never a crates.io source
+      # compile. `cargo install wasm-pack --locked` rebuilt wasm-pack and its whole
+      # chrono/wasm-bindgen dependency tree from the registry on all five matrix rows, so a
+      # transient registry/CDN blip would fail a BLOCKING (soft: false) Linux row — and unlike
+      # a re-runnable PR check, that row fails the `release` job through `needs`. This is the
+      # flake shape that red-gated the `js` lane on PR #1131 (that occurrence is documented in
+      # scripts/tests/test_wasm_pack_install.py); no release-lane occurrence is claimed here.
+      #
+      # WHY taiki-e/install-action AND NOT jetli/wasm-pack-action (which js.yml uses — correct
+      # THERE, since that lane is ubuntu-latest/x86_64 only): jetli's dist/index.js never reads
+      # `process.arch`. It switches on `process.platform` alone and hardcodes
+      # `x86_64-pc-windows-msvc` / `x86_64-apple-darwin` / `x86_64-unknown-linux-musl` (read at
+      # the SHA js.yml pins). On this job's `ubuntu-24.04-arm` (arm64-linux, BLOCKING) and
+      # `macos-14` (arm64-darwin) rows that fetches an x86_64 binary, and Linux arm64 has no
+      # Rosetta to fall back on. install-action resolves the host arch, and its wasm-pack
+      # manifest at the SHA pinned below carries a checksummed 0.15.0 entry for every platform
+      # this matrix uses — x86_64 + aarch64 linux-musl (statically linked, so they run on the
+      # glibc runners), x86_64 + aarch64 macos, x86_64 windows.
+      #
+      # The version is pinned EXACTLY (repo tool-pin doctrine, cf. sq-tool-pin): 0.15.0 is
+      # wasm-pack's current release (install-action's manifest resolves `latest` to it) and is
+      # the version js.yml pins, so this is version-neutral against the unpinned `cargo install`
+      # it replaces. The explicit `tool:` input is required by
+      # scripts/check-install-action-tool.py: our SHA-pin policy drops install-action's
+      # `@<tool>` ref selector, and without `tool:` it installs NOTHING (bead sq-ur7o).
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: wasm-pack@0.15.0
 
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js
