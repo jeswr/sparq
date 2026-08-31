@@ -436,9 +436,10 @@ as **defense-in-depth only**, never the load-bearing mechanism. Do not weaken
 rule 1 on the strength of it.
 
 **Operational notes.** `pull_request`-event CI runs are cancel-superseded per PR
-(`concurrency` groups; `bench.yml` now cancels superseded **PR** runs only — its
-push/schedule runs still never cancel, protecting the benchmark history — and
-`js.yml` gained the standard per-PR group). `merge_group` runs are never cancelled
+(`concurrency` groups; `bench.yml` coalesces superseded **PR and main-push** runs so
+only the newest main state consumes runners, while schedule/manual full runs use
+isolated non-cancellable groups that protect benchmark history; `js.yml` gained the
+standard per-PR group). `merge_group` runs are never cancelled
 by these groups. **No required-check name changed** — the ruleset still requires
 exactly `ci-summary / gate`, and every full-tier run still emits exactly that
 context; a draft-tier run emits the additional, deliberately **non-required**

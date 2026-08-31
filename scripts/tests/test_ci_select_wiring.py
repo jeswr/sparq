@@ -1719,12 +1719,22 @@ class TestDraftTierWiring(unittest.TestCase):
             self.assertIn(key, env, f"gate step must export {key}")
         self.assertIn("github.event.pull_request.draft", str(env["PR_DRAFT"]))
 
-    def test_bench_concurrency_cancels_only_pull_request(self):
+    def test_bench_concurrency_coalesces_pr_and_push_only(self):
         conc = self.bench.get("concurrency", {})
+        self.assertEqual(
+            str(conc.get("group")),
+            "bench-${{ github.ref }}-${{ (github.event_name == 'schedule' || "
+            "github.event_name == 'workflow_dispatch' || "
+            "(github.event_name == 'pull_request' && "
+            "contains(fromJSON('[\"labeled\",\"unlabeled\"]'), "
+            "github.event.action))) && github.run_id || 'shared' }}",
+            "nightly/manual benchmark runs need isolated per-run groups while "
+            "ordinary PR and main-push runs share their ref's coalescing group",
+        )
         self.assertEqual(str(conc.get("cancel-in-progress")),
-                         "${{ github.event_name == 'pull_request' }}",
-                         "bench must cancel superseded PR runs but never a "
-                         "push/schedule run (history integrity)")
+                         "${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}",
+                         "bench must coalesce superseded PR/main-push runs while "
+                         "preserving every nightly/manual full run")
 
     def test_js_has_per_pr_concurrency(self):
         conc = self.js.get("concurrency", {})
