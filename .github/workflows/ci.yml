@@ -178,12 +178,18 @@ jobs:
   # `scripts/ci_select.py --classify-only` — the IDENTICAL `classify_change()` path the
   # `select` pre-job runs on this event, so the two layers cannot disagree on a resolved
   # diff (no duplicated path lists; ci_select.py stays the single source of truth).
-  # Class docs-only/orchestration-only => rust_changed=false + docker_changed=false
+  # A class on ci_select.py `_INERT_CLASSES` => rust_changed=false + docker_changed=false
   # (sound: every path in the dorny `rust`/`docker` filter sets classifies `engine`, so
   # those classes PROVE both filters would be false — same trust model as the PR-level
   # gate, a pure function of the authoritative diff). Any OTHER class, an unresolvable
   # SHA pair, or ANY classifier error => true/true (fail-safe = full run, cost never
-  # soundness). Gate accounting: the skipped legs report `skipped` and the required
+  # soundness).
+  # [OPUS-5] sq-g25hr widened `_INERT_CLASSES` from {docs-only, orchestration-only} to
+  # also cover `deploy-only` (deploy/** + the deploy lint workflows) and `inert-mixed`
+  # (a diff confined to inert surfaces that SPANS more than one of them — previously
+  # collapsed into `mixed` and therefore paid the full suite). Nothing about the trust
+  # model changed: the class is still computed from the authoritative queued diff, so
+  # one crates/** path taints the batch back to `mixed` => the wildcard arm => full run. Gate accounting: the skipped legs report `skipped` and the required
   # ci-summary gate attributes them to the (green, same-diff) `select` pre-job —
   # attributed skips, never missing legs (scripts/ci_summary_gate.py, sq-fmx4u.3).
   # NOT gated by-class here: vectorized-feature-off.yml stays FULL on merge groups on
@@ -287,8 +293,13 @@ jobs:
             if [ "${ok}" = "true" ]; then
               cls="$(python3 scripts/ci_select.py --classify-only --event merge_group \
                        --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
+              # [OPUS-5] sq-g25hr: the arm lists ci_select.py `_INERT_CLASSES` verbatim
+              # (pinned by scripts/tests/test_ci_select_wiring.py so the two cannot drift).
+              # deploy-only = deploy/** + the deploy lint workflows; inert-mixed = a diff
+              # confined to inert surfaces that SPANS more than one of them (the observed
+              # cloud-deploy batch: manifests + their READMEs + deploy-*.yml).
               case "${cls}" in
-                docs-only|orchestration-only) rust=false; docker=false ;;
+                docs-only|orchestration-only|deploy-only|inert-mixed) rust=false; docker=false ;;
                 *) rust=true; docker=true ;;
               esac
             else
@@ -571,12 +582,23 @@ jobs:
     # than the prior 5×(131s build) and with the shards genuinely finishing together.
     #
     # GENERALISING (so a NEW heavy test cannot silently re-skew this): the known-heavy
-    # set is the single `HEAVY` filterset env below. When nextest's run output flags a
-    # NEW test SLOW (the `SLOW [> Ns]` markers), add `| test(=its_name)` to HEAVY and,
-    # if it is comparable to the existing heavies, give it its own matrix shard; the
+    # set is the single `HEAVY` filterset env below. To add one: `| test(=its_name)` in
+    # HEAVY and, if it is comparable to the existing heavies, its own matrix shard; the
     # bulk filter is the negation of HEAVY, so it stays correct automatically. This is
     # the pragmatic known-heavy-list + count-partition-the-rest design — deliberately
     # NOT a timing database (over-engineered for a 2-heavy tail).
+    #
+    # [OPUS-5] sq-6vshe.7 phase 4 (#5563) — WHO NOTICES. This upkeep used to depend on a
+    # human spotting a `SLOW [> Ns]` marker in a shard log, which is not a mechanism: a
+    # newly-slow test just rejoins a bulk shard and re-skews the split, and the only
+    # symptom is a slower merge queue that nobody attributes back to this env. That read
+    # is now MEASURED weekly by `.github/workflows/heavy-set-alarm.yml` +
+    # scripts/heavy_set_alarm.py, which times every test via nextest's libtest-json-plus
+    # stream and files an issue when HEAVY stops matching the measured heavy set — a test
+    # above the floor that HEAVY does not name, an atom left behind by a rename (whose
+    # shard then silently runs ZERO tests, since `test(=NAME)` is an exact match), or a
+    # declared heavy that got fast and is now wasting a shard. It is ADVISORY and reads
+    # this env; it never edits it, so the list below stays hand-owned.
     #
     # fail-fast: false so one shard's failure does not cancel the others (we want the
     # full failure picture across the suite, not just the first shard to break).

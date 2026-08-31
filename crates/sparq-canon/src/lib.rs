@@ -60,10 +60,10 @@
 //! natively re-implements the RDFC-1.0 algorithm over oxrdf-0.3 and **descends
 //! the Hash-N-Degree-Quads gossip into triple-term objects**, so blank nodes
 //! nested inside triple terms get relabelled. It is byte-identical to the
-//! standard path on triple-term-free input. This is **not** W3C RDFC-1.0
-//! (RDF-1.2 canonicalization is unsettled upstream); see the `rdf12` module
-//! (only present with the feature on). With the feature OFF the crate is
-//! byte-identical to before — the standard surface still returns
+//! standard path on triple-term-free input. This is **not** W3C RDFC-1.0;
+//! W3C has published no RDF-1.2 dataset canonicalization specification. See the
+//! `rdf12` module (only present with the feature on). With the feature OFF the
+//! crate is byte-identical to before — the standard surface still returns
 //! [`CanonError::TripleTerm`] on triple terms.
 //!
 //! The same feature also carries a **constrained ground-triple-term** variant
