@@ -22,10 +22,23 @@
 #      `prepare` lifecycle (sq-bkag git-pin build) runs on `npm ci` and needs
 #      wasm-pack on PATH to compile the wasm engine.
 #
-# SCOPE — deliberately js.yml ONLY. gui.yml / pages.yml / publish.yml / release.yml /
-# nightly-full-sweep.yml / site-e2e-hero.yml / site-visual.yml still `cargo install`
-# wasm-pack; converting them is separate work and is NOT asserted here, so this file's
-# silence about them is not a claim that they are hardened.
+# [OPUS-5] #5851 adds the cross-lane property:
+#
+#   5. NO VERSION DIVERGENCE. Every DIRECT jetli/wasm-pack-action call site in the repo
+#      must name the SAME exact version. There are two — js.yml and ci.yml's `wasm` job
+#      — and they silently disagreed (js.yml v0.15.0 vs ci.yml v0.13.1), so the lane
+#      that BUILDS the published wasm engine and the lane that TESTS the
+#      #[wasm_bindgen] exports were exercising different wasm-pack releases. That is
+#      invisible while both happen to work and misleading when one breaks: a green `js`
+#      build says nothing about the toolchain the `wasm` tests ran under. Asserted as a
+#      repo-wide SWEEP rather than a hard-coded pair, so a THIRD direct call site added
+#      later is covered automatically.
+#
+# SCOPE — the DIRECT `jetli/wasm-pack-action` call sites only. The 16 lanes that still
+# `cargo install wasm-pack --locked` (gui.yml / pages.yml / publish.yml / release.yml /
+# nightly-full-sweep.yml / site-e2e-hero.yml / site-visual.yml) are UNPINNED and are NOT
+# asserted here — pinning them behind a shared composite action is #5776's scope — so
+# this file's silence about them is not a claim that they are hardened.
 #
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).
@@ -40,7 +53,8 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-JS_YML = REPO_ROOT / ".github" / "workflows" / "js.yml"
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+JS_YML = WORKFLOWS / "js.yml"
 
 WASM_PACK_ACTION = "jetli/wasm-pack-action"
 # The repo's action-pin policy: a 40-char lowercase hex commit SHA, never a tag.
@@ -165,6 +179,82 @@ class JsLaneWasmPackInstall(unittest.TestCase):
             "wasm-pack must be installed BEFORE `npm ci`: the package's `prepare` "
             "lifecycle (sq-bkag) runs on `npm ci` and compiles the wasm engine with "
             "wasm-pack from PATH.",
+        )
+
+
+def _direct_call_sites() -> dict[str, str]:
+    """{workflow filename -> `version:` input} for every DIRECT jetli/wasm-pack-action
+    step across .github/workflows. Sweeps the directory rather than naming js.yml/ci.yml
+    so a third call site added later is caught rather than silently unasserted."""
+    sites: dict[str, str] = {}
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        if WASM_PACK_ACTION not in text:
+            continue
+        for block in gate.split_steps(text):
+            if (gate._step_uses(block) or (None,))[0] != WASM_PACK_ACTION:
+                continue
+            versions = [
+                ln.strip().split(":", 1)[1].strip()
+                for ln in block
+                if ln.strip().startswith("version:")
+            ]
+            assert len(versions) == 1, (
+                f"{path.name}: {WASM_PACK_ACTION} step must carry exactly one "
+                f"`version:` input, found {versions!r}"
+            )
+            # A file with two call sites would collide; assert rather than overwrite.
+            assert path.name not in sites, (
+                f"{path.name} has more than one {WASM_PACK_ACTION} step; this sweep "
+                f"assumes at most one per workflow"
+            )
+            sites[path.name] = versions[0]
+    return sites
+
+
+class WasmPackVersionAgreement(unittest.TestCase):
+    """(5) #5851 — the two direct call sites must not drift apart again."""
+
+    def setUp(self):
+        self.sites = _direct_call_sites()
+
+    def test_sweep_finds_the_known_call_sites(self):
+        """Guards the guard: if the sweep silently matched nothing, the agreement
+        assertion below would pass vacuously."""
+        self.assertIn(
+            "js.yml",
+            self.sites,
+            "the sweep must still find js.yml's direct wasm-pack install — if this "
+            "fails the step-splitting changed and the agreement check is vacuous",
+        )
+        self.assertIn(
+            "ci.yml",
+            self.sites,
+            "the sweep must still find ci.yml's direct wasm-pack install (the `wasm` "
+            "job) — if this fails the agreement check is vacuous",
+        )
+
+    def test_every_direct_call_site_is_exactly_pinned(self):
+        for name, version in self.sites.items():
+            with self.subTest(workflow=name):
+                self.assertRegex(
+                    version,
+                    VERSION_RE,
+                    f"{name}: wasm-pack must be pinned to an exact release (e.g. "
+                    f"v0.15.0), never `latest` — got {version!r}",
+                )
+
+    def test_all_direct_call_sites_agree_on_one_version(self):
+        distinct = sorted(set(self.sites.values()))
+        self.assertEqual(
+            len(distinct),
+            1,
+            "every direct jetli/wasm-pack-action call site must name the SAME "
+            f"wasm-pack version, found {distinct!r} across {self.sites!r}. The `js` "
+            "lane builds the published wasm engine and ci.yml's `wasm` job runs the "
+            "headless #[wasm_bindgen] tests; if they install different wasm-pack "
+            "releases, a green build says nothing about the toolchain the tests ran "
+            "under (#5851 — ci.yml sat on v0.13.1 while js.yml moved to v0.15.0).",
         )
 
 
