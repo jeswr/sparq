@@ -9,10 +9,10 @@ name: CI
 on:
   push:
     branches: [main]
-  # [FABLE-5] sq-fmx4u.5: react to labeled/unlabeled too so toggling the `ci-full`
-  # label re-evaluates the change-based selection (ci-select.yml maps the label to
-  # `--full`). The default types (opened/synchronize/reopened) are listed explicitly
-  # so adding the label events does NOT drop `synchronize` (the push-to-PR trigger).
+  # [FABLE-5] sq-fmx4u.5: toggling the `ci-full` label re-evaluates the
+  # change-based selection (ci-select.yml maps the label to `--full`).
+  # [GPT-5.6] #5215: ci-label-override.yml owns labeled/unlabeled events and calls
+  # this workflow only for ci-full. The default PR event types stay explicit.
   # [FABLE-5] LABEL-TRIGGER GUARD: only the `ci-full` toggle may start real work off
   # these label events. The autonomous review pipeline flips review:*/status:* labels
   # several times per round on ~20 open PRs, and before this guard EVERY flip
@@ -41,7 +41,10 @@ on:
   # a non-`ci-full` label flip stays a no-op regardless of draft state, and a draft
   # head stays tier-reduced regardless of label events.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
+  # [GPT-5.6] #5215: ci-label-override.yml calls this workflow only when the
+  # explicit ci-full override changes. Ordinary label churn never reaches it.
+  workflow_call:
   # [OPUS-4.8] Merge queue: re-run the identical PR check-set on the queue's
   # merge_group ref so the required ci-summary gate finds the same siblings it finds
   # on a PR. The per-commit `coverage` job (if: event_name != 'schedule') runs here;

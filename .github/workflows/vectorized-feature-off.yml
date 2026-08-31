@@ -57,18 +57,23 @@ on:
   push:
     branches: [main]
   # [FABLE-5] Draft-tier CI: default types + ready_for_review (the un-draft moment
-  # must re-run the wasm-equality leg a draft head may have scoped out) +
-  # labeled/unlabeled (the `ci-full` label toggle must re-evaluate the draft-tier
-  # scope decision in the artifact-exact-equality decide step below).
+  # must re-run the wasm-equality leg a draft head may have scoped out).
+  # [GPT-5.6] #5215: ci-label-override.yml owns labeled/unlabeled events and calls
+  # this workflow only when ci-full changes, preserving that scope re-evaluation.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
+  # [GPT-5.6] #5215: ci-label-override.yml calls this workflow only when the
+  # explicit ci-full override changes. Ordinary label churn never reaches it.
+  workflow_call:
   merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  group: vectorized-feature-off-${{ github.workflow }}-${{ github.ref }}
+  # A ci-full call carries the labeled/unlabeled PR payload. Isolate it so the
+  # override cannot cancel evidence already running on the same head SHA.
+  group: vectorized-feature-off-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
   cancel-in-progress: true
 
 env:

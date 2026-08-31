@@ -54,6 +54,8 @@ CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 FM_YML = REPO_ROOT / ".github" / "workflows" / "feature-matrix.yml"
 FUZZ_YML = REPO_ROOT / ".github" / "workflows" / "fuzz.yml"  # [OPUS-4.8] sq-fmx4u.6
 BENCH_YML = REPO_ROOT / ".github" / "workflows" / "bench.yml"  # [SONNET-4.6] sq-mel85
+VECTOR_OFF_YML = REPO_ROOT / ".github" / "workflows" / "vectorized-feature-off.yml"
+LABEL_DISPATCH_YML = REPO_ROOT / ".github" / "workflows" / "ci-label-override.yml"
 SELECT_YML = REPO_ROOT / ".github" / "workflows" / "ci-select.yml"
 GATE_PY = REPO_ROOT / "scripts" / "ci_summary_gate.py"
 CI_SELECT_PY = REPO_ROOT / "scripts" / "ci_select.py"  # [OPUS-4.8] sq-fmx4u.6
@@ -361,6 +363,7 @@ class TestWiring(unittest.TestCase):
         cls.fm = _load(FM_YML)
         cls.fuzz = _load(FUZZ_YML)  # [OPUS-4.8] sq-fmx4u.6
         cls.bench = _load(BENCH_YML)  # [SONNET-4.6] sq-mel85
+        cls.vector_off = _load(VECTOR_OFF_YML)
         cls.sel = _load(SELECT_YML)
         cls.members = _workspace_members()
         cls.gate = _gate_module()
@@ -494,24 +497,93 @@ class TestWiring(unittest.TestCase):
         # The label check must gate the --full branch (fail-open toward RUNNING more).
         self.assertIn('[ "$CI_FULL_LABEL" = "true" ]', run)
 
-    def test_label_toggle_reevaluates_selection(self):
-        """[FABLE-5] sq-fmx4u.5. Toggling the ci-full label must re-run selection, so
-        both selection-consuming workflows react to labeled/unlabeled — and must NOT
-        drop the default `synchronize` (push-to-PR) trigger while doing so."""
-        for wf_name, wf in (("ci.yml", self.ci), ("feature-matrix.yml", self.fm),
-                            ("fuzz.yml", self.fuzz), ("bench.yml", self.bench)):
+    def test_label_toggles_route_through_one_zero_runner_dispatcher(self):
+        """[GPT-5.6] #5215. Review/status/area label churn must not instantiate a
+        selector in every heavy workflow. The heavy workflows remain reusable so a
+        single label dispatcher can invoke exactly the workflows whose explicit
+        full-run override changed; their ordinary PR triggers remain intact."""
+        callers = {
+            "ci": ("ci.yml", self.ci, {"ci-full"}),
+            "feature-matrix": ("feature-matrix.yml", self.fm, {"ci-full"}),
+            "bench": ("bench.yml", self.bench, {"ci-full", "bench-full"}),
+            "fuzz": ("fuzz.yml", self.fuzz, {"ci-full", "fuzz-full"}),
+            "vectorized-feature-off": (
+                "vectorized-feature-off.yml", self.vector_off, {"ci-full"}),
+        }
+
+        for _, (wf_name, wf, _) in callers.items():
             on = _on_block(wf)
             pr = on.get("pull_request") or {}
             self.assertIsInstance(
                 pr, dict, f"{wf_name}: pull_request must carry a types list")
             types = pr.get("types", [])
-            for needed in ("labeled", "unlabeled"):
-                self.assertIn(needed, types,
-                              f"{wf_name}: pull_request must react to {needed} so the "
-                              f"ci-full label toggle re-evaluates selection")
+            for noisy in ("labeled", "unlabeled"):
+                self.assertNotIn(
+                    noisy, types,
+                    f"{wf_name}: ordinary {noisy} events must not create a heavy "
+                    "workflow run; ci-label-override.yml owns that event",
+                )
             for keep in ("opened", "synchronize", "reopened"):
                 self.assertIn(keep, types,
                               f"{wf_name}: must keep the default {keep} trigger")
+            self.assertIn(
+                "workflow_call", on,
+                f"{wf_name}: the label dispatcher must be able to call this workflow",
+            )
+
+        dispatch = _load(LABEL_DISPATCH_YML)
+        dispatch_on = _on_block(dispatch)
+        self.assertEqual(
+            dispatch_on.get("pull_request", {}).get("types"),
+            ["labeled", "unlabeled"],
+            "the lightweight dispatcher must own only label-toggle events",
+        )
+        self.assertEqual(set(dispatch["jobs"]), set(callers))
+        for job_id, (wf_name, _, _) in callers.items():
+            job = dispatch["jobs"][job_id]
+            self.assertEqual(job.get("uses"), f"./.github/workflows/{wf_name}")
+            self.assertNotIn("runs-on", job)
+            self.assertNotIn("steps", job)
+
+            # GitHub permits nested workflows to maintain or reduce the caller's
+            # token scopes, never to elevate them. Pin the call job to at least the
+            # maximum scope any called job declares, or an override run can fail at
+            # workflow validation before its event guards are evaluated.
+            required = {}
+            called = callers[job_id][1]
+            permission_blocks = [called.get("permissions", {})]
+            permission_blocks += [spec.get("permissions", {})
+                                  for spec in called["jobs"].values()]
+            rank = {None: 0, "read": 1, "write": 2}
+            for block in permission_blocks:
+                if not isinstance(block, dict):
+                    continue
+                for scope, level in block.items():
+                    if rank.get(level, 0) > rank.get(required.get(scope), 0):
+                        required[scope] = level
+            actual_permissions = job.get("permissions", {})
+            for scope, level in required.items():
+                self.assertGreaterEqual(
+                    rank.get(actual_permissions.get(scope), 0), rank[level],
+                    f"{job_id}: caller permission {scope} must allow {level}",
+                )
+
+        for action in ("labeled", "unlabeled"):
+            for label in ("review:pass", "review:needs", "area:ci", "trust-surface",
+                          "ci-full", "bench-full", "fuzz-full"):
+                actual = {
+                    job_id for job_id, job in dispatch["jobs"].items()
+                    if eval_job_if(str(job.get("if", "")),
+                                   pr_event(action=action, label=label))
+                }
+                expected = {
+                    job_id for job_id, (_, _, labels) in callers.items()
+                    if label in labels
+                }
+                self.assertEqual(
+                    actual, expected,
+                    f"{action} {label}: dispatcher invoked the wrong workflow set",
+                )
 
     def test_nightly_full_matrix_backstop(self):
         """[FABLE-5] sq-fmx4u.5 (design §6.1). ci.yml runs on a cron schedule (the
