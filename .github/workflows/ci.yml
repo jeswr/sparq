@@ -3403,13 +3403,23 @@ jobs:
         # the sole gate). NB under enforce the outside-cone crates are not measured, so
         # divergence detection is structurally unavailable and the report says so instead
         # of implying the empty divergence list proves the cone sound.
+        #
+        # [OPUS-5] #6026: NO `--divergence-log` here. `shadow_report()` can only populate
+        # `divergences` when the shard measured the OUTSIDE-cone crates too, i.e. only when
+        # the compute step above runs WITHOUT `--enforce`; since the sq-3dr4t enforce flip it
+        # always passes `--enforce`, so the log was `{"divergences": [], ...}` on every run —
+        # and it was written to the workspace root, which nothing uploads, so it died with the
+        # runner regardless. The flag is still supported by scripts/cone_coverage.py (see
+        # test_shadow_report_divergence_log_written), so RE-OPENING the shadow corpus means
+        # BOTH: drop `--enforce` from the compute step AND re-add the flag here TOGETHER WITH
+        # an upload-artifact step for the written path — without the upload the evidence is
+        # still unreadable, which is the trap this step fell into.
         if: always() && hashFiles('cone.json') != '' && hashFiles('target/coverage/coverage-summary.json') != ''
         run: |
           python3 scripts/cone_coverage.py \
             --mode report \
             --cone cone.json \
             --coverage-summary target/coverage/coverage-summary.json \
-            --divergence-log coverage-cone-divergence-shard-${{ matrix.shard }}.json \
             --summary-file "$GITHUB_STEP_SUMMARY" || true
       - name: Upload coverage summary (shard ${{ matrix.shard }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
