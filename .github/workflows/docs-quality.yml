@@ -1276,6 +1276,24 @@ jobs:
         run: python3 scripts/check-sticky-failure-exits.py --self-test
       - name: "Reject exception handlers that erase collected failures (#3770) — GATING"
         run: python3 scripts/check-sticky-failure-exits.py
+      # [OPUS-5] #5133 (follow-up of #4911) — HOLD the one border sparq controls. #4911's
+      # two proposed fixes are both registry-side (the alias label writes originate in
+      # jeswr/agent-account-registry; `park_policy.py` does not exist here), so the root
+      # cause stays OPEN and this does not close it. What it does close is the regression
+      # channel under #4911's sparq-side AUDIT — "no label-writing workflow step runs
+      # under a maintainer-alias PAT" — which was a point-in-time reading of 78 workflow
+      # files with nothing pinning it. A PAT-written label is indistinguishable from a
+      # human's own action at the label's name, which is exactly the confusion #4911
+      # measured; this stops sparq becoming a SECOND producer of it. Non-vacuity: the
+      # fixtures cover the PAT / App-token / plain-token shapes AND the negative (a
+      # non-label step carrying REGISTRY_RING_TOKEN must NOT red). The enforce step is
+      # not vacuous over the live tree: it resolves the real label-writing steps in
+      # rearm-sweeper/verdict-bridge/triage-*/pr-area-label/pr-backlog/promote-on-approval
+      # (`--list-writers` prints the derived label-writing script set it keys off).
+      - name: Self-test label-write token attribution (#4911 shapes + negatives)
+        run: python3 scripts/check-label-write-tokens.py --self-test
+      - name: "Label writes must use github.token or the App token (#5133) — GATING"
+        run: python3 scripts/check-label-write-tokens.py
 
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE
