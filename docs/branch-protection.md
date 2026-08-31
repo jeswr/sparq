@@ -504,12 +504,13 @@ un-draft moment.
   `bypass_mode: always`). This is an explicit exception to uniform enforcement, not a
   compensating control. The automated landing flow does not use the bypass: auto-merge
   still enters the merge queue and waits for its required checks.
-- **Use the merge queue.** The live `merge_queue` rule groups with `HEADGREEN`, admits at
-  most 8 entries per merge, and gives required checks 60 minutes to report
-  (`check_response_timeout_minutes: 60`). HEADGREEN is paired with the executable
-  `merge_group => --full` invariant in `ci-select.yml`: the complete combined tree runs
-  every selection-controlled leg once, while GitHub no longer rebuilds every prefix in
-  the group. Its remaining **throughput** parameters are recorded below.
+- **Use the merge queue.** The #6048 rollout is deliberately staged: the live
+  `merge_queue` rule remains `ALLGREEN` until this change lands. The settings follow-up
+  then changes only `grouping_strategy` to `HEADGREEN`; it keeps the 8-entry merge cap
+  and the 60-minute required-check deadline. That post-merge setting is paired with the
+  executable `merge_group => --full` invariant in `ci-select.yml`: the complete combined
+  tree runs every selection-controlled leg once, while GitHub no longer rebuilds every
+  prefix in the group. Its remaining **throughput** parameters are recorded below.
 - **Require conversation resolution before merging** (all PR review threads resolved —
   `required_review_thread_resolution: true`).
 
@@ -530,12 +531,13 @@ The `merge_queue` rule's throughput parameters:
 | `max_entries_to_merge` | `8` | entries merged in one group (the cap the omnibus batcher folds overflow past) |
 | `min_entries_to_merge` | `1` | one queued entry is enough to form a group |
 | `min_entries_to_merge_wait_minutes` | `5` | **inert** at `min_entries_to_merge: 1` — see (b) |
-| `grouping_strategy` | `HEADGREEN` | one full required-gate run validates the combined group head |
+| `grouping_strategy` | staged: `ALLGREEN` until #6049 lands; `HEADGREEN` after the post-merge ruleset update | one full required-gate run validates the combined group head after rollout |
 | `check_response_timeout_minutes` | `60` | required-check reporting deadline |
 
-Provenance: `max_entries_to_merge`, `grouping_strategy` and
-`check_response_timeout_minutes` are in the verified live-ruleset table at the end of
-this document. The other three are read from the 2026-07-10 profile of ruleset
+Provenance: `max_entries_to_merge` and `check_response_timeout_minutes` are in the
+verified live-ruleset table at the end of this document; `grouping_strategy` records the
+staged #6048 transition above and must be re-read after the post-merge settings update.
+The other three are read from the 2026-07-10 profile of ruleset
 `17688455` (`research/ci-mergequeue-speedup-2026-07.md` §1, §3.3, §6) and are **not**
 re-verified against the live API at this commit — this is a doc-only change. Confirm
 them with the `gh api …/rulesets/<id>` recipe below before acting on (a).
@@ -710,7 +712,7 @@ gh api repos/jeswr/sparq/rulesets
 gh api repos/jeswr/sparq/rulesets/<id> | python3 -m json.tool
 ```
 
-As verified on the date of this commit, the live `main` ruleset
+As verified before the #6048 settings follow-up, the live `main` ruleset
 (`enforcement: active`) carries one always-on repository-administrator bypass actor
 (`actor_id: 5`, `actor_type: RepositoryRole`) and exactly these rules, all of which match
 the sections above:
@@ -724,7 +726,7 @@ the sections above:
 | `code_quality` | `severity: all` | Required reviews |
 | `code_scanning` | `CodeQL`, `alerts_threshold: errors_and_warnings`, `security_alerts_threshold: all` | Required reviews |
 | `copilot_code_review` | `review_on_push: true`, `review_draft_pull_requests: false` | Required reviews |
-| `merge_queue` | `grouping_strategy: HEADGREEN`, `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` | Other settings; Merge-queue throughput settings; Omnibus batching |
+| `merge_queue` | `grouping_strategy: ALLGREEN` before #6049; `HEADGREEN` after the post-merge ruleset update; `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` unchanged | Other settings; Merge-queue throughput settings; Omnibus batching |
 
 The `Key parameters` column is a selection, not an exhaustive dump: the `merge_queue`
 row's remaining throughput parameters (`max_entries_to_build`, `min_entries_to_merge`,
