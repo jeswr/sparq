@@ -174,8 +174,22 @@ untouched here to avoid colliding with it.)
 Heavy or independent lanes that already ran and gated on the PR head dropped their
 `merge_group` trigger because the queue re-run added wall-clock per enqueue with no new
 signal: currently `formal-verification.yml` (Kani proofs), `fuzz.yml` (corpus replay),
-and `bench.yml` (noisy timing suites; the deterministic ratchet is guarded separately).
-This is a **decision, not a defect**.
+`zk-toolchain.yml` (Noir forge suite), `container-scan.yml` (trivy image build + scan),
+`supply-chain.yml` (cargo-deny/vet/SBOM), and `bench.yml` (noisy timing suites; the
+deterministic ratchet is guarded separately — `bench.yml`'s removal predates this
+directive, under sq-6vshe.6). This is a **decision, not a defect**.
+
+<!-- [OPUS-5] issue #5165: the three zk/container/supply-chain lanes carry the same
+     "(2026-07-18 maintainer directive, merge-queue subset) merge_group REMOVED" header
+     comment as the other two but were missing from this list, which is the doc-of-record
+     for the subset. Verified against the `on:` blocks in .github/workflows/ on
+     2026-08-01; the same pass corrected research/ci-mergequeue-speedup-2026-07.md §2.1. -->
+
+The lanes that DO trigger on `merge_group` today are: `ci-summary.yml` (the gate itself),
+`ci.yml`, `feature-matrix.yml`, `vectorized-feature-off.yml`, `docs-quality.yml`,
+`flow-on-gates.yml`, `routing-self-tests.yml` and `pr-area-label.yml` — plus
+`codeql.yml`, whose trigger set lists `merge_group` but which is operationally disabled
+per the note above and so produces no check-run there.
 
 Why it stays sound:
 
@@ -267,7 +281,7 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts. The `ready_for_review` run re-measures at full tier; since sq-6vshe.17 the `merge_group` run does **not** re-measure (only the fast floor gates run there — see *Coverage MEASUREMENT off the merge queue*), so the non-draft PR head and the post-merge `main` run are the measurement points |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
 | `cargo-fuzz` corpus replay (nightly toolchain + a libFuzzer build of every `fuzz/fuzz_targets/` target) | `fuzz.yml` `fuzz` | kept iff the PR carries `ci-full`/`fuzz-full` (`fuzz-full` also selects the randomized budget, so a bare draft skip would neuter it); otherwise the `ready_for_review` run re-replays at full tier. `differential-smoke` — the wrong-answer gate in the same workflow — is deliberately NOT draft-skipped: a wrong-answer regression is review-relevant |
-| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; codeql.yml is byte-identical to `main` — its triggers, including merge_group, are untouched by this PR — but the workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |
+| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; the merge_group run is since sq-g25hr additionally class-gated — an inert batch produces no analysis, a batch with any Rust does — while push-main and the weekly schedule always analyse in full. The workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
@@ -408,7 +422,13 @@ The ruleset additionally carries a `code_scanning` rule (CodeQL). While CodeQL
 is operationally disabled (manual workflow-disable — see the OPERATIONALLY DISABLED note) no
 analyses are produced, so this rule currently exerts **no** blocking pressure.
 If CodeQL is re-enabled: a draft-built head carries no PR CodeQL analysis
-(`analyze` skips on drafts), so the rule would *independently* block such a head
+(`analyze` skips on drafts), and — since sq-g25hr — neither does a `merge_group`
+batch whose change-class is proven inert (`scripts/ci_select.py --classify-only`
+returns one of `_INERT_CLASSES`: the queued diff touches no Rust at all. Any
+`crates/**` path in the batch classifies `mixed` and the full analysis runs, and
+`push`-to-main analyses every merged commit in full, so the default branch's
+code-scanning database never goes stale). The rule would then *independently*
+block such a head
 — but it is an **out-of-repo, owner-mutable setting** and evadable in corner
 cases (a non-draft PR sharing the same head SHA supplies an analysis for the
 commit; the rule may be relaxed during a CodeQL outage), so it is recorded here

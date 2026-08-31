@@ -793,18 +793,25 @@ pub fn status_ref_commit_digest(list_id: &Fr, index_commitment: &Fr, version: u6
 /// version open. Domain-separated and binding under the Poseidon2
 /// collision/hiding assumption.
 ///
-/// # Future in-circuit use (sq-6qe, see `research/zk-statuslist-hide-iri-version.md`)
-/// The deferred fully-hidden circuit recomputes this commitment IN-CIRCUIT from
-/// the SAME private `(list_id, version)` it (a) proves member of the relying
-/// party's accepted `(list, version, status_list_root)` set and (b) freshness-checks
-/// (`version >= public min_version`), exposing it so the verifier byte-matches it
-/// against the ISSUER-SIGNED value — exactly the cross-binding discipline
-/// [`status_index_commitment`] uses for the index. So `list_id` and `version` are
-/// disclosed in NEITHER the signed object NOR any clear field, yet the proof is
-/// bound to a list/version the issuer attested and the relying party accepts.
+/// # In-circuit use today (sq-kndw, see `research/zk-statuslist-hide-iri-version.md`)
+/// The COMPILED fully-hidden member `revoke_hidden_ref_d10_a4` recomputes this
+/// commitment IN-CIRCUIT from the SAME private `(list_id, version)` it (a) proves
+/// member of the relying party's accepted `(list, version, status_list_root)` set
+/// and (b) freshness-checks (`version >= public min_version`), exposing it as a
+/// PUBLIC input so the verifier byte-matches it against the ISSUER-SIGNED value —
+/// exactly the cross-binding discipline [`status_index_commitment`] uses for the
+/// index. So `list_id` and `version` are disclosed in NEITHER the signed object NOR
+/// any clear field, yet the proof is bound to a list/version the issuer attested and
+/// the relying party accepts. The relying-party side is the
+/// `sparq_zk_compose::verifier` `bind_fully_hidden_revocation` stage (run by
+/// `verify_manifest`), which derives the accepted-set root and the epoch floor from
+/// its OWN curated snapshots and rebuilds the public inputs from them, so the prover
+/// chooses neither anchor. Research-grade, NOT externally audited (sq-qhy4) — no
+/// soundness or privacy property is claimed as achieved.
 ///
 /// Maps to a Noir `Poseidon2::hash([DOMAIN, list_id, version, ref_blinding], 4)`.
 // [OPUS-4.8] sq-6qe: hiding (list, version) reference commitment.
+// [OPUS-5] sq-kndw: deferral note retired — the fully-hidden member is compiled.
 pub fn status_ref_commitment(list_id: &Fr, version: u64, ref_blinding: &Fr) -> Fr {
     const SIG_DOMAIN_STATUS_REF_COMMITMENT: u64 = 0x5a4b_5349_475f_5243; // "ZKSIG_RC"
     poseidon2::hash(&[
@@ -826,16 +833,23 @@ pub fn status_ref_commitment(list_id: &Fr, version: u64, ref_blinding: &Fr) -> F
 /// three disclosure modes is possible.
 ///
 /// `ref_commitment` is [`status_ref_commitment`]`(list_id, version, ref_blinding)`
-/// and `index_commitment` is [`status_index_commitment`]`(index, blinding)`. The
-/// verifier (in the deferred sq-6qe path) recomputes this digest from the disclosed
-/// commitments to check the issuer signature; the fully-hidden revocation proof
-/// then cross-binds BOTH commitments in-circuit (the proven-unset index to
-/// `index_commitment`, and the membership-resolved `(list, version)` to
-/// `ref_commitment`), so the disclosure floor is "some accepted (list, version) in
-/// the RP's committed set, version >= public min_version, my hidden index unset".
+/// and `index_commitment` is [`status_index_commitment`]`(index, blinding)`. On the
+/// fully-hidden path (sq-kndw, landed) the verifier recomputes this digest from the
+/// disclosed commitments to check the issuer signature; the compiled
+/// `revoke_hidden_ref_d10_a4` proof then cross-binds BOTH commitments in-circuit (the
+/// proven-unset index to `index_commitment`, and the membership-resolved
+/// `(list, version)` to `ref_commitment`), so the disclosure floor is "some accepted
+/// (list, version) in the RP's committed set, version >= public min_version, my
+/// hidden index unset". That check is the `sparq_zk_compose::verifier`
+/// `bind_fully_hidden_revocation` stage, which also enforces single-use of the
+/// `(ref_commitment, index_commitment)` pair — the pair is stable per ISSUANCE, so
+/// the issuer must re-blind and RE-SIGN per presentation or the pair itself becomes a
+/// cross-presentation linkage handle. Research-grade, NOT externally audited
+/// (sq-qhy4) — no soundness or privacy property is claimed as achieved.
 ///
 /// Maps to a Noir `Poseidon2::hash([DOMAIN, ref_commitment, index_commitment], 3)`.
 // [OPUS-4.8] sq-6qe: fully-committed (list+version+index hidden) status-reference digest.
+// [OPUS-5] sq-kndw: deferral note retired — the fully-hidden path is landed.
 pub fn status_ref_fully_committed_digest(ref_commitment: &Fr, index_commitment: &Fr) -> Fr {
     const SIG_DOMAIN_STATUS_REF_FULL_COMMIT: u64 = 0x5a4b_5349_475f_4643; // "ZKSIG_FC"
     poseidon2::hash(&[

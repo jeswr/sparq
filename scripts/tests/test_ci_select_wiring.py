@@ -62,6 +62,7 @@ OWNERSHIP_TOML = REPO_ROOT / "ci" / "path-ownership.toml"  # [OPUS-4.8] sq-fmx4u
 # [OPUS-4.8] path-aware CI audit: the merge_group changed-files gates.
 CONTAINER_SCAN_YML = REPO_ROOT / ".github" / "workflows" / "container-scan.yml"
 SUPPLY_CHAIN_YML = REPO_ROOT / ".github" / "workflows" / "supply-chain.yml"
+CODEQL_YML = REPO_ROOT / ".github" / "workflows" / "codeql.yml"  # [OPUS-5] sq-g25hr
 
 FAIL_CLOSED_DISJUNCT = "needs.select.outputs.mode != 'selected'"
 NEEDLE_RE = re.compile(
@@ -2142,29 +2143,35 @@ class TestSupplyChainMergeGroupGate(unittest.TestCase):
 
 class TestMergeGroupChangeClassGate(unittest.TestCase):
     """[FABLE-5] merge-group change-class gate (extends #3420/#3421 to the
-    rust_changed layer): the ci.yml + feature-matrix.yml `changes` decide steps
-    classify the queued batch's diff via `scripts/ci_select.py --classify-only`
-    instead of hard-forcing rust_changed=true on merge_group, so a docs-only/
-    orchestration-only batch skips the rust_changed-only lanes (lint / msrv /
-    geiger / docker-smoke / coverage-floors; feature-matrix setup / check-tier /
-    fedclient-boundary) with ATTRIBUTED skips. Pins the SHAPE:
+    rust_changed layer): the ci.yml + feature-matrix.yml + codeql.yml `changes`
+    decide steps classify the queued batch's diff via `scripts/ci_select.py
+    --classify-only` instead of hard-forcing rust_changed=true on merge_group, so a
+    provably-inert batch skips the rust_changed-only lanes (lint / msrv / geiger /
+    docker-smoke / coverage-floors; feature-matrix setup / check-tier /
+    fedclient-boundary; the CodeQL rust analysis) with ATTRIBUTED skips. Pins the
+    SHAPE:
       * the merge_group branch exists and is FAIL-SAFE (defaults true, the #3421
         fetch guard, `|| cls=engine` on the classifier invocation);
       * classification is DELEGATED to scripts/ci_select.py (single source of
         truth) — no duplicated grep path list in the step;
-      * the skip-class set is EXACTLY {docs-only, orchestration-only}, spelled
-        with the classifier module's own tokens (engine/mixed/unknown => full);
+      * the skip-class set is EXACTLY ci_select.py `_INERT_CLASSES`, spelled with
+        the classifier module's own tokens (engine/mixed/unknown => full);
       * ci.yml's docker_changed is class-gated the same way;
       * fuzz.yml needs no such layer (its heavy jobs are select-gated and
         ci-select passes the merge_group SHA pair) and bench.yml has no
         merge_group trigger at all (pinned elsewhere) — this layer must NOT
-        creep into them as a redundant/conflicting second gate."""
+        creep into them as a redundant/conflicting second gate.
+
+    [OPUS-5] sq-g25hr added codeql.yml to the gated set (the ~20-40min CodeQL
+    analysis was the longest merge_group pole for a zero-Rust batch) and widened
+    `_INERT_CLASSES` with `deploy-only` + `inert-mixed`."""
 
     @classmethod
     def setUpClass(cls):
         cls.ci = _load(CI_YML)
         cls.fm = _load(FM_YML)
         cls.fuzz = _load(FUZZ_YML)
+        cls.codeql = _load(CODEQL_YML)
         cls.select_mod = _ci_select_module()
 
     def _decide(self, wf, wf_name):
@@ -2174,8 +2181,11 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
         self.fail(f"{wf_name} missing the `Decide rust_changed` step")
 
     def _both(self):
+        # Every workflow whose merge_group batch is class-gated. (Name kept for the
+        # existing call sites; sq-g25hr made it three.)
         return (("ci.yml", self._decide(self.ci, "ci.yml")),
-                ("feature-matrix.yml", self._decide(self.fm, "feature-matrix.yml")))
+                ("feature-matrix.yml", self._decide(self.fm, "feature-matrix.yml")),
+                ("codeql.yml", self._decide(self.codeql, "codeql.yml")))
 
     def test_merge_group_branch_present_and_fail_safe(self):
         for wf_name, step in self._both():
@@ -2228,23 +2238,50 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
                              f"{wf_name}: the merge_group branch must NOT re-encode the "
                              "class path sets as a grep — no duplicated path lists")
 
-    def test_skip_class_set_is_exactly_docs_and_orchestration(self):
-        # The case-arm must skip on EXACTLY the two proven-inert classes, spelled
-        # with the classifier module's own tokens; the wildcard arm must force the
-        # full run (engine/mixed/any unknown token => rust=true).
-        docs = self.select_mod._CLASS_DOCS
-        orch = self.select_mod._CLASS_ORCHESTRATION
-        self.assertEqual((docs, orch), ("docs-only", "orchestration-only"),
-                         "classifier tokens drifted — update the workflow case-arms in "
-                         "lock-step (they match on these literal strings)")
+    def test_skip_class_set_is_exactly_the_inert_classes(self):
+        # The case-arm must skip on EXACTLY the proven-inert classes, spelled with
+        # the classifier module's own tokens; the wildcard arm must force the full
+        # run (engine/mixed/any unknown token => rust=true).
+        inert = self.select_mod._INERT_CLASSES
+        self.assertEqual(
+            inert, ("orchestration-only", "docs-only", "deploy-only", "inert-mixed"),
+            "classifier tokens drifted — update the workflow case-arms in lock-step "
+            "(they match on these literal strings)")
+        # The arm is spelled docs-first for readability; assert on the SET so a
+        # re-ordering of _INERT_CLASSES is not a spurious failure, and on the exact
+        # arm text so an extra/renamed token cannot sneak in.
         for wf_name, step in self._both():
             run = str(step.get("run", ""))
-            self.assertIn(f"{docs}|{orch}) rust=false", run,
-                          f"{wf_name}: the skip case-arm must cover exactly {docs}|{orch}")
+            arms = re.findall(r"^\s*([a-z|-]+)\) rust=false", run, re.MULTILINE)
+            self.assertEqual(
+                len(arms), 1,
+                f"{wf_name}: expected exactly one skip case-arm, found {arms}")
+            self.assertEqual(
+                set(arms[0].split("|")), set(inert),
+                f"{wf_name}: the skip case-arm {arms[0]!r} must cover exactly the "
+                f"classifier's inert classes {inert}")
             self.assertIn("*) rust=true", run,
                           f"{wf_name}: the wildcard arm must force the full run")
-            self.assertNotIn("mixed) rust=false", run, wf_name)
-            self.assertNotIn("engine) rust=false", run, wf_name)
+            # `mixed` (engine + something inert) and `engine` must NEVER skip — this
+            # is the "a code change cannot be mislabelled as docs-only" obligation.
+            self.assertNotIn("mixed", arms[0].replace("inert-mixed", ""), wf_name)
+            self.assertNotIn("engine", arms[0], wf_name)
+
+    def test_codeql_merge_group_is_class_gated_not_force_true(self):
+        # [OPUS-5] sq-g25hr: the regression this bead fixes — codeql.yml used to
+        # hard-force rust_changed=true on merge_group, paying the full ~20-40min
+        # analysis for a zero-Rust batch. push/schedule MUST still force true.
+        step = self._decide(self.codeql, "codeql.yml")
+        run = str(step.get("run", ""))
+        self.assertIn('"${EVENT_NAME}" = "merge_group"', run,
+                      "codeql.yml: merge_group must be class-gated, not lumped into "
+                      "the force-true else-branch")
+        self.assertIn('echo "rust_changed=true" >> "$GITHUB_OUTPUT"', run,
+                      "codeql.yml: the off-PR/off-merge_group else-branch must still "
+                      "force the full analysis (push-to-main + the weekly schedule)")
+        analyze_if = str(self.codeql["jobs"]["analyze"].get("if", ""))
+        self.assertIn("needs.changes.outputs.rust_changed == 'true'", analyze_if,
+                      "codeql.yml: the analyze job must gate on the changes output")
 
     def test_ci_docker_changed_is_class_gated_with_rust(self):
         run = str(self._decide(self.ci, "ci.yml").get("run", ""))
