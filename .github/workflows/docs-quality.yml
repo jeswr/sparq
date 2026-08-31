@@ -973,6 +973,18 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] issue #5165 — the LANE INVENTORY half of the same problem. The
+      # `merge_group` trigger set and the prose in docs/branch-protection.md
+      # §Merge-queue subset that describes it are unrelated files, so the list drifted
+      # silently: SIX workflows have left the queue (five under the 2026-07-18
+      # directive, bench.yml earlier under sq-6vshe.6) but the doc-of-record's list
+      # named only three, while research/ci-mergequeue-speedup-2026-07.md §2.1 still
+      # listed all six as gate legs — and three lanes that gate there today appeared in
+      # neither. That list is what the sq-6vshe speedup levers are sized off. Hermetic +
+      # stdlib-only; reuses the cache-posture suite's on:-block parser so the two can
+      # never disagree about what "triggers on merge_group" means.
+      - name: Merge-queue lane inventory (docs match the workflow triggers — issue 5165)
+        run: python3 scripts/tests/test_mergequeue_lane_inventory.py
       # [OPUS-5] #4935: the gating inference-conformance lane used to re-download the
       # OWL 2 corpus from web.archive.org over http:// on EVERY run, so a transient
       # outage there concluded `failure` with nothing measured and ejected an unrelated
@@ -1044,6 +1056,18 @@ jobs:
       # leave CI.
       - name: Self-test the CI execution-latency alarm (3 choke modes + YAML seam)
         run: python3 scripts/tests/test_ci_execution_latency_alarm.py
+      # [OPUS-5] sq-6vshe.7 phase 4: the HEAVY-set DRIFT alarm
+      # (scripts/heavy_set_alarm.py, .github/workflows/heavy-set-alarm.yml). Hermetic
+      # (no cargo, no gh, no network) and stdlib-only. Runs the script's own fixture
+      # suite — the UNDECLARED/MISSING/DEMOTED classification, the heavy-floor boundary
+      # and the demotion hysteresis band, libtest-json-plus parsing (binary-id
+      # stripping, slowest-attempt-wins across retries), and BOTH empty-measurement
+      # fail-louds, of which the second is the one that matters: test events carrying no
+      # `exec_time` must RED, because a detector that scores every test at 0s would
+      # report a confident all-clear forever. It also drives the drift → issue-body path
+      # so a finding cannot be raised and then dropped before it is rendered.
+      - name: Self-test the HEAVY-set drift alarm (drift classes + empty-measurement fail-loud)
+        run: python3 scripts/heavy_set_alarm.py --self-test
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
