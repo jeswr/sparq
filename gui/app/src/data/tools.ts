@@ -28,6 +28,7 @@ import {
   Server,
   Scale,
   Gauge,
+  PieChart,
 } from "lucide-react";
 
 /**
@@ -100,6 +101,19 @@ export const TOOLS: ToolDef[] = [
     blurb: "Run SPARQL 1.1/1.2 over the live store — SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE.",
     tier: "live",
     icon: Database,
+    built: true,
+    group: "working",
+  },
+  {
+    id: "overview",
+    label: "Overview",
+    // [OPUS-5] sq-ixc3.21 — the dataset summary views (class-hierarchy bubble,
+    // class-relationship chord, domain–range table), computed from four aggregate SPARQL
+    // queries over the live store. Asserted statements only — no entailment is applied.
+    blurb:
+      "Summarise the live store — class bubbles sized by instance count, a class-relationship chord, and the observed domain–range signatures.",
+    tier: "live",
+    icon: PieChart,
     built: true,
     group: "working",
   },

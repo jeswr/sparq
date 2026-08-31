@@ -77,6 +77,9 @@ const OdrlTool = lazyPanel(() =>
 const PlanExplorer = lazyPanel(() =>
   import("@/components/workbench/plan-explorer").then((m) => ({ default: m.PlanExplorer })),
 );
+const OverviewTool = lazyPanel(() =>
+  import("@/components/workbench/overview-tool").then((m) => ({ default: m.OverviewTool })),
+);
 
 interface ToolPanelEntry {
   Component: ComponentType;
@@ -111,6 +114,9 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // [FABLE-5] sq-ixc3.19 — the visual query-plan explorer (EXPLAIN/ANALYZE operator tree +
   // q-error heat + the this-workbench query monitor with endpoint Kill).
   plan: { Component: PlanExplorer, override: PLAN_TOOL_OVERRIDE },
+  // [OPUS-5] sq-ixc3.21 — the dataset overview: class-hierarchy bubble, class-relationship
+  // chord and domain–range table, all derived from aggregate queries over the live store.
+  overview: { Component: OverviewTool },
 };
 
 /**

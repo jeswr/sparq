@@ -165,6 +165,28 @@ snapshot of the asserted store and runs `reasonN3`; derived ground triples are l
 query-time closure. [SONNET-4.6] This is the honest live-wasm boundary: formula and quoted-graph
 conclusions are not inserted because the in-tab store represents ground triples only.
 
+## Dataset overview (summary views) — `sq-ixc3.21`
+
+The **Overview tool** answers "what IS this dataset" from the live store, with three views over
+ONE snapshot: a **class-hierarchy bubble** chart (a bubble per class, area proportional to its
+direct instance count, nested by asserted `rdfs:subClassOf`), a **class-relationship chord** (a
+ribbon per ordered class pair, width proportional to the statements between their instances), and
+a **domain–range** table of the predicate signatures the data actually contains. Both SVGs are
+dependency-free (no d3 / cytoscape), and the layout maths — the nested circle packing and the
+chord angles — lives in `lib/dataset-overview.ts` and is unit-tested there.
+
+It is built from **four aggregate SPARQL queries** the panel shows you (the "Queries behind this
+overview" disclosure), run in order over the in-tab store: class counts, `rdfs:subClassOf` axioms,
+class→predicate→class counts, and class→predicate→datatype counts. Nothing is sampled or
+estimated. The counts are of **asserted** statements — no entailment is applied, so a bubble is
+direct `rdf:type` instances and the domain–range rows are what the data contains rather than what
+an `rdfs:domain` / `rdfs:range` axiom declares; the panel says so. Drill-down is real too: a
+bubble runs an instance query, and a ribbon breaks down into its per-predicate counts. Every cap
+(the top-N classes the chord shows, the per-query row limits, the instance limit) is stated in the
+UI, a query that fails is named instead of being silently dropped, and the snapshot does not
+follow the store — an import marks it stale and asks for a Refresh rather than showing figures for
+a store that no longer exists.
+
 ## Shared TS client
 
 The frontend consumes the framework-agnostic `@sparq/client`
