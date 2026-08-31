@@ -504,11 +504,12 @@ un-draft moment.
   `bypass_mode: always`). This is an explicit exception to uniform enforcement, not a
   compensating control. The automated landing flow does not use the bypass: auto-merge
   still enters the merge queue and waits for its required checks.
-- **Use the merge queue.** The live `merge_queue` rule groups with `ALLGREEN`, admits at
+- **Use the merge queue.** The live `merge_queue` rule groups with `HEADGREEN`, admits at
   most 8 entries per merge, and gives required checks 60 minutes to report
-  (`check_response_timeout_minutes: 60`). Its **throughput** parameters — how many
-  entries the queue speculatively builds, and the minimum-group-size wait — are recorded
-  in *Merge-queue throughput settings* below.
+  (`check_response_timeout_minutes: 60`). HEADGREEN is paired with the executable
+  `merge_group => --full` invariant in `ci-select.yml`: the complete combined tree runs
+  every selection-controlled leg once, while GitHub no longer rebuilds every prefix in
+  the group. Its remaining **throughput** parameters are recorded below.
 - **Require conversation resolution before merging** (all PR review threads resolved —
   `required_review_thread_resolution: true`).
 
@@ -518,7 +519,8 @@ un-draft moment.
      research/ci-mergequeue-speedup-2026-07.md §3.3. Records the throughput parameter
      set, the min-entries-wait audit VERDICT, and the CodeQL merge_group placement
      re-verdict. INVARIANT: no required-check change — the sole required context stays
-     `gate`; ALLGREEN grouping and squash-only are untouched by all three items. -->
+     `gate`; squash-only is untouched by all three items. #6048 later changed only the
+     grouping strategy, paired with full combined-head validation. -->
 
 The `merge_queue` rule's throughput parameters:
 
@@ -528,7 +530,7 @@ The `merge_queue` rule's throughput parameters:
 | `max_entries_to_merge` | `8` | entries merged in one group (the cap the omnibus batcher folds overflow past) |
 | `min_entries_to_merge` | `1` | one queued entry is enough to form a group |
 | `min_entries_to_merge_wait_minutes` | `5` | **inert** at `min_entries_to_merge: 1` — see (b) |
-| `grouping_strategy` | `ALLGREEN` | one red leg requeues the whole entry |
+| `grouping_strategy` | `HEADGREEN` | one full required-gate run validates the combined group head |
 | `check_response_timeout_minutes` | `60` | required-check reporting deadline |
 
 Provenance: `max_entries_to_merge`, `grouping_strategy` and
@@ -722,7 +724,7 @@ the sections above:
 | `code_quality` | `severity: all` | Required reviews |
 | `code_scanning` | `CodeQL`, `alerts_threshold: errors_and_warnings`, `security_alerts_threshold: all` | Required reviews |
 | `copilot_code_review` | `review_on_push: true`, `review_draft_pull_requests: false` | Required reviews |
-| `merge_queue` | `grouping_strategy: ALLGREEN`, `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` | Other settings; Merge-queue throughput settings; Omnibus batching |
+| `merge_queue` | `grouping_strategy: HEADGREEN`, `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` | Other settings; Merge-queue throughput settings; Omnibus batching |
 
 The `Key parameters` column is a selection, not an exhaustive dump: the `merge_queue`
 row's remaining throughput parameters (`max_entries_to_build`, `min_entries_to_merge`,

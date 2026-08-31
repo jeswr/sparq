@@ -494,6 +494,33 @@ class TestWiring(unittest.TestCase):
         # The label check must gate the --full branch (fail-open toward RUNNING more).
         self.assertIn('[ "$CI_FULL_LABEL" = "true" ]', run)
 
+    def test_merge_group_forces_full_before_any_narrowing_escape_hatch(self):
+        """[#6048] HEADGREEN is sound only when its one combined head runs in full.
+
+        Pin the exact reusable-workflow seam because all selection-consuming queue
+        workflows inherit this shell block. The override must precede both the PR-label
+        override and shadow mode, and must add the real ``--full`` argv element; an echo,
+        an inverted event test, or a later branch would not establish that invariant.
+        """
+        run = str(self._select_step()["run"])
+        branch = re.compile(
+            r'(?m)^\s*if \[ "\$EVENT" = "merge_group" \]; then\n'
+            r'\s*args\+=\(--full\)\n'
+            r'\s*elif \[ "\$CI_FULL_LABEL" = "true" \]; then$'
+        )
+        self.assertRegex(run, branch)
+        self.assertLess(run.index('$EVENT" = "merge_group'), run.index("CI_SELECT_MODE"),
+                        "the merge-group full override must win over shadow mode")
+
+        for broken in (
+            run.replace('$EVENT" = "merge_group', '$EVENT" != "merge_group', 1),
+            run.replace("args+=(--full)", "echo --full", 1),
+            run.replace("elif [ \"$CI_FULL_LABEL\" = \"true\" ]; then",
+                        "fi\n          if [ \"$CI_FULL_LABEL\" = \"true\" ]; then", 1),
+        ):
+            self.assertNotRegex(broken, branch,
+                                "the structural guard must reject weakened mutants")
+
     def test_label_toggle_reevaluates_selection(self):
         """[FABLE-5] sq-fmx4u.5. Toggling the ci-full label must re-run selection, so
         both selection-consuming workflows react to labeled/unlabeled — and must NOT
@@ -955,8 +982,9 @@ class TestBenchMetricTierInvariant(unittest.TestCase):
 # contains EXACTLY ONE entry: {"context":"gate","integration_id":15368} — i.e.
 # `ci-summary / gate` is the SOLE required check.  No individual per-crate matrix
 # legs, no individual `opt-in <X>` legs are in the required list.  The merge queue
-# (grouping_strategy=ALLGREEN, check_response_timeout_minutes=60) therefore blocks
-# ONLY on the single "gate" check, not on absent or skipped siblings.
+# (grouping_strategy=HEADGREEN after #6048, check_response_timeout_minutes=60) therefore
+# blocks ONLY on the single "gate" check, not on absent or skipped siblings. HEADGREEN's
+# one combined head is forced to full selection by TestWiring's structural invariant.
 #
 # Consequence: PLAIN-SKIP IS SAFE.  A selection-skipped job (conclusion=skipped
 # from a job-level `if:` guard) reports a complete check-run; the gate already
