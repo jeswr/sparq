@@ -186,12 +186,12 @@ decomposition to be **one limb**.
   `ops/kernels.nr:1035-1043`).
 
 So on **§5.2's** 8-package corpus the patched arm is **never reached — it neither fires nor
-declines**. Under (C) — i.e. *if* those are the 8 packages the row was taken over, which
-#13265's body does not say (§4.1) — "all unchanged" is entailed by the patch's shape
+declines**. Under (C) — i.e. *if* those are the 8 packages the row was taken over, which #13265's
+body does not say (§4.1) — "all unchanged" is entailed by the patch's shape
 exactly as #13314's row was, and the stated mechanism (*"real code rarely decomposes into a
 single limb explicitly"*) is also the wrong reason, since §5.2's 8 contain **no explicit
-decomposition of any width** and so single-limb rarity is not what produced the null. If
-#13265's 8 are some *other* 8 — its count matches §5.2's compose half but a count is not an
+decomposition of any width** and so single-limb rarity is not what produced the null. If #13265's
+8 are some *other* 8 — its count matches §5.2's compose half but a count is not an
 identification — none of that transfers and the row's status is simply unknown.
 
 Two repairs are available and cheap, and they are not the same repair:
@@ -265,8 +265,8 @@ unsound direction, and an under-estimate would make `8 > max` true and delete a 
 nonzero delta. So *under (C)* the bare "unchanged" row is **doing real work**.
 
 **But (C) is least supported for this PR, and the gap lands on the load-bearing package.**
-The evidential path above runs through `filter_f64` / `filter_f64_d4`, and nothing in
-#13263's body or in this repo places either in its 13-program set: the opcode extrema pin
+The evidential path above runs through `filter_f64` / `filter_f64_d4`, and nothing in #13263's
+body or in this repo places either in its 13-program set: the opcode extrema pin
 only `filter_int_d1` and `scan_k2_n64_r8` (§4.1), and neither is a `filter_f64*`. #13263 is
 also the one PR whose count (13) **exceeds** §5.2's documented 11, so even the superset
 reading of (C) is unestablished — the 13 are consistent with §5.2's 11 plus two unknowns,

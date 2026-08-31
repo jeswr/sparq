@@ -806,10 +806,10 @@ Two program-level items fall out. (1) **§6.1's provenance blockers do not repli
 all four sibling bodies name `bb 5.0.0-nightly.20260522`, `bb gates -s ultra_honk` and
 `nargo info --force`, and each ships its named fixture in the PR — only #13314 does
 not, so only #13314's focused table is un-re-takeable. (2) The four bodies quote
-**four different corpora** (13 / 11 / 8 / 39 programs) and none names its packages;
-#13266's "31 real ZK circuit binaries" is confirmed against this repo (31 `type = "bin"`
-`zk/compose` packages at `397ce990`, 2026-07-04) and #13264's 11 *count*-matches §5.2, but
-#13263's 13 exceeds §5.2's 11 with none of the 13 identified. Naming the corpus — one line,
+**four different corpora** (13 / 11 / 8 / 39 programs) and none names its packages; #13266's
+"31 real ZK circuit binaries" is confirmed against this repo (31 `type = "bin"`
+`zk/compose` packages at `397ce990`, 2026-07-04) and #13264's 11 *count*-matches §5.2, but #13263's
+13 exceeds §5.2's 11 with none of the 13 identified. Naming the corpus — one line,
 a sparq commit plus a package list — is unblocked today, needs no `sq-i50o4`, and is what
 turns the conditional table above into verdicts.
 
