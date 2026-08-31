@@ -493,7 +493,37 @@ jobs:
       # (repointed off the marketing site by PR #1003 / sq-ixc3.8). Its `prebuild` hook
       # (gui/app/scripts/sync-wasm.mjs) needs the lean shacl,jsonld wasm bundle present in js/wasm/.
       # Mirror gui.yml's proven-green `gui-app`/`tauri-e2e` jobs: build the wasm bundle FIRST.
-      - name: Install wasm-pack
+      #
+      # [OPUS-5] #5304 (extends sq-khm3f/#3236 beyond the `js` lane): prefer the PREBUILT
+      # release binary over `cargo install wasm-pack --locked`, which recompiled wasm-pack
+      # and its whole chrono/wasm-bindgen source tree from crates.io on EVERY run — one
+      # transient crates.io/CDN blip away from reddening a BLOCKING release row (that is how
+      # PR #1131 died: `download of wa/sm/wasm-bindgen failed / curl failed: [16] Error in
+      # the HTTP2 framing layer`, cleared by a plain re-run). @actions/tool-cache retries the
+      # single tarball fetch, so the one remaining request is itself flake-tolerant. Version
+      # pinned EXACTLY (v0.15.0 is wasm-pack's current release, i.e. what `cargo install`
+      # resolved to here — version-neutral today); `latest` would re-add an unauthenticated
+      # api.github.com release lookup, a second rate-limit-flake source.
+      #
+      # SPLIT BY ARCH — this is the ONE wasm-pack-installing job in the repo that is not
+      # pinned to an x86_64 runner (every other one is `runs-on: ubuntu-latest`).
+      # jetli/wasm-pack-action ignores `process.arch`: its dist/index.js switches on
+      # `process.platform` ALONE and maps win32/darwin/linux to x86_64-pc-windows-msvc /
+      # x86_64-apple-darwin / x86_64-unknown-linux-musl — so even though upstream publishes
+      # aarch64 assets, the action never requests them. The arm64 rows (ubuntu-24.04-arm,
+      # macos-14) would get an x86_64 binary; ubuntu-24.04-arm is a BLOCKING row and has no
+      # Rosetta to fall back on. They keep the source compile; the x64 rows
+      # (ubuntu-latest, macos-15-intel, windows-latest) get the hardening. Drop the fallback
+      # (and its entry in scripts/tests/test_wasm_pack_install.py's EXPECTED_ARCH_FALLBACKS)
+      # once the action gains arch detection.
+      - name: Install wasm-pack (prebuilt binary — x86_64 rows)
+        if: runner.arch == 'X64'
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
+
+      - name: Install wasm-pack (source compile — non-x86_64 rows)
+        if: runner.arch != 'X64'
         run: cargo install wasm-pack --locked
 
       - name: Build wasm bundle (shacl,jsonld)

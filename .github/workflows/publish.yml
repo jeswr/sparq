@@ -128,8 +128,20 @@ jobs:
         run: |
           npm install -g 'npm@^11.5.1'
           npm --version
+      # [OPUS-5] #5304 (extends sq-khm3f/#3236 beyond the `js` lane): install the
+      # PREBUILT binary, not `cargo install wasm-pack --locked` — that recompiled
+      # wasm-pack's whole chrono/wasm-bindgen source tree from crates.io on EVERY run,
+      # so one transient registry/CDN blip could red this lane on unrelated work (how
+      # PR #1131 died). jetli/wasm-pack-action fetches one static musl tarball with
+      # @actions/tool-cache, which retries a failed download, and drops the binary in
+      # ~/.cargo/bin. `version:` is pinned EXACTLY — v0.15.0 is wasm-pack's current
+      # release, i.e. what `cargo install` resolved to here (version-neutral today);
+      # `latest` would re-add an unauthenticated api.github.com release lookup, a
+      # second rate-limit-flake source. Full rationale: the same step in js.yml.
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
       - name: Install npm dependencies
         run: npm ci
       # Publish guardrail (sq-bkag): refuse to publish a binding that would ship without its
@@ -216,7 +228,9 @@ jobs:
           npm install -g 'npm@^11.5.1'
           npm --version
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
       # Build tooling only (typescript, @rdfjs/types). --workspaces=false installs just this
       # package's devDeps without pulling the whole monorepo graph; the package has no lockfile.
       - name: Install build dependencies
@@ -293,7 +307,9 @@ jobs:
           npm install -g 'npm@^11.5.1'
           npm --version
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
       # Build the wasm bundle so the `files` allowlist packs a populated wasm/ tree. This package
       # has NO `prepack`/`build` script (unlike @jeswr/sparq / eyereasoner-compat), so the wasm is
       # NOT rebuilt automatically on `npm publish` — build it explicitly here, before publish.
