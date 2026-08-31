@@ -104,26 +104,36 @@ finest cadence in use is 5 minutes, on exactly one lane:
 | `batch-merge.yml` | `7,22,37,52 * * * *` | 15 min |
 | `ci-latency-alarm.yml` | `26 * * * *` | hourly |
 
-## 4. Finding B — the required context needs no migration
+## 4. Finding B — context identity is plausible, but cutover needs live proof
 
-Branch protection matches required checks by **context name**, and a check-run created
-through the Checks API occupies the same name namespace as a job-produced one. An
-evaluator that creates and updates a check-run named exactly `gate` on the head SHA
-satisfies ruleset 17688455's existing `{context: "gate"}` entry with **no ruleset edit**.
+The Checks REST API can create a check-run named `gate` on an arbitrary head SHA, but
+write access is restricted to GitHub App installation credentials. `GITHUB_TOKEN` is the
+repository-scoped installation token available to an Actions run, so the evaluator can
+request `checks: write`; a user token or classic PAT is not an equivalent fallback. The
+official API contract is the authority here:
+<https://docs.github.com/en/rest/checks/runs>; GitHub documents `GITHUB_TOKEN`'s App
+installation identity at
+<https://docs.github.com/en/actions/concepts/security/github_token>.
 
-This also dissolves the original §3.3 fork problem (a `statuses: write` token is not
-available to fork PR heads): the evaluator runs from the **default branch** on
-`workflow_run` / `schedule`, so it holds a full-permission token regardless of the PR's
-origin — the same isolation property `fast-fix-ring.yml` already depends on
-(sparq-org/sparq#3474).
+Ruleset 17688455 pins both the context `gate` and GitHub Actions' integration id. The
+design must therefore **not assume** that a run created through `GITHUB_TOKEN` has the
+right required-check identity merely because its display name matches. Phase 4 must prove
+on live heads that every `gate-shadow` run reports the expected GitHub Actions App identity
+and that create/update work for same-repository, fork, and merge-group heads. Cutover is
+forbidden if that identity differs or is absent.
 
-Two consequences that must be designed for, not assumed away:
+Two more consequences must be designed for, not assumed away:
 
-- **The current job must be renamed.** A job still named `gate` would emit a second,
-  competing check-run of the same name. `scripts/tests/test_ci_select_wiring.py`
+- **The current job must eventually be renamed.** A job still named `gate` would emit a
+  second, competing check-run of the same name. `scripts/tests/test_ci_select_wiring.py`
   `::TestRequiredCheckAnchor::test_gate_job_name_is_exactly_gate` pins today's name; it
-  must be **re-pointed** at whatever now emits the `gate` check-run, never weakened or
-  deleted.
+  must be **re-pointed** at the trusted API publisher, never weakened or deleted.
+- **An ordinary cutover PR cannot bootstrap itself.** A PR that renames its own resident
+  `gate` job loses the required check before its evaluator definition is on the default
+  branch. Running both publishers under the same name is also ambiguous and is not an
+  acceptable bridge. §9 therefore requires a drained queue and one explicitly authorised
+  administrator bypass for the cutover commit; the ruleset context remains exactly
+  `gate`. There is no claim of a zero-intervention atomic migration.
 - **Draft-tier integrity gets structurally weaker.** Today the invariant *"a draft-tier
   result can never satisfy branch protection"* is enforced by a YAML name expression
   (`gate${{ … ', draft-tier' … }}`, `ci-summary.yml:264`) — it holds even if the script is
@@ -157,8 +167,11 @@ State that must survive between invocations is small (well under 1 KB of JSON): 
 counter, the completed-count history, the fail-fast suspect set, the unsatisfiable-hold
 counter, consecutive fetch failures, `extension_started`, and the new start timestamp.
 
-**Where:** the `gate` check-run's own `external_id` / `output` on the head SHA. It is
-per-SHA, already written on every invocation, and readable with `checks: read`.
+**Where:** the evaluator-owned check-run on the head SHA. Its `external_id` is a short,
+versioned identity (`sparq-gate:v1:<sha>`); its `output.text` carries a versioned machine
+marker containing the JSON state. The codec must reject a mismatched SHA/schema, preserve
+the human verdict summary separately, and tolerate unknown fields for forward
+compatibility.
 
 **The race:** N siblings completing at once means N concurrent evaluations
 read-modify-writing the same state. The original §3.5 advised `cancel-in-progress: true`
@@ -168,32 +181,109 @@ to debounce. That is wrong in a way that matters:
 - Worse, if the cancelled invocation is the one carrying the *final* sibling's completion,
   no further event ever arrives and the gate hangs forever.
 
-**Correct:** `cancel-in-progress: false`, which serializes evaluations per head SHA. Note
-the residual caveat honestly — GitHub retains only **one pending run** per concurrency
-group, so a burst still coalesces and intermediate events are dropped. That is harmless
-here *only because* each evaluation is a **full re-read of the world** (`fetch_runs()`
-re-fetches every check-run from scratch) rather than incremental event processing, and
-because the cron lane guarantees a final evaluation after any dropped burst. Idempotent
-full re-evaluation plus a timer backstop is the load-bearing principle of this design.
+**Correct:** every event and sweep dispatch enters the **same** per-head-SHA concurrency
+group with `cancel-in-progress: false` and the default single-pending queue. A burst may
+replace an older pending invocation, but it cannot cancel the running one. This
+coalescing is harmless only because each invocation performs a **full re-read of the
+world** (`fetch_runs()` re-fetches every check-run from scratch), never applies the event
+as an incremental delta, and because the sweep guarantees a later evaluation. This
+behaviour is documented by GitHub's concurrency contract:
+<https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency>.
+
+Creation must also be idempotent. Under the concurrency lock the evaluator lists
+same-App, same-name check-runs for the SHA, creates one only when none exists, and fails
+closed if more than one live candidate exists. It never silently picks a winner from
+duplicate required contexts. A newly requested sibling generation or rerun first moves
+the existing evaluator check back to `in_progress` and clears its prior terminal verdict
+before evaluation; a stale green can never remain authoritative while replacement work is
+pending. The Checks update contract permits the App-owned run's status to be updated, and
+this reopen path needs its own adversarial test.
 
 ## 7. Recommended architecture
 
-A new default-branch workflow, `ci-gate-eval.yml`, with a job **not** named `gate`:
+The design has three deliberately separate pieces. No workflow that executes a PR or
+merge ref receives `checks: write` or dispatch privilege.
 
-- **Triggers:** `workflow_run: types: [completed]` (fires for sibling workflows without
-  needing a hard-coded name list); `pull_request` and `merge_group` as *seed* events so a
-  `gate` check-run exists promptly; `schedule` at 5-minute granularity as the timer lane
-  (§3); `workflow_dispatch` for manual validation.
-- **Body:** resolve the target head SHA (`event.workflow_run.head_sha`; on the cron lane,
-  enumerate open PR heads and merge-group refs carrying a non-terminal `gate` check-run),
-  then run one `step()` — load state from the `gate` check-run, fetch, evaluate, write
-  state back. On a terminal decision, conclude the `gate` check-run with the existing
-  `render_verdict` summary.
-- **Permissions:** today's reads plus **`checks: write`** (to create/update the `gate`
-  check-run) and the existing `actions: write` (the #3505 bounded once-only re-dispatch).
-  `checks: write` is a genuine privilege increase; it is acceptable only because this
-  workflow runs from the default branch and never from PR-head content.
-- **Concurrency:** group per head SHA, `cancel-in-progress: false` (§6).
+### 7.1 Non-verdict seed doorbells
+
+A small PR doorbell runs on `pull_request_target`, so GitHub takes its definition from the
+default branch. It never checks out a ref, restores a cache, downloads an artifact, or
+executes a repository script. Its token has `actions: write` and no contents/checks/PR
+write; its only operation dispatches `ci-gate-eval.yml` at the exact default-branch ref,
+passing the PR head SHA as untrusted data through an environment variable. This is the
+same trusted-code/no-checkout pattern already used by `merge-group-doorbell.yml`.
+
+For merge groups, extend that existing default-branch doorbell to dispatch the sweep on
+enqueue/dequeue; normal `workflow_run: requested` events from the explicit merge-group
+workflow inventory provide the direct fast path once the group ref exists. There is no
+new `merge_group`-triggered writer or dispatcher whose definition could come from the
+combined ref.
+
+Neither doorbell can publish or update a verdict. If one is absent or fails, the required
+context remains absent and the scheduled sweep below is the backstop.
+
+### 7.2 Default-branch evaluator
+
+`ci-gate-eval.yml` has **no** `pull_request` or `merge_group` trigger. Its privileged job
+runs only on:
+
+- `workflow_run` with `types: [requested, completed]` and an explicit `workflows:` list;
+- `workflow_dispatch` with a target SHA, dispatched at the exact default-branch ref by
+  the sweeper or a trusted reporter.
+
+GitHub requires the `workflow_run.workflows` selector; there is no wildcard subscription.
+The event also runs the evaluator definition from the default branch and can receive a
+write token even when the upstream workflow was unprivileged. Those are documented
+platform properties, not local assumptions:
+<https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run>.
+
+The list is generated from a committed wake-up inventory and pinned in both directions by
+a drift test:
+
+1. every workflow with a `pull_request` or `merge_group` trigger is listed or carries an
+   explicit, reviewed non-gating exemption;
+2. every listed display name exists exactly once and appears byte-for-byte in
+   `ci-gate-eval.yml`;
+3. every default-branch reporter that creates check-runs on another head SHA explicitly
+   dispatches the evaluator after its last write, or carries a reviewed sweep-only
+   exemption;
+4. `pr-area-label` remains the unfiltered, always-expected source workflow for both PR and
+   merge-group targets, and the two default-branch doorbells' no-checkout, no-check-write,
+   dispatch-only posture is pinned.
+
+An unknown workflow therefore fails the routing self-test; it cannot silently disappear
+from the wake-up set. The inventory controls **when to wake**, not what the verdict sees:
+each invocation still re-reads all workflow runs and check-runs on the target SHA.
+
+The evaluator checks out and executes only its triggering default-branch SHA, with
+credentials persistence disabled. A dispatched run refuses to evaluate unless its
+workflow ref is the default branch and its execution SHA belongs to that branch's reviewed
+history. It never checks out the target SHA, restores a cache from it, downloads its
+artifacts, or executes text from the event payload. The target SHA is data: validate its
+syntax, repository, current PR/merge-group membership, and target kind before any write.
+Event fields reach scripts through environment variables or JSON files, never shell
+interpolation.
+
+Permissions are the current read set plus `checks: write` for the evaluator-owned check
+and `actions: write` for the existing bounded once-only re-dispatch. The job enters the
+per-SHA concurrency group from §6, loads state, performs one `step()`, and updates either
+`gate-shadow` or (only after cutover) `gate`.
+
+### 7.3 Default-branch sweep
+
+`ci-gate-sweep.yml` runs at GitHub's minimum supported schedule interval and on manual
+dispatch. It holds read permissions plus only the permission needed to dispatch the
+evaluator; it does **not** hold `checks: write`. It enumerates current non-draft PR heads,
+active merge-group heads, and evaluator-owned non-terminal checks, then dispatches
+`ci-gate-eval.yml` at the exact default-branch ref once per SHA. The dispatched runs join
+the same concurrency groups as event wake-ups.
+
+`pr-area-label` is the one unconditional expected source workflow per target. The
+evaluator records the target discovery time and refuses a stable-empty success until that
+run is observed successful and the existing startup/settle semantics are satisfied. If
+it never registers or never becomes terminal by the corresponding wall-clock deadline,
+the sweep drives `gate-shadow`/`gate` to a terminal failure. A total Actions outage may
+delay that diagnostic, but the missing required context remains fail-closed throughout.
 
 ## 8. Honest payoff analysis — peak concurrency, not billable minutes
 
@@ -214,48 +304,66 @@ option (c) (reject with measurement):** if measurement shows the pool is bound b
 minutes rather than peak concurrency, this re-architecture is not worth its risk and the
 adaptive saturation budget stays the operative mitigation.
 
-## 9. Phased plan (each phase a future bead)
+## 9. Phased plan (each implementation phase is a future bead)
 
-1. **Phase 0 — measure, then go/no-go.** Instrument the current gate's per-run slot-seconds
-   and count sibling-completion events per head. Confirm peak concurrency (not total
-   minutes) is the binding constraint. A negative result closes sq-6vshe.19 as option (c).
+1. **Phase 0 — measure, then go/no-go.** Preserve the live Actions API snapshot linked in
+   this PR's review discussion as structured evidence, then add a repeatable collector for
+   waiter occupancy and sibling progress. Confirm peak concurrency, rather than only total
+   minutes, is binding. A negative result chooses option (c) and stops here.
 2. **Phase 1 — pure refactor, zero behaviour change.** Extract `step()`; `run_gate` becomes
-   a loop over it (§5). All 186 existing tests pass unchanged; add tests for `step()`
-   purity. Independently mergeable, no risk to the gate.
-3. **Phase 2 — wall-clock re-expression.** Re-express the poll counters as deadlines
-   anchored to a persisted start timestamp (§3), keeping the resident driver's fixed
-   cadence so poll-count and wall-clock stay equivalent and every existing test still
-   passes.
-4. **Phase 3 — state codec.** Serialize/deserialize state via the `gate` check-run; unit-test
-   round-trip plus tolerance of an unknown-field payload (forward compatibility).
-5. **Phase 4 — SHADOW.** Ship `ci-gate-eval.yml` publishing a **non-required** check-run
-   named `gate-shadow` alongside the live resident gate. Soak, and diff shadow vs live
-   verdict per head. Zero merge risk. This is sq-6vshe.19's "shadow-run first", and it is
-   the only way to settle the platform questions in §10.
-6. **Phase 5 — cutover.** Only on a clean shadow diff: rename the resident job, flip the
-   evaluator to publish `gate`, re-point `TestRequiredCheckAnchor` (§4).
-7. **Phase 6 — remove the resident waiter**, and update `ci-summary.yml`'s doctrine header
-   and `docs/branch-protection.md`.
+   a loop over it (§5). All existing tests pass unchanged; add tests for `step()` purity.
+   Independently mergeable, no risk to the required check.
+3. **Phase 2 — wall-clock state.** Re-express poll counters as deadlines anchored to a
+   persisted start timestamp, keeping the resident driver's fixed cadence equivalent;
+   add the fail-closed state codec and duplicate-check detection (§6).
+4. **Phase 3 — inventory and seed doorbells.** Add the generated wake-up inventory, its
+   both-direction drift test, the default-branch PR doorbell, and the evaluator dispatch
+   from the existing merge-group doorbell (§7.1–§7.2). The resident gate is still
+   authoritative.
+5. **Phase 4 — shadow transport.** Ship the evaluator and sweeper publishing only the
+   non-required `gate-shadow` context. Exercise PR, fork, rerun, no-leg, cancellation,
+   genuine-hang, late reporter, and merge-group cases.
+6. **Phase 5 — evidence gate.** Compare every terminal shadow verdict with the resident
+   verdict and measure wake/terminal latency. Verify the check-run's App identity against
+   the live ruleset integration. Any unexplained mismatch, duplicate, missing target, or
+   permission failure blocks cutover.
+7. **Phase 6 — controlled cutover.** Drain and pause merge-queue admission. With explicit
+   administrator authorisation, land the reviewed cutover commit via one bypass: rename
+   the resident job, switch the already-shipped default-branch evaluator from
+   `gate-shadow` to `gate`, and re-point `TestRequiredCheckAnchor`. Immediately evaluate a
+   canary PR and merge-group head before reopening admission. The ruleset continues to
+   require exactly `gate` throughout.
+8. **Phase 7 — cleanup.** Remove the resident polling transport, keep the rollback commit
+   prepared, and update `ci-summary.yml`'s doctrine header and
+   `docs/branch-protection.md`.
 
-**Rollback.** Because the ruleset is never edited (§4), reverting the evaluator's `gate`
-publication and restoring the job name restores today's behaviour in a single commit, and
-there is no window in which the required context is unsatisfiable. That property is the
-main practical reason Finding B matters.
+**Rollback.** Before Phase 6, disabling the shadow has no merge effect. After Phase 6,
+rollback is another drained-queue, administrator-controlled commit restoring the resident
+job name before disabling API publication. It is intentionally not described as an
+ordinary self-bootstrapping PR.
 
-## 10. Open questions for the maintainer
+## 10. Decisions and live questions
 
-1. **Does `workflow_run: completed` fire for sibling runs triggered by `merge_group`?**
-   This is the single riskiest platform assumption in the design. It was **not** verified —
-   see §11. Phase 4's shadow run is what proves or kills it.
-2. **Does the merge queue tolerate a required check created after the merge-group ref is
-   built?** The seed evaluation must register the `gate` check-run promptly, or the queue
-   may treat the ref as carrying no required check at all.
-3. **Appetite for `checks: write`** on a default-branch workflow (§7).
-4. **Is peak concurrency or total minutes the binding constraint?** Phase 0 answers it;
-   it determines go/no-go (§8).
-5. **Hang-RED latency.** Five minutes is the finest cron granularity GitHub offers, and
-   ticks are themselves delayed under load. Detection of a genuine hang moves from ~20 s
-   to roughly 5–10 min. Acceptable?
+Resolved by this revision:
+
+- `workflow_run` uses a complete explicit workflow list; no wildcard is assumed.
+- PR/merge-ref execution is unprivileged and separate from the default-branch evaluator.
+- every wake-up is idempotent and keyed by repository + head SHA;
+- shadow publication precedes any required-context change;
+- initial registration and a missing seed have explicit fail-closed behaviour.
+
+Phase 4 must answer with live evidence, not maintainer guesswork:
+
+1. Does `workflow_run` deliver both requested/completed wake-ups for merge-group-triggered
+   source workflows, with the merge-group head SHA?
+2. Does an evaluator-created check carry the exact App identity required by ruleset
+   17688455 for same-repository, fork, and merge-group heads?
+3. Which default-branch reporters need an explicit evaluator doorbell because their own
+   `workflow_run.head_sha` is the default-branch SHA rather than the head they annotate?
+4. Is peak concurrency or total slot time the binding constraint after the label-router
+   and merge batching changes land?
+5. Does scheduled hang detection remain timely under the same saturation it is intended
+   to diagnose?
 
 ## 11. Verification status
 
@@ -266,10 +374,13 @@ assertions (`scripts/tests/test_ci_summary_gate.py`); the required-check anchor
 (`scripts/tests/test_ci_select_wiring.py`); the required context and aggregated lane set
 (`docs/branch-protection.md`); and the existing cron lanes' schedules.
 
-**Not verified — no GitHub API call was made from this session, by orchestration policy.**
-Every claim about GitHub *platform* behaviour — `workflow_run` firing for merge-group
-siblings, check-run/branch-protection context matching, merge-queue check registration
-timing, and concurrency-group pending-run coalescing — is drawn from platform
-documentation and from how existing workflows in this repo already rely on it. None of it
-is measured. Phases 0 and 4 exist precisely to convert these assumptions into evidence
-before anything touches the required check.
+The 2026-09-01 revision also checked the official GitHub Actions documentation for the
+`workflow_run` selector/default-branch trust model and concurrency coalescing, and the
+Checks REST documentation for App-only writes. A live Actions API snapshot linked in this
+PR's discussion confirmed that resident `ci-summary` waiters and queued build work coexist
+under saturation.
+
+Still not verified: evaluator-created check identity against ruleset 17688455,
+merge-group wake-up payloads, required-check registration timing, and shadow/live verdict
+equivalence. Phases 4–5 exist specifically to turn those platform assumptions into
+evidence before the required check changes.
