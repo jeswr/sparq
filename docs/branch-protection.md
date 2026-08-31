@@ -107,7 +107,7 @@ From the binding/packaging workflows (when those surfaces are exercised):
 | Job name | Workflow | What it gates |
 |---|---|---|
 | `maturin build + pytest` | `.github/workflows/python.yml` | The `sparq-rdf` PyPI binding (`import sparq`) build + pytest parity suite. |
-| (js binding job) | `.github/workflows/js.yml` | The `@jeswr/sparq` npm build/tests. |
+| (js binding job) | `.github/workflows/js.yml` | The `@sparq-org/sparq` npm build/tests. |
 
 > **Benchmarks — the DETERMINISTIC ratchet gates on PRs; the NOISY timing is nightly (sq-6vshe.6,
 > maintainer-directed).** On a `pull_request` the `bench.yml` `run + track benchmarks` job runs the
@@ -702,10 +702,10 @@ so confirm it with the GitHub API (read-only token is sufficient):
 
 ```sh
 # List rulesets on the default branch and grab the `main` ruleset id.
-gh api repos/jeswr/sparq/rulesets
+gh api repos/sparq-org/sparq/rulesets
 
 # Dump the full rule set and eyeball it against this document.
-gh api repos/jeswr/sparq/rulesets/<id> | python3 -m json.tool
+gh api repos/sparq-org/sparq/rulesets/<id> | python3 -m json.tool
 ```
 
 As verified on the date of this commit, the live `main` ruleset

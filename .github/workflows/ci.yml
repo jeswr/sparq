@@ -1181,7 +1181,7 @@ jobs:
         with:
           node-version: 20
       # [OPUS-5] #5771: this pin must stay EQUAL to the one the `js` lane
-      # (.github/workflows/js.yml) builds + packs the @jeswr/sparq wasm artifact with.
+      # (.github/workflows/js.yml) builds + packs the @sparq-org/sparq wasm artifact with.
       # It was v0.13.1 here while js.yml pinned v0.15.0, so any wasm-pack/wasm-bindgen
       # behaviour change between those releases was exercised only in that BUILD lane
       # and never here — in the lane that actually RUNS the headless suites. Unified on
