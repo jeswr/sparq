@@ -551,17 +551,29 @@ class TestWiring(unittest.TestCase):
             # workflow validation before its event guards are evaluated.
             required = {}
             called = callers[job_id][1]
-            permission_blocks = [called.get("permissions", {})]
-            permission_blocks += [spec.get("permissions", {})
-                                  for spec in called["jobs"].values()]
+            permission_blocks = [("workflow", called.get("permissions", {}))]
+            permission_blocks += [
+                (f"job {called_job_id}", spec.get("permissions", {}))
+                for called_job_id, spec in called["jobs"].items()
+            ]
             rank = {None: 0, "read": 1, "write": 2}
-            for block in permission_blocks:
-                if not isinstance(block, dict):
-                    continue
+            for owner, block in permission_blocks:
+                self.assertIsInstance(
+                    block,
+                    dict,
+                    f"{wf_name}: {owner} permissions must use an explicit scope map; "
+                    "read-all/write-all cannot be safely reduced to the caller's "
+                    "least-privilege scope list",
+                )
                 for scope, level in block.items():
                     if rank.get(level, 0) > rank.get(required.get(scope), 0):
                         required[scope] = level
             actual_permissions = job.get("permissions", {})
+            self.assertIsInstance(
+                actual_permissions,
+                dict,
+                f"{job_id}: reusable call permissions must use an explicit scope map",
+            )
             for scope, level in required.items():
                 self.assertGreaterEqual(
                     rank.get(actual_permissions.get(scope), 0), rank[level],

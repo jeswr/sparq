@@ -73,7 +73,7 @@ permissions:
 concurrency:
   # A ci-full call carries the labeled/unlabeled PR payload. Isolate it so the
   # override cannot cancel evidence already running on the same head SHA.
-  group: vectorized-feature-off-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
+  group: vectorized-feature-off-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')) && github.run_id || 'shared' }}
   cancel-in-progress: true
 
 env:
