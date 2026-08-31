@@ -1319,9 +1319,10 @@ fn a_budget_trip_is_reported_distinctly_from_an_authorization_denial() {
 }
 
 /// `INSERT DATA` carries no WHERE, so it consults no budget — an exhausted deadline must
-/// NOT block it. This is the documented boundary of the bound (operand-size-limited
-/// operations are capped by the request body-size limit, not the `QueryBudget`); without
-/// it, "bound everything" could silently become "bound nothing writes".
+/// NOT block it. This is the documented boundary of the bound: an operand-size-limited
+/// operation is bounded by the request that carries it, not by the `QueryBudget` (this
+/// crate caps neither — see the module docs). Without this test, "bound everything" could
+/// silently become "bound nothing writes".
 #[test]
 fn an_exhausted_budget_does_not_block_a_whereless_insert_data() {
     let mut s = server_with_timeout(ALICE, Some(0));

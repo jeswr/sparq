@@ -148,8 +148,11 @@
 //!   per-graph write permission check under the SAME wall-clock/row budget the read tools
 //!   enforce. Only the WHERE-bearing parts of an update consult that budget (the
 //!   authorization check's `GRAPH ?var` binding SELECT and the apply's
-//!   `DELETE`/`INSERT … WHERE`); `INSERT`/`DELETE DATA` and `CLEAR`/`DROP` are bounded by
-//!   their operand size, which the request body-size limit already caps.
+//!   `DELETE`/`INSERT … WHERE`); `INSERT`/`DELETE DATA` and `CLEAR`/`DROP` consult no
+//!   budget — their cost is linear in the operand they carry, so the only thing bounding
+//!   them is the size of the request itself. This crate imposes NO request-size cap of
+//!   its own (the stdio transport reads a line-delimited message of any length), so an
+//!   embedder that needs one must cap the request before dispatch.
 //! - Time-windowed conditional grants fail closed unless [`SolidServerConfig::now`]
 //!   supplies a request clock.
 
