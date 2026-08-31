@@ -5,7 +5,7 @@
 // moved to sparq-org/sparq. Two prior-location origins must never re-land in the source:
 //   • https://jeswr.github.io/sparq — the old GitHub-Pages sub-path origin, DEAD
 //     (live-verified 404); any href/URL string pointing at it is a broken link.
-//   • https://github.com/sparq-org/sparq — the old repository location; GitHub's rename
+//   • https://github.com/jeswr/sparq — the old repository location; GitHub's rename
 //     redirect keeps it working, but R4 migrates every such reference to
 //     github.com/sparq-org/sparq so the site never advertises the stale name.
 // This spec greps the source tree and FAILS the moment either string is reintroduced, so
@@ -31,10 +31,10 @@ import { test, expect } from "@playwright/test";
 const SRC_DIR = fileURLToPath(new URL("../src", import.meta.url));
 
 // The stale origins. Each is kept deliberately broad (host + repo segment) so ANY link
-// shape — https://jeswr.github.io/sparq, github.com/sparq-org/sparq/actions, a bare reference
+// shape — https://jeswr.github.io/sparq, github.com/jeswr/sparq/actions, a bare reference
 // — is caught. The `github.com/` anchor on the repo pattern means the live `@sparq-org/sparq`
 // npm package name (and other bare `sparq-org/sparq` mentions) is NOT flagged.
-const STALE_ORIGINS = ["jeswr.github.io/sparq", "github.com/sparq-org/sparq"];
+const STALE_ORIGINS = ["jeswr.github.io/sparq", "github.com/jeswr/sparq"];
 
 // Paths (relative to site/src, POSIX-style) exempted until their owning bead lands.
 const EXCLUDED = new Set<string>([
@@ -59,7 +59,7 @@ function walk(dir: string): string[] {
   return out;
 }
 
-test("no stale jeswr.github.io/sparq or github.com/sparq-org/sparq origins remain in site/src", () => {
+test("no stale jeswr.github.io/sparq or github.com/jeswr/sparq origins remain in site/src", () => {
   const offenders: string[] = [];
   for (const abs of walk(SRC_DIR)) {
     const rel = relative(SRC_DIR, abs).split("\\").join("/");
