@@ -67,7 +67,7 @@ No unaudited crypto is labelled "sound" anywhere.
 | Bead | Sev | File | Tier | Defect (short) |
 |------|-----|------|------|----------------|
 | `sq-3x7dl.1` | **HIGH** | `src/codegen.nr` | **fable** | `new(bits)` decode under-constrained; non-injective re-encode |
-| `sq-3x7dl.2` | low | `src/ops/kernels.nr` (+`codegen.nr`) | sonnet | no SPARQL/XPath round-half-toward-+∞ mode |
+| `sq-3x7dl.2` | low | *(face repo)* `src/ops/kernels.nr` (+`codegen.nr`) | sonnet | no SPARQL/XPath round-half-toward-+∞ mode — **RESOLVED: no in-repo consumer** |
 | `sq-3x7dl.3` | low | `README.md`, `ct.nr` | haiku | stale "Known gaps"; dead/broken `ct.nr` |
 
 **`sq-3x7dl.1` — the soundness hole (fable).**
@@ -100,20 +100,58 @@ non-canonical fields that re-encode to the same `bits` yet denote a different re
   (`should_fail`), per width, while the canonical decode still passes; existing `lib.nr` tests
   stay green; PR records the `bb gates` delta (a small increase is expected and acceptable).
 
-**`sq-3x7dl.2` — SPARQL/XPath ROUND mode (sonnet).** The round-to-integral family implements
-IEEE `roundToIntegral{TowardNegative,TowardPositive,TowardZero,TiesToEven}` but has no
+**`sq-3x7dl.2` — SPARQL/XPath ROUND mode. RESOLVED: consumer responsibility, no in-repo consumer.**
+
+*As filed:* the round-to-integral family implements IEEE
+`roundToIntegral{TowardNegative,TowardPositive,TowardZero,TiesToEven}` but has no
 round-half-toward-+∞, which is exactly what SPARQL 1.1 `ROUND()` and XPath 2.0 `fn:round`
 require. `round_ties_even(2.5)=2`, `(0.5)=0`, `(-0.5)=-0` (correct IEEE); SPARQL wants
 `ROUND(2.5)=3`, `ROUND(0.5)=1`, `ROUND(-0.5)=0`.
-**Invariant:** `ROUND(n+0.5) == n+1` for all representable `n`; the four IEEE modes byte-unchanged.
-**Fix:** add a fifth mode; do **not** substitute `floor(x+0.5)` (the intermediate FP add is
-wrong near the boundary). Depends on `sq-3x7dl.1` (shares `codegen.nr`).
+
+**The premise does not hold.** The stated risk was conditional — *if* the engine wires SPARQL
+`ROUND()` to `round_ties_even`, the results diverge on halves. Neither consumer does. Both
+compose the SPARQL/XPath rounding themselves, and both already round half toward +∞:
+
+- **Engine (Rust).** `F::Round` (`crates/sparq-engine/src/exec.rs:13438`) → `Num::round`
+  (`crates/sparq-substrate/src/numeric.rs:657`) → `round_half_to_pos_inf`
+  (`crates/sparq-substrate/src/numeric.rs:858`). That helper is deliberately *not*
+  `floor(x+0.5)` — the very substitution this finding warns against — and its doc-comment
+  records why (the `x+0.5` add double-rounds at `0.49999999999999994`). Pinned by tests at
+  `crates/sparq-substrate/src/numeric.rs:1073-1081`: `2.5→3`, `0.5→1`, `-0.5→0`, `-2.5→-2`.
+- **ZK / Noir.** The SPARQL-facing rounding is `round_double` from the `noir_XPath` face repo
+  (ties toward +∞), pinned by `differential_oracle_round_double`
+  (`zk/xpath/tests/differential_oracle/src/lib.nr:600`) against F&O 3.1 §4.4.4.
+
+`sparq_ieee754` is consumed only for **float comparisons** (`FILTER` over `xsd:double` —
+`zk/compose/compose_core/Nargo.toml:10-18`), and there is no `round_to_integral` call anywhere
+under `zk/`. The missing fifth mode has **no consumer in this repo**, so nothing here is wrong
+and there is no in-repo change to make.
+
+**Where the code would go if it is ever wanted.** Not here: the `zk/ieee754` tree was
+externalized to [`sparq-org/noir_IEEE754`](https://github.com/sparq-org/noir_IEEE754) by
+`sq-5reoy` (#1602) and is consumed as a pinned Nargo git dep at `v0.11.0`; `git ls-files
+zk/ieee754` is empty. The mode stays a reasonable *additive* face-repo item, and if taken there
+§3.4 of [`noir-ieee754-directed-rounding-design.md`](noir-ieee754-directed-rounding-design.md)
+governs — one shared `MODE` namespace, never renumbering an existing constant. Invariant, for
+that repo: `ROUND(n+0.5) == n+1` for all representable `n`, non-tie inputs match
+round-to-nearest, and the four existing modes stay byte-unchanged. It is not a correctness gap
+for sparq, so it carries no in-repo acceptance test and no longer depends on `sq-3x7dl.1`.
+
+> **Residual, and distinct from this finding:** sparq-engine's `ROUND(xsd:double("-0.5"))`
+> yields `+0.0` where F&O 3.1 §4.4.4 requires `-0.0` (a negative argument in `[-0.5, 0)` rounds
+> to *negative* zero). That is a sign-of-zero defect in the **engine** — the magnitude is
+> already correct — not a missing `sparq_ieee754` mode. It is recorded as a live SPEC-REFERENCE
+> row in the differential-oracle header (`zk/xpath/tests/differential_oracle/src/lib.nr:32-35`),
+> which holds `noir_XPath` to the spec rather than to sparq. Out of scope for `sq-3x7dl.2`;
+> filed as a separate follow-up.
 
 > **Adjacent, distinct:** `sq-3x7dl.2` is the *round-to-integral* family. Directed rounding
 > for the *arithmetic* ops (`rndu`/`rndd`/`rndz`/`rna` on add/sub/mul/div) is a separate,
 > kernel-level gap tracked as `sq-xs0pa` (#3140); its decision record is
 > [`noir-ieee754-directed-rounding-design.md`](noir-ieee754-directed-rounding-design.md).
-> Both touch the round-and-pack step, so sequence them rather than running them in parallel.
+> `sq-xs0pa` is unaffected by the resolution above and remains live. (The two both touch the
+> round-and-pack step, so they needed sequencing; with `sq-3x7dl.2` closed as not-applicable
+> that constraint lapses.)
 > Wider still, `sq-i6f4l` (#3155) evaluates the whole set of API items dropped from the
 > published surface in the Float-API migration — `abs`, that directed-rounding arithmetic,
 > and `Field`↔float — in
