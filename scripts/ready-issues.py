@@ -1586,7 +1586,13 @@ def _self_test():
           _dump["reserves"], {"ci": False, "ci-fragments": False, "deps": True})
     check("...without dropping the #4365 keys the registry already reads",
           (sorted(_dump), _dump["resolved"]["ci-fragments"]),
-          (["non_reserving", "reserves", "resolved", "roots"], ["ci"]))
+          (["non_reserving", "reserves", "resolved", "roots", "subpartitions"], ["ci"]))
+    check("...and publishes the declared bench sub-partition contract",
+          _dump["subpartitions"],
+          {"bench-declarations": {"parent": "bench",
+                                  "paths": ["bench/feature-off-declarations/"]},
+           "bench-zk-compose": {"parent": "bench", "paths": ["bench/zk-compose/"]},
+           "bench-suites": {"parent": "bench", "paths": []}})
     # SCOPE: candidacy untouched, and a SELECTED candidate still reserves — per-tick width stays
     # one worker per partition, which is why the live frontier moved 1 -> 3 and not 1 -> ~50.
     check("candidate keying for ci/docs is unchanged", (packages_of({"area:ci"}),
