@@ -188,7 +188,7 @@ regex = "1"
 # the feature avoids pulling in unvetted `encoding_rs 0.8.35` (cargo-vet gating failure
 # sq-pbz04.5.3 fix-3).  If non-UTF-8 RIF/XML support is ever needed, re-enable the
 # feature AND add a cargo-vet exemption per supply-chain/config.toml precedent.
-quick-xml = { version = "0.41", default-features = false, optional = true }
+quick-xml = { version = "0.42", default-features = false, optional = true }
 
 [dev-dependencies]
 # [FABLE-5] sq-pbz04.1.2 / [SONNET-4.6]: the ordering-parity ORACLE for the

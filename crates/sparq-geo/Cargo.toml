@@ -121,7 +121,7 @@ rstar = "0.13"
 # Bumped 0.40 -> 0.41 for RUSTSEC-2026-0194 (quadratic duplicate-attribute check)
 # and RUSTSEC-2026-0195 (unbounded NsReader namespace-declaration allocation); both
 # transitive 0.37.5 copies are scoped-ignored in deny.toml until oxigraph bumps.
-quick-xml = { version = "0.41", default-features = false }
+quick-xml = { version = "0.42", default-features = false }
 # Behind the `reproject` feature: pure-Rust proj4 (NOT the C `proj` binding —
 # the workspace's pure-Rust constraint holds). One transitive dep (thiserror).
 proj4rs = { version = "0.1", optional = true }

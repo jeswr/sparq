@@ -331,7 +331,7 @@ spargebra.workspace = true
 rustc-hash.workspace = true
 # Expected-result parsing only: RDF/XML result sets (.rdf) and SPARQL XML results (.srx).
 oxrdfxml = { version = "0.2", features = ["rdf-12"] }
-quick-xml = "0.41"
+quick-xml = "0.42"
 serde_json = "1"
 # [OPUS-4.8] sq-oy1f.2 — JSON-LD parser, used ONLY by the `jsonld-suite` lane to
 # re-parse the engine writer's JSON-LD output back into RDF (the fromRdf

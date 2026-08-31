@@ -61,7 +61,7 @@ serde = { version = "1", default-features = false, optional = true }
 serde_json = { version = "1", optional = true }
 # SPARQL-Results-XML (SRX) parse: some endpoints ignore the `Accept: …+json` header and
 # return XML. Platform-independent; `default-features = false` drops its unused serde derive.
-quick-xml = { version = "0.41", default-features = false, optional = true }
+quick-xml = { version = "0.42", default-features = false, optional = true }
 
 # `ureq` (the SERVICE feature's blocking HTTP client) is native-only: depending on it from
 # the wasm build would drag an HTTP/TLS stack into the browser graph, and SERVICE never runs
