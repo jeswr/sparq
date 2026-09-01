@@ -466,3 +466,38 @@ export const ALL_SURFACES: Surface[] = GROUPS.flatMap((g) => g.surfaces);
 
 /** Capability surfaces + the /about utility page — the complete navigable surface set. */
 export const ALL_SURFACES_WITH_ABOUT: Surface[] = [...ALL_SURFACES, ABOUT_SURFACE];
+
+/** [GPT-5] issue #6144 — crates.io inventory mapped to the capability catalogue.
+ *
+ * Support crates intentionally share their user-facing capability instead of acquiring a
+ * duplicate marketing page. Keep this exhaustive for workspace packages whose Cargo manifest
+ * does not set `publish = false`; the mdBook crate catalogue mirrors this mapping.
+ */
+export const PUBLISHED_CRATE_SURFACE = {
+  "sparq-algos": "graph-analytics",
+  "sparq-arrow": "arrow-columnar",
+  "sparq-cli": "cli",
+  "sparq-core": "sparql",
+  "sparq-engine": "sparql",
+  "sparq-fedplan": "federation",
+  "sparq-forms": "shacl",
+  "sparq-geo": "geosparql",
+  "sparq-hdt": "data-formats",
+  "sparq-introspect": "genai",
+  "sparq-mcp": "mcp-server",
+  "sparq-nlq": "genai",
+  "sparq-reason": "inference",
+  "sparq-reason-el": "inference",
+  "sparq-reason-ql": "inference",
+  "sparq-rsp": "streaming-rsp",
+  "sparq-serve": "http-server",
+  "sparq-server": "http-server",
+  "sparq-shacl": "shacl",
+  "sparq-shaclc": "shacl",
+  "sparq-sim": "genai",
+  "sparq-solid": "solid-pairs",
+  "sparq-substrate": "sparql",
+  "sparq-text": "full-text",
+  "sparq-vectors": "vector",
+  "sparq-wrapper": "sparql",
+} as const;
