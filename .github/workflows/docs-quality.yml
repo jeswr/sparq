@@ -1250,6 +1250,31 @@ jobs:
         run: python3 scripts/auto-arm.py --self-test
       - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
         run: python3 scripts/tests/test_arm_capability_wiring.py
+      # [OPUS-5] #4542 — THE ORPHANED-THREAD EXIT. The `main` ruleset requires review-thread
+      # resolution; CodeQL, which files most of those threads, is `disabled_manually`. A
+      # thread filed before it was switched off can never be superseded, so the PR is BLOCKED
+      # forever with every CI signal green. orphan-thread-sweeper.py is the only thing that
+      # can satisfy the `threads-resolved` unpark condition #4534's stuck-arm sweep writes —
+      # and it is the one mutation in this estate that RESOLVES A SECURITY REVIEW THREAD, so
+      # its preconditions gate HERE rather than only at cron time (orphan-thread-sweeper.yml
+      # is schedule/dispatch-only, so a PR loosening the eligibility rules would otherwise
+      # merge unvalidated and be discovered by what it resolved).
+      #   * --self-test — the eligibility rules, one case per safety precondition, each
+      #     RESOLVING NOTHING: a second participant on the thread, an unregistered author, a
+      #     different analysis's finding under the same author, a workflow that is still
+      #     `active` (or in any state the script does not recognise), a workflow that ran
+      #     after the finding was filed, every unreadable read, the per-tick bound, and the
+      #     ordering rule that a failed rationale reply resolves nothing.
+      #   * test_orphan_thread_sweeper_wiring.py — the YAML seam, parsed STRUCTURALLY: no
+      #     PR-head trigger, least-privilege permissions pinned in both directions,
+      #     SHA-pinned actions, and the swallow shapes (`continue-on-error` on job or step,
+      #     `if: false`, `|| true`, a left-behind `--dry-run`, a missing bound) each applied
+      #     to a MUTATED copy of the real workflow so the guard is watched going red.
+      # The wiring test needs PyYAML — installed once in the shared setup above.
+      - name: Self-test the orphan-thread sweep policy (eligibility rules — #4542)
+        run: python3 scripts/orphan-thread-sweeper.py --self-test
+      - name: Orphan-thread sweep wiring inspection (seam + least privilege — #4542)
+        run: python3 scripts/tests/test_orphan_thread_sweeper_wiring.py
       # [OPUS-5] sq-w1dxx: release.yml's container contract was pinned by a test that NOTHING
       # ran, so every assertion in it was decorative. Wire it in beside its sibling tests.
       # sq-fvzi6 pins the multi-arch push; sq-n6rv + sq-p9xq pin sparq-server's trigger-gated

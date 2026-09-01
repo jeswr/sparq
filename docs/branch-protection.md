@@ -485,6 +485,22 @@ un-draft moment.
 - **Require conversation resolution before merging** — all PR review threads (human and
   bot, incl. Copilot/CodeQL) must be resolved (live ruleset `pull_request`
   `required_review_thread_resolution: true`). (Also listed under "Other settings".)
+
+  > **[OPUS-5] Issue #4542 — this rule composes with a DISABLED analysis into a permanent,
+  > silent merge blocker, and `.github/workflows/orphan-thread-sweeper.yml` is its exit.**
+  > Most review threads here are filed by an analysis, and an analysis is a workflow that
+  > can be switched off — CodeQL has been `disabled_manually` since 2026-07-18 (see the
+  > OPERATIONALLY DISABLED note above). A thread filed *before* that can never be
+  > re-scanned, superseded or dismissed by the tool that filed it, so the PR stays
+  > `BLOCKED` forever while every individual CI signal on it is green. The sweeper resolves
+  > **only** such a thread, and only when all of: its author is a workflow-backed analysis
+  > in the script's registry, no second participant has replied, the finding text matches
+  > that analysis's marker, the mapped workflow's live Actions state is a disabled one, and
+  > that workflow has not run since the thread was filed. It posts the evidence as a reply
+  > *before* resolving (a failed reply resolves nothing), leaves the finding text intact,
+  > bounds itself per tick, and every resolution is reversible with **Unresolve
+  > conversation**. It is schedule/dispatch-only, publishes no check-run, and does not
+  > weaken the ruleset rule: a thread from a *live* analysis is never eligible.
 - **Code-quality rule active.** The live ruleset also carries a `code_quality` rule
   (`severity: all`), GitHub's built-in PR quality signal, alongside the checks above.
 

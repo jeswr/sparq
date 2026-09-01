@@ -1,0 +1,77 @@
+# [OPUS-5] Issue #4542 — the exit out of "blocked by a thread nothing can ever resolve".
+#
+# The `main` ruleset sets `required_review_thread_resolution: true`; CodeQL, which files
+# most of the review threads on this repository, is `disabled_manually`. A thread filed
+# before it was switched off can never be re-scanned or superseded, so the pull request is
+# BLOCKED forever while every CI signal on it is green. #4534's stuck-arm sweep makes that
+# shape VISIBLE (class `blocked-threads`, parked with a receipt naming `threads-resolved`);
+# this workflow is the thing that can actually satisfy `threads-resolved`.
+#
+# NOT A GATE. schedule / workflow_dispatch only — it never runs on a pull-request head and
+# publishes no check-run, so it is not a sibling `ci-summary / gate` waits on and it is
+# absent from .github/advisory-registry.json by construction. It is deliberately a SEPARATE
+# workflow from rearm-sweeper.yml (whose subject is the ARMED population, on a ten-minute
+# cron) so that the one mutation in this estate that resolves a security review thread can
+# be switched off on its own with `gh workflow disable`, without taking the arm sweeps with
+# it.
+#
+# The safety preconditions live in scripts/orphan-thread-sweeper.py's header and are pinned
+# by its `--self-test` plus scripts/tests/test_orphan_thread_sweeper_wiring.py; both run as
+# HARD steps in docs-quality.yml, so a change to this policy is validated on the pull
+# request that makes it rather than at 03:00 on the cron.
+#
+# Third-party actions pinned by full commit SHA (supply-chain hardening); the trailing
+# `# vX.Y.Z` comment is what Dependabot follows to bump the pin.
+name: orphan-thread sweeper
+
+on:
+  schedule:
+    # Hourly, at an odd minute that collides with neither auto-arm's ten-minute cron nor
+    # rearm-sweeper's `8,18,...` offset. An orphaned thread is a permanent condition, not
+    # an urgent one — the bound below matters far more than the cadence.
+    - cron: "37 * * * *"
+  workflow_dispatch:
+
+# `pull-requests: write` is what BOTH mutations consume: `resolveReviewThread` and the
+# review-comment reply that must precede it. `contents: read` is only the checkout. There
+# is deliberately no `issues: write` — this sweep never labels and never opens an issue.
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: orphan-thread-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: resolve review threads filed by a disabled analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Always execute the trusted default-branch policy, including on manual dispatch.
+      - name: Checkout sweep policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          # The WHOLE directory, never a file-by-file manifest — a manifest goes stale the
+          # first time a script gains a sibling import and nobody remembers (see
+          # rearm-sweeper.yml's account of #3776). Cone mode is what makes this recursive.
+          sparse-checkout: scripts
+
+      # Runs FIRST so a regression in the eligibility rules reds the cron before a single
+      # thread is touched.
+      - name: Self-test policy
+        run: python3 scripts/orphan-thread-sweeper.py --self-test
+
+      - name: Resolve orphaned review threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: >-
+          python3 scripts/orphan-thread-sweeper.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          --max-resolutions 10
