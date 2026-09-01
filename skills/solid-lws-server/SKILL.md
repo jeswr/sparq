@@ -198,6 +198,57 @@ direction. Protocol `default-graph-uri` and `named-graph-uri` parameters may
 select from that authorized dataset; they cannot make an unreadable resource
 visible.
 
+## Subscribe to change notifications (WebSocketChannel2023)
+
+Discovery is public. `GET /.well-known/solid` returns a storage description
+listing the supported channel type and the subscription service URL; LDP reads
+also carry `describedby` and Solid `storageDescription` `Link` headers pointing
+at it. Do not hardcode the subscription path — read it from that document.
+
+Subscribe with an authenticated `POST`, then open the returned `receiveFrom`
+URL as a WebSocket:
+
+```sh
+curl -X POST \
+  -H 'Authorization: DPoP ACCESS_TOKEN' \
+  -H 'DPoP: FRESH_REQUEST_BOUND_PROOF' \
+  -H 'Content-Type: application/ld+json' \
+  --data-binary '{
+    "@context": "https://www.w3.org/ns/solid/notifications-context/v1",
+    "type": "http://www.w3.org/ns/solid/notifications#WebSocketChannel2023",
+    "topic": "https://solid.example/alice/data"
+  }' \
+  https://solid.example/.notifications/WebSocketChannel2023/
+```
+
+The response is a channel description whose `receiveFrom` is a `ws(s)://` URL
+carrying `topic` plus a short-lived, unguessable receive token bound to the
+subscribing WebID and that topic. Connecting to it upgrades to a WebSocket and
+the server pushes AS2.0 notifications whenever the topic, or its container
+membership, changes.
+
+Both ends are fail-closed, so plan for these responses:
+
+- Subscribe is behind the same DPoP middleware as the LDP routes. An anonymous
+  caller gets `401`; there are no anonymous subscriptions.
+- Subscribe then applies **per-resource WAC**: the authenticated WebID must
+  hold `acl:Read` on the topic under the same authorizer the LDP read path
+  uses. Without it the response is `403` and no channel or token is created.
+  A topic outside `SOLID_SERVER_BASE_URL` is `403` too — this server holds no
+  `.acl` governing a foreign IRI. A subscription can never surface a resource
+  the caller could not `GET`.
+- A `type` that is not the WebSocketChannel2023 IRI, or a missing `topic`, is
+  `400`.
+- The receive endpoint carries no DPoP header (a browser `WebSocket` cannot
+  send one). A missing, invalid, expired, or wrong-topic token is `401` with no
+  socket opened. The bound WebID's `acl:Read` is then **re-checked** on the
+  upgrade, so a revoked grant takes effect immediately rather than at token
+  expiry; a revoked subscriber gets `403`.
+
+A connection that falls far enough behind drops the oldest frames rather than
+growing without bound, so reconcile state with a `GET` after reconnecting
+instead of assuming a gapless stream.
+
 ## Follow the normative specs, not this server
 
 Several behaviours here implement an external specification, and **the spec is the
