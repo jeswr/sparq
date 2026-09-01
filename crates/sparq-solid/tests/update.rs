@@ -629,3 +629,59 @@ fn an_unlimited_budget_is_plain_update_as() {
         assert_eq!(store_snapshot(&plain), store_snapshot(&budgeted), "stores diverge");
     }
 }
+
+#[test]
+fn partial_apply_that_retains_an_acl_change_still_refreshes_the_auth_view() {
+    // The multi-operation security invariant behind the partial-apply contract: the
+    // engine apply is NON-atomic, so an op that trips the budget keeps the ops BEFORE
+    // it. If one of those retained ops rewrote an `.acl` graph, the materialized auth
+    // view is now stale w.r.t. the store — and the next authorization decision would be
+    // made against access-control rules that no longer exist. `update_inner` must
+    // therefore re-materialize on the ERROR path too, not only after a clean apply.
+    let mut s = wac_store();
+    // priv0/c0/ has its OWN acl granting ALICE Read+Write+Control (it shadows the root),
+    // so removing its `acl:mode acl:Write` triple revokes alice's write on that subtree.
+    // She keeps Control, which is what lets her write the `.acl` graph in the first place.
+    let acl = "https://pod.ex/priv0/c0/.acl";
+    let revoked = "https://pod.ex/priv0/c0/g0/d0.ttl";
+    // A graph alice can still write, so the whole request passes `check` before applying.
+    let other = "https://pod.ex/priv0/c4/g0/d0.ttl";
+    assert!(
+        s.update_as(&sess(Some(ALICE)), &insert_tag(revoked, "before")).is_ok(),
+        "precondition: alice may write priv0/c0 before the revocation"
+    );
+    let acl_before = graph_len(&s, acl);
+    let other_before = graph_len(&s, other);
+    let revoked_before = graph_len(&s, revoked);
+
+    // op1 revokes alice's Write (an `.acl` write ⇒ `permit.rematerialize`); op2's WHERE
+    // is a whole-store scan that blows the row budget. `INSERT DATA`/`DELETE DATA` do not
+    // consult the budget, so op1 applies and op2 is the one that trips.
+    let body = format!(
+        "DELETE DATA {{ GRAPH <{acl}> {{ <{acl}#owner> \
+         <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> }} }} ; \
+         INSERT {{ GRAPH <{other}> {{ <{other}#it> <{TAG}> ?o }} }} \
+         WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}"
+    );
+    let mut budget = sparq_engine::QueryBudget::unlimited();
+    budget.max_rows = Some(1);
+    let err = s
+        .update_as_with_budget(&sess(Some(ALICE)), &body, &budget)
+        .expect_err("op2 must trip the row budget");
+    assert!(err.contains("query budget exceeded"), "{err}");
+
+    // The documented partial-apply contract: op1 (before the failing op) is RETAINED,
+    // op2 is not applied.
+    assert_eq!(graph_len(&s, acl), acl_before - 1, "op1 retained (acl:Write revoked)");
+    assert_eq!(graph_len(&s, other), other_before, "op2 not applied");
+
+    // THE INVARIANT: authorization now reflects the retained access-control graph. With
+    // a stale view alice would still be allowed here, because the view still held the
+    // deleted `acl:mode acl:Write`.
+    let after = s.update_as(&sess(Some(ALICE)), &insert_tag(revoked, "after"));
+    assert!(
+        after.is_err(),
+        "auth view is stale: the retained .acl revocation was not re-materialized: {after:?}"
+    );
+    assert_eq!(graph_len(&s, revoked), revoked_before, "denied write changed nothing");
+}

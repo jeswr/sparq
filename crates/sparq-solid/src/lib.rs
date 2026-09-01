@@ -1284,12 +1284,20 @@ impl PodStore {
     ///
     /// A budget trip during the ENGINE apply has the same partial-apply contract as any
     /// other mid-update error — [`sparq_engine::update_in_place`] is non-atomic on error
-    /// by documented contract, so a multi-operation request that trips on operation *K*
-    /// keeps operations `1..K`. This path stays on the non-atomic primitive rather than
+    /// by documented contract, so a multi-operation request that fails on operation *K*
+    /// retains the operations that already completed, i.e. those BEFORE *K*; operation
+    /// *K* itself is not guaranteed to be applied, nor guaranteed to have applied
+    /// nothing, and no operation after *K* runs. This path stays on the non-atomic
+    /// primitive rather than
     /// [`sparq_engine::update_in_place_atomic_with_budget`]: that variant commits by
     /// replacing the store with a fork which, by its own documented contract, carries no
     /// WAL/redo-journal, so switching would change a directory-backed pod's durability
     /// behaviour — a separate decision, not one this budget threading makes.
+    ///
+    /// The retained prefix cannot leave a stale authorization view. If the request could
+    /// have written a control document, the WAC/ACP view is re-materialized on the error
+    /// path as well as the success path, so a later authorization decision is never made
+    /// against access-control rules the retained prefix has already changed.
     ///
     /// The non-WHERE operations (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`) do not
     /// consult the budget — they are bounded by their operand size — so passing
@@ -1335,16 +1343,33 @@ impl PodStore {
         let auth = Arc::clone(&self.auth);
         let permit = update::check(&self.graph, &auth, s, sparql, self.group_docs(), budget)?;
         // Authorized: apply through the engine's in-place delta path, under the budget.
-        sparq_engine::update_in_place_with_budget(&mut self.graph, sparql, budget)?;
-        // A change to the access-control rules invalidates the auth view.
+        // NOT atomic on error by the engine's documented contract: a multi-operation
+        // request that fails on operation K retains the operations BEFORE K. So the error
+        // is held, not propagated with `?` — the auth view must be reconciled with
+        // whatever prefix stuck before this returns.
+        let applied = sparq_engine::update_in_place_with_budget(&mut self.graph, sparql, budget);
+        // A change to the access-control rules invalidates the auth view. `permit`
+        // describes the WHOLE request, so this covers the retained prefix of a partial
+        // apply too: if any operation could have touched a control doc and part of the
+        // request stuck, the view is rebuilt BEFORE returning the error. Skipping it on
+        // the error path would leave subsequent authorization consulting a view
+        // inconsistent with the retained ACL/ACR graphs. Rebuilding when the retained
+        // prefix in fact changed nothing is merely wasted work, never a hole.
         if permit.rematerialize {
-            if acp {
-                self.materialize_acp()?;
-            } else {
-                self.materialize_wac()?;
+            let remat = if acp { self.materialize_acp() } else { self.materialize_wac() };
+            if let Err(e) = remat {
+                return Err(match applied {
+                    // Both failed: the apply error is the primary one, but a view that
+                    // could NOT be rebuilt is a fail-closed concern of its own and must
+                    // never be swallowed — report both.
+                    Err(a) => {
+                        format!("{} (and the authorization view could not be rebuilt: {})", a, e)
+                    }
+                    Ok(()) => e,
+                });
             }
         }
-        Ok(())
+        applied
     }
 
     /// [OPUS-4.8] sq-h3uk — evaluate an ODRL `policy` against `request` and, on a
