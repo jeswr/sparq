@@ -1279,6 +1279,16 @@ jobs:
         run: python3 scripts/check-sticky-failure-exits.py --self-test
       - name: "Reject exception handlers that erase collected failures (#3770) — GATING"
         run: python3 scripts/check-sticky-failure-exits.py
+      # [OPUS-5] #5654 — a `workflow_run` trigger with no `workflows:` filter fails
+      # SILENTLY: the lane never fires, so there is no run, no check-run and no
+      # annotation to notice. Every other trigger mistake shows up as a red check;
+      # this one shows up as an absence, which is why it needs an authoring-time lint.
+      # Pure stdlib (no PyYAML), and non-vacuity is proved by its own fixture table —
+      # each violation branch asserts its DIAGNOSIS, not just a finding count.
+      - name: Self-test workflow_run filter lint (#5654 fixtures)
+        run: python3 scripts/check-workflow-run-filters.py --self-test
+      - name: "Require an explicit `workflows:` filter on every workflow_run (#5654) — GATING"
+        run: python3 scripts/check-workflow-run-filters.py
 
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE
