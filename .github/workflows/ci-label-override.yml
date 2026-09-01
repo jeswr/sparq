@@ -1,4 +1,4 @@
-# [GPT-5.6] #5215 — one server-side router for the three explicit CI override
+# [SPARQ agent] #6081 — one server-side router for the three explicit CI override
 # labels. The review pipeline also changes review:*, status:*, trust-surface and
 # area:* labels. Letting each heavy workflow subscribe to every label event made
 # those ordinary transitions instantiate four unconditional selector jobs (and

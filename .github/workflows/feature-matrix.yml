@@ -156,7 +156,7 @@ on:
     branches: [main]
   # [FABLE-5] sq-fmx4u.5: toggling the `ci-full` label re-evaluates change-based
   # selection for the opt-in leg set as well (the `setup` assembler filters legs).
-  # [GPT-5.6] #5215: ci-label-override.yml owns labeled/unlabeled events and calls
+  # [SPARQ agent] #6081: ci-label-override.yml owns labeled/unlabeled events and calls
   # this workflow only for ci-full. The default PR event types stay explicit.
   # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
   # the `ci-full` toggle starts real work off a label event — the review pipeline's
@@ -174,7 +174,7 @@ on:
   # above: a non-`ci-full` label flip stays a no-op regardless of draft state.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # [GPT-5.6] #5215: ci-label-override.yml calls this workflow only when the
+  # [SPARQ agent] #6081: ci-label-override.yml calls this workflow only when the
   # explicit ci-full override changes. Ordinary label churn never reaches it.
   workflow_call:
   # Merge queue: mirror the PR check-set onto the merge_group ref so the required

@@ -498,7 +498,7 @@ class TestWiring(unittest.TestCase):
         self.assertIn('[ "$CI_FULL_LABEL" = "true" ]', run)
 
     def test_label_toggles_route_through_one_zero_runner_dispatcher(self):
-        """[GPT-5.6] #5215. Review/status/area label churn must not instantiate a
+        """[SPARQ agent] #6081. Review/status/area label churn must not instantiate a
         selector in every heavy workflow. The heavy workflows remain reusable so a
         single label dispatcher can invoke exactly the workflows whose explicit
         full-run override changed; their ordinary PR triggers remain intact."""

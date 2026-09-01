@@ -58,11 +58,11 @@ on:
     branches: [main]
   # [FABLE-5] Draft-tier CI: default types + ready_for_review (the un-draft moment
   # must re-run the wasm-equality leg a draft head may have scoped out).
-  # [GPT-5.6] #5215: ci-label-override.yml owns labeled/unlabeled events and calls
+  # [SPARQ agent] #6081: ci-label-override.yml owns labeled/unlabeled events and calls
   # this workflow only when ci-full changes, preserving that scope re-evaluation.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # [GPT-5.6] #5215: ci-label-override.yml calls this workflow only when the
+  # [SPARQ agent] #6081: ci-label-override.yml calls this workflow only when the
   # explicit ci-full override changes. Ordinary label churn never reaches it.
   workflow_call:
   merge_group:
