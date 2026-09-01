@@ -1086,7 +1086,9 @@ pub(crate) async fn serve_read<S: Store>(
 /// `PUT /{path}` — create-or-replace an RDF resource (Turtle / JSON-LD), with conditional-write
 /// support (`If-Match` / `If-None-Match`).
 ///
-/// Fail-closed: a mutation from a public caller is a 403 (the WAC seam is M2-next). The body is
+/// Fail-closed: the caller is authorized through the WAC engine before anything else runs (see the
+/// mode analysis on the `authorize` call below), so a mutation from an under-authorized caller is a
+/// 401/403 with no dependence on whether the target exists. The body is
 /// validated as well-formed RDF in its declared type (415 unsupported / 400 malformed). The
 /// `If-None-Match: *` create-guard and `If-Match` overwrite-guard are evaluated against the current
 /// ETag (412 on mismatch).

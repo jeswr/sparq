@@ -64,7 +64,11 @@ tower = "0.5"
 # stays issuer-agnostic + seam-based, so unit tests still drive the verification CORE via the
 # in-memory test doubles. Pinned to an exact rev (not the floating default branch) for reproducible,
 # security-reviewable builds; Cargo.lock is committed.
-# Pinned to `b146253` — verifier `main`. This rev bumps the verifier's `hickory-resolver`
+# PIN-RATIONALE LOG — chronological, OLDEST ENTRY FIRST. The CURRENT pin is the rev on the
+# `solid-oidc-verifier` dependency line in the native-target section below (`89c8962`); each entry
+# here records what an earlier rev contributed and is inherited by the current pin unless a later
+# entry supersedes it. Read the dependency line, not this log, for what is actually pinned.
+# `b146253` (verifier `main`) bumped the verifier's `hickory-resolver`
 # (its async DNS-pinning SSRF resolver) `0.24 → 0.26.1`, which in turn lets THIS repo's Cargo.lock
 # resolve the PATCHED `hickory-proto 0.26.1` — closing dependabot GHSA-q2qq-hmj6-3wpp (the O(n²)
 # DNS name-compression DoS) on the server. The verifier's PUBLIC API is UNCHANGED — `Verifier::verify`

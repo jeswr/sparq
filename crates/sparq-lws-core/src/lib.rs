@@ -52,8 +52,10 @@
 //! endpoint, a subscribe endpoint, and discovery (storage description + `Link` rels). The LDP write
 //! path makes a single emit call after a successful mutation. Everything else network-facing (the live
 //! SPARQ HTTP client, live JWKS) and the parts of the Solid surface that need designs not yet written
-//! (per-resource authorization of a subscription, the reconciler, multipart Range, `acl:agentGroup`
-//! resolution) are clearly marked `M2-next:` seams. PATCH supports both the Solid N3 Patch and the
+//! (per-resource authorization of a subscription, `acl:agentGroup` resolution) are clearly marked
+//! `M2-next:` seams. The reconciler and multipart Range have since LANDED and are no longer seams
+//! (`store::reconcile`, `ldp::range`; sq-gg0qq.8, `research/lws-branch-port-triage.md` §5.2).
+//! PATCH supports both the Solid N3 Patch and the
 //! `application/sparql-update` INSERT/DELETE-DATA subset. The Solid conformance suite passes **41/41**
 //! (Protocol 25/25 + WAC 16/16) — see `conformance/SCORE.md`. The default impls used here are
 //! in-memory test doubles.

@@ -485,8 +485,9 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         // the metadata + the edge commit together, there is no window in which the edge exists
         // without backing metadata — so the POST path needs NO removal-based compensation and a
         // concurrent same-IRI creator can never observe or tear down a half-built containment. A
-        // missing container ⇒ 404; the bytes written above are then orphaned and GC'd by the
-        // reconciler (M2-next) — the same crash-consistency model `write` documents.
+        // missing container ⇒ 404; the bytes written above are then orphaned and reclaimed by the
+        // reconciler (`crate::store::reconcile`, implemented) — the same crash-consistency model
+        // `write` documents.
         //
         // The child's blob key is minted UNIQUE PER WRITE (`mint_blob_key`), so a concurrent same-IRI
         // create writes a disjoint object and cannot collide with this one on a shared key. Minting FAILS
@@ -528,8 +529,8 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         };
         // Detach from the parent's containment first, then drop the index record, then the bytes.
         // Index-before-bytes keeps the invariant "if it's indexed, its bytes exist" — a crash after
-        // the index delete leaves orphaned bytes (the reconciler GCs them — M2-next), never an index
-        // row pointing at missing bytes.
+        // the index delete leaves orphaned bytes (the reconciler reclaims them —
+        // `crate::store::reconcile`, implemented), never an index row pointing at missing bytes.
         if let Some(p) = parent {
             self.sparq
                 .remove_child(p, iri)
