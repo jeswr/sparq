@@ -96,6 +96,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gh_enumerate  # noqa: E402 - needs the sys.path line above
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Labels every alarm issue carries (mirrors flow-on's `flow-on`+`auto`). The label
@@ -884,20 +887,30 @@ def open_issue_exists(key: str, repo: str) -> bool:
     # Idempotency: list ALL open selection-alarm issues and EXACT-match the body
     # marker. We deliberately do NOT pass `--search` — a triage key contains
     # punctuation (parens/slashes) that gh's search tokeniser handles unreliably,
-    # which could MISS an existing issue and break dedupe (mint a duplicate). The
-    # deduped label keeps the open set tiny, so listing 100 is cheap.
+    # which could MISS an existing issue and break dedupe (mint a duplicate).
+    #
+    # [OPUS-5] #4985: the old `--limit 100` had exactly the failure mode this comment
+    # already refuses `--search` for — a missed marker mints a duplicate — but reached it
+    # SILENTLY once the labelled open set crossed 100. This is the dedupe guard itself, so
+    # it fails CLOSED: a truncated fetch raises rather than reading as "no open issue
+    # carries this marker", which would file a duplicate on every run.
     marker = key_marker(key)
     out = _run(
         [
             "gh", "issue", "list", "--repo", repo, "--state", "open",
-            "--label", "selection-alarm", "--json", "number,body", "--limit", "100",
-        ],
+            "--label", "selection-alarm", "--json", "number,body",
+        ] + gh_enumerate.limit_args(gh_enumerate.ISSUE_CEILING),
         check=False,
     )
     try:
         issues = json.loads(out or "[]")
-    except json.JSONDecodeError:
-        return False
+    except json.JSONDecodeError as exc:
+        # Was `return False` — an unreadable response claimed "nothing is open", the
+        # fail-OPEN direction for a dedupe guard. Refuse the run instead.
+        raise AlarmError(
+            f"could not read the open selection-alarm issue list: {exc}") from exc
+    issues = gh_enumerate.guard(issues, "open selection-alarm issues",
+                                ceiling=gh_enumerate.ISSUE_CEILING, exc=AlarmError)
     return any(marker in (i.get("body") or "") for i in issues)
 
 
@@ -1136,7 +1149,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"          jobs : {', '.join(f.failed_jobs)}")
                 print(f"          PRs  : {', '.join(_pr_ref(wc) for wc in f.suspect_prs)}")
                 continue
-            if open_issue_exists(f.key, repo):
+            # [OPUS-5] #4985: a dedupe lookup that cannot be trusted must stop the run,
+            # not fall through to `create_issue` — filing past a broken guard is exactly
+            # the duplicate-per-run spam the guard exists to prevent.
+            try:
+                already_open = open_issue_exists(f.key, repo)
+            except AlarmError as exc:
+                print(f"::error::{exc}", file=sys.stderr)
+                return 1
+            if already_open:
                 print(f"selection-alarm: skip (open issue exists) key={f.key}")
                 skipped += 1
                 continue

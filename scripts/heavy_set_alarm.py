@@ -82,6 +82,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gh_enumerate  # noqa: E402 - needs the sys.path line above
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CI_YAML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
@@ -323,14 +326,19 @@ def ensure_labels(repo: str) -> None:
 
 
 def open_issue_exists(repo: str) -> bool:
+    # [OPUS-5] #4985: a fail-closed CEILING, not the old `--limit 100` cap. Same dedupe
+    # guard as formal_lane_alarm.py — truncation is the fail-OPEN direction, so it raises
+    # rather than reading a missed marker as "nothing open" and filing a duplicate.
     out = _run_gh(
         [
             "gh", "issue", "list", "--repo", repo, "--state", "open",
-            "--label", BASE_LABELS[0], "--json", "number,body", "--limit", "100",
-        ]
+            "--label", BASE_LABELS[0], "--json", "number,body",
+        ] + gh_enumerate.limit_args(gh_enumerate.ISSUE_CEILING)
     )
+    rows = gh_enumerate.guard(json.loads(out or "[]"), f"open '{BASE_LABELS[0]}' issues",
+                              ceiling=gh_enumerate.ISSUE_CEILING, exc=AlarmError)
     marker = f"{KEY_PREFIX}: {ISSUE_KEY}"
-    return any(marker in (item.get("body") or "") for item in json.loads(out or "[]"))
+    return any(marker in (item.get("body") or "") for item in rows)
 
 
 def file_issue(repo: str, findings: list[dict], heavy_floor: float) -> None:

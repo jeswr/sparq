@@ -27,6 +27,7 @@ jobs:
           python3 - <<'PY'
           import json, os, subprocess, datetime, sys
           sys.path.insert(0, "scripts")
+          import gh_enumerate
           from promote import should_promote
           from triage import triage
           REPO = os.environ["REPO"]
@@ -41,9 +42,17 @@ jobs:
               r = gh("api", f"repos/{REPO}/collaborators/{user}/permission", "--jq", ".permission")
               return r.stdout.strip() if r.returncode == 0 else "none"
 
-          issues = json.loads(gh("issue", "list", "-R", REPO, "--label", "trust:untrusted",
-                                 "--state", "open", "--limit", "200",
-                                 "--json", "number,updatedAt,labels").stdout or "[]")
+          # [OPUS-5] #4985: a fail-closed CEILING, not the old `--limit 200` cap. This poll
+          # is the ONLY way an issue leaves quarantine, so a silent truncation does not
+          # promote late — the truncated tail is never promoted on any tick, and the run
+          # still reports success.
+          issues = gh_enumerate.guard(
+              json.loads(gh("issue", "list", "-R", REPO, "--label", "trust:untrusted",
+                            "--state", "open", "--json", "number,updatedAt,labels",
+                            *gh_enumerate.limit_args(gh_enumerate.ISSUE_CEILING)).stdout
+                         or "[]"),
+              "open trust:untrusted issues", ceiling=gh_enumerate.ISSUE_CEILING,
+              exc=SystemExit)
           for it in issues:
               n = it["number"]
               rx = json.loads(gh("api", f"repos/{REPO}/issues/{n}/reactions").stdout or "[]")

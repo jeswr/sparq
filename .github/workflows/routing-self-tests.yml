@@ -114,6 +114,11 @@ on:
       - "scripts/tests/test_start_here_render.py"
       - ".github/workflows/refresh-start-here.yml"
       - ".github/workflows/routing-self-tests.yml"
+      # [OPUS-5] #4985: promote-on-approval.yml enumerates open `trust:untrusted`
+      # issues from an INLINE heredoc — no importable seam, no self-test of its own.
+      # test_gh_enumerate_wiring.py pins that site structurally, so a change to it
+      # must run this lane or the pin cannot fire.
+      - ".github/workflows/promote-on-approval.yml"
       # [OPUS-5] sparq#5098 — the SELF-TEST WRITE GUARD's scan surface. It scans
       # `scripts/**/*.py` for a self-test that can reach a live write (the shape that posted four
       # real comments to #7/#8 from `--selftest`), so its trigger must be the same DIRECTORY GLOB
@@ -229,6 +234,11 @@ on:
       - "scripts/tests/test_start_here_render.py"
       - ".github/workflows/refresh-start-here.yml"
       - ".github/workflows/routing-self-tests.yml"
+      # [OPUS-5] #4985: promote-on-approval.yml enumerates open `trust:untrusted`
+      # issues from an INLINE heredoc — no importable seam, no self-test of its own.
+      # test_gh_enumerate_wiring.py pins that site structurally, so a change to it
+      # must run this lane or the pin cannot fire.
+      - ".github/workflows/promote-on-approval.yml"
       # [OPUS-5] sparq#5098 — the SELF-TEST WRITE GUARD's scan surface. It scans
       # `scripts/**/*.py` for a self-test that can reach a live write (the shape that posted four
       # real comments to #7/#8 from `--selftest`), so its trigger must be the same DIRECTORY GLOB
@@ -273,6 +283,14 @@ jobs:
           python3 scripts/ready-issues.py --self-test
           python3 scripts/dispatch-plan.py --self-test
           python3 scripts/batch-merge.py --self-test
+          # [OPUS-5] #4985: `gh <list> --limit N` truncates SILENTLY — no warning, exit 0.
+          # The shared ceiling helper turns that into a loud refusal; the wiring suite
+          # drives each REAL call site (the three alarms' dedupe lookups, pr-backlog's
+          # marker set + PR sweep, the pr-area backfill, the promote-on-approval heredoc)
+          # and reds if any is reverted to a hard-coded cap. It pins its own invocation
+          # here, so `if: false` on this job or step reds it.
+          python3 scripts/gh_enumerate.py --self-test
+          python3 scripts/tests/test_gh_enumerate_wiring.py
           python3 scripts/tests/test_readiness_visibility.py
           # [OPUS-5] a deprecated model must not reappear in ANY routing position — the routing
           # table, a .claude/settings.json agent hook, a workflow JS dispatch site, or agent

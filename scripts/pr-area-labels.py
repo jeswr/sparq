@@ -69,6 +69,9 @@ import sys
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gh_enumerate  # noqa: E402 - needs the sys.path line above
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = REPO_ROOT / "ci" / "area-labels.toml"
 WORKSPACE_MANIFEST = REPO_ROOT / "Cargo.toml"
@@ -459,15 +462,21 @@ def fetch_pr(repo, number, runner=None):
     }, data.get("changedFiles"), runner=runner)
 
 
-def fetch_open_prs(repo, limit=300, runner=None):
+def fetch_open_prs(repo, limit=gh_enumerate.PR_CEILING, runner=None):
     # Same rule as fetch_pr: the list call carries metadata + the authoritative count,
     # never the capped GraphQL `files` connection. The per-PR REST enumeration costs one
     # extra call per open PR; a backfill is a hand-run, dry-run-by-default operation, and
     # a wrong narrow label is not worth saving ~90 requests.
-    raw = _gh(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
-               "--json", "number,labels,changedFiles,isDraft,title"], runner=runner)
+    #
+    # [OPUS-5] #4985: `limit` is a fail-closed CEILING, not a page size — a backfill that
+    # silently stopped at 300 would leave the tail of the open-PR set unlabelled while
+    # reporting a clean run. Landing ON the limit raises rather than half-labelling.
+    raw = _gh(["pr", "list", "--repo", repo, "--state", "open",
+               "--json", "number,labels,changedFiles,isDraft,title"]
+              + gh_enumerate.limit_args(limit), runner=runner)
     out = []
-    for data in json.loads(raw):
+    for data in gh_enumerate.guard(json.loads(raw), "open PRs",
+                                   ceiling=limit, exc=SystemExit):
         out.append(_with_changed_files(repo, {
             "number": data.get("number"),
             "labels": [lb.get("name") for lb in data.get("labels") or []],
@@ -563,7 +572,10 @@ def main(argv=None, runner=None, out=None):
                     help="actually add the labels (default: dry run, touch nothing)")
     ap.add_argument("--dry-run", action="store_true",
                     help="explicit no-op default; mutually exclusive with --apply")
-    ap.add_argument("--limit", type=int, default=300, help="backfill PR page ceiling")
+    ap.add_argument("--limit", type=int, default=gh_enumerate.PR_CEILING,
+                    help="backfill open-PR fail-closed ceiling: a fetch that comes back "
+                         "sitting on it is treated as truncated and refused, never "
+                         "half-labelled (#4985)")
     ap.add_argument("--pace", type=float, default=0.0,
                     help="seconds to wait between label writes during a backfill. Adding a "
                          "label fires a `pull_request: labeled` event, and ci/bench/fuzz/"

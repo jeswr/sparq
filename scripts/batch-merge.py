@@ -109,6 +109,8 @@ PROG = "batch-merge"
 # pre-#3433 single-batch behaviour). Grouping is scheduling-only — the omnibus's own
 # CI recomputes the class from its real diff, so this can never skip a required check.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gh_enumerate  # noqa: E402 - needs the sys.path line above
+
 try:
     from ci_select import _INERT_CLASSES, classify_change
 except Exception:  # defensive only; --self-test pins the working import path red/green
@@ -559,8 +561,16 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     per-PR views only where the policy needs the heavy fields (open omnibus PRs and the
     overflow candidates)."""
     fields = "number,headRefName,title,author,labels,isDraft,autoMergeRequest"
-    raw = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "open",
-                             "--limit", "200", "--json", fields]))
+    # [OPUS-5] #4985: a fail-closed CEILING, not the old `--limit 200` cap. The batcher
+    # enumerates the open-PR set to pick constituents, so a silent truncation makes it
+    # stop batching the tail of the queue — throughput degrades with nothing to attribute
+    # it to. `gh` stops paging at hasNextPage, so the higher ceiling costs no extra call
+    # at the live population; it only decides how a runaway snapshot fails.
+    raw = gh_enumerate.guard(
+        json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "open",
+                           "--json", fields]
+                          + gh_enumerate.limit_args(gh_enumerate.PR_CEILING))),
+        "open PRs", ceiling=gh_enumerate.PR_CEILING, exc=SystemExit)
     open_prs = []
     for pr in raw:
         am = pr.get("autoMergeRequest")

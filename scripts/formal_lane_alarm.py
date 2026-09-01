@@ -54,6 +54,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gh_enumerate  # noqa: E402 - needs the sys.path line above
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = REPO_ROOT / "ci" / "formal-verification.toml"
 
@@ -209,14 +212,20 @@ def ensure_labels(repo: str) -> None:
 
 
 def open_issue_exists(repo: str, workflow: str) -> bool:
+    # [OPUS-5] #4985: a fail-closed CEILING, not the old `--limit 100` cap. This is the
+    # dedupe guard, so truncation is the fail-OPEN direction — a marker past the cap reads
+    # as "nothing open" and files a duplicate on every run. Raising AlarmError stops the
+    # run (main() reports it as ::error::) rather than spamming the tracker.
     out = _run_gh(
         [
             "gh", "issue", "list", "--repo", repo, "--state", "open",
-            "--label", BASE_LABELS[0], "--json", "number,body", "--limit", "100",
-        ]
+            "--label", BASE_LABELS[0], "--json", "number,body",
+        ] + gh_enumerate.limit_args(gh_enumerate.ISSUE_CEILING)
     )
+    rows = gh_enumerate.guard(json.loads(out or "[]"), f"open '{BASE_LABELS[0]}' issues",
+                              ceiling=gh_enumerate.ISSUE_CEILING, exc=AlarmError)
     marker = f"{KEY_PREFIX}: {workflow}"
-    return any(marker in (item.get("body") or "") for item in json.loads(out or "[]"))
+    return any(marker in (item.get("body") or "") for item in rows)
 
 
 def file_issue(repo: str, v: dict) -> None:

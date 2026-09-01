@@ -70,6 +70,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gh_enumerate  # noqa: E402 - needs the sys.path line above
+
 # ---------------------------------------------------------------------------
 # Refusal reasons. Every one of these is a NAMED outcome so a census row can say
 # *why* a PR was refused, and so each has its own test.
@@ -620,12 +623,17 @@ def _gh_json(path: str) -> object:
 
 
 def _default_pr_lister(repo: str) -> list[dict]:
+    # [OPUS-5] #4985: a fail-closed CEILING, not the old `--limit 200` cap. This sweep
+    # decides which open PRs need a feature-OFF declaration by enumerating them, so a
+    # silent truncation leaves the tail permanently undeclared with no signal.
     proc = subprocess.run(
-        ["gh", "pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
-         "--json", "number,headRefOid,isDraft,title"],
+        ["gh", "pr", "list", "--repo", repo, "--state", "open",
+         "--json", "number,headRefOid,isDraft,title"]
+        + gh_enumerate.limit_args(gh_enumerate.PR_CEILING),
         capture_output=True, text=True, check=True,
     )
-    return json.loads(proc.stdout)
+    return gh_enumerate.guard(json.loads(proc.stdout), "open PRs",
+                              ceiling=gh_enumerate.PR_CEILING, exc=SystemExit)
 
 
 def _default_check_lister(repo: str, sha: str) -> list[dict]:

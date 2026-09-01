@@ -62,6 +62,8 @@ from datetime import datetime, timedelta, timezone
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gh_enumerate  # noqa: E402 - needs the sys.path line above
+
 # [OPUS-5] #1135: the shared Release-PR predicate (branch/author/title, never a label).
 # NOT fail-soft: the stub treats every PR as a release PR, so a missing module makes this
 # script groom nothing rather than groom the Release PR.
@@ -435,12 +437,18 @@ def _normalise_checks(status_check_rollup):
 
 
 def collect_prs(repo, gh_json=_gh_json):
-    """Fetch the light open-PR snapshot used to decide which details are needed."""
-    prs = gh_json([
-        "pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
+    """Fetch the light open-PR snapshot used to decide which details are needed.
+
+    [OPUS-5] #4985: a fail-closed CEILING, not the old `--limit 200` cap. The groomer
+    decides staleness by ENUMERATING open PRs, so a silent truncation does not groom late
+    — it never grooms the truncated tail on any tick, and reports success while doing it.
+    """
+    prs = gh_enumerate.guard(gh_json([
+        "pr", "list", "--repo", repo, "--state", "open",
         "--json",
         "number,title,author,isDraft,headRefName,labels,updatedAt",
-    ])
+    ] + gh_enumerate.limit_args(gh_enumerate.PR_CEILING)),
+        "open PRs", ceiling=gh_enumerate.PR_CEILING, exc=SystemExit)
     norm = []
     for p in prs:
         norm.append({
@@ -507,12 +515,30 @@ def enrich_prs(prs, existing_markers, repo, exclude_pr, now, gh_json=_gh_json):
     return errors
 
 
-def collect_existing_markers(repo):
-    """Every dedupe marker present in the body of an OPEN issue."""
-    issues = _gh_json([
-        "issue", "list", "--repo", repo, "--state", "open", "--limit", "500",
+def collect_existing_markers(repo, gh_json=_gh_json):
+    """Every dedupe marker present in the body of an OPEN issue.
+
+    [OPUS-5] #4985. This was `--limit 500` over the UNFILTERED open-issue set, and unlike
+    the rest of that sweep it was not latent. POINT-IN-TIME, per #4985's live count on
+    2026-09-01: 1707 open issues, so the fetch returned only the newest 500 and every
+    marker on the other ~1200 was invisible. That count is a snapshot, not a fixed gain —
+    the defect is DEPTH-CONDITIONAL and bites only while the open-issue set exceeds the
+    limit (below it, the capped and ceilinged fetches are identical).
+
+    This set is the SOLE dedupe input for `plan()` — a marker it cannot see reads as "not
+    yet filed", so the groomer re-filed an already-open stale-PR / dep-upgrade issue and
+    then recorded it as newly filed. The non-spam invariant failed OPEN, quietly, which is
+    the exact shape #4985 predicted for the capped dedupe searches.
+
+    The ceiling is ISSUE_CEILING (shared with ready-issues.py / retriage.py /
+    triage-area.py) so this fetch now fails CLOSED — no markers rather than half the
+    markers — if the open-issue population ever runs away.
+    """
+    issues = gh_enumerate.guard(gh_json([
+        "issue", "list", "--repo", repo, "--state", "open",
         "--json", "body",
-    ])
+    ] + gh_enumerate.limit_args(gh_enumerate.ISSUE_CEILING)),
+        "open issues (dedupe markers)", ceiling=gh_enumerate.ISSUE_CEILING, exc=SystemExit)
     markers = set()
     marker_re = re.compile(r"<!-- (?:dep-upgrade|pr-backlog):[^>]+ -->")
     for it in issues:
