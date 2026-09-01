@@ -189,6 +189,16 @@ Materialize the authorization view from the access-control documents, then enfor
 - `store.update_as(&Session, sparql)` / `store.update_as_acp(...)` — **write-path
   gating**: check every graph an update could mutate *before* applying, and
   auto-re-materialize on `.acl`/`.acr` writes.
+- `store.update_as_with_budget(&Session, sparql, &QueryBudget)` /
+  `store.update_as_acp_with_budget(...)` — the same, under a cooperative
+  `sparq_engine::QueryBudget` ([SONNET-4.6] sq-yhlf0). An update evaluates its WHERE over
+  the whole store **twice** — the authorization check's `GRAPH ?var` binding SELECT and
+  the engine's template instantiation — and both run under the one budget, so a host that
+  must bound every evaluation it issues (the MCP pod server, mcp-solid draft §9.4) can.
+  A trip reports the engine's `query budget exceeded (timeout|max-rows|max-bytes|cancelled)`
+  rather than an authorization deny; a trip inside the check leaves the store untouched,
+  while one inside the apply inherits `update_in_place`'s documented non-atomic-on-error
+  contract. An unlimited budget is byte-for-byte `update_as`.
 - `store.put_acl(acl_iri, content, format) -> AclWriteOutcome` /
   `store.delete_acl(acl_iri)` (+ `…_acp` variants) — **authoritative ACL write-through**
   ([OPUS-4.8] issue #992 FR-3, sq-snopa.5): the LDP `PUT`/`DELETE /resource.acl` STORAGE

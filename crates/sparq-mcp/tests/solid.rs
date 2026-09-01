@@ -661,6 +661,126 @@ fn update_tool_enforces_session_write_authorization() {
     assert!(!is_err, "{text}");
 }
 
+// ───────────────────── update budget (draft §9.4) ─────────────────────
+//
+// [SONNET-4.6] sq-yhlf0 — §9.4: EVERY tool-issued evaluation must be bounded. An update
+// evaluates its WHERE pattern over the whole pod TWICE — once in the authorization check
+// (the `GRAPH ?var` binding SELECT) and once in the engine's template instantiation — and
+// both now run under the server's per-call budget. Each test below flips red if
+// `tool_update` is reverted to the unbudgeted `PodStore::update_as`.
+
+/// A write-enabled server for `agent` with the budget overridden.
+fn budgeted_server(
+    agent: &str,
+    timeout_secs: Option<u64>,
+    max_rows: Option<usize>,
+) -> SolidMcpServer {
+    let config = SolidServerConfig {
+        agent: Some(agent.to_string()),
+        allow_update: true,
+        query_timeout_secs: timeout_secs,
+        max_rows,
+        ..SolidServerConfig::default()
+    };
+    SolidMcpServer::with_config(pod(), config).expect("materializes")
+}
+
+/// Rows the session can see for `?s ?p ?o` across all readable graphs — the witness that a
+/// budget-refused update mutated NOTHING. (Only usable on a server whose budget still
+/// admits this read, i.e. not one with an already-expired deadline.)
+fn visible_quad_count(server: &mut SolidMcpServer) -> usize {
+    let (text, is_err) = tool(
+        server,
+        "query",
+        json!({"sparql": "SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } }"}),
+    );
+    assert!(!is_err, "{text}");
+    let v: Value = serde_json::from_str(&text).expect("results JSON");
+    v["results"]["bindings"].as_array().expect("bindings").len()
+}
+
+#[test]
+fn update_tool_trips_the_deadline_on_a_pathological_where() {
+    // A zero-second timeout is a deadline that has already passed by the time the tool
+    // consults it, so the trip is deterministic — no wall-clock race in CI. (It also
+    // bounds this server's READS to nothing, which is why the mutation witness below
+    // lives on the row-cap tests instead.)
+    let mut alice = budgeted_server(ALICE, Some(0), None);
+
+    // Pathological: a three-way cross product over every quad in the pod, feeding a
+    // STATIC (writable) template target — so authorization resolves without evaluating
+    // anything and the budget must be enforced by the ENGINE apply path.
+    let (text, is_err) = tool(
+        &mut alice,
+        "update",
+        json!({"sparql":
+            "INSERT { GRAPH <https://pod.ex/notes/n1> { <urn:x> <urn:y> ?o1 } } WHERE { \
+             GRAPH ?g1 { ?s1 ?p1 ?o1 } GRAPH ?g2 { ?s2 ?p2 ?o2 } GRAPH ?g3 { ?s3 ?p3 ?o3 } }"}),
+    );
+    assert!(is_err, "a pathological update must be refused, not run: {text}");
+    assert!(
+        text.contains("query budget exceeded (timeout)"),
+        "the deadline must surface as the tool error, not a deny or a stall: {text}"
+    );
+}
+
+#[test]
+fn update_budget_trip_in_the_authorization_check_mutates_nothing() {
+    // The template target is a `GRAPH ?var` slot, so the trip happens in the
+    // authorization check's binding SELECT, BEFORE the engine is reached. The row cap
+    // (not a deadline) makes it deterministic AND leaves reads working, so the pod can
+    // be witnessed unchanged. The error must stay the budget one, not become a deny.
+    let mut alice = budgeted_server(ALICE, None, Some(64));
+    let before = visible_quad_count(&mut alice);
+    let (text, is_err) = tool(
+        &mut alice,
+        "update",
+        json!({"sparql":
+            "INSERT { GRAPH ?g1 { <urn:x> <urn:y> \"z\" } } WHERE { \
+             GRAPH ?g1 { ?s1 ?p1 ?o1 } GRAPH ?g2 { ?s2 ?p2 ?o2 } }"}),
+    );
+    assert!(is_err, "{text}");
+    assert!(
+        text.contains("query budget exceeded (max-rows)"),
+        "a budget trip in the check must stay a budget error, not become a deny: {text}"
+    );
+    assert_eq!(before, visible_quad_count(&mut alice), "nothing may be applied");
+}
+
+#[test]
+fn update_row_cap_refuses_the_pathological_shape_and_admits_the_benign_one() {
+    // No deadline at all — this bound is purely structural, so it discriminates a
+    // pathological WHERE from a benign one rather than refusing everything.
+    let mut alice = budgeted_server(ALICE, None, Some(64));
+    let before = visible_quad_count(&mut alice);
+
+    let (text, is_err) = tool(
+        &mut alice,
+        "update",
+        json!({"sparql":
+            "INSERT { GRAPH <https://pod.ex/notes/n1> { <urn:x> <urn:y> ?o1 } } WHERE { \
+             GRAPH ?g1 { ?s1 ?p1 ?o1 } GRAPH ?g2 { ?s2 ?p2 ?o2 } }"}),
+    );
+    assert!(is_err, "the cross product must be refused: {text}");
+    assert!(text.contains("query budget exceeded (max-rows)"), "{text}");
+    assert_eq!(before, visible_quad_count(&mut alice), "a refused update must not add quads");
+
+    // The benign shape — same server, same cap — still runs.
+    let (text, is_err) = tool(
+        &mut alice,
+        "update",
+        json!({"sparql":
+            "INSERT { GRAPH <https://pod.ex/notes/n1> { <urn:x> <urn:y> ?t } } WHERE { \
+             GRAPH <https://pod.ex/notes/n1> { ?s <https://ex.dev/ns#title> ?t } }"}),
+    );
+    assert!(!is_err, "a bounded update must still succeed under the same cap: {text}");
+    assert_eq!(
+        before + 1,
+        visible_quad_count(&mut alice),
+        "the admitted update must actually have written its one quad"
+    );
+}
+
 // ───────────────────────── ACL write-through (§7.3) ─────────────────────────
 
 #[test]

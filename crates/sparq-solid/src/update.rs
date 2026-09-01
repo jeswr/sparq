@@ -61,6 +61,7 @@ use crate::loader::{ACL_SUFFIX, ACR_SUFFIX};
 use crate::{AuthIndex, Mode, Session};
 use oxrdf::{NamedNode, Term, Variable};
 use rustc_hash::FxHashSet;
+use sparq_engine::QueryBudget;
 use spargebra::algebra::{GraphPattern, GraphTarget, QueryDataset};
 use spargebra::term::{GraphName, GraphNamePattern};
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
@@ -311,13 +312,33 @@ fn rescope_dataset(graph: &sparq_core::Graph, u: &QueryDataset) -> QueryDataset 
     QueryDataset { default: u.default.clone(), named: Some(named) }
 }
 
+/// Why [`resolve_var_graphs`] could not produce a precise per-graph requirement set.
+/// [SONNET-4.6] sq-yhlf0.
+enum Unresolved {
+    /// Give up precisely and demand write on EVERY store graph at this need level
+    /// (fail-closed: only ever denies an update the precise analysis might have allowed).
+    Wildcard(Need),
+    /// The binding SELECT hit the caller's [`QueryBudget`]. Carries the engine's
+    /// `"query budget exceeded (…)"` message, which the caller returns verbatim so a
+    /// budgeted host (the MCP `update` tool) can classify it as a resource failure.
+    BudgetExceeded(String),
+}
+
+/// Is `e` the engine's cooperative-budget abort (as opposed to a real evaluation error)?
+/// Matches the same `"query budget exceeded"` prefix the HTTP layer maps to 503/413.
+fn is_budget_error(e: &str) -> bool {
+    e.contains("query budget exceeded")
+}
+
 /// Resolve a `DELETE/INSERT … WHERE` operation's `GRAPH ?var` template slots into the
 /// concrete (named-graph, need) requirements its solutions actually produce.
 /// [OPUS-4.8] sq-biss.
 ///
 /// `Ok(reqs)` is the precise per-graph requirement set: write is needed only on the
-/// graphs `?var` actually binds to. `Err(need)` means the resolution must fall back to
-/// the conservative all-graphs wildcard at `need` (fail-closed); the caller raises it.
+/// graphs `?var` actually binds to. [`Unresolved::Wildcard`] means the resolution must
+/// fall back to the conservative all-graphs wildcard at that need (fail-closed); the
+/// caller raises it. [`Unresolved::BudgetExceeded`] means the binding SELECT hit the
+/// caller's [`QueryBudget`] and the whole update must fail with that error.
 ///
 /// # Soundness — why the WHERE runs over the FULL store, not the actor's read view
 ///
@@ -362,17 +383,30 @@ fn rescope_dataset(graph: &sparq_core::Graph, u: &QueryDataset) -> QueryDataset 
 ///
 /// Fail-closed cases that still fall back to the wildcard (rather than risk a hole):
 ///
-/// - the WHERE cannot be evaluated (parse/serialize/engine error) — `Err(need)`;
+/// - the WHERE cannot be evaluated (parse/serialize/engine error) —
+///   [`Unresolved::Wildcard`];
 /// - a slot binds to a **blank-node** graph name: the engine *would* write to it
 ///   ([`gnp_subst`] accepts blank nodes), but the auth view only ever grants write on
-///   named graphs, so write can never be proven — `Err(need)`.
+///   named graphs, so write can never be proven — [`Unresolved::Wildcard`].
 ///
 /// Bindings the engine *drops* (an unbound variable, or a literal/triple where a graph
 /// name is required — [`gnp_subst`] returns `None`) produce no write and are ignored.
+///
+/// # Budget ([SONNET-4.6] sq-yhlf0)
+///
+/// The binding SELECT is a full evaluation of the operation's WHERE over the whole store,
+/// so it runs under the caller's `budget` — otherwise a budgeted `update_as_with_budget`
+/// would still be unbounded on any `GRAPH ?var` update, which is exactly the shape
+/// mcp-solid §9.4 requires to be bounded. A budget trip is reported as
+/// [`Unresolved::BudgetExceeded`], NOT as a wildcard fallback: falling back would turn a
+/// resource-limit failure into an authorization verdict (a confusing deny for a
+/// non-owner, and for a session that CAN write every graph, an apply that then trips the
+/// same budget anyway).
 fn resolve_var_graphs(
     graph: &sparq_core::Graph,
     r: &VarGraphResolve,
-) -> Result<Vec<(NamedNode, Need)>, Need> {
+    budget: &QueryBudget,
+) -> Result<Vec<(NamedNode, Need)>, Unresolved> {
     // The strongest need across this operation's slots is the fallback level (and the
     // floor for any escalation): if we must give up, give up at the level that protects
     // every slot.
@@ -392,8 +426,11 @@ fn resolve_var_graphs(
         },
         base_iri: None,
     };
-    let Ok(result) = sparq_engine::query(graph, &select.to_string()) else {
-        return Err(fallback); // un-evaluable WHERE → conservative
+    let result = match sparq_engine::query_with_budget(graph, &select.to_string(), budget) {
+        Ok(result) => result,
+        // A budget trip is a resource failure, not an authorization one — propagate it.
+        Err(e) if is_budget_error(&e) => return Err(Unresolved::BudgetExceeded(e)),
+        Err(_) => return Err(Unresolved::Wildcard(fallback)), // un-evaluable WHERE → conservative
     };
 
     // Column index of each slot variable in the result (a projected variable absent from
@@ -413,7 +450,7 @@ fn resolve_var_graphs(
                 }
                 // A blank-node graph name IS written by the engine but can never be
                 // authorized → fail closed to the wildcard.
-                Some(Term::BlankNode(_)) => return Err(fallback),
+                Some(Term::BlankNode(_)) => return Err(Unresolved::Wildcard(fallback)),
                 // Unbound, or a literal/triple term: the engine drops the quad
                 // (`gnp_subst` → None), so no write happens — nothing to authorize.
                 _ => {}
@@ -480,12 +517,18 @@ pub(crate) struct Permit {
 /// Authorize an update string for `session` against `auth` over the dataset `graph`,
 /// WITHOUT mutating anything. `Ok(Permit)` means every target is writable; `Err(msg)`
 /// is a deny (fail-closed) and the caller must not apply the update.
+///
+/// `budget` bounds the only evaluation this check performs — the `GRAPH ?var` binding
+/// SELECT ([`resolve_var_graphs`]); a budget trip is returned as the engine's
+/// `"query budget exceeded (…)"` message rather than a deny. Pass
+/// [`QueryBudget::unlimited`] for the unbudgeted entry points.
 pub(crate) fn check(
     graph: &sparq_core::Graph,
     auth: &AuthIndex,
     session: &Session,
     sparql: &str,
     group_docs: &FxHashSet<String>,
+    budget: &QueryBudget,
 ) -> Result<Permit, String> {
     let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
     let mut reqs = analyze(&upd);
@@ -506,8 +549,8 @@ pub(crate) fn check(
     // so resolved targets are authorized on exactly the same footing as static ones.
     // (Resolve first, then fold in — `resolve_var_graphs` borrows `reqs.var_graphs`, the
     // folding mutates the rest of `reqs`.)
-    let resolutions: Vec<Result<Vec<(NamedNode, Need)>, Need>> =
-        reqs.var_graphs.iter().map(|r| resolve_var_graphs(graph, r)).collect();
+    let resolutions: Vec<Result<Vec<(NamedNode, Need)>, Unresolved>> =
+        reqs.var_graphs.iter().map(|r| resolve_var_graphs(graph, r, budget)).collect();
     for res in resolutions {
         match res {
             Ok(resolved) => {
@@ -525,7 +568,10 @@ pub(crate) fn check(
                 reqs.graphs.extend(resolved);
             }
             // Fail-closed: fall back to demanding write on every store graph.
-            Err(need) => raise_wildcard(&mut reqs, need),
+            Err(Unresolved::Wildcard(need)) => raise_wildcard(&mut reqs, need),
+            // Bounded, not denied: the budget stopped the check before it could decide,
+            // so nothing is applied and the caller sees the resource failure.
+            Err(Unresolved::BudgetExceeded(e)) => return Err(e),
         }
     }
 
@@ -685,7 +731,7 @@ mod differential_writeset_tests {
         );
         let mut out = BTreeSet::new();
         for r in &reqs.var_graphs {
-            match resolve_var_graphs(graph, r) {
+            match resolve_var_graphs(graph, r, &QueryBudget::unlimited()) {
                 Ok(resolved) => {
                     for (n, _need) in resolved {
                         out.insert(n.as_str().to_owned());

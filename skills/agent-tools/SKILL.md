@@ -123,7 +123,7 @@ at construction — the MCP-Solid proposal draft's local-trusted-agent deploymen
 | `introspect` | `sparq_introspect::Introspection` over the session's authorized projection | schema of the readable documents only — never the whole pod |
 | `shapes` | the same miner, one class | a class only unreadable documents use reports as absent |
 | `stats` | totals over the same projection | two sessions get different totals; no grants ⇒ zeros |
-| `update` *(gated)* | `PodStore::update_as` / `update_as_acp` | per-graph session write check, fail-closed |
+| `update` *(gated)* | `PodStore::update_as_with_budget` / `update_as_acp_with_budget` | per-graph session write check, fail-closed; runs under the SAME deadline/row budget as the read tools (draft §9.4, sq-yhlf0) — a pathological WHERE errors `query budget exceeded (…)` |
 | `resource_put` *(gated)* | atomic named-graph swap (+ containment link on create) | `.acl`/`.acr` route through `put_acl`/`put_acl_acp` |
 | `resource_delete` *(gated)* | slot removal + containment unlink | non-empty containers rejected; `.acl` via `delete_acl` |
 | `container_create` *(gated)* | typed `ldp:BasicContainer` graph + containment | slash-terminated IRIs only |

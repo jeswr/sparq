@@ -557,3 +557,75 @@ fn positive_control_fully_authorized_multi_op_body_applies() {
     assert_eq!(graph_len(&s, g1), before1 + 1, "first op applied");
     assert_eq!(graph_len(&s, g2), before2 + 1, "second op applied");
 }
+
+// ───────────────── budgeted write path (sq-yhlf0) ─────────────────
+//
+// [SONNET-4.6] sq-yhlf0 — `update_as_with_budget` bounds BOTH evaluations an update
+// performs over the whole store: the authorization check's `GRAPH ?var` binding SELECT
+// and the engine's template instantiation. A host that must bound every evaluation it
+// issues (the sparq-mcp pod server, mcp-solid draft §9.4) depends on both being covered.
+
+/// A budget with an already-elapsed deadline: any evaluation under it trips at its first
+/// cooperative check site, so these tests carry no wall-clock race.
+fn expired_budget() -> sparq_engine::QueryBudget {
+    let mut b = sparq_engine::QueryBudget::unlimited();
+    b.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+    b
+}
+
+#[test]
+fn budgeted_update_bounds_the_engine_apply() {
+    // STATIC (authorized) template target ⇒ the check resolves without evaluating
+    // anything, so the only evaluation is the engine's — and the budget must reach it.
+    let mut s = wac_store();
+    let g = "https://pod.ex/team2/c3/g0/d0.ttl";
+    let before = store_snapshot(&s);
+    let body = format!(
+        "INSERT {{ GRAPH <{g}> {{ <{g}#it> <{TAG}> ?o1 }} }} WHERE \
+         {{ GRAPH ?g1 {{ ?s1 ?p1 ?o1 }} GRAPH ?g2 {{ ?s2 ?p2 ?o2 }} }}"
+    );
+    let err = s
+        .update_as_with_budget(&sess(Some(CAROL)), &body, &expired_budget())
+        .expect_err("an exhausted budget must refuse the apply");
+    assert!(err.contains("query budget exceeded"), "{err}");
+    assert_eq!(store_snapshot(&s), before, "nothing applied");
+}
+
+#[test]
+fn budgeted_update_bounds_the_authorization_check() {
+    // A `GRAPH ?var` template slot makes the CHECK evaluate the WHERE (the binding
+    // SELECT). The budget must bound that too, and the trip must surface as the budget
+    // error — NOT be swallowed into the conservative all-graphs wildcard, which would
+    // report a misleading "update denied" for a resource failure.
+    let mut s = wac_store();
+    let before = store_snapshot(&s);
+    let body = format!(
+        "INSERT {{ GRAPH ?g1 {{ <urn:x> <{TAG}> \"z\" }} }} WHERE {{ GRAPH ?g1 {{ ?s1 ?p1 ?o1 }} }}"
+    );
+    let err = s
+        .update_as_with_budget(&sess(Some(CAROL)), &body, &expired_budget())
+        .expect_err("an exhausted budget must refuse the check");
+    assert!(
+        err.contains("query budget exceeded"),
+        "a budget trip must not be reported as a deny: {err}"
+    );
+    assert_eq!(store_snapshot(&s), before, "nothing applied");
+}
+
+#[test]
+fn an_unlimited_budget_is_plain_update_as() {
+    // The equivalence the unbudgeted entry points rely on: same allow, same deny, same
+    // resulting store. (Positive AND negative — a path that denied everything would pass
+    // a positive-only check.)
+    let g = "https://pod.ex/team2/c3/g0/d0.ttl";
+    let denied = "https://pod.ex/priv0/c4/g0/d0.ttl";
+    let unlimited = sparq_engine::QueryBudget::unlimited();
+
+    for body in [insert_tag(g, "carol"), insert_tag(denied, "carol")] {
+        let (mut plain, mut budgeted) = (wac_store(), wac_store());
+        let a = plain.update_as(&sess(Some(CAROL)), &body);
+        let b = budgeted.update_as_with_budget(&sess(Some(CAROL)), &body, &unlimited);
+        assert_eq!(a.is_ok(), b.is_ok(), "verdicts diverge for `{body}`: {a:?} vs {b:?}");
+        assert_eq!(store_snapshot(&plain), store_snapshot(&budgeted), "stores diverge");
+    }
+}
