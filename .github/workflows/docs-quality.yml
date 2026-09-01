@@ -974,9 +974,11 @@ jobs:
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
       # [OPUS-5] #5214: the sibling half of the property above. `save-if` stopped the
-      # branch-scoped cache WRITES; `shared-key` stops ten near-identical conformance
-      # /oracle jobs from each holding their own dependency entry against the shared
-      # 10 GB budget. Same invisible-regression shape — drop the key and rust-cache
+      # branch-scoped cache WRITES; `shared-key` stops the five MEASURED-coincident
+      # conformance jobs from each holding their own dependency entry against the
+      # shared 10 GB budget (the other five conformance/oracle lanes measure below the
+      # floor and stay unkeyed — see the canonical note on ci.yml's `conformance` job).
+      # Same invisible-regression shape — drop the key and rust-cache
       # silently falls back to a job-name key while CI stays green. This pins the
       # grouping over ci.yml AND re-runs the dependency-closure measurement that
       # justifies it, so a dep change that pulls one member away from the rest reds
