@@ -2,10 +2,13 @@
      housekeeping/security branches, plus the `M2-next:` marker register. -->
 # LWS upstream branch triage — port-or-drop verdicts + the `M2-next:` register (sq-gg0qq.8)
 
-> **Status: TRIAGE RECORD.** Three named branches, three written verdicts, plus a
-> classified sweep of every remaining `// M2-next:` marker under
+> **Status: TRIAGE RECORD — PARTIAL.** Three named branches, three **HOLD/UNVERIFIED**
+> verdicts, plus a classified sweep of every remaining `// M2-next:` marker under
 > `crates/sparq-lws-core/`. This record **corrects the premise it was written
-> against** — see §1 — so read §1 before §2.
+> against** — see §1 — so read §1 before §2. The upstream repository was **not
+> inspected**. What is verified is that each branch's *named functionality* is present
+> in this checkout; **not** that the branch carries no further delta. No verdict here
+> closes a branch — see §7.
 >
 > Bead: **sq-gg0qq.8** · Issue: **#2744** · Blocked-by: **#2747** (`.4`) · Parent:
 > **#2572** / `sq-gg0qq`. Siblings: `.1` supply-chain pre-flight, `.2` the crate
@@ -20,7 +23,7 @@
 
 ---
 
-## 1. Premise correction — all three "branches to port" already landed with the import
+## 1. Premise correction — the named functionality already landed with the import; the branch deltas are unverified
 
 The brief asks for a port-or-drop verdict on `origin/chore/repin-async-dns-verifier`,
 `origin/fix/unique-blob-keys`, and `origin/phase-existence-non-disclosure`, phrased as
@@ -30,10 +33,9 @@ plus `.git/packed-refs` both return nothing). They are branches of the *upstream
 `jeswr/solid-server-rs`, which `crates/sparq-lws-core` was imported from at rev
 `1e555b10` under `sq-gg0qq.2`.
 
-And all three had **already been merged upstream before that import rev**, so their
-content arrived in this repository wholesale, in one commit. The evidence is a
-`git log -S` on each branch's defining symbol — every one of them is introduced by the
-import commit and by nothing else:
+The functionality each of the three is named for is **already present in this checkout**,
+and in each case it was introduced by that import commit and by nothing since. The
+evidence is a `git log -S` on each branch's defining symbol:
 
 | Branch | Defining symbol searched | Sole introducing commit |
 |---|---|---|
@@ -41,26 +43,33 @@ import commit and by nothing else:
 | `phase-existence-non-disclosure` | `guard_conditional_requires_read`, `guard_post_existence_requires_read` | `47e11a5c` (#1949, `sq-gg0qq.2`) |
 | `chore/repin-async-dns-verifier` | the `solid-oidc-verifier` rev pin + its rationale block | `47e11a5c` (#1949, `sq-gg0qq.2`) |
 
-So the correct disposition for all three is **DROP-AS-ALREADY-LANDED**, not PORT. There
-is no upstream commit to cherry-pick and no code to write. What this bead can honestly
-deliver instead is (a) the verification that the landed code is real and tested — §2,
-§3 — (b) the one residual defect that verification found — §4 — and (c) the `M2-next:`
-sweep the brief also asked for — §5.
+**What that evidence does and does not establish.** A `git log -S` over *this* repository
+can only show that a symbol entered here with the import. It cannot reconstruct upstream
+branch ancestry, and it is silent about any commit on a branch that did not touch the
+searched symbol. This pass could not inspect `jeswr/solid-server-rs`: the repository has
+no remote for it (`git remote -v` lists `origin` → `sparq-org/sparq` only), so **no
+merge-base and no branch-vs-`1e555b10` diff was computed, and no upstream commit ID is
+cited anywhere in this record.** The tempting inference — "all three were merged upstream
+before the import rev" — is the explanation most consistent with the evidence, but it is
+an inference, not a finding, and this record does not assert it.
 
-**A caveat on the negative claim.** "Already merged upstream before `1e555b10`" is the
-explanation most consistent with the evidence, but this pass could not read
-`jeswr/solid-server-rs` to confirm it. What is *directly* verified is the weaker and
-sufficient statement: **the functionality each branch names is present in this
-checkout, arrived with the import commit, and is covered by tests.** If the upstream
-branches turn out to contain work *beyond* what landed, that delta is unknown to this
-record — see §7.
+So the disposition for all three is **HOLD/UNVERIFIED** — not PORT, and *not* DROP. The
+functionality each branch is named for is in-tree and tested, so there is no *known* port
+to perform; but a branch may still carry an unported delta this record cannot see.
+Downgrading any of the three to DROP requires the upstream inspection set out in §7.
+What this bead can honestly deliver meanwhile is (a) the verification that the landed
+functionality is real and tested — §2, §3 — (b) the one residual defect that verification
+found — §4 — and (c) the `M2-next:` sweep the brief also asked for — §5.
 
 ## 2. Per-branch verdicts
 
-### 2.1 `origin/fix/unique-blob-keys` — DROP (already landed); bytes-integrity confirmed
+### 2.1 `origin/fix/unique-blob-keys` — HOLD/UNVERIFIED; named functionality landed, bytes-integrity confirmed
 
-**Verdict: already in-tree, keep.** The brief's guess ("likely PORT, bytes-integrity")
-was directionally right about *importance* and wrong about *status*.
+**Verdict: HOLD/UNVERIFIED.** The functionality the branch is named for is in-tree and
+should be kept; the branch itself was not inspected, so any further delta on it is
+unknown (§1). The brief's guess ("likely PORT, bytes-integrity") was directionally right
+about *importance*. Everything below is verified of `mint_blob_key` as it stands in this
+checkout, not of the branch as a whole.
 
 `CompositeStore::mint_blob_key` (`crates/sparq-lws-core/src/store/mod.rs:333`) mints a
 fresh unguessable key per write rather than deriving one from the IRI, and it is used at
@@ -76,9 +85,11 @@ reclaimed by an unconditional delete instead of leaking forever
 (`BlobStore::delete_if_unchanged`) is retained as defence-in-depth on top of it, not as
 the primary guard.
 
-### 2.2 `origin/phase-existence-non-disclosure` — DROP (already landed); composes with WAC
+### 2.2 `origin/phase-existence-non-disclosure` — HOLD/UNVERIFIED; named functionality landed, composes with WAC
 
-**Verdict: already in-tree, keep.** The V2/V4/V5/V6 closure family is implemented and
+**Verdict: HOLD/UNVERIFIED.** The V2/V4/V5/V6 closure family the branch is named for is
+in-tree and should be kept; the branch itself was not inspected, so any further delta on
+it is unknown (§1). That family is implemented and
 already has a durable design record at
 [`lws-design-records.md`](./lws-design-records.md) §6 — written under sibling `.10`,
 which is why no new ADR is needed here.
@@ -107,10 +118,11 @@ Two things this record must repeat rather than let drift:
 No observable authz behaviour is changed by this bead, so the Opus-review trigger the
 brief attached to that condition does not fire.
 
-### 2.3 `origin/chore/repin-async-dns-verifier` — DROP (already landed); one residual, fixed here
+### 2.3 `origin/chore/repin-async-dns-verifier` — HOLD/UNVERIFIED; named functionality landed, one residual fixed here
 
-**Verdict: already in-tree — pin, lockfile, and cargo-vet delta all present.** The
-verifier is pinned to an exact rev, not a floating branch
+**Verdict: HOLD/UNVERIFIED — the pin, lockfile, and cargo-vet delta the branch is named
+for are all present in-tree; the branch itself was not inspected, so any further delta on
+it is unknown (§1).** The verifier is pinned to an exact rev, not a floating branch
 (`crates/sparq-lws-core/Cargo.toml:230`), `Cargo.lock:4801` resolves that same rev, and
 the security payload the branch existed for is real: `hickory-proto` resolves at
 `0.26.1` (`Cargo.lock:2119-2121`), the patched version that closes
@@ -223,11 +235,14 @@ run must not write `.beads/`. Ordered by priority.
 
 ## 7. What genuinely needs the maintainer
 
-- **The unverifiable delta.** §1 confirms the *functionality* of all three branches is
-  in-tree, but could not read `jeswr/solid-server-rs` to confirm the branches contain
-  nothing further. Only the maintainer can say whether those three refs still exist
-  upstream with unmerged commits on them. If they do not, they can be deleted upstream
-  and this record closes the question; if they do, the delta needs its own bead.
+- **The unverified delta — this is what keeps all three verdicts at HOLD.** §1 confirms
+  the *named functionality* of all three branches is in-tree, but could not read
+  `jeswr/solid-server-rs` at all, so no branch was compared against import rev
+  `1e555b10`. Closing a branch to DROP needs, per branch: its merge-base with
+  `1e555b10`, the diff of the branch tip against that merge-base, and the resulting
+  upstream commit IDs shown to be empty of unported work. Whoever has access to the
+  upstream refs can run that and amend §2; where a branch does carry unmerged commits,
+  the delta needs its own bead.
 - **The `321db01` gap.** §2.3 leaves the undocumented middle link in the verifier pin
   chain visible rather than guessing at it. The maintainer, who made the pins, can
   supply the missing entry or confirm it is not worth reconstructing.
