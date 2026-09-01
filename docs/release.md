@@ -196,40 +196,40 @@ labelled OPT-IN artifact, not silently alongside the `sparq-cli` archives.
 crates.io metadata and no `publish = false`, so publish.yml's `crates` job already packages
 + attests it; it is added below as a core-only leaf (depends on sparq-core only — verified
 in crates/sparq-algos/Cargo.toml — and nothing in the workspace depends on it). -->
-**17 crates publish.** The publish order follows the dependency DAG, leaf-first (a crate's
+**26 crates publish.** The publish order follows the dependency DAG, leaf-first (a crate's
 deps must exist on crates.io before it can be verified):
 
 ```text
-sparq-core                      # no internal deps — first
-  ├── sparq-introspect          # core only                ┐
-  ├── sparq-reason              # core only                │ order among these
-  ├── sparq-hdt                 # core only                │ seven doesn't matter
-  ├── sparq-shacl               # core only                │
-  ├── sparq-sim                 # core only                │
-  ├── sparq-vectors             # core only                │
-  └── sparq-algos               # core only                ┘
-sparq-engine                    # core + introspect — after both
-  ├── sparq-geo                 # core + engine            ┐
-  ├── sparq-serve               # core + engine            │ order among these
-  ├── sparq-text                # core + engine            │ six doesn't matter
-  ├── sparq-rsp                 # core + engine            │
-  ├── sparq-solid               # core + engine + reason   │
-  └── sparq-nlq                 # core + engine + introspect ┘
-sparq-cli                       # core + engine + reason + hdt
-sparq-server                    # core + engine + geo + serve — last
+sparq-core, sparq-fedplan       # no published internal deps — first
+sparq-algos, sparq-hdt, sparq-introspect, sparq-sim,
+sparq-substrate, sparq-wrapper  # core-only leaves
+sparq-engine                    # core + introspect
+sparq-reason                    # core + substrate
+sparq-reason-el                 # core + optional substrate
+sparq-arrow, sparq-geo, sparq-nlq, sparq-rsp,
+sparq-serve, sparq-shacl,
+sparq-solid, sparq-text         # engine/reason dependants
+sparq-forms                     # core + shacl
+sparq-server                    # core + engine + geo + serve
+sparq-vectors                   # core + optional engine
+sparq-cli                       # core + engine + reason + hdt + server
+sparq-mcp                       # broad optional integrations — last
+
+sparq-reason-ql and sparq-shaclc have no published runtime dependencies and may be
+published in any earlier group; they appear after their related capability crates below.
 ```
 
 Exact commands, from the repo root, on the tagged commit:
 
 ```sh
 cargo publish -p sparq-core
+cargo publish -p sparq-fedplan
 cargo publish -p sparq-introspect
-cargo publish -p sparq-reason
 cargo publish -p sparq-hdt
-cargo publish -p sparq-shacl
 cargo publish -p sparq-sim
-cargo publish -p sparq-vectors
 cargo publish -p sparq-algos        # [OPUS-4.8] sq-v286.1 — core-only leaf (17th publishable crate)
+cargo publish -p sparq-substrate
+cargo publish -p sparq-wrapper
 
 # CHECKPOINT before sparq-engine: the crates.io package resolves UPSTREAM spargebra 0.4.6,
 # not the vendored copy (the [patch]/path override is stripped on publish). Dry-run it
@@ -237,14 +237,23 @@ cargo publish -p sparq-algos        # [OPUS-4.8] sq-v286.1 — core-only leaf (1
 #   cargo publish --dry-run -p sparq-engine
 cargo publish -p sparq-engine
 
+cargo publish -p sparq-reason
+cargo publish -p sparq-reason-el
+cargo publish -p sparq-arrow
 cargo publish -p sparq-geo
 cargo publish -p sparq-serve
 cargo publish -p sparq-text
 cargo publish -p sparq-rsp
 cargo publish -p sparq-solid
 cargo publish -p sparq-nlq
-cargo publish -p sparq-cli
+cargo publish -p sparq-shacl
+cargo publish -p sparq-forms
+cargo publish -p sparq-reason-ql
+cargo publish -p sparq-shaclc
 cargo publish -p sparq-server
+cargo publish -p sparq-vectors
+cargo publish -p sparq-cli
+cargo publish -p sparq-mcp
 ```
 
 - Modern cargo **waits for index propagation** after each publish, so the commands can be
@@ -441,7 +450,7 @@ for a **pending** publisher) → **Add a new publisher** → *GitHub*:
 
 Because PyPI allows a *pending* publisher, no manual bootstrap upload is required.
 
-### 8c. crates.io (17 crates) — CI side PRE-WIRED, flip is one config change (`release-plz.yml` + `release-plz.toml`)
+### 8c. crates.io (26 crates) — CI side PRE-WIRED, flip is one config change (`release-plz.yml` + `release-plz.toml`)
 
 crates.io Trusted Publishing (GA 2025-07, RFC 3691) supplies a short-lived OIDC token via
 `rust-lang/crates-io-auth-action` — no `CARGO_REGISTRY_TOKEN`. The CI side is pre-wired as a
@@ -449,7 +458,7 @@ commented block on `release-plz.yml`'s `release-plz-release` job; `release-plz.t
 `publish = false` until the trust config exists (so a `publish=true` with no credential can't break
 tag-cutting). This is the "config-flip" the design record (§6 item 4) calls "the point of adoption".
 
-**needs:user (crates.io), per the 17 publishable crates (`docs/release.md` §4 DAG), leaf-first:**
+**needs:user (crates.io), per the 26 publishable crates (`docs/release.md` §4 DAG), leaf-first:**
 1. ONE bootstrap `cargo publish` per crate (crates.io requires each crate to already exist).
 2. For **each** crate: crates.io → crate → **Settings → Trusted Publishing → Add** → *GitHub*:
    - Repository owner: **`jeswr`**, Repository name: **`sparq`**

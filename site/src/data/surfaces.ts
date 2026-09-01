@@ -471,7 +471,8 @@ export const ALL_SURFACES_WITH_ABOUT: Surface[] = [...ALL_SURFACES, ABOUT_SURFAC
  *
  * Support crates intentionally share their user-facing capability instead of acquiring a
  * duplicate marketing page. Keep this exhaustive for workspace packages whose Cargo manifest
- * does not set `publish = false`; the mdBook crate catalogue mirrors this mapping.
+ * does not set `publish = false`. scripts/tests/test_published_crate_catalogue.py validates
+ * both this mapping and the mdBook catalogue against the manifests and known surface slugs.
  */
 export const PUBLISHED_CRATE_SURFACE = {
   "sparq-algos": "graph-analytics",

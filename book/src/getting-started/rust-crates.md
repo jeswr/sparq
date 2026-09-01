@@ -2,12 +2,18 @@
 derived from crates/*/Cargo.toml: a package is publishable unless `publish = false`.
 The website destination agrees with PUBLISHED_CRATE_SURFACE in site/src/data/surfaces.ts.
 Supporting packages deliberately share their parent capability page. -->
+<!-- This manifest-derived catalogue is the narrow exception to the book's include-only prose
+rule. scripts/tests/test_published_crate_catalogue.py gates every row against its source data. -->
 
 # Rust crate catalogue
 
 Every workspace package eligible for crates.io publication is represented below. A capability
 may use several packages: implementation and support crates deliberately share one website page
 and usage guide rather than presenting the same feature as separate products.
+
+Publication is currently manual and the initial crates.io bootstrap is still pending; these
+names become installable registry links only after the leaf-first procedure in
+[the release runbook](https://github.com/jeswr/sparq/blob/main/docs/release.md#4-cratesio-publication).
 
 | Publishable crate | Website capability | Usage guide |
 |---|---|---|

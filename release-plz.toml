@@ -21,7 +21,7 @@
 # all packages that share a version_group the SAME (highest computed) next
 # version, so they keep bumping together — e.g. 0.1.0 -> 0.2.0 in lockstep —
 # instead of drifting to per-crate versions. Without this, adoption would
-# silently start versioning the 17 publishable crates independently.
+# silently start versioning the publishable crates independently.
 
 [workspace]
 # Automate the version + changelog that docs/release.md §1–§2 do by hand today
@@ -92,7 +92,7 @@ git_release_enable = false
 #   token needed — crates.io Trusted Publishing went GA 2025-07, RFC 3691). The CI side is
 #   pre-wired in .github/workflows/release-plz.yml (a commented `crates-io-auth-action` OIDC
 #   block on the `release-plz-release` job). To flip:
-#     (a) needs:user — register the crates.io Trusted Publisher for EACH of the 17 publishable
+#     (a) needs:user — register the crates.io Trusted Publisher for EACH publishable
 #         crates (owner `jeswr`, repo `sparq`, workflow `release-plz.yml`); crates.io requires
 #         each crate to ALREADY EXIST (one bootstrap `cargo publish` per crate, leaf-first per
 #         docs/release.md §4), then enable trusted publishing on each crate's Settings page;
@@ -102,21 +102,23 @@ git_release_enable = false
 #   `crates` job reverts to attest-only over the .crate bytes — "the point of adoption".
 publish = false
 
-# --- The locked version_group: all 17 publishable crates ---------------------
+# --- The locked version_group: all 26 publishable crates ---------------------
 # These are exactly the crates under crates/* WITHOUT `publish = false`
-# (verified against crates/*/Cargo.toml; count reconciled to 17 incl. sparq-algos
-# in docs/release.md via #783 / sq-v286.1). The remaining 18 workspace members
-# (sparq-bench, -canon, -conformance, -fedclient, -fedplan, -gpu, -mpc, -parse,
-# -policy, -prov, -py, -reason-wasm, -rsp-wasm, -shacl-wasm, -text-wasm, -wasm,
-# -zk, -zk-compose) are `publish = false` and are intentionally omitted — they
-# never reach crates.io, so they are not versioned by release-plz.
+# (verified against crates/*/Cargo.toml). The remaining workspace members set
+# `publish = false` and are intentionally omitted — they never reach crates.io,
+# so they are not versioned by release-plz.
 #
-# Each entry pins `changelog_path = "CHANGELOG.md"` so all 17 crates write to
+# Each entry pins `changelog_path = "CHANGELOG.md"` so all 26 crates write to
 # the SINGLE root Keep-a-Changelog file (the locked model has one changelog,
-# not 17 per-crate ones); changelog_path is a per-package-only key.
+# not per-crate changelogs); changelog_path is a per-package-only key.
 
 [[package]]
 name = "sparq-algos"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-arrow"
 version_group = "sparq"
 changelog_path = "CHANGELOG.md"
 
@@ -136,6 +138,16 @@ version_group = "sparq"
 changelog_path = "CHANGELOG.md"
 
 [[package]]
+name = "sparq-fedplan"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-forms"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
 name = "sparq-geo"
 version_group = "sparq"
 changelog_path = "CHANGELOG.md"
@@ -151,12 +163,27 @@ version_group = "sparq"
 changelog_path = "CHANGELOG.md"
 
 [[package]]
+name = "sparq-mcp"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
 name = "sparq-nlq"
 version_group = "sparq"
 changelog_path = "CHANGELOG.md"
 
 [[package]]
 name = "sparq-reason"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-reason-el"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-reason-ql"
 version_group = "sparq"
 changelog_path = "CHANGELOG.md"
 
@@ -181,6 +208,11 @@ version_group = "sparq"
 changelog_path = "CHANGELOG.md"
 
 [[package]]
+name = "sparq-shaclc"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
 name = "sparq-sim"
 version_group = "sparq"
 changelog_path = "CHANGELOG.md"
@@ -191,11 +223,21 @@ version_group = "sparq"
 changelog_path = "CHANGELOG.md"
 
 [[package]]
+name = "sparq-substrate"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
 name = "sparq-text"
 version_group = "sparq"
 changelog_path = "CHANGELOG.md"
 
 [[package]]
 name = "sparq-vectors"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "sparq-wrapper"
 version_group = "sparq"
 changelog_path = "CHANGELOG.md"
