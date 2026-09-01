@@ -20,8 +20,12 @@
 #
 # ENFORCE MODE (design §6 — the sq-fmx4u.5 rollout, ENFORCEMENT FLIPPED). [FABLE-5]
 # Enforce is now the DEFAULT: the selector's mode=selected skips are HONORED, so a
-# not-affected crate's wide-lane tests/benchmarks are actually SKIPPED. Two overrides,
-# both fail toward RUNNING MORE:
+# not-affected crate's wide-lane tests/benchmarks are actually SKIPPED. Three
+# overrides, all of which fail toward RUNNING MORE:
+#   * merge_group event => --full, UNCONDITIONALLY and with the highest precedence
+#     (the combined-head invariant, #6048 / design §10.3 — see the step below). The
+#     merge queue therefore never selects: PR-level runs are where the width saving
+#     lives, queue runs are the evidence the landed tree is validated.
 #   * ci-full PR label => the selector runs with --full (mode=full, nothing skipped);
 #     the calling workflows react to labeled/unlabeled so toggling re-evaluates.
 #   * CI_SELECT_MODE repo variable == the literal "shadow" => report-only rollback
@@ -136,8 +140,11 @@ jobs:
           CARGO_NET_RETRY: "10"
           EVENT: ${{ github.event_name }}
           # pull_request: PR base/head. merge_group: the queue entry's target-tip
-          # base_sha/head_sha (the diff is then the union of queued content — sound
-          # per design §3.1/P8). Exactly one pair is non-empty per event.
+          # base_sha/head_sha. Exactly one pair is non-empty per event.
+          # [OPUS-5] #6048: the merge_group pair is still passed for shape symmetry,
+          # but it no longer decides anything — the merge_group branch below forces
+          # --full, and ci_select.py's `if args.full` short-circuit resolves to
+          # mode=full without ever diffing --base...--head.
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           # [FABLE-5] sq-fmx4u.5 ENFORCEMENT FLIP: enforce is the DEFAULT now. The
@@ -171,7 +178,37 @@ jobs:
           case "$EVENT" in
             pull_request|merge_group) args+=(--base "$BASE" --head "$HEAD") ;;
           esac
-          if [ "$CI_FULL_LABEL" = "true" ]; then
+          if [ "$EVENT" = "merge_group" ]; then
+            # [OPUS-5] #6048 — THE COMBINED-HEAD INVARIANT. Inside the merge queue the
+            # selection is FORCED OFF: every merge_group run is a full matrix run
+            # (design research/change-based-test-selection.md §10.3, superseding P8).
+            #
+            # WHY. The old basis for skipping in the queue was the ALLGREEN induction:
+            # ALLGREEN requires EVERY prefix of the group to be green, each prefix is
+            # validated against its own target-tip diff, and the commit that lands is
+            # one of those individually-validated prefixes — so a per-entry selection
+            # was sound per entry. HEADGREEN drops that: only the group HEAD has to be
+            # green, so exactly ONE merge_group validation stands between the queue and
+            # `main`, and a selection skip on that single run has no other run behind
+            # it. Forcing full here makes the landed tree's evidence independent of the
+            # grouping strategy — the tree that lands was validated by a FULL matrix
+            # run over itself — which is what makes the ALLGREEN → HEADGREEN flip a
+            # throughput change rather than a coverage change.
+            #
+            # SCOPE. This is the reusable selector, so the override reaches every
+            # caller that has a `merge_group` trigger — ci.yml and feature-matrix.yml
+            # (bench.yml and fuzz.yml have no merge_group trigger, so it is inert for
+            # them). PR-level selection is UNCHANGED: PRs are where the width saving
+            # lives, and a PR is re-validated in the queue anyway.
+            #
+            # PRECEDENCE. Checked FIRST, before the ci-full label and before the shadow
+            # escape hatch: --full and --shadow both mean "nothing is skipped", so
+            # taking --full here can only run more, never less. The bulk nextest
+            # shards also stop narrowing, because their filterset branch requires
+            # `SELECT_MODE = 'selected'` and mode is now `full`.
+            args+=(--full)
+            echo "**Selection: forced full (merge_group)** — the combined-head invariant (#6048): every merge-queue run validates the combined head with the FULL matrix, so the landed tree's evidence does not depend on the queue's grouping strategy." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$CI_FULL_LABEL" = "true" ]; then
             # ci-full label: force the full matrix regardless of mode (design §6.2).
             args+=(--full)
           elif [ "${CI_SELECT_MODE:-}" = "shadow" ]; then

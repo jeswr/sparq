@@ -915,7 +915,7 @@ def _classify_only_main(args: argparse.Namespace, output_file: str | None,
     reason = ""
     try:
         if args.full:
-            reason = "forced full run (ci-full override) => class engine"
+            reason = "forced full run (--full override) => class engine"
         elif args.event not in ("pull_request", "merge_group"):
             reason = f"{args.event} event: no PR/batch diff => class engine"
         else:
@@ -997,7 +997,16 @@ def main(argv: list[str] | None = None) -> int:
         # (base, head) revision pair; push/schedule/workflow_dispatch (and any
         # future event) get the full matrix by construction, not by error-trap.
         if args.full or args.event not in ("pull_request", "merge_group"):
-            reason = "forced full run (ci-full override)" if args.full else f"{args.event} event: no PR diff"
+            # [OPUS-5] #6048: --full now has two callers in the wiring — the ci-full
+            # PR label (design §6.2) and the unconditional merge_group override (the
+            # combined-head invariant, §10.3). The selector cannot tell them apart, so
+            # the reason names both rather than mislabelling a queue run "ci-full".
+            reason = (
+                "forced full run (--full override: the ci-full label, or a merge_group "
+                "run under the combined-head invariant)"
+                if args.full
+                else f"{args.event} event: no PR diff"
+            )
             meta = load_metadata(args.metadata_file, repo_root)
             ws = parse_workspace(meta)
             sel = Selection(mode="full", reason=reason, affected=sorted(ws.members),

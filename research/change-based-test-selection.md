@@ -361,6 +361,9 @@ id 17688455, last updated 2026-07-02):
 - `merge_queue` uses `grouping_strategy: "ALLGREEN"` and
   `check_response_timeout_minutes: 60`; the queue blocks only on the required
   `gate` check, not on absent or skipped siblings.
+  *(2026-09-01, #6048 [OPUS-5]: still the live value, but selection no longer
+  depends on it — see §10 for the combined-head invariant and the planned
+  ALLGREEN → HEADGREEN flip.)*
 - A selection-skipped job (`conclusion=skipped`) from a static-matrix `if:`
   guard **reports a complete check-run** (the `skipped` conclusion is present,
   never "expected but missing"). `ci_summary_gate.py` already treats `skipped`
@@ -474,6 +477,11 @@ failed nightly jobs with suspect landed PRs and auto-files a deduplicated issue.
 - **P8 — selection applies to `merge_group` too**: the queue-entry diff vs
   the target tip is the union of queued content — conservative by
   construction, and queue width is where the throughput pain concentrates.
+  ***SUPERSEDED by §10.3 (issue #6048, 2026-09-01). [OPUS-5]*** Selection is
+  now forced OFF inside the merge queue: every `merge_group` run is `mode=full`.
+  P8's soundness argument was correct but it was an argument about a
+  *per-prefix* validation, and it stops carrying the weight once the queue
+  stops requiring every prefix to be green (§10.2). See §10.
 - **P9 — the SAFE list starts empty** and only audit-proven entries join it.
 - **P10 — enforce only after the shadow window** (§6.4); nightly full +
   `ci-full` label remain permanent backstops. *(sq-fmx4u.5, 2026-07-03:
@@ -500,3 +508,147 @@ Once enforced, fold the operative rules (§2, §4.1, the scoped-lane table)
 into the AGENTS.md gate documentation, keep the ownership map + selector as
 the living source of truth, and rewrite this record's "will" into "does" — or
 delete it in favor of the CI docs, per the research-record graduation rule.
+
+## 10. Selection inside the merge queue — the combined-head invariant
+
+*(Added 2026-09-01 for issue #6048. [OPUS-5] Supersedes §7 P8. This section is
+about `merge_group` runs only; §3–§6 continue to describe `pull_request` runs
+unchanged.)*
+
+### 10.1 The old basis: the ALLGREEN induction
+
+The live `merge_queue` rule groups with `grouping_strategy: ALLGREEN` (recorded
+in `docs/branch-protection.md` §*Merge-queue throughput settings*). Under
+ALLGREEN, GitHub builds a speculative entry for each **prefix** of the queue —
+`P₁`, `P₁+P₂`, … — and merges the group only when the required check is green
+on *every* prefix; a red entry is evicted and the prefixes behind it requeue.
+
+That is what made per-entry selection sound. The argument was an induction over
+prefixes:
+
+1. Entry *k*'s `merge_group` payload carries `base_sha` = the target-branch tip
+   and `head_sha` = the combined head of `P₁…P_k`, so the selector's three-dot
+   diff is the **union** of all content in that prefix (§3.1).
+2. Selection over that union is sound *for that prefix* by the §2 invariant.
+3. ALLGREEN merges only a prefix that was itself green, so the commit that
+   reaches `main` is a tree that was individually validated in step 2. ∎
+
+The induction is load-bearing on step 3: it needs *every* prefix — including
+the one that lands — to have its own required-check verdict.
+
+### 10.2 Why HEADGREEN alone would be unsafe
+
+`HEADGREEN` grouping merges the whole group as soon as the **head** entry (the
+full combined tree) is green, without requiring the intermediate prefixes to
+report. That is the throughput lever we want: an 8-deep group costs one full
+validation instead of one per prefix. (Issue #6048 reports ~36 minutes
+time-to-merge for an already-green queued PR under the current settings; that
+figure is the issue's, not a measurement taken here.)
+
+But it deletes step 3 of the induction, and with it the redundancy the design
+was relying on. Under HEADGREEN + selection there is exactly **one**
+`merge_group` validation standing between the queue and `main`, and that single
+run is allowed to skip lanes. Every failure mode of the selector — a stale
+ownership-map entry, an unattributed path, an over-broad SAFE entry, a
+`--classify-only` disagreement — used to have `k−1` other prefix runs behind it
+that would still exercise the skipped lane; under HEADGREEN it has none. The
+§2 invariant ("a skip must be a proof of non-interference") is not itself
+violated by HEADGREEN, but the *margin* that made a selector bug a
+recoverable-cost problem instead of a correctness hole disappears. Flipping the
+grouping strategy while leaving selection on in the queue is therefore not a
+throughput change — it is a coverage change wearing a throughput change's
+clothes.
+
+### 10.3 The invariant: the combined head is validated in full
+
+> **Every `merge_group` run is a FULL matrix run.** Change-based selection is
+> forced off inside the merge queue: the tree that lands on `main` was
+> validated by a full run over *itself*, and that fact does not depend on the
+> queue's grouping strategy.
+
+This restores the property the induction was there to establish — the landed
+tree has full evidence — by direct construction rather than by induction over
+prefixes, which is what makes ALLGREEN and HEADGREEN interchangeable from a
+coverage standpoint.
+
+**Mechanism.** `.github/workflows/ci-select.yml`'s selector step passes
+`--full` unconditionally when `$EVENT` is `merge_group`, ahead of both the
+`ci-full` label branch and the `CI_SELECT_MODE=shadow` escape hatch (both of
+those also mean "skip nothing", so taking `--full` first can only run more).
+`scripts/ci_select.py` short-circuits `--full` to `mode=full` before it reads
+the revision pair, so the queue never computes an affected closure at all. The
+override lives in the *reusable* workflow, so it reaches every caller with a
+`merge_group` trigger — today `ci.yml` and `feature-matrix.yml`, i.e. the CI
+matrix and the opt-in feature legs on the combined head. `bench.yml` and
+`fuzz.yml` have no `merge_group` trigger, so it is inert for them.
+
+**What this costs — and the ORDERING HAZARD.** Queue entries lose the selection
+width saving, and the loss is not small. Assembling the opt-in feature matrix
+for a `merge_group` event (`scripts/assemble-feature-matrix.py --grouped --event
+merge_group`, run on this commit — a static leg *count*, not a runtime
+measurement):
+
+| `--select-mode` | `--affected` | legs | bin-packed groups |
+|---|---|---|---|
+| `selected` | `["sparq-core"]` | 7 | 2 |
+| `selected` | `["sparq-core","sparq-engine","sparq-vectors"]` | 39 | 17 |
+| `full` | *(ignored — full assembles everything)* | 186 | 46 |
+
+So the trade only pays off **after** the grouping flip:
+
+- **HEADGREEN + full (the target state):** one entry × the full leg set.
+  Strictly cheaper than the status quo for any group deeper than one, because
+  it replaces *n* partial validations with one; a single-entry group is the one
+  case that gets more expensive.
+- **ALLGREEN + full (this commit, the transient state):** *every* prefix pays
+  the full leg set. For a shallow-diff batch that is a real cost increase over
+  ALLGREEN + selection, bounded by `max_entries_to_merge: 8` entries and
+  `max_entries_to_build: 3` built in parallel.
+
+The transient is deliberate — it is the *safe* intermediate state (more
+validation than needed), whereas the other ordering (HEADGREEN first) is the
+unsafe one (§10.2). But it is a cost regression while it lasts, so §10.4 step 2
+should follow step 1 promptly rather than sitting indefinitely.
+
+PR-level selection is untouched — the PR run is where the width saving actually
+lives, and a PR is re-validated in the queue anyway.
+
+**What this does NOT change.** Three other queue-scoped reductions are
+*separate* proofs with their own audits and are deliberately left alone:
+
+- the **change-class gate** (`--classify-only`, §4.2 / the `_INERT_CLASSES`
+  set), which lets a provably-inert batch skip the Rust lanes. Each entry
+  classifies its own `merge_group` payload diff, so the entry that decides the
+  merge classifies the diff of the tree that lands — the argument does not go
+  through the other prefixes either way;
+- the **heavy-shard demotion** off the merge-queue ref (`sq-6vshe.6`);
+- the **merge-queue lane subset** (which workflows carry a `merge_group`
+  trigger at all — `docs/branch-protection.md` §*Merge-queue subset*).
+
+Each remains valid or invalid on its own terms; none of them is an argument
+about prefixes, so none is affected by the grouping-strategy flip.
+
+**Pinned by** `scripts/tests/test_ci_select_wiring.py`
+`TestMergeGroupForcesFullSelection`, which *executes* the selector step's shell
+body under a stubbed `python3` and asserts the resulting argv per event
+(merge_group ⇒ `--full`; merge_group + `CI_SELECT_MODE=shadow` ⇒ still
+`--full`; a plain `pull_request` ⇒ neither, so PR selection is provably still
+live), then feeds that argv to the real selector and asserts the emitted
+`mode=full`. Deleting the branch, weakening it to `--shadow`, or reordering it
+behind the shadow hatch each turn the suite red.
+
+### 10.4 Rollout order
+
+The two halves are deliberately sequenced, because the safe intermediate state
+is "full validation under ALLGREEN" (redundant, slower) and the unsafe one is
+"selection under HEADGREEN":
+
+1. Land + validate the `--full` override under the **existing ALLGREEN**
+   ruleset. Nothing about the merge protections changes; queue entries simply
+   stop selecting. *(This step.)*
+2. Only then, flip ruleset `17688455`'s `merge_queue.grouping_strategy` from
+   `ALLGREEN` to `HEADGREEN`, leaving `required_status_checks` (the sole `gate`
+   context), `max_entries_to_merge`, `check_response_timeout_minutes` and every
+   other protection untouched, and re-read the ruleset to record the result.
+   Agents cannot edit rulesets — see `docs/branch-protection.md`
+   §*Merge-queue grouping strategy* for the status of this step.

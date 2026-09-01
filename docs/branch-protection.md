@@ -508,7 +508,10 @@ un-draft moment.
   most 8 entries per merge, and gives required checks 60 minutes to report
   (`check_response_timeout_minutes: 60`). Its **throughput** parameters — how many
   entries the queue speculatively builds, and the minimum-group-size wait — are recorded
-  in *Merge-queue throughput settings* below.
+  in *Merge-queue throughput settings* below, and the pending `ALLGREEN` → `HEADGREEN`
+  change in *Merge-queue grouping strategy*. Whatever the strategy, every `merge_group`
+  run validates the combined head with the **full** matrix (the combined-head invariant,
+  #6048) — CI test-selection is forced off inside the queue.
 - **Require conversation resolution before merging** (all PR review threads resolved —
   `required_review_thread_resolution: true`).
 
@@ -528,7 +531,7 @@ The `merge_queue` rule's throughput parameters:
 | `max_entries_to_merge` | `8` | entries merged in one group (the cap the omnibus batcher folds overflow past) |
 | `min_entries_to_merge` | `1` | one queued entry is enough to form a group |
 | `min_entries_to_merge_wait_minutes` | `5` | **inert** at `min_entries_to_merge: 1` — see (b) |
-| `grouping_strategy` | `ALLGREEN` | one red leg requeues the whole entry |
+| `grouping_strategy` | `ALLGREEN` | one red leg requeues the whole entry — every prefix of the group is validated. Flip to `HEADGREEN` is **pending**; see *Merge-queue grouping strategy* below |
 | `check_response_timeout_minutes` | `60` | required-check reporting deadline |
 
 Provenance: `max_entries_to_merge`, `grouping_strategy` and
@@ -584,6 +587,73 @@ produced on any event and it costs the queue nothing at all right now. The stand
 meaning is forward-looking: when PR #3427 settles the successor policy and CodeQL runs
 again, **queue latency is not a valid argument for keeping it off the blocking path** —
 that premise was measured and falsified.
+
+### Merge-queue grouping strategy (issue #6048)
+
+<!-- [OPUS-5] #6048. INVARIANT, same as the throughput block above: no required-check
+     change — the sole required context stays `gate`. This section records the CI-side
+     half (landed) and the ruleset-side half (pending, maintainer-only). -->
+
+**Why the queue is slow when it is green.** `ALLGREEN` grouping makes GitHub build and
+validate **every prefix** of the group — `P₁`, `P₁+P₂`, … — and merge only when the
+required check is green on all of them. At `max_entries_to_merge: 8` that is up to eight
+full required validations for one merge. (Issue #6048 reports ~36 minutes time-to-merge
+for an already-green queued PR — the issue's figure, not re-measured here.) `HEADGREEN`
+requires only the **head** entry — the full combined tree — so a group of any depth costs
+one validation instead of *n*.
+
+**Why the flip needed a CI change first.** Change-based test selection
+(`research/change-based-test-selection.md`) used to run inside the queue, and its
+soundness argument for doing so was an *induction over prefixes*: each prefix was
+validated against its own target-tip diff, and ALLGREEN guarantees the commit that lands
+is one of those individually-validated prefixes. HEADGREEN removes that guarantee —
+under it there is exactly one `merge_group` validation behind the landed commit, and
+that run would have been allowed to skip lanes. Flipping the strategy alone would have
+been a coverage reduction, not just a throughput change.
+
+**The CI-side half — LANDED (this commit).** `.github/workflows/ci-select.yml` now forces
+`--full` on every `merge_group` event, ahead of the `ci-full` label and the
+`CI_SELECT_MODE=shadow` escape hatch. The result is the **combined-head invariant**: the
+tree that lands was validated by a *full* matrix run over itself, independent of the
+grouping strategy. It reaches both queue-gating callers (`ci.yml` and
+`feature-matrix.yml`) because the override lives in the reusable selector workflow. Pinned
+by `scripts/tests/test_ci_select_wiring.py::TestMergeGroupForcesFullSelection`, which
+executes the selector step's shell body and asserts the argv per event. Full argument:
+`research/change-based-test-selection.md` §10.
+
+**Sequencing matters, and the intermediate state costs more.** The safe intermediate
+state is "full validation under ALLGREEN" — more validation than needed; the *unsafe*
+one is "selection under HEADGREEN". So the CI half lands first. While both halves are
+not yet in place, **every prefix** of a group pays the full matrix, which is a real cost
+increase over ALLGREEN + selection for a shallow-diff batch (bounded by
+`max_entries_to_merge: 8` / `max_entries_to_build: 3`). Step 2 below should follow
+promptly rather than sit indefinitely; the leg-count figures are in
+`research/change-based-test-selection.md` §10.3.
+
+**The ruleset-side half — PENDING; not applied at this commit.** The live
+`grouping_strategy` is still `ALLGREEN` (see the verified live-ruleset table at the end of
+this document). Agents cannot edit rulesets, so this is a maintainer action:
+
+```sh
+# 1. Snapshot the current merge_queue rule (keep the output — it is the rollback).
+gh api repos/jeswr/sparq/rulesets/17688455 \
+  | python3 -c 'import json,sys; print(json.dumps([r for r in json.load(sys.stdin)["rules"] if r["type"]=="merge_queue"], indent=2))'
+
+# 2. Change ONLY grouping_strategy: ALLGREEN -> HEADGREEN. Leave required_status_checks
+#    (the sole `gate` context), max_entries_to_merge, min_entries_to_*,
+#    check_response_timeout_minutes and every non-merge_queue rule untouched.
+
+# 3. Re-read and record the exact result here + in the live-ruleset table below.
+gh api repos/jeswr/sparq/rulesets/17688455 | python3 -m json.tool
+```
+
+**Rollback.** Setting `grouping_strategy` back to `ALLGREEN` restores the previous
+behaviour on its own; the CI-side override is safe (strictly more validation) under
+either strategy and does not need to be reverted with it.
+
+**When this is done**, replace this paragraph with the re-read result and update the
+`merge_queue` row of the live-ruleset table in the same commit, per the
+doc-never-lags-the-ruleset rule at the end of this document.
 
 ## How this maps to the merge discipline
 

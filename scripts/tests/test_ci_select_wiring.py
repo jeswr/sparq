@@ -2306,5 +2306,241 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
                          "select pre-job; keep one gate, not two")
 
 
+# [OPUS-5] #6048 — THE COMBINED-HEAD INVARIANT.
+#
+# Every other test in this file pins the SHAPE of a YAML expression, because a
+# job-level `if:` cannot be executed. The merge_group full-selection override is
+# different: it lives in the selector step's `run:` BODY, which is plain bash with
+# no `${{ }}` interpolation in it, so it CAN be executed. These tests do exactly
+# that — they extract the real `run:` body from .github/workflows/ci-select.yml,
+# put a `python3` stub on PATH that records its argv, and run the body under a
+# synthetic event environment. What is asserted is the ARGV the selector would
+# actually be invoked with, not the presence of a string.
+#
+# WHY IT MATTERS (research/change-based-test-selection.md §10):
+#   The queue used to run change-based SELECTION on each merge_group entry. That
+#   was sound because ALLGREEN grouping requires EVERY prefix of the group to be
+#   green and the commit that lands is one of those individually-validated
+#   prefixes (§10.1). Under HEADGREEN only the group HEAD must be green, so there
+#   is exactly ONE merge_group validation behind the commit that lands (§10.2).
+#   Forcing mode=full on merge_group (§10.3) makes that single validation a FULL
+#   matrix run over the combined head, which is what makes the landed tree's
+#   evidence independent of the grouping strategy. If this override is deleted,
+#   weakened to --shadow, or reordered behind the shadow escape hatch, the queue
+#   silently returns to selection — with no prefix runs behind it. Hence: an
+#   executable test, not a grep.
+class TestMergeGroupForcesFullSelection(unittest.TestCase):
+    """[OPUS-5] #6048: EXECUTE the ci-select.yml selector step body and assert the
+    argv it hands scripts/ci_select.py, per event."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sel_yml = _load(SELECT_YML)
+        steps = cls.sel_yml["jobs"]["select"]["steps"]
+        matches = [s for s in steps if s.get("id") == "sel"]
+        assert len(matches) == 1, "ci-select.yml must have exactly one step with id: sel"
+        cls.step = matches[0]
+        cls.body = str(cls.step["run"])
+
+    # ---- the executable harness -------------------------------------------------
+    def _invoke(self, *, event, ci_full="false", select_mode="",
+                is_draft="false", is_no_leg="false"):
+        """Run the step's real `run:` body with a python3 stub on PATH.
+
+        Returns (argv, step_summary) where argv is everything the body passed to
+        `python3` (i.e. `scripts/ci_select.py` plus its flags).
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "bash is required to execute the step body")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            bindir = tmp / "bin"
+            bindir.mkdir()
+            argv_out = tmp / "argv.txt"
+            summary = tmp / "summary.md"
+            summary.write_text("", encoding="utf-8")
+            stub = bindir / "python3"
+            # NUL-delimited so an argument containing a newline cannot forge a split.
+            stub.write_text(
+                '#!/bin/sh\nprintf \'%s\\0\' "$@" > "$ARGS_OUT"\n', encoding="utf-8")
+            stub.chmod(0o755)
+            body = tmp / "body.sh"
+            body.write_text(self.body, encoding="utf-8")
+
+            env = dict(os.environ)
+            # The stub must win over any real python3, and PYTHONPATH must not leak.
+            env.pop("PYTHONPATH", None)
+            env.update({
+                "PATH": f"{bindir}:{env.get('PATH', '')}",
+                "ARGS_OUT": str(argv_out),
+                "GITHUB_STEP_SUMMARY": str(summary),
+                "EVENT": event,
+                "BASE": "base0000", "HEAD": "head0000",
+                "CI_FULL_LABEL": ci_full,
+                "CI_SELECT_MODE": select_mode,
+                "IS_DRAFT_PR": is_draft,
+                "IS_NO_LEG_RUN": is_no_leg,
+            })
+            proc = subprocess.run([bash, str(body)], env=env,
+                                  capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0,
+                             f"the selector step body failed:\n{proc.stderr}")
+            raw = argv_out.read_text(encoding="utf-8") if argv_out.exists() else ""
+            argv = [a for a in raw.split("\0") if a]
+            return argv, summary.read_text(encoding="utf-8")
+
+    def test_harness_reaches_the_selector(self):
+        """Sanity: if the stub were never invoked every other assertion below would
+        pass vacuously on an empty argv. Pin that the body really calls the
+        selector."""
+        argv, _ = self._invoke(event="pull_request")
+        self.assertEqual(argv[0], "scripts/ci_select.py",
+                         f"the step body did not invoke the selector (argv={argv})")
+
+    def test_merge_group_forces_full(self):
+        """THE INVARIANT. A merge_group run selects nothing: --full, always."""
+        argv, _ = self._invoke(event="merge_group")
+        self.assertIn(
+            "--full", argv,
+            "a merge_group run MUST pass --full to the selector (the combined-head "
+            "invariant, #6048 / design §10.3). Without it the merge queue runs "
+            "change-based selection, which under HEADGREEN grouping leaves the "
+            f"landed tree with no full validation behind it. argv={argv}")
+        self.assertNotIn("--shadow", argv,
+                         "--shadow instead of --full would leave the run's mode as "
+                         "`shadow`, which is a REPORT-ONLY posture, not a full run")
+
+    def test_merge_group_full_outranks_the_shadow_escape_hatch(self):
+        """PRECEDENCE. The shadow rollback hatch must not be able to displace the
+        merge_group override — i.e. the branch must be FIRST, not appended to the
+        end of the if/elif chain."""
+        argv, _ = self._invoke(event="merge_group", select_mode="shadow")
+        self.assertIn("--full", argv,
+                      f"CI_SELECT_MODE=shadow displaced the merge_group override "
+                      f"(the branch is ordered after it). argv={argv}")
+        argv, _ = self._invoke(event="merge_group", ci_full="true")
+        self.assertIn("--full", argv, f"argv={argv}")
+
+    def test_merge_group_forced_full_is_attributed_in_the_step_summary(self):
+        """No silent behaviour changes: a human reading the queue run must see WHY
+        the full matrix ran."""
+        _, summary = self._invoke(event="merge_group")
+        self.assertIn("forced full (merge_group)", summary,
+                      "the merge_group full-run override must attribute itself in "
+                      f"the step summary; got:\n{summary}")
+        _, summary = self._invoke(event="pull_request")
+        self.assertNotIn("forced full (merge_group)", summary,
+                         "a pull_request run must not claim a merge_group override")
+
+    def test_pull_request_selection_is_unchanged(self):
+        """SCOPE. The override must be merge_group-only — a blanket `--full` would
+        silently delete the PR-level width saving this whole design exists for."""
+        argv, _ = self._invoke(event="pull_request")
+        self.assertNotIn("--full", argv,
+                         f"a plain pull_request run must still SELECT. argv={argv}")
+        self.assertNotIn("--shadow", argv, f"argv={argv}")
+        # The two PR-level overrides still work.
+        argv, _ = self._invoke(event="pull_request", ci_full="true")
+        self.assertIn("--full", argv, f"the ci-full label override broke. argv={argv}")
+        argv, _ = self._invoke(event="pull_request", select_mode="shadow")
+        self.assertIn("--shadow", argv, f"the shadow escape hatch broke. argv={argv}")
+
+    def test_diff_events_still_carry_the_revision_pair(self):
+        """The base/head pair is still passed on both diff-carrying events (the
+        selector ignores it under --full, but the step's shape must not drift)."""
+        for event in ("pull_request", "merge_group"):
+            argv, _ = self._invoke(event=event)
+            self.assertIn("--base", argv, f"{event}: argv={argv}")
+            self.assertIn("--head", argv, f"{event}: argv={argv}")
+        argv, _ = self._invoke(event="schedule")
+        self.assertNotIn("--base", argv,
+                         f"a no-diff event must not fabricate a revision pair. argv={argv}")
+
+    def test_event_env_is_the_real_workflow_event_name(self):
+        """The branch reads $EVENT, so $EVENT must be github.event_name — if this
+        env drifted, the override would key on something that is never the literal
+        'merge_group' and would silently never fire."""
+        self.assertEqual(
+            str((self.step.get("env") or {}).get("EVENT", "")),
+            "${{ github.event_name }}",
+            "ci-select.yml's EVENT env must be github.event_name verbatim")
+
+    def test_forced_full_argv_really_yields_mode_full(self):
+        """END-TO-END. Feed the REAL selector the exact argv a merge_group run
+        produces and assert the $GITHUB_OUTPUT it writes says mode=full. This is
+        the link the workflow-shape tests cannot make: --full is only worth
+        asserting if the selector honours it."""
+        import tempfile
+
+        argv, _ = self._invoke(event="merge_group")
+        self.assertIn("--full", argv)
+        mod = _ci_select_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            meta = tmp / "metadata.json"
+            # Hermetic two-crate workspace: no cargo, no network.
+            meta.write_text(json.dumps({
+                "workspace_root": str(tmp),
+                "workspace_members": [
+                    f"alpha 0.1.0 (path+file://{tmp}/alpha)",
+                    f"beta 0.1.0 (path+file://{tmp}/beta)",
+                ],
+                "packages": [
+                    {"name": "alpha", "id": f"alpha 0.1.0 (path+file://{tmp}/alpha)",
+                     "manifest_path": f"{tmp}/alpha/Cargo.toml", "dependencies": []},
+                    {"name": "beta", "id": f"beta 0.1.0 (path+file://{tmp}/beta)",
+                     "manifest_path": f"{tmp}/beta/Cargo.toml", "dependencies": []},
+                ],
+            }), encoding="utf-8")
+            out = tmp / "gh-output"
+            summary = tmp / "gh-summary"
+            # argv[0] is the script path the workflow runs; the rest are its flags.
+            rc = mod.main(argv[1:] + [
+                "--metadata-file", str(meta), "--repo-root", str(tmp),
+                "--output-file", str(out), "--summary-file", str(summary),
+            ])
+            self.assertEqual(rc, 0)
+            outputs = dict(
+                ln.split("=", 1) for ln in out.read_text(encoding="utf-8").splitlines()
+                if "=" in ln)
+        self.assertEqual(
+            outputs.get("mode"), "full",
+            "the merge_group argv must resolve to mode=full — every downstream "
+            "selection guard skips ONLY on mode == 'selected', so this is the "
+            f"output that actually stops the queue from skipping. outputs={outputs}")
+        self.assertEqual(json.loads(outputs["affected"]), ["alpha", "beta"],
+                         "mode=full must report the whole member set as affected")
+
+    def test_both_merge_group_callers_share_this_one_override(self):
+        """COVERAGE. The override lives in the reusable workflow, so it reaches a
+        caller exactly when that caller triggers on merge_group. Pin that the two
+        queue-gating callers (ci.yml, feature-matrix.yml) do call the reusable
+        selector, and that bench/fuzz — for which the override is inert — still
+        have no merge_group trigger."""
+        reusable = "./.github/workflows/ci-select.yml"
+
+        def calls_selector(wf):
+            return any(str(j.get("uses", "")) == reusable for j in wf["jobs"].values())
+
+        for name, wf in (("ci.yml", _load(CI_YML)), ("feature-matrix.yml", _load(FM_YML))):
+            self.assertTrue(calls_selector(wf),
+                            f"{name} must call the reusable selector, or it is not "
+                            "covered by the merge_group full-selection override")
+            self.assertIn("merge_group", _on_block(wf),
+                          f"{name} must trigger on merge_group — it is one of the two "
+                          "workflows that validate the combined head")
+        for name, wf in (("bench.yml", _load(BENCH_YML)), ("fuzz.yml", _load(FUZZ_YML))):
+            self.assertNotIn(
+                "merge_group", _on_block(wf),
+                f"{name} grew a merge_group trigger. That is not wrong in itself, but "
+                "it now inherits the forced-full override (its whole matrix would run "
+                "on every queue entry) — re-cost it deliberately and update this test.")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
