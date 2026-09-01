@@ -213,6 +213,13 @@ QUEUE_ENTRY_PAGE = 20
 # LOCKED is the queue's own transient.
 ACTIONABLE_STATES = frozenset({"AWAITING_CHECKS"})
 
+# The ONE entry state that POSITIVELY asserts "no speculative group has been built for
+# this entry yet", and therefore the only state under which a missing `headCommit` is a
+# fact rather than a gap in the read. Every other state — and an unreadable state —
+# arriving without a head means the reap could not enumerate that entry's group head,
+# which is exactly the shape that makes a LIVE group look obsolete. See `queue_snapshot`.
+STATE_NO_GROUP_YET = "QUEUED"
+
 # Dequeue reasons a `dequeuePullRequest` mutation (ours) can surface as. A
 # MERGE_CONFLICT / CI_FAILURE dequeue is never attributed to the watchdog.
 SELF_DEQUEUE_REASONS = frozenset({"MANUAL", "UNKNOWN"})
@@ -570,6 +577,12 @@ class QueueSnapshot:
     inferred from two empty sets. There is no `readable` flag by design: an unreadable
     queue never becomes a QueueSnapshot at all — `queue_snapshot()` raises — because a
     "maybe empty" snapshot is exactly the value that would cancel a live group.
+
+    `complete` is the weaker sibling of that raise, for a queue that WAS readable but
+    whose `head_oids` may not be the whole current set: a truncated page, or an entry
+    whose head this read could not resolve. Both mean a live group's head can be absent
+    from `head_oids` for a reason other than the group being gone, so `decide_stale_run`
+    REFUSEs on it rather than comparing against a set it cannot trust.
     """
 
     head_oids: frozenset[str]
@@ -755,8 +768,9 @@ def decide_stale_run(
     if not queue.complete:
         return Decision(
             REFUSE,
-            "the merge-queue read was not provably complete — a truncated queue makes "
-            "a CURRENT group look obsolete, so nothing is cancelled",
+            "the merge-queue read was not provably complete (truncated page, or an "
+            "entry whose group head could not be resolved) — a partial queue makes a "
+            "CURRENT group look obsolete, so nothing is cancelled",
         )
     if not _SHA_RE.fullmatch(run.head_sha or ""):
         return Decision(
@@ -802,6 +816,38 @@ def decide_stale_run(
         f"merge-queue group head(s) and the run is {int(age)}s old (grace "
         f"{grace_seconds}s){reused} — the group it was dispatched for is gone",
     )
+
+
+def entry_commit_oid(node: dict, field: str) -> str | None:
+    """One `{base,head}Commit{oid}` off a merge-queue entry, or RAISE.
+
+    STRICT on shape, with exactly ONE permitted absence: an explicit `null` commit,
+    which the queue really does report for an entry whose speculative group has not
+    been built yet. Everything else — a non-object commit, an object carrying no `oid`,
+    an `oid` that is not a full 40-hex sha — is schema drift or a partially-resolved
+    response, and it raises.
+
+    Why it cannot merely skip the value: a LOST head is indistinguishable downstream
+    from "that head is not a current group", which is the single input that makes
+    `decide_stale_run` cancel a RUNNING merge-group build. The previous
+    `(node.get(field) or {}).get("oid")` lost one every way it could — a falsy commit
+    and an object with no usable `oid` were dropped, a malformed `oid` was stringified
+    into the set in place of the real head, and a truthy non-object commit raised
+    AttributeError, which is not a `GhError` and so escapes the reap's own handler.
+    """
+    commit = node.get(field)
+    if commit is None:
+        return None
+    if not isinstance(commit, dict):
+        raise GhError(f"merge-queue entry {field} is not an object: {commit!r:.80}")
+    oid = commit.get("oid")
+    if oid is None:
+        raise GhError(f"merge-queue entry {field} carries no oid: {commit!r:.80}")
+    if not isinstance(oid, str) or not _SHA_RE.fullmatch(oid):
+        raise GhError(
+            f"merge-queue entry {field} oid {oid!r:.80} is not a full commit sha"
+        )
+    return oid
 
 
 def parse_workflow_run(row: object) -> WorkflowRun:
@@ -1183,11 +1229,16 @@ class Watchdog:
     def queue_snapshot(self) -> QueueSnapshot:
         """The group refs/heads the queue is currently building, or RAISE.
 
-        Every early return here is a `raise`, never a degraded value. `mergeQueue: null`
-        is the one that matters most: GraphQL answers null whenever it cannot resolve a
-        merge queue for the branch — a mis-typed branch, a queue turned off, a schema
-        change — and NONE of those readings is "the queue is empty". Reading it as one
-        would declare every running merge-group run obsolete at the same instant.
+        No early return here is a degraded value: the read either raises, or answers
+        with `complete` set truthfully. `mergeQueue: null` is the raise that matters
+        most: GraphQL answers null whenever it cannot resolve a merge queue for the
+        branch — a mis-typed branch, a queue turned off, a schema change — and NONE of
+        those readings is "the queue is empty". Reading it as one would declare every
+        running merge-group run obsolete at the same instant.
+
+        The per-entry equivalent is the loop below: a node whose head cannot be resolved
+        is a hole in the "current groups" set, and a hole there has exactly the effect of
+        a truncated page, so it clears `complete` rather than quietly narrowing the set.
         """
         data = self._graphql(
             QUEUE_STATE_QUERY,
@@ -1221,18 +1272,30 @@ class Watchdog:
             )
         heads: set[str] = set()
         refs: set[str] = set()
+        # Completeness is not just about PAGING. `head_oids` has to be a TOTAL
+        # enumeration of the groups the queue is building, so an entry whose head this
+        # read cannot resolve drops the snapshot to incomplete — a head silently missing
+        # from the set is read downstream as "that group is gone", i.e. cancel its live
+        # run. The one exception is positive: an entry that says it is still QUEUED is
+        # stating that no group exists for it, so there is no head to be missing.
+        complete = True
         for node in nodes:
             if not isinstance(node, dict):
                 raise GhError(f"merge-queue entry is not an object: {node!r:.120}")
-            head = (node.get("headCommit") or {}).get("oid")
-            base = (node.get("baseCommit") or {}).get("oid")
+            head = entry_commit_oid(node, "headCommit")
+            base = entry_commit_oid(node, "baseCommit")
             number = (node.get("pullRequest") or {}).get("number")
             if head:
-                heads.add(str(head))
+                heads.add(head)
+            elif node.get("state") != STATE_NO_GROUP_YET:
+                complete = False
             if base and isinstance(number, int) and not isinstance(number, bool):
-                refs.add(queue_ref(self.branch, number, str(base)))
+                refs.add(queue_ref(self.branch, number, base))
         return QueueSnapshot(
-            head_oids=frozenset(heads), refs=frozenset(refs), entries=len(nodes)
+            head_oids=frozenset(heads),
+            refs=frozenset(refs),
+            entries=len(nodes),
+            complete=complete,
         )
 
     def merge_group_runs(self) -> list[WorkflowRun]:

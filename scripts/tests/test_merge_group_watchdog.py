@@ -3496,6 +3496,54 @@ class TestQueueSnapshotIsAuthoritative(unittest.TestCase):
         with self.assertRaises(mgw.GhError):
             watchdog.queue_snapshot()
 
+    def test_a_malformed_head_commit_raises_rather_than_dropping_the_head(self):
+        # THE SECOND WAY TO FAKE AN EMPTY QUEUE. A head that is silently dropped from
+        # `head_oids` is indistinguishable downstream from a group that no longer
+        # exists, so a partially-resolved node must raise exactly like `mergeQueue: null`
+        # — never yield a snapshot that is missing a CURRENT head but claims to be whole.
+        for head_commit in ({}, {"oid": None}, {"oid": ""}, {"oid": "abc123"},
+                            {"oid": LIVE_HEAD[:39]}, {"oid": LIVE_HEAD + "0"},
+                            {"oid": 12345}, {"oid": ["a" * 40]}, "deadbeef", ["x"], 7):
+            node = dict(_queue_node(), headCommit=head_commit)
+            with self.assertRaises(mgw.GhError, msg=head_commit):
+                FakeReaper.build(nodes=[node]).watchdog.queue_snapshot()
+
+    def test_a_malformed_base_commit_raises_too(self):
+        # Same helper, same reasoning: an entry structure this broken is not a queue
+        # state anything may be compared against.
+        for base_commit in ({}, {"oid": "nope"}, "deadbeef"):
+            node = dict(_queue_node(), baseCommit=base_commit)
+            with self.assertRaises(mgw.GhError, msg=base_commit):
+                FakeReaper.build(nodes=[node]).watchdog.queue_snapshot()
+
+    def test_an_unresolvable_head_makes_the_snapshot_incomplete(self):
+        # `headCommit: null` on an entry that is NOT saying "no group yet" is a hole in
+        # the current-heads set. The read succeeded, so it does not raise — but it is no
+        # longer a total enumeration, which is what `complete` means.
+        for state in ("AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED", None, ""):
+            node = dict(_queue_node(), headCommit=None, state=state)
+            snapshot = FakeReaper.build(nodes=[node]).watchdog.queue_snapshot()
+            self.assertFalse(snapshot.complete, state)
+            self.assertEqual(snapshot.head_oids, frozenset(), state)
+
+    def test_a_missing_head_commit_key_is_treated_exactly_like_a_null_one(self):
+        node = {k: v for k, v in _queue_node().items() if k != "headCommit"}
+        self.assertFalse(FakeReaper.build(nodes=[node]).watchdog.queue_snapshot().complete)
+
+    def test_a_QUEUED_entry_positively_has_no_group_so_it_stays_complete(self):
+        # THE CONTROL on the arm above, and the reason it is not simply "any missing
+        # head refuses": an entry the queue has not built a group for yet reports
+        # `headCommit: null` as a FACT, and it is normal for one to sit behind the
+        # entries that are building. Refusing on it would switch the reap off for as
+        # long as the queue is deeper than the groups in flight.
+        nodes = [_queue_node(),
+                 dict(_queue_node(number=99900013), headCommit=None, baseCommit=None,
+                      state="QUEUED")]
+        snapshot = FakeReaper.build(nodes=nodes).watchdog.queue_snapshot()
+        self.assertTrue(snapshot.complete)
+        self.assertEqual(snapshot.head_oids, frozenset({LIVE_HEAD}))
+        self.assertEqual(snapshot.entries, 2)
+
     def test_the_reap_asks_for_the_whole_queue(self):
         harness = FakeReaper.build()
         harness.watchdog.queue_snapshot()
@@ -3597,6 +3645,61 @@ class TestReapBehaviour(unittest.TestCase):
         harness = FakeReaper.build(runs=self.REBUILD_RUNS, has_next_page=True)
         self.assertEqual(harness.run(), 1)
         self.assertEqual(harness.gh.mutations, [])
+
+    def test_a_queue_entry_with_no_resolvable_head_never_cancels_a_live_run(self):
+        # The paging guard's blind spot, at the level that matters: the page is whole
+        # and `hasNextPage` is false, but ONE node came back without a resolvable head.
+        # The live run 99900104 IS that entry's group build, so a snapshot that quietly
+        # omitted the head would cancel a running CI job.
+        for head_commit in (None, {"oid": None}, {"oid": "abc123"}, "deadbeef"):
+            harness = FakeReaper.build(
+                runs=self.REBUILD_RUNS,
+                nodes=[dict(_queue_node(), headCommit=head_commit)],
+            )
+            self.assertNotEqual(harness.run(), 0, head_commit)
+            self.assertEqual(harness.gh.mutations, [], head_commit)
+
+    def test_a_missing_head_commit_key_also_cancels_nothing(self):
+        node = {k: v for k, v in _queue_node().items() if k != "headCommit"}
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS, nodes=[node])
+        self.assertNotEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [])
+
+    def test_a_partial_queue_entry_at_REVALIDATION_time_aborts_the_write(self):
+        # The same defect served only on the re-read, so it lands on the REAL mutation
+        # path: the decision was CANCEL, and the last thing before the POST is a queue
+        # read that can no longer prove the head is gone.
+        for head_commit, expect_errors in ((None, False), ({"oid": "abc123"}, True)):
+            harness = FakeReaper.build(runs=[_run_row()])
+
+            def degrade(gh, joined, _head=head_commit):
+                # Fires after the run list is read, so only the revalidation queue read
+                # sees it — exactly the TOCTOU seam.
+                if "/actions/runs?" in joined:
+                    gh.nodes = [dict(_queue_node(), headCommit=_head)]
+
+            harness.gh.on_call = degrade
+            status = harness.run()
+            self.assertEqual(harness.gh.mutations, [], head_commit)
+            self.assertTrue(
+                any("NOT CANCELLED" in r or "CANCEL FAILED" in r for r in harness.rows),
+                harness.rows,
+            )
+            if expect_errors:
+                self.assertNotEqual(status, 0, head_commit)
+
+    def test_control_a_QUEUED_entry_does_not_switch_the_reap_off(self):
+        # THE CONTROL on the two tests above. An entry with no group built yet reports a
+        # null head legitimately and is common on a deep queue; if that alone refused,
+        # the reap would stop working precisely when orphaned runs pile up.
+        harness = FakeReaper.build(
+            runs=self.REBUILD_RUNS,
+            nodes=[_queue_node(),
+                   dict(_queue_node(number=99900013), headCommit=None, baseCommit=None,
+                        state="QUEUED")],
+        )
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.cancelled, [99900101, 99900102, 99900103])
 
     def test_a_run_inside_the_registration_grace_is_left_alone(self):
         fresh = mgw.iso(NOW - timedelta(seconds=30))
