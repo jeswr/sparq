@@ -228,6 +228,42 @@ async fn subscribe_authenticated_returns_receive_from() {
     assert!(out.contains(WS_TYPE), "{out}");
 }
 
+/// Per-resource WAC on subscribe, END-TO-END through the assembled router (issue #4877).
+///
+/// The harness's authenticated caller holds Read on everything under the storage root, so the ONLY
+/// thing that can deny this request is the topic authorization the router wires onto the notification
+/// state. A topic outside the storage root has no `.acl` this server is authoritative for and must be
+/// refused — proving `build_router` really does hand the store to the subscribe handler, not merely
+/// that the handler would authorize if it had one.
+#[tokio::test]
+async fn subscribe_denied_for_topic_outside_the_storage_root() {
+    let h = Harness::new().await;
+    let body = serde_json::json!({
+        "@context": "https://www.w3.org/ns/solid/notifications-context/v1",
+        "type": WS_TYPE,
+        "topic": "https://evil.example/someone-elses-resource",
+    })
+    .to_string();
+    let resp = h
+        .auth_request(
+            "POST",
+            "/.notifications/WebSocketChannel2023/",
+            Some("application/ld+json"),
+            Body::from(body),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "an authenticated caller must not subscribe to a topic this server holds no ACL for"
+    );
+    let out = body_string(resp).await;
+    assert!(
+        !out.contains("receiveFrom"),
+        "a denied subscribe must not return a channel: {out}"
+    );
+}
+
 // --- Receive endpoint token-gate (the HIGH-finding fix; non-ignored, via oneshot) ---------------
 
 /// Build a GET request that LOOKS like a WS upgrade for the receive endpoint with the given query.
