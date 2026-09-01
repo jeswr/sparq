@@ -3514,11 +3514,20 @@ jobs:
       # RUSTFLAGS (enforced by scripts/check-coverage-rustflags.py) and neither exports
       # llvm-cov's instrumentation env until after this step.
       #
-      # Save-race: with `save-if` restricting saves to push-to-main, the partitions now
-      # contend for one key there. rust-cache's save step returns early on an exact-key hit
-      # (`isCacheUpToDate()` in src/save.ts), so one partition saves and the rest no-op —
-      # and since the closures are identical, whichever wins stores the same content. The old
-      # per-part key bought that non-contention with a per-partition entry each.
+      # Save-race, stated precisely (src/restore.ts + src/save.ts + src/utils.ts at e18b497):
+      # with `save-if` restricting saves to push-to-main, all four jobs now contend for one
+      # key there. `isCacheUpToDate()` short-circuits the save ONLY after a FULL exact-key
+      # restore — restore.ts skips `config.saveState()` on a full match and save.ts returns
+      # on that empty state — which is the steady state on main, so usually nobody re-saves.
+      # When the key IS absent or stale, all four DO attempt the save and the cache API
+      # reserves it for exactly one; the losers' error is swallowed by save.ts's
+      # `catch (e) { reportError(e) }` — that is `core.error`, an ANNOTATION, not a non-zero
+      # exit. So the race costs a stray annotation on a green main run, never a failed job,
+      # and since the closures are identical whichever wins stores the same content. The old
+      # per-part key avoided that annotation by paying a per-partition entry; narrowing
+      # `save-if` to one partition instead is NOT available, because
+      # scripts/tests/test_mergequeue_cache_posture.py requires that input to be exactly
+      # `${{ github.ref == 'refs/heads/main' }}` on every rust-cache step in this workflow.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
