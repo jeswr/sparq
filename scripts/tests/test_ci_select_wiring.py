@@ -2244,7 +2244,8 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
         # run (engine/mixed/any unknown token => rust=true).
         inert = self.select_mod._INERT_CLASSES
         self.assertEqual(
-            inert, ("orchestration-only", "docs-only", "deploy-only", "inert-mixed"),
+            inert, ("orchestration-only", "docs-only", "deploy-only", "release-only",
+                    "inert-mixed"),
             "classifier tokens drifted — update the workflow case-arms in lock-step "
             "(they match on these literal strings)")
         # The arm is spelled docs-first for readability; assert on the SET so a

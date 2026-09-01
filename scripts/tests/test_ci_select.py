@@ -27,6 +27,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -592,6 +593,69 @@ class ChangeClassTests(unittest.TestCase):
         self.assertEqual(sel.affected, [])
         self.assertEqual(sel.change_class, "docs-only")
 
+    def test_classify_release_only(self):
+        # [OPUS-5] #2536: the release/publish pipeline workflows live under
+        # `.github/`, an unconditional full-run TRIGGER — the release allowlist is
+        # their only rescue.
+        self.assertEqual(
+            cs.classify_change([".github/workflows/release.yml",
+                                ".github/workflows/publish.yml"]),
+            "release-only",
+        )
+
+    def test_classify_release_only_on_the_issue_2536_case(self):
+        # THE MOTIVATING DIFF (#2536, PR #2533): one comment in one release workflow.
+        self.assertEqual(
+            cs.classify_change([".github/workflows/release.yml"]), "release-only")
+
+    def test_classify_mixed_release_plus_engine(self):
+        # A crate change alongside a release workflow must taint back to `mixed`
+        # (=> the workflow wildcard arm => full run). Release paths never mask code.
+        self.assertEqual(
+            cs.classify_change([".github/workflows/release.yml",
+                                "crates/sparq-core/src/lib.rs"]),
+            "mixed",
+        )
+
+    def test_classify_inert_mixed_release_plus_docs(self):
+        self.assertEqual(
+            cs.classify_change([".github/workflows/release.yml", "docs/releasing.md"]),
+            "inert-mixed",
+        )
+
+    def test_release_only_diff_selects_empty_closure(self):
+        # A release-workflow-only PR selects mode=selected with an EMPTY affected
+        # set, so every Rust lane (incl. the bench/fuzz/wasm seed lanes) skips.
+        sel = self._select([".github/workflows/release.yml",
+                            ".github/workflows/dist.yml"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "release-only")
+        self.assertIn("skipped-by-class: release-only", sel.reason)
+
+    def test_release_path_with_a_crate_change_still_narrows_not_fulls(self):
+        # A release path must never FORCE full; the crate change narrows normally
+        # and the class taints to `mixed` (=> the workflow wildcard arm => full).
+        sel = self._select([".github/workflows/release.yml", "crates/app/src/lib.rs"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app"])
+        self.assertEqual(sel.change_class, "mixed")
+
+    def test_a_non_allowlisted_release_adjacent_workflow_still_forces_full(self):
+        # Fail-closed: the allowlist is a WHITELIST. A `.github/` workflow that is
+        # NOT on it (here the SLSA builder-pin review lane) must still hit the
+        # `.github/` trigger => full.
+        sel = self._select([".github/workflows/slsa-builder-pin-review.yml"])
+        self.assertEqual(sel.mode, "full")
+
+    def test_release_scripts_are_not_rescued(self):
+        # The publish/release SCRIPTS are deliberately NOT allowlisted (several are
+        # invoked by ci.yml), so they must keep forcing the full matrix.
+        for path in ("scripts/build-dist.sh", "scripts/gen-sbom-vex.sh",
+                     "scripts/verify-release-provenance.sh"):
+            with self.subTest(path=path):
+                self.assertEqual(self._select([path]).mode, "full")
+
     def test_deploy_only_diff_selects_empty_closure(self):
         # [OPUS-5] sq-g25hr: a deploy-only PR — including the `.github/workflows/
         # deploy-*.yml` files, which would otherwise hit the `.github/` full-run
@@ -909,6 +973,138 @@ class DeployOnlyInertnessTests(unittest.TestCase):
             "an entry is on BOTH inert allowlists — pick one so the audit-trail "
             "class is unambiguous",
         )
+
+
+def _top_level_triggers(path: Path) -> set[str]:
+    """The top-level keys of a workflow's `on:` block, parsed without PyYAML (the
+    selector suite is stdlib-only). Collects the `^  <key>:` lines between the
+    column-0 `on:` line and the next column-0 key; comment/continuation lines are
+    indented past that or start with `#`, so they never match."""
+    triggers: set[str] = set()
+    inside = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not inside:
+            if re.match(r"^(on|'on'|\"on\"):\s*$", line):
+                inside = True
+            continue
+        if re.match(r"^[^\s#]", line):  # next column-0 key ends the block
+            break
+        m = re.match(r"^  ([A-Za-z_]+):", line)
+        if m:
+            triggers.add(m.group(1))
+    return triggers
+
+
+class ReleaseOnlyInertnessTests(unittest.TestCase):
+    """[OPUS-5] #2536: THE INERTNESS OBLIGATION for `_RELEASE_ONLY` — and a STRONGER
+    one than the other two allowlists get.
+
+    The orchestration/deploy lists prove inertness by grepping the Rust-CI workflows
+    for a textual reference. For the release pipeline we can prove something much
+    better MECHANICALLY: every entry is a workflow that CANNOT RUN AT PR TIME AT ALL
+    (no `pull_request:`/`merge_group:` trigger, and not `uses:`-reachable from a
+    workflow that has one). A file that never executes on a PR cannot change what any
+    PR-time job does, so it cannot affect a selector-gated Rust lane. If someone later
+    adds a `pull_request:` trigger to release.yml, THIS TEST GOES RED rather than the
+    allowlist silently becoming unsound."""
+
+    _RUST_CI_WORKFLOWS = OrchestrationSafeInertnessTests._RUST_CI_WORKFLOWS
+    _WF_DIR = REPO_ROOT / ".github" / "workflows"
+
+    def test_entries_exist_on_disk(self):
+        for entry in cs._RELEASE_ONLY:
+            path = REPO_ROOT / entry.rstrip("/")
+            self.assertTrue(
+                path.exists(),
+                f"release-only entry {entry} does not exist on disk (stale allowlist)",
+            )
+
+    def test_no_entry_is_a_rust_ci_workflow(self):
+        for entry in cs._RELEASE_ONLY:
+            self.assertNotIn(
+                Path(entry).name, self._RUST_CI_WORKFLOWS,
+                f"{entry} is listed as release-only but is a Rust-CI workflow",
+            )
+
+    def test_no_entry_can_be_triggered_by_a_pull_request_or_merge_group(self):
+        # THE CORE PROOF. A release-pipeline workflow that gained a PR trigger would
+        # start running (and therefore mattering) at PR time.
+        for entry in cs._RELEASE_ONLY:
+            path = REPO_ROOT / entry
+            triggers = _top_level_triggers(path)
+            self.assertTrue(triggers, f"{entry}: could not parse an `on:` block")
+            for forbidden in ("pull_request", "pull_request_target", "merge_group"):
+                self.assertNotIn(
+                    forbidden, triggers,
+                    f"release-only {entry} declares a `{forbidden}:` trigger — it CAN "
+                    f"run at PR time and is therefore NOT inert; remove it from "
+                    f"_RELEASE_ONLY (fail-closed: it must keep triggering the full "
+                    f"matrix).",
+                )
+
+    def test_no_entry_is_reachable_from_a_pr_time_workflow(self):
+        # The `workflow_call:` reusables (build-matrix.yml, release-verify.yml) are
+        # only inert while their CALLERS are also non-PR — and their callers' callers.
+        # Walk the TRANSITIVE `uses: ./.github/workflows/...` closure of every
+        # workflow that CAN run at PR time and assert no allowlisted file is in it.
+        def local_calls(path: Path) -> set[str]:
+            return set(re.findall(r"uses:\s*\./(\.github/workflows/[\w.-]+)",
+                                  path.read_text(encoding="utf-8")))
+
+        pr_time = [
+            p for p in sorted(self._WF_DIR.glob("*.yml"))
+            if {"pull_request", "pull_request_target", "merge_group"}
+            & _top_level_triggers(p)
+        ]
+        self.assertTrue(pr_time, "no PR-time workflows found — parser is broken")
+
+        reachable: set[str] = set()
+        stack = [f".github/workflows/{p.name}" for p in pr_time]
+        while stack:
+            cur = stack.pop()
+            for callee in local_calls(REPO_ROOT / cur):
+                if callee not in reachable and (REPO_ROOT / callee).exists():
+                    reachable.add(callee)
+                    stack.append(callee)
+
+        for entry in cs._RELEASE_ONLY:
+            self.assertNotIn(
+                entry, reachable,
+                f"release-only {entry} is `uses:`-reachable from a PR-time workflow — "
+                f"it CAN run at PR time and is therefore NOT inert; remove it from "
+                f"_RELEASE_ONLY.",
+            )
+
+    def test_release_only_is_disjoint_from_the_other_allowlists(self):
+        # One path, one class (the sq-g25hr rule): an overlap would be silently
+        # mislabelled, since classify_change consults orchestration/deploy FIRST.
+        for name, other in (("_ORCHESTRATION_SAFE", cs._ORCHESTRATION_SAFE),
+                            ("_DEPLOY_ONLY", cs._DEPLOY_ONLY)):
+            self.assertEqual(
+                set(cs._RELEASE_ONLY) & set(other), set(),
+                f"an entry is on BOTH _RELEASE_ONLY and {name} — pick one so the "
+                f"audit-trail class is unambiguous",
+            )
+
+    def test_the_release_structural_tests_still_run_on_every_pr(self):
+        # WHAT KEEPS THESE FILES HONEST once the Rust matrix stops running on them:
+        # the structural release tests parse the very YAMLs we allowlist, and they
+        # live in docs-quality.yml, whose jobs are UNCONDITIONAL (not selector-gated).
+        # If they ever move to a selector-gated workflow, this allowlist would start
+        # skipping the only PR-time check of these files.
+        dq = self._WF_DIR / "docs-quality.yml"
+        blob = dq.read_text(encoding="utf-8")
+        for test in ("test_release_slsa_l3_provenance.py",
+                     "test_release_container_multiarch.py",
+                     "test_release_publish_guard.py"):
+            self.assertIn(
+                test, blob,
+                f"{test} is no longer run by docs-quality.yml — the release-only "
+                f"allowlist relies on it as the PR-time check of those workflows",
+            )
+        # docs-quality.yml must not gate its jobs on the selector.
+        self.assertNotIn("uses: ./.github/workflows/ci-select.yml", blob,
+                         "docs-quality.yml became selector-gated — re-audit _RELEASE_ONLY")
 
 
 class RealMetadataShapeTests(unittest.TestCase):

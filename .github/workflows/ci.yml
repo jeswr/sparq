@@ -295,11 +295,13 @@ jobs:
                        --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
               # [OPUS-5] sq-g25hr: the arm lists ci_select.py `_INERT_CLASSES` verbatim
               # (pinned by scripts/tests/test_ci_select_wiring.py so the two cannot drift).
-              # deploy-only = deploy/** + the deploy lint workflows; inert-mixed = a diff
-              # confined to inert surfaces that SPANS more than one of them (the observed
-              # cloud-deploy batch: manifests + their READMEs + deploy-*.yml).
+              # deploy-only = deploy/** + the deploy lint workflows; release-only = the
+              # release/publish pipeline workflows (#2536 — none of them can run at PR
+              # time at all); inert-mixed = a diff confined to inert surfaces that SPANS
+              # more than one of them (the observed cloud-deploy batch: manifests + their
+              # READMEs + deploy-*.yml).
               case "${cls}" in
-                docs-only|orchestration-only|deploy-only|inert-mixed) rust=false; docker=false ;;
+                docs-only|orchestration-only|deploy-only|release-only|inert-mixed) rust=false; docker=false ;;
                 *) rust=true; docker=true ;;
               esac
             else
