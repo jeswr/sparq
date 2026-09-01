@@ -415,7 +415,7 @@ export function termToNTriples(t: SparqlTerm | undefined): string | null {
 
 /** The identity key for one directed edge, over the shared node key space. */
 export function edgeKeyOf(s: string, predicate: string, o: string): string {
-  return `${s} ${predicate} ${o}`;
+  return `${s}\u0000${predicate}\u0000${o}`;
 }
 
 /** The {@link edgeKeyOf} key for a parsed statement. */
