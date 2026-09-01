@@ -8,10 +8,17 @@ import type { SparqlResults, SparqlTerm } from "@sparq/client";
 import {
   BUBBLE_MAX_RADIUS,
   BUBBLE_MIN_RADIUS,
+  CLASS_COUNT_QUERY,
+  CLASS_RELATION_QUERY,
+  CLASS_ROW_LIMIT,
+  EDGE_ROW_LIMIT,
+  LITERAL_RANGE_QUERY,
+  SUBCLASS_QUERY,
   buildChordModel,
   buildClassHierarchy,
   buildDomainRangeRows,
   bubbleRadius,
+  hitRowLimit,
   instanceListQuery,
   packHierarchy,
   parseClassRows,
@@ -20,6 +27,7 @@ import {
   parseRelationRows,
   parseSubClassEdges,
   predicatesBetween,
+  runAtStableRevision,
   subtreeInstances,
   type RelationRow,
 } from "./dataset-overview.js";
@@ -226,6 +234,169 @@ test("packing nests child bubbles inside their parent and never overlaps sibling
     assert.ok(b.x - b.r >= -1e-6 && b.x + b.r <= pack.width + 1e-6, "inside the viewBox width");
     assert.ok(b.y - b.r >= -1e-6 && b.y + b.r <= pack.height + 1e-6, "inside the viewBox height");
   }
+});
+
+test("a bubble that encloses nothing is DRAWN at its direct-instance mark", () => {
+  // The quantitative claim the UI makes, tested directly: r = MIN + (MAX-MIN)·√(n/max), i.e. the
+  // area is √-scaled by the count above a visibility floor. No subclasses here, so nothing is
+  // enlarged and every bubble is drawn at that mark.
+  const pack = packHierarchy(
+    buildClassHierarchy(
+      [
+        { iri: "urn:big", label: "big", instances: 100 },
+        { iri: "urn:quarter", label: "quarter", instances: 25 },
+        { iri: "urn:none", label: "none", instances: 0 },
+      ],
+      [],
+    ),
+  );
+  const at = (iri: string) => {
+    const b = pack.bubbles.find((x) => x.iri === iri);
+    assert.ok(b, `${iri} was packed`);
+    return b;
+  };
+  for (const b of pack.bubbles) {
+    assert.equal(b.container, false, `${b.iri} encloses nothing, so it is not a container`);
+    assert.equal(b.r, b.countRadius, `${b.iri} is drawn at its direct-count radius`);
+  }
+  assert.equal(at("urn:big").r, BUBBLE_MAX_RADIUS);
+  // A quarter of the instances puts the radius √(25/100) = ½ of the way up the range: the
+  // √-of-count encoding the panel advertises, measured against the largest class.
+  const halfway = BUBBLE_MIN_RADIUS + (BUBBLE_MAX_RADIUS - BUBBLE_MIN_RADIUS) / 2;
+  assert.ok(Math.abs(at("urn:quarter").r - halfway) < 1e-9);
+  assert.equal(at("urn:none").r, BUBBLE_MIN_RADIUS);
+});
+
+test("a low-count parent is a CONTAINER: its area is containment, not its instance count", () => {
+  // The case the reviewer flagged: a superclass with one direct instance but big subclasses. Its
+  // circle must grow to enclose them, so it is flagged `container` and the renderer draws it as
+  // an outline — its own count keeps a separate, still-quantitative mark in `countRadius`.
+  const pack = packHierarchy(
+    buildClassHierarchy(
+      [
+        { iri: "urn:parent", label: "parent", instances: 1 },
+        { iri: "urn:childA", label: "childA", instances: 10 },
+        { iri: "urn:childB", label: "childB", instances: 7 },
+      ],
+      [
+        { sub: "urn:childA", super: "urn:parent" },
+        { sub: "urn:childB", super: "urn:parent" },
+      ],
+    ),
+  );
+  const at = (iri: string) => {
+    const b = pack.bubbles.find((x) => x.iri === iri);
+    assert.ok(b, `${iri} was packed`);
+    return b;
+  };
+  const parent = at("urn:parent");
+  const childA = at("urn:childA");
+  assert.equal(parent.container, true, "the parent had to grow past its own count");
+  assert.equal(parent.countRadius, bubbleRadius(1, 10));
+  assert.ok(parent.r > parent.countRadius, "the drawn radius is the enclosing one");
+  // The honest ranking survives in the count mark even though the drawn circle is the biggest.
+  assert.ok(parent.countRadius < childA.countRadius, "1 instance marks smaller than 10");
+  assert.ok(parent.r > childA.r, "…while the drawn container is larger, hence not a count");
+  assert.equal(childA.container, false);
+  assert.equal(childA.r, childA.countRadius);
+});
+
+test("a parent whose own count already covers its subclasses stays at its count mark", () => {
+  const pack = packHierarchy(
+    buildClassHierarchy(
+      [
+        { iri: "urn:parent", label: "parent", instances: 100 },
+        { iri: "urn:child", label: "child", instances: 1 },
+      ],
+      [{ sub: "urn:child", super: "urn:parent" }],
+    ),
+  );
+  const parent = pack.bubbles.find((b) => b.iri === "urn:parent");
+  assert.ok(parent);
+  assert.equal(parent.container, false);
+  assert.equal(parent.r, BUBBLE_MAX_RADIUS);
+  assert.equal(parent.r, parent.countRadius);
+});
+
+test("a batch whose store mutates mid-flight is re-run, returning only the settled read", async () => {
+  // The overview runs four queries that must describe ONE store state. Here the store is mutated
+  // DURING the first two batches (the exact race the panel cannot otherwise see) and settles on
+  // the third: the caller must receive the settled read, never a mix of the earlier ones.
+  let revision = 0;
+  let mutations = 2;
+  const batch = async () => {
+    const readAt = revision;
+    if (mutations > 0) {
+      mutations -= 1;
+      revision += 1; // something else wrote to the store while this batch was in flight
+    }
+    return `rows@${readAt}`;
+  };
+
+  const out = await runAtStableRevision(batch, () => revision, { attempts: 3 });
+  assert.equal(out.consistent, true);
+  assert.equal(out.attempts, 3);
+  assert.equal(out.value, "rows@2", "the settled read, not either of the mixed ones");
+  assert.equal(out.cancelled, false);
+});
+
+test("a store that never settles is reported INCONSISTENT, not published silently", async () => {
+  let revision = 0;
+  const batch = async () => {
+    revision += 1;
+    return revision;
+  };
+  const out = await runAtStableRevision(batch, () => revision, { attempts: 3 });
+  assert.equal(out.attempts, 3, "bounded: it must not spin forever");
+  assert.equal(out.consistent, false, "the caller is told the views may mix store states");
+});
+
+test("a settled store costs exactly one batch, and a superseded one stops retrying", async () => {
+  let calls = 0;
+  const settled = await runAtStableRevision(
+    async () => {
+      calls += 1;
+      return "rows";
+    },
+    () => 7,
+    { attempts: 3 },
+  );
+  assert.equal(settled.attempts, 1);
+  assert.equal(calls, 1, "no retry when nothing moved");
+  assert.equal(settled.consistent, true);
+
+  let revision = 0;
+  let ran = 0;
+  const abandoned = await runAtStableRevision(
+    async () => {
+      ran += 1;
+      revision += 1;
+      return "rows";
+    },
+    () => revision,
+    { attempts: 3, cancelled: () => true },
+  );
+  assert.equal(ran, 1, "a superseded request does not keep re-querying");
+  assert.equal(abandoned.cancelled, true);
+  assert.equal(abandoned.consistent, false);
+});
+
+test("each aggregate query fetches one probe row past the cap so truncation is detectable", () => {
+  assert.ok(CLASS_COUNT_QUERY.endsWith(`LIMIT ${CLASS_ROW_LIMIT + 1}`));
+  for (const query of [SUBCLASS_QUERY, CLASS_RELATION_QUERY, LITERAL_RANGE_QUERY]) {
+    assert.ok(query.endsWith(`LIMIT ${EDGE_ROW_LIMIT + 1}`), query);
+  }
+
+  const bindings = (n: number) =>
+    results(
+      ["class", "instances"],
+      Array.from({ length: n }, (_, i) => ({ class: uri(`${EX}C${i}`), instances: lit("1") })),
+    );
+  // Exactly the cap: the probe row did NOT come back, so the query returned everything.
+  assert.equal(hitRowLimit(bindings(CLASS_ROW_LIMIT), CLASS_ROW_LIMIT), false);
+  // The probe row came back: rows beyond the cap exist and were never fetched.
+  assert.equal(hitRowLimit(bindings(CLASS_ROW_LIMIT + 1), CLASS_ROW_LIMIT), true);
+  assert.equal(hitRowLimit(results(["class"], []), CLASS_ROW_LIMIT), false);
 });
 
 test("an empty hierarchy packs to an empty box", () => {

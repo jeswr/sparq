@@ -2,10 +2,11 @@
 
 // [OPUS-5] sq-ixc3.21 — the dataset OVERVIEW tool: the read-side "what IS this dataset" tab
 // (research/competitive-feature-analysis-2026-07.md names the GraphDB Explore views as a cheap,
-// high-value parity gap). Three views over ONE snapshot of the live store:
+// high-value parity gap). Three views over one BATCH of four aggregate queries:
 //
-//   1. class-hierarchy bubble — a class per bubble, area ∝ its direct instance count, nested by
-//      the asserted `rdfs:subClassOf` axioms. Click a bubble to drill into its instances.
+//   1. class-hierarchy bubble — a class per bubble; a bubble that encloses no subclasses is drawn
+//      at the √-scaled mark of its direct instance count, one that does is drawn as a container
+//      outline instead (see `PackedBubble.container`). Click a bubble to drill into its instances.
 //   2. class-relationship chord — a ribbon per ordered class pair, width ∝ the statements
 //      between their instances. Click a ribbon for the per-predicate breakdown.
 //   3. domain–range panel — the OBSERVED predicate signatures (domain class → range class or
@@ -17,9 +18,21 @@
 // a class's bubble shows DIRECT `rdf:type` instances, and the domain–range rows are what the data
 // contains rather than what an `rdfs:domain`/`rdfs:range` axiom declares. The panel says so.
 // A query that fails is reported by name instead of being silently dropped, and the view caps
-// (top-N chord classes, per-query row limits, the drill-down instance limit) are all stated.
-// The snapshot does not follow the store: importing data marks it stale and asks for a Refresh
-// rather than quietly showing figures for a store that no longer exists.
+// (top-N chord classes, per-query row limits, the drill-down instance limit) are all stated —
+// including WHICH queries actually hit their row limit, which is the only truncation figure this
+// panel can honestly report (how many rows were left unfetched is unknown without a wider query).
+//
+// CONSISTENCY. The engine exposes no transaction or snapshot handle, so the four queries cannot
+// be a true atomic read: they run back to back against a store that another tab action could
+// mutate in between. What this panel DOES enforce is a check on the context's monotone store
+// REVISION (`storeEpoch`, bumped on hydration / import / a successful UPDATE) across the batch —
+// if it moved, the batch is discarded and re-run (bounded attempts), and if it is still moving
+// the views are published with an explicit "these views may mix store states" warning rather than
+// silently. That is a best-effort detector, not a guarantee: the revision is observed through
+// React state, so a bump that commits after the last query is read is caught by the STALE notice
+// instead, which likewise compares revisions (not quad counts, so a same-size replacement of the
+// store still reads as stale) and asks for a Refresh rather than showing figures for a store that
+// no longer exists.
 //
 // The two SVGs are dependency-free (same reasoning as graph-view.tsx: no d3 / cytoscape for a
 // view this size); the layout maths lives in lib/dataset-overview.ts and is unit-tested there.
@@ -35,12 +48,15 @@ import {
   CHORD_MAX_CLASSES,
   CLASS_COUNT_QUERY,
   CLASS_RELATION_QUERY,
+  CLASS_ROW_LIMIT,
+  EDGE_ROW_LIMIT,
   LITERAL_RANGE_QUERY,
   SUBCLASS_QUERY,
   abbreviateIri,
   buildChordModel,
   buildClassHierarchy,
   buildDomainRangeRows,
+  hitRowLimit,
   instanceListQuery,
   packHierarchy,
   parseClassRows,
@@ -49,6 +65,7 @@ import {
   parseRelationRows,
   parseSubClassEdges,
   predicatesBetween,
+  runAtStableRevision,
   type BubblePack,
   type ChordModel,
   type ChordRibbon,
@@ -61,8 +78,22 @@ import {
 const INSTANCE_LIMIT = 50;
 /** Domain–range rows rendered before the table says how many more there are. */
 const DOMAIN_RANGE_ROWS = 60;
+/**
+ * How many times the four-query batch is re-run when the live store revision moves while it is in
+ * flight. Bounded: a store under continuous mutation must not spin the panel forever, so the last
+ * attempt is published with the `consistent: false` warning instead.
+ */
+const BATCH_ATTEMPTS = 3;
 
-/** One computed snapshot of the store — every view on this panel reads from the same one. */
+/** Which queries came back holding their probe row, i.e. left an unknown number of rows behind. */
+interface Truncation {
+  classes: boolean;
+  subClasses: boolean;
+  relations: boolean;
+  literals: boolean;
+}
+
+/** One computed batch of the store — every view on this panel reads from the same one. */
 interface Snapshot {
   classes: ClassRow[];
   pack: BubblePack;
@@ -71,7 +102,18 @@ interface Snapshot {
   domainRange: DomainRangeRow[];
   /** Queries that did not return a result table, named so a partial view is never silent. */
   failures: string[];
-  /** The store size the snapshot was taken at — drives the "stale, Refresh" notice. */
+  truncated: Truncation;
+  /**
+   * The engine context's store revision did not move between the first and the last of the four
+   * queries. False means the views below may combine results computed against DIFFERENT store
+   * states, and the UI says so. This is a best-effort detector, not a transaction: the revision is
+   * observed through React state, so a mutation whose bump commits after the last query is read
+   * lands in the {@link Snapshot.storeEpoch} stale check instead of this one.
+   */
+  consistent: boolean;
+  /** The store revision the batch was computed at — drives the "stale, Refresh" notice. */
+  storeEpoch: number;
+  /** The quad count at that revision, for the stale notice's "N → M quads" figure. */
   storeSize: number;
 }
 
@@ -93,7 +135,7 @@ type InstanceState =
   | { kind: "error"; message: string };
 
 export function OverviewTool() {
-  const { run, status, storeSize } = useEngine();
+  const { run, status, storeSize, storeEpoch } = useEngine();
   const [state, setState] = React.useState<LoadState>({ kind: "idle" });
   const [selection, setSelection] = React.useState<Selection>(null);
   const [instances, setInstances] = React.useState<InstanceState | null>(null);
@@ -102,6 +144,17 @@ export function OverviewTool() {
 
   const ready = status.kind === "ready";
 
+  // The engine has no snapshot/transaction handle, so the closest available consistency signal is
+  // `storeEpoch` — the context's strictly-monotone CONTENT revision, bumped on hydration, import
+  // and every successful SPARQL UPDATE (see engine-context). It is used rather than the quad count
+  // because a replacement that leaves the size unchanged still bumps the epoch. Mirrored into a
+  // ref (rather than read off the values this callback closed over) so the async batch below
+  // observes the CURRENT revision at each await point.
+  const liveRef = React.useRef({ epoch: storeEpoch, size: storeSize });
+  React.useEffect(() => {
+    liveRef.current = { epoch: storeEpoch, size: storeSize };
+  }, [storeEpoch, storeSize]);
+
   const load = React.useCallback(async () => {
     const ticket = requestRef.current + 1;
     requestRef.current = ticket;
@@ -109,23 +162,35 @@ export function OverviewTool() {
     setSelection(null);
     setInstances(null);
 
-    const failures: string[] = [];
-    const ask = async (label: string, query: string) => {
-      const { outcome } = await run(query);
-      if (outcome.kind === "select") return outcome.results;
-      failures.push(
-        `${label} — ${outcome.kind === "error" ? outcome.message : `no result table (${outcome.kind})`}`,
-      );
-      return null;
-    };
-
-    try {
+    /** One pass of the four queries. Never spliced with another pass — see runAtStableRevision. */
+    const runBatch = async () => {
+      const failures: string[] = [];
+      const ask = async (label: string, query: string) => {
+        const { outcome } = await run(query);
+        if (outcome.kind === "select") return outcome.results;
+        failures.push(
+          `${label} — ${outcome.kind === "error" ? outcome.message : `no result table (${outcome.kind})`}`,
+        );
+        return null;
+      };
       // Sequential on purpose: one in-tab store, one query at a time.
       const classResults = await ask("class counts", CLASS_COUNT_QUERY);
       const subClassResults = await ask("subclass axioms", SUBCLASS_QUERY);
       const relationResults = await ask("class relationships", CLASS_RELATION_QUERY);
       const literalResults = await ask("literal ranges", LITERAL_RANGE_QUERY);
+      return { classResults, subClassResults, relationResults, literalResults, failures };
+    };
+
+    try {
+      // If the store's revision moves while the four queries run they describe different stores,
+      // so the whole batch is discarded and re-run rather than published as a mixed view.
+      const attempt = await runAtStableRevision(runBatch, () => liveRef.current.epoch, {
+        attempts: BATCH_ATTEMPTS,
+        cancelled: () => requestRef.current !== ticket,
+      });
       if (requestRef.current !== ticket) return; // superseded by a later Refresh
+      const { classResults, subClassResults, relationResults, literalResults, failures } =
+        attempt.value;
 
       if (classResults === null && relationResults === null) {
         setState({
@@ -135,10 +200,17 @@ export function OverviewTool() {
         return;
       }
 
-      const classes = classResults ? parseClassRows(classResults) : [];
-      const edges = subClassResults ? parseSubClassEdges(subClassResults) : [];
-      const relations = relationResults ? parseRelationRows(relationResults) : [];
-      const literals = literalResults ? parseLiteralRangeRows(literalResults) : [];
+      // Drop the probe row each query carries: it exists to detect the limit, not to be shown.
+      const classes = classResults ? parseClassRows(classResults).slice(0, CLASS_ROW_LIMIT) : [];
+      const edges = subClassResults
+        ? parseSubClassEdges(subClassResults).slice(0, EDGE_ROW_LIMIT)
+        : [];
+      const relations = relationResults
+        ? parseRelationRows(relationResults).slice(0, EDGE_ROW_LIMIT)
+        : [];
+      const literals = literalResults
+        ? parseLiteralRangeRows(literalResults).slice(0, EDGE_ROW_LIMIT)
+        : [];
       setState({
         kind: "ready",
         snapshot: {
@@ -148,17 +220,25 @@ export function OverviewTool() {
           chord: buildChordModel(relations),
           domainRange: buildDomainRangeRows(relations, literals),
           failures,
-          storeSize,
+          truncated: {
+            classes: classResults !== null && hitRowLimit(classResults, CLASS_ROW_LIMIT),
+            subClasses: subClassResults !== null && hitRowLimit(subClassResults, EDGE_ROW_LIMIT),
+            relations: relationResults !== null && hitRowLimit(relationResults, EDGE_ROW_LIMIT),
+            literals: literalResults !== null && hitRowLimit(literalResults, EDGE_ROW_LIMIT),
+          },
+          consistent: attempt.consistent,
+          storeEpoch: liveRef.current.epoch,
+          storeSize: liveRef.current.size,
         },
       });
     } catch (err) {
       if (requestRef.current !== ticket) return;
       setState({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     }
-  }, [run, storeSize]);
+  }, [run]);
 
   // Compute once the engine is warm; after that the user drives it with Refresh (the notice
-  // below says when the store has moved on from the snapshot).
+  // below says when the store has moved on from the revision these views were computed at).
   React.useEffect(() => {
     if (ready && state.kind === "idle") void load();
   }, [ready, state.kind, load]);
@@ -197,7 +277,8 @@ export function OverviewTool() {
   );
 
   const snapshot = state.kind === "ready" ? state.snapshot : null;
-  const stale = snapshot !== null && snapshot.storeSize !== storeSize;
+  // Revision, not size: a replacement that leaves the quad count unchanged is still stale.
+  const stale = snapshot !== null && snapshot.storeEpoch !== storeEpoch;
 
   return (
     <div className="flex h-full flex-col" data-tool-panel="overview">
@@ -246,9 +327,21 @@ export function OverviewTool() {
                 className="rounded-md border border-[var(--warning)]/40 bg-[var(--warning)]/5 p-2 text-xs text-muted-foreground"
                 data-overview-stale
               >
-                The store has changed since this snapshot was taken (
-                {snapshot.storeSize.toLocaleString()} → {storeSize.toLocaleString()} quads).
-                Refresh to recompute.
+                {`The store has changed since these views were computed${
+                  snapshot.storeSize === storeSize
+                    ? ` (its contents were replaced; still ${storeSize.toLocaleString()} quads)`
+                    : ` (${snapshot.storeSize.toLocaleString()} → ${storeSize.toLocaleString()} quads)`
+                }. Refresh to recompute.`}
+              </p>
+            )}
+            {!snapshot.consistent && (
+              <p
+                className="rounded-md border border-[var(--warning)]/40 bg-[var(--warning)]/5 p-2 text-xs text-muted-foreground"
+                data-overview-inconsistent
+              >
+                The store kept changing while these four queries ran ({BATCH_ATTEMPTS} attempts),
+                so the views below may combine results computed against different states of it.
+                Refresh once the store is settled.
               </p>
             )}
             {snapshot.failures.length > 0 && (
@@ -276,7 +369,7 @@ export function OverviewTool() {
                 setInstances(null);
               }}
             />
-            <DomainRangePanel rows={snapshot.domainRange} />
+            <DomainRangePanel rows={snapshot.domainRange} truncated={snapshot.truncated} />
             <QueryDisclosure />
           </div>
         )}
@@ -308,6 +401,28 @@ function Section({
   );
 }
 
+/**
+ * The per-view CAP notice. A query that came back holding its probe row left rows behind, and the
+ * number left behind is UNKNOWN from that query — so this names the queries that hit their limit
+ * and says the view is incomplete, and never invents a "N more" figure. Renders nothing when
+ * every query the view depends on returned everything that matched.
+ */
+function CapNote({ hit }: { hit: Array<[string, number, boolean]> }) {
+  const capped = hit.filter(([, , truncated]) => truncated);
+  if (capped.length === 0) return null;
+  return (
+    <p
+      className="border-t px-3 py-1.5 text-[11px] text-[var(--warning)]"
+      data-overview-truncated
+    >
+      Incomplete view:{" "}
+      {capped.map(([label, limit]) => `the ${label} query hit its ${limit}-row limit`).join(", ")}.
+      Rows past the limit were never fetched, so what they would have added is unknown — narrow the
+      store or run the query yourself (the disclosure below) to see the rest.
+    </p>
+  );
+}
+
 // ── 1. Class-hierarchy bubble ──────────────────────────────────────────────────────────────────
 
 function ClassBubbles({
@@ -329,9 +444,12 @@ function ClassBubbles({
       title="Classes"
       note={
         <>
-          One bubble per class, area proportional to its <strong>direct</strong> instance count (
-          no entailment applied), nested by asserted <code>rdfs:subClassOf</code>. Click a bubble
-          for its instances.
+          One bubble per class, nested by asserted <code>rdfs:subClassOf</code>. A bubble with no
+          subclasses inside it is sized by its <strong>direct</strong> instance count — area
+          √-scaled against the largest class, above a floor so a rare class stays clickable, and
+          no entailment applied. A class that <em>does</em> hold subclasses is drawn as a dashed{" "}
+          <strong>container</strong> sized to fit them, so its size shows nesting rather than a
+          count — its own direct count is in the tooltip. Click a bubble for its instances.
         </>
       }
       dataKey="bubbles"
@@ -347,7 +465,10 @@ function ClassBubbles({
               viewBox={`0 0 ${pack.width} ${pack.height}`}
               className="mx-auto h-auto w-full max-w-[620px]"
               role="img"
-              aria-label="Class hierarchy bubble chart, sized by instance count"
+              aria-label={
+                "Class hierarchy bubble chart: a filled bubble is sized by its direct instance" +
+                " count, a dashed container is sized to hold its subclasses"
+              }
             >
               {pack.bubbles.map((b) => {
                 const isSelected = b.iri === selected;
@@ -368,7 +489,11 @@ function ClassBubbles({
                         onSelectClass(b.iri);
                       }
                     }}
-                    aria-label={`${b.label}: ${b.instances} direct instances`}
+                    aria-label={
+                      b.container
+                        ? `${b.label}: container for its subclasses, ${b.instances} direct instances`
+                        : `${b.label}: ${b.instances} direct instances`
+                    }
                     data-overview-bubble={b.label}
                   >
                     <title>
@@ -376,18 +501,26 @@ function ClassBubbles({
                       {b.totalInstances !== b.instances
                         ? ` (${b.totalInstances.toLocaleString()} including subclasses)`
                         : ""}
+                      {b.container
+                        ? " — drawn as a container sized to hold its subclasses, not by its own count"
+                        : ""}
                       {parents}
                     </title>
+                    {/* A container is enlarged to fit its subclasses, so its area is NOT its
+                        instance count: draw it as a dashed outline, never a filled disc, so
+                        filled area on this chart only ever means direct instances. */}
                     <circle
                       cx={b.x}
                       cy={b.y}
                       r={b.r}
-                      fill="var(--primary)"
+                      fill={b.container ? "none" : "var(--primary)"}
                       fillOpacity={b.depth === 0 ? 0.1 : 0.16 + 0.08 * b.depth}
+                      pointerEvents={b.container ? "all" : undefined}
                       stroke={isSelected ? "var(--primary)" : "var(--border)"}
                       strokeWidth={isSelected ? 2 : 1}
+                      strokeDasharray={b.container ? "4 3" : undefined}
                     />
-                    {/* A parent's own label sits at the top of its ring so it does not collide
+                    {/* A container's own label sits at the top of its ring so it does not collide
                         with the child bubbles packed in the middle. */}
                     {b.r >= 18 && (
                       <text
@@ -396,7 +529,7 @@ function ClassBubbles({
                         className="fill-foreground"
                         fontSize={9}
                         textAnchor="middle"
-                        dy={b.depth === 0 && b.totalInstances !== b.instances ? -b.r + 12 : 3}
+                        dy={b.container ? -b.r + 12 : 3}
                       >
                         {b.label}
                       </text>
@@ -407,10 +540,20 @@ function ClassBubbles({
             </svg>
           </div>
           <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
+            {/* Both figures come from the class-count query, so both are lower bounds once it
+                has hit its row limit — say so rather than printing a capped count as a total. */}
+            {snapshot.truncated.classes ? "at least " : ""}
             {classes.length.toLocaleString()} classes ·{" "}
+            {snapshot.truncated.classes ? "at least " : ""}
             {classes.reduce((sum, c) => sum + c.instances, 0).toLocaleString()} typed instances
             (summed over classes; a resource with several types counts once per type).
           </p>
+          <CapNote
+            hit={[
+              ["class counts", CLASS_ROW_LIMIT, snapshot.truncated.classes],
+              ["subclass axioms", EDGE_ROW_LIMIT, snapshot.truncated.subClasses],
+            ]}
+          />
           {selected !== null && (
             <InstancePanel iri={selected} instances={instances} />
           )}
@@ -609,11 +752,12 @@ function ClassChord({
                 {" "}
                 {chord.hiddenClasses.toLocaleString()} further class
                 {chord.hiddenClasses === 1 ? "" : "es"} (
-                {chord.hiddenStatements.toLocaleString()} statements) are outside the top-
-                {CHORD_MAX_CLASSES} the chord shows.
+                {chord.hiddenStatements.toLocaleString()} statements) in the rows this query
+                returned are outside the top-{CHORD_MAX_CLASSES} the chord shows.
               </>
             )}
           </p>
+          <CapNote hit={[["class relationships", EDGE_ROW_LIMIT, snapshot.truncated.relations]]} />
           {selectedPair && (
             <PairPanel
               relations={relations}
@@ -664,7 +808,13 @@ function PairPanel({
 
 // ── 3. Domain–range panel ──────────────────────────────────────────────────────────────────────
 
-function DomainRangePanel({ rows }: { rows: readonly DomainRangeRow[] }) {
+function DomainRangePanel({
+  rows,
+  truncated,
+}: {
+  rows: readonly DomainRangeRow[];
+  truncated: Truncation;
+}) {
   const shown = rows.slice(0, DOMAIN_RANGE_ROWS);
   return (
     <Section
@@ -726,10 +876,16 @@ function DomainRangePanel({ rows }: { rows: readonly DomainRangeRow[] }) {
           </table>
           {rows.length > shown.length && (
             <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
-              Showing the {shown.length} most frequent of {rows.length.toLocaleString()}{" "}
-              signatures.
+              Showing the {shown.length} most frequent of the {rows.length.toLocaleString()}{" "}
+              signatures these queries returned.
             </p>
           )}
+          <CapNote
+            hit={[
+              ["class relationships", EDGE_ROW_LIMIT, truncated.relations],
+              ["literal ranges", EDGE_ROW_LIMIT, truncated.literals],
+            ]}
+          />
         </>
       )}
     </Section>
@@ -746,8 +902,12 @@ function QueryDisclosure() {
       </summary>
       <div className="border-t px-3 py-2">
         <p className="mb-2 text-[11px] text-muted-foreground">
-          Run in order over the live store. Copy any of them into the Query tool to see the rows
-          this panel is drawn from.
+          Run in order over the live store — not inside one transaction (the engine exposes none),
+          so the panel re-runs the whole batch if the store&apos;s revision moves while they are in
+          flight. Each <code>LIMIT</code> is one past the {CLASS_ROW_LIMIT}/{EDGE_ROW_LIMIT} rows
+          the views use: the extra row is never displayed, it is how the panel detects that a query
+          hit its limit. Copy any of them into the Query tool to see the rows this panel is drawn
+          from.
         </p>
         {[CLASS_COUNT_QUERY, SUBCLASS_QUERY, CLASS_RELATION_QUERY, LITERAL_RANGE_QUERY].map(
           (query) => (

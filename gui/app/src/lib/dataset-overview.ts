@@ -4,9 +4,13 @@
 //
 // HONESTY: every model here is derived from the REAL bindings the engine returned for the
 // queries below. Nothing is seeded, sampled or fabricated — an empty store yields empty models
-// and the panel says so. Every cap (top-N classes, per-query row limits) is explicit, carried
-// back in the model (`hidden…` fields) and surfaced in the UI, so a truncated view is never
-// presented as a complete one.
+// and the panel says so. Two DIFFERENT caps apply and they are reported separately, because only
+// one of them can be quantified:
+//   * the per-query row LIMITs — each query asks for one row beyond its cap so the panel can tell
+//     it hit the limit ({@link hitRowLimit}). When it did, an UNKNOWN number of rows were left
+//     unfetched; the UI says the view is capped and does not pretend to a count.
+//   * the top-N chord class cap — applied to the rows that WERE fetched, so its omissions are
+//     exactly countable and are carried back in the `hidden…` fields.
 //
 // React-free + dependency-free (like lib/select-result-graph.ts) so `npm run test:unit` covers
 // the parsing, the packing geometry and the chord angles directly, with no DOM.
@@ -17,25 +21,83 @@ const RDF_PREFIX = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>";
 const RDFS_PREFIX = "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>";
 
 /**
- * Per-query row limits. These bound what the OVERVIEW asks the engine for; a store with more
- * classes / class-pair predicates than this renders the top rows and the panel says how many
- * were left out. Not a benchmark bound — a view bound.
+ * Per-query row limits — how many rows each view USES. Not a benchmark bound, a view bound.
+ *
+ * Each query below asks for `limit + 1` rows: the extra "probe" row is never displayed, it exists
+ * only so {@link hitRowLimit} can tell "exactly this many rows exist" from "there are more rows
+ * than we fetched". A store with more classes / class-pair predicates than the limit renders the
+ * top rows and the panel says the view is CAPPED — how many rows were left unfetched is unknown
+ * from this query alone, and the panel never guesses at it.
  */
 export const CLASS_ROW_LIMIT = 500;
 export const EDGE_ROW_LIMIT = 1000;
+
+/**
+ * Did this result hit its query's row limit — i.e. did the probe row come back? True means the
+ * view built from it OMITS an unknown number of rows; false means the query returned everything
+ * that matched.
+ */
+export function hitRowLimit(results: SparqlResults, limit: number): boolean {
+  return rows(results).length > limit;
+}
+
+/** The outcome of {@link runAtStableRevision}. */
+export interface StableBatch<T> {
+  /** The LAST attempt's result. Never a splice of two attempts. */
+  value: T;
+  /** The store revision held still across the attempt that produced {@link value}. */
+  consistent: boolean;
+  /** Attempts actually made (≥ 1). */
+  attempts: number;
+  /** The caller's `cancelled` predicate fired, so retrying was abandoned. */
+  cancelled: boolean;
+}
+
+/**
+ * Run `batch` — a group of queries that must describe ONE store state — and verify it did, by
+ * reading the store's monotone `revision` immediately before and after. The engine exposes no
+ * transaction, so this is the available substitute: if the revision moved, the whole batch is
+ * DISCARDED and re-run (up to `attempts` times) rather than published as a mix of states, and
+ * the returned `consistent` flag tells the caller whether the last attempt actually held still —
+ * so a mixed result can be surfaced as such, but never silently.
+ *
+ * NOT a transaction, and the caller must not describe it as one: a mutation the `revision` source
+ * has not yet observed when the last read happens is invisible here (the caller's staleness check
+ * is the backstop). Results are never combined across attempts, which is the property that makes
+ * "no mixed view is published without the flag" hold.
+ */
+export async function runAtStableRevision<T>(
+  batch: () => Promise<T>,
+  revision: () => number,
+  options: { attempts: number; cancelled?: () => boolean },
+): Promise<StableBatch<T>> {
+  const limit = Math.max(1, Math.trunc(options.attempts));
+  let startedAt = revision();
+  let value = await batch();
+  let endedAt = revision();
+  let attempts = 1;
+  while (endedAt !== startedAt && attempts < limit) {
+    if (options.cancelled?.()) return { value, consistent: false, attempts, cancelled: true };
+    startedAt = revision();
+    value = await batch();
+    endedAt = revision();
+    attempts += 1;
+  }
+  return { value, consistent: endedAt === startedAt, attempts, cancelled: false };
+}
 
 /** Q1 — the class bubble sizes: distinct instances per `rdf:type` class. */
 export const CLASS_COUNT_QUERY = `SELECT ?class (COUNT(DISTINCT ?s) AS ?instances)
 WHERE { ?s a ?class }
 GROUP BY ?class
 ORDER BY DESC(?instances)
-LIMIT ${CLASS_ROW_LIMIT}`;
+LIMIT ${CLASS_ROW_LIMIT + 1}`;
 
 /** Q2 — the bubble NESTING: asserted `rdfs:subClassOf` axioms between classes. */
 export const SUBCLASS_QUERY = `${RDFS_PREFIX}
 SELECT ?sub ?super
 WHERE { ?sub rdfs:subClassOf ?super }
-LIMIT ${EDGE_ROW_LIMIT}`;
+LIMIT ${EDGE_ROW_LIMIT + 1}`;
 
 /** Q3 — the chord ribbons + the object half of domain–range: class → predicate → class counts. */
 export const CLASS_RELATION_QUERY = `${RDF_PREFIX}
@@ -48,7 +110,7 @@ WHERE {
 }
 GROUP BY ?source ?predicate ?target
 ORDER BY DESC(?statements)
-LIMIT ${EDGE_ROW_LIMIT}`;
+LIMIT ${EDGE_ROW_LIMIT + 1}`;
 
 /** Q4 — the literal half of domain–range: class → predicate → datatype counts. */
 export const LITERAL_RANGE_QUERY = `SELECT ?source ?predicate ?datatype (COUNT(*) AS ?statements)
@@ -60,7 +122,7 @@ WHERE {
 }
 GROUP BY ?source ?predicate ?datatype
 ORDER BY DESC(?statements)
-LIMIT ${EDGE_ROW_LIMIT}`;
+LIMIT ${EDGE_ROW_LIMIT + 1}`;
 
 /**
  * Abbreviate an IRI with a well-known prefix (`foaf:Person`), else shorten to its fragment /
@@ -302,7 +364,24 @@ export interface PackedBubble {
   totalInstances: number;
   x: number;
   y: number;
+  /**
+   * The DRAWN radius. Equals {@link countRadius} unless the bubble had to grow to enclose its
+   * subclasses, in which case it encodes CONTAINMENT rather than any count — see
+   * {@link PackedBubble.container}.
+   */
   r: number;
+  /**
+   * The radius this class's DIRECT instance count encodes on its own — the √-scaled quantitative
+   * mark {@link bubbleRadius} defines. Always meaningful, whatever `r` is.
+   */
+  countRadius: number;
+  /**
+   * True when `r > countRadius` — the circle was enlarged purely to hold this class's subclasses,
+   * so its area does NOT encode its direct instance count. The renderer draws a container
+   * as an outline rather than a filled disc, so filled area only ever means direct instances and
+   * a low-count superclass can never read as the biggest class in the store.
+   */
+  container: boolean;
   /** 0 for a root bubble, 1 for its children, … — drives the fill shade. */
   depth: number;
   otherParents: string[];
@@ -320,9 +399,12 @@ export const BUBBLE_MAX_RADIUS = 56;
 const BUBBLE_PADDING = 6;
 
 /**
- * Leaf radius, scaled by √instances against the largest class so bubble AREA tracks instance
- * count. A class with no direct instances still gets {@link BUBBLE_MIN_RADIUS} so it stays
- * visible and clickable.
+ * The direct-instance mark: a radius scaled by √instances against the largest class, so the
+ * circle's AREA tracks the instance count. A class with no direct instances still gets
+ * {@link BUBBLE_MIN_RADIUS} so it stays visible and clickable.
+ *
+ * This is the radius a bubble is DRAWN at unless it also has to enclose subclasses; see
+ * {@link PackedBubble.container}.
  */
 export function bubbleRadius(instances: number, maxInstances: number): number {
   if (instances <= 0 || maxInstances <= 0) return BUBBLE_MIN_RADIUS;
@@ -381,21 +463,36 @@ function placeAroundOrigin(circles: Placed[], padding: number): void {
 interface SizedNode extends Placed {
   node: HierarchyNode;
   children: SizedNode[];
+  countRadius: number;
 }
 
 function sizeNode(node: HierarchyNode, maxInstances: number): SizedNode {
   const children = node.children.map((c) => sizeNode(c, maxInstances));
-  const own = bubbleRadius(node.instances, maxInstances);
-  if (children.length === 0) return { node, children, x: 0, y: 0, r: own };
+  const countRadius = bubbleRadius(node.instances, maxInstances);
+  if (children.length === 0) return { node, children, x: 0, y: 0, r: countRadius, countRadius };
   placeAroundOrigin(children, BUBBLE_PADDING);
   const enclosing = children.reduce((m, c) => Math.max(m, Math.hypot(c.x, c.y) + c.r), 0);
-  return { node, children, x: 0, y: 0, r: Math.max(own, enclosing + BUBBLE_PADDING) };
+  // A class whose own count already covers its subclasses keeps the count mark as its radius;
+  // otherwise the circle grows to hold them and becomes a CONTAINER (`r > countRadius`), whose
+  // area is a nesting device, not a quantity. Both cases are distinguishable by the caller.
+  return {
+    node,
+    children,
+    x: 0,
+    y: 0,
+    r: Math.max(countRadius, enclosing + BUBBLE_PADDING),
+    countRadius,
+  };
 }
 
 /**
  * Pack a class hierarchy into nested circles: a subclass bubble sits INSIDE its superclass
- * bubble, and every bubble's area tracks its direct instance count. Returns absolute
- * coordinates in a tight `width`×`height` box the caller renders as the SVG viewBox.
+ * bubble. A bubble that does not have to enclose anything is drawn at its {@link bubbleRadius},
+ * so its area is the √-scaled mark of its direct instance count; a bubble that does becomes a
+ * `container` whose radius encodes containment instead — its own count stays available as
+ * {@link PackedBubble.countRadius}, and the renderer must not present container area as a
+ * quantity. Returns absolute coordinates in a tight `width`×`height` box the caller renders as
+ * the SVG viewBox.
  */
 export function packHierarchy(roots: readonly HierarchyNode[]): BubblePack {
   if (roots.length === 0) return { bubbles: [], width: 0, height: 0 };
@@ -428,6 +525,8 @@ export function packHierarchy(roots: readonly HierarchyNode[]): BubblePack {
       x,
       y,
       r: s.r,
+      countRadius: s.countRadius,
+      container: s.r > s.countRadius,
       depth,
       otherParents: s.node.otherParents,
     });
@@ -479,7 +578,13 @@ export interface ChordModel {
   ribbons: ChordRibbon[];
   /** Statements represented by the rendered ribbons. */
   shownStatements: number;
-  /** Classes dropped by the top-N cap, and the statements that went with them. */
+  /**
+   * Classes dropped by the top-N cap, and the statements that went with them — measured over the
+   * `relations` rows this model was BUILT from. If the class-relationship query itself hit
+   * {@link EDGE_ROW_LIMIT} ({@link hitRowLimit}) then rows never reached this function at all, and
+   * those omissions are NOT in these figures: the UI reports that truncation separately, as an
+   * unknown quantity.
+   */
   hiddenClasses: number;
   hiddenStatements: number;
 }

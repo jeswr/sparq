@@ -167,13 +167,20 @@ conclusions are not inserted because the in-tab store represents ground triples 
 
 ## Dataset overview (summary views) — `sq-ixc3.21`
 
-The **Overview tool** answers "what IS this dataset" from the live store, with three views over
-ONE snapshot: a **class-hierarchy bubble** chart (a bubble per class, area proportional to its
-direct instance count, nested by asserted `rdfs:subClassOf`), a **class-relationship chord** (a
-ribbon per ordered class pair, width proportional to the statements between their instances), and
-a **domain–range** table of the predicate signatures the data actually contains. Both SVGs are
-dependency-free (no d3 / cytoscape), and the layout maths — the nested circle packing and the
-chord angles — lives in `lib/dataset-overview.ts` and is unit-tested there.
+The **Overview tool** answers "what IS this dataset" from the live store, with three views over one
+batch of queries: a **class-hierarchy bubble** chart (a bubble per class, nested by asserted
+`rdfs:subClassOf`), a **class-relationship chord** (a ribbon per ordered class pair, width
+proportional to the statements between their instances), and a **domain–range** table of the
+predicate signatures the data actually contains. Both SVGs are dependency-free (no d3 /
+cytoscape), and the layout maths — the nested circle packing and the chord angles — lives in
+`lib/dataset-overview.ts` and is unit-tested there.
+
+On the bubble chart, size encodes a count **only where it can**: a bubble holding no subclasses is
+sized by its direct instance count (area √-scaled against the largest class, above a floor so a
+rare class stays clickable), while a class that holds subclasses is drawn as a dashed
+**container** sized to fit them — its size is a nesting device, not a quantity, so a
+barely-instantiated superclass never reads as the biggest class in the store. Its own direct count
+stays in the tooltip, and the panel states the distinction.
 
 It is built from **four aggregate SPARQL queries** the panel shows you (the "Queries behind this
 overview" disclosure), run in order over the in-tab store: class counts, `rdfs:subClassOf` axioms,
@@ -181,11 +188,23 @@ class→predicate→class counts, and class→predicate→datatype counts. Nothi
 estimated. The counts are of **asserted** statements — no entailment is applied, so a bubble is
 direct `rdf:type` instances and the domain–range rows are what the data contains rather than what
 an `rdfs:domain` / `rdfs:range` axiom declares; the panel says so. Drill-down is real too: a
-bubble runs an instance query, and a ribbon breaks down into its per-predicate counts. Every cap
-(the top-N classes the chord shows, the per-query row limits, the instance limit) is stated in the
-UI, a query that fails is named instead of being silently dropped, and the snapshot does not
-follow the store — an import marks it stale and asks for a Refresh rather than showing figures for
-a store that no longer exists.
+bubble runs an instance query, and a ribbon breaks down into its per-predicate counts.
+
+The four queries are **not one atomic read** — the engine exposes no transaction or snapshot
+handle. What the panel enforces instead is a check on the engine context's monotone store
+**revision** (`storeEpoch`, bumped on hydration, import and every successful UPDATE) across the
+batch: if it moved, the batch is discarded and re-run, and if it keeps moving the views are
+published with an explicit "these views may mix store states" warning rather than silently. That
+is a best-effort detector, not a guarantee — the revision is observed through React state, so a
+bump that commits after the last query is read is caught by the stale notice instead. Caps are
+reported at the precision they are known to: the chord's top-N class cap is applied to rows the
+panel already holds, so its omissions are counted exactly, whereas a query that hits its row limit
+left behind an **unknown** number of rows — each query asks for one row past its cap purely to
+detect that, and the affected view is then marked incomplete without inventing a figure. A query
+that fails is named instead of being silently dropped, and the views do not follow the store: a
+later revision marks them stale and asks for a Refresh rather than showing figures for a store
+that no longer exists — a comparison on the revision, not the quad count, so a same-size
+replacement still reads as stale.
 
 ## Shared TS client
 
