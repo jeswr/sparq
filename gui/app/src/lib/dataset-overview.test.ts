@@ -340,6 +340,22 @@ test("a batch whose store mutates mid-flight is re-run, returning only the settl
   assert.equal(out.cancelled, false);
 });
 
+test("the returned revision is the VALIDATED one, so a post-batch mutation still reads as stale", async () => {
+  // The publication window: the caller awaits this helper and then builds its snapshot, and the
+  // store can move in between. If the caller stamped a fresh read of the live revision, those old
+  // results would carry the NEW revision and look both consistent and current — the exact hole
+  // `StableBatch.revision` closes, so the token must be pinned to the last validation read.
+  let revision = 4;
+  const out = await runAtStableRevision(async () => "rows", () => revision, { attempts: 3 });
+  assert.equal(out.consistent, true);
+  assert.equal(out.revision, 4, "the revision the batch was validated at");
+
+  revision += 1; // a mutation commits after validation but before the caller publishes
+  assert.equal(out.revision, 4, "stamping is unaffected by a later store write");
+  // What the panel does with the stamp: snapshot.storeEpoch !== live epoch => stale notice.
+  assert.notEqual(out.revision, revision, "the published snapshot is stale, not current");
+});
+
 test("a store that never settles is reported INCONSISTENT, not published silently", async () => {
   let revision = 0;
   const batch = async () => {

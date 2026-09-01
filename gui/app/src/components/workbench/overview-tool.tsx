@@ -181,13 +181,22 @@ export function OverviewTool() {
       return { classResults, subClassResults, relationResults, literalResults, failures };
     };
 
+    // The quad count paired with the revision the helper VALIDATES, latched by the revision reader
+    // below so the two always describe the same store state.
+    let observedSize = liveRef.current.size;
+
     try {
       // If the store's revision moves while the four queries run they describe different stores,
       // so the whole batch is discarded and re-run rather than published as a mixed view.
-      const attempt = await runAtStableRevision(runBatch, () => liveRef.current.epoch, {
-        attempts: BATCH_ATTEMPTS,
-        cancelled: () => requestRef.current !== ticket,
-      });
+      const attempt = await runAtStableRevision(
+        runBatch,
+        () => {
+          const live = liveRef.current;
+          observedSize = live.size;
+          return live.epoch;
+        },
+        { attempts: BATCH_ATTEMPTS, cancelled: () => requestRef.current !== ticket },
+      );
       if (requestRef.current !== ticket) return; // superseded by a later Refresh
       const { classResults, subClassResults, relationResults, literalResults, failures } =
         attempt.value;
@@ -227,8 +236,13 @@ export function OverviewTool() {
             literals: literalResults !== null && hitRowLimit(literalResults, EDGE_ROW_LIMIT),
           },
           consistent: attempt.consistent,
-          storeEpoch: liveRef.current.epoch,
-          storeSize: liveRef.current.size,
+          // The revision the batch was VALIDATED at, not a fresh `liveRef` read: resuming from the
+          // await above is a yield point, so an epoch bump can commit between the helper's final
+          // validation read and this publication. Re-reading `liveRef` here would stamp these
+          // already-computed results with that newer revision, leaving them looking consistent AND
+          // current with nothing left to catch them. The validated token makes them read as stale.
+          storeEpoch: attempt.revision,
+          storeSize: observedSize,
         },
       });
     } catch (err) {

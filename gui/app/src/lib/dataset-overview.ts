@@ -45,6 +45,14 @@ export function hitRowLimit(results: SparqlResults, limit: number): boolean {
 export interface StableBatch<T> {
   /** The LAST attempt's result. Never a splice of two attempts. */
   value: T;
+  /**
+   * The revision the FINAL `revision()` read returned — the one {@link StableBatch.consistent} was
+   * decided against. Callers that stamp {@link StableBatch.value} with a revision must use THIS
+   * one and must not re-read the live revision: a mutation landing between that final validation
+   * read and publication would otherwise label the already-computed results with the NEW revision,
+   * so they would read as both consistent and current and no staleness check could ever see them.
+   */
+  revision: number;
   /** The store revision held still across the attempt that produced {@link value}. */
   consistent: boolean;
   /** Attempts actually made (≥ 1). */
@@ -64,7 +72,9 @@ export interface StableBatch<T> {
  * NOT a transaction, and the caller must not describe it as one: a mutation the `revision` source
  * has not yet observed when the last read happens is invisible here (the caller's staleness check
  * is the backstop). Results are never combined across attempts, which is the property that makes
- * "no mixed view is published without the flag" hold.
+ * "no mixed view is published without the flag" hold. For the staleness backstop to actually work
+ * the caller must stamp its published result with the returned {@link StableBatch.revision} — see
+ * that field for why re-reading the live revision after this resolves silently defeats it.
  */
 export async function runAtStableRevision<T>(
   batch: () => Promise<T>,
@@ -77,13 +87,14 @@ export async function runAtStableRevision<T>(
   let endedAt = revision();
   let attempts = 1;
   while (endedAt !== startedAt && attempts < limit) {
-    if (options.cancelled?.()) return { value, consistent: false, attempts, cancelled: true };
+    if (options.cancelled?.())
+      return { value, revision: endedAt, consistent: false, attempts, cancelled: true };
     startedAt = revision();
     value = await batch();
     endedAt = revision();
     attempts += 1;
   }
-  return { value, consistent: endedAt === startedAt, attempts, cancelled: false };
+  return { value, revision: endedAt, consistent: endedAt === startedAt, attempts, cancelled: false };
 }
 
 /** Q1 — the class bubble sizes: distinct instances per `rdf:type` class. */
