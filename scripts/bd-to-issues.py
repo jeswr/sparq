@@ -405,10 +405,11 @@ def fetch_bd_map(repo, issues=None):
     is that lost information: {bd-id: [every issue number in the colliding class(es)]}, which
     apply_migration refuses to resume from for any bd-id the run touches.
 
-    Ambiguity is per trust CLASS on purpose. A marker-only copy of an ALREADY-authenticated issue
-    is not ambiguity — resolve_resume_map already treats it as inert and the labelled issue is
-    canonical — and reporting it would hand any unprivileged user a way to stop `--apply` by
-    pasting a marker into a new issue."""
+    Ambiguity is per trust CLASS on purpose, and an unverified-class collision is suppressed
+    entirely once the same bd-id has a trusted entry. A marker-only copy of an ALREADY-authenticated
+    issue is not ambiguity — resolve_resume_map drops EVERY marker-only copy the moment `trusted`
+    holds the bd-id, so the arbitrary pick among them is never read — and reporting it would hand
+    any unprivileged user a way to stop `--apply` by pasting a marker into one issue, or two."""
     issues = fetch_issues(repo) if issues is None else issues
     trusted, unverified = {}, {}
     by_class = {}
@@ -421,8 +422,11 @@ def fetch_bd_map(repo, issues=None):
         (trusted if is_trusted else unverified)[mm.group(1)] = it["number"]
         by_class.setdefault((mm.group(1), is_trusted), []).append(it["number"])
     ambiguous = {}
-    for (bid, _), nums in by_class.items():
-        if len(nums) > 1:
+    for (bid, is_trusted), nums in by_class.items():
+        # `bid not in trusted` is the DoS guard: N marker-only decoys behind an authenticated issue
+        # are inert for the same reason ONE is, so they must not abort a resume the trusted entry
+        # already resolves. A trusted-class collision is still always reported.
+        if len(nums) > 1 and (is_trusted or bid not in trusted):
             ambiguous.setdefault(bid, []).extend(nums)
     return trusted, unverified, {bid: sorted(nums) for bid, nums in ambiguous.items()}
 
@@ -1212,6 +1216,13 @@ def _self_test():
     # unprivileged user stop --apply by pasting a marker into a new issue.
     _, _, amb = fetch_bd_map(None, [_mk(1, "sq-a"), _mk(9, "sq-a", labeled=False)])
     chk("a marker-only copy shadowing an authenticated issue is not ambiguity", amb, {})
+    # TWO decoys behind the authenticated issue are inert for the same reason one is: they collide
+    # only with each other, and resolve_resume_map never reads the unverified entry for a bd-id the
+    # trusted map already holds. Reporting that collision would let any user who can open two issues
+    # abort --apply for the bead — the exact DoS the per-class rule exists to prevent.
+    _, _, amb = fetch_bd_map(None, [_mk(1, "sq-a"), _mk(8, "sq-a", labeled=False),
+                                    _mk(9, "sq-a", labeled=False)])
+    chk("two marker-only decoys behind an authenticated issue are not ambiguity", amb, {})
     # …but two issues in the SAME class are, labelled or not: which one wins is list order.
     _, _, amb = fetch_bd_map(None, [_mk(8, "sq-a", labeled=False), _mk(9, "sq-a", labeled=False)])
     chk("two marker-only issues on one bd-id are ambiguous", amb, {"sq-a": [8, 9]})
@@ -1254,6 +1265,21 @@ def _self_test():
         except SystemExit as exc:
             chk("--apply refuses when an ambiguous bd-id is an edge endpoint",
                 "SystemExit" if "sq-elsewhere" in str(exc) else f"unnamed: {exc}", "SystemExit")
+        # The decoy shape end-to-end: two marker-only copies of a bd-id this run DOES touch must not
+        # abort it, because the authenticated #1 is canonical and resolve_resume_map never reads the
+        # unverified entry. Resume maps to #1 and creates nothing; before the trusted-entry
+        # suppression in fetch_bd_map this raised SystemExit — a DoS any user with two issues could
+        # trigger. Kept LAST in this block: it rebinds the `fetch_issues` stub.
+        globals()["fetch_issues"] = lambda repo: [_mk(1, "sq-dup"), _mk(8, "sq-dup", labeled=False),
+                                                  _mk(9, "sq-dup", labeled=False)]
+        try:
+            idm, created, rec, edged = apply_migration(
+                "o/r", dup_bead, {}, {}, checkpoint="/nonexistent/bd-map.json", reconcile=False)
+            got = (idm["sq-dup"], created, rec, edged)
+        except SystemExit as exc:   # render the regression as a NAMED fail, not a bare traceback
+            got = f"refused: {exc}"
+        chk("two marker-only decoys do not block resuming the authenticated issue",
+            got, (1, 0, 0, 0))
     finally:
         globals()["fetch_issues"], globals()["_run"] = real_fetch, real_run
 
