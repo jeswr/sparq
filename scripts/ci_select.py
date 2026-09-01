@@ -184,6 +184,57 @@ _DEPLOY_ONLY: list[str] = [
 ]
 
 
+# [OPUS-5] #2536: RELEASE/PUBLISH-PIPELINE surfaces — the workflow files that build,
+# publish and verify a RELEASE. Same allowlist shape and same inertness obligation as
+# the two lists above (a "/"-suffixed entry is a directory prefix, else an exact
+# repo-relative path), kept as a THIRD list for the same reason sq-g25hr kept deploy
+# separate from orchestration: so the audit trail says "release-only" rather than
+# mislabelling a cargo-building release pipeline as "orchestration" (whose list header
+# truthfully claims none of its entries runs cargo — these DO).
+#
+# THE MOTIVATING CASE (#2536): PR #2533 changed ONE COMMENT in a release workflow and
+# paid the entire Rust matrix, because `.github/` is an unconditional full-run trigger
+# and nothing rescued it. Running the engine test suite on that diff validates NOTHING
+# about the file that changed.
+#
+# WHY IT IS INERT for the Rust matrix — a STRONGER proof than the other two lists get.
+# Every entry here is a workflow that CANNOT RUN AT PR TIME AT ALL: none declares a
+# `pull_request:` or `merge_group:` trigger (they run on tag push / release published /
+# workflow_dispatch / push-to-main), and the two `workflow_call:` reusables
+# (build-matrix.yml, release-verify.yml) are `uses:`-called ONLY by release.yml and
+# dist.yml, which are themselves non-PR. A file that never executes on a PR cannot
+# change what any PR-time job does, so it cannot affect a selector-gated Rust lane.
+# `ReleaseOnlyInertnessTests` in scripts/tests/test_ci_select.py MACHINE-CHECKS exactly
+# that property (no PR/merge_group trigger, not `uses:`-reachable from a PR-time
+# workflow, not itself a Rust-CI workflow) — so an entry can never silently become
+# unsound if someone later adds a `pull_request:` trigger to one of these files.
+#
+# WHAT STILL VALIDATES THESE FILES ON A PR: the structural release tests
+# (scripts/tests/test_release_slsa_l3_provenance.py, test_release_container_multiarch.py,
+# test_release_publish_guard.py) parse these YAMLs and run in docs-quality.yml, whose
+# jobs are UNCONDITIONAL — not selector-gated. So this list only ever removes release
+# workflow paths from the *Rust* full set; the checks that actually read them still run.
+#
+# NOT here (deliberately):
+#   * the release-adjacent SCRIPTS under scripts/ (docker-smoke.sh, gen-sbom-vex.sh,
+#     build-dist.sh, verify-release-provenance.sh, …). scripts/ is its own full-run
+#     trigger and each script needs its own inertness audit — and docker-smoke.sh is
+#     in fact invoked by ci.yml's release-container job, so it is genuinely NOT inert.
+#     Only the workflow FILES are rescued here.
+#   * slsa-builder-pin-review.yml — a review lane for the builder pin rather than the
+#     release pipeline itself (and it runs verify-release-provenance.sh).
+#   * container-scan.yml / release-plz's own gates that DO carry a pull_request
+#     trigger: the PR-time test above rejects them automatically.
+_RELEASE_ONLY: list[str] = [
+    ".github/workflows/release.yml",
+    ".github/workflows/release-plz.yml",
+    ".github/workflows/release-verify.yml",
+    ".github/workflows/publish.yml",
+    ".github/workflows/dist.yml",
+    ".github/workflows/build-matrix.yml",
+]
+
+
 def _allowlist_match(path: str, allowlist: list[str]) -> bool:
     """Is `path` on `allowlist`? A "/"-suffixed entry is a directory prefix; else
     an exact repo-relative path."""
@@ -212,6 +263,13 @@ def _deploy_only_match(path: str) -> bool:
     return _allowlist_match(path, _DEPLOY_ONLY)
 
 
+def _release_only_match(path: str) -> bool:
+    """[OPUS-5] #2536: is `path` on the audited release/publish-pipeline allowlist?
+    Same pre-trigger position and same fail-safe posture as the two matchers above —
+    a non-matching `.github/` path still hits the trigger => full."""
+    return _allowlist_match(path, _RELEASE_ONLY)
+
+
 # Change-class labels emitted for the audit trail (design: the gate renders an
 # explicit "skipped-by-class" attribution). PURELY DESCRIPTIVE of the diff — the
 # skip decision itself is still the sound mode/affected math below.
@@ -221,8 +279,10 @@ _CLASS_DOCS = "docs-only"
 # [OPUS-5] sq-g25hr: deployment manifests only (deploy/** + the two deploy lint
 # workflows) — see _DEPLOY_ONLY.
 _CLASS_DEPLOY = "deploy-only"
+# [OPUS-5] #2536: release/publish pipeline workflows only — see _RELEASE_ONLY.
+_CLASS_RELEASE = "release-only"
 # [OPUS-5] sq-g25hr: EVERY changed path is on a proven-inert surface, but they span
-# MORE THAN ONE of {orchestration, docs, deploy}. This used to collapse into
+# MORE THAN ONE of {orchestration, docs, deploy, release}. This used to collapse into
 # `mixed` — the same token an engine+docs diff produces — so the consumers' skip
 # case-arm could not distinguish "provably nothing for the Rust matrix" from
 # "some Rust changed too" and conservatively ran the full suite. That is exactly
@@ -244,6 +304,7 @@ _INERT_CLASSES: tuple[str, ...] = (
     _CLASS_ORCHESTRATION,
     _CLASS_DOCS,
     _CLASS_DEPLOY,
+    _CLASS_RELEASE,
     _CLASS_INERT_MIXED,
 )
 
@@ -283,6 +344,8 @@ def classify_change(changed_paths: list[str]) -> str:
             seen_inert.add(_CLASS_DOCS)
         elif _deploy_only_match(path):
             seen_inert.add(_CLASS_DEPLOY)
+        elif _release_only_match(path):
+            seen_inert.add(_CLASS_RELEASE)
         else:
             seen_other = True
     if seen_other:
@@ -650,6 +713,14 @@ def select(
         # listing it here keeps the selection and the CLASS on one path list.
         if _deploy_only_match(path):
             file_owners.append((path, "DEPLOY-SAFE"))
+            continue
+        # [OPUS-5] #2536: the RELEASE-pipeline carve-out, same position and same
+        # rationale as the two above — it is the only rescue for the release/publish
+        # workflow files from the `.github/` full-run trigger, and it contributes no
+        # crate, so a release-workflow-only diff (the PR #2533 comment-edit class)
+        # selects an empty closure instead of paying the whole Rust matrix.
+        if _release_only_match(path):
+            file_owners.append((path, "RELEASE-SAFE"))
             continue
         trig = _trigger_match(path)
         if trig is not None:

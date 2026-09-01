@@ -171,7 +171,7 @@ jobs:
               # Lists ci_select.py `_INERT_CLASSES` verbatim (pinned by
               # scripts/tests/test_ci_select_wiring.py so the two cannot drift).
               case "${cls}" in
-                docs-only|orchestration-only|deploy-only|inert-mixed) rust=false ;;
+                docs-only|orchestration-only|deploy-only|release-only|inert-mixed) rust=false ;;
                 *) rust=true ;;
               esac
             else
