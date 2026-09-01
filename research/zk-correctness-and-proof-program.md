@@ -144,7 +144,7 @@ for sparq, so it carries no in-repo acceptance test and no longer depends on `sq
 > row in the differential-oracle header (`zk/xpath/tests/differential_oracle/src/lib.nr:32-35`),
 > which holds `noir_XPath` to the spec rather than to sparq. Out of scope for `sq-3x7dl.2`;
 > filed as a separate follow-up.
-
+>
 > **Adjacent, distinct:** `sq-3x7dl.2` is the *round-to-integral* family. Directed rounding
 > for the *arithmetic* ops (`rndu`/`rndd`/`rndz`/`rna` on add/sub/mul/div) is a separate,
 > kernel-level gap tracked as `sq-xs0pa` (#3140); its decision record is
