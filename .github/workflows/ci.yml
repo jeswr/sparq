@@ -2480,6 +2480,13 @@ jobs:
         # GENUINE regression fails the runner's own `assert!(pass >= FLOOR)` on every
         # attempt and still reds the job — the floors are never weakened. `rc` is
         # captured from PIPESTATUS[0] (cargo, not tee).
+        # [OPUS-5] sq-mwnko (the sibling audit): `--lib` for the same reason as the QL
+        # lane — `jsonld_bench` is `#[cfg(feature = "jsonld-suite")]`-gated in
+        # src/lib.rs, so its 17 in-module unit tests (the `json_ld_equal` document
+        # comparator + the canonical-dataset bridges the conformance lanes AND the
+        # bench harness both trust) compile only under this feature and
+        # `--test jsonld_suite` never built them. Pinned by
+        # scripts/tests/test_conformance_lib_lanes.py.
         run: |
           set -uo pipefail
           MAX_ATTEMPTS=2
@@ -2487,7 +2494,7 @@ jobs:
           while true; do
             echo "::group::JSON-LD conformance — attempt $attempt/$MAX_ATTEMPTS"
             rc=0
-            cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite -- --nocapture \
+            cargo test -p sparq-conformance --features jsonld-suite --lib --test jsonld_suite -- --nocapture \
               | tee jsonld-conformance.out
             rc=${PIPESTATUS[0]}
             echo "::endgroup::"
@@ -2653,9 +2660,15 @@ jobs:
         # Drives RAW HTTP at the in-process loopback server (no fetched data). The runner asserts
         # the pinned HTTP_PROTOCOL_FLOOR in-process AND prints a `TOTAL http-protocol <pass> <fail>
         # <div> (floor N)` line re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
+        # [OPUS-5] sq-mwnko (the sibling audit): `--lib` for the same reason as the QL lane in the
+        # inference job — `http_protocol` is `#[cfg(feature = "service-loopback")]`-gated in
+        # src/lib.rs (this lane's `http-protocol` feature forwards to it), so its 10 in-module unit
+        # tests (raw-response parsing, the exact status-code oracle, URL escaping, the outcome
+        # tally) compile only under that feature and `--test http_protocol_suite` never built them.
+        # Pinned by scripts/tests/test_conformance_lib_lanes.py.
         run: |
           set -o pipefail
-          cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite -- --nocapture \
+          cargo test -p sparq-conformance --features http-protocol --lib --test http_protocol_suite -- --nocapture \
             | tee http-protocol-conformance.out
           if ! grep -qE '^TOTAL http-protocol ' http-protocol-conformance.out; then
             echo "::error::SPARQL-Protocol lane produced no 'TOTAL http-protocol' line — infra/build issue, not a conformance change. Re-run the job."
@@ -2681,9 +2694,15 @@ jobs:
         # Drives RAW HTTP at the in-process loopback server (no fetched data). The runner asserts the
         # pinned SD_GSP_FLOOR in-process AND prints a `TOTAL sd-gsp <pass> <fail> <div> (floor N)`
         # line re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
+        # [OPUS-5] sq-mwnko (the sibling audit): `--lib` for the same reason as the QL lane in the
+        # inference job — `sd_gsp` is `#[cfg(feature = "federation-descriptors")]`-gated in
+        # src/lib.rs, so its 9 in-module unit tests (the assert-contains/absent recorders, the GSP
+        # read/write request shapes, the exact status-code oracle) compile only under this feature
+        # and `--test sd_gsp_suite` never built them. Pinned by
+        # scripts/tests/test_conformance_lib_lanes.py.
         run: |
           set -o pipefail
-          cargo test -p sparq-conformance --features federation-descriptors --test sd_gsp_suite -- --nocapture \
+          cargo test -p sparq-conformance --features federation-descriptors --lib --test sd_gsp_suite -- --nocapture \
             | tee sd-gsp-conformance.out
           if ! grep -qE '^TOTAL sd-gsp ' sd-gsp-conformance.out; then
             echo "::error::SD/GSP lane produced no 'TOTAL sd-gsp' line — infra/build issue, not a conformance change. Re-run the job."
@@ -2992,9 +3011,20 @@ jobs:
         # so this step cannot drift from the in-runner const. HONESTLY sparq-EXTENSION
         # ratchets — NOT an OWL 2 QL / entailment-regime conformance claim.
         # `--nocapture` so the ratchet lines reach stdout.
+        # [OPUS-5] sq-mwnko: `--lib` is LOAD-BEARING, not tidiness. The crate's
+        # `ql-experimental`-gated LIB unit tests
+        # (`inference::sparql_entail::ql_tests`, src/inference/sparql_entail.rs)
+        # compile only with this feature ON, and the three `--test` binaries above do
+        # not build them — so they ran in NO CI leg at all. Consequence, measured in
+        # sq-p6yb7: `gate_rejections_classify_into_the_taxonomy` sat RED on
+        # origin/main against a stale `contains("B5")` expectation (sq-pbz04.3.2's
+        # gate-side alternation desugaring had changed the rejection reason to the
+        # UNION/B1 message) and nothing noticed. Kept structural by
+        # scripts/tests/test_conformance_lib_lanes.py, which fails if a gated lib-test
+        # module loses its `--lib` executor.
         run: |
           set -uo pipefail
-          cargo test -p sparq-conformance --features ql-experimental --test ql_entailment_floor --test ql_dllite_suite --test ql_experimental_arm -- --nocapture \
+          cargo test -p sparq-conformance --features ql-experimental --lib --test ql_entailment_floor --test ql_dllite_suite --test ql_experimental_arm -- --nocapture \
             | tee ql-conformance.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::OWL 2 QL lane tests failed (exit $rc)"; exit "$rc"; }
@@ -3042,9 +3072,15 @@ jobs:
         # same test target, same `dl-direct` feature, same EXACT `==` pins (68 profile /
         # 184 direct) asserted in-runner and re-grepped from source — only the codegen
         # optimization level changes, never the assertions or the fail-closed behavior.
+        # [OPUS-5] sq-mwnko (the sibling audit): `--lib` for the same reason as the QL
+        # lane above — `inference::dl_suite` is `#[cfg(feature = "dl-direct")]`-gated in
+        # src/inference/mod.rs, so its 11 in-module unit tests (the tri-state
+        # abstention-is-never-a-pass mappings, the pinned budget, the render-roundtrip
+        # accounting) compile only under this feature and `--test dl_suite` never built
+        # them. Pinned by scripts/tests/test_conformance_lib_lanes.py.
         run: |
           set -uo pipefail
-          cargo test --profile release-fast -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
+          cargo test --profile release-fast -p sparq-conformance --features dl-direct --lib --test dl_suite -- --nocapture \
             | tee dl-direct-conformance.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::OWL 2 Direct-Semantics arm test failed (exit $rc)"; exit "$rc"; }

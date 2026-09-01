@@ -1985,8 +1985,9 @@ mod ql_tests {
         // (Since sq-pbz04.3.2 the gate DESUGARS an alternation into a UCQ (B5 landed), so
         // the single-CQ gate rejects it with the UNION/B1 message — still an honest
         // pending-gate hold, because `ql_graduation_one` runs `as_conjunctive_query`, not
-        // `as_ucq`. The stale `contains("B5")` expectation was fixed by sq-p6yb7 — this lib
-        // test lane is not in any CI leg, so the drift went unnoticed; bead filed.)
+        // `as_ucq`. The stale `contains("B5")` expectation was fixed by sq-p6yb7; the drift
+        // had gone unnoticed because this module ran in NO CI leg, which sq-mwnko closed by
+        // adding `--lib` to ci.yml's QL lane — so a stale expectation here now reds CI.)
         let r = classify(&format!("{PRE} SELECT ?x WHERE {{ ?x (:p|:q) ?y }}"));
         assert_eq!(r.label(), "pending-gate");
         assert!(r.reason().contains("B1 UCQ input"), "reason: {}", r.reason());

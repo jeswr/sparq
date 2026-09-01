@@ -1279,6 +1279,17 @@ jobs:
         run: python3 scripts/check-sticky-failure-exits.py --self-test
       - name: "Reject exception handlers that erase collected failures (#3770) — GATING"
         run: python3 scripts/check-sticky-failure-exits.py
+      # [OPUS-5] sq-mwnko (#3015): `cargo test -p <crate> --features F --test T` builds
+      # ONLY the integration binary T — the crate's own `#[cfg(test)]` modules under
+      # `src/` live in the LIB test binary, which that command never builds. So a unit
+      # test behind an opt-in feature can be dead in CI while looking perfectly wired,
+      # and a stale assertion in it sits RED on main unnoticed (measured: sq-p6yb7's
+      # `ql_tests::gate_rejections_classify_into_the_taxonomy`). This cross-file
+      # inspection pins that every feature-gated lib-test module in sparq-conformance
+      # has a ci.yml `--lib` executor whose activated feature set covers it. It reads
+      # only ci.yml + the crate's Cargo.toml/src — stdlib, no PyYAML, no cargo.
+      - name: "Feature-gated conformance lib tests have a CI executor (sq-mwnko) — GATING"
+        run: python3 scripts/tests/test_conformance_lib_lanes.py
 
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE
