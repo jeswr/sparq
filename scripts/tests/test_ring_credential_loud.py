@@ -42,8 +42,8 @@
 # assumed.
 #
 # Run:  python3 scripts/tests/test_ring_credential_loud.py
-# Requires `jq` on PATH — see _require_jq() below for why that is a hard precondition
-# rather than a skip.
+# Requires `jq` on PATH — see _require_script_tools() below for why that is a hard
+# precondition rather than a skip.
 
 from __future__ import annotations
 
@@ -96,19 +96,48 @@ UNDECLARED_LANE = "some undeclared lane that must gate"
 # also let a CI runner image that dropped `jq` silently stop pinning the guards.
 _UNSTUBBED_SCRIPT_TOOLS = ("jq",)
 
+# Per-tool follow-on paragraph, appended to the sweep's generic message for whichever
+# tools are actually missing (#5342). The sweep alone says "a script takes an early-exit
+# branch"; a reader still has to find WHICH branch and why it looks like the reverted
+# guard. Spelling out that mechanism is what turns minutes of re-investigation into a
+# one-line read, so it lives here rather than in a second precondition — a separate
+# `_require_jq()` after the sweep could never fire, since `jq` is in the sweep's own
+# list and the sweep raises first.
+_TOOL_DIAGNOSIS = {
+    "jq": (
+        "On jq specifically: fast-fix-ring.yml:ring reads the resolved PR's live state "
+        "through `jq -r`/`jq -e`, so with jq absent every `$(jq ...)` expands to the "
+        "empty string, the head_repo comparison mismatches, and the body exits 0 at its "
+        "fork / cross-repo collision branch BEFORE the credential guard is reached — "
+        "which is indistinguishable, from the outside, from the reverted guard this "
+        "file exists to pin."
+    ),
+}
+
 
 def _require_script_tools() -> None:
+    """The suite's ONE precondition, run at every `_Harness` construction.
+
+    Deliberately a FAILURE and not a `skipUnless`: this file's whole thesis is that a
+    control which goes quiet because a dependency is absent is indistinguishable from
+    one that works, and skipping would be that same shape one level up. It only ever
+    fires locally — the ring workflow calls `jq` with no install step of its own, so a
+    CI runner without `jq` would already have broken the workflow this file pins.
+    """
     missing = [t for t in _UNSTUBBED_SCRIPT_TOOLS if shutil.which(t) is None]
-    if missing:
-        raise AssertionError(
-            f"{', '.join(missing)}: not on PATH. This suite EXECUTES the real `run:` "
-            f"scripts of the ring jobs, and they invoke these commands directly (only "
-            f"`gh` is stubbed). Without them a script takes an early-exit branch and the "
-            f"credential assertions would be measuring this environment rather than the "
-            f"workflow — so this is NOT a #4966 regression. Install them (e.g. "
-            f"`apt-get install -y jq`) and re-run. CI runs this suite on `ubuntu-latest` "
-            f"(.github/workflows/docs-quality.yml), whose image preinstalls them."
-        )
+    if not missing:
+        return
+    generic = (
+        f"{', '.join(missing)}: not on PATH. This suite EXECUTES the real `run:` "
+        f"scripts of the ring jobs, and they invoke these commands directly (only "
+        f"`gh` is stubbed). Without them a script takes an early-exit branch and the "
+        f"credential assertions would be measuring this environment rather than the "
+        f"workflow — so this is NOT a #4966 regression. Install them (e.g. "
+        f"`apt-get install -y jq`) and re-run. CI runs this suite on `ubuntu-latest` "
+        f"(.github/workflows/docs-quality.yml), whose image preinstalls them."
+    )
+    diagnoses = [_TOOL_DIAGNOSIS[t] for t in missing if t in _TOOL_DIAGNOSIS]
+    raise AssertionError(" ".join([generic, *diagnoses]))
 
 
 def _ring_step(workflow_file: str, job_id: str) -> dict:
@@ -119,46 +148,14 @@ def _ring_step(workflow_file: str, job_id: str) -> dict:
     return steps[0]
 
 
-def _require_jq() -> None:
-    """Fail on the REAL cause when `jq` is missing (sparq-org/sparq#5342).
-
-    `fast-fix-ring.yml:ring` parses its PR state with `jq -r`/`jq -e`. With no `jq` on
-    PATH every one of those parses yields the empty string, the script takes its
-    `head repo is not ...` cross-repo branch and exits 0 — and the two execution tests
-    below then report that as "the control is a no-op in BOTH states" and "~130 rings
-    vanished into green runs", accusing the production ring of the exact regression
-    this file exists to prevent. Naming the missing tool costs a reader minutes
-    instead of an investigation.
-
-    Applied at harness construction, so it covers EVERY extracted body rather than
-    only the one that happens to call `jq` today.
-
-    Deliberately a FAILURE and not a `skipUnless`: this file's whole thesis is that a
-    control which goes quiet because a dependency is absent is indistinguishable from
-    one that works. Skipping would be that same shape, one level up. It only ever
-    fires locally — the ring workflow calls `jq` with no install step of its own, so a
-    CI runner without `jq` would already have broken the workflow this file pins.
-    """
-    if shutil.which("jq") is None:
-        raise AssertionError(
-            "jq is required to exercise the ring step body, and it is not on PATH. "
-            "The fast-fix-ring body parses its PR state with jq; without it the "
-            "eligibility checks all compare against the empty string, the script "
-            "skips to its cross-repo branch and exits 0, and the assertions in this "
-            "file would blame the workflow for a missing local tool. Install jq and "
-            "re-run."
-        )
-
-
 class _Harness:
     """Executes an extracted `run:` script with a stubbed `gh` on PATH."""
 
     def __init__(self, tmp: Path):
-        # Both preconditions run FIRST, before any assertion can misattribute a missing
-        # tool to the workflow: the declared-tool sweep (#5853), then the jq-specific
-        # diagnosis (#5342) that spells out the exact misreading a jq-less box produces.
+        # First, before any assertion can misattribute a missing tool to the workflow.
+        # The sweep (#5853) carries the per-tool diagnosis (#5342) in its own message,
+        # so this stays a single authoritative precondition.
         _require_script_tools()
-        _require_jq()
         self.tmp = tmp
         self.dispatch_log = tmp / "dispatch.log"
         self.summary = tmp / "step-summary.md"
@@ -380,7 +377,9 @@ class TestTheNewFailureCannotGate(unittest.TestCase):
 class TestTheJqPreconditionBlamesTheTool(unittest.TestCase):
     """#5342. A missing `jq` must be reported as a missing `jq`, never as the #4966
     regression — the two execution tests above cannot tell the difference, because a
-    jq-less body and a reverted guard both exit 0 without dispatching."""
+    jq-less body and a reverted guard both exit 0 without dispatching. Naming the tool
+    is the sweep's job (#5853, pinned below); what this class pins is the extra
+    jq-SPECIFIC mechanism, which the generic sweep message does NOT contain."""
 
     def test_harness_refuses_to_run_without_jq(self):
         with tempfile.TemporaryDirectory() as d:
@@ -395,6 +394,21 @@ class TestTheJqPreconditionBlamesTheTool(unittest.TestCase):
 
         message = str(caught.exception)
         self.assertIn("jq", message, "the failure must name the missing tool")
+        # Mutation-sensitive: these phrases exist ONLY in _TOOL_DIAGNOSIS["jq"], so
+        # dropping that entry or the line that appends it to the raised message REDs
+        # this test. A generic "jq: not on PATH" sweep alone does not satisfy them.
+        for mechanism in ("expands to the empty string", "cross-repo collision branch"):
+            self.assertIn(
+                mechanism, message,
+                f"the failure lost the jq-specific mechanism ({mechanism!r}); without "
+                f"it a reader still has to re-derive WHY a jq-less box looks like the "
+                f"reverted guard",
+            )
+        self.assertTrue(
+            _TOOL_DIAGNOSIS.get("jq"),
+            "the jq diagnosis was emptied rather than kept — the assertions above "
+            "would then pass vacuously on an empty appended string",
+        )
         for accusation in ("no-op", "vanished into green runs"):
             self.assertNotIn(
                 accusation, message,
@@ -404,11 +418,10 @@ class TestTheJqPreconditionBlamesTheTool(unittest.TestCase):
 
 
 class TestTheHarnessRefusesToMeasureTheEnvironment(unittest.TestCase):
-    """#5853. The harness's OWN precondition, pinned. Delete BOTH precondition calls
-    (`_require_script_tools()` and `_require_jq()`, kept together since #5342) from
-    `_Harness.__init__` and this class REDs — without them a box missing `jq` silently
-    rewrites the two credential-state tests into a false accusation against
-    fast-fix-ring.yml."""
+    """#5853. The harness's OWN precondition, pinned. Delete the
+    `_require_script_tools()` call from `_Harness.__init__` and this class REDs — without
+    it a box missing `jq` silently rewrites the two credential-state tests into a false
+    accusation against fast-fix-ring.yml."""
 
     def test_a_missing_script_tool_fails_by_name(self):
         with mock.patch.object(shutil, "which", return_value=None):
