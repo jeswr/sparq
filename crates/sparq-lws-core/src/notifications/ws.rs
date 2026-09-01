@@ -151,6 +151,13 @@ impl<S: Store> NotifyState<S> {
     /// The denial is deliberately NOT conditioned on whether the topic EXISTS — no ACL read touches
     /// the topic's own bytes — so this adds no existence oracle (the same property the LDP routes
     /// preserve).
+    // [OPUS-5] `Response` is a large type (128 bytes — at clippy's `large-error-threshold`), so
+    // carrying it in the `Err` arm trips `clippy::result_large_err` under the workspace's
+    // `-D warnings` gate. Returning the ready-made denial is the point: both call sites `return` it
+    // verbatim, so the handler cannot accidentally turn a deny into an allow. Boxing would only move
+    // the allocation and force a deref at each `return`. Same allow, same reason, as the
+    // `Result<_, Response>` handler helpers in `sparq-server::solid_authz`.
+    #[allow(clippy::result_large_err)]
     async fn authorize_topic_read(
         &self,
         topic: &str,
