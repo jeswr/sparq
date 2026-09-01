@@ -148,8 +148,9 @@
 //!   per-graph write permission check under the SAME wall-clock/row budget the read
 //!   tools enforce ([SONNET-4.6] sq-yhlf0). A budget trip during the engine apply leaves
 //!   the partially-applied prefix in place — `update_in_place` is non-atomic on error by
-//!   documented contract — where a trip during the authorization check (which runs
-//!   first, in full) leaves the pod untouched.
+//!   documented contract, so the tool is NOT request-atomic — where a trip during the
+//!   authorization check (which precedes every mutation) leaves the pod untouched. A
+//!   check that trips reports the budget error rather than an allow/deny verdict.
 //! - Time-windowed conditional grants fail closed unless [`SolidServerConfig::now`]
 //!   supplies a request clock.
 
@@ -1245,7 +1246,13 @@ impl SolidMcpServer {
     }
 
     /// `update`: session-checked SPARQL Update (`PodStore::update_as_with_budget` —
-    /// every touched graph needs this session's write permission, fail-closed, atomic).
+    /// every touched graph needs this session's write permission, fail-closed).
+    ///
+    /// NOT request-atomic: the store applies through `sparq_engine::update_in_place`,
+    /// which is non-atomic on error by documented contract, so a `;`-separated request
+    /// that fails on operation *K* (a budget trip, or any other apply error) leaves
+    /// operations `1..K` applied. Only the authorization check precedes every mutation:
+    /// a deny — or a budget trip inside the check — leaves the pod untouched.
     ///
     /// [SONNET-4.6] sq-yhlf0 — it runs under the SAME per-call [budget](Self::budget) the
     /// read tools enforce, satisfying mcp-solid §9.4 ("every tool-issued evaluation MUST

@@ -1272,13 +1272,24 @@ impl PodStore {
     /// WHERE fails with the engine's `"query budget exceeded (timeout|max-rows|…)"`
     /// instead of running the caller to a stall or an OOM.
     ///
-    /// Authorization is unchanged and still runs to completion BEFORE anything is
-    /// applied: a denied update is denied whatever the budget. The two failure modes are
-    /// distinct and both leave the store untouched when they fire during the check —
-    /// a deny reports `"update denied: …"`, a budget trip reports `"query budget
-    /// exceeded (…)"`. A budget trip during the ENGINE apply has the same partial-apply
-    /// contract as any other mid-update error ([`sparq_engine::update_in_place`] is
-    /// non-atomic on error by documented contract).
+    /// Authorization still runs BEFORE anything is applied, so no budget trip can let an
+    /// unauthorized write through — but the check is NOT budget-independent. Only the
+    /// static refusals decided ahead of the bounded work (a write to the default graph)
+    /// are reached whatever the budget; the `GRAPH ?var` binding SELECT that resolves an
+    /// update's variable graph targets runs INSIDE the check, and a trip there aborts
+    /// with `"query budget exceeded (…)"` before any allow/deny verdict is computed. So
+    /// an update that a complete check would have denied can instead surface as a budget
+    /// error, not `"update denied: …"`. Either way nothing is applied: a trip inside the
+    /// check leaves the store untouched.
+    ///
+    /// A budget trip during the ENGINE apply has the same partial-apply contract as any
+    /// other mid-update error — [`sparq_engine::update_in_place`] is non-atomic on error
+    /// by documented contract, so a multi-operation request that trips on operation *K*
+    /// keeps operations `1..K`. This path stays on the non-atomic primitive rather than
+    /// [`sparq_engine::update_in_place_atomic_with_budget`]: that variant commits by
+    /// replacing the store with a fork which, by its own documented contract, carries no
+    /// WAL/redo-journal, so switching would change a directory-backed pod's durability
+    /// behaviour — a separate decision, not one this budget threading makes.
     ///
     /// The non-WHERE operations (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`) do not
     /// consult the budget — they are bounded by their operand size — so passing
