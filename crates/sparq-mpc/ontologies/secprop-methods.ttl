@@ -32,10 +32,12 @@
 #   2. EVERY assertion names the assumption(s) it rests on, and EVERY protocol rests on
 #      `secx:HonestMajority`. Nothing in this crate is dishonest-majority secure, so a
 #      preference requiring dishonest-majority security excludes ALL of it.
-#   3. `secx:SemiHonest` is present IFF the protocol's guarantee holds only against a
-#      PASSIVE adversary. It is deliberately ABSENT from `mpc:auth-comparison-v1`, the
-#      one protocol that is malicious-with-abort — a blanket "semi-honest" label over the
-#      whole crate would be inaccurate now that the IT-MAC comparison has landed.
+#   3. `secx:SemiHonest` is present whenever the protocol's guarantee is not established
+#      against an ACTIVELY deviating party. It is therefore present on EVERY subject
+#      here, including the IT-MAC `mpc:auth-comparison-v1` — see block (iv). The
+#      annotation FAILS CLOSED: a protocol leaves the semi-honest set only once the
+#      known active-deviation holes are closed AND an end-to-end adversarial witness
+#      shows the pipeline aborting, never on the strength of its `auth_`/MAC surface.
 #   4. COMPLETENESS. Every protocol in `secprop::ANNOTATED_METHODS` has a block. The
 #      crypto-free paths (`join::DisclosedKeyJoin`, `bounded_path`) are deliberately NOT
 #      subjects: they run no MPC and open every operand, so they have no adversary model
@@ -128,33 +130,54 @@ mpc:comparison-v1
 
 # ════════════════════════════════════════════════════════════════════════════
 # (iv) mpc:auth-comparison-v1 — crate::auth_compare::malicious_greater_than.
-# THE ONE PROTOCOL THAT IS NOT SEMI-HONEST. Honest-majority MALICIOUS-WITH-ABORT: every
-# multiplication carries an information-theoretic MAC under a session-global secret-shared
-# key `α` no party knows (`MacSession::auth_mul`, the Chida-et-al. shape — the value
-# reduce and the MAC reduce are SEPARATE re-sharings over DIFFERENT input shares, so a
-# party that injects δ into one cannot land both on a consistent `(z+δ, α·(z+δ))` pair),
-# and the verdict is MAC-checked BEFORE it is opened.
+# THE IT-MAC COMPARISON CHAIN — the crate's strongest construction, and still annotated
+# `secx:SemiHonest`. Every multiplication carries an information-theoretic MAC under a
+# session-global secret-shared key `α` no party knows (`MacSession::auth_mul`, the
+# Chida-et-al. shape: the value reduce and the MAC reduce are SEPARATE re-sharings, so an
+# in-reduce δ on the FIRST operand cannot land a consistent `(z+δ, α·(z+δ))` pair), and
+# the verdict is MAC-checked BEFORE it is opened. That genuinely closes the in-reduce and
+# tampered-open cases at the minimal `n = 2t+1` (tests
+# `mac_carry_soundness_distinguished_by_in_reduce_tamper` /
+# `tamper_in_the_verdict_is_caught`, crates/sparq-mpc/src/auth_compare.rs).
 #
-# `secx:SemiHonest` is therefore ABSENT here — deliberately, and this is the annotation
-# that makes the graph non-trivial: a preference requiring malicious security excludes
-# (i)–(iii) and (v) but ADMITS this one. Note it is still honest-majority-only: it does
-# NOT enter the dishonest-majority SPDZ regime, so `secx:HonestMajority` remains, and a
-# preference requiring dishonest-majority security still excludes it.
+# WHY IT IS STILL ANNOTATED SemiHonest (the fail-closed direction of rule 3). `auth_mul`
+# carries the output MAC as `[α·z] = reduce([α·x]·[y])` — the FIRST operand's MAC times
+# the SECOND operand's VALUE — so a value tamper on the SECOND operand is ADOPTED: the
+# gate recomputes a MAC consistent with the tampered value and the batched `mac_check`
+# passes on a WRONG product (pinned by the witness test
+# `mac_check_adopts_a_second_operand_tamper_but_catches_a_first_operand_one`,
+# crates/sparq-mpc/src/auth_disclose.rs). That is a property of the PRIMITIVE, not of one
+# call site, and every gate of this chain (`auth_and` / `auth_and_not`) is an `auth_mul`
+# — so an actively deviating party has a known route to a wrong verdict WITHOUT an abort.
+# A construction with a known unclosed active-deviation hole must not be admitted by a
+# preference requiring malicious security, so this subject rests on `secx:SemiHonest`
+# alongside (i)–(iii) and (v) and the malicious-security query excludes ALL of the crate.
+#
+# WHAT WOULD LIFT IT. Not a re-reading of the `auth_` surface: (a) the second-operand
+# adoption closed in `MacSession` (multiplication-gate verification — e.g. sacrificing /
+# triple-checking — rather than more output MAC-checks, since `mac_check` only ever
+# covers values it OPENS), AND (b) an end-to-end adversarial witness on the REAL
+# `malicious_greater_than` pipeline showing an ABORT for the tamper classes concerned,
+# red before the fix and green after. Only then may `secx:SemiHonest` be removed here.
+#
+# It is honest-majority-only regardless: it does NOT enter the dishonest-majority SPDZ
+# regime, so `secx:HonestMajority` remains and that preference also excludes it.
 #
 # Assurance stays `Claimed` + `ExternalSignOffPending`: an unaudited implementation of a
-# published protocol is a claim, not a proof (sq-qhy4).
+# published protocol is a claim, not a proof (sq-qhy4) — and an assurance axis cannot
+# repair a wrong ADVERSARY-MODEL classification, which is what rule 3 governs.
 # ════════════════════════════════════════════════════════════════════════════
 
 mpc:auth-comparison-v1
-  rdfs:comment "IT-MAC authenticated comparison: honest-majority malicious-with-abort (crate::auth_compare)." ;
+  rdfs:comment "IT-MAC authenticated comparison (crate::auth_compare): MAC-checked verdict, but auth_mul adopts a second-operand tamper, so NOT malicious-secure." ;
   secx:hasProperty
     [ secx:property secx:Hiding ; secx:level secx:PerfectHiding ;
       secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
-      secx:assumption secx:HonestMajority ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
       secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] ,
     [ secx:property secx:Soundness ; secx:level secx:Sound ;
       secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
-      secx:assumption secx:HonestMajority ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
       secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] ,
     [ secx:property secx:ZeroKnowledgeType ; secx:level secx:NotZK ;
       secx:assurance secx:Proven ; secx:auditStatus secx:InternallyReviewed ;

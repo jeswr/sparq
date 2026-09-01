@@ -300,13 +300,14 @@ use sparq_mpc::secprop::{
 
 let annotations = parse_annotations();
 
-// A preference requiring security against an ACTIVELY deviating party excludes every
-// semi-honest protocol — but NOT the IT-MAC comparison, which is genuinely
-// honest-majority malicious-with-abort. A blanket "all of sparq-mpc is semi-honest"
-// label would be an inaccurate under-claim in exactly that one place.
+// A preference requiring security against an ACTIVELY deviating party excludes EVERY
+// protocol here — including the IT-MAC `auth_compare` chain, the crate's strongest
+// construction: `auth_mul` ADOPTS a value tamper on its second operand, and every gate
+// of that chain is an `auth_mul`, so a wrong verdict without an abort is a known route.
+// The annotation fails closed rather than reading an `auth_`/MAC surface as malicious.
 let excluded = excluded_by_requiring_malicious_security(&annotations);
 assert!(excluded.iter().any(|m| m.as_str() == MPC_EQUALITY_JOIN_V1));
-assert!(!excluded.iter().any(|m| m.as_str() == MPC_AUTH_COMPARISON_V1));
+assert!(excluded.iter().any(|m| m.as_str() == MPC_AUTH_COMPARISON_V1));
 
 // Nothing here is dishonest-majority secure, so that requirement excludes ALL of it.
 assert_eq!(excluded_by_requiring_dishonest_majority(&annotations).len(), annotations.len());

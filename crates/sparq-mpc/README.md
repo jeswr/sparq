@@ -11,9 +11,9 @@ deferred malicious-security seams live in [`PLAN.md`](./PLAN.md).
 
 > **Internal crate — not published** to crates.io (`publish = false`).
 > **No security guarantee — research-grade and externally unaudited (`sq-qhy4`).**
-> Honest-majority, and **semi-honest** on every operator except the IT-MAC
-> comparison (`auth_compare`, honest-majority malicious-with-abort) — NOT
-> dishonest-majority anywhere. <!-- privacy-claims-allow: NEGATIVE/scoped — denies dishonest-majority security everywhere and malicious security outside auth_compare; sq-qhy4 pending -->
+> Honest-majority, **semi-honest only** — NOT malicious security (not even the
+> IT-MAC `auth_compare` chain: `auth_mul` adopts a second-operand tamper), NOT
+> dishonest-majority. <!-- privacy-claims-allow: NEGATIVE/scoped — denies malicious + dishonest-majority security; sq-qhy4 pending -->
 > The ZK verifier it composes with is not externally signed off (`sq-qhy4`
 > pending), and the collaborative ZK proof is a stub (`NotYetImplemented`). Nothing
 > here is a production security claim.

@@ -102,7 +102,10 @@ pub const MPC_EQUALITY_JOIN_V1: &str = "https://sparq.dev/ns/mpc#equality-join-v
 /// [`crate::compare`]).
 pub const MPC_COMPARISON_V1: &str = "https://sparq.dev/ns/mpc#comparison-v1";
 /// `mpc:auth-comparison-v1` — the IT-MAC authenticated comparison
-/// ([`crate::auth_compare`]). The one protocol here that is **not** semi-honest.
+/// ([`crate::auth_compare`]). The crate's strongest construction, and still annotated
+/// semi-honest: [`crate::shamir::MacSession::auth_mul`] ADOPTS a value tamper on its
+/// second operand, and every gate of the chain is an `auth_mul`, so an actively
+/// deviating party has a known route to a wrong verdict without an abort.
 pub const MPC_AUTH_COMPARISON_V1: &str = "https://sparq.dev/ns/mpc#auth-comparison-v1";
 /// `mpc:tamper-evident-disclose-v1` — the EXPERIMENTAL tamper-evident threshold
 /// disclosure ([`crate::auth_disclose`]). MAC layer notwithstanding, it is annotated
@@ -246,8 +249,11 @@ impl MethodAnnotations {
 /// guarantees rest on `secx:SemiHonest`, i.e. hold only against a PASSIVE adversary.
 ///
 /// This is §5c's headline: the honest encoding of "semi-honest only" in the property
-/// data. Today this returns every annotated protocol EXCEPT
-/// [`MPC_AUTH_COMPARISON_V1`], the honest-majority malicious-with-abort comparison.
+/// data. Today it returns **every** annotated protocol — including
+/// [`MPC_AUTH_COMPARISON_V1`], whose IT-MAC chain is the crate's strongest construction
+/// but still inherits `auth_mul`'s adopted second-operand tamper. The annotation fails
+/// closed: a protocol leaves this set only once the active-deviation hole is closed and
+/// an end-to-end adversarial witness shows the real pipeline aborting.
 pub fn excluded_by_requiring_malicious_security(
     annotations: &BTreeMap<String, MethodAnnotations>,
 ) -> Vec<String> {

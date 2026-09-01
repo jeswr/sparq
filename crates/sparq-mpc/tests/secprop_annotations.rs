@@ -105,12 +105,32 @@ fn only_the_negative_not_zk_rows_are_proven() {
     }
 }
 
-/// **The §5c headline.** A preference requiring malicious security must mechanically
-/// exclude every semi-honest protocol — and must NOT exclude the one protocol that
-/// genuinely delivers honest-majority malicious-with-abort. A blanket "the whole crate
-/// is semi-honest" annotation would pass a weaker test; this one pins both directions.
+/// **The §5c headline, stated FAIL-CLOSED.** A preference requiring malicious security
+/// must mechanically exclude every protocol whose guarantee is not established against
+/// an actively deviating party — which today is the ENTIRE crate.
+///
+/// That includes [`MPC_AUTH_COMPARISON_V1`], the IT-MAC comparison, even though it is
+/// the crate's strongest construction. `MacSession::auth_mul` carries the output MAC as
+/// `[α·z] = reduce([α·x]·[y])`, so a value tamper on its SECOND operand is *adopted* —
+/// the gate recomputes a MAC consistent with the tampered value and the batched
+/// `mac_check` passes on a wrong product (pinned by the witness
+/// `mac_check_adopts_a_second_operand_tamper_but_catches_a_first_operand_one` in
+/// `crate::auth_disclose`). That is a property of the primitive, not of one call site,
+/// and every gate of `malicious_greater_than` is an `auth_mul` — so an active deviation
+/// has a known route to a wrong verdict WITHOUT an abort. Admitting it under a
+/// malicious-security preference would hand a caller exactly the protocol its preference
+/// exists to refuse; `secx:Claimed` + `secx:ExternalSignOffPending` records how much we
+/// know about a claim and cannot repair a wrong adversary-model classification.
+///
+/// **Do not relax this test to re-admit the comparison on the strength of its
+/// `auth_`/MAC surface.** It may be admitted only once (a) the second-operand adoption
+/// is closed in `MacSession` (multiplication-gate verification — `mac_check` only ever
+/// covers values it OPENS, so more output checks cannot close it), and (b) an
+/// END-TO-END adversarial witness on the real `malicious_greater_than` pipeline shows an
+/// ABORT for the relevant tamper classes — a test that is RED before the fix and green
+/// after. Metadata-only admission is what this test exists to prevent.
 #[test]
-fn requiring_malicious_security_excludes_the_semi_honest_set_but_admits_the_it_mac_comparison() {
+fn requiring_malicious_security_excludes_the_whole_crate_including_the_it_mac_comparison() {
     let annotations = parse_annotations();
     let excluded: BTreeSet<String> = excluded_by_requiring_malicious_security(&annotations)
         .into_iter()
@@ -129,10 +149,17 @@ fn requiring_malicious_security_excludes_the_semi_honest_set_but_admits_the_it_m
     }
 
     assert!(
-        !excluded.contains(MPC_AUTH_COMPARISON_V1),
-        "{MPC_AUTH_COMPARISON_V1} is honest-majority malicious-with-abort (IT-MAC per \
-         multiplication, MAC-checked verdict), so requiring malicious security must NOT \
-         exclude it — annotating it secx:SemiHonest would be an inaccurate under-claim"
+        excluded.contains(MPC_AUTH_COMPARISON_V1),
+        "{MPC_AUTH_COMPARISON_V1} inherits auth_mul's ADOPTED second-operand tamper on \
+         every gate of its chain, so a preference requiring malicious security must \
+         exclude it too — admitting it would over-claim the adversary model"
+    );
+
+    let all: BTreeSet<String> = ANNOTATED_METHODS.iter().map(|m| (*m).to_owned()).collect();
+    assert_eq!(
+        excluded, all,
+        "no sparq-mpc protocol is established against an actively deviating party today, \
+         so requiring malicious security must exclude all of them"
     );
 }
 
