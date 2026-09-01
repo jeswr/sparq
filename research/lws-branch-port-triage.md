@@ -121,7 +121,7 @@ source is allow-listed (`deny.toml:216`).
 
 **The residual this verification found.** The pin-rationale comment block is an
 accumulated log inherited from upstream, and its *first* line asserted a pin that is no
-longer the pin: it opened `Pinned to \`b146253\`` while the dependency line 160 lines
+longer the pin: it opened "Pinned to `b146253`" while the dependency line 160 lines
 later declares `89c8962`. A reader — including a supply-chain auditor, who is exactly
 who that block is written for — reaches the stale sentence first and can reasonably
 conclude the crate is pinned to `b146253`. This bead rewrites that opening as an
