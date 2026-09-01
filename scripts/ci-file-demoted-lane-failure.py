@@ -470,6 +470,57 @@ def self_test() -> int:
         assert find_open_issue("absent") is None
     finally:
         globals()["gh"] = real_gh
+    # [SONNET-4.6] review round 4 of #5860: ensure_label() is a GUARD and was pinned by
+    # nothing. Both the dedupe listing and `issue create --label` are keyed on
+    # ISSUE_LABEL, so if the upsert stops running, the create fails against a repo that
+    # has never carried the label and the lane's failure is filed NOWHERE. Drive the
+    # REAL filing path with a recording stub and pin the three properties that make it
+    # a guard: it runs, it runs BEFORE the create, and it upserts idempotently.
+    calls: list[tuple[str, ...]] = []
+
+    def recording_gh(*argv):
+        calls.append(argv)
+        if argv[0] == "api":
+            return "[]"                      # no open issue => take the CREATE path
+        return "https://example.invalid/issues/1"
+
+    globals()["gh"] = recording_gh
+    try:
+        file_github_issue(b1, "fuzz-randomized", A, "PANIC: known crasher\n")
+    finally:
+        globals()["gh"] = real_gh
+    verbs = [tuple(c[:2]) for c in calls]
+    assert ("label", "create") in verbs, (
+        "ensure_label() must run on the filing path — without the upsert, "
+        f"`issue create --label {ISSUE_LABEL}` fails on a repo that has never seen "
+        f"the label and the lane failure is filed nowhere: {verbs}")
+    assert ("issue", "create") in verbs, verbs
+    assert verbs.index(("label", "create")) < verbs.index(("issue", "create")), (
+        f"the label must be upserted BEFORE the issue that carries it: {verbs}")
+    upsert = calls[verbs.index(("label", "create"))]
+    assert ISSUE_LABEL in upsert and "--force" in upsert, (
+        "the upsert must name ISSUE_LABEL and be idempotent — without --force the "
+        f"second filing run errors on the already-existing label: {upsert}")
+    # ...and it must be FAIL-SOFT: a repo where labelling is refused must still get the
+    # issue. (Letting the CalledProcessError escape ensure_label makes this go red.)
+    calls.clear()
+
+    def label_refused_gh(*argv):
+        calls.append(argv)
+        if argv[0] == "label":
+            raise subprocess.CalledProcessError(1, "gh", stderr="label: forbidden")
+        if argv[0] == "api":
+            return "[]"
+        return "https://example.invalid/issues/2"
+
+    globals()["gh"] = label_refused_gh
+    try:
+        file_github_issue(b1, "fuzz-randomized", A, "PANIC: known crasher\n")
+    finally:
+        globals()["gh"] = real_gh
+    assert ("issue", "create") in [tuple(c[:2]) for c in calls], (
+        "a REFUSED label upsert must not sink the filing run — the lane failure still "
+        f"has to reach an issue: {calls}")
     log("self-test OK")
     return 0
 
