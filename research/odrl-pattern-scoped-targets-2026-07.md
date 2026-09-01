@@ -172,6 +172,12 @@ authority) is a different problem (blind writes into masked regions, delete-visi
 interactions) and is explicitly deferred (§7, follow-up bead). A scoped dataset is a
 read-only replica; writes to the underlying store invalidate it (§6).
 
+That deferred design is now recorded in
+[`pattern-scoped-update-enforcement-2026-09.md`](pattern-scoped-update-enforcement-2026-09.md)
+(spike `sq-fznmq`, design-only): it answers the three questions above, and records a
+measured PRECONDITION — an update's WHERE clause is today an unauthorized read channel at
+GRAPH granularity, which must be closed before any pattern-scoped write can mean anything.
+
 ## 3. Prototype (merged with this record, feature `pattern-scope`, OFF by default)
 
 `crates/sparq-solid/src/pattern_scope.rs`, `#[cfg(feature = "pattern-scope")]`:
@@ -262,3 +268,4 @@ of the evaluator entirely.
    `pattern-scope` + `odrl-bridge`.
 2. `sq-nc3c6` — `feat(solid)`: scoped-replica cache + write-path invalidation (§6).
 3. `sq-fznmq` — `spike(solid)`: pattern-scoped UPDATE enforcement design (§2.4).
+   **Done** — [`pattern-scoped-update-enforcement-2026-09.md`](pattern-scoped-update-enforcement-2026-09.md).
