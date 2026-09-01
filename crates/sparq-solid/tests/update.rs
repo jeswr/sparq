@@ -567,12 +567,21 @@ fn positive_control_fully_authorized_multi_op_body_applies() {
 
 /// A budget with an already-elapsed deadline: any evaluation under it trips at its first
 /// cooperative check site, so these tests carry no wall-clock race.
+///
+/// NATIVE ONLY, with the two tests that use it: `QueryBudget::deadline` is itself
+/// `#[cfg(not(target_arch = "wasm32"))]` (`std::time::Instant` panics on
+/// `wasm32-unknown-unknown`), so naming the field would not compile under the wasm lane's
+/// `cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets`. This
+/// mirrors how `sparq-engine` gates its own deadline tests. The budgeted write path keeps
+/// full wasm compile coverage through the portable `max_rows` tests below.
+#[cfg(not(target_arch = "wasm32"))]
 fn expired_budget() -> sparq_engine::QueryBudget {
     let mut b = sparq_engine::QueryBudget::unlimited();
     b.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
     b
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn budgeted_update_bounds_the_engine_apply() {
     // STATIC (authorized) template target ⇒ the check resolves without evaluating
@@ -591,6 +600,7 @@ fn budgeted_update_bounds_the_engine_apply() {
     assert_eq!(store_snapshot(&s), before, "nothing applied");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn budgeted_update_bounds_the_authorization_check() {
     // A `GRAPH ?var` template slot makes the CHECK evaluate the WHERE (the binding
