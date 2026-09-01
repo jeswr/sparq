@@ -911,6 +911,205 @@ class DeployOnlyInertnessTests(unittest.TestCase):
         )
 
 
+try:  # PyYAML is an OPTIONAL accelerator for the #5237 content proof (see ci_select.py).
+    import yaml as _yaml
+except ModuleNotFoundError:  # pragma: no cover - CI installs it; a dev box may not have it
+    _yaml = None
+
+
+_BASE_WORKFLOW = """\
+# A header comment.
+# Second header line.
+name: ci
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: run tests
+        run: |
+          set -euo pipefail
+          # a comment INSIDE the block scalar (part of the string)
+          cargo test --all
+"""
+
+
+class YamlInertEditTests(unittest.TestCase):
+    """[OPUS-5] #5237: the CONTENT-based inert-edit proof for `.github/**/*.yml`.
+
+    The proof is a CONJUNCTION and each half is load-bearing, so both halves get a
+    test that fails if the other half is deleted:
+      * structural (parsed YAML equal) alone would accept a comment edited INSIDE a
+        `run: |` block scalar — an unsound skip;
+      * textual (no non-comment line differs) alone would accept a YAML-1.1
+        renormalisation (`yes` -> `true`) that PyYAML parses equal but GitHub
+        Actions does not — also an unsound skip.
+    Everything else is fail-closed: unreadable side, unparseable side, PyYAML
+    missing, trailing-comment edit => declined => the path keeps its full-run
+    trigger.
+    """
+
+    # ---- eligibility -------------------------------------------------------
+    def test_candidate_is_github_yaml_only(self):
+        for path in (".github/workflows/ci.yml", ".github/workflows/bench.yaml",
+                     ".github/dependabot.yml", ".github/feature-matrix.d/zk.yml"):
+            self.assertTrue(cs._yaml_inert_candidate(path), path)
+        for path in ("crates/core/ci.yml", "ci/path-ownership.toml",
+                     ".github/advisory-registry.json", ".github/workflows/ci.yml.bak",
+                     "scripts/ci_select.py", "deploy/k8s/app.yml"):
+            self.assertFalse(cs._yaml_inert_candidate(path), path)
+
+    # ---- the textual half (stdlib; runs with or without PyYAML) ------------
+    def test_code_lines_drop_blank_and_whole_line_comments_only(self):
+        text = "# lead\n\n  # indented comment\nname: ci\n  runs-on: x  # trailing\n"
+        self.assertEqual(cs._yaml_code_lines(text), ["name: ci", "  runs-on: x  # trailing"])
+
+    def test_code_lines_preserve_indentation(self):
+        # Re-indenting a mapping key is a CODE change, not a comment change.
+        self.assertNotEqual(cs._yaml_code_lines("a: 1\n"), cs._yaml_code_lines("  a: 1\n"))
+
+    def test_declines_when_a_non_comment_line_differs(self):
+        head = _BASE_WORKFLOW.replace("cargo test --all", "cargo test --all --release")
+        proven, detail = cs.yaml_edit_is_inert(_BASE_WORKFLOW, head)
+        self.assertFalse(proven)
+        self.assertIn("non-comment line", detail)
+
+    def test_declines_a_trailing_comment_edit(self):
+        # Conservative by design: soundly stripping a trailing `#` needs quote-aware
+        # tokenising, so a trailing-comment edit keeps the full-run trigger.
+        head = _BASE_WORKFLOW.replace("name: ci\n", "name: ci  # the CI workflow\n")
+        self.assertFalse(cs.yaml_edit_is_inert(_BASE_WORKFLOW, head)[0])
+
+    def test_declines_when_either_side_is_unreadable(self):
+        for base, head in ((None, _BASE_WORKFLOW), (_BASE_WORKFLOW, None), (None, None)):
+            proven, detail = cs.yaml_edit_is_inert(base, head)
+            self.assertFalse(proven)
+            self.assertIn("unreadable", detail)
+
+    @unittest.skipIf(_yaml is not None, "only meaningful when PyYAML is absent")
+    def test_declines_when_pyyaml_is_absent(self):
+        # The P1 promise: on a stdlib-only interpreter the carve-out is simply OFF.
+        proven, detail = cs.yaml_edit_is_inert(_BASE_WORKFLOW, _BASE_WORKFLOW)
+        self.assertFalse(proven)
+        self.assertIn("PyYAML unavailable", detail)
+
+    # ---- the structural half (needs PyYAML) --------------------------------
+    @unittest.skipUnless(_yaml is not None, "needs PyYAML (installed in the CI job)")
+    def test_proves_a_whole_line_comment_edit_inert(self):
+        head = _BASE_WORKFLOW.replace(
+            "# Second header line.\n",
+            "# Second header line, REWORDED.\n# and a brand new comment line.\n\n",
+        )
+        proven, detail = cs.yaml_edit_is_inert(_BASE_WORKFLOW, head)
+        self.assertTrue(proven, detail)
+
+    @unittest.skipUnless(_yaml is not None, "needs PyYAML (installed in the CI job)")
+    def test_declines_a_comment_edited_inside_a_block_scalar(self):
+        # THE case a line-based comment stripper gets wrong: this "comment" is part
+        # of the `run:` STRING, so the shell script the runner executes changed.
+        head = _BASE_WORKFLOW.replace(
+            "# a comment INSIDE the block scalar (part of the string)",
+            "# a REWORDED comment inside the block scalar",
+        )
+        # The textual half cannot see it (it looks like a whole-line comment)...
+        self.assertEqual(cs._yaml_code_lines(_BASE_WORKFLOW), cs._yaml_code_lines(head))
+        # ...so the STRUCTURAL half is what must decline.
+        proven, detail = cs.yaml_edit_is_inert(_BASE_WORKFLOW, head)
+        self.assertFalse(proven, "a comment inside a block scalar is CONTENT, not a comment")
+        self.assertIn("parsed YAML differs", detail)
+
+    @unittest.skipUnless(_yaml is not None, "needs PyYAML (installed in the CI job)")
+    def test_declines_a_yaml_1_1_renormalisation_that_parses_equal(self):
+        # PyYAML resolves `yes` to True (YAML 1.1); GitHub Actions does not. The
+        # two documents parse EQUAL, so only the TEXTUAL half can decline this.
+        base = _BASE_WORKFLOW.replace("runs-on: ubuntu-latest\n",
+                                      "runs-on: ubuntu-latest\n    continue-on-error: yes\n")
+        head = base.replace("continue-on-error: yes", "continue-on-error: true")
+        self.assertEqual(_yaml.safe_load(base), _yaml.safe_load(head),
+                         "fixture no longer exercises the structural blind spot")
+        proven, detail = cs.yaml_edit_is_inert(base, head)
+        self.assertFalse(proven, "a scalar rewrite that only PyYAML normalises must decline")
+        self.assertIn("non-comment line", detail)
+
+    @unittest.skipUnless(_yaml is not None, "needs PyYAML (installed in the CI job)")
+    def test_declines_an_unparseable_side(self):
+        proven, detail = cs.yaml_edit_is_inert("a: 1\n", "a: 1\n  b: [\n")
+        self.assertFalse(proven)
+        self.assertTrue("parse failed" in detail or "non-comment line" in detail, detail)
+
+
+class YamlInertSelectionWiringTests(unittest.TestCase):
+    """[OPUS-5] #5237: how a proved-inert `.github` YAML edit flows through
+    `select()`. Hermetic — the content proof is INJECTED, so these run with or
+    without PyYAML and pin the wiring, not the parser."""
+
+    CI_YML = ".github/workflows/ci.yml"
+
+    def setUp(self):
+        self.meta = _synthetic_meta()
+        self.asked: list[str] = []
+
+    def _check(self, verdict):
+        def check(path):
+            self.asked.append(path)
+            return verdict
+        return check
+
+    def test_proved_inert_workflow_contributes_no_crate(self):
+        sel = cs.select([self.CI_YML], self.meta,
+                        yaml_inert_check=self._check((True, "comment-only")))
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertIn((self.CI_YML, "YAML-INERT"), sel.file_owners)
+
+    def test_declined_proof_still_forces_full_and_says_why(self):
+        sel = cs.select([self.CI_YML], self.meta,
+                        yaml_inert_check=self._check((False, "a non-comment line differs")))
+        self.assertEqual(sel.mode, "full")
+        self.assertEqual(sel.affected, ALL_MEMBERS)
+        self.assertIn("content proof declined", sel.reason)
+        self.assertIn("a non-comment line differs", sel.reason)
+
+    def test_absent_check_preserves_the_pre_5237_full_run(self):
+        # The default (and every hermetic --changed-file run): carve-out OFF.
+        sel = cs.select([self.CI_YML], self.meta)
+        self.assertEqual(sel.mode, "full")
+        self.assertEqual(sel.affected, ALL_MEMBERS)
+
+    def test_an_inert_workflow_never_rescues_a_real_crate_change(self):
+        sel = cs.select([self.CI_YML, "crates/app/src/lib.rs"], self.meta,
+                        yaml_inert_check=self._check((True, "comment-only")))
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app"])
+
+    def test_a_second_non_yaml_trigger_still_forces_full(self):
+        # The carve-out rescues ONLY the eligible YAML path; Cargo.lock still triggers.
+        sel = cs.select([self.CI_YML, "Cargo.lock"], self.meta,
+                        yaml_inert_check=self._check((True, "comment-only")))
+        self.assertEqual(sel.mode, "full")
+
+    def test_the_proof_is_consulted_only_for_eligible_paths(self):
+        cs.select([self.CI_YML, "crates/app/src/lib.rs", "docs/x.md"], self.meta,
+                  yaml_inert_check=self._check((True, "comment-only")))
+        self.assertEqual(self.asked, [self.CI_YML],
+                         "the content proof must never be consulted for a non-.github-YAML path")
+
+    def test_orchestration_allowlist_still_wins_without_consulting_the_proof(self):
+        # A path-based proof is cheaper and already sufficient; it must short-circuit.
+        sel = cs.select([".github/workflows/pr-title.yml"], self.meta,
+                        yaml_inert_check=self._check((False, "declined")))
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(self.asked, [])
+
+    def test_summary_names_the_content_proved_files(self):
+        sel = cs.select([self.CI_YML], self.meta,
+                        yaml_inert_check=self._check((True, "comment-only")))
+        summary = cs.render_summary(sel)
+        self.assertIn("content-proof (#5237)", summary)
+        self.assertIn(self.CI_YML, summary)
+
+
 class RealMetadataShapeTests(unittest.TestCase):
     """(i) Pinned against the REAL workspace metadata: core is root-like, geo is
     leaf-like, and closure(geo) is a subset of closure(core) (structural: geo

@@ -128,6 +128,27 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      # [OPUS-5] #5237: PyYAML powers the STRUCTURAL half of the content-based
+      # inert-edit proof (a comment-only `.github/**/*.yml` edit contributes no
+      # crate — scripts/ci_select.py `yaml_edit_is_inert`). It is an OPTIONAL
+      # ACCELERATOR, never a dependency: without it the proof declines and every
+      # `.github/**` path keeps its §4.1 full-run trigger, i.e. exactly the
+      # pre-#5237 behaviour. Both steps are therefore `continue-on-error: true` —
+      # this pre-job is unconditional and gate-critical (a hard failure here reds
+      # the required ci-summary gate for the whole head SHA), and NOTHING about
+      # soundness depends on the install succeeding. Worst case: a slower CI run.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        continue-on-error: true
+        with:
+          python-version: "3.12"
+      - name: Ensure PyYAML for the content-based inert-edit proof (best-effort)
+        continue-on-error: true
+        # HASH-pinned (Scorecard PinnedDependenciesID): the same full-closure PyYAML
+        # 6.0.2 requirements file the docs-quality / feature-matrix / formal-verification
+        # lanes install, so --require-hashes verifies each artifact's sha256 before use.
+        # PyYAML has no runtime deps, so that file is the complete dependency closure.
+        # Skipped entirely when the runner image already provides the module.
+        run: python3 -c 'import yaml' || pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Compute the affected crate closure (scripts/ci_select.py)
         id: sel
         env:

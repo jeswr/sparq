@@ -51,6 +51,14 @@
 # Stdlib only (design §7 P1): no third-party deps, no compile step. Runs under
 # the CI setup-python 3.12; `tomllib` (stdlib >= 3.11) is imported lazily and
 # only when a map file is actually present.
+#
+# [OPUS-5] #5237 — ONE QUALIFIED EXCEPTION TO P1, and it is opt-IN, never
+# required: the CONTENT-based inert-edit proof for `.github/**/*.yml`
+# (`yaml_edit_is_inert` below) lazily imports PyYAML. If PyYAML is absent the
+# proof DECLINES and the path keeps its §4.1 full-run trigger, so the selector's
+# behaviour on a stdlib-only interpreter is EXACTLY the pre-#5237 behaviour.
+# P1 is therefore intact for correctness: PyYAML can only ever make the selector
+# skip MORE, never make it fail or run less than it must.
 
 from __future__ import annotations
 
@@ -210,6 +218,152 @@ def _deploy_only_match(path: str) -> bool:
     Same pre-trigger position and same fail-safe posture as
     _orchestration_safe_match — a non-matching path still hits the trigger => full."""
     return _allowlist_match(path, _DEPLOY_ONLY)
+
+
+# --- CONTENT-based inert-edit proof for `.github/**/*.yml` (#5237) -----------
+# [OPUS-5] The two allowlists above are PATH-based proofs: they rescue a `.github/`
+# path from the §4.1 trigger because that FILE is never read by the Rust matrix.
+# That can never cover the Rust-CI workflows themselves (ci.yml, bench.yml,
+# fuzz.yml, feature-matrix.yml, ci-select.yml, ...) — those files genuinely do
+# define the Rust lanes. But a COMMENT-ONLY edit to one of them changes nothing
+# the Rust matrix can observe, and MORE THAN HALF the non-blank lines under
+# `.github/workflows/` are whole-line comments, so such an edit paying the full
+# Rust matrix is pure waste.
+#
+# THE PROOF (both halves are required; each closes a hole the other leaves open):
+#
+#   (1) STRUCTURAL — `yaml.safe_load(base) == yaml.safe_load(head)`. Comments
+#       outside a block scalar vanish under parsing, so a pure-comment edit
+#       compares equal. A comment INSIDE a `run: |` block stays part of the
+#       scalar STRING, so it compares UNEQUAL and correctly declines — which is
+#       exactly the case a naive line-based comment stripper would get wrong.
+#
+#   (2) TEXTUAL — the two files' CODE LINES (every line that is neither blank nor
+#       a whole-line `#` comment, compared verbatim including indentation) must be
+#       identical. This closes the hole in (1): PyYAML resolves scalars per YAML
+#       1.1 while GitHub Actions does not, so (all four verified against PyYAML
+#       6.0.2) `yes` vs `true`, the sexagesimal `1:30` vs `90`, an anchor/alias
+#       pair vs its expansion, and a duplicate key vs its last-wins survivor each
+#       parse EQUAL while the workflow the runner executes differs. Requiring that
+#       no non-comment character moved makes every such rewrite decline.
+#
+# Together: the diff touched only whole-line comments/blank lines AND those lines
+# were not part of any block scalar. Under that conjunction the job graph the
+# runner builds and the text of every `run:` script are bit-identical, so no Rust
+# lane can behave differently => the edit contributes no crate (design §2: a skip
+# is a PROOF of non-interference).
+#
+# FAIL-CLOSED at every step (design §4.3) — each returns "not proven" and the path
+# falls through to its normal full-run trigger: PyYAML unavailable; either blob
+# unreadable (added/deleted/renamed file, unresolvable merge-base, git failure);
+# either side unparseable; parsed docs differ; any code line differs. A
+# TRAILING comment edit (`foo: bar  # note`) also declines, deliberately: stripping
+# a trailing `#` soundly needs quote/escape-aware tokenising, and the repo's
+# comment blocks are whole-line, so the conservative rule keeps the payoff without
+# the hand-rolled parsing risk.
+_YAML_INERT_PREFIX = ".github/"
+_YAML_INERT_SUFFIXES = (".yml", ".yaml")
+
+
+def _yaml_inert_candidate(path: str) -> bool:
+    """Is `path` ELIGIBLE for the content proof? Deliberately narrow: only YAML
+    under `.github/` — the workflows, the feature-matrix fragments, dependabot.
+    Eligibility is NOT a verdict; the proof below still has to succeed.
+
+    Scope note: the checks that read a workflow's TEXT (including its comments) —
+    the workflow-inspection suites under scripts/tests/ — run in docs-quality.yml,
+    which is NOT one of this selector's four callers (ci/feature-matrix/fuzz/bench),
+    so they run on such a PR either way. What this carve-out can skip is the RUST
+    matrix, whose behaviour is fixed by the parsed job graph plus the verbatim
+    `run:` text that the two halves of the proof both pin.
+    """
+    return path.startswith(_YAML_INERT_PREFIX) and path.endswith(_YAML_INERT_SUFFIXES)
+
+
+def _yaml_code_lines(text: str) -> list[str]:
+    """The verbatim lines of `text` that are neither blank nor a whole-line `#`
+    comment. Indentation is preserved (re-indenting a mapping key is a code
+    change, not a comment change), and a trailing `# ...` is NOT stripped — see
+    the block comment above for why that conservatism is deliberate."""
+    out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        out.append(line)
+    return out
+
+
+def yaml_edit_is_inert(base_text: str | None, head_text: str | None) -> tuple[bool, str]:
+    """[OPUS-5] #5237: is the base->head edit of one `.github/**/*.yml` file a
+    COMMENT-ONLY (hence Rust-matrix-inert) edit?
+
+    Returns (proven, detail); `detail` is a human-readable audit-trail phrase for
+    the step summary in BOTH directions — a declined proof explains why the full
+    matrix ran. Never raises: every failure mode is a decline (fail-closed).
+    """
+    if base_text is None or head_text is None:
+        return (False, "one side unreadable (added/deleted/renamed file, or git failure)")
+    # (2) textual first: it is cheap, stdlib-only, and is what usually declines.
+    if _yaml_code_lines(base_text) != _yaml_code_lines(head_text):
+        return (False, "a non-comment line differs")
+    try:
+        import yaml  # optional accelerator; absent => decline (see the module header)
+    except ModuleNotFoundError:
+        return (False, "PyYAML unavailable, so the structural half of the proof cannot run")
+    try:
+        base_doc = yaml.safe_load(base_text)
+        head_doc = yaml.safe_load(head_text)
+    except Exception as exc:  # any parse/scanner error => decline
+        return (False, f"YAML parse failed ({type(exc).__name__})")
+    if base_doc != head_doc:
+        return (False, "parsed YAML differs (e.g. a comment inside a `run: |` block scalar)")
+    return (True, "parsed YAML identical and every non-comment line unchanged")
+
+
+def _git_blob_text(rev: str, path: str, repo_root: str | None) -> str | None:
+    """`git show <rev>:<path>` as text, or None on ANY failure (missing at that
+    rev, non-UTF-8, git error, timeout) — the caller treats None as a decline."""
+    try:
+        out = subprocess.run(
+            ["git", "show", f"{rev}:{path}"],
+            cwd=repo_root, check=True, capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, UnicodeDecodeError):
+        return None
+    return out.stdout
+
+
+def _merge_base(base: str, head: str, repo_root: str | None) -> str | None:
+    """The three-dot diff's left-hand revision, or None if unresolvable. The
+    changed-path list comes from `git diff base...head`, i.e. merge-base(base,head)
+    vs head; the content proof MUST compare the same pair, or it would be proving
+    something about a revision the diff never mentioned."""
+    try:
+        out = subprocess.run(
+            ["git", "merge-base", base, head],
+            cwd=repo_root, check=True, capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    return out.stdout.strip() or None
+
+
+def make_yaml_inert_check(base_rev: str, head_rev: str, repo_root: str | None):
+    """Build the (path) -> (proven, detail) callback `select()` consumes, reading
+    both blob versions out of git. Memoised per path (a diff never repeats a path,
+    but the cache also keeps the two `git show` calls to at most one pair)."""
+    cache: dict[str, tuple[bool, str]] = {}
+
+    def check(path: str) -> tuple[bool, str]:
+        if path not in cache:
+            cache[path] = yaml_edit_is_inert(
+                _git_blob_text(base_rev, path, repo_root),
+                _git_blob_text(head_rev, path, repo_root),
+            )
+        return cache[path]
+
+    return check
 
 
 # Change-class labels emitted for the audit trail (design: the gate renders an
@@ -608,8 +762,13 @@ def select(
     changed_paths: list[str],
     meta: dict,
     map_entries: list[dict] | None = None,
+    yaml_inert_check=None,
 ) -> Selection:
     """Pure core: changed paths + cargo metadata + optional map -> Selection.
+
+    `yaml_inert_check` is the optional (path) -> (proven, detail) content proof of
+    #5237 (see `make_yaml_inert_check`). None (the default, and the hermetic-input
+    case) simply disables the carve-out, which is the pre-#5237 behaviour.
 
     Raises SelectorError on any malformed input; main() traps that to mode=full.
     """
@@ -651,9 +810,23 @@ def select(
         if _deploy_only_match(path):
             file_owners.append((path, "DEPLOY-SAFE"))
             continue
+        # [OPUS-5] #5237: the CONTENT-based inert-edit proof — the only rescue from
+        # the `.github/` trigger for a file the Rust matrix DOES read. Same position
+        # (before _trigger_match) and same posture as the two path-based carve-outs:
+        # a declined proof falls straight through to the trigger below, carrying its
+        # reason into the full-run reason so the audit trail says why.
+        decline: str | None = None
+        if yaml_inert_check is not None and _yaml_inert_candidate(path):
+            proven, detail = yaml_inert_check(path)
+            if proven:
+                file_owners.append((path, "YAML-INERT"))
+                continue
+            decline = detail
         trig = _trigger_match(path)
         if trig is not None:
             file_owners.append((path, "FULL-TRIGGER"))
+            if decline is not None:
+                trig = f"{trig}; {path}: content proof declined — {decline}"
             return full(trig)
 
         # [FABLE-5] sq-m4bxc: additional-readers (monotone union). Extra reader
@@ -860,6 +1033,17 @@ def render_summary(sel: Selection) -> str:
             "runs; the closure below is what enforcement WOULD run (flip: sq-fmx4u.5)."
         )
         lines.append("")
+    # [OPUS-5] #5237: name the content-proved files explicitly. A skip whose only
+    # justification is "we parsed both versions and they matched" must be legible
+    # in the run that performed it, not just in this file's comments.
+    inert_yaml = [p for p, owner in sel.file_owners if owner == "YAML-INERT"]
+    if inert_yaml:
+        lines.append(
+            f"> content-proof (#5237): {len(inert_yaml)} `.github` YAML file(s) changed "
+            "COMMENT-ONLY — parsed YAML identical AND every non-comment line unchanged — "
+            "so they contribute no crate: " + ", ".join(f"`{p}`" for p in inert_yaml)
+        )
+        lines.append("")
     if sel.file_owners:
         lines += ["| Changed file | Owning crate |", "|---|---|"]
         for path, owner in sel.file_owners:
@@ -1017,8 +1201,19 @@ def main(argv: list[str] | None = None) -> int:
                 map_file = candidate if os.path.exists(candidate) else None
             map_entries = load_ownership_map(map_file)
 
+            # [OPUS-5] #5237: enable the content-based inert-edit proof only on the
+            # real diff path, where a (merge-base, head) revision pair actually
+            # exists to read the two blob versions from. Hermetic --changed-file
+            # runs, or a run whose merge-base will not resolve, get None => the
+            # carve-out is simply off (pre-#5237 behaviour), never an error.
+            yaml_inert_check = None
+            if not args.changed_file:
+                merge_base = _merge_base(args.base, args.head, repo_root)
+                if merge_base is not None:
+                    yaml_inert_check = make_yaml_inert_check(merge_base, args.head, repo_root)
+
             meta = load_metadata(args.metadata_file, repo_root)
-            sel = select(changed, meta, map_entries)
+            sel = select(changed, meta, map_entries, yaml_inert_check=yaml_inert_check)
 
     except Exception as exc:  # fail-closed boundary: ANY error => full run (design §4.3)
         # We could not even build the member list; emit full with an empty
