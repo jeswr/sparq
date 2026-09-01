@@ -1723,18 +1723,18 @@ class TestDraftTierWiring(unittest.TestCase):
         conc = self.bench.get("concurrency", {})
         self.assertEqual(
             str(conc.get("group")),
-            "bench-${{ github.ref }}-${{ (github.event_name == 'schedule' || "
-            "github.event_name == 'workflow_dispatch' || "
+            "bench-${{ github.ref }}-${{ "
+            "(!contains(fromJSON('[\"pull_request\",\"push\"]'), github.event_name) || "
             "(github.event_name == 'pull_request' && "
             "contains(fromJSON('[\"labeled\",\"unlabeled\"]'), "
             "github.event.action))) && github.run_id || 'shared' }}",
-            "nightly/manual benchmark runs need isolated per-run groups while "
-            "ordinary PR and main-push runs share their ref's coalescing group",
+            "only explicitly allowlisted PR/main-push runs may share a ref group; "
+            "label-only and every unknown/future event need isolated per-run groups",
         )
         self.assertEqual(str(conc.get("cancel-in-progress")),
-                         "${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}",
-                         "bench must coalesce superseded PR/main-push runs while "
-                         "preserving every nightly/manual full run")
+                         "${{ contains(fromJSON('[\"pull_request\",\"push\"]'), github.event_name) }}",
+                         "only explicitly allowlisted PR/main-push runs may cancel; "
+                         "nightly/manual and every unknown/future event must not")
 
     def test_js_has_per_pr_concurrency(self):
         conc = self.js.get("concurrency", {})
