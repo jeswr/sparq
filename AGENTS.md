@@ -586,6 +586,23 @@ disappears. Fail the sweep outright on a duplicate id or an anchor that no longe
   verdict**. On every preserve route the verdict may only survive if the head has **not moved
   since it was granted** (a commit, a force-push, or a revoked label after the grant forfeits
   it): never restore a verdict onto a tree it was not given for.
+  **The stale-run reap (#6068) — the same workflow's second job.** The mirror-image waste:
+  when the queue times an entry out and rebuilds the entries behind it, the deleted group
+  refs' `merge_group` workflow **runs** are not cancelled, so they keep holding resident
+  `ci-summary` waiters and runner capacity while the *replacement* group queues behind them.
+  `reap-stale-runs` enumerates the queue's current group head SHAs from a **provably
+  complete** GraphQL read (`pageInfo{hasNextPage}` must be present and false) and cancels
+  only an unfinished `merge_group` run whose head is not among them, past a **registration
+  grace**, and only after re-reading **both the run and the queue** immediately before the
+  write. `mergeQueue: null`, a truncated page, an unreadable run and an unparseable head are
+  all **refusals that keep the run and red the pass** — an unreadable queue is never read as
+  an empty one, because that single misreading would cancel every running group at once. A
+  PR-head or `push` run is never touched (the **event** and the **ref** are both checked, and
+  a `push` run really can carry a `gh-readonly-queue/…` head_branch, so neither check is
+  redundant). It is idempotent by construction — no marker, no cursor — so a duplicate
+  doorbell ring finds the runs it already cancelled `completed` and skips them; and it holds
+  `actions: write` with **no** `pull-requests: write`, so it can stop abandoned work but
+  cannot comment, label or dequeue.
   **Runbook — resolving and clearing a dead ref by hand.** The group head is the queue entry's
   `headCommit{oid}` (`MergeQueueEntry` has **no** `headOid` field), or read the live refs with
   `git ls-remote origin 'refs/heads/gh-readonly-queue/main/*'`; the trailing sha in a ref name

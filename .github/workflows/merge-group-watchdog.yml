@@ -51,15 +51,31 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Emit decisions without dequeuing/re-enqueuing anything"
+        description: "Emit decisions without dequeuing/re-enqueuing or cancelling anything"
         type: boolean
         default: false
 
-# Least privilege, mirroring rearm-sweeper.yml (the sibling queue sweeper):
+# ── [OPUS-5] #6068 — THE SECOND JOB: reaping runs the queue no longer needs ──────
+# The `watch` job below fixes a group ref that never got its runs. The `reap` job fixes
+# the mirror-image waste: runs that outlive the group ref that justified them. Reported
+# live on #6068 — when a queue entry timed out and GitHub rebuilt the entries behind it,
+# the deleted group refs' `merge_group` runs stayed queued/in-progress, holding resident
+# `ci-summary` waiters and runner capacity while the REPLACEMENT group queued behind
+# them. Cancelling them by hand released the train; this job does it automatically.
+#
+# The two jobs are deliberately SEPARATE rather than two steps of one job, because they
+# need different tokens: the reap needs `actions: write` (cancel a run) and must NOT
+# hold `pull-requests: write`, while `watch` needs the opposite. Job-level permissions
+# below give each exactly its own. They share this workflow only so that the doorbell's
+# single `workflow_dispatch` rings both on every enqueue/dequeue, and so the retained
+# cron is the backstop for both.
+#
+# Least privilege for `watch`, mirroring rearm-sweeper.yml (the sibling queue sweeper):
 #   contents: read       — the repository ACTIVITY api (branch_creation timestamps),
 #                          which is the only exact merge-group build-time anchor.
 #   checks: read         — the load-bearing predicate: check-SUITE count on the group head.
 #   pull-requests: write — the marker comment + the dequeue/enqueue mutations.
+# `reap` overrides all three with its own narrower set.
 permissions:
   contents: read
   checks: read
@@ -177,3 +193,68 @@ jobs:
             echo "::endgroup::"
           done
           exit "$rc"
+
+  # ── [OPUS-5] #6068 — cancel runs whose merge-group ref is positively obsolete ──
+  # INDEPENDENT of `watch` (no `needs:`): neither job's answer is an input to the
+  # other's, and serialising them would put the reap behind the watch job's 4-minute
+  # resweep loop for no benefit. The shared workflow-level `concurrency` group still
+  # means two ticks never overlap.
+  reap:
+    name: cancel workflow runs for obsolete merge-group refs
+    runs-on: ubuntu-latest
+    # One pass over a single-digit queue plus at most DEFAULT_MAX_CANCELS_PER_RUN
+    # cancellations. No sleep, no loop — the retained cron is the backstop.
+    timeout-minutes: 10
+    # LEAST PRIVILEGE, and narrower than the workflow default this overrides:
+    #   contents: read       — checking out the default-branch policy, nothing else.
+    #   actions: write       — list workflow runs + POST .../cancel. The whole job.
+    #   pull-requests: read  — the GraphQL `mergeQueue` read that defines "current".
+    # In particular NO `pull-requests: write` and NO `checks:` — this job must not be
+    # able to comment, label, dequeue, or touch the queue itself. It can only stop work
+    # the queue has already abandoned.
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    steps:
+      # NEVER A MERGE REF. The policy that decides a cancellation is always the
+      # reviewed copy on the default branch; a `gh-readonly-queue/...` ref is DATA to
+      # this job, never code, and is never checked out or executed.
+      - name: Checkout reap policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/merge-group-watchdog.py
+            scripts/gh_retry.py
+          sparse-checkout-cone-mode: false
+
+      - name: Self-test reap policy
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/merge-group-watchdog.py --self-test
+
+      # IDEMPOTENT BY CONSTRUCTION, which is what makes a duplicate doorbell delivery
+      # free: the predicate is a pure comparison of live run state against live queue
+      # state, so a second pass over an unchanged queue finds the runs it already
+      # cancelled in status `completed` and skips them. There is no marker to keep and
+      # no cursor to advance.
+      #
+      # FAILS LOUD. Unlike the sweep, this pass exits non-zero when the queue or run
+      # state cannot be established. Nothing is cancelled on that path — the run is red
+      # so an operator sees that obsolete work may still be holding capacity. It can
+      # never gate a PR: this workflow has no PR-head trigger at all.
+      - name: Reap workflow runs for obsolete merge-group refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          set -euo pipefail
+          reap_args=(reap-stale-runs --repo "$REPO" --branch "$DEFAULT_BRANCH")
+          if [ -n "$DRY_RUN" ]; then
+            reap_args+=("$DRY_RUN")
+          fi
+          python3 scripts/merge-group-watchdog.py "${reap_args[@]}"

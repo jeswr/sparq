@@ -130,6 +130,7 @@
 #
 # CLI:
 #   python3 scripts/merge-group-watchdog.py sweep --repo O/R [--branch main] [--dry-run]
+#   python3 scripts/merge-group-watchdog.py reap-stale-runs --repo O/R [--branch main] [--dry-run]
 #   python3 scripts/merge-group-watchdog.py classify-dequeue --repo O/R --pr N --reason R
 #   python3 scripts/merge-group-watchdog.py --self-test
 
@@ -252,6 +253,50 @@ MARKER_ACTION_REENQUEUE = "re-enqueue"
 # of the routing split.
 REVIEW_PASS = "review:pass"
 
+# ── #6068: the STALE merge_group RUN reap ────────────────────────────────────────
+# THE SECOND HALF OF THE SAME OUTAGE. When the queue times an entry out and rebuilds
+# the ones behind it, the group refs it built are deleted — but the workflow RUNS
+# dispatched for those refs are not. Reported live on #6068 while a merge train was
+# being unblocked by hand: three obsolete `gh-readonly-queue/main/pr-*` refs still held
+# resident `ci-summary` waiters plus queued CI and feature-matrix runs while the
+# replacement group waited for a runner. Cancelling them by hand released the capacity;
+# that is what this reap automates. (Evidence: the obsolete unfinished runs named on
+# #6068, whose replacement group's runs were created separately.)
+#
+# THE PREDICATE IS "NOT A CURRENT GROUP HEAD", and it is only sound against a COMPLETE
+# read of the queue — a truncated or unreadable queue makes a LIVE group look obsolete
+# and would cancel the very work the queue is waiting for. So `queue_snapshot()`
+# refuses rather than returning a partial answer, and every refusal keeps the run.
+#
+# THE REGISTRATION GRACE covers the other direction: a run can exist for a group ref
+# that our queue read has not caught up with yet. A run younger than the grace is never
+# cancelled, whatever the queue says.
+#
+# 180 s is CHOSEN, not measured, and is stated as such: the create->first-suite latency
+# measured for the zero-dispatch predicate above (N=209, max 4 s) bounds the ref->run
+# leg but NOT the queue API's own read lag, which cannot be measured from here. It is
+# ~45x that measured maximum, and it is smaller than the 300 s cron interval, so a run
+# that WAITs on one tick is always actionable on the next rather than oscillating.
+# Raise it if a run ever turns out to have been cancelled on a stale queue read.
+DEFAULT_REGISTRATION_GRACE_SECONDS = 180
+# Blast-radius bound, mirroring DEFAULT_MAX_RECOVERIES_PER_RUN. One tick may not cancel
+# an unbounded amount of work; the periodic backstop re-evaluates whatever is left.
+DEFAULT_MAX_CANCELS_PER_RUN = 12
+# The `on:` event a merge-group run carries. A run with any other event is somebody
+# else's (a PR head, a push to main, a schedule) and is never a candidate.
+MERGE_GROUP_EVENT = "merge_group"
+# The ref namespace GitHub builds merge groups in.
+QUEUE_REF_NAMESPACE = "gh-readonly-queue"
+# Statuses a run can be cancelled from. Deliberately the two named on #6068 and nothing
+# else: `waiting`/`requested` are deployment-approval states this repo does not use,
+# and a `completed` run has nothing to release.
+CANCELLABLE_RUN_STATUSES = frozenset({"queued", "in_progress"})
+# The API's own idempotence signal. Cancelling a run that finished between our read and
+# our write answers 409, which means "already not running" — the outcome we wanted, not
+# a failure. Matched narrowly so a genuine error is never swallowed.
+_CANCEL_ALREADY_FINISHED_RE = re.compile(r"HTTP 409|Conflict", re.IGNORECASE)
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
 # Verdicts. Named constants so a test cannot silently drift from the emitter.
 SKIP = "SKIP"
 HOLD = "HOLD"
@@ -260,6 +305,10 @@ REFUSE = "REFUSE"
 NOOP = "NOOP"
 CAP = "CAP"
 RECOVER = "RECOVER"
+# Reap-only verdicts. KEEP is the CONTROL of the reap the way HOLD is the control of
+# the sweep: a run whose group is positively still in the queue.
+KEEP = "KEEP"
+CANCEL = "CANCEL"
 
 ROUTE_PRESERVE = "preserve"
 ROUTE_DEMOTE = "demote"
@@ -329,6 +378,31 @@ QUEUE_QUERY = """query($owner:String!,$name:String!,$branch:String!,$first:Int!)
           baseCommit{oid}
           headCommit{oid}
           pullRequest{number id}
+        }
+      }
+    }
+  }
+}"""
+
+# The reap's OWN queue read, deliberately NOT the sweep's.
+#
+# It asks for one thing the sweep does not need and cannot use: `pageInfo{hasNextPage}`.
+# The sweep's soundness does not depend on completeness — an entry it never sees is
+# simply not recovered this tick. The REAP's does, and in the dangerous direction: an
+# entry missing from a truncated read has its group head missing from the "current"
+# set, so its live runs read as obsolete and would be cancelled. Rather than bolt a
+# completeness signal the sweep ignores onto its proven read path, the reap reads for
+# itself and REFUSES on any answer it cannot prove is whole.
+QUEUE_STATE_QUERY = """query($owner:String!,$name:String!,$branch:String!,$first:Int!){
+  repository(owner:$owner,name:$name){
+    mergeQueue(branch:$branch){
+      entries(first:$first){
+        pageInfo{hasNextPage}
+        nodes{
+          state
+          baseCommit{oid}
+          headCommit{oid}
+          pullRequest{number}
         }
       }
     }
@@ -476,6 +550,35 @@ class QueueEntry:
 
 
 @dataclass(frozen=True)
+class WorkflowRun:
+    """One Actions run, as much of it as the reap is allowed to reason about."""
+
+    run_id: int
+    name: str
+    event: str
+    status: str
+    head_branch: str
+    head_sha: str
+    created_at: datetime | None
+
+
+@dataclass(frozen=True)
+class QueueSnapshot:
+    """The set of group refs/heads the queue is CURRENTLY building.
+
+    `entries` is carried so an empty queue is emitted as an observed fact rather than
+    inferred from two empty sets. There is no `readable` flag by design: an unreadable
+    queue never becomes a QueueSnapshot at all — `queue_snapshot()` raises — because a
+    "maybe empty" snapshot is exactly the value that would cancel a live group.
+    """
+
+    head_oids: frozenset[str]
+    refs: frozenset[str]
+    entries: int
+    complete: bool = True
+
+
+@dataclass(frozen=True)
 class Decision:
     verdict: str
     detail: str
@@ -602,6 +705,126 @@ def decide_entry(
         RECOVER,
         f"zero check-suites {int(age)}s after the ref was built "
         f"(grace {grace_seconds}s) — dequeue + re-enqueue",
+    )
+
+
+def is_merge_group_ref(head_branch: str, branch: str) -> bool:
+    """Is `head_branch` a merge-group ref this repo's queue built for `branch`?
+
+    A POSITIVE test, not a negative one. The reap may only ever touch a ref it can
+    prove the queue built: the namespace, the target branch, and the `pr-` member
+    segment must all be present. `main` itself (a push run), a PR head branch, and
+    another branch's queue all fail it, so none of them can be cancelled even if a
+    later edit loosened the event filter.
+    """
+    if not branch or not head_branch:
+        return False
+    return head_branch.startswith(f"{QUEUE_REF_NAMESPACE}/{branch}/pr-")
+
+
+def decide_stale_run(
+    run: WorkflowRun,
+    *,
+    queue: QueueSnapshot,
+    branch: str,
+    now: datetime,
+    grace_seconds: int,
+) -> Decision:
+    """Is this workflow run's merge-group ref positively obsolete?
+
+    Fail-safe in the same shape as `decide_entry`: CANCEL is the only mutation, and
+    every arm that cannot POSITIVELY establish its premise KEEPS the run (SKIP/REFUSE).
+    A REFUSE is additionally an ERROR at the call site, because "I could not tell" about
+    running CI is a state an operator has to see.
+    """
+    # The three arms that make a run somebody else's. They run FIRST, so an unreadable
+    # queue never produces noise about runs the reap would not have touched anyway.
+    if run.event != MERGE_GROUP_EVENT:
+        return Decision(
+            SKIP, f"event={run.event or '(none)'} is not {MERGE_GROUP_EVENT}"
+        )
+    if not is_merge_group_ref(run.head_branch, branch):
+        return Decision(
+            SKIP,
+            f"head_branch {run.head_branch or '(none)'} is not a "
+            f"{QUEUE_REF_NAMESPACE}/{branch}/pr-* merge-group ref",
+        )
+    if run.status not in CANCELLABLE_RUN_STATUSES:
+        return Decision(SKIP, f"status={run.status or '(none)'} is not cancellable")
+    # From here the run IS a candidate, so every remaining unknown is loud.
+    if not queue.complete:
+        return Decision(
+            REFUSE,
+            "the merge-queue read was not provably complete — a truncated queue makes "
+            "a CURRENT group look obsolete, so nothing is cancelled",
+        )
+    if not _SHA_RE.fullmatch(run.head_sha or ""):
+        return Decision(
+            REFUSE,
+            f"head_sha {run.head_sha or '(none)'!r} is not a full commit sha — this "
+            "run's group cannot be compared against the queue",
+        )
+    # THE CONTROL. A run whose head is a group the queue is currently building is doing
+    # exactly the work the queue is waiting for.
+    if run.head_sha in queue.head_oids:
+        return Decision(
+            KEEP,
+            f"head {run.head_sha[:8]} is a CURRENT merge-queue group head "
+            f"({queue.entries} entries currently queued)",
+        )
+    if run.created_at is None:
+        return Decision(
+            REFUSE,
+            "the run has no readable creation time, so the registration grace cannot "
+            "be applied — taking no action",
+        )
+    age = (now - run.created_at).total_seconds()
+    if age < 0:
+        return Decision(
+            REFUSE,
+            f"run creation {iso(run.created_at)} is in the future — clock skew, "
+            "taking no action",
+        )
+    if age < grace_seconds:
+        return Decision(
+            WAIT,
+            f"head {run.head_sha[:8]} is not a current group head, but the run is "
+            f"{int(age)}s old — inside the {grace_seconds}s registration grace, so the "
+            "queue read may simply not have caught up with it yet",
+        )
+    # A ref NAME can be rebuilt on the same base with a NEW head (measured for the
+    # sweep: 15 names recreated, zero head collisions), so the name is recorded for the
+    # operator but the SHA is what decides.
+    reused = " (its ref name is current, but for a different head)" if run.head_branch in queue.refs else ""
+    return Decision(
+        CANCEL,
+        f"head {run.head_sha[:8]} is not among the {len(queue.head_oids)} current "
+        f"merge-queue group head(s) and the run is {int(age)}s old (grace "
+        f"{grace_seconds}s){reused} — the group it was dispatched for is gone",
+    )
+
+
+def parse_workflow_run(row: object) -> WorkflowRun:
+    """Build a WorkflowRun from one Actions API row.
+
+    Only the run ID is required to be well-formed, because a run that cannot be NAMED
+    cannot be reported on either. Every other field is carried through as-is (missing
+    becomes empty/None) so the decision table above sees the defect and REFUSES, rather
+    than this parser quietly inventing a plausible value.
+    """
+    if not isinstance(row, dict):
+        raise GhError(f"workflow-run row is not an object: {row!r:.120}")
+    run_id = row.get("id")
+    if isinstance(run_id, bool) or not isinstance(run_id, int):
+        raise GhError(f"workflow-run row has no usable integer id: {row.get('id')!r}")
+    return WorkflowRun(
+        run_id=run_id,
+        name=str(row.get("name") or ""),
+        event=str(row.get("event") or ""),
+        status=str(row.get("status") or ""),
+        head_branch=str(row.get("head_branch") or ""),
+        head_sha=str(row.get("head_sha") or ""),
+        created_at=parse_iso(row.get("created_at")),
     )
 
 
@@ -873,6 +1096,8 @@ class Watchdog:
         max_recoveries_per_pr: int = DEFAULT_MAX_RECOVERIES_PER_PR,
         recovery_window_seconds: int = DEFAULT_RECOVERY_WINDOW_SECONDS,
         max_recoveries_per_run: int = DEFAULT_MAX_RECOVERIES_PER_RUN,
+        registration_grace_seconds: int = DEFAULT_REGISTRATION_GRACE_SECONDS,
+        max_cancels_per_run: int = DEFAULT_MAX_CANCELS_PER_RUN,
         dry_run: bool = False,
         # LATE-BOUND ON PURPOSE. `gh: Callable = run_gh` binds the module function at
         # DEFINITION time, so a test that patches `merge_group_watchdog.run_gh` does not
@@ -894,12 +1119,20 @@ class Watchdog:
             raise ValueError("repo must be OWNER/REPOSITORY")
         if grace_seconds < 60:
             raise ValueError("grace_seconds must be at least 60")
+        # The registration grace is the ONLY thing standing between a lagging queue read
+        # and a cancelled live group, so it gets the same floor as the sweep's grace.
+        if registration_grace_seconds < 60:
+            raise ValueError("registration_grace_seconds must be at least 60")
+        if max_cancels_per_run < 1:
+            raise ValueError("max_cancels_per_run must be at least 1")
         self.repo = repo
         self.branch = branch
         self.grace_seconds = grace_seconds
         self.max_recoveries_per_pr = max_recoveries_per_pr
         self.recovery_window_seconds = recovery_window_seconds
         self.max_recoveries_per_run = max_recoveries_per_run
+        self.registration_grace_seconds = registration_grace_seconds
+        self.max_cancels_per_run = max_cancels_per_run
         self.dry_run = dry_run
         self.gh = gh if gh is not None else run_gh
         self.gh_read = gh_read if gh_read is not None else self.gh
@@ -946,6 +1179,92 @@ class Watchdog:
                 )
             )
         return entries
+
+    def queue_snapshot(self) -> QueueSnapshot:
+        """The group refs/heads the queue is currently building, or RAISE.
+
+        Every early return here is a `raise`, never a degraded value. `mergeQueue: null`
+        is the one that matters most: GraphQL answers null whenever it cannot resolve a
+        merge queue for the branch — a mis-typed branch, a queue turned off, a schema
+        change — and NONE of those readings is "the queue is empty". Reading it as one
+        would declare every running merge-group run obsolete at the same instant.
+        """
+        data = self._graphql(
+            QUEUE_STATE_QUERY,
+            owner=self.owner,
+            name=self.name,
+            branch=self.branch,
+            first=QUEUE_ENTRY_PAGE,
+        )
+        repository = data.get("repository")
+        if not isinstance(repository, dict):
+            raise GhError("GraphQL returned no repository object for the merge queue")
+        queue = repository.get("mergeQueue")
+        if not isinstance(queue, dict):
+            raise GhError(
+                f"no merge queue is readable for branch {self.branch!r} "
+                "(mergeQueue is null) — an unreadable queue is NOT an empty one"
+            )
+        entries = queue.get("entries")
+        if not isinstance(entries, dict):
+            raise GhError("the merge queue returned no entries connection")
+        nodes = entries.get("nodes")
+        if not isinstance(nodes, list):
+            raise GhError("the merge queue returned no entry list")
+        page = entries.get("pageInfo")
+        # `is not False` on purpose: a MISSING pageInfo (a drifted query, a partial
+        # response) must fail exactly like a truncated one.
+        if not isinstance(page, dict) or page.get("hasNextPage") is not False:
+            raise GhError(
+                f"the merge queue read is not provably complete (first={QUEUE_ENTRY_PAGE}, "
+                f"pageInfo={page!r:.80}) — refusing to compare runs against a partial queue"
+            )
+        heads: set[str] = set()
+        refs: set[str] = set()
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise GhError(f"merge-queue entry is not an object: {node!r:.120}")
+            head = (node.get("headCommit") or {}).get("oid")
+            base = (node.get("baseCommit") or {}).get("oid")
+            number = (node.get("pullRequest") or {}).get("number")
+            if head:
+                heads.add(str(head))
+            if base and isinstance(number, int) and not isinstance(number, bool):
+                refs.add(queue_ref(self.branch, number, str(base)))
+        return QueueSnapshot(
+            head_oids=frozenset(heads), refs=frozenset(refs), entries=len(nodes)
+        )
+
+    def merge_group_runs(self) -> list[WorkflowRun]:
+        """Every unfinished `merge_group` run, keyed by id so the two status reads
+        cannot double-count a run that transitioned between them."""
+        found: dict[int, WorkflowRun] = {}
+        for status in sorted(CANCELLABLE_RUN_STATUSES):
+            raw = self.gh_read(
+                [
+                    "api",
+                    "-X",
+                    "GET",
+                    "--paginate",
+                    "-q",
+                    ".workflow_runs[]|@json",
+                    f"repos/{self.repo}/actions/runs"
+                    f"?event={MERGE_GROUP_EVENT}&status={status}&per_page=100",
+                ]
+            )
+            for row in _ndjson(raw):
+                run = parse_workflow_run(row)
+                found[run.run_id] = run
+        return sorted(found.values(), key=lambda run: run.run_id)
+
+    def workflow_run(self, run_id: int) -> WorkflowRun:
+        """Re-read ONE run. Used only for the revalidation immediately before a cancel."""
+        raw = self.gh_read(["api", "-X", "GET", f"repos/{self.repo}/actions/runs/{run_id}"])
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise GhError(f"run {run_id} re-read returned non-JSON: {error}") from error
+        return parse_workflow_run(payload)
 
     def check_suite_count(self, sha: str) -> int | None:
         """`total_count` of check-suites on a commit, or None if not establishable.
@@ -1182,6 +1501,22 @@ class Watchdog:
             ]
         )
 
+    def cancel_run(self, run: WorkflowRun) -> str:
+        """Cancel one run. Returns the outcome word for the emitted row.
+
+        409 is the API telling us the run finished between our read and our write.
+        That is the state we were asking for, so it is reported as an already-finished
+        no-op rather than a failure — which is also what makes a duplicate doorbell
+        delivery harmless even if two reaps ever overlap.
+        """
+        try:
+            self.gh(["api", "-X", "POST", f"repos/{self.repo}/actions/runs/{run.run_id}/cancel"])
+        except GhError as error:
+            if _CANCEL_ALREADY_FINISHED_RE.search(str(error)):
+                return "already-finished"
+            raise
+        return "cancelled"
+
     # -- the sweep -----------------------------------------------------------
 
     def emit(self, row: str) -> None:
@@ -1324,6 +1659,133 @@ class Watchdog:
 
         census = " ".join(f"{key}={value}" for key, value in sorted(counts.items()))
         self.emit(f"sweep complete: entries={len(entries)} {census} errors={errors}")
+        return errors
+
+    # -- the stale merge_group run reap (#6068) ------------------------------
+
+    def _revalidate(self, run: WorkflowRun, *, now: datetime) -> Decision:
+        """Re-derive the verdict from FRESH state immediately before cancelling.
+
+        Both halves are re-read, because both can move under us between the decision
+        and the write: the RUN (it may have finished, which makes the cancel pointless)
+        and the QUEUE (a rebuild may have re-enqueued this very group head, which makes
+        the cancel WRONG). The window is small and this closes it; the alternative is a
+        cancel justified by a queue that no longer exists.
+        """
+        fresh_queue = self.queue_snapshot()
+        fresh_run = self.workflow_run(run.run_id)
+        if fresh_run.head_sha != run.head_sha:
+            return Decision(
+                REFUSE,
+                f"run {run.run_id} now reports head {fresh_run.head_sha[:8]}, not "
+                f"{run.head_sha[:8]} — the run this decision was made about is not the "
+                "run about to be cancelled",
+            )
+        return decide_stale_run(
+            fresh_run,
+            queue=fresh_queue,
+            branch=self.branch,
+            now=now,
+            grace_seconds=self.registration_grace_seconds,
+        )
+
+    def reap_stale_runs(self) -> int:
+        """Cancel unfinished merge_group runs whose group ref is positively obsolete."""
+        now = self._now()
+        # FAIL LOUD, and cancel nothing. Both reads are preconditions of the whole pass:
+        # without the queue there is no definition of "current", and without the run
+        # list there is nothing to compare. Neither has a safe degraded reading.
+        try:
+            queue = self.queue_snapshot()
+            runs = self.merge_group_runs()
+        except (GhError, json.JSONDecodeError) as error:
+            self.emit(f"reap REFUSED on branch={self.branch}: {error}")
+            self.log(
+                f"::error title={PROGRAM} stale-run reap refused::"
+                f"queue/run state could not be established, so NOTHING was cancelled: {error}"
+            )
+            return 1
+
+        queue_state = (
+            f"branch={self.branch} queue_entries={queue.entries} "
+            f"current_heads={len(queue.head_oids)} runs={len(runs)}"
+        )
+        if not runs:
+            self.emit(
+                f"reap: no queued/in-progress {MERGE_GROUP_EVENT} runs — {queue_state}"
+            )
+            return 0
+        self.emit(f"reap: {queue_state} grace={self.registration_grace_seconds}s")
+
+        counts: dict[str, int] = {}
+        errors = 0
+        cancels = 0
+        for run in runs:
+            decision = decide_stale_run(
+                run,
+                queue=queue,
+                branch=self.branch,
+                now=now,
+                grace_seconds=self.registration_grace_seconds,
+            )
+            if decision.verdict == CANCEL and cancels >= self.max_cancels_per_run:
+                decision = Decision(
+                    CAP,
+                    f"per-run cancellation budget exhausted "
+                    f"({cancels}/{self.max_cancels_per_run}) — the next tick "
+                    "re-evaluates the rest",
+                )
+            # Built AFTER the budget arm so there is exactly ONE row shape and one
+            # place the verdict is rendered — a second copy is how a row comes to
+            # claim a verdict the code did not take.
+            row = (
+                f"run={run.run_id} workflow={run.name!r} status={run.status} "
+                f"ref={run.head_branch or '-'} head={(run.head_sha or '-')[:8]} "
+                f"decision={decision.verdict} — {decision.detail}"
+            )
+            if decision.verdict == CANCEL and not self.dry_run:
+                try:
+                    revalidated = self._revalidate(run, now=self._now())
+                    if revalidated.verdict != CANCEL:
+                        self.emit(
+                            f"{row} :: NOT CANCELLED — revalidation immediately before "
+                            f"the cancel returned {revalidated.verdict}: {revalidated.detail}"
+                        )
+                        counts[f"ABORTED_{revalidated.verdict}"] = (
+                            counts.get(f"ABORTED_{revalidated.verdict}", 0) + 1
+                        )
+                        continue
+                    outcome = self.cancel_run(run)
+                except (GhError, json.JSONDecodeError) as error:
+                    self.emit(f"{row} :: CANCEL FAILED ({error})")
+                    self.log(
+                        f"::error title={PROGRAM} cancel failed::run {run.run_id} "
+                        f"({run.head_branch}): {error}"
+                    )
+                    counts["CANCEL_FAILED"] = counts.get("CANCEL_FAILED", 0) + 1
+                    errors += 1
+                    continue
+                cancels += 1
+                row += f" :: {outcome}"
+
+            self.emit(
+                row + (" [dry-run]" if self.dry_run and decision.verdict == CANCEL else "")
+            )
+            if decision.verdict in (REFUSE, CAP):
+                self.log(
+                    f"::warning title={PROGRAM} {decision.verdict}::"
+                    f"run {run.run_id} ({run.head_branch}): {decision.detail}"
+                )
+                if decision.verdict == REFUSE:
+                    # An unknown is not a quiet KEEP. The run stays, and the pass is red
+                    # so somebody looks at why the state was unreadable.
+                    errors += 1
+            counts[decision.verdict] = counts.get(decision.verdict, 0) + 1
+
+        census = " ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+        self.emit(
+            f"reap complete: runs={len(runs)} {census} cancelled={cancels} errors={errors}"
+        )
         return errors
 
     # -- the dequeue routing split -------------------------------------------
@@ -1566,6 +2028,77 @@ def self_test() -> None:
     # A conflict dequeue right after a recovery is NOT attributed to the watchdog.
     assert route(reason="MERGE_CONFLICT", now=now + timedelta(seconds=30)).route == ROUTE_DEMOTE
 
+    # ── #6068: the stale merge_group run reap ────────────────────────────────────
+    stale_head = "a" * 40
+    live_head = "b" * 40
+    live_ref = "gh-readonly-queue/main/pr-99900002-" + ("c" * 40)
+    built_at = now - timedelta(minutes=30)
+
+    def reap(**overrides):
+        run_kwargs = dict(
+            run_id=99900101,
+            name="ci",
+            event=MERGE_GROUP_EVENT,
+            status="queued",
+            head_branch="gh-readonly-queue/main/pr-99900001-" + ("d" * 40),
+            head_sha=stale_head,
+            created_at=built_at,
+        )
+        queue = overrides.pop(
+            "queue",
+            QueueSnapshot(
+                head_oids=frozenset({live_head}), refs=frozenset({live_ref}), entries=1
+            ),
+        )
+        kwargs = dict(
+            branch="main",
+            now=now,
+            grace_seconds=DEFAULT_REGISTRATION_GRACE_SECONDS,
+        )
+        for key in list(overrides):
+            if key in run_kwargs:
+                run_kwargs[key] = overrides.pop(key)
+        kwargs.update(overrides)
+        return decide_stale_run(WorkflowRun(**run_kwargs), queue=queue, **kwargs)
+
+    # The incident: a run for a group ref the queue no longer builds.
+    assert reap().verdict == CANCEL, reap()
+    # THE CONTROL: the run's head IS a current group head => never touched.
+    assert reap(head_sha=live_head).verdict == KEEP, reap(head_sha=live_head)
+    # A dequeue that emptied the queue makes every surviving group run obsolete...
+    empty = QueueSnapshot(head_oids=frozenset(), refs=frozenset(), entries=0)
+    assert reap(queue=empty).verdict == CANCEL
+    # ...but an UNPROVEN queue read never does.
+    partial = QueueSnapshot(
+        head_oids=frozenset(), refs=frozenset(), entries=0, complete=False
+    )
+    assert reap(queue=partial).verdict == REFUSE, reap(queue=partial)
+    # Never a PR-head run, never a push run, never a finished run.
+    assert reap(event="pull_request").verdict == SKIP
+    assert reap(event="push", head_branch="main").verdict == SKIP
+    assert reap(head_branch="main").verdict == SKIP
+    assert reap(head_branch="gh-readonly-queue/release/pr-99900001-" + "d" * 40).verdict == SKIP
+    assert reap(status="completed").verdict == SKIP
+    # The registration grace, expressed against the constant so a retune cannot leave
+    # this stale.
+    reg = DEFAULT_REGISTRATION_GRACE_SECONDS
+    assert reap(created_at=now - timedelta(seconds=reg - 1)).verdict == WAIT
+    assert reap(created_at=now - timedelta(seconds=reg)).verdict == CANCEL
+    assert 60 <= reg <= 300, reg
+    # Unreadable run state keeps the run and is loud.
+    assert reap(head_sha="").verdict == REFUSE
+    assert reap(head_sha="not-a-sha").verdict == REFUSE
+    assert reap(created_at=None).verdict == REFUSE
+    assert reap(created_at=now + timedelta(minutes=5)).verdict == REFUSE
+    # A ref NAME that is current but on a different head is still obsolete work.
+    assert reap(head_branch=live_ref).verdict == CANCEL, reap(head_branch=live_ref)
+    # The ref predicate is positive: it admits a real group ref and nothing else.
+    assert is_merge_group_ref("gh-readonly-queue/main/pr-1-" + "e" * 40, "main")
+    assert not is_merge_group_ref("gh-readonly-queue/main/", "main")
+    assert not is_merge_group_ref("main", "main")
+    assert not is_merge_group_ref("", "main")
+    assert not is_merge_group_ref("gh-readonly-queue/main/pr-1-x", "")
+
     print(f"{PROGRAM} self-test: PASS")
 
 
@@ -1591,6 +2124,22 @@ def main(argv: list[str] | None = None) -> int:
         "--max-recoveries-per-run", type=int, default=DEFAULT_MAX_RECOVERIES_PER_RUN
     )
     sweep_parser.add_argument("--dry-run", action="store_true")
+
+    reap_parser = sub.add_parser(
+        "reap-stale-runs",
+        help="cancel unfinished merge_group runs whose group ref is obsolete",
+    )
+    reap_parser.add_argument("--repo", required=True)
+    reap_parser.add_argument("--branch", default="main")
+    reap_parser.add_argument(
+        "--registration-grace-seconds",
+        type=int,
+        default=DEFAULT_REGISTRATION_GRACE_SECONDS,
+    )
+    reap_parser.add_argument(
+        "--max-cancels-per-run", type=int, default=DEFAULT_MAX_CANCELS_PER_RUN
+    )
+    reap_parser.add_argument("--dry-run", action="store_true")
 
     classify_parser = sub.add_parser(
         "classify-dequeue", help="route a pull_request.dequeued event"
@@ -1637,6 +2186,30 @@ def main(argv: list[str] | None = None) -> int:
                 f"failures::{error}"
             )
             return 0
+        except (GhError, ValueError, json.JSONDecodeError) as error:
+            print(f"[{PROGRAM}] fatal: {error}", file=sys.stderr)
+            return 1
+
+    if args.command == "reap-stale-runs":
+        # NOT fail-soft, unlike the sweep. A sweep that skips a cycle costs a few
+        # minutes of detection latency; a reap that cannot read its state has left
+        # obsolete runs holding queue capacity and must SAY so. Nothing is cancelled on
+        # any of these paths — the exit code is the only difference.
+        try:
+            watchdog = Watchdog(
+                args.repo,
+                branch=args.branch,
+                registration_grace_seconds=args.registration_grace_seconds,
+                max_cancels_per_run=args.max_cancels_per_run,
+                dry_run=args.dry_run,
+                gh_read=run_gh_read,
+            )
+            return 1 if watchdog.reap_stale_runs() else 0
+        except gh_retry.GhTransientExhausted as error:
+            print(
+                f"::error title={PROGRAM} stale-run reap could not read GitHub::{error}"
+            )
+            return 1
         except (GhError, ValueError, json.JSONDecodeError) as error:
             print(f"[{PROGRAM}] fatal: {error}", file=sys.stderr)
             return 1

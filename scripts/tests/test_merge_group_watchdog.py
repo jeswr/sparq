@@ -2170,7 +2170,12 @@ class TestFixturesNameNothingReal(unittest.TestCase):
         found = {
             int(n)
             for n in re.findall(
-                r'(?:pr=|"number": |pr_number=|classify_dequeue\(|pr_markers\()(\d{3,})',
+                # `run_id=` / `"id": ` were added with the #6068 reap: a workflow-run
+                # id is a WRITE target too (`POST .../actions/runs/<id>/cancel`), so it
+                # belongs in the reserved band for exactly the same reason a PR number
+                # does.
+                r'(?:pr=|"number": |"id": |run_id=|pr_number=|classify_dequeue\(|'
+                r'pr_markers\()(\d{3,})',
                 "\n".join(lines),
             )
         }
@@ -2205,6 +2210,12 @@ class TestTheSuiteCannotTouchTheNetwork(unittest.TestCase):
     def test_main_sweep_cannot_reach_the_network_uninjected(self):
         with self.assertRaises(RealGhCallAttempted):
             mgw.main(["sweep", "--repo", "sparq-org/sparq"])
+
+    def test_main_reap_cannot_reach_the_network_uninjected(self):
+        # The reap CANCELS RUNS, so the poison must cover it too — an uninjected reap
+        # reaching the real API would cancel production CI, not merely read it.
+        with self.assertRaises(RealGhCallAttempted):
+            mgw.main(["reap-stale-runs", "--repo", "sparq-org/sparq"])
 
 
 class TestEntrypointExitContract(unittest.TestCase):
@@ -3173,6 +3184,662 @@ class TestSuiteIsWiredIntoCI(unittest.TestCase):
                 )
                 return
         self.fail("no docs-quality job runs the watchdog suite")
+
+
+# ── #6068: the stale merge_group RUN reap ────────────────────────────────────────
+# Same three layers as the watchdog above — policy, behaviour against a scripted gh
+# (assert on the CANCELS ISSUED, never on the log text), and the YAML seam.
+#
+# The scenarios are the six named in the acceptance for #6068: REBUILD (an entry timed
+# out and the ones behind it were rebuilt), DEQUEUE (the queue emptied), ACTIVE-CURRENT
+# (the control — a run for a group the queue is still building), API FAILURE (the queue
+# or run state is unreadable), DUPLICATE DELIVERY (the doorbell rings twice), and TOCTOU
+# (the queue changes between the decision and the write).
+
+# Reserved-band ids, as everywhere else in this file: a run id is a POST target.
+STALE_HEAD = "9f" * 20
+STALE_REF = "gh-readonly-queue/main/pr-99900011-" + ("1a" * 20)
+LIVE_HEAD = "7c" * 20
+LIVE_BASE = "2b" * 20
+LIVE_REF = f"gh-readonly-queue/main/pr-99900012-{LIVE_BASE}"
+# 2400 s before NOW (23:20:00Z), i.e. comfortably past the registration grace.
+RUN_CREATED = "2026-07-27T22:40:00Z"
+
+
+def _run_row(**overrides) -> dict:
+    row = {
+        "id": 99900101,
+        "name": "ci",
+        "event": "merge_group",
+        "status": "queued",
+        "head_branch": STALE_REF,
+        "head_sha": STALE_HEAD,
+        "created_at": RUN_CREATED,
+    }
+    row.update(overrides)
+    return row
+
+
+def _queue_node(*, number: int = 99900012, base: str = LIVE_BASE, head: str = LIVE_HEAD,
+                state: str = "AWAITING_CHECKS") -> dict:
+    return {
+        "state": state,
+        "baseCommit": {"oid": base},
+        "headCommit": {"oid": head},
+        "pullRequest": {"number": number},
+    }
+
+
+def _snapshot(*, heads=(LIVE_HEAD,), refs=(LIVE_REF,), entries: int = 1,
+              complete: bool = True) -> "mgw.QueueSnapshot":
+    return mgw.QueueSnapshot(
+        head_oids=frozenset(heads), refs=frozenset(refs), entries=entries,
+        complete=complete,
+    )
+
+
+def reap_decide(**overrides) -> "mgw.Decision":
+    kwargs = dict(
+        queue=overrides.pop("queue", _snapshot()),
+        branch="main",
+        now=NOW,
+        grace_seconds=mgw.DEFAULT_REGISTRATION_GRACE_SECONDS,
+    )
+    run = overrides.pop("run", None)
+    if run is None:
+        run = mgw.parse_workflow_run(_run_row(**overrides))
+        overrides = {}
+    kwargs.update(overrides)
+    return mgw.decide_stale_run(run, **kwargs)
+
+
+class TestStaleRunPolicy(unittest.TestCase):
+    """The decision table, and the control that stops it firing on live work."""
+
+    def test_rebuild_an_obsolete_group_ref_is_cancelled(self):
+        decision = reap_decide()
+        self.assertEqual(decision.verdict, mgw.CANCEL, decision)
+        self.assertIn(STALE_HEAD[:8], decision.detail)
+
+    def test_control_a_run_for_a_CURRENT_group_head_is_never_cancelled(self):
+        # THE CONTROL. Same run, same queue, only the head matches — and the verdict
+        # must flip. Without this the predicate could be "cancel everything".
+        decision = reap_decide(head_sha=LIVE_HEAD)
+        self.assertEqual(decision.verdict, mgw.KEEP, decision)
+
+    def test_dequeue_an_emptied_queue_makes_every_group_run_obsolete(self):
+        decision = reap_decide(queue=_snapshot(heads=(), refs=(), entries=0))
+        self.assertEqual(decision.verdict, mgw.CANCEL, decision)
+
+    def test_an_incomplete_queue_read_refuses_rather_than_cancelling(self):
+        # THE DANGEROUS DIRECTION: a truncated read drops a live entry, whose head then
+        # looks obsolete. It must never be actionable.
+        decision = reap_decide(queue=_snapshot(heads=(), refs=(), entries=0, complete=False))
+        self.assertEqual(decision.verdict, mgw.REFUSE, decision)
+
+    def test_a_pr_head_run_is_never_a_candidate(self):
+        self.assertEqual(
+            reap_decide(event="pull_request", head_branch="feature/x").verdict, mgw.SKIP
+        )
+
+    def test_a_push_run_is_never_a_candidate(self):
+        self.assertEqual(reap_decide(event="push", head_branch="main").verdict, mgw.SKIP)
+
+    def test_the_event_is_checked_even_on_a_queue_ref(self):
+        # A `push` (or `workflow_dispatch`) run CAN carry a `gh-readonly-queue/...`
+        # head_branch — GitHub really does create that branch. The ref predicate cannot
+        # separate those from a group run, so the EVENT is the guard that does, and it
+        # is load-bearing rather than belt-and-braces.
+        for event in ("push", "workflow_dispatch", "schedule", ""):
+            decision = reap_decide(event=event, head_branch=STALE_REF)
+            self.assertEqual(decision.verdict, mgw.SKIP, event)
+
+    def test_a_merge_group_run_on_a_non_queue_ref_is_never_a_candidate(self):
+        # Belt and braces: even if the event filter were loosened, the ref predicate
+        # alone keeps `main` and a PR branch out.
+        for branch_name in ("main", "feature/x", "gh-readonly-queue/main/", "", "gh-readonly-queue/release/pr-1-abc"):
+            self.assertEqual(
+                reap_decide(head_branch=branch_name).verdict, mgw.SKIP, branch_name
+            )
+
+    def test_a_finished_run_is_skipped(self):
+        for status in ("completed", "cancelled", "waiting", ""):
+            self.assertEqual(reap_decide(status=status).verdict, mgw.SKIP, status)
+
+    def test_the_registration_grace_boundary(self):
+        grace = mgw.DEFAULT_REGISTRATION_GRACE_SECONDS
+        just_inside = mgw.iso(NOW - timedelta(seconds=grace - 1))
+        exactly_at = mgw.iso(NOW - timedelta(seconds=grace))
+        self.assertEqual(reap_decide(created_at=just_inside).verdict, mgw.WAIT)
+        self.assertEqual(reap_decide(created_at=exactly_at).verdict, mgw.CANCEL)
+
+    def test_the_grace_is_bounded_and_below_the_cron_interval(self):
+        # Expressed against the constant so a retune cannot leave this stale, and
+        # bounded above by the 5-minute cron so the grace never costs an extra tick.
+        self.assertGreaterEqual(mgw.DEFAULT_REGISTRATION_GRACE_SECONDS, 60)
+        self.assertLessEqual(mgw.DEFAULT_REGISTRATION_GRACE_SECONDS, 300)
+
+    def test_unreadable_run_state_keeps_the_run_and_is_loud(self):
+        for row in ({"head_sha": ""}, {"head_sha": "not-a-sha"}, {"created_at": None},
+                    {"created_at": "2026-07-27T23:25:00Z"}):
+            self.assertEqual(reap_decide(**row).verdict, mgw.REFUSE, row)
+
+    def test_a_reused_ref_name_on_a_new_head_is_still_obsolete_work(self):
+        # A group ref NAME can be rebuilt on the same base with a NEW head. The SHA is
+        # the key; the name is recorded for the operator only.
+        decision = reap_decide(head_branch=LIVE_REF)
+        self.assertEqual(decision.verdict, mgw.CANCEL, decision)
+        self.assertIn("ref name is current", decision.detail)
+
+    def test_the_ref_predicate_is_positive(self):
+        self.assertTrue(mgw.is_merge_group_ref(STALE_REF, "main"))
+        self.assertFalse(mgw.is_merge_group_ref(STALE_REF, "release"))
+        self.assertFalse(mgw.is_merge_group_ref("gh-readonly-queue/mainx/pr-1-a", "main"))
+        self.assertFalse(mgw.is_merge_group_ref(STALE_REF, ""))
+        self.assertFalse(mgw.is_merge_group_ref("", "main"))
+
+
+class TestWorkflowRunParsing(unittest.TestCase):
+    def test_a_run_that_cannot_be_named_is_a_hard_error(self):
+        for row in ({}, {"id": "123"}, {"id": True}, {"id": None}, "nonsense"):
+            with self.assertRaises(mgw.GhError):
+                mgw.parse_workflow_run(row)
+
+    def test_missing_fields_become_defects_the_decision_table_can_see(self):
+        run = mgw.parse_workflow_run({"id": 99900101})
+        self.assertEqual((run.event, run.status, run.head_sha, run.head_branch), ("", "", "", ""))
+        self.assertIsNone(run.created_at)
+
+    def test_a_well_formed_row_round_trips(self):
+        run = mgw.parse_workflow_run(_run_row())
+        self.assertEqual(run.run_id, 99900101)
+        self.assertEqual(run.head_sha, STALE_HEAD)
+        self.assertEqual(run.created_at, mgw.parse_iso(RUN_CREATED))
+
+
+class ScriptedReapGh:
+    """A gh runner scripted for exactly the argv shapes the reap issues.
+
+    It MODELS the API's state: a cancelled run becomes `completed`, so a second pass
+    over the same repository genuinely sees what GitHub would show it. A fake that
+    swallowed the cancel would make the duplicate-delivery and TOCTOU tests vacuous.
+    """
+
+    def __init__(self, *, runs, nodes, has_next_page=False, merge_queue_missing=False):
+        self.runs = {int(row["id"]): dict(row) for row in runs}
+        self.nodes = list(nodes)
+        self.has_next_page = has_next_page
+        self.merge_queue_missing = merge_queue_missing
+        self.calls: list[list[str]] = []
+        self.mutations: list[list[str]] = []
+        self.fail_on: tuple[str, ...] = ()
+        #: hook(gh, joined_argv) invoked BEFORE each call is served, so a test can move
+        #  the world under the reap exactly where the TOCTOU window is.
+        self.on_call = None
+
+    # -- helpers the tests use --------------------------------------------------
+    @property
+    def cancelled(self) -> list[int]:
+        return sorted(
+            int(argv[-1].rsplit("/runs/", 1)[1].split("/", 1)[0])
+            for argv in self.mutations
+        )
+
+    def __call__(self, argv: list[str]) -> str:
+        self.calls.append(argv)
+        joined = " ".join(argv)
+        if self.on_call is not None:
+            self.on_call(self, joined)
+        for needle in self.fail_on:
+            if needle in joined:
+                raise mgw.GhError(f"simulated failure for {needle}")
+        if argv[:2] == ["api", "graphql"]:
+            query = next(a for a in argv if a.startswith("query="))
+            assert query.startswith("query=query"), query
+            if self.merge_queue_missing:
+                return json.dumps({"data": {"repository": {"mergeQueue": None}}})
+            return json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "mergeQueue": {
+                                "entries": {
+                                    "pageInfo": {"hasNextPage": self.has_next_page},
+                                    "nodes": self.nodes,
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+        if argv[:3] == ["api", "-X", "POST"]:
+            self.mutations.append(argv)
+            run_id = int(argv[-1].rsplit("/runs/", 1)[1].split("/", 1)[0])
+            self.runs[run_id]["status"] = "completed"
+            return ""
+        if "/actions/runs?" in joined:
+            status = joined.split("status=", 1)[1].split("&", 1)[0]
+            return "\n".join(
+                json.dumps(row) for row in self.runs.values() if row["status"] == status
+            )
+        if "/actions/runs/" in joined:
+            run_id = int(argv[-1].rsplit("/runs/", 1)[1])
+            return json.dumps(self.runs[run_id])
+        raise AssertionError(f"unexpected gh call: {argv}")
+
+
+class FakeReaper:
+    def __init__(self, gh, rows, watchdog):
+        self.gh = gh
+        self.rows = rows
+        self.watchdog = watchdog
+
+    @classmethod
+    def build(cls, *, runs=None, nodes=None, has_next_page=False,
+              merge_queue_missing=False, dry_run=False, now=None, **kwargs):
+        gh = ScriptedReapGh(
+            runs=[_run_row()] if runs is None else runs,
+            nodes=[_queue_node()] if nodes is None else nodes,
+            has_next_page=has_next_page,
+            merge_queue_missing=merge_queue_missing,
+        )
+        rows: list[str] = []
+        watchdog = mgw.Watchdog(
+            "sparq-org/sparq",
+            dry_run=dry_run,
+            gh=gh,
+            log=rows.append,
+            now=lambda: now or NOW,
+            **kwargs,
+        )
+        return cls(gh, rows, watchdog)
+
+    def run(self) -> int:
+        return self.watchdog.reap_stale_runs()
+
+
+class TestQueueSnapshotIsAuthoritative(unittest.TestCase):
+    """`queue_snapshot()` has no degraded return value — it answers or it raises."""
+
+    def test_a_complete_read_yields_the_current_heads_and_refs(self):
+        snapshot = FakeReaper.build().watchdog.queue_snapshot()
+        self.assertEqual(snapshot.head_oids, frozenset({LIVE_HEAD}))
+        self.assertEqual(snapshot.refs, frozenset({LIVE_REF}))
+        self.assertEqual(snapshot.entries, 1)
+        self.assertTrue(snapshot.complete)
+
+    def test_an_empty_queue_is_an_observed_fact(self):
+        snapshot = FakeReaper.build(nodes=[]).watchdog.queue_snapshot()
+        self.assertEqual(snapshot.entries, 0)
+        self.assertEqual(snapshot.head_oids, frozenset())
+
+    def test_a_null_merge_queue_is_NOT_an_empty_queue(self):
+        with self.assertRaises(mgw.GhError) as caught:
+            FakeReaper.build(merge_queue_missing=True).watchdog.queue_snapshot()
+        self.assertIn("NOT an empty one", str(caught.exception))
+
+    def test_a_truncated_page_is_refused(self):
+        with self.assertRaises(mgw.GhError):
+            FakeReaper.build(has_next_page=True).watchdog.queue_snapshot()
+
+    def test_a_missing_pageInfo_is_refused_exactly_like_a_truncated_one(self):
+        # A response with no completeness signal at all — a drifted query, a partial
+        # answer — must not be read as "complete". This is the arm a `.get("hasNextPage")`
+        # truthiness test would silently pass.
+        def serve(argv):
+            self.assertEqual(argv[:2], ["api", "graphql"])
+            return json.dumps(
+                {"data": {"repository": {"mergeQueue": {"entries": {"nodes": [_queue_node()]}}}}}
+            )
+
+        watchdog = mgw.Watchdog("sparq-org/sparq", gh=serve, log=lambda _r: None)
+        with self.assertRaises(mgw.GhError):
+            watchdog.queue_snapshot()
+
+    def test_the_reap_asks_for_the_whole_queue(self):
+        harness = FakeReaper.build()
+        harness.watchdog.queue_snapshot()
+        call = next(c for c in harness.gh.calls if c[:2] == ["api", "graphql"])
+        self.assertIn(f"first={mgw.QUEUE_ENTRY_PAGE}", call)
+        self.assertIn("pageInfo", next(a for a in call if a.startswith("query=")))
+
+
+class TestReapBehaviour(unittest.TestCase):
+    """Assert on the CANCELS ISSUED, never on the log text."""
+
+    # The #6068 shape: an entry timed out, the entries behind it were rebuilt, and the
+    # runs for the three deleted group refs stayed queued/in-progress.
+    REBUILD_RUNS = [
+        _run_row(id=99900101, name="ci", status="queued"),
+        _run_row(id=99900102, name="ci-summary", status="in_progress"),
+        _run_row(id=99900103, name="feature-matrix", status="queued",
+                 head_branch="gh-readonly-queue/main/pr-99900013-" + ("3c" * 20),
+                 head_sha="4d" * 20),
+        # ...and the REPLACEMENT group's own run, which must survive.
+        _run_row(id=99900104, name="ci", status="queued",
+                 head_branch=LIVE_REF, head_sha=LIVE_HEAD),
+    ]
+
+    def test_rebuild_cancels_exactly_the_obsolete_runs(self):
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS)
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.cancelled, [99900101, 99900102, 99900103])
+
+    def test_control_the_replacement_groups_run_is_untouched(self):
+        # The same fixture, stated as the property that matters: the run whose head IS
+        # the current group head is never in the cancel set.
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS)
+        harness.run()
+        self.assertNotIn(99900104, harness.gh.cancelled)
+
+    def test_active_current_only_issues_no_mutation_at_all(self):
+        harness = FakeReaper.build(
+            runs=[_run_row(id=99900104, head_branch=LIVE_REF, head_sha=LIVE_HEAD)]
+        )
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [])
+
+    def test_dequeue_an_emptied_queue_reaps_the_orphans(self):
+        harness = FakeReaper.build(runs=[_run_row()], nodes=[])
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.cancelled, [99900101])
+
+    def test_a_pr_head_run_and_a_push_run_are_never_cancelled(self):
+        # The fake serves every run regardless of `event=`, deliberately: the real API
+        # filters server-side, and a fake that ALSO filtered would make the reap's own
+        # event guard untestable in process. The third row is the one that matters —
+        # a non-merge_group run sitting on a stale QUEUE ref, where the ref predicate
+        # cannot help and only the event check keeps the cancel away.
+        harness = FakeReaper.build(
+            runs=[
+                _run_row(id=99900105, event="pull_request", head_branch="feature/x",
+                         head_sha="5e" * 20),
+                _run_row(id=99900106, event="push", head_branch="main", head_sha="6f" * 20),
+                _run_row(id=99900107, event="push", head_branch=STALE_REF,
+                         head_sha=STALE_HEAD),
+            ]
+        )
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [])
+
+    def test_dry_run_decides_but_never_mutates(self):
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS, dry_run=True)
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [])
+        cancels = [r for r in harness.rows if f"decision={mgw.CANCEL}" in r]
+        self.assertEqual(len(cancels), 3, harness.rows)
+        for row in cancels:
+            self.assertIn("[dry-run]", row)
+
+    def test_api_failure_on_the_queue_read_cancels_nothing_and_fails_loud(self):
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS)
+        harness.gh.fail_on = ("query=query",)
+        self.assertEqual(harness.run(), 1)
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(any("::error" in r for r in harness.rows), harness.rows)
+
+    def test_api_failure_on_the_run_list_cancels_nothing_and_fails_loud(self):
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS)
+        harness.gh.fail_on = ("/actions/runs?",)
+        self.assertEqual(harness.run(), 1)
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(any("::error" in r for r in harness.rows), harness.rows)
+
+    def test_an_unreadable_queue_never_reads_as_an_empty_one(self):
+        # THE WORST FAILURE THIS CODE COULD HAVE: three live runs plus a queue read that
+        # answers `mergeQueue: null`. Treating that as "no current groups" would cancel
+        # every one of them.
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS, merge_queue_missing=True)
+        self.assertEqual(harness.run(), 1)
+        self.assertEqual(harness.gh.mutations, [])
+
+    def test_a_truncated_queue_read_never_cancels(self):
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS, has_next_page=True)
+        self.assertEqual(harness.run(), 1)
+        self.assertEqual(harness.gh.mutations, [])
+
+    def test_a_run_inside_the_registration_grace_is_left_alone(self):
+        fresh = mgw.iso(NOW - timedelta(seconds=30))
+        harness = FakeReaper.build(runs=[_run_row(created_at=fresh)])
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(any(f"decision={mgw.WAIT}" in r for r in harness.rows), harness.rows)
+
+    def test_an_unreadable_run_refuses_keeps_it_and_reds_the_pass(self):
+        harness = FakeReaper.build(runs=[_run_row(head_sha="")])
+        self.assertEqual(harness.run(), 1)
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(any("::warning" in r and mgw.REFUSE in r for r in harness.rows))
+
+    def test_duplicate_delivery_is_a_no_op(self):
+        # The doorbell rings on every enqueue AND dequeue, so double delivery is normal.
+        # The second pass sees the runs it already cancelled as `completed` and skips
+        # them; there is no marker and no cursor, so idempotence is structural.
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS)
+        harness.run()
+        first = list(harness.gh.mutations)
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, first)
+
+    def test_toctou_a_group_re_enqueued_before_the_write_is_not_cancelled(self):
+        # The window this closes: the queue rebuilds between the decision and the POST,
+        # and the "obsolete" head becomes current again. The revalidation immediately
+        # before the cancel re-reads BOTH the queue and the run, so the write never
+        # lands on live work.
+        harness = FakeReaper.build(runs=[_run_row()])
+
+        def re_enqueue(gh, joined):
+            # Fire once the decision has been made (the run list has been read) so the
+            # only remaining queue read is the revalidation one.
+            if "/actions/runs?" in joined:
+                gh.nodes = [_queue_node(number=99900011, base="1a" * 20, head=STALE_HEAD)]
+
+        harness.gh.on_call = re_enqueue
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(
+            any("NOT CANCELLED" in r and mgw.KEEP in r for r in harness.rows), harness.rows
+        )
+
+    def test_toctou_a_run_that_finished_before_the_write_is_not_cancelled(self):
+        harness = FakeReaper.build(runs=[_run_row()])
+
+        def finish(gh, joined):
+            if "/actions/runs/" in joined and "?" not in joined:
+                gh.runs[99900101]["status"] = "completed"
+
+        harness.gh.on_call = finish
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(any("NOT CANCELLED" in r for r in harness.rows), harness.rows)
+
+    def test_the_revalidation_really_happens_before_every_cancel(self):
+        # Guards the guard: if the re-read were dropped, the two tests above would pass
+        # vacuously for a fake that simply never changed state. The single-run GET must
+        # appear before each POST.
+        harness = FakeReaper.build(runs=[_run_row()])
+        harness.run()
+        kinds = [
+            "POST" if c[:3] == ["api", "-X", "POST"]
+            else "GET-RUN" if "/actions/runs/" in " ".join(c)
+            else "GRAPHQL" if c[:2] == ["api", "graphql"]
+            else "LIST"
+            for c in harness.gh.calls
+        ]
+        self.assertEqual(kinds[-3:], ["GRAPHQL", "GET-RUN", "POST"], kinds)
+
+    def test_a_run_whose_identity_changed_under_us_is_not_cancelled(self):
+        harness = FakeReaper.build(runs=[_run_row()])
+
+        def swap_head(gh, joined):
+            if "/actions/runs/" in joined and "?" not in joined:
+                gh.runs[99900101]["head_sha"] = "8a" * 20
+
+        harness.gh.on_call = swap_head
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.gh.mutations, [])
+
+    def test_a_409_on_the_cancel_is_the_outcome_we_wanted_not_a_failure(self):
+        harness = FakeReaper.build(runs=[_run_row()])
+        original = harness.gh.__call__
+
+        def conflict(argv):
+            if argv[:3] == ["api", "-X", "POST"]:
+                harness.gh.calls.append(argv)
+                harness.gh.mutations.append(argv)
+                raise mgw.GhError("gh api: HTTP 409: Cannot cancel a completed run")
+            return original(argv)
+
+        harness.watchdog.gh = conflict
+        self.assertEqual(harness.run(), 0)
+        self.assertTrue(any("already-finished" in r for r in harness.rows), harness.rows)
+
+    def test_a_genuine_cancel_failure_is_a_red_pass(self):
+        harness = FakeReaper.build(runs=[_run_row()])
+        harness.gh.fail_on = ("POST",)
+        self.assertEqual(harness.run(), 1)
+        self.assertTrue(any("CANCEL FAILED" in r for r in harness.rows), harness.rows)
+
+    def test_the_per_run_cancellation_budget_bounds_one_tick(self):
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS, max_cancels_per_run=1)
+        self.assertEqual(harness.run(), 0)
+        self.assertEqual(len(harness.gh.cancelled), 1)
+        self.assertTrue(any(f"decision={mgw.CAP}" in r for r in harness.rows), harness.rows)
+
+    def test_every_run_emits_a_row_and_the_census_closes_the_pass(self):
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS)
+        harness.run()
+        for run in self.REBUILD_RUNS:
+            self.assertTrue(
+                any(f"run={run['id']} " in r for r in harness.rows), (run["id"], harness.rows)
+            )
+        census = [r for r in harness.rows if "reap complete:" in r]
+        self.assertEqual(len(census), 1, harness.rows)
+        self.assertIn("cancelled=3", census[0])
+        self.assertIn("errors=0", census[0])
+
+    def test_an_empty_run_list_says_so_explicitly(self):
+        harness = FakeReaper.build(runs=[])
+        self.assertEqual(harness.run(), 0)
+        self.assertTrue(any("no queued/in-progress" in r for r in harness.rows), harness.rows)
+
+    def test_both_unfinished_statuses_are_enumerated(self):
+        harness = FakeReaper.build(runs=self.REBUILD_RUNS)
+        harness.run()
+        listed = [" ".join(c) for c in harness.gh.calls if "/actions/runs?" in " ".join(c)]
+        self.assertEqual(len(listed), 2, listed)
+        self.assertTrue(any("status=queued" in c for c in listed), listed)
+        self.assertTrue(any("status=in_progress" in c for c in listed), listed)
+        for call in listed:
+            self.assertIn("event=merge_group", call)
+
+
+class TestReapEntrypoint(unittest.TestCase):
+    def test_a_grace_below_the_floor_is_refused(self):
+        with self.assertRaises(ValueError):
+            mgw.Watchdog("sparq-org/sparq", registration_grace_seconds=30, gh=lambda _a: "")
+
+    def test_a_zero_cancel_budget_is_refused(self):
+        with self.assertRaises(ValueError):
+            mgw.Watchdog("sparq-org/sparq", max_cancels_per_run=0, gh=lambda _a: "")
+
+    def test_the_cli_accepts_every_flag_the_workflow_can_emit(self):
+        # Reaching the POISONED runner (rather than SystemExit-ing out of argparse) is
+        # what proves the flags parsed. `--dry-run` does not short-circuit the reads, so
+        # this path is identical either way.
+        with self.assertRaises(RealGhCallAttempted):
+            mgw.main(["reap-stale-runs", "--repo", "sparq-org/sparq", "--branch", "main",
+                      "--dry-run", "--registration-grace-seconds", "120",
+                      "--max-cancels-per-run", "3"])
+
+    def test_a_malformed_repo_argument_exits_nonzero(self):
+        self.assertEqual(mgw.main(["reap-stale-runs", "--repo", "not-a-repo"]), 1)
+
+
+class TestReapWiring(unittest.TestCase):
+    """Mutate the job, its permissions, or the call site and one of these goes red."""
+
+    def setUp(self):
+        self.wf = _yaml(WATCHDOG_YML)
+        self.job = self.wf["jobs"]["reap"]
+        self.steps = self.job["steps"]
+
+    def test_the_reap_job_exists_in_the_workflow_the_doorbell_rings(self):
+        # The doorbell dispatches merge-group-watchdog.yml, so a reap job living HERE
+        # is what makes the reap fire on every enqueue/dequeue. Moving it to another
+        # workflow without a doorbell would silently drop the event-driven half.
+        ring = _yaml(DOORBELL_YML)["jobs"]["doorbell"]["steps"][0]["run"]
+        self.assertIn("merge-group-watchdog.yml", ring)
+        self.assertIn("reap", self.wf["jobs"])
+
+    def test_the_periodic_backstop_is_retained(self):
+        on = _on_block(self.wf)
+        self.assertIn("schedule", on)
+        self.assertIn("workflow_dispatch", on)
+
+    def test_the_call_site_invokes_the_reap_subcommand(self):
+        run = _step(self.wf, "reap", "Reap workflow runs")["run"]
+        self.assertIn("scripts/merge-group-watchdog.py", run)
+        self.assertIn("reap-stale-runs", run)
+        self.assertIn("--repo", run)
+        self.assertIn("--branch", run)
+
+    def test_dry_run_is_reachable_from_the_dispatch_input(self):
+        step = _step(self.wf, "reap", "Reap workflow runs")
+        self.assertIn("--dry-run", step["env"]["DRY_RUN"])
+        self.assertIn("$DRY_RUN", step["run"])
+
+    def test_permissions_are_least_privilege_and_narrower_than_the_default(self):
+        perms = self.job["permissions"]
+        self.assertEqual(
+            perms, {"contents": "read", "actions": "write", "pull-requests": "read"}
+        )
+        # The whole point of the separate job: the reap must not be able to comment,
+        # label, or dequeue.
+        self.assertNotEqual(perms.get("pull-requests"), "write")
+        self.assertNotEqual(self.wf["permissions"].get("actions"), "write")
+
+    def test_it_checks_out_the_default_branch_and_never_a_merge_ref(self):
+        step = _step(self.wf, "reap", "Checkout reap policy")
+        self.assertEqual(step["with"]["ref"], "${{ github.event.repository.default_branch }}")
+        self.assertIs(step["with"]["persist-credentials"], False)
+        self.assertIn("scripts/merge-group-watchdog.py", step["with"]["sparse-checkout"])
+        self.assertIn("scripts/gh_retry.py", step["with"]["sparse-checkout"])
+
+    def test_no_step_checks_out_or_executes_a_merge_ref(self):
+        for step in self.steps:
+            body = str(step.get("run", "")) + json.dumps(step.get("with", {}))
+            self.assertNotIn("gh-readonly-queue", body, step.get("name"))
+            self.assertNotIn("github.event.merge_group", body, step.get("name"))
+
+    def test_the_self_test_runs_before_the_live_reap(self):
+        names = [s.get("name") or s.get("uses") for s in self.steps]
+        self.assertLess(
+            next(i for i, n in enumerate(names) if n and "Self-test" in n),
+            next(i for i, n in enumerate(names) if n and "Reap workflow runs" in n),
+        )
+
+    def test_actions_are_sha_pinned(self):
+        raw = WATCHDOG_YML.read_text(encoding="utf-8")
+        seen = 0
+        for step in self.steps:
+            uses = step.get("uses")
+            if not uses:
+                continue
+            seen += 1
+            self.assertRegex(uses, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$", uses)
+            self.assertRegex(raw, re.escape(f"uses: {uses} # v"), uses)
+        self.assertGreater(seen, 0)
+
+    def test_the_job_name_is_not_advisory_classified(self):
+        self.assertIsNone(re.search(r"\b(advisory|informational)\b", self.job["name"]))
+
+    def test_the_reap_does_not_hold_the_watch_jobs_app_token(self):
+        # The reap needs no App identity: it fires no queue event, so GITHUB_TOKEN is
+        # sufficient. Granting it the orchestrator App would be a strict widening.
+        self.assertNotIn("env", {k: v for k, v in self.job.items() if k == "env"})
+        step = _step(self.wf, "reap", "Reap workflow runs")
+        self.assertEqual(step["env"]["GH_TOKEN"], "${{ github.token }}")
 
 
 if __name__ == "__main__":

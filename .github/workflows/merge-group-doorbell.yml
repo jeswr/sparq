@@ -87,6 +87,15 @@
 # NOT A NEW DECISION. This file changes only the TIMING of an existing sweep. It carries
 # no predicate, no threshold and no dequeue: `merge-group-watchdog.py` still decides,
 # and still recovers only an entry it has POSITIVELY established has zero check-suites.
+#
+# ── [OPUS-5] #6068 — THE RING NOW DRIVES TWO JOBS ───────────────────────────────
+# `merge-group-watchdog.yml` gained a second, independent job (`reap`) that cancels
+# workflow runs whose merge-group ref the queue no longer builds. Because a
+# `workflow_dispatch` starts the whole workflow, this one unchanged ring covers it too,
+# and the SAME pair of activity types is the right producer for it: an entry ENTERING
+# the queue and an entry LEAVING it are between them what makes a group ref — and hence
+# every run dispatched for it — obsolete. Nothing in this file changes; the note exists
+# so a future edit knows the ring has a second consumer.
 name: merge-group doorbell
 
 on:
