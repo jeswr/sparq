@@ -1,46 +1,51 @@
 #!/usr/bin/env python3
-# [OPUS-5] sq-khm3f — INSPECTION test for how the GATING `js` lane
-# (.github/workflows/js.yml) puts wasm-pack on PATH.
+# [OPUS-5] sq-khm3f (#1131) / #5771 / #5305 — INSPECTION test for HOW this repo puts
+# wasm-pack on PATH, and for the fact that it does so in exactly one way.
 #
-# WHY a test at all: the property is a single `uses:`/`run:` YAML line, and its
-# failure mode is INVISIBLE. Reverting to `cargo install wasm-pack --locked` keeps
-# the lane green on a good day — it just recompiles wasm-pack and its whole
-# chrono/wasm-bindgen source tree from crates.io on every run, so a transient
-# registry/CDN blip reds this HARD gate on an unrelated PR (observed on PR #1131:
-# "download of wa/sm/wasm-bindgen failed / curl failed: [16] Error in the HTTP2
-# framing layer", cleared by a plain re-run). Nothing goes red when the hardening
-# is dropped, so the posture is pinned here instead:
+# WHY A TEST AT ALL: every property below is a single YAML line, and every failure
+# mode is INVISIBLE — drop any one of them and CI stays green, on a good day, while
+# a real guarantee is gone. Nothing reds, so the posture is pinned here instead.
 #
-#   1. NO SOURCE COMPILE. js.yml must not `cargo install wasm-pack` anywhere.
-#   2. PREBUILT BINARY, SHA-PINNED. wasm-pack comes from jetli/wasm-pack-action
-#      (one static musl tarball, fetched through @actions/tool-cache, which retries
-#      the download), pinned to a 40-hex commit SHA per the repo's action-pin policy.
-#   3. EXACT VERSION PIN. `version:` is an exact `vX.Y.Z`, never `latest` —
-#      `latest` re-adds an unauthenticated api.github.com release lookup, i.e. a
-#      second rate-limit-flake source, which is the thing this bead removes.
-#   4. ORDERING. The install still precedes the root `npm ci`, because the package's
-#      `prepare` lifecycle (sq-bkag git-pin build) runs on `npm ci` and needs
-#      wasm-pack on PATH to compile the wasm engine.
+# The properties, and the incident each one is standing on:
 #
-# SCOPE — properties 1–4 are deliberately js.yml ONLY. gui.yml / site-e2e-hero.yml /
-# site-visual.yml still `cargo install` wasm-pack; converting them is separate work and
-# is NOT asserted here, so this file's silence about them is not a claim that they are
-# hardened.
+#   1. ONE SOURCE OF TRUTH FOR THE VERSION (#5305).
+#      wasm-pack is installed by 18 steps across 9 workflows. They used to disagree:
+#      two named a version via jetli/wasm-pack-action (ci.yml said v0.13.1, js.yml
+#      said v0.15.0 — the #5771 skew) and sixteen ran a bare `cargo install wasm-pack
+#      --locked`, resolving to whatever crates.io's newest release was that day. So
+#      the lane that RUNS the headless `wasm-pack test --node` suites and the lanes
+#      that BUILD and PUBLISH the artifact users install could each use a different
+#      wasm-pack, and therefore a different bundled wasm-bindgen: a behaviour change
+#      between releases got exercised in one lane and never the other, with every
+#      lane individually green. The version now lives in ONE file,
+#      .github/actions/install-wasm-pack/action.yml, and every lane calls it.
+#      Asserted by CompositeActionIsTheSingleSourceOfTruth +
+#      NoWorkflowBypassesTheCompositeAction.
 #
-# One CROSS-WORKFLOW property is asserted, by WasmPackVersionUnified below:
+#   2. NO SOURCE COMPILE ON THE GATING LANES (sq-khm3f).
+#      `cargo install wasm-pack` compiles wasm-pack and its whole chrono/wasm-bindgen
+#      source tree from crates.io on every run, so a transient registry/CDN blip reds
+#      a HARD gate on an unrelated PR — observed on PR #1131 ("download of
+#      wa/sm/wasm-bindgen failed / curl failed: [16] Error in the HTTP2 framing
+#      layer"), cleared by a plain re-run. The prebuilt path fetches one static musl
+#      tarball through @actions/tool-cache, which retries a failed download.
+#      Asserted by NoWorkflowBypassesTheCompositeAction (no workflow may `cargo
+#      install wasm-pack`) — the composite's own non-x64-Linux fallback is the single
+#      permitted source install, and it is version-pinned.
 #
-#   5. ONE VERSION REPO-WIDE. Every workflow that installs wasm-pack through
-#      jetli/wasm-pack-action must pass the action exactly one `with: version:` input
-#      (read indentation-aware, so a `version:` under a sibling mapping does not count
-#      as a pin), and they must all request the SAME one (a step with none takes the
-#      action's default, i.e. it is an unpinned lane, which is the same regression in
-#      a different shape). #5771: ci.yml's `wasm`
-#      job — the lane that RUNS the headless `wasm-pack test --node` suites — pinned
-#      v0.13.1 while js.yml — the lane that BUILDS the published artifact — pinned
-#      v0.15.0, so a wasm-pack/wasm-bindgen behaviour change between those releases was
-#      exercised in the build lane and never in the test lane. Nothing goes red when the
-#      two drift apart again, hence this assertion. It says nothing about WHICH version
-#      is right; bumping is fine, bumping one lane only is not.
+#   3. PREBUILT BINARY, SHA-PINNED. jetli/wasm-pack-action is pinned to a 40-hex
+#      commit SHA, per the repo's action-pin policy.
+#
+#   4. EXACT VERSION, NEVER `latest`. `latest` re-adds an unauthenticated
+#      api.github.com release lookup on every run — a second rate-limit-flake source,
+#      i.e. the thing sq-khm3f removed.
+#
+#   5. ORDERING IN THE `js` LANE. The install still precedes the root `npm ci`,
+#      because the package's `prepare` lifecycle (sq-bkag git-pin build) runs on
+#      `npm ci` and needs wasm-pack already on PATH to compile the wasm engine.
+#
+# SCOPE HONESTY: this file says nothing about WHICH version is correct. Bumping is
+# fine; bumping one lane only is what it makes impossible.
 #
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).
@@ -58,11 +63,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 JS_YML = WORKFLOWS / "js.yml"
 
+# The ONE file the wasm-pack version is written in, and the `uses:` value every lane
+# reaches it by. A local action is referenced by path, so it has no `@ref` — the
+# checked-out tree IS the version, which is why no pin is needed on this line.
+COMPOSITE_PATH = REPO_ROOT / ".github" / "actions" / "install-wasm-pack" / "action.yml"
+COMPOSITE_USES = "./.github/actions/install-wasm-pack"
+
 WASM_PACK_ACTION = "jetli/wasm-pack-action"
 # The repo's action-pin policy: a 40-char lowercase hex commit SHA, never a tag.
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # An exact release pin, e.g. `v0.15.0`. `latest` (and any floating ref) must fail.
 VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+# The composite's source-build fallback. `--version <X>` is mandatory: without it the
+# fallback resolves to crates.io's newest release, which is the #5305 drift itself.
+CARGO_INSTALL_RE = re.compile(
+    r"cargo install wasm-pack\b(?P<args>[^\n]*)"
+)
+CARGO_VERSION_RE = re.compile(r"--version[= ]+(?P<v>\S+)")
 
 
 def _load(name: str, filename: str):
@@ -81,8 +98,9 @@ gate = _load("check_install_action_tool", "check-install-action-tool.py")
 
 def _code_lines(text: str) -> list[str]:
     """Lines with comments and blanks dropped — so a `#`-commented mention of the
-    old command (this repo comments its workflows heavily) is never mistaken for a
-    live step."""
+    old command (this repo comments its workflows heavily, and several of those
+    comments quote `cargo install wasm-pack` to explain why it is gone) is never
+    mistaken for a live step."""
     out = []
     for raw in text.splitlines():
         stripped = raw.strip()
@@ -135,47 +153,102 @@ def _with_versions(block: list[str]) -> list[str]:
     return versions
 
 
-class JsLaneWasmPackInstall(unittest.TestCase):
+def _step_version(block: list[str]) -> str:
+    """The wasm-pack version one step requests, or a DESCRIPTIVE SENTINEL when the
+    step does not carry exactly one non-empty `with: version:` input.
+
+    Only a `version:` that is a direct child of the step's `with:` mapping counts
+    (see `_with_versions`): that is the one the action actually receives. A duplicate
+    `with.version` is a sentinel too — YAML last-key-wins makes the effective pin
+    ambiguous to a reader, and no assertion should have to guess.
+
+    Returning a sentinel rather than nothing is what keeps the assertions honest. A
+    step that LOST its `version:` installs whatever the action defaults to — the
+    unpinned-lane regression — but if such a step simply contributed no entry, a
+    comparison over the remaining entries would still agree and pass. As a sentinel it
+    matches no `vX.Y.Z`, so it reds instead.
+    """
+    versions = _with_versions(block)
+    exact = [v for v in versions if v]
+    if len(exact) != 1 or len(versions) != 1:
+        return f"<not exactly one `with: version:` input: {versions!r}>"
+    return exact[0]
+
+
+def _wasm_pack_installs(text: str) -> list[tuple[str, list[str]]]:
+    """Every step in `text` that puts wasm-pack on PATH, as (kind, block).
+
+    kind is one of:
+      "composite" — `uses: ./.github/actions/install-wasm-pack` (the sanctioned route)
+      "jetli"     — a direct `uses: jetli/wasm-pack-action@...` (bypasses the pin)
+      "cargo"     — a live `run:` that `cargo install`s it (bypasses the pin AND
+                    re-adds the sq-khm3f source-compile flake surface)
+
+    Detection is per-STEP rather than per-line because this repo comments its
+    workflows heavily and the splitter retains comment lines, so a prose mention of
+    an action leaks into the preceding step's block; `_code_lines` is applied to the
+    block before the `run:` scan for exactly that reason.
+    """
+    found: list[tuple[str, list[str]]] = []
+    for block in gate.split_steps(text):
+        uses = gate._step_uses(block)
+        if uses and uses[0] == WASM_PACK_ACTION:
+            found.append(("jetli", block))
+            continue
+        # A local action is `uses: <path>` with no `@ref`, so `_step_uses` (which
+        # requires an `@`) does not see it; match the path on the step's own `uses:`.
+        if any(
+            ln.lstrip(" ").lstrip("- ").startswith("uses:")
+            and COMPOSITE_USES in ln
+            for ln in _code_lines("\n".join(block))
+        ):
+            found.append(("composite", block))
+            continue
+        if any("cargo install wasm-pack" in ln for ln in _code_lines("\n".join(block))):
+            found.append(("cargo", block))
+    return found
+
+
+def _workflow_sources() -> dict[str, str]:
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted(WORKFLOWS.glob("*.y*ml"))
+    }
+
+
+class CompositeActionIsTheSingleSourceOfTruth(unittest.TestCase):
+    """(1,3,4) The one file the version lives in, and the shape of what it installs."""
+
     @classmethod
     def setUpClass(cls):
-        cls.text = JS_YML.read_text(encoding="utf-8")
-        cls.code = _code_lines(cls.text)
+        cls.text = COMPOSITE_PATH.read_text(encoding="utf-8")
+        cls.steps = gate.split_steps(cls.text)
 
-    def _wasm_pack_step(self) -> list[str]:
-        # Match on the step's parsed `uses:` action, NOT on a substring of the block:
-        # this workflow is heavily commented, and the splitter keeps comment lines, so
-        # a prose mention of the action leaks into the PRECEDING step's block.
+    def test_composite_action_exists(self):
+        self.assertTrue(
+            COMPOSITE_PATH.is_file(),
+            f"{COMPOSITE_PATH.relative_to(REPO_ROOT)} is the single place the repo's "
+            "wasm-pack version is written (#5305). Every lane `uses:` it; without the "
+            "file they all fail to resolve the action.",
+        )
+
+    def _prebuilt_step(self) -> list[str]:
         blocks = [
             b
-            for b in gate.split_steps(self.text)
+            for b in self.steps
             if (gate._step_uses(b) or (None,))[0] == WASM_PACK_ACTION
         ]
         self.assertEqual(
             len(blocks),
             1,
-            f"js.yml must have exactly one {WASM_PACK_ACTION} step, found "
-            f"{len(blocks)}",
+            f"the composite action must have exactly one {WASM_PACK_ACTION} step, "
+            f"found {len(blocks)}",
         )
         return blocks[0]
 
-    def test_no_cargo_install_wasm_pack(self):
-        """(1) The source compile — the actual flake surface — must be gone."""
-        offenders = [ln for ln in self.code if "cargo install wasm-pack" in ln]
-        self.assertEqual(
-            offenders,
-            [],
-            "js.yml must NOT `cargo install wasm-pack`: compiling it (and the "
-            "chrono/wasm-bindgen source tree) from crates.io on every run is what "
-            "let a transient registry blip red this gating lane (sq-khm3f). Install "
-            f"the prebuilt binary via {WASM_PACK_ACTION} instead.",
-        )
-
-    def test_installs_prebuilt_binary_sha_pinned(self):
-        """(2) The replacement is the SHA-pinned prebuilt-download action."""
-        block = self._wasm_pack_step()
-        uses = gate._step_uses(block)
-        self.assertIsNotNone(uses, "the wasm-pack step must have a `uses:` line")
-        action, ref = uses
+    def test_prebuilt_step_is_sha_pinned(self):
+        """(3) The prebuilt-download action is pinned to a commit SHA, not a tag."""
+        action, ref = gate._step_uses(self._prebuilt_step())
         self.assertEqual(action, WASM_PACK_ACTION)
         self.assertRegex(
             ref,
@@ -184,35 +257,133 @@ class JsLaneWasmPackInstall(unittest.TestCase):
             f"action-pin policy), got {ref!r}",
         )
 
-    def test_version_is_pinned_exactly_not_latest(self):
-        """(3) An exact vX.Y.Z — `latest` re-adds a network lookup to resolve it."""
-        block = self._wasm_pack_step()
-        versions = _with_versions(block)
-        self.assertEqual(
-            len(versions),
-            1,
-            "the wasm-pack step must carry exactly one `with: version:` input, found "
-            f"{versions!r}",
-        )
+    def test_prebuilt_version_is_exact_not_latest(self):
+        """(4) An exact vX.Y.Z — `latest` re-adds a network lookup to resolve it."""
+        version = _step_version(self._prebuilt_step())
         self.assertRegex(
-            versions[0],
+            version,
             VERSION_RE,
-            "wasm-pack must be pinned to an exact release (e.g. v0.15.0). "
-            "`latest` costs an unauthenticated api.github.com lookup on every run "
-            "— a second rate-limit-flake source (sq-khm3f).",
+            "wasm-pack must be pinned to an exact release (e.g. v0.15.0). `latest` "
+            "costs an unauthenticated api.github.com lookup on every run — a second "
+            "rate-limit-flake source (sq-khm3f).",
         )
 
+    def test_source_fallback_pins_the_same_version(self):
+        """(1) The composite's two install paths must not drift from EACH OTHER.
+
+        The fallback exists for runners with no proven prebuilt asset. An unpinned
+        `cargo install wasm-pack` there would resolve to crates.io's newest release —
+        reintroducing, inside the very file that is supposed to end it, the exact
+        drift #5305 is about.
+        """
+        live = [
+            ln
+            for ln in _code_lines(self.text)
+            if "cargo install wasm-pack" in ln
+        ]
+        self.assertEqual(
+            len(live),
+            1,
+            f"expected exactly one source-build fallback command, found {live!r}",
+        )
+        args = CARGO_INSTALL_RE.search(live[0]).group("args")
+        m = CARGO_VERSION_RE.search(args)
+        self.assertIsNotNone(
+            m,
+            "the source-build fallback must pass `--version <X.Y.Z>`; without it it "
+            f"resolves to whatever crates.io ships that day (#5305). Got: {live[0].strip()!r}",
+        )
+        prebuilt = _step_version(self._prebuilt_step())
+        self.assertEqual(
+            m.group("v"),
+            prebuilt.lstrip("v"),
+            "the composite's prebuilt pin and its source-build fallback must request "
+            f"the SAME wasm-pack: prebuilt asks {prebuilt!r}, fallback asks "
+            f"{m.group('v')!r}. Bump both literals together.",
+        )
+
+
+class NoWorkflowBypassesTheCompositeAction(unittest.TestCase):
+    """(1,2) Every wasm-pack install in the repo goes through the one pinned route.
+
+    A lane that installs wasm-pack any other way is unpinned by construction, and
+    that is invisible: the lane is green, it just used a different wasm-pack than the
+    lane that tested the bindings (#5771) or than the lane that published them.
+    """
+
+    def test_no_workflow_cargo_installs_wasm_pack(self):
+        """(2) The source compile — the actual flake surface — is gone from every lane."""
+        offenders = [
+            f"{name}: {ln.strip()}"
+            for name, text in sorted(_workflow_sources().items())
+            for kind, block in _wasm_pack_installs(text)
+            if kind == "cargo"
+            for ln in _code_lines("\n".join(block))
+            if "cargo install wasm-pack" in ln
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "no workflow may `cargo install wasm-pack`: it compiles wasm-pack (and "
+            "its whole chrono/wasm-bindgen source tree) from crates.io on every run, "
+            "which let a transient registry blip red a gating lane (sq-khm3f, PR "
+            "#1131), and unpinned it resolves to a different release than the other "
+            f"lanes (#5305). Use `uses: {COMPOSITE_USES}` instead. Offenders: "
+            f"{offenders}",
+        )
+
+    def test_no_workflow_calls_the_action_directly(self):
+        """(1) A direct jetli step carries its own `version:` — a second pin to drift."""
+        offenders = [
+            name
+            for name, text in sorted(_workflow_sources().items())
+            for kind, _ in _wasm_pack_installs(text)
+            if kind == "jetli"
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            f"no workflow may call {WASM_PACK_ACTION} directly: doing so re-adds a "
+            "per-lane `with: version:`, which is the drift #5771/#5305 removed. Call "
+            f"`uses: {COMPOSITE_USES}` — the one file the version lives in. "
+            f"Offenders: {offenders}",
+        )
+
+    def test_key_lanes_still_install_wasm_pack(self):
+        """Anti-vacuity. Both assertions above are satisfied by a repo that installs
+        wasm-pack NOWHERE, so name the lanes whose skew motivated this: ci.yml RUNS
+        the headless suites, js.yml BUILDS the artifact the `js` gate packs, and
+        publish.yml builds the artifact actually published to npm. If any drops out
+        of the sample, the guarantee has silently narrowed."""
+        via_composite = {
+            name
+            for name, text in _workflow_sources().items()
+            for kind, _ in _wasm_pack_installs(text)
+            if kind == "composite"
+        }
+        for expected in ("ci.yml", "js.yml", "publish.yml"):
+            self.assertIn(
+                expected,
+                via_composite,
+                f"{expected} must install wasm-pack via `uses: {COMPOSITE_USES}` — "
+                "without it the single-source assertions above have nothing to "
+                "constrain and pass vacuously (#5771, #5305). Lanes currently on the "
+                f"composite: {sorted(via_composite)}",
+            )
+
+
+class JsLaneInstallOrdering(unittest.TestCase):
+    """(5) `prepare` runs on `npm ci` and needs wasm-pack already on PATH."""
+
     def test_install_precedes_npm_ci(self):
-        """(4) `prepare` runs on `npm ci` and needs wasm-pack already on PATH."""
-        install_at = [
-            i for i, ln in enumerate(self.code) if WASM_PACK_ACTION in ln
-        ]
+        code = _code_lines(JS_YML.read_text(encoding="utf-8"))
+        install_at = [i for i, ln in enumerate(code) if COMPOSITE_USES in ln]
         npm_ci_at = [
-            i
-            for i, ln in enumerate(self.code)
-            if re.match(r"^\s*run:\s*npm ci\s*$", ln)
+            i for i, ln in enumerate(code) if re.match(r"^\s*run:\s*npm ci\s*$", ln)
         ]
-        self.assertEqual(len(install_at), 1, "one wasm-pack install step expected")
+        self.assertEqual(
+            len(install_at), 1, "one wasm-pack install step expected in js.yml"
+        )
         self.assertTrue(npm_ci_at, "js.yml must still run the root `npm ci`")
         self.assertLess(
             install_at[0],
@@ -223,215 +394,66 @@ class JsLaneWasmPackInstall(unittest.TestCase):
         )
 
 
-def _step_version(block: list[str]) -> str:
-    """The wasm-pack version one step requests, or a DESCRIPTIVE SENTINEL when the
-    step does not carry exactly one non-empty `with: version:` input.
+class DetectionGuard(unittest.TestCase):
+    """The assertions above are only as good as `_wasm_pack_installs`. Feed it the
+    exact regressions it exists to catch — as synthetic text, touching no file — and
+    prove it classifies each one rather than passing it through as unremarkable."""
 
-    Only a `version:` that is a direct child of the step's `with:` mapping counts
-    (see `_with_versions`): that is the one the action actually receives. A duplicate
-    `with.version` is a sentinel too — YAML last-key-wins makes the effective pin
-    ambiguous to a reader, and the repo-wide comparison should not have to guess.
+    def _kinds(self, text: str) -> list[str]:
+        return [kind for kind, _ in _wasm_pack_installs(text)]
 
-    Returning a sentinel rather than nothing is what keeps the cross-workflow
-    comparison honest. A step that LOST its `version:` installs whatever the action
-    defaults to — the same unpinned-lane regression #5771 is about — but if such a
-    step simply contributed no entry, the remaining lanes would still agree and both
-    assertions below would pass. As a sentinel it reads as a pin unlike any other, so
-    it reds `test_single_version_across_workflows` (and, being no `vX.Y.Z`,
-    `test_every_step_pins_an_exact_version` too).
-    """
-    versions = _with_versions(block)
-    exact = [v for v in versions if v]
-    if len(exact) != 1 or len(versions) != 1:
-        return f"<not exactly one `with: version:` input: {versions!r}>"
-    return exact[0]
-
-
-class WasmPackVersionUnified(unittest.TestCase):
-    """(5) Every jetli/wasm-pack-action step in the repo asks for the SAME version,
-    and every such step actually asks for one.
-
-    ci.yml's `wasm` job RUNS the headless suites; js.yml BUILDS + packs the npm
-    package's wasm artifact. If they skew, a wasm-pack/wasm-bindgen behaviour change is
-    only ever exercised in the build lane (#5771). This pins the EQUALITY, not the
-    value — bumping is fine, bumping one lane only is not. Dropping a lane's `version:`
-    altogether is the same regression wearing a different hat (that lane silently takes
-    the action's default), so it is caught too.
-    """
-
-    @staticmethod
-    def _pins_from(sources: dict[str, str]) -> dict[str, list[str]]:
-        """{workflow filename: [one entry PER wasm-pack step]}.
-
-        Per-step, not flattened-over-values: a step with no `version:` must still
-        occupy a slot (as a `_step_version` sentinel) instead of disappearing.
-        Split out from `_pins` so the mutation guard below can feed it synthetic
-        workflows without touching the tree.
-        """
-        found: dict[str, list[str]] = {}
-        for name, text in sorted(sources.items()):
-            if WASM_PACK_ACTION not in text:
-                continue
-            for block in gate.split_steps(text):
-                if (gate._step_uses(block) or (None,))[0] != WASM_PACK_ACTION:
-                    continue
-                found.setdefault(name, []).append(_step_version(block))
-        return found
-
-    @classmethod
-    def _pins(cls) -> dict[str, list[str]]:
-        return cls._pins_from(
-            {
-                path.name: path.read_text(encoding="utf-8")
-                for path in sorted(WORKFLOWS.glob("*.y*ml"))
-            }
-        )
-
-    def test_both_wasm_lanes_use_the_action(self):
-        """Anti-vacuity: the two lanes #5771 unified must still be in the sample."""
-        pins = self._pins()
-        for expected in ("ci.yml", "js.yml"):
-            self.assertIn(
-                expected,
-                pins,
-                f"{expected} must install wasm-pack via {WASM_PACK_ACTION} — without "
-                "it the single-version assertion below has nothing to compare and "
-                "passes vacuously (#5771).",
-            )
-
-    def test_every_step_pins_an_exact_version(self):
-        """Every wasm-pack step names an exact release — an omitted `version:` takes
-        the action's default, which is exactly the unpinned lane #5771 removed."""
-        for name, versions in sorted(self._pins().items()):
-            for i, version in enumerate(versions):
-                self.assertRegex(
-                    version,
-                    VERSION_RE,
-                    f"{name}: {WASM_PACK_ACTION} step #{i} must carry exactly one "
-                    f"exact `version:` (e.g. v0.15.0), got {version!r}. A step "
-                    "without one installs whatever the action defaults to, so the "
-                    "lane is unpinned and the repo-wide version agreement below "
-                    "means nothing for it (#5771).",
-                )
-
-    def test_single_version_across_workflows(self):
-        pins = self._pins()
-        distinct = {v for versions in pins.values() for v in versions}
+    def test_detects_a_reverted_cargo_install(self):
         self.assertEqual(
-            len(distinct),
-            1,
-            "all workflows must install the SAME wasm-pack version, found "
-            f"{sorted(distinct)} across { {k: v for k, v in sorted(pins.items())} }. "
-            "ci.yml's `wasm` job RUNS the headless suites and js.yml BUILDS the "
-            "published artifact: if they skew, a wasm-pack/wasm-bindgen behaviour "
-            "change is only ever exercised in the build lane (#5771). Bump every "
-            "lane together.",
+            self._kinds(
+                "jobs:\n  x:\n    steps:\n"
+                "      - name: Install wasm-pack\n"
+                "        run: cargo install wasm-pack --locked\n"
+            ),
+            ["cargo"],
         )
 
-    # --- mutation guard for the two assertions above -------------------------
-    # Hermetic synthetic workflows (no tree mutation): `_MUT_BAD` is `_MUT_GOOD`
-    # with the `version:` line deleted, i.e. the exact regression the reviewer
-    # described.
-    _MUT_GOOD = """\
-jobs:
-  wasm:
-    steps:
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
-        with:
-          version: v0.15.0
-      - name: Test
-        run: wasm-pack test --node
-"""
-    _MUT_BAD = """\
-jobs:
-  wasm:
-    steps:
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
-      - name: Test
-        run: wasm-pack test --node
-"""
-
-    # The step has NO `with: version:` (so wasm-pack-action takes its default) but does
-    # carry an unrelated, correctly-named `version:` under a SIBLING mapping. A
-    # block-wide "any line starting `version:`" scan reads v0.15.0 here and calls the
-    # lane pinned; only the `with:`-scoped walk sees the omission.
-    _MUT_UNRELATED_VERSION = """\
-jobs:
-  wasm:
-    steps:
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
-        with:
-          cache-key: wasm-pack
-        env:
-          version: v0.15.0
-      - name: Test
-        run: wasm-pack test --node
-"""
-
-    # Two direct `with: version:` keys: YAML last-key-wins, so which release the lane
-    # actually installs is not what a reader (or the first match) sees.
-    _MUT_DUPLICATE_VERSION = """\
-jobs:
-  wasm:
-    steps:
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
-        with:
-          version: v0.15.0
-          version: v0.13.1
-      - name: Test
-        run: wasm-pack test --node
-"""
-
-    def test_mutation_dropping_a_lanes_version_is_caught(self):
-        """Deleting one lane's `version:` must NOT leave both assertions green."""
-        good = self._pins_from({"a.yml": self._MUT_GOOD, "b.yml": self._MUT_GOOD})
-        self.assertEqual(good, {"a.yml": ["v0.15.0"], "b.yml": ["v0.15.0"]})
-        self.assertEqual(len({v for vs in good.values() for v in vs}), 1)
-
-        mutated = self._pins_from({"a.yml": self._MUT_GOOD, "b.yml": self._MUT_BAD})
-        # The unpinned lane is still IN the sample (so the anti-vacuity check keeps
-        # passing, as the reviewer noted) — it must therefore fail on its own terms.
-        self.assertIn("b.yml", mutated)
-        self.assertNotRegex(
-            mutated["b.yml"][0],
-            VERSION_RE,
-            "a step with no `version:` must not read as an exact pin",
-        )
+    def test_detects_a_direct_action_call(self):
         self.assertEqual(
-            len({v for vs in mutated.values() for v in vs}),
-            2,
-            "a step with no `version:` must count as a DISTINCT pin, so the "
-            "single-version assertion goes red instead of comparing the one "
-            "surviving lane against itself",
+            self._kinds(
+                "jobs:\n  x:\n    steps:\n"
+                "      - name: Install wasm-pack\n"
+                f"        uses: {WASM_PACK_ACTION}@" + "0" * 40 + "\n"
+                "        with:\n          version: v0.13.1\n"
+            ),
+            ["jetli"],
         )
 
-    def test_mutation_version_outside_with_is_not_a_pin(self):
-        """A `version:` that the action never receives must not read as a pin."""
-        for label, text in (
-            ("unrelated nested `version:`", self._MUT_UNRELATED_VERSION),
-            ("duplicate `with: version:`", self._MUT_DUPLICATE_VERSION),
-        ):
-            with self.subTest(mutation=label):
-                mutated = self._pins_from(
-                    {"a.yml": self._MUT_GOOD, "b.yml": text}
-                )
-                self.assertIn("b.yml", mutated)
-                self.assertNotRegex(
-                    mutated["b.yml"][0],
-                    VERSION_RE,
-                    f"{label}: the step does not unambiguously pass one `version:` "
-                    "input to the action, so it must not read as an exact pin",
-                )
-                self.assertEqual(
-                    len({v for vs in mutated.values() for v in vs}),
-                    2,
-                    f"{label}: must count as a DISTINCT pin so the single-version "
-                    "assertion goes red",
-                )
+    def test_accepts_the_composite_route(self):
+        self.assertEqual(
+            self._kinds(
+                "jobs:\n  x:\n    steps:\n"
+                "      - name: Install wasm-pack\n"
+                f"        uses: {COMPOSITE_USES}\n"
+            ),
+            ["composite"],
+        )
+
+    def test_a_commented_out_command_is_not_a_live_step(self):
+        """The repo's workflow comments quote `cargo install wasm-pack` to explain
+        why it is gone; reading those as offences would make the gate unfixable."""
+        self.assertEqual(
+            self._kinds(
+                "jobs:\n  x:\n    steps:\n"
+                "      # do NOT `cargo install wasm-pack --locked` here\n"
+                "      - name: Install wasm-pack\n"
+                f"        uses: {COMPOSITE_USES}\n"
+            ),
+            ["composite"],
+        )
+
+    def test_a_step_that_lost_its_version_reads_as_unpinned(self):
+        """`_step_version`'s sentinel must not look like an exact release."""
+        block = [
+            "      - uses: " + WASM_PACK_ACTION + "@" + "0" * 40,
+            "        with:",
+            "          args: --no-opt",
+        ]
+        self.assertNotRegex(_step_version(block), VERSION_RE)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,58 @@
+# [OPUS-5] #5305 — THE single place the repo's wasm-pack version is written.
+#
+# WHY THIS FILE EXISTS. wasm-pack is installed by 18 steps across 9 workflows, and
+# they used to disagree about WHICH wasm-pack. Two lanes pinned a version through
+# jetli/wasm-pack-action (ci.yml pinned v0.13.1, js.yml v0.15.0 — the #5771 skew,
+# since unified), and the other sixteen ran a bare `cargo install wasm-pack
+# --locked`, which resolves to whatever crates.io's newest release happens to be on
+# the day the job runs. So the lane that RUNS the headless `wasm-pack test --node`
+# suites (ci.yml) and the lanes that BUILD and PUBLISH the artifact users install
+# (publish.yml, release.yml, pages.yml) could each use a different wasm-pack, and
+# therefore a different bundled wasm-bindgen. Any behaviour change between those
+# releases was then exercised in one lane and never in the other — a validation gap
+# that no CI failure would ever reveal, because every lane is individually green.
+#
+# Fixing that by writing `--version 0.15.0` into all eighteen steps would trade one
+# silent-drift shape for another: a bump would have to land in eighteen places at
+# once, and a missed one reintroduces exactly the skew. So the version lives HERE,
+# once, and every lane calls this action.
+#
+# TO BUMP: change both literals below (they are asserted equal), and nothing else.
+# scripts/tests/test_js_wasm_pack_install.py fails if any workflow installs
+# wasm-pack by another route, so a lane cannot quietly opt out of the pin.
+#
+# TWO INSTALL PATHS, ONE VERSION. The prebuilt path is the sq-khm3f hardening: it
+# downloads a single static release binary through @actions/tool-cache (which
+# retries a failed download) instead of compiling wasm-pack and its whole
+# chrono/wasm-bindgen source tree from crates.io on every run — the source compile
+# is what let a transient registry blip red the gating `js` lane on PR #1131. It is
+# applied on x64 Linux, the one platform this repo has actually proven it green on
+# (ci.yml and js.yml have both been fetching the prebuilt binary on ubuntu runners),
+# which covers seventeen of the eighteen call sites — every one of them but the
+# eighteenth runs on `ubuntu-latest`. That eighteenth is release.yml's `matrix.os` job, whose
+# arm64-Linux row is BLOCKING; whether wasm-pack publishes a prebuilt asset for
+# every triple in that matrix was not verified here, so those runners keep the
+# source install they already used — now version-pinned. That is a deliberate
+# scope line, not an oversight: the pin is the fix for #5305, and switching a
+# blocking row's install mechanism on an unverified assumption is not.
+name: Install wasm-pack
+description: >-
+  Install the one repo-canonical wasm-pack version. Every lane that needs wasm-pack
+  calls this action, so the version is written in exactly one file.
+
+runs:
+  using: composite
+  steps:
+    - name: Install wasm-pack (prebuilt binary)
+      if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
+      uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+      with:
+        # Exact release, never `latest`: `latest` costs an unauthenticated
+        # api.github.com lookup on every run — a rate-limit-flake source.
+        version: v0.15.0
+
+    # Runners with no proven prebuilt path. Same version, slower route.
+    - name: Install wasm-pack (source build, same version)
+      if: ${{ !(runner.os == 'Linux' && runner.arch == 'X64') }}
+      shell: bash
+      run: cargo install wasm-pack --locked --version 0.15.0

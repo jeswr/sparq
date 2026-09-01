@@ -106,18 +106,16 @@ jobs:
       # and jetli/wasm-pack-action fetches it with @actions/tool-cache, which retries a
       # failed download — so the one remaining request is itself flake-tolerant. It
       # installs to ~/.cargo/bin (already on PATH; disjoint from the registry/git paths
-      # the rust-cache step above owns, so the two do not interact). Same action, same
-      # SHA pin, same shape as the `wasm` job in ci.yml already uses for wasm-pack.
+      # the rust-cache step above owns, so the two do not interact).
       #
-      # The version is pinned EXACTLY (repo tool-pin doctrine, cf. sq-tool-pin): 0.15.0
-      # is wasm-pack's current release, i.e. what `cargo install wasm-pack` resolved to
-      # here, so this is version-neutral today. `version: latest` would re-add an
-      # unauthenticated api.github.com release lookup — a second rate-limit-flake
-      # source, which is the thing being removed. Bump deliberately, not implicitly.
+      # [OPUS-5] #5305: that download, and the exact version it asks for, now live in
+      # the composite action rather than inline here — it is the ONE place the repo's
+      # wasm-pack version is written, so this lane (which BUILDS the published artifact)
+      # cannot drift from the lane that RUNS the headless suites (ci.yml) or from the
+      # publish/release lanes. Read .github/actions/install-wasm-pack/action.yml before
+      # changing this step; the version is pinned exactly there, never `latest`.
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
-        with:
-          version: v0.15.0
+        uses: ./.github/actions/install-wasm-pack
 
       # [OPUS-4.8] sq-fvz8: install the FULL workspace from the repo ROOT, not just the
       # `js/` member. The cross-language Solid differential oracle (test/solid-differential
