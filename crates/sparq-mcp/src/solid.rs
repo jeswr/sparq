@@ -1250,8 +1250,10 @@ impl SolidMcpServer {
     ///
     /// NOT request-atomic: the store applies through `sparq_engine::update_in_place`,
     /// which is non-atomic on error by documented contract, so a `;`-separated request
-    /// that fails on operation *K* (a budget trip, or any other apply error) leaves
-    /// operations `1..K` applied. Only the authorization check precedes every mutation:
+    /// that fails on operation *K* (a budget trip, or any other apply error) retains the
+    /// operations BEFORE *K*; operation *K* itself is not guaranteed to be applied, nor
+    /// guaranteed to have applied nothing, and no operation after *K* runs. Only the
+    /// authorization check precedes every mutation:
     /// a deny — or a budget trip inside the check — leaves the pod untouched.
     ///
     /// [SONNET-4.6] sq-yhlf0 — it runs under the SAME per-call [budget](Self::budget) the
