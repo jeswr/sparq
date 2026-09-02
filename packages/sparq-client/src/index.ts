@@ -493,34 +493,74 @@ export interface CursorBatch {
 }
 
 /**
+ * [OPUS-5] sq-f4pmk (#2933) — optional bounds on a {@link streamQueryRows} pull.
+ */
+export interface StreamQueryRowsOptions {
+  /**
+   * STOP PULLING once at least this many rows have been yielded — the demand-driven bound.
+   *
+   * The cursor is forward-only and its batches are a fixed sequence, so a bounded pull
+   * delivers exactly the PREFIX of the batches an unbounded pull delivers; the batch that
+   * crosses `maxRows` is still delivered whole (batches are not split), so a consumer that
+   * wants exactly `maxRows` rows must still trim its last batch. Nothing about the returned
+   * introspection changes: `vars` / `rowCount` / `batchSize` are read from the cursor BEFORE
+   * the first pull, so `rowCount` remains the engine's exact total even when the pull stops
+   * early — the caller does not have to drain the cursor to learn how many rows there are.
+   *
+   * Omitted, non-finite or `<= 0` means "no bound" (drain the cursor), which is the
+   * behaviour of every caller that does not pass this option.
+   */
+  maxRows?: number;
+}
+
+/**
  * Stream a SELECT query's rows one BATCH at a time through the wasm `queryCursor` cursor
  * (mirrors `@jeswr/sparq`'s `queryBindingsStream`): pull a batch of up to `batchSize`
  * self-contained SPARQL-JSON rows, hand it to `onBatch`, drop it, pull the next — so the
  * consumer never holds more than one batch. Returns the cursor's introspection (`vars`,
- * `rowCount`, `batchSize`) once drained. The wasm cursor is always freed, even if `onBatch`
- * throws. An empty result yields exactly one empty batch.
+ * `rowCount`, `batchSize`) plus whether the cursor was `drained`. The wasm cursor is always
+ * freed, even if `onBatch` throws. An empty result yields exactly one empty batch.
+ *
+ * [OPUS-5] sq-f4pmk (#2933) — `options.maxRows` makes the pull DEMAND-DRIVEN: a consumer that
+ * will only ever show the first N rows stops the cursor there instead of paying the per-batch
+ * JSON build (in wasm) and `JSON.parse` (in JS) for rows it is about to drop. This bounds the
+ * SERIALISATION half of the work by what is consumed; the EVALUATION half is still eager (the
+ * engine materialises the result before the first batch — `research/gui-design.md` §A.5.1).
  */
 export function streamQueryRows(
   store: WasmStore,
   sparql: string,
   batchSize: number,
   onBatch?: (batch: CursorBatch) => void,
-): { vars: string[]; rowCount: number; batchSize: number } {
+  options: StreamQueryRowsOptions = {},
+): { vars: string[]; rowCount: number; batchSize: number; drained: boolean } {
   const cursor = store.queryCursor(sparql, batchSize);
+  const { maxRows } = options;
+  // A bound only applies when it is a real, positive, finite row count; anything else (the
+  // default) is 0 = "drain", so no existing caller changes behaviour.
+  const limit =
+    typeof maxRows === "number" && Number.isFinite(maxRows) && maxRows > 0 ? maxRows : 0;
   const meta = {
     vars: cursor.vars(),
     rowCount: cursor.rowCount(),
     batchSize: cursor.batchSize(),
+    drained: false,
   };
   try {
     let index = 0;
     let cumulative = 0;
     for (;;) {
       const chunk = cursor.next();
-      if (chunk === undefined) break;
+      if (chunk === undefined) {
+        meta.drained = true;
+        break;
+      }
       const rows = (JSON.parse(chunk) as SparqlResults).results.bindings;
       cumulative += rows.length;
       onBatch?.({ index: ++index, rows, cumulative });
+      // Stop AFTER delivering the batch that reaches the bound, so the consumer sees every
+      // row up to `maxRows` and the delivered sequence is a prefix of the unbounded one.
+      if (limit > 0 && cumulative >= limit) break;
     }
   } finally {
     cursor.free();

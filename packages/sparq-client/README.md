@@ -25,7 +25,13 @@ copy is the **single source of truth**, kept byte-identical to a fresh wasm buil
   configurable `basePath` (defaulted from `NEXT_PUBLIC_BASE_PATH` ?? `"/sparq"` so the site is
   unchanged; a desktop GUI passes its own `tauri://` / `file://` origin).
 - The framework-agnostic query helpers: `matchQuads`, `countQuads`, `streamQueryRows`,
-  `sparqShaclValidate`, `formatTerm`.
+  `sparqShaclValidate`, `formatTerm`. `streamQueryRows(store, sparql, batchSize, onBatch?,
+  options?)` pulls SELECT rows one batch at a time through the wasm `SolutionCursor` and returns
+  `{ vars, rowCount, batchSize, drained }`; `options.maxRows` (`sq-f4pmk`) makes the pull
+  **demand-driven** — it stops at the batch that reaches the bound rather than draining, so a
+  consumer that only shows the first *N* rows does not pay the per-batch JSON build + `JSON.parse`
+  for rows it will drop. `rowCount` is the cursor's exact total, read before the first pull, so it
+  stays correct under a bounded pull; `drained` says whether the cursor was exhausted.
 - **RDF-document display + serialisation helpers** (`sq-8uew` / `sq-gb4o`, all dependency-free
   and DOM-free so the site and the Tauri 2 webview share one copy): `prettyTurtle(input, opts?)`
   / `prettyTrig(input, opts?)` reshape the engine's FLAT N-Triples / N-Quads

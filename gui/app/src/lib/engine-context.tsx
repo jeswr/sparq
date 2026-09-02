@@ -201,8 +201,12 @@ export interface RunOptions {
 
 /**
  * The default cap on SELECT rows kept in JS for the table/JSON views (streaming bounds peak
- * memory at one batch + this many displayed rows; exports re-stream the WHOLE result). This is a
- * UI display bound, not a result bound — it is labelled in the results panel, not a benchmark.
+ * memory at one batch + this many displayed rows). This is a UI display bound, not a result
+ * bound — it is labelled in the results panel, not a benchmark.
+ *
+ * [OPUS-5] sq-f4pmk (#2933) — every consumer of a run reads the KEPT rows: the CSV / TSV /
+ * JSON exports serialise `outcome.results` like the views do, so nothing re-streams the
+ * uncapped result. That is why the pull may stop at the cap (`maxRows`) rather than draining.
  */
 export const DEFAULT_ROW_CAP = 5_000;
 
@@ -1362,23 +1366,36 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           outcome = { kind: "update", sizeAfter: size };
         } else {
           // SELECT — STREAM the rows one batch at a time through the wasm cursor so a large
-          // result never materialises whole in JS. We keep at most `rowCap` rows for the views;
-          // rows beyond the cap are counted but dropped (the outcome records `truncated`). The
-          // cooperative `signal` is checked between batches so Stop actually halts the pull.
+          // result never materialises whole in JS. We keep at most `rowCap` rows for the views.
+          // The cooperative `signal` is checked between batches so Stop actually halts the pull.
+          //
+          // [OPUS-5] sq-f4pmk (#2933) — the pull is DEMAND-DRIVEN (`maxRows`): it stops at the
+          // batch that fills `rowCap` instead of draining the cursor to drop the overflow. No
+          // view reads a dropped row (the Table + Graph views and the CSV / TSV / JSON exports
+          // render `outcome.results`; the Raw JSON view renders `outcome.rawJson`, serialised
+          // from those same KEPT rows), and `truncated` is derived from the
+          // cursor's own `rowCount` rather than from a counted drain — so the outcome is
+          // unchanged while the per-row JSON build + `JSON.parse` cost past the cap is not paid.
           const kept: SparqlBinding[] = [];
           let total = 0;
           let cancelled = false;
-          const meta = streamQueryRows(target, query, STREAM_BATCH_SIZE, (batch) => {
-            if (signal?.aborted) {
-              cancelled = true;
-              // Throw to break streamQueryRows' loop; the cursor is freed in its `finally`.
-              throw new AbortError();
-            }
-            total += batch.rows.length;
-            for (const row of batch.rows) {
-              if (kept.length < rowCap) kept.push(row);
-            }
-          });
+          const meta = streamQueryRows(
+            target,
+            query,
+            STREAM_BATCH_SIZE,
+            (batch) => {
+              if (signal?.aborted) {
+                cancelled = true;
+                // Throw to break streamQueryRows' loop; the cursor is freed in its `finally`.
+                throw new AbortError();
+              }
+              total += batch.rows.length;
+              for (const row of batch.rows) {
+                if (kept.length < rowCap) kept.push(row);
+              }
+            },
+            { maxRows: rowCap },
+          );
           if (cancelled) {
             outcome = { kind: "cancelled" };
           } else {
@@ -1386,8 +1403,11 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
               head: { vars: meta.vars },
               results: { bindings: kept },
             };
-            // `meta.rowCount` is the cursor's own total; prefer it (it covers an empty result's
-            // single empty batch correctly), falling back to the counted total.
+            // `meta.rowCount` is the cursor's own EXACT total, read before the first pull, so
+            // it stays correct when the bounded pull stops early. `total` is only the fallback
+            // for a fully drained result (it covers an empty result's single empty batch). A
+            // bounded stop can only occur with `rowCap >= 1` and at least that many rows
+            // pulled, i.e. `rowCount >= rowCap >= 1`, so the fallback is never reached then.
             const totalRows = meta.rowCount || total;
             outcome = {
               kind: "select",

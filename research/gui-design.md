@@ -197,6 +197,62 @@ Until that exec-model decision is made and measured, pagination over the streame
 is the honest, shippable surface; the evaluation half is tracked as a separate follow-up bead
 (no performance number is claimed for either half).
 
+##### The exec-model decision (`sq-f4pmk`, #2933)
+
+<!-- [OPUS-5] sq-f4pmk (#2933) — resolves the (a)/(b) fork the paragraph above left open.
+     Verified against the tree, not assumed: `SolutionCursor` still holds a
+     `sparq_engine::QueryResult` and slices `result.rows`; `GraphPattern::Slice` evaluates its
+     input to a materialised `Bindings` and then `slice_bindings` drains/truncates
+     (`crates/sparq-engine/src/exec.rs`), so OFFSET does not skip work; the engine's `Iterator`
+     impls are over the bindings WITHIN one solution (`solution.rs`), not over plan operators;
+     and `crates/sparq-wasm/src/` exports no SPARQL parser / algebra printer, so the GUI cannot
+     build or mutate a query except by string concatenation. -->
+
+**Decision: neither (a) nor (b) is adopted from the GUI layer. The GUI takes the bounded
+increment that the *existing* pull boundary already permits, and the evaluation half stays
+gated.** The reasoning, in the order it was checked:
+
+- **(a) is not a GUI change.** A pull/Volcano exec model is an engine-architecture rewrite of
+  `sparq-engine`'s evaluation core; it is out of the GUI's reach and is not something the GUI
+  surface can decide unilaterally. It remains the only route to *true* demand-driven
+  evaluation, and stays open as engine work.
+- **(b) is rejected on soundness, not on cost.** `ORDER BY … LIMIT … OFFSET k·pageSize` is
+  page-correct only under a **total** order over solutions. SPARQL's `ORDER BY` is a *partial*
+  order — tied solutions may be returned in any order, and the ordering of terms across
+  disjoint type categories is left unspecified — so pages built from independent re-evaluations
+  may overlap or skip rows. There is no static test the GUI could run to certify "this user's
+  query has a stable total order", and the GUI has no query AST to rewrite against (it would
+  have to splice strings into a query it cannot parse). A paginator that can silently drop a
+  row is worse than one that pages over rows already in hand.
+- **What *is* achievable today.** The wasm `SolutionCursor` **is** a pull iterator — just over
+  an already-materialised result. So the two halves of the per-page cost separate:
+  **evaluation** (eager, in the engine, gated on (a)) and **serialisation** (the per-batch
+  SPARQL-JSON build in wasm plus `JSON.parse` in JS — driven entirely by how many batches the
+  consumer asks for). The second half can be made demand-driven now, with no engine change and
+  no query rewrite.
+
+**Shipped under this decision:** `streamQueryRows(store, sparql, batchSize, onBatch, {maxRows})`
+in `@sparq/client` stops the cursor at the batch that reaches `maxRows` instead of draining it,
+and the workbench passes its display `rowCap`. Every workbench consumer of a run — the Table,
+Graph and Raw JSON views and the CSV / TSV / JSON exports — reads the *kept* rows, and
+`totalRows` / `truncated` come from `SolutionCursor::rowCount()`, which is exact and readable
+**before** the first pull; so the outcome is unchanged while the rows past the cap are no longer
+serialised and parsed just to be dropped. Equivalence is asserted as a differential against the
+unbounded pull (`packages/sparq-client/test/stream-query-rows.test.mjs`): the bounded pull must
+deliver a batch-for-batch **prefix** of the drained pull and identical cursor introspection.
+
+*Rejected alternative:* making `streamQueryRows` a generator (which is how `js/`'s sibling
+`SparqStore.queryBindingsStream` gets laziness for free — a consumer that stops iterating stops
+the pull). It is the more idiomatic shape, but it moves `cursor.free()` into generator
+finalisation, so a consumer that abandons the iterator outside a `for…of` can leak the wasm
+cursor. The callback form keeps the `finally { cursor.free() }` unconditional, and `maxRows`
+buys the same bounded pull without changing the existing signature.
+
+**Still gated, and honestly so:** this bounds work by what is *displayed*, not by what is
+*evaluated*, and it does not let the pager walk past the row cap — paging to row *k* of an
+arbitrarily large result still needs (a). No performance number is claimed for it; the property
+asserted in tests is structural (batches pulled scale with rows consumed, not with result size).
+
 ## 0. Ground truth — what exists today
 
 <!-- [OPUS-4.8] sq-uau8 — CORRECTED. The earlier draft said "Nothing is built yet /

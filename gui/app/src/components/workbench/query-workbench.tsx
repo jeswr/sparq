@@ -607,8 +607,9 @@ function ResultBody({
         <p className="border-b bg-warning/10 px-3 py-1 text-[11px] text-muted-foreground">
           Showing the first {outcome.rowCount.toLocaleString()} of{" "}
           {outcome.totalRows.toLocaleString()} rows (display cap{" "}
-          {DEFAULT_ROW_CAP.toLocaleString()}). The full result streamed through the engine; the
-          CSV / TSV / JSON export covers the kept rows.
+          {DEFAULT_ROW_CAP.toLocaleString()}). The engine evaluated the full result; only the
+          kept rows were streamed into the page, and the CSV / TSV / JSON export covers those
+          kept rows.
         </p>
       )}
       <div className="min-h-0 flex-1 overflow-auto">
