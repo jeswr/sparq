@@ -251,6 +251,12 @@ sparq-policy = { path = "../sparq-policy", optional = true }
 sparq-solid = { path = "../sparq-solid", optional = true }
 sparq-trust = { path = "../sparq-trust", optional = true }
 object_store = "0.14"
+# `ObjectStore::list` returns a `futures_util::stream::BoxStream`, so draining it in the real
+# `object_store` blob adapter (`store::object_store`) needs the `TryStreamExt` combinator. The crate is
+# ALREADY in the resolved tree (`object_store` and axum's `ws` feature both depend on it) and it was
+# already named as a dev-dependency below, so promoting it to a native runtime dependency adds NO new
+# crate to the build — the same pattern as `bytes` / `pin-project-lite` above.
+futures-util = "0.3"
 pin-project-lite = "0.2"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio", "server-auto", "server-graceful"] }

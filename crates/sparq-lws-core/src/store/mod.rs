@@ -28,6 +28,13 @@ pub mod embedded;
 #[cfg(all(feature = "http-sparq", not(target_arch = "wasm32")))]
 pub mod http;
 mod limits;
+// The REAL `object_store`-backed `BlobStore` (issue #4878): S3 / GCS / Azure / local-filesystem bytes
+// behind the same seam as the in-memory double, so `BlobStore::list` — and therefore the orphaned-bytes
+// reconciler — can finally run against a non-test backend. Native-only, because `object_store` is a
+// native-only dependency (asserted by `tests/wasm_dependency_boundary.rs`). Not feature-gated: the
+// dependency is already mandatory here, so the module adds no crate to the graph — see its module docs.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod object_store;
 pub mod reconcile;
 pub mod sparq;
 pub mod sparql;
@@ -52,6 +59,8 @@ pub use limits::{
     InMemoryStoreLimits, StoreUsage, DEFAULT_IN_MEMORY_MAX_RESOURCE_COUNT,
     DEFAULT_IN_MEMORY_MAX_TOTAL_BYTES,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use object_store::ObjectStoreBlobStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use reconcile::spawn_periodic;
 pub use reconcile::{
