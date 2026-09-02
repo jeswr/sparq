@@ -2887,15 +2887,20 @@ class TestHeadOfQueueStall(unittest.TestCase):
 
     def _entries(self):
         """The #4537 shape: a stuck head with two entries behind it, one already
-        green (MERGEABLE) and therefore provably only blocked by the head."""
+        green (MERGEABLE) and therefore provably only blocked by the head.
+
+        The ids are the file's RESERVED band (TestFixturesNameNothingReal), not the
+        live PR numbers the narrative above cites — a fixture id must never be able
+        to resolve to a real object.
+        """
         return [
-            mgw.QueueEntry(pr_number=4537, pr_id="PR_1", entry_id="MQE_1", position=1,
+            mgw.QueueEntry(pr_number=99900001, pr_id="PR_1", entry_id="MQE_1", position=1,
                            state="AWAITING_CHECKS", enqueued_at=self.ENQUEUED,
                            base_oid=BASE, head_oid=HEAD),
-            mgw.QueueEntry(pr_number=3559, pr_id="PR_2", entry_id="MQE_2", position=2,
+            mgw.QueueEntry(pr_number=99900002, pr_id="PR_2", entry_id="MQE_2", position=2,
                            state="MERGEABLE", enqueued_at=self.ENQUEUED,
                            base_oid=BASE, head_oid=HEAD),
-            mgw.QueueEntry(pr_number=4561, pr_id="PR_3", entry_id="MQE_3", position=3,
+            mgw.QueueEntry(pr_number=99900003, pr_id="PR_3", entry_id="MQE_3", position=3,
                            state="AWAITING_CHECKS", enqueued_at=self.ENQUEUED,
                            base_oid=BASE, head_oid=HEAD),
         ]
@@ -2913,7 +2918,7 @@ class TestHeadOfQueueStall(unittest.TestCase):
     def test_the_row_names_what_is_stranded_behind_the_head(self):
         row = mgw.head_of_queue_stall(
             self._entries(), self._at(mgw.HEAD_OF_QUEUE_STALL_SECONDS))
-        self.assertIn("pr=#4537", row)
+        self.assertIn("pr=#99900001", row)
         self.assertIn("state=AWAITING_CHECKS", row)
         self.assertIn("blocked=2", row)
         self.assertIn("blocked_green=1", row)
