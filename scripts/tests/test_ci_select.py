@@ -27,6 +27,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -795,15 +796,11 @@ class OrchestrationSafeInertnessTests(unittest.TestCase):
     audited by convention (never cargo-compiled) and exempt from the grep."""
 
     # The workflows that run cargo build/test/clippy/coverage/bench/fuzz/CodeQL and
-    # therefore MUST NOT reference an orchestration-safe script.
-    _RUST_CI_WORKFLOWS = [
-        "ci.yml", "feature-matrix.yml", "codeql.yml", "supply-chain.yml",
-        "bench.yml", "fuzz.yml", "miri.yml", "asan.yml", "kani.yml",
-        "metamorph.yml", "vectorized-feature-off.yml", "ci-select.yml",
-        "ci-summary.yml", "formal-verification.yml", "differential.yml",
-        "shacl-diff-fuzz.yml", "nightly-full-sweep.yml",
-        "datalog-souffle.yml",
-    ]
+    # therefore MUST NOT reference an orchestration-safe script. [OPUS-5] #6078: this
+    # list USED to be duplicated here; it now derives from ci_select.py's
+    # `_RUST_CI_WORKFLOWS`, which is load-bearing for the selection itself, so the
+    # grep corpus and the denylist can no longer drift apart.
+    _RUST_CI_WORKFLOWS = sorted(cs._RUST_CI_WORKFLOWS)
 
     def test_no_orch_safe_script_is_referenced_by_a_rust_ci_workflow(self):
         wf_dir = REPO_ROOT / ".github" / "workflows"
@@ -909,6 +906,196 @@ class DeployOnlyInertnessTests(unittest.TestCase):
             "an entry is on BOTH inert allowlists — pick one so the audit-trail "
             "class is unambiguous",
         )
+
+
+def _yaml_code(text: str) -> str:
+    """Workflow text with whole-line `#` comments removed.
+
+    Every obligation below is about what a workflow DOES, so a mention inside a
+    comment must not count: ci.yml's own header explains the `_INERT_CLASSES` arms
+    and names sibling workflows in prose, and feature-matrix.yml documents
+    `mode != 'selected'` at length. Whole-line stripping is deliberately crude but
+    is CONSERVATIVE in the direction that matters: it never hides an executable
+    line, because a step's `run:`/`uses:`/`paths:` entry is never a comment line.
+    """
+    return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+
+
+class CiWorkflowInversionTests(unittest.TestCase):
+    """[OPUS-5] issue #6078: the machine-checkable obligations that make the
+    `.github/workflows/**` POLARITY INVERSION sound.
+
+    `_RUST_CI_WORKFLOWS` is a DENYLIST — a workflow file absent from it is inert by
+    default, so a NEW file is inert until someone declares it. That is only safe
+    because the three obligations below are checked against the real workflow
+    directory on every PR (docs-quality.yml `quick-gates` runs this suite with no
+    `if:` guard, so it fires even on the PRs whose Rust matrix this rule skips):
+
+      O1 an inert workflow consumes no selector output;
+      O2 an inert workflow is not `uses:`-reachable from a Rust-CI workflow;
+      O3 no Rust-CI workflow references an inert workflow on an executable line.
+
+    Together they pin: editing an inert workflow cannot change the definition or the
+    inputs of any job the selector is allowed to skip.
+    """
+
+    WF_DIR = REPO_ROOT / ".github" / "workflows"
+
+    # The forms by which a workflow CONSUMES the change-based selector. Expression
+    # syntax, not bare script names: routing-self-tests.yml legitimately lists
+    # `scripts/ci_select.py` in a `paths:` filter (it TESTS the selector) without
+    # ever gating a job on its output, and that is not consumption.
+    _SELECTOR_CONSUMPTION = (
+        "outputs.rust_changed",
+        "needs.select.outputs",
+        "steps.select.outputs",
+        "--classify-only",
+        "./.github/workflows/ci-select.yml",
+    )
+
+    @classmethod
+    def _workflow_names(cls):
+        return sorted(p.name for p in cls.WF_DIR.glob("*.yml")) + \
+            sorted(p.name for p in cls.WF_DIR.glob("*.yaml"))
+
+    def _inert_names(self):
+        return [n for n in self._workflow_names() if n not in cs._RUST_CI_WORKFLOWS]
+
+    # --- the matcher itself ---
+    def test_matcher_rescues_a_non_rust_workflow(self):
+        self.assertTrue(cs._ci_workflow_inert_match(".github/workflows/site-e2e.yml"))
+        self.assertTrue(cs._ci_workflow_inert_match(".github/workflows/scorecard.yml"))
+
+    def test_matcher_does_not_rescue_a_rust_ci_workflow(self):
+        for name in ("ci.yml", "feature-matrix.yml", "codeql.yml", "bench.yml"):
+            self.assertFalse(cs._ci_workflow_inert_match(f".github/workflows/{name}"), name)
+
+    def test_matcher_does_not_rescue_the_deliberately_excluded_github_surfaces(self):
+        # These are the surfaces the design calls out as NOT rescuable: they are
+        # `uses:`-d or read BY the Rust-CI workflows, so they must keep hitting the
+        # `.github/` full-run trigger. Excluded by CONSTRUCTION (the matcher accepts
+        # only a single `.yml`/`.yaml` segment under .github/workflows/), not by a
+        # second hand-maintained list.
+        for path in (
+            ".github/actions/setup-rust/action.yml",
+            ".github/feature-matrix.d/10-core.toml",
+            ".github/codeql/codeql-config.yml",
+            ".github/requirements/python-build.txt",
+            ".github/advisory-registry.json",
+            ".github/dependabot.yml",
+            ".github/workflows/README.md",       # non-YAML parked in the dir
+            ".github/workflows/nested/thing.yml",  # nested: not a workflow GitHub reads
+        ):
+            self.assertFalse(cs._ci_workflow_inert_match(path), path)
+            self.assertIsNotNone(
+                cs._trigger_match(path),
+                f"{path} must still hit the `.github/` full-run trigger",
+            )
+
+    # --- O1/O2/O3, checked against the REAL workflow directory ---
+    def test_o1_no_inert_workflow_consumes_the_selector(self):
+        # A workflow whose own jobs the selector can SKIP must force full, so that
+        # editing it re-runs the jobs it just redefined. This is what makes the
+        # denylist self-maintaining: wire a new workflow into the selector without
+        # declaring it here and this goes RED before it can merge.
+        for name in self._inert_names():
+            code = _yaml_code((self.WF_DIR / name).read_text(encoding="utf-8"))
+            hits = [m for m in self._SELECTOR_CONSUMPTION if m in code]
+            self.assertEqual(
+                hits, [],
+                f"{name} CONSUMES the change-based selector {hits} but is not on "
+                f"ci_select._RUST_CI_WORKFLOWS — a selector-gated workflow must keep "
+                f"forcing the full matrix. Add it to the denylist.",
+            )
+
+    def test_o2_uses_reachable_workflows_are_all_denylisted(self):
+        # A reusable workflow called by a Rust-CI workflow is part of that workflow's
+        # job definitions, so it must force full too. Transitive closure.
+        seen, frontier = set(), [n for n in cs._RUST_CI_WORKFLOWS if (self.WF_DIR / n).exists()]
+        while frontier:
+            cur = frontier.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            code = _yaml_code((self.WF_DIR / cur).read_text(encoding="utf-8"))
+            for callee in re.findall(r"uses:\s*\./\.github/workflows/([A-Za-z0-9._-]+)", code):
+                self.assertIn(
+                    callee, cs._RUST_CI_WORKFLOWS,
+                    f"{cur} `uses:` the reusable workflow {callee}, which is NOT on "
+                    f"_RUST_CI_WORKFLOWS — editing {callee} changes a Rust-CI job's "
+                    f"definition, so it must force the full matrix.",
+                )
+                if (self.WF_DIR / callee).exists():
+                    frontier.append(callee)
+
+    def test_o3_no_rust_ci_workflow_references_an_inert_workflow(self):
+        # The catch-all for "read as an INPUT": a Rust-CI workflow naming another
+        # workflow on an executable line (a `paths:` filter entry, a `run:` argument)
+        # makes that file an input to a job the selector can skip. This is exactly how
+        # feature-matrix-report.yml earned its denylist entry.
+        blob = "\n".join(
+            _yaml_code((self.WF_DIR / n).read_text(encoding="utf-8"))
+            for n in sorted(cs._RUST_CI_WORKFLOWS) if (self.WF_DIR / n).exists()
+        )
+        for name in self._inert_names():
+            self.assertNotIn(
+                name, blob,
+                f"a Rust-CI workflow references {name} on an executable line — it is an "
+                f"INPUT to a selector-gated job and is therefore NOT inert; add it to "
+                f"ci_select._RUST_CI_WORKFLOWS.",
+            )
+
+    def test_denylist_entries_all_exist_on_disk(self):
+        # A stale entry silently covers nothing (and would let a renamed Rust-CI
+        # workflow fall through to inert-by-default).
+        for name in sorted(cs._RUST_CI_WORKFLOWS):
+            self.assertTrue(
+                (self.WF_DIR / name).exists(),
+                f"_RUST_CI_WORKFLOWS names {name}, which does not exist — stale denylist",
+            )
+
+    # --- the selection consequences (the point of the issue) ---
+    def test_the_named_tail_workflows_no_longer_force_full(self):
+        # The files issue #6078 enumerates as forcing the full matrix for no reason.
+        tail = [
+            ".github/workflows/site-e2e.yml",
+            ".github/workflows/site-visual.yml",
+            ".github/workflows/pages.yml",
+            ".github/workflows/docs.yml",
+            ".github/workflows/scorecard.yml",
+            ".github/workflows/triage-area.yml",
+            ".github/workflows/review-alarm.yml",
+            ".github/workflows/merge-queue-feedback.yml",
+            ".github/workflows/rearm-sweeper.yml",
+            ".github/workflows/auto-arm.yml",
+        ]
+        for path in tail:
+            self.assertTrue((REPO_ROOT / path).exists(), f"{path} vanished; refresh this fixture")
+        sel = cs.select(tail, _synthetic_meta())
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "orchestration-only")
+        self.assertEqual([owner for _p, owner in sel.file_owners], ["CI-WF-SAFE"] * len(tail))
+
+    def test_a_rust_ci_workflow_in_the_diff_still_forces_full(self):
+        # FAIL-CLOSED: one denylisted workflow anywhere in the diff re-arms the full
+        # matrix, however many inert siblings it travels with.
+        sel = cs.select(
+            [".github/workflows/scorecard.yml", ".github/workflows/ci.yml"],
+            _synthetic_meta(),
+        )
+        self.assertEqual(sel.mode, "full")
+        # `mixed` = at least one engine path plus something inert, which is exactly
+        # the token the three `changes` case-arms send to their wildcard (full) arm.
+        self.assertEqual(sel.change_class, "mixed")
+
+    def test_inert_workflow_beside_a_crate_change_still_narrows(self):
+        sel = cs.select(
+            [".github/workflows/scorecard.yml", "crates/app/src/lib.rs"], _synthetic_meta()
+        )
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app"])
+        self.assertEqual(sel.change_class, "mixed")
 
 
 class RealMetadataShapeTests(unittest.TestCase):
