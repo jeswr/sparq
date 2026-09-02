@@ -147,7 +147,7 @@ class TestRoutingTable(unittest.TestCase):
 
 
 class TestProviderPreference(unittest.TestCase):
-    """[GPT-5.6] The 2026-09-02 protocol makes model responsibility explicit.
+    """[SPARQ agent] The 2026-09-02 protocol makes model responsibility explicit.
 
     Sol is the primary default implementation tier. Opus 5 is retained behind it for continuity
     with current Anthropic-authored fixes and total Sol unavailability, and is the sole

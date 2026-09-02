@@ -39,7 +39,7 @@ UI_SURFACE_LABELS = ("area:site", "surface:frontend", "dashboard")
 # UI_SURFACE_LABELS above and therefore derived role:site — which made the carve-out inexpressible,
 # because role:site also covers area:site / surface:frontend / dashboard, and those are NOT in the
 # carve-out. Splitting the label out is what lets orchestration/routing.toml give role:gui a
-# [GPT-5.6] The current protocol makes both role:gui and role:site Sol-first; role:site
+# [SPARQ agent] The current protocol makes both role:gui and role:site Sol-first; role:site
 # historically took the Opus-first default.
 # EXACT label, never a substring: a substring test would match "guide"/"guidance".
 #
@@ -113,7 +113,7 @@ def _role(labels, issue_type):
     # precedence slot otherwise (after security, an explicit role:*, and kind).
     if any(lb in GUI_SURFACE_LABELS for lb in labels):
         return "gui"
-    # [GPT-5.6] UI-surface labels derive role:site (now the common Sol-first implementation
+    # [SPARQ agent] UI-surface labels derive role:site (now the common Sol-first implementation
     # chain) before the
     # generic type map, after kind (so kind:docs about the site stays docs) and after an explicit
     # role:* label. NOTE: area:gui is deliberately NOT here — see GUI_SURFACE_LABELS.

@@ -109,7 +109,7 @@ agent = "sparq-reviewer"
 escalate = true                        # consumed by dispatch: on chain-exhaustion, label needs:user
 
 # ---------------------------------------------------------------------------------------------------
-# [GPT-5.6] ROLE ROUTES. The 2026-09-02 maintainer protocol separates responsibilities: GPT-5.6
+# [SPARQ agent] ROLE ROUTES. The 2026-09-02 maintainer protocol separates responsibilities: GPT-5.6
 # Sol is the primary implementation tier, while Opus 5 remains the review/soundness tier and
 # reviews new Sol-authored PRs through the existing cross-provider inversion. Opus stays behind Sol as a
 # continuity fallback for current Anthropic-authored repairs and total Sol unavailability. Each
@@ -203,7 +203,7 @@ model_chain = ["sol", "opus5"]
 agent = "sparq-site"
 escalate = true
 
-# [GPT-5.6] CI/infrastructure is implementation and therefore uses the same Sol-first lane. Opus 5
+# [SPARQ agent] CI/infrastructure is implementation and therefore uses the same Sol-first lane. Opus 5
 # reviews the resulting OpenAI-authored PR through the registry-owned review chain.
 # The chain is deliberately frontier-only rather than floor-pinned. `escalate = true` uses the
 # registry's bounded capacity-starvation path: retry first, then a visible machine-owned park.
@@ -264,7 +264,7 @@ agent = "sparq-reviewer"
 escalate = true
 
 # ---------------------------------------------------------------------------------------------------
-# [GPT-5.6] LEGACY CHAIN-ORDER PREFERENCE — retained for PLAN/CLAIM compatibility with older
+# [SPARQ agent] LEGACY CHAIN-ORDER PREFERENCE — retained for PLAN/CLAIM compatibility with older
 # target revisions.
 # The current implementation routes are already Sol-first, so this rule is idempotent today. It
 # remains declared as data because the dispatch decision is made twice, in two repositories:

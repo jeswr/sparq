@@ -271,7 +271,7 @@ def _self_test():
 
     R = ["status:ready"]
 
-    # [GPT-5.6] Fixture: impl → Sol-first + Opus continuity fallback + escalate.
+    # [SPARQ agent] Fixture: impl → Sol-first + Opus continuity fallback + escalate.
     # The WHOLE chain is asserted, not only its head: the planner row is what the registry's CLAIM
     # step compares for exact equality. This catches either a lead-order regression or accidental
     # removal of the transition fallback needed to repair existing Opus-authored PRs.

@@ -35,7 +35,7 @@ NOT_A_ROUTING_TARGET = {"haiku", "sonnet"}
 # docs chain and must not appear anywhere else.
 DOCS_ONLY = {"terra"}
 
-# [GPT-5.6] LEGACY `area:gui` CARVE-OUT — THE COMPATIBILITY MECHANISM (review of PR #4211).
+# [SPARQ agent] LEGACY `area:gui` CARVE-OUT — THE COMPATIBILITY MECHANISM (review of PR #4211).
 #
 # Historical maintainer directive 2026-07-26: "Opus5 should be prioritised over sol on all tasks
 # for which they are both possible implementors; except for GUI work where sol should remain
@@ -265,7 +265,7 @@ def _self_test():
     # (the opus-4.8 tail fallback was deprecated 2026-07-26), escalate
     mc, ag, esc = resolve(["role:impl", "area:sparq-zk"], doc)
     chk("impl+zk -> opus5/escalate", (mc, ag, esc), (["opus5"], "sparq-reviewer", True))
-    # [GPT-5.6] 2026-09-02 protocol: ordinary implementation is Sol-first, with Opus retained as
+    # [SPARQ agent] 2026-09-02 protocol: ordinary implementation is Sol-first, with Opus retained as
     # the continuity fallback for current Anthropic-authored repairs and total Sol unavailability.
     mc, ag, esc = resolve(["role:impl", "area:sparq-core"], doc)
     chk("impl -> SOL-FIRST with Opus continuity fallback", (mc, ag, esc),
@@ -291,7 +291,7 @@ def _self_test():
         resolve(["role:perf", "area:sparq-engine"], doc)[0::2], (["sol", "opus5"], True))
 
     # ---------------------------------------------------------------------------------------------
-    # [GPT-5.6] SOL IMPLEMENTATION + OPUS REVIEW (maintainer protocol 2026-09-02).
+    # [SPARQ agent] SOL IMPLEMENTATION + OPUS REVIEW (maintainer protocol 2026-09-02).
     # ---------------------------------------------------------------------------------------------
     for _role in ("impl", "site", "gui", "ci", "perf"):
         mc, _agent, esc = resolve([f"role:{_role}"], doc)
