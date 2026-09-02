@@ -115,31 +115,18 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 # coverage*.py/sh, perf-gate.py, assemble-feature-matrix.py, feature-matrix-tiers.py,
 # check-*.py gates, fetch-*.sh conformance fetchers, ci-bench.sh, ci-free-disk.sh,
 # unsafe/mutants gates, sbom/vex tooling, docker-smoke.sh, wasm-deps-guard.sh, the
-# fv/formal lane scripts, and scripts/tests/* that gate the engine); the Rust-CI
-# workflow files themselves (ci.yml, feature-matrix.yml, codeql.yml, supply-chain.yml,
-# bench.yml, fuzz.yml, miri.yml, asan.yml, kani.yml, metamorph.yml,
-# vectorized-feature-off.yml, ci-select.yml, ci-summary.yml, conformance/coverage
-# lanes); `.github/feature-matrix.d/**`; `.github/codeql/**`; `.github/actions/**`.
+# fv/formal lane scripts, and scripts/tests/* that gate the engine);
+# `.github/feature-matrix.d/**`; `.github/codeql/**`; `.github/actions/**`.
+#
+# [OPUS-5] issue #6078: `.github/workflows/*.yml` files are NO LONGER hand-listed
+# here — they are covered by the INVERTED rule below (`_RUST_CI_WORKFLOWS` +
+# `_ci_workflow_inert_match`), which is denylist-shaped and so scales to the whole
+# workflow directory instead of one family at a time.
 _ORCHESTRATION_SAFE: list[str] = [
     # Orchestration configuration + agent harness (never compiled/tested by cargo).
     "orchestration/",       # routing.toml + orchestration policy (the #3416 class)
     ".claude/",             # agent definitions / skills / workflows / settings
     ".beads/",              # the bead task DB (never read by any build/test)
-    # Orchestration-only workflow files (PR/issue/bead/merge automation — none run
-    # cargo build/test/clippy/coverage/bench/fuzz/CodeQL).
-    ".github/workflows/triage-issue.yml",
-    ".github/workflows/retriage.yml",
-    ".github/workflows/pr-backlog.yml",
-    ".github/workflows/pr-title.yml",
-    ".github/workflows/batch-merge.yml",
-    ".github/workflows/bead-autoclose.yml",
-    ".github/workflows/promote-on-approval.yml",
-    ".github/workflows/differential-update.yml",
-    ".github/workflows/kb-dump.yml",
-    ".github/workflows/pkg-ingest.yml",
-    # NOTE deliberately NOT here: selection-alarm.yml / formal-alarm.yml — they are
-    # monitors for the Rust/formal lanes (borderline), so they keep triggering full
-    # (fail-closed; the value of skipping them is negligible and the audit is cleaner).
     # Orchestration-only scripts (PR/issue/bead/routing/dispatch automation). Each is
     # pinned inert by the OrchestrationSafeInertnessTests grep.
     "scripts/triage.py",
@@ -182,6 +169,130 @@ _DEPLOY_ONLY: list[str] = [
     ".github/workflows/deploy-lint.yml",
     ".github/workflows/deploy-terraform-lint.yml",
 ]
+
+
+# [OPUS-5] issue #6078 (follow-up to #2536): the CI-WORKFLOW POLARITY INVERSION.
+#
+# THE PROBLEM the two allowlists above could not solve: `.github/` is an
+# unconditional `_FULL_TRIGGERS` entry, so EVERY workflow file in the directory
+# forces the whole Rust matrix unless it is hand-listed as inert — and hand-listing
+# rescued only a handful, leaving a long tail (site-e2e*.yml, site-visual.yml,
+# pages.yml, docs.yml, docs-quality.yml, scorecard.yml, triage-area.yml,
+# pr-area-label.yml, review-alarm.yml, merge-queue-feedback.yml,
+# merge-group-doorbell.yml, rearm-sweeper.yml, refresh-start-here.yml, flow-on*.yml,
+# fast-fix-ring.yml, auto-arm.yml, the release/publish family, …) paying the full
+# engine suite for an edit that cannot reach it. Each family had to be rescued one
+# audited allowlist at a time, so the tail never shrank on its own.
+#
+# THE INVERSION: enumerate the SHORT set of workflow files that ARE Rust-CI and treat
+# every other `.github/workflows/<name>.yml` as inert-by-default. This is a DENYLIST,
+# so a NEW workflow file is inert unless declared — the opposite fail-safe direction
+# from the allowlists, which is only sound because inertness is MACHINE-CHECKED (see
+# the obligations below) rather than asserted by hand.
+#
+# WHAT "INERT" MEANS HERE, precisely (design §2 — a skip must be a PROOF): the
+# selector's job is to decide whether the SELECTOR-GATED Rust jobs run. A GitHub
+# Actions job's definition and inputs come from (i) its own workflow file, (ii) any
+# workflow/action it `uses:`, and (iii) any file its steps read. So editing workflow
+# W can change a selector-gated job iff W is one of those three for that job — which
+# is exactly what `CiWorkflowInversionTests` in scripts/tests/test_ci_select.py
+# enforces, on EVERY workflow file on disk that is not on this denylist:
+#
+#   O1  W consumes NO selector output (no `outputs.rust_changed`, no
+#       `needs.select.outputs`/`steps.select.outputs`, no `--classify-only`, no
+#       `uses: ./.github/workflows/ci-select.yml`) on a non-comment line. A workflow
+#       whose own jobs the selector can skip MUST force full, so that an edit to it
+#       re-runs the jobs it just redefined. This is the obligation that makes the
+#       denylist self-maintaining: wire a new workflow into the selector and the test
+#       REDs until you declare it here.
+#   O2  W is not `uses:`-reachable (transitively) from any denylisted workflow.
+#   O3  No denylisted workflow REFERENCES W on a non-comment line — this is the check
+#       that caught feature-matrix-report.yml, whose path is listed in
+#       feature-matrix.yml's `changes` paths-filter precisely so that editing the
+#       privileged reporter re-runs the `setup` job that self-tests it.
+#
+# NOT rescuable by this rule, deliberately, and excluded BY CONSTRUCTION rather than
+# by another list — `_ci_workflow_inert_match` matches ONLY a single path segment
+# directly under `.github/workflows/` ending in `.yml`/`.yaml`, so
+# `.github/actions/**` (composite actions the Rust-CI workflows `uses:`),
+# `.github/feature-matrix.d/**` (the feature-matrix leg definitions),
+# `.github/codeql/**` (the CodeQL query config), `.github/requirements/**`,
+# `.github/advisory-registry.json`, `.github/dependabot.yml` and any non-`.yml`
+# file or nested path under `.github/workflows/` all still hit the `.github/`
+# full-run trigger. Same for a workflow file this list does name.
+#
+# DELIBERATE REVERSAL: the old allowlist carried a note keeping selection-alarm.yml
+# and formal-alarm.yml OUT of the inert set because they MONITOR the Rust/formal
+# lanes, on the stated grounds that "the value of skipping them is negligible and the
+# audit is cleaner" — a taste call, not a soundness one. Both now come out inert, and
+# both satisfy O1/O2/O3 (neither gates on a selector output, neither is `uses:`-called
+# by or named in a Rust-CI workflow). The audit argument is answered by the
+# obligations replacing the hand-audit, so the exception no longer earns its keep.
+#
+# CLASS: an inert workflow file contributes NO crate and classifies
+# `_CLASS_ORCHESTRATION`. That token is kept (rather than minting a new one) so the
+# three `changes` case-arms in ci.yml / feature-matrix.yml / codeql.yml — which list
+# `_INERT_CLASSES` verbatim — do not have to change; read it as "CI-plumbing only",
+# which is what the class has covered since it first held `triage-issue.yml`. The
+# per-file audit row in the step summary is tagged `CI-WF-SAFE`, so the summary still
+# says exactly WHY each individual path was skipped.
+_RUST_CI_WORKFLOWS: frozenset[str] = frozenset({
+    # The repo's long-standing Rust-CI set — the lanes that run cargo
+    # build/test/clippy/coverage/bench/fuzz/CodeQL — plus the selection/gate
+    # machinery itself. Note that only some of them (ci/feature-matrix/codeql/bench/
+    # fuzz/supply-chain/vectorized-feature-off/ci-select) actually consume the
+    # selector today; miri/asan/kani/metamorph/differential/shacl-diff-fuzz/
+    # nightly-full-sweep/datalog-souffle gate on their own triggers and O1 would let
+    # them be inert. They are kept here CONSERVATIVELY: an edit to a Rust lane is the
+    # case where engine cover is most plausibly wanted, and those files change rarely
+    # enough that the occasional full run costs little. Dropping one is a soundness-
+    # neutral cost decision, not a correctness fix — the obligations below are what
+    # keep the REST of the directory honest.
+    "ci.yml",
+    "feature-matrix.yml",
+    "codeql.yml",
+    "supply-chain.yml",
+    "bench.yml",
+    "fuzz.yml",
+    "miri.yml",
+    "asan.yml",
+    "kani.yml",
+    "metamorph.yml",
+    "vectorized-feature-off.yml",
+    "ci-select.yml",
+    "ci-summary.yml",
+    "formal-verification.yml",
+    "differential.yml",
+    "shacl-diff-fuzz.yml",
+    "nightly-full-sweep.yml",
+    "datalog-souffle.yml",
+    # [OPUS-5] #6078: NOT a cargo lane — declared because of O3. Its path is an
+    # explicit entry in feature-matrix.yml's `changes` paths-filter (a PR touching
+    # only the PRIVILEGED reporter must re-run the `setup` job whose self-tests pin
+    # that trust boundary), so it IS an input to a selector-gated job.
+    "feature-matrix-report.yml",
+})
+
+_WORKFLOW_DIR = ".github/workflows/"
+
+
+def _ci_workflow_inert_match(path: str) -> bool:
+    """[OPUS-5] issue #6078: is `path` a NON-Rust-CI workflow file — i.e. inert for
+    the Rust matrix under the inversion documented above?
+
+    True only for a path of the exact shape `.github/workflows/<name>.yml` (or
+    `.yaml`) with `<name>.yml` absent from `_RUST_CI_WORKFLOWS`. Anything else under
+    `.github/` — a nested path, a non-YAML file, `.github/actions/**`,
+    `.github/codeql/**`, `.github/feature-matrix.d/**` — returns False and therefore
+    still hits the `.github/` full-run trigger (fail-closed, design §2)."""
+    if not path.startswith(_WORKFLOW_DIR):
+        return False
+    name = path[len(_WORKFLOW_DIR):]
+    if not name or "/" in name:
+        return False  # a nested path is not a workflow file GitHub reads => full
+    if not (name.endswith(".yml") or name.endswith(".yaml")):
+        return False  # non-workflow data parked next to the workflows => full
+    return name not in _RUST_CI_WORKFLOWS
 
 
 def _allowlist_match(path: str, allowlist: list[str]) -> bool:
@@ -283,6 +394,11 @@ def classify_change(changed_paths: list[str]) -> str:
             seen_inert.add(_CLASS_DOCS)
         elif _deploy_only_match(path):
             seen_inert.add(_CLASS_DEPLOY)
+        elif _ci_workflow_inert_match(path):
+            # [OPUS-5] #6078: a non-Rust-CI workflow file. Classified as CI-plumbing
+            # (`orchestration-only`) — see the _RUST_CI_WORKFLOWS note on why the
+            # existing token is reused rather than a new one minted.
+            seen_inert.add(_CLASS_ORCHESTRATION)
         else:
             seen_other = True
     if seen_other:
@@ -650,6 +766,14 @@ def select(
         # listing it here keeps the selection and the CLASS on one path list.
         if _deploy_only_match(path):
             file_owners.append((path, "DEPLOY-SAFE"))
+            continue
+        # [OPUS-5] issue #6078: the CI-WORKFLOW inversion — a `.github/workflows/*.yml`
+        # file that is NOT on `_RUST_CI_WORKFLOWS`. Same pre-trigger position and same
+        # posture as the two allowlists above (contributes no crate), but denylist-
+        # shaped so it covers the whole workflow tail; its soundness is machine-checked
+        # by CiWorkflowInversionTests, not asserted per file.
+        if _ci_workflow_inert_match(path):
+            file_owners.append((path, "CI-WF-SAFE"))
             continue
         trig = _trigger_match(path)
         if trig is not None:
