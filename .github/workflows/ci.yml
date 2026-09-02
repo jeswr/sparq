@@ -1901,16 +1901,20 @@ jobs:
           # members (solid-conformance, odrl-conformance, text-oracle, rsp-oracle,
           # jsonld-conformance) carry the same key and point back here.
           #
-          # WHY ANY KEY AT ALL: `shared-key` is documented as replacing the key
-          # rust-cache otherwise derives from the JOB ID. Sixteen of this file's twenty
-          # rust-cache steps declared neither `shared-key` nor `key`, so sixteen jobs
-          # each held their OWN entry of the repo's shared 10 GB Actions-cache budget —
-          # and budget pressure is exactly the LRU-eviction mechanism sq-3sbrr (#1395)
-          # identified as what makes a warm cache restore cold. A derived key is also
-          # invisible and rename-fragile: renaming a job silently orphans its entry.
-          # Every rust-cache step in this file now names its key explicitly, and
-          # scripts/tests/test_mergequeue_cache_posture.py pins both that property and
-          # this group's exact membership.
+          # WHY `shared-key` SPECIFICALLY: rust-cache's two key inputs are NOT
+          # interchangeable. `shared-key` REPLACES the key it otherwise derives from the
+          # JOB ID; `key` is an ADDITIONAL component that leaves the job-derived one in
+          # place. Sixteen of this file's twenty rust-cache steps declared neither, and
+          # two more (the coverage-engine run/merge pair) declared only `key` — so
+          # eighteen jobs each held their OWN job-scoped entry of the repo's shared
+          # 10 GB Actions-cache budget, and budget pressure is exactly the LRU-eviction
+          # mechanism sq-3sbrr (#1395) identified as what makes a warm cache restore
+          # cold. A job-derived key is also invisible and rename-fragile: renaming a job
+          # silently orphans its entry, and no other job can ever address it (which is
+          # how coverage-engine-merge's `coverage-engine-run-1` was a dead letter).
+          # Every rust-cache step in this file now declares an explicit `shared-key`,
+          # and scripts/tests/test_mergequeue_cache_posture.py pins that property —
+          # rejecting `key`-only steps by name — plus this group's exact membership.
           #
           # WHY THESE SIX COLLAPSE — the argument sq-h2gz6/sq-aemq7 already made for
           # `coverage-measure` below. rust-cache stores the EXTERNAL dependency closure
@@ -3645,11 +3649,17 @@ jobs:
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # [OPUS-5] sq-h2gz6 / [SONNET-4.6] sq-aemq7: the per-part key is LEFT ALONE
-          # here — it is outside both beads' named scope (coverage-shard-N), which
-          # collapsed only the coverage-SHARD matrix onto one `shared-key`, and unlike
-          # those shards the merge job below deliberately points at part 1's key.
-          key: coverage-engine-run-${{ matrix.part }}
+          # [OPUS-5] #5214 — `shared-key`, NOT `key`. rust-cache treats the two
+          # differently: `shared-key` REPLACES the key it otherwise derives from the
+          # job id, while `key` is an ADDITIONAL component alongside that derived key.
+          # This step used `key`, so its entry stayed job-id-scoped — anonymous in the
+          # same rename-fragile way as the sixteen steps that named nothing, AND
+          # unreachable from `coverage-engine-merge` below, whose `coverage-engine-run-1`
+          # could never match across a different job id. The per-PART value is kept: the
+          # three partitions still take three entries, which is what avoids the
+          # save-race clobbering (they are NOT collapsed onto one key like the
+          # coverage-SHARD matrix of sq-h2gz6 / sq-aemq7 was).
+          shared-key: coverage-engine-run-${{ matrix.part }}
       - name: Install cargo-llvm-cov + nextest
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action (the @<tool> ref is dropped by the pin). Both tools are needed:
@@ -3716,11 +3726,17 @@ jobs:
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
-          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py. The pinned
-          # `key:` stays (see the note above this step) — both beads collapsed only the
-          # coverage-SHARD matrix onto one `shared-key`.
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: coverage-engine-run-1
+          # [OPUS-5] #5214 — deliberately part 1's key, and `shared-key` is what makes
+          # that reuse REAL: only `shared-key` drops the job-id component, so under the
+          # previous `key:` this job asked for `…-coverage-engine-run-1-coverage-engine-merge`
+          # and never restored the partition entry it names. Value must stay in lockstep
+          # with the run step's `shared-key` at `matrix.part == 1` — pinned by
+          # scripts/tests/test_mergequeue_cache_posture.py. Sharing the key with part 1
+          # is safe: both save on main only and rust-cache skips saving on an exact hit,
+          # so the second writer is a no-op rather than a clobber.
+          shared-key: coverage-engine-run-1
       - name: Install cargo-llvm-cov + nextest
         uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # cargo-llvm-cov
         with:
