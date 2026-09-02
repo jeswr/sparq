@@ -22,12 +22,12 @@
 #      `prepare` lifecycle (sq-bkag git-pin build) runs on `npm ci` and needs
 #      wasm-pack on PATH to compile the wasm engine.
 #
-# SCOPE — properties 1–4 are deliberately js.yml ONLY. gui.yml / site-e2e-hero.yml /
-# site-visual.yml still `cargo install` wasm-pack; converting them is separate work and
-# is NOT asserted here, so this file's silence about them is not a claim that they are
-# hardened.
+# SCOPE — properties 1–4 are deliberately js.yml ONLY, because ordering (4) is a
+# js.yml-specific obligation. The no-source-compile half of (1) is now repo-wide: see
+# property 6.
 #
-# One CROSS-WORKFLOW property is asserted, by WasmPackVersionUnified below:
+# TWO CROSS-WORKFLOW properties are asserted, by WasmPackVersionUnified and
+# NoSourceCompileOutsideAllowlist below:
 #
 #   5. ONE VERSION REPO-WIDE. Every workflow that installs wasm-pack through
 #      jetli/wasm-pack-action must pass the action exactly one `with: version:` input
@@ -41,6 +41,22 @@
 #      exercised in the build lane and never in the test lane. Nothing goes red when the
 #      two drift apart again, hence this assertion. It says nothing about WHICH version
 #      is right; bumping is fine, bumping one lane only is not.
+#
+#   6. NO SOURCE COMPILE REPO-WIDE, except a DECLARED allowlist. #5776 converted the
+#      remaining 15 `cargo install wasm-pack` sites (gui.yml ×5, nightly-full-sweep.yml
+#      ×4, publish.yml ×3, pages.yml, site-e2e-hero.yml, site-visual.yml) to the same
+#      prebuilt action — they are all `ubuntu-latest` x86_64, the runner the action is
+#      already proven green on in `js`/`ci`. release.yml's `gui-bundle` is NOT converted
+#      (its matrix spans ubuntu-24.04-arm / macos-14 / macos-15-intel / windows-latest,
+#      where the prebuilt-download path is unverified) and is the sole CARGO_INSTALL_
+#      ALLOWLIST entry. Two directions are pinned, because they fail differently:
+#      putting a lane BACK on `cargo install` reds test_no_source_compile_outside_
+#      allowlist, while DELETING an install step outright leaves no `cargo install`
+#      line to count and is caught only by test_converted_lanes_still_use_the_action.
+#      (A partial revert — one of gui.yml's five steps — reds the first only, since
+#      the file still reaches the action via its other four.) The allowlist is also
+#      asserted LIVE, so once
+#      `gui-bundle` is converted the stale free pass must be deleted rather than rot.
 #
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).
@@ -63,6 +79,34 @@ WASM_PACK_ACTION = "jetli/wasm-pack-action"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # An exact release pin, e.g. `v0.15.0`. `latest` (and any floating ref) must fail.
 VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+
+# The source-compile command #5776 removed from every lane but one.
+CARGO_INSTALL = "cargo install wasm-pack"
+
+# {workflow filename: why it may still source-compile}. Deliberately tiny: an entry is
+# a standing exemption from the flake hardening, so it must name a REASON a reader can
+# check, and it is asserted live (test_allowlist_is_not_stale) so a converted lane's
+# entry cannot linger as a silent free pass for a future regression.
+CARGO_INSTALL_ALLOWLIST = {
+    "release.yml": (
+        "the `gui-bundle` matrix also runs on ubuntu-24.04-arm, macos-14, "
+        "macos-15-intel and windows-latest; jetli/wasm-pack-action's behaviour on "
+        "those targets is unverified here, and a wrong-arch download would break a "
+        "RELEASE bundle. Converting it needs a real matrix run (#5776 follow-up)."
+    ),
+}
+
+# The lanes #5776 converted. Listed explicitly rather than derived, so that deleting a
+# lane's install step (or reverting it to `cargo install`) is caught by name instead of
+# silently shrinking the sample the version-unification assertion compares.
+CONVERTED_LANES = (
+    "gui.yml",
+    "nightly-full-sweep.yml",
+    "pages.yml",
+    "publish.yml",
+    "site-e2e-hero.yml",
+    "site-visual.yml",
+)
 
 
 def _load(name: str, filename: str):
@@ -432,6 +476,142 @@ jobs:
                     f"{label}: must count as a DISTINCT pin so the single-version "
                     "assertion goes red",
                 )
+
+
+class NoSourceCompileOutsideAllowlist(unittest.TestCase):
+    """(6) `cargo install wasm-pack` survives ONLY in a declared, reasoned allowlist,
+    and every lane #5776 converted still reaches the prebuilt action.
+
+    The regression is invisible in both directions — a lane that goes back to the
+    source compile is green on a good day and reds an unrelated PR on a bad one — so
+    both are pinned here rather than left to review to notice.
+    """
+
+    @staticmethod
+    def _offenders_from(sources: dict[str, str]) -> dict[str, int]:
+        """{workflow filename: number of live `cargo install wasm-pack` lines}.
+
+        Comment lines are dropped first (`_code_lines`): this repo comments its
+        workflows heavily and several of them DISCUSS the removed command in prose —
+        counting those would make the assertion permanently red for the wrong reason.
+        """
+        found: dict[str, int] = {}
+        for name, text in sorted(sources.items()):
+            hits = sum(1 for ln in _code_lines(text) if CARGO_INSTALL in ln)
+            if hits:
+                found[name] = hits
+        return found
+
+    @classmethod
+    def _offenders(cls) -> dict[str, int]:
+        return cls._offenders_from(
+            {
+                path.name: path.read_text(encoding="utf-8")
+                for path in sorted(WORKFLOWS.glob("*.y*ml"))
+            }
+        )
+
+    def test_no_source_compile_outside_allowlist(self):
+        unexpected = sorted(set(self._offenders()) - set(CARGO_INSTALL_ALLOWLIST))
+        self.assertEqual(
+            unexpected,
+            [],
+            f"{unexpected} run `{CARGO_INSTALL}`, which rebuilds wasm-pack and its "
+            "whole chrono/wasm-bindgen source tree from crates.io on every run — a "
+            "transient registry blip then fails the lane (sq-khm3f; it red-gated PR "
+            f"#1131). Install the prebuilt binary via {WASM_PACK_ACTION} instead "
+            "(#5776), or, if the lane genuinely cannot, add it to "
+            "CARGO_INSTALL_ALLOWLIST with the reason.",
+        )
+
+    def test_allowlist_is_not_stale(self):
+        """Every exemption must still describe a REAL, current source compile.
+
+        Without this, converting release.yml later would leave a dead entry behind
+        that silently re-permits the regression it was written to bound.
+        """
+        offenders = self._offenders()
+        for name in sorted(CARGO_INSTALL_ALLOWLIST):
+            self.assertIn(
+                name,
+                offenders,
+                f"CARGO_INSTALL_ALLOWLIST names {name}, but it no longer runs "
+                f"`{CARGO_INSTALL}`. Delete the entry — a stale exemption is a "
+                "standing free pass for the next regression (#5776).",
+            )
+
+    def test_converted_lanes_still_use_the_action(self):
+        """Anti-vacuity for (5) and the other half of (6): a lane that dropped its
+        install step contributes no `cargo install` line either, so the assertion
+        above would go quiet about it."""
+        pins = WasmPackVersionUnified._pins()
+        for name in CONVERTED_LANES:
+            self.assertIn(
+                name,
+                pins,
+                f"{name} must install wasm-pack via {WASM_PACK_ACTION} (#5776). If "
+                "the lane legitimately no longer needs wasm-pack, drop it from "
+                "CONVERTED_LANES in the same change.",
+            )
+
+    # --- mutation guard ------------------------------------------------------
+    # Synthetic workflows, so the check runs without mutating the tree.
+    _MUT_CONVERTED = """\
+jobs:
+  build:
+    steps:
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
+      - name: Build
+        run: npm run build:wasm
+"""
+    # The exact revert #5776 undoes.
+    _MUT_REVERTED = """\
+jobs:
+  build:
+    steps:
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Build
+        run: npm run build:wasm
+"""
+    # Prose ABOUT the command, which must not count as a live step — otherwise the
+    # assertion reds on every workflow that documents why the command was removed.
+    _MUT_COMMENT_ONLY = """\
+jobs:
+  build:
+    steps:
+      # Do NOT `cargo install wasm-pack` here — see #5776.
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
+"""
+
+    def test_mutation_reverting_a_lane_is_caught(self):
+        """A converted lane put back on `cargo install` must be seen as an offender."""
+        clean = self._offenders_from({"gui.yml": self._MUT_CONVERTED})
+        self.assertEqual(clean, {}, "the converted shape must not read as an offender")
+
+        reverted = self._offenders_from({"gui.yml": self._MUT_REVERTED})
+        self.assertEqual(reverted, {"gui.yml": 1})
+        self.assertEqual(
+            sorted(set(reverted) - set(CARGO_INSTALL_ALLOWLIST)),
+            ["gui.yml"],
+            "a revert in a non-allowlisted lane must survive the allowlist "
+            "subtraction, i.e. red test_no_source_compile_outside_allowlist",
+        )
+
+    def test_mutation_commented_out_command_is_not_a_live_step(self):
+        """The counter reads STEPS, not prose — this file and several workflows quote
+        the removed command in comments."""
+        self.assertEqual(
+            self._offenders_from({"gui.yml": self._MUT_COMMENT_ONLY}),
+            {},
+            "a `#`-commented mention of the command must not count as a live step",
+        )
 
 
 if __name__ == "__main__":
