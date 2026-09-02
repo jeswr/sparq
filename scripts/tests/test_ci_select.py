@@ -1110,6 +1110,145 @@ class YamlInertSelectionWiringTests(unittest.TestCase):
         self.assertIn(self.CI_YML, summary)
 
 
+@unittest.skipIf(shutil.which("git") is None, "needs git (present on every CI runner)")
+class YamlInertGitReaderTests(unittest.TestCase):
+    """[OPUS-5] #5237: the GIT-READING half of the content proof —
+    `_merge_base` + `_git_blob_text` + `make_yaml_inert_check`.
+
+    `yaml_edit_is_inert` is a pure function over two strings and is pinned above;
+    these three are what actually PRODUCE those strings in a real run, and they are
+    the half that can turn a sound proof into an unsound SKIP: read the wrong
+    revision, resolve the path against the wrong directory, or let the memo answer
+    for a different file, and the selector drops lanes it was obliged to run. So
+    they are exercised end-to-end against a real temporary repository rather than a
+    stub.
+
+    The fixture is deliberately a THREE-commit fork, because the interesting
+    revision bug is invisible on a linear one:
+
+        A ──► F      (feature tip: A + a WHOLE-LINE COMMENT edit of w.yml)
+        └──► B       (base tip:    A + a CODE edit of the same w.yml line)
+
+    merge-base(B, F) is A, and the A->F edit is comment-only. Reading the left-hand
+    side from B instead — the `--base` ref, which is the tempting shortcut — sees
+    the code edit and declines. Every proof assertion below therefore fails if the
+    left-hand revision stops being the merge base.
+    """
+
+    WF = ".github/workflows/w.yml"
+
+    # Line 5 (`runs-on:`) is what commit B rewrites and F leaves alone.
+    _A = (
+        "# header comment\n"
+        "name: w\n"
+        "jobs:\n"
+        "  j:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: cargo test\n"
+    )
+    _F = _A.replace("# header comment\n", "# header comment, REWORDED\n# and another line\n")
+    _B = _A.replace("runs-on: ubuntu-latest", "runs-on: ubuntu-24.04")
+
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self.repo, check=True,
+                       capture_output=True, text=True)
+
+    def _commit(self, text, message):
+        path = Path(self.repo) / self.WF
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        self._git("add", self.WF)
+        self._git("commit", "-q", "-m", message)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = self._tmp.name
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@example.invalid")
+        self._git("config", "user.name", "t")
+        self._git("config", "commit.gpgsign", "false")
+        self.sha_a = self._commit(self._A, "A: add the workflow")
+        self.sha_f = self._commit(self._F, "F: reword a whole-line comment")
+        # Detach back to A and add the divergent base-side commit. Referenced by
+        # SHA throughout, so the fixture never depends on a default branch name.
+        self._git("checkout", "-q", self.sha_a)
+        self.sha_b = self._commit(self._B, "B: change runs-on (a CODE line)")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    # ---- _merge_base -------------------------------------------------------
+    def test_merge_base_is_the_three_dot_left_hand_revision(self):
+        self.assertEqual(cs._merge_base(self.sha_b, self.sha_f, self.repo), self.sha_a)
+
+    def test_merge_base_is_none_when_a_revision_does_not_resolve(self):
+        self.assertIsNone(cs._merge_base("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                                         self.sha_f, self.repo))
+
+    # ---- _git_blob_text ----------------------------------------------------
+    def test_blob_text_reads_the_version_at_that_revision(self):
+        self.assertEqual(cs._git_blob_text(self.sha_a, self.WF, self.repo), self._A)
+        self.assertEqual(cs._git_blob_text(self.sha_f, self.WF, self.repo), self._F)
+        self.assertEqual(cs._git_blob_text(self.sha_b, self.WF, self.repo), self._B)
+
+    def test_blob_text_is_none_for_a_path_or_revision_that_is_absent(self):
+        self.assertIsNone(cs._git_blob_text(self.sha_a, ".github/workflows/absent.yml",
+                                            self.repo))
+        self.assertIsNone(cs._git_blob_text("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                                            self.WF, self.repo))
+
+    # ---- make_yaml_inert_check --------------------------------------------
+    @unittest.skipUnless(_yaml is not None, "needs PyYAML (installed in the CI job)")
+    def test_a_comment_only_edit_across_the_real_revision_pair_is_proven(self):
+        check = cs.make_yaml_inert_check(
+            cs._merge_base(self.sha_b, self.sha_f, self.repo), self.sha_f, self.repo)
+        proven, detail = check(self.WF)
+        self.assertTrue(proven, detail)
+
+    @unittest.skipUnless(_yaml is not None, "needs PyYAML (installed in the CI job)")
+    def test_reading_the_left_side_from_the_base_tip_instead_would_decline(self):
+        # The negative control for the test above: it is the MERGE BASE that makes
+        # the A->F edit comment-only. Pinning this keeps the two revisions honest.
+        check = cs.make_yaml_inert_check(self.sha_b, self.sha_f, self.repo)
+        self.assertFalse(check(self.WF)[0])
+
+    def test_a_code_edit_across_the_real_revision_pair_declines(self):
+        # A -> B touches `runs-on:`. Textual half only, so this runs without PyYAML.
+        check = cs.make_yaml_inert_check(self.sha_a, self.sha_b, self.repo)
+        proven, detail = check(self.WF)
+        self.assertFalse(proven)
+        self.assertIn("non-comment line", detail)
+
+    def test_a_file_absent_on_one_side_declines(self):
+        check = cs.make_yaml_inert_check(self.sha_a, self.sha_f, self.repo)
+        proven, detail = check(".github/workflows/never-existed.yml")
+        self.assertFalse(proven)
+        self.assertIn("unreadable", detail)
+
+    def test_the_verdict_is_memoised_per_path(self):
+        calls: list[tuple[str, str]] = []
+        real = cs._git_blob_text
+
+        def counting(rev, path, repo_root):
+            calls.append((rev, path))
+            return real(rev, path, repo_root)
+
+        cs._git_blob_text = counting
+        try:
+            check = cs.make_yaml_inert_check(self.sha_a, self.sha_f, self.repo)
+            first = check(self.WF)
+            self.assertEqual(len(calls), 2, "one `git show` per side on the first ask")
+            self.assertEqual(check(self.WF), first, "the memo must not change the verdict")
+            self.assertEqual(len(calls), 2, "a repeated path must not re-read the blobs")
+            check(".github/workflows/other.yml")
+            self.assertEqual(len(calls), 4, "a DIFFERENT path must not reuse the memo")
+        finally:
+            cs._git_blob_text = real
+
+
 class RealMetadataShapeTests(unittest.TestCase):
     """(i) Pinned against the REAL workspace metadata: core is root-like, geo is
     leaf-like, and closure(geo) is a subset of closure(core) (structural: geo
