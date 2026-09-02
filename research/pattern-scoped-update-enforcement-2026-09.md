@@ -278,10 +278,19 @@ accidentally.
 
 ### L7 — Uniform denial: the verdict must not describe the data
 
-A deny must name only the **scope that was violated**, never the offending quad's content,
-and must not distinguish "the triple you named is outside your scope" from "the triple you
-named does not exist". Otherwise the error string is itself the oracle L2 and L4 exist to
-close. The cautionary prior art is Postgres's own documented residual channel: *"they are
+A deny must name only the **scope that was violated**, never the offending quad's content:
+two denials raised by the same law over *different* quads must produce a **byte-identical**
+message. Otherwise the error string is itself the oracle L2 and L4 exist to close.
+
+Note carefully what this law does *not* say. Under §5.1 a `DELETE` naming a triple that is
+absent — or masked, which is the same thing on the fork — produces no delete effect and so
+no deny at all; it succeeds as a no-op (§4). "The triple you named does not exist" therefore
+never reaches an error string in the first place, and there is no message to make
+indistinguishable from anything. The indistinguishability that matters is *within* the deny
+path, and it is an INSERT property: an out-of-scope insert must deny identically whether or
+not the quad it names is already present behind the mask (§5.3 item 4).
+
+The cautionary prior art is Postgres's own documented residual channel: *"they are
 not applied when the system is performing internal referential integrity checks or
 validating constraints … attempting to insert a duplicate value into a column that … has a
 unique constraint. If the insert fails then the user can infer that the value already
@@ -413,8 +422,17 @@ Not "would be nice" — the acceptance bar, mirroring what the read path already
 3. **L4 membership-oracle battery.** Insert a triple that is masked-and-present vs
    masked-and-absent; the observable outcome (verdict, store, subsequent read) must be
    identical in both cases.
-4. **L7 error-string battery.** The deny message for out-of-scope-quad and for
-   nonexistent-quad must be byte-identical.
+4. **L7 uniform-denial battery.** Compare messages only across pairs that *both* actually
+   deny. Under §5.1 a `DELETE` of an absent or masked quad does not deny — it is a silent
+   no-op (§4, L7) — so it has no message to compare, and the delete-side obligation is
+   discharged as *successful* indistinguishability by item 2, not here. The two denying
+   pairs, both under L3 (an insert outside `Wins`):
+   * **Content independence.** Two out-of-scope inserts whose offending quads carry
+     *different* attacker-supplied term text must produce byte-identical messages — the
+     message names the violated scope and nothing about the quad.
+   * **Scope-boundary indistinguishability.** Item 3's pair — a quad masked-and-present vs
+     masked-and-absent, both outside `Wins` by L4 and so both denied — must produce
+     byte-identical messages in addition to item 3's identical store and subsequent read.
 5. **Delta-parity guard.** The quads authorized in step 6 must equal the quads
    `apply_effects` writes in step 8 — the write twin of the existing
    `differential_writeset_tests` module.
