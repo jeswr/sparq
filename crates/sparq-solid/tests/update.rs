@@ -575,11 +575,22 @@ fn positive_control_fully_authorized_multi_op_body_applies() {
 // SAME cooperative check a genuine blow-up trips at. Property (1) is what makes the abort
 // meaningful; the row-cap case below is the non-degenerate twin that trips on the actual
 // size of an intermediate result rather than on a clock that had already run out.
+//
+// The deadline-based cases carry `#[cfg(not(target_arch = "wasm32"))]`:
+// `QueryBudget::deadline` does not EXIST on `wasm32-unknown-unknown` (the field is
+// `#[cfg(not(target_arch = "wasm32"))]` in sparq-engine, because `std::time::Instant`
+// panics there), and this crate's test targets are COMPILED for wasm32 by the CI wasm lane
+// (`cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets` and
+// `wasm-pack test --node crates/sparq-solid`). No coverage is lost: a plain `#[test]` is
+// never RUN by `wasm-pack test`, which executes only the `#[wasm_bindgen_test]`s in
+// tests/wasm_materialize.rs. The row-cap, unlimited and denial cases are portable and stay
+// ungated, so the budgeted write path keeps a compiled twin on wasm32.
 
 use sparq_engine::QueryBudget;
 
 /// A budget whose wall-clock deadline is already in the past, so the FIRST cooperative
-/// poll site the evaluator reaches aborts.
+/// poll site the evaluator reaches aborts. NON-wasm32 (see the section note above).
+#[cfg(not(target_arch = "wasm32"))]
 fn expired() -> QueryBudget {
     let mut b = QueryBudget::unlimited();
     b.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
@@ -596,6 +607,7 @@ fn tag_where(doc: &str) -> String {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn an_exhausted_deadline_aborts_the_apply_and_leaves_the_store_unchanged() {
     let mut s = wac_store();
@@ -635,6 +647,7 @@ fn a_row_cap_aborts_the_apply_and_leaves_the_store_unchanged() {
     assert_eq!(store_snapshot(&s), before, "an aborted update mutates nothing");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn an_exhausted_budget_also_bounds_the_authorization_checks_binding_select() {
     // The check path evaluates a SELECT of its own to resolve a `GRAPH ?g` template slot

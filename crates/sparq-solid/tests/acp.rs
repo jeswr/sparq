@@ -3,7 +3,6 @@
 
 use sparq_core::Graph;
 use sparq_solid::fixture::{acp_fixture, ALICE, APP, BOB, CAROL, DAVE};
-use sparq_engine::QueryBudget;
 use sparq_solid::{AccessProvenance, Mode, PodStore, Session};
 
 fn store() -> PodStore {
@@ -123,6 +122,9 @@ fn acp_write_enforcement_matches_grants() {
 }
 
 /// How many triples the named graph `name` currently holds (0 if absent).
+///
+/// NON-wasm32 with the deadline test below, its only caller (see that test's note).
+#[cfg(not(target_arch = "wasm32"))]
 fn graph_len(store: &PodStore, name: &str) -> usize {
     let term = oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(name));
     store
@@ -142,8 +144,17 @@ fn graph_len(store: &PodStore, name: &str) -> usize {
 /// caller's budget is exhausted — leaving the store untouched. (The WAC side's fuller matrix
 /// lives in tests/update.rs; this pins that the ACP entry point is wired to the same path
 /// rather than quietly dropping the budget.)
+///
+/// NON-wasm32: `QueryBudget::deadline` does not exist on `wasm32-unknown-unknown` (the
+/// field is `#[cfg(not(target_arch = "wasm32"))]` in sparq-engine, because
+/// `std::time::Instant` panics there), and this crate's test targets are COMPILED for
+/// wasm32 by the CI wasm lane. Nothing is lost: a plain `#[test]` is never RUN by
+/// `wasm-pack test`, which executes only `#[wasm_bindgen_test]`s (tests/wasm_materialize.rs).
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn acp_budgeted_write_enforces_grants_and_the_budget() {
+    use sparq_engine::QueryBudget;
+
     let mut s = store();
     let priv0 = "https://pod.ex/priv0/c4/g0/d0.ttl";
     // A WHERE-bearing update: the engine's bulk-data operations do not consult the budget.
