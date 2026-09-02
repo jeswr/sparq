@@ -22,12 +22,14 @@
 #      `prepare` lifecycle (sq-bkag git-pin build) runs on `npm ci` and needs
 #      wasm-pack on PATH to compile the wasm engine.
 #
-# SCOPE — properties 1–4 are deliberately js.yml ONLY. gui.yml / site-e2e-hero.yml /
-# site-visual.yml still `cargo install` wasm-pack; converting them is separate work and
-# is NOT asserted here, so this file's silence about them is not a claim that they are
-# hardened.
+# SCOPE — properties 1–4 are deliberately js.yml ONLY. gui.yml / nightly-full-sweep.yml /
+# pages.yml / publish.yml / site-e2e-hero.yml / site-visual.yml still `cargo install`
+# wasm-pack; converting them is separate work and is NOT asserted here, so this file's
+# silence about them is not a claim that they are hardened. (Property 6 below covers
+# release.yml's `gui-bundle` only, for the arch-specific reason given there.)
 #
-# One CROSS-WORKFLOW property is asserted, by WasmPackVersionUnified below:
+# Two CROSS-WORKFLOW properties are asserted, by WasmPackVersionUnified and
+# ReleaseGuiBundleArchAware below:
 #
 #   5. ONE VERSION REPO-WIDE. Every workflow that installs wasm-pack through
 #      jetli/wasm-pack-action must pass the action exactly one `with: version:` input
@@ -41,6 +43,20 @@
 #      exercised in the build lane and never in the test lane. Nothing goes red when the
 #      two drift apart again, hence this assertion. It says nothing about WHICH version
 #      is right; bumping is fine, bumping one lane only is not.
+#
+#   6. ARCH-AWARE INSTALL WHERE THE MATRIX IS NOT ALL-x86_64 (#5772).
+#      jetli/wasm-pack-action is x86_64-ONLY: its dist/index.js switches on
+#      `process.platform` alone and always requests x86_64-pc-windows-msvc /
+#      x86_64-apple-darwin / x86_64-unknown-linux-musl — `process.arch` is never
+#      consulted — even though upstream publishes aarch64 assets. release.yml's
+#      `gui-bundle` is the one wasm-pack-installing job whose matrix is not all-x64
+#      (`ubuntu-24.04-arm`, a BLOCKING row with no Rosetta, and the arm64 `macos-14`),
+#      so it must install from an ARCH-AWARE source — taiki-e/install-action, which
+#      resolves per (arch, platform) from its bundled manifest. That job therefore must
+#      not `cargo install wasm-pack` (the crates.io source-compile flake surface
+#      properties 1–2 exist to remove) and must not reach for the x86_64-only action
+#      either. Both regressions are silent: a source compile is green on a good day, and
+#      the x86_64-only action would only fail once a release tag actually runs the job.
 #
 # The step splitter is single-sourced from scripts/check-install-action-tool.py
 # rather than re-implemented. Hermetic: stdlib only (no PyYAML, no network, no gh).
@@ -57,12 +73,29 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 JS_YML = WORKFLOWS / "js.yml"
+RELEASE_YML = WORKFLOWS / "release.yml"
 
 WASM_PACK_ACTION = "jetli/wasm-pack-action"
+# The arch-aware alternative: resolves the asset per (arch, platform) from a bundled,
+# checksum-pinned manifest, so it is the only one usable on a non-x86_64 row (#5772).
+INSTALL_ACTION = "taiki-e/install-action"
+# The job whose matrix is not all-x86_64 — see property 6 in the header.
+ARCH_MIXED_JOB = "gui-bundle"
 # The repo's action-pin policy: a 40-char lowercase hex commit SHA, never a tag.
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # An exact release pin, e.g. `v0.15.0`. `latest` (and any floating ref) must fail.
 VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+# install-action names the tool it installs as `<tool>[@<version>]`; an exact
+# `wasm-pack@x.y.z` is required for the same reason `latest` is banned above.
+TOOL_RE = re.compile(r"^wasm-pack@(\d+\.\d+\.\d+)$")
+# Runner labels this recognises as arm64: GitHub's `*-arm` Linux images say so in the
+# label, and the plain macOS 14+ images are arm64 by DEFAULT (the x86_64 variant is
+# spelled out — `macos-15-intel` — so the anchored alternation must not match it).
+# Deliberately an ALLOWLIST, not a classifier: it does not know about the sized images
+# (`macos-14-xlarge` is arm64, `macos-14-large` is not). Being incomplete only ever
+# UNDER-counts arm rows, and the one assertion using it requires at least one — so an
+# unrecognised label reds the anti-vacuity check rather than passing it wrongly.
+ARM64_RUNNER_RE = re.compile(r"(?:-arm(?:64)?$)|(?:^macos-(?:1[4-9]|latest)$)")
 
 
 def _load(name: str, filename: str):
@@ -92,18 +125,18 @@ def _code_lines(text: str) -> list[str]:
     return out
 
 
-def _with_versions(block: list[str]) -> list[str]:
-    """Every value of a `version:` key that is a DIRECT child of the step's `with:`
+def _with_values(block: list[str], want: str) -> list[str]:
+    """Every value of the `want:` key that is a DIRECT child of the step's `with:`
     mapping, in order (so duplicates are visible to the caller).
 
-    Scoping matters: `with.version` is the ONLY key that reaches the action as an
-    input. A bare "any stripped line starting `version:`" scan would also read a
-    `version:` living under some sibling mapping (`env:`, a matrix entry, a nested
-    input object), so a step that dropped its `with.version` — and therefore silently
-    takes the action's default, the #5771 regression — could still look pinned. The
-    indentation-aware walk mirrors `check-install-action-tool.py`'s `_has_with_tool`.
+    Scoping matters: only a direct child of `with:` reaches the action as an input. A
+    bare "any stripped line starting `<key>:`" scan would also read one living under
+    some sibling mapping (`env:`, a matrix entry, a nested input object), so a step
+    that dropped its `with.version` — and therefore silently takes the action's
+    default, the #5771 regression — could still look pinned. The indentation-aware
+    walk mirrors `check-install-action-tool.py`'s `_has_with_tool`.
     """
-    versions: list[str] = []
+    values: list[str] = []
     with_indent: int | None = None
     child_indent: int | None = None
     for raw in block:
@@ -130,9 +163,14 @@ def _with_versions(block: list[str]) -> list[str]:
         if ind != child_indent:
             # Nested deeper than the mapping's own keys — not a `with:` input.
             continue
-        if key.startswith("version:"):
-            versions.append(key.split(":", 1)[1].strip())
-    return versions
+        if key.startswith(f"{want}:"):
+            values.append(key.split(":", 1)[1].strip())
+    return values
+
+
+def _with_versions(block: list[str]) -> list[str]:
+    """`with: version:` inputs — the pin jetli/wasm-pack-action reads."""
+    return _with_values(block, "version")
 
 
 class JsLaneWasmPackInstall(unittest.TestCase):
@@ -432,6 +470,284 @@ jobs:
                     f"{label}: must count as a DISTINCT pin so the single-version "
                     "assertion goes red",
                 )
+
+
+def _job_lines(text: str, job: str) -> list[str]:
+    """The lines of one `jobs:` entry — from its `  <job>:` key up to the next key at
+    the SAME indent (the next job).
+
+    Job-scoped rather than file-scoped because release.yml installs wasm-pack in
+    exactly one job and property 6 is a statement about THAT job's runner matrix; a
+    file-wide scan would wrongly constrain any future all-x64 job in the same file.
+
+    A DEDENTED COMMENT ends the block too. This repo comments its workflows heavily
+    and a job's own comments live inside its body (indented past the job key), so a
+    comment back at the job-key column is the next job's banner — release.yml's is
+    literally the line after `gui-bundle` ends. Should some future job break that
+    convention the slice truncates early, which is fail-CLOSED: the assertions below
+    require the matrix AND the install step to be found, so a short slice reds rather
+    than passing on a job it never read.
+    """
+    out: list[str] = []
+    key_indent: int | None = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if key_indent is None:
+            if stripped == f"{job}:":
+                key_indent = gate._indent(raw)
+                out.append(raw)
+            continue
+        if stripped and gate._indent(raw) <= key_indent:
+            break  # dedented to a sibling job (or out of `jobs:` entirely)
+        out.append(raw)
+    return out
+
+
+def _matrix_runners(job_text: str) -> list[str]:
+    """Every `os:` value in the job's matrix rows, comments stripped."""
+    return re.findall(
+        r"\bos:\s*([A-Za-z0-9._-]+)", "\n".join(_code_lines(job_text))
+    )
+
+
+def _wasm_pack_posture(job_text: str) -> dict[str, list]:
+    """How one job puts wasm-pack on PATH, as three separately-assertable facts.
+
+    Split out from the assertions so the mutation guard can feed it a synthetic job
+    and prove each regression is actually DETECTED rather than merely absent today.
+    """
+    source_compiles = [
+        ln.strip()
+        for ln in _code_lines(job_text)
+        if "cargo install wasm-pack" in ln
+    ]
+    x86_only: list[str] = []
+    arch_aware: list[tuple[str, str]] = []
+    for block in gate.split_steps(job_text):
+        uses = gate._step_uses(block)
+        if uses is None:
+            continue
+        action, ref = uses
+        if action == WASM_PACK_ACTION:
+            x86_only.append(ref)
+        elif action == INSTALL_ACTION:
+            # install-action installs many tools; only the wasm-pack one is ours.
+            arch_aware += [
+                (ref, tool)
+                for tool in _with_values(block, "tool")
+                if tool.split("@", 1)[0] == "wasm-pack"
+            ]
+    return {
+        "source_compiles": source_compiles,
+        "x86_only": x86_only,
+        "arch_aware": arch_aware,
+    }
+
+
+class ReleaseGuiBundleArchAware(unittest.TestCase):
+    """(6) release.yml's `gui-bundle` — the one wasm-pack job with arm64 rows —
+    installs wasm-pack from an arch-aware source (#5772).
+
+    Before this, the job ran `cargo install wasm-pack --locked` on every row: the
+    crates.io source compile properties 1–2 exist to remove, on a matrix whose Linux
+    rows are BLOCKING. The obvious conversion — reuse jetli/wasm-pack-action like the
+    js/ci lanes — is WRONG here: that action never reads `process.arch`, so on
+    `ubuntu-24.04-arm` it would fetch an x86_64 binary that cannot execute (no
+    Rosetta). Both mistakes are invisible on a PR — release.yml is tag/dispatch
+    triggered — so the posture is pinned here instead.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.job = "\n".join(
+            _job_lines(RELEASE_YML.read_text(encoding="utf-8"), ARCH_MIXED_JOB)
+        )
+        cls.posture = _wasm_pack_posture(cls.job)
+
+    def test_the_job_matrix_still_has_an_arm64_row(self):
+        """Anti-vacuity: the arch-awareness requirement only exists BECAUSE this job
+        has a non-x86_64 row. If the matrix ever loses them the rest of this class is
+        arguing about nothing, and should be re-derived rather than left passing."""
+        runners = _matrix_runners(self.job)
+        self.assertTrue(
+            runners,
+            f"release.yml's `{ARCH_MIXED_JOB}` job must still have a runner matrix — "
+            "found no `os:` rows, so this class no longer inspects what it claims to",
+        )
+        arm = [r for r in runners if ARM64_RUNNER_RE.search(r)]
+        self.assertTrue(
+            arm,
+            f"expected at least one arm64 row in `{ARCH_MIXED_JOB}` (e.g. "
+            f"ubuntu-24.04-arm, macos-14), got {runners}. #5772's whole premise is "
+            "that this matrix is not all-x86_64.",
+        )
+
+    def test_no_source_compile(self):
+        """(1) applied to this job: the crates.io flake surface must be gone."""
+        self.assertEqual(
+            self.posture["source_compiles"],
+            [],
+            f"release.yml's `{ARCH_MIXED_JOB}` must NOT `cargo install wasm-pack`: "
+            "recompiling it and its chrono/wasm-bindgen source tree from crates.io on "
+            "every row puts a BLOCKING release row one transient registry blip from "
+            f"red (#5772). Install the prebuilt binary via {INSTALL_ACTION} instead.",
+        )
+
+    def test_does_not_use_the_x86_64_only_action(self):
+        """The x86_64-only action is what makes this job different from js/ci."""
+        self.assertEqual(
+            self.posture["x86_only"],
+            [],
+            f"release.yml's `{ARCH_MIXED_JOB}` must NOT install wasm-pack via "
+            f"{WASM_PACK_ACTION}: it switches on `process.platform` alone and always "
+            "requests an x86_64 asset, so the arm64 rows would download a binary they "
+            f"cannot run (#5772). Use {INSTALL_ACTION}, which resolves per (arch, "
+            "platform).",
+        )
+
+    def test_installs_via_sha_pinned_install_action_at_an_exact_version(self):
+        """(2)+(3) applied to this job, via the arch-aware installer."""
+        arch_aware = self.posture["arch_aware"]
+        self.assertEqual(
+            len(arch_aware),
+            1,
+            f"release.yml's `{ARCH_MIXED_JOB}` must have exactly one "
+            f"{INSTALL_ACTION} step installing wasm-pack, found {arch_aware!r}",
+        )
+        ref, tool = arch_aware[0]
+        self.assertRegex(
+            ref,
+            SHA_RE,
+            f"{INSTALL_ACTION} must be pinned to a 40-hex commit SHA (repo "
+            f"action-pin policy), got {ref!r}",
+        )
+        self.assertRegex(
+            tool,
+            TOOL_RE,
+            "the `with: tool:` input must name an exact release "
+            "(`wasm-pack@x.y.z`), got {!r}. A bare `wasm-pack` takes whatever "
+            "install-action's manifest calls latest, which is the same floating pin "
+            "`latest` is banned for above.".format(tool),
+        )
+
+    def test_version_matches_the_other_wasm_pack_lanes(self):
+        """Same equality property as (5), across the two installer kinds: this job
+        BUILDS the wasm bundle the desktop GUI ships, so it must not skew from the
+        lanes that build + test the published one."""
+        arch_aware = self.posture["arch_aware"]
+        self.assertEqual(
+            len(arch_aware),
+            1,
+            "no single arch-aware wasm-pack install to compare — see "
+            f"test_installs_via_sha_pinned_install_action_at_an_exact_version "
+            f"(found {arch_aware!r})",
+        )
+        here = TOOL_RE.match(arch_aware[0][1])
+        self.assertIsNotNone(here, f"unparseable tool pin {arch_aware[0][1]!r}")
+        jetli = {
+            v.lstrip("v")
+            for versions in WasmPackVersionUnified._pins().values()
+            for v in versions
+        }
+        self.assertEqual(
+            jetli,
+            {here.group(1)},
+            f"release.yml's `{ARCH_MIXED_JOB}` pins wasm-pack {here.group(1)} while "
+            f"the {WASM_PACK_ACTION} lanes pin {sorted(jetli)}. Bump every lane "
+            "together — a wasm-pack/wasm-bindgen behaviour change exercised in one "
+            "lane only is exactly what #5771 removed.",
+        )
+
+    # --- mutation guard ------------------------------------------------------
+    # Synthetic jobs (no tree mutation). `_MUT_ARCH_AWARE` is the shape shipped;
+    # the other two are the two regressions this class exists to catch, and each
+    # must be DETECTED by `_wasm_pack_posture`, not merely absent from the tree.
+    _MUT_ARCH_AWARE = """\
+jobs:
+  gui-bundle:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, label: x64-linux, soft: false }
+          - { os: ubuntu-24.04-arm, label: arm64-linux, soft: false }
+    steps:
+      # A prose mention of `cargo install wasm-pack --locked` and of
+      # jetli/wasm-pack-action, as the real file carries — neither may be read as live.
+      - name: Install wasm-pack (prebuilt, arch-aware)
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: wasm-pack@0.15.0
+  other-job:
+    steps:
+      - run: cargo install wasm-pack --locked
+"""
+    _MUT_SOURCE_COMPILE = _MUT_ARCH_AWARE.replace(
+        """      - name: Install wasm-pack (prebuilt, arch-aware)
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: wasm-pack@0.15.0
+""",
+        """      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+""",
+    )
+    _MUT_X86_ONLY_ACTION = _MUT_ARCH_AWARE.replace(
+        """        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: wasm-pack@0.15.0
+""",
+        """        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+        with:
+          version: v0.15.0
+""",
+    )
+
+    def _synthetic(self, text: str) -> dict[str, list]:
+        return _wasm_pack_posture("\n".join(_job_lines(text, ARCH_MIXED_JOB)))
+
+    def test_mutation_source_compile_is_detected(self):
+        good = self._synthetic(self._MUT_ARCH_AWARE)
+        self.assertEqual(good["source_compiles"], [])
+        self.assertEqual(good["x86_only"], [])
+        self.assertEqual(len(good["arch_aware"]), 1)
+
+        bad = self._synthetic(self._MUT_SOURCE_COMPILE)
+        self.assertTrue(
+            bad["source_compiles"],
+            "reverting the step to `cargo install wasm-pack --locked` must be "
+            "detected — otherwise test_no_source_compile passes vacuously",
+        )
+        self.assertEqual(bad["arch_aware"], [])
+
+    def test_mutation_x86_only_action_is_detected(self):
+        bad = self._synthetic(self._MUT_X86_ONLY_ACTION)
+        self.assertEqual(
+            bad["x86_only"],
+            ["0d096b08b4e5a7de8c28de67e11e945404e9eefa"],
+            "swapping in the x86_64-only action must be detected — that is the "
+            "regression #5772 is specifically about",
+        )
+        self.assertEqual(bad["arch_aware"], [])
+
+    def test_mutation_job_scoping_and_comments(self):
+        """Two ways this could pass/fail for the wrong reason: reading a SIBLING
+        job's steps, and reading a `#`-commented mention as a live step. The real
+        release.yml exercises the second directly — the converted step is preceded by
+        a comment naming BOTH the old `cargo install wasm-pack --locked` command and
+        the x86_64-only action, so a comment-blind scan would red on the shipped,
+        correct file."""
+        good = self._synthetic(self._MUT_ARCH_AWARE)
+        self.assertEqual(
+            good["source_compiles"],
+            [],
+            "the sibling `other-job`'s `cargo install wasm-pack`, and the commented "
+            "mentions inside the job, must not be attributed to `gui-bundle`",
+        )
+        self.assertEqual(
+            _matrix_runners("\n".join(_job_lines(self._MUT_ARCH_AWARE, "other-job"))),
+            [],
+            "job slicing must stop at the next sibling job key",
+        )
 
 
 if __name__ == "__main__":

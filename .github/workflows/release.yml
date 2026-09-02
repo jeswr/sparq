@@ -493,8 +493,40 @@ jobs:
       # (repointed off the marketing site by PR #1003 / sq-ixc3.8). Its `prebuild` hook
       # (gui/app/scripts/sync-wasm.mjs) needs the lean shacl,jsonld wasm bundle present in js/wasm/.
       # Mirror gui.yml's proven-green `gui-app`/`tauri-e2e` jobs: build the wasm bundle FIRST.
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+      #
+      # [OPUS-5] #5772 — PREBUILT BINARY, ARCH-AWARE. This step used to
+      # `cargo install wasm-pack --locked`, recompiling wasm-pack and its whole
+      # chrono/wasm-bindgen source tree from crates.io on EVERY row of the matrix — one
+      # transient crates.io/CDN blip away from reddening a BLOCKING release row (that is how
+      # PR #1131 died: `download of wa/sm/wasm-bindgen failed / curl failed: [16] Error in the
+      # HTTP2 framing layer`, cleared by a plain re-run). Same hardening sq-khm3f/#3236 applied
+      # to the `js` lane.
+      #
+      # WHY taiki-e/install-action AND NOT jetli/wasm-pack-action (which the js/ci lanes use):
+      # `gui-bundle` is the one wasm-pack-installing job in the repo whose matrix is NOT all
+      # x86_64 — it includes `ubuntu-24.04-arm` (BLOCKING) and `macos-14` (arm64). The jetli
+      # action ignores `process.arch`: its dist/index.js switches on `process.platform` alone
+      # and always requests x86_64-pc-windows-msvc / x86_64-apple-darwin /
+      # x86_64-unknown-linux-musl, so on the arm64 rows it would fetch an x86_64 binary with no
+      # Rosetta to fall back on. install-action resolves per (arch, platform) from its bundled
+      # manifest and VERIFIES a pinned sha256, and its wasm-pack manifest at the SHA pinned here
+      # covers all five rows of this matrix: x86_64/aarch64 linux-musl, x86_64/aarch64 macOS,
+      # x86_64 windows — each mapping to a real upstream release asset.
+      #
+      # Version pinned EXACTLY, and to the SAME v0.15.0 the js.yml/ci.yml lanes pin (#5771):
+      # a bare `tool: wasm-pack` installs whatever this action's bundled manifest calls latest,
+      # so the version would move silently on an action bump, and skew would exercise a
+      # wasm-pack/wasm-bindgen change in one lane only. `with: tool:` is mandatory under the
+      # repo's SHA-pin policy (scripts/check-install-action-tool.py): the SHA rewrite drops the
+      # `@<tool>` ref selector, so the tool must be named explicitly.
+      #
+      # Pinned by scripts/tests/test_js_wasm_pack_install.py::ReleaseGuiBundleArchAware —
+      # release.yml is tag/dispatch-triggered, so nothing here runs on a PR and a regression
+      # would otherwise surface for the first time on a release tag.
+      - name: Install wasm-pack (prebuilt, arch-aware)
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: wasm-pack@0.15.0
 
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js
