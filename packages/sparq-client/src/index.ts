@@ -506,6 +506,9 @@ export interface StreamQueryRowsOptions {
    * introspection changes: `vars` / `rowCount` / `batchSize` are read from the cursor BEFORE
    * the first pull, so `rowCount` remains the engine's exact total even when the pull stops
    * early — the caller does not have to drain the cursor to learn how many rows there are.
+   * That exact total is also what makes the returned `drained` honest under a bound: a bound
+   * at or past the result size delivers every row and reports `drained: true`, so `false`
+   * always means "rows remain".
    *
    * Omitted, non-finite or `<= 0` means "no bound" (drain the cursor), which is the
    * behaviour of every caller that does not pass this option.
@@ -518,8 +521,9 @@ export interface StreamQueryRowsOptions {
  * (mirrors `@jeswr/sparq`'s `queryBindingsStream`): pull a batch of up to `batchSize`
  * self-contained SPARQL-JSON rows, hand it to `onBatch`, drop it, pull the next — so the
  * consumer never holds more than one batch. Returns the cursor's introspection (`vars`,
- * `rowCount`, `batchSize`) plus whether the cursor was `drained`. The wasm cursor is always
- * freed, even if `onBatch` throws. An empty result yields exactly one empty batch.
+ * `rowCount`, `batchSize`) plus `drained` — whether EVERY result row was delivered, so a
+ * `false` means (and only means) that rows remain unpulled behind the bound. The wasm cursor
+ * is always freed, even if `onBatch` throws. An empty result yields exactly one empty batch.
  *
  * [OPUS-5] sq-f4pmk (#2933) — `options.maxRows` makes the pull DEMAND-DRIVEN: a consumer that
  * will only ever show the first N rows stops the cursor there instead of paying the per-batch
@@ -560,7 +564,16 @@ export function streamQueryRows(
       onBatch?.({ index: ++index, rows, cumulative });
       // Stop AFTER delivering the batch that reaches the bound, so the consumer sees every
       // row up to `maxRows` and the delivered sequence is a prefix of the unbounded one.
-      if (limit > 0 && cumulative >= limit) break;
+      if (limit > 0 && cumulative >= limit) {
+        // Stopping at the bound skips the extra exhausting `next()`, but the cursor's EXACT
+        // `rowCount` (read before the first pull) still settles the question: if every result
+        // row has been delivered there is nothing left to fetch, so `drained` reports the
+        // ROWS, not whether exhaustion happened to be probed. Without this, a bound equal to
+        // the result size — or one landing on the final partial batch — would report
+        // `drained: false` for a completely delivered result and mislead a paginating caller.
+        meta.drained = cumulative >= meta.rowCount;
+        break;
+      }
     }
   } finally {
     cursor.free();

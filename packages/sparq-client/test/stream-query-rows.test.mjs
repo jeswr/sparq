@@ -136,10 +136,25 @@ test("a bound at or above the result size drains, and never over-pulls", () => {
     const { meta, stats, rows } = pull(2_500, 1_000, { maxRows });
     assert.equal(rows.length, 2_500, `all rows for maxRows=${maxRows}`);
     assert.equal(stats.pulls, 3);
-    // Reaching the bound exactly on the last batch stops WITHOUT the extra `undefined` pull,
-    // so `drained` is false there; a strictly larger bound runs the cursor to exhaustion.
-    assert.equal(meta.drained, maxRows > 2_500);
+    // `drained` reports the ROWS, not whether the extra exhausting `next()` was made: a bound
+    // reached exactly on the last batch has still delivered the complete result, so a caller
+    // using the flag for continuation is told there is nothing left to fetch.
+    assert.equal(meta.drained, true, `drained for maxRows=${maxRows}`);
   }
+});
+
+test("a bound landing inside the FINAL PARTIAL batch reports drained", () => {
+  // 2_500 rows over 1_000-row batches: the bound is crossed by the 500-row tail batch, which
+  // completes the result even though the pull stopped at the bound, not at exhaustion.
+  const { meta, stats, rows } = pull(2_500, 1_000, { maxRows: 2_400 });
+  assert.equal(stats.pulls, 3);
+  assert.equal(rows.length, 2_500);
+  assert.equal(meta.drained, true);
+  // ...whereas a bound that stops before the tail genuinely leaves rows behind.
+  const short = pull(2_500, 1_000, { maxRows: 1_200 });
+  assert.equal(short.stats.pulls, 2);
+  assert.equal(short.rows.length, 2_000);
+  assert.equal(short.meta.drained, false);
 });
 
 test("a non-positive or non-finite maxRows means no bound", () => {
@@ -229,6 +244,19 @@ test("randomised: a bounded pull delivers a strict PREFIX of the drained pull", 
     // 3. The introspection the consumer derives its totals from is untouched.
     assert.equal(bounded.meta.rowCount, drained.meta.rowCount, `rowCount (${label})`);
     assert.deepEqual(bounded.meta.vars, drained.meta.vars, `vars (${label})`);
+
+    // 3b. `drained` is a statement about the ROWS: true exactly when the bounded pull
+    //     delivered the whole result, whether it stopped at the bound or at exhaustion. So
+    //     `drained === false` always means "rows remain", which is what a paginating caller
+    //     reads it as; a bounded pull that finished the result agrees with the drained one.
+    assert.equal(
+      bounded.meta.drained,
+      bounded.rows.length >= totalRows,
+      `drained (${label})`,
+    );
+    if (bounded.meta.drained) {
+      assert.deepEqual(bounded.rows, drained.rows, `complete result (${label})`);
+    }
 
     // 4. No wasted serialisation: work is bounded by the rows actually asked for, rounded up
     //    to a whole batch. (The point of the change — asserted, not claimed.) A bound never

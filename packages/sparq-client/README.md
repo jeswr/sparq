@@ -31,7 +31,8 @@ copy is the **single source of truth**, kept byte-identical to a fresh wasm buil
   **demand-driven** — it stops at the batch that reaches the bound rather than draining, so a
   consumer that only shows the first *N* rows does not pay the per-batch JSON build + `JSON.parse`
   for rows it will drop. `rowCount` is the cursor's exact total, read before the first pull, so it
-  stays correct under a bounded pull; `drained` says whether the cursor was exhausted.
+  stays correct under a bounded pull; `drained` says whether every result row was delivered, so
+  `false` means rows remain behind the bound.
 - **RDF-document display + serialisation helpers** (`sq-8uew` / `sq-gb4o`, all dependency-free
   and DOM-free so the site and the Tauri 2 webview share one copy): `prettyTurtle(input, opts?)`
   / `prettyTrig(input, opts?)` reshape the engine's FLAT N-Triples / N-Quads
