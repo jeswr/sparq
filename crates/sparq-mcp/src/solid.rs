@@ -148,10 +148,14 @@
 //!   per-graph write permission check AND the same wall-clock/row budget the read tools
 //!   enforce ([FABLE-5] sq-yhlf0). The budget reaches the two evaluations an update
 //!   performs — the authorization check's `GRAPH ?var` binding SELECT and the apply's
-//!   `DELETE`/`INSERT … WHERE`. It does NOT bound the bulk-data operations
-//!   (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`), which the engine costs by operand
-//!   size; those are bounded by the size of the update text the transport accepted, so an
-//!   embedder serving untrusted callers should cap the request body.
+//!   `DELETE`/`INSERT … WHERE`. It does NOT bound the remaining operations, and capping the
+//!   request body does not bound all of them either: `INSERT`/`DELETE DATA` carry their
+//!   triples inline (a body cap DOES bound those, and an embedder serving untrusted callers
+//!   should set one), but `CLEAR`/`DROP` cost whatever the targeted graphs already hold —
+//!   bounded by this session's write grants, not by the request — and `LOAD` reads a file
+//!   whose size is independent of the SPARQL text. This server never installs an allowlisted
+//!   LOAD base (`sparq_engine::with_load_base`), so a `LOAD` is refused unless the embedder
+//!   wraps the call in one; an embedder that does owes its own file-size limit.
 //! - Time-windowed conditional grants fail closed unless [`SolidServerConfig::now`]
 //!   supplies a request clock.
 
@@ -1248,13 +1252,16 @@ impl SolidMcpServer {
 
     /// `update`: session-checked SPARQL Update (`PodStore::update_as_with_budget` — every
     /// touched graph needs this session's write permission, fail-closed) under the SAME
-    /// per-call [budget](Self::budget) the read tools enforce, so a tool-issued update is
-    /// bounded exactly as a tool-issued query is (draft §9.4). [FABLE-5] sq-yhlf0.
+    /// per-call [budget](Self::budget) the read tools enforce, so a tool-issued update's
+    /// SPARQL *evaluation* is bounded exactly as a tool-issued query is (draft §9.4).
+    /// [FABLE-5] sq-yhlf0.
     ///
     /// The budget bounds the two places an update evaluates SPARQL: the authorization
-    /// check's `GRAPH ?var` binding SELECT and the apply's `DELETE`/`INSERT … WHERE`. The
-    /// bulk-data operations (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`) are bounded
-    /// instead by the size of the update text the transport accepted.
+    /// check's `GRAPH ?var` binding SELECT and the apply's `DELETE`/`INSERT … WHERE`. It
+    /// does NOT make the whole call bounded — see the module-level *Honest v1 limits*: only
+    /// the inline `INSERT`/`DELETE DATA` forms are bounded by the accepted request size,
+    /// `CLEAR`/`DROP` cost whatever the session may write, and `LOAD` is refused unless the
+    /// embedder installs an allowlisted base.
     fn tool_update(&mut self, args: &Value) -> Result<String, String> {
         let sparql = arg_str(args, "sparql")?.to_string();
         let config = self.config.clone();

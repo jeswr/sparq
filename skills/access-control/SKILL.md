@@ -191,13 +191,19 @@ Materialize the authorization view from the access-control documents, then enfor
   auto-re-materialize on `.acl`/`.acr` writes.
 - `store.update_as_with_budget(&Session, sparql, &QueryBudget)` /
   `store.update_as_acp_with_budget(...)` — the same write path under a cooperative
-  `QueryBudget`, for a caller obliged to bound **every** evaluation it issues (an agent
-  tool surface, an HTTP handler). [FABLE-5] sq-yhlf0. The budget reaches both places an
+  `QueryBudget`, for a caller obliged to bound **every SPARQL evaluation** it issues (an
+  agent tool surface, an HTTP handler). [FABLE-5] sq-yhlf0. The budget reaches both places an
   update evaluates SPARQL — the authorization check's `GRAPH ?var` binding SELECT (an
   exhausted budget there is a **deny**, nothing mutated) and the apply's
-  `DELETE`/`INSERT … WHERE`. It does **not** bound the engine's bulk-data operations
-  (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`/`LOAD`), which are costed by operand
-  size — cap the accepted update text for those. A budget can only add a failure mode,
+  `DELETE`/`INSERT … WHERE`. It does **not** bound the remaining operations, and a
+  request-size cap does not cover all of them: `INSERT`/`DELETE DATA` carry their triples
+  inline (a text cap *does* bound those; `CREATE` adds one empty-graph entry), but
+  `CLEAR`/`DROP` cost whatever
+  the targeted graphs already hold — their bound is authorization, since `NAMED`/`ALL`
+  escalates to the all-graphs wildcard and a targeted `CLEAR GRAPH <g>` needs write on `g` —
+  and `LOAD` reads a file whose size is independent of the update text (refused entirely
+  unless an allowlisted base is installed via `sparq_engine::with_load_base`). A caller
+  wanting a hard ceiling on those must add it itself. A budget can only add a failure mode,
   never widen authorization; an unlimited budget is byte-for-byte `update_as`. Failure
   semantics are `update_as`'s, including its engine-inherited **non-atomicity on error**
   across a `;`-separated multi-operation request (a single operation's WHERE is fully

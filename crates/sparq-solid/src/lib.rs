@@ -1271,10 +1271,26 @@ impl PodStore {
     /// - the apply's `DELETE`/`INSERT … WHERE` evaluation, via
     ///   [`sparq_engine::update_in_place_with_budget`].
     ///
-    /// Everything else is bounded by its operand size: as the engine documents, the
-    /// non-WHERE operations (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`/`LOAD`) do not
-    /// consult the budget at all, so a caller that also needs to bound *those* must cap the
-    /// update text it accepts. Authorization is unchanged — a budget can only turn a
+    /// The remaining operations never consult the budget, and — importantly — capping the
+    /// accepted update text does **not** bound all of them, because their cost is set by the
+    /// operand, not by the request:
+    ///
+    /// - `INSERT`/`DELETE DATA` carry their triples INLINE, so a request-size cap *does*
+    ///   bound them; `CREATE` is a single empty-graph entry.
+    /// - `CLEAR`/`DROP` name data that already exists, so a few bytes of text (`CLEAR ALL`)
+    ///   costs whatever the targeted graphs hold. Their bound here is **authorization, not
+    ///   size**: `CLEAR`/`DROP NAMED`/`ALL` escalates to the all-graphs wildcard, so it
+    ///   proceeds only for a session holding write on every store graph, and a targeted
+    ///   `CLEAR GRAPH <g>` only for one holding write on `g`.
+    /// - `LOAD` reads and parses a file whose size is independent of the SPARQL text. It is
+    ///   refused outright unless the embedder installs an allowlisted base directory
+    ///   ([`sparq_engine::with_load_base`]); leaving it uninstalled — the default — is the
+    ///   bound.
+    ///
+    /// So a caller that needs a hard ceiling on *those* must impose it itself: a request-size
+    /// cap for the inline-DATA forms, leaving LOAD disabled (or separately capping the files
+    /// it can reach), and for `CLEAR`/`DROP` either a store-size limit of its own or
+    /// refusing the operations. Authorization is unchanged — a budget can only turn a
     /// permitted update into an error, never a denied one into a write.
     ///
     /// Failure semantics are otherwise exactly [`PodStore::update_as`]'s, including its
