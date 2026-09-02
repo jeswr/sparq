@@ -1,5 +1,5 @@
 {
- "_doc": "[OPUS-5] sparq-org/sparq#5799 — run-body failure-swallow waivers. A GitHub Actions step can be made unable to fail DECLARATIVELY (`continue-on-error:`) or IMPERATIVELY, inside the `run:` body, with `cmd || true` / `set +e`. The second form is invisible to YAML-structure checks: the step reports success, the job stays green, and `ci-summary / gate` counts a check-run that asserted nothing. scripts/check-workflow-run-swallow.py closes that hole for every job that GATES (i.e. every job NOT declared in .github/advisory-registry.json — the same load-bearing definition ci_summary_gate.py has used since #3773). W1 flags a statement-level `|| true` / `|| :`; commands whose non-zero exit is a DATA outcome or a diagnostic print (grep/cat/ls/find/tail/... — the checker's OBSERVATIONAL_COMMANDS set) need no entry here. Everything else — git, gh, npm, cargo, python3, any repo script — must be declared in this file with a REASON, so the next one has to be argued for rather than merely typed. Each entry needs {workflow, job_id, match, reason, registered}: `match` is a substring of the normalised logical command (>= 12 chars, so it pins the specific command rather than rubber-stamping the job), and W3 fails if it matches nothing live, so a waiver cannot rot into a standing pre-authorisation for a future swallow. THIS IS A RATCHET, NOT AN APPROVAL LIST: the 14 entries below are the complete set of W1-flagged sites on main as of 2026-09-02 (out of 22 `|| true` sites in gating jobs; the other 8 are observational and need no entry), each one read in context and found intentional. Adding an entry is a deliberate act; removing a swallow is always preferred to declaring it. Precedent that this failure mode is real and not theoretical: the PR #4211 review found `gh issue edit --add-label \"$l\" || true` in triage-issue.yml silently dropping ROUTING labels when a label did not exist, leaving `status:ready` set without its paired role label — the `|| true` on that call was deleted, and the comment block above the step records why.",
+ "_doc": "[OPUS-5] sparq-org/sparq#5799 — run-body failure-swallow waivers. A GitHub Actions step can be made unable to fail DECLARATIVELY (`continue-on-error:`) or IMPERATIVELY, inside the `run:` body, with `cmd || true` / `set +e`. The second form is invisible to YAML-structure checks: the step reports success, the job stays green, and `ci-summary / gate` counts a check-run that asserted nothing. scripts/check-workflow-run-swallow.py closes that hole for every job that GATES (i.e. every job NOT declared in .github/advisory-registry.json — the same load-bearing definition ci_summary_gate.py has used since #3773). W1 flags EVERY statement-level `|| true` / `|| :` in a gating job. There is NO exemption by command name: a program is not intrinsically observational — `grep -q required out.log || true`, `find . -exec validate {} \\; || true` and `cat generated-artifact || true` are assertions with the verdict deleted, and a shell function named `true` is not `true(1)` — so a diagnostic `cat`/`ls`/`tail` is declared here exactly like `git`, `gh`, `npm`, `cargo`, `python3` or a repo script, with a REASON that argues why THAT invocation removes no verdict. Each entry needs {workflow, job_id, match, reason, registered}: `match` is a substring of the normalised logical command (>= 12 chars, so it pins the specific command rather than rubber-stamping the job), and W3 fails if it matches nothing live, so a waiver cannot rot into a standing pre-authorisation for a future swallow. THIS IS A RATCHET, NOT AN APPROVAL LIST: the 22 entries below are the complete set of W1-flagged sites on main as of 2026-09-02 — every `|| true` in a gating job — each one read in context and found intentional. Adding an entry is a deliberate act; removing a swallow is always preferred to declaring it. Precedent that this failure mode is real and not theoretical: the PR #4211 review found `gh issue edit --add-label \"$l\" || true` in triage-issue.yml silently dropping ROUTING labels when a label did not exist, leaving `status:ready` set without its paired role label — the `|| true` on that call was deleted, and the comment block above the step records why.",
  "waivers": [
   {
    "workflow": "bench-ec2.yml",
@@ -30,6 +30,13 @@
    "registered": "2026-09-02"
   },
   {
+   "workflow": "ci.yml",
+   "job_id": "service-federation-conformance",
+   "match": "grep -E 'pass /' served-conformance.log",
+   "reason": "Lifts the one-line pass/fail tally out of the report log into $GITHUB_STEP_SUMMARY, inside a `{ … } >> \"$GITHUB_STEP_SUMMARY\"` group. The verdict is the `cargo run … --bin served-conformance-report` two lines above, which runs under `set -o pipefail` with NO swallow and is the fail-closed emitter; if it produced no report there is no summary line to find, and that failure has already reddened the step. Only the cosmetic summary line is tolerated missing.",
+   "registered": "2026-09-02"
+  },
+  {
    "workflow": "feature-matrix.yml",
    "job_id": "premerge-c1",
    "match": "git merge --abort || true",
@@ -44,10 +51,31 @@
    "registered": "2026-09-02"
   },
   {
+   "workflow": "formal-verification.yml",
+   "job_id": "kani",
+   "match": "tail -n 40 \"$log\" 2>/dev/null || true",
+   "reason": "Renders the last 40 lines of a FAILED harness's log into a `<details>` block in the step summary — it sits inside `if [ \"$ec\" -ne 0 ]`, i.e. on a path where the failure has ALREADY been recorded (`had_fail=1` plus an `::error title=Kani proof failed::` annotation on the lines above). The harness verdict is `ec`, captured unswallowed and acted on; a truncated or missing log tail degrades the report, not the verdict.",
+   "registered": "2026-09-02"
+  },
+  {
    "workflow": "miri.yml",
    "job_id": "miri",
    "match": "cargo +nightly-2026-06-11 miri nextest run",
    "reason": "Deliberate, documented verdict RECLASSIFICATION, not a swallow. `cargo miri nextest` exits 100 both when a heavy loader test TIMED OUT (known cost debt, sq-0s15k) and when Miri found genuine UB, and the raw code cannot tell them apart — so the lane concluded `failure` every night on tracked debt and masked whether Miri found anything. The run emits a libtest-json-plus event stream to a file, and the NEXT step ('Classify shard verdict') parses it and exits 1 on a real UB/assertion failure. That classifier step is the shard verdict and carries no swallow.",
+   "registered": "2026-09-02"
+  },
+  {
+   "workflow": "miri.yml",
+   "job_id": "miri",
+   "match": "cat \"miri-shard-${{ matrix.shard }}.stderr\"",
+   "reason": "Echoes the shard's captured stderr into the log so a human reading the run can see what Miri printed. It is the FIRST line of the 'Classify shard verdict' step; the verdict is `python3 scripts/miri_classify_verdict.py --events …` on the very next line, unswallowed, and that exit code IS the shard verdict. A missing .stderr file (e.g. the shard aborted before writing it) must not pre-empt the classifier's own, more precise diagnosis.",
+   "registered": "2026-09-02"
+  },
+  {
+   "workflow": "pages.yml",
+   "job_id": "build",
+   "match": "grep -E '^dev/bench' || true",
+   "reason": "Feeds the glob-fold assertion's `while read` loop from `git ls-tree -d origin/benchmark-data dev/ | grep -E '^dev/bench'` via process substitution. grep exits 1 when the branch carries no dev/bench* subtree — an empty worklist, which the loop already handles by asserting nothing. Bash does not propagate a process-substitution exit status to the `done <` redirection anyway, so this `|| true` is belt-and-braces under `set -euo pipefail`. STATED BOUND: it does make a grep MALFUNCTION look like an empty branch; the overlay itself (`git archive … | tar -x`) and the `[ \"$missing\" -eq 0 ] || exit 1` verdict below are both unswallowed, so a dropped worklist weakens this assertion's coverage without ever turning a real regression green.",
    "registered": "2026-09-02"
   },
   {
@@ -69,6 +97,34 @@
    "job_id": "npm-solid-server",
    "match": "npm view \"@jeswr/solid-server@${ver}\" dist.attestations",
    "reason": "Same provenance-attestation probe as publish.yml:npm, for the solid-server package. The `|| true` keeps a missing-attestation registry response from aborting under `set -euo pipefail` before the explicit emptiness check can report it.",
+   "registered": "2026-09-02"
+  },
+  {
+   "workflow": "publish.yml",
+   "job_id": "crates",
+   "match": "echo \"Packaged crates:\"; ls -l crate-pkgs/ || true",
+   "reason": "Prints what the per-crate `cargo package` loop staged. The assertion is the very next statement — `if [ -z \"$(ls -A crate-pkgs/ 2>/dev/null)\" ]; then echo '::error::no .crate artifacts produced'; exit 1; fi` — which is unswallowed and covers the exact case (`crate-pkgs/` empty or absent) that would make this `ls -l` non-zero. Listing the directory twice must not be able to red the job before that check runs.",
+   "registered": "2026-09-02"
+  },
+  {
+   "workflow": "release.yml",
+   "job_id": "gui-bundle",
+   "match": "ls -la target/release >&2 || true",
+   "reason": "Diagnostics on an ALREADY-FAILING path: it sits inside `if [[ -z \"$binary\" ]]`, between the `ERROR: no release binary found under target/release` message and an unconditional `exit 1` on the next line. The step fails either way; the listing only tells the reader what WAS in target/release, and must not mask the exit 1 by failing first when the directory does not exist at all.",
+   "registered": "2026-09-02"
+  },
+  {
+   "workflow": "release.yml",
+   "job_id": "gui-bundle",
+   "match": "find \"$BUNDLE_DIR\" -maxdepth 2 -type f 2>/dev/null || true",
+   "reason": "Same shape as the `ls -la target/release` waiver in this job: it is inside `if [ \"$found\" -eq 0 ]`, after `ERROR: tauri build produced no installer bundles under $BUNDLE_DIR` and immediately before an unconditional `exit 1`. The verdict is `found`, computed unswallowed by the staging loop above. A missing $BUNDLE_DIR is the very condition being reported, so `find` failing there is expected and must not short-circuit the explicit exit 1.",
+   "registered": "2026-09-02"
+  },
+  {
+   "workflow": "slsa-builder-pin-review.yml",
+   "job_id": "review",
+   "match": "grep -hoE '^[[:space:]]*uses:[[:space:]]*slsa-framework/slsa-github-generator/",
+   "reason": "Harvests the pinned trusted-builder refs out of release.yml + dist.yml into `refs=$(…)` under `set -euo pipefail`. ZERO matches is precisely the failure this step exists to catch, and it is caught EXPLICITLY two lines below: `count` is compared against 1 and anything other than exactly one distinct ref exits 1. Without the `|| true` a zero-match grep would abort the step under errexit before that count check could emit its specific `expected exactly ONE distinct pinned ref … found 0` diagnostic.",
    "registered": "2026-09-02"
   },
   {

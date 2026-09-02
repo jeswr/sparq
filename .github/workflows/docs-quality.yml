@@ -1180,22 +1180,26 @@ jobs:
       # neutralise a gate with no reviewer signal. Not theoretical — the #4211 review
       # found `gh issue edit --add-label "$l" || true` in triage-issue.yml silently
       # dropping routing labels, and that swallow was deleted.
-      #   W1 — a statement-level `|| true` / `|| :` in a GATING job's run body whose
-      #        swallowed command is neither OBSERVATIONAL (grep/cat/ls/find/… — a
-      #        non-zero exit there is a data outcome, not a failure) nor declared in
-      #        .github/run-swallow-waivers.json with a reason.
-      #   W2 — a `set +e` region in which `$?` is never read. `set +e` is not itself
-      #        the defect: all 7 live uses CAPTURE the status (`rc=$?` / `CODE=$?`)
-      #        and act on it. Tolerating a failure and never looking at it is what
-      #        reds. A bare trailing `exit 0` is deliberately NOT flagged — under
-      #        `bash -e` it is unreachable after a failure, so it is an explicit
-      #        success exit rather than a swallow (reasoning in the script header).
+      #   W1 — a statement-level `|| true` / `|| :` in a GATING job's run body that
+      #        is not declared in .github/run-swallow-waivers.json with a reason.
+      #        No command name is exempt: `grep -q required out.log || true` and
+      #        `find . -exec validate {} \; || true` are assertions with the verdict
+      #        deleted, so a "diagnostic" cat/ls/tail is argued for like any other.
+      #   W2 — a `set +e` region that does not IMMEDIATELY capture and act on the
+      #        status of the command it tolerates: the next statement must be
+      #        `VAR=$?` (with `$VAR` actually read afterwards) or a branch/exit on
+      #        `$?`. `set +e` is not itself the defect — all 7 live uses capture on
+      #        the next line and act on it — but `./gate; echo note; rc=$?` captures
+      #        the echo, and `echo $?` enforces nothing. A bare trailing `exit 0` is
+      #        deliberately NOT flagged: under `bash -e` it is unreachable after a
+      #        failure, so it is an explicit success exit rather than a swallow
+      #        (reasoning, and W2's one stated bound, in the script header).
       #   W3 — a waiver matching no live command is STALE and must be deleted, so a
       #        waiver cannot rot into a standing pre-authorisation (C4's spirit).
       # The waiver file is a RATCHET over a measured inventory, not an approval list:
       # #5799 asked for the inventory first, and the 57 swallow sites then live in
-      # gating jobs were all reviewed and found intentional — the 14 that this
-      # checker flags are declared one by one, with a reason, in the waiver file.
+      # gating jobs were all reviewed and found intentional — the 22 this checker
+      # flags are declared one by one, with a reason, in the waiver file.
       # Same shape as C2/C3/C4 — self-test pins the classifier's own logic, the
       # enforce step applies it to the live workflows, and both are stdlib-only.
       - name: Self-test the run-body swallow checker (W1/W2/W3 logic — #5799)

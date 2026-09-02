@@ -21,25 +21,41 @@
 # inventory, so that the NEXT one has to be justified.
 #
 # Under this checker's own (narrower, see below) scope those 57 resolve to 22
-# `|| true` sites in gating jobs — 8 observational, 14 declared in the waiver
-# file — plus 7 `set +e` regions, all of which capture and act on the status.
+# `|| true` sites in gating jobs, every one of them declared in the waiver file,
+# plus 7 `set +e` regions, all of which capture and act on the status.
 #
 # The checks, over every `run:` body in a job that GATES (i.e. a job whose name
 # is NOT declared in .github/advisory-registry.json — the same load-bearing
 # definition ci_summary_gate.py uses since #3773):
 #
-#  W1: a statement-level `|| true` / `|| :` whose swallowed command is neither
-#      OBSERVATIONAL (see OBSERVATIONAL_COMMANDS — commands whose non-zero exit
-#      is a data outcome or which only print diagnostics) nor covered by a
-#      waiver in .github/run-swallow-waivers.json.
+#  W1: a statement-level `|| true` / `|| :` not covered by a waiver in
+#      .github/run-swallow-waivers.json. There is NO exemption by command name.
+#      An earlier draft exempted a set of "observational" heads (grep/cat/ls/
+#      find/…) on the theory that their non-zero exit is a data outcome — but a
+#      program is not intrinsically observational: `grep -q required out.log ||
+#      true` and `find . -exec validate {} \; || true` are assertions with the
+#      verdict deleted, `cat generated-artifact || true` hides a missing build
+#      output, and a shell function named `true` is not `true(1)`. A name-based
+#      exemption is exactly the two-character neutralisation this check exists
+#      to stop, so every site — diagnostic ones included — is declared ONCE,
+#      with a reason that argues why THAT invocation removes no verdict.
 #
-#  W2: a `set +e` region in which `$?` is never read. `set +e` itself is not the
-#      defect — every one of the 7 live uses CAPTURES the status (`rc=$?` /
-#      `CODE=$?`) and acts on it; 6 also restore `set -e` immediately, and the
-#      7th (dependency-monitoring `audit`) routes the captured code to
-#      `$GITHUB_OUTPUT` for a later step to fail the job on. The defect is
-#      tolerating a failure and then never looking at it, which is
-#      indistinguishable from not running the command at all.
+#  W2: a `set +e` region that does not IMMEDIATELY capture and act on the status
+#      of the command it tolerates. Concretely: the first command inside the
+#      region must be followed, as the VERY NEXT statement, by either `VAR=$?`
+#      (with `$VAR` actually read afterwards) or a direct branch/exit on `$?`.
+#      `set +e` itself is not the defect — every one of the 7 live uses captures
+#      the status on the next line (`rc=$?` / `CODE=$?`) and acts on it; 6 also
+#      restore `set -e` immediately, and the 7th (dependency-monitoring `audit`)
+#      routes the captured code to `$GITHUB_OUTPUT` for a later step to fail the
+#      job on. The defect is tolerating a failure and then never looking at it,
+#      which is indistinguishable from not running the command at all — and
+#      "looking at it" has to mean THAT command's status: `./gate; echo note;
+#      rc=$?` captures `echo`'s status and drops the gate's, and `echo $?`
+#      prints a status while enforcing nothing. Both are offences.
+#      BOUND, stated honestly: a SECOND command placed after a valid capture in
+#      the same region is not covered. Every live region tolerates exactly one
+#      command, so tightening that would only add unenforceable noise today.
 #
 #  W3: a waiver that matches no live command — STALE. Mirrors C4's spirit in
 #      check-advisory-registry.py: a declaration that binds to nothing must be
@@ -79,19 +95,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 WAIVERS_PATH = Path(".github") / "run-swallow-waivers.json"
 
-# Commands whose non-zero exit is a DATA outcome or which only print diagnostics,
-# so `… || true` on them removes no verdict. Kept deliberately small: a false
-# positive costs one waiver line, a false NEGATIVE costs a silent gate. Anything
-# that can WRITE, BUILD, PUBLISH or ASSERT is absent on purpose — `git`, `gh`,
-# `npm`, `cargo`, `python3` and every repo script must be waived explicitly.
-OBSERVATIONAL_COMMANDS = frozenset({
-    # exit 1 means "no match" — a result, not a failure
-    "grep", "egrep", "fgrep", "rg",
-    # read-only prints; failure means "the optional file wasn't there"
-    "cat", "head", "tail", "ls", "find", "wc", "df", "du", "stat",
-    "echo", "printf", "true",
-})
-
+# NOTE: there is deliberately no OBSERVATIONAL_COMMANDS set here. The head verb
+# is still parsed — it makes the offence message readable and is asserted by the
+# parser self-tests — but it grants NO exemption. See W1 in the header.
+#
 # `|| true` / `|| :`. The `:` form only counts as a swallow when `:` is the whole
 # command (followed by end-of-line or a shell operator), so `|| :.foo` is not one.
 SWALLOW_RE = re.compile(r"\|\|\s*(?:true(?![\w.-])|:(?=\s*(?:$|[;)&|])))")
@@ -101,6 +108,17 @@ SET_PLUS_E_RE = re.compile(r"(?:^|;|&&|\|\|)\s*set\s+(?:\+[a-df-z]*e[a-z]*|\+o\s
 SET_MINUS_E_RE = re.compile(r"(?:^|;|&&|\|\|)\s*set\s+(?:-[a-df-z]*e[a-z]*|-o\s+errexit)\b")
 # Any read of the previous command's status: `rc=$?`, `if [ $? -ne 0 ]`, `echo $?`.
 STATUS_READ_RE = re.compile(r"\$\?")
+# A status read that ENFORCES something. `VAR=$?` parks the status in a variable
+# (which must then actually be read — see _status_is_enforcing), and the branch
+# form acts on it on the spot. A bare `echo $?` matches neither: printing a
+# status is not inspecting it, so it leaves the failure just as swallowed.
+STATUS_ASSIGN_RE = re.compile(
+    r"(?:^|[;&|({]|&&|\|\||\bthen\b|\bdo\b)\s*"
+    r"(?:local\s+|export\s+|declare\s+|readonly\s+)?([A-Za-z_][A-Za-z0-9_]*)=\$\?")
+STATUS_BRANCH_RE = re.compile(r"(?:\b(?:if|test|exit|return|case|while|until)\b|\[\[?)[^;]*\$\?")
+# A statement that is ONLY a `set` builtin — neither a tolerated command nor a
+# status read, so it neither opens the W2 obligation nor discharges it.
+SET_ONLY_RE = re.compile(r"\s*set\s+[-+][^;&|]*")
 
 # Process substitution `<( … )` / `>( … )`. Normalised to a plain `(` BEFORE
 # redirections are stripped, or `done < <(git ls-tree … | grep -E … || true)` has
@@ -108,8 +126,12 @@ STATUS_READ_RE = re.compile(r"\$\?")
 PROCESS_SUBST_RE = re.compile(r"[<>]\(")
 # Shell redirections, stripped before the head verb is read (`ls -la x >&2` → `ls`).
 REDIRECTION_RE = re.compile(r"\d*(?:>>|>&|>|<<<|<<|<)\s*&?\S*")
-# Shell operators that end one command and start the next.
-COMMAND_SPLIT_RE = re.compile(r"(?:;|&&|\|\||\||\bthen\b|\bdo\b|\belse\b|\{|\()")
+# Shell operators that end one command and start the next. A BACKSLASH-ESCAPED
+# `;` is find(1)'s `-exec … \;` terminator, not a separator, and `{}` is its
+# placeholder — a group brace is always followed by whitespace (`{ cmd; }`), so
+# requiring that keeps `-exec ./validate.sh {} \;` from eating the head verb.
+COMMAND_SPLIT_RE = re.compile(
+    r"(?:(?<!\\);|&&|\|\||\||\bthen\b|\bdo\b|\belse\b|\{(?=\s)|\()")
 # `VAR=value cmd` prefixes.
 ENV_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
 # `${{ … }}` GitHub expressions — masked before shell parsing (they can contain
@@ -282,29 +304,91 @@ def find_swallows(body: str, folded: bool) -> list[dict]:
     return hits
 
 
+def _statement_kind(masked: str) -> str:
+    """`status` (reads `$?`), `set` (a bare `set` builtin), or `command`."""
+    if STATUS_READ_RE.search(masked):
+        return "status"
+    if SET_ONLY_RE.fullmatch(masked):
+        return "set"
+    return "command"
+
+
+def _status_is_enforcing(masked: str, real: str, later: list[str]) -> str | None:
+    """None if this status read acts on the status; else why it does not.
+
+    `VAR=$?` only counts when `$VAR` is read somewhere afterwards — a captured
+    status nobody looks at is the same swallow with an extra step. `later` is
+    the RAW (unmasked) remainder of the body, because the read is almost always
+    inside double quotes (`if [ "$rc" -ne 0 ]`) which masking blanks out.
+    """
+    assign = STATUS_ASSIGN_RE.search(masked)
+    if assign:
+        var = assign.group(1)
+        reference = re.compile(r"\$\{?" + re.escape(var) + r"\b")
+        tail = [real[assign.end():], *later]
+        if any(reference.search(text) for text in tail):
+            return None
+        return (f"captures the status into `{var}` and then never reads `${var}` "
+                f"— a status nobody looks at is the swallow with an extra step")
+    if STATUS_BRANCH_RE.search(masked):
+        return None
+    return ("reads `$?` without acting on it (no `VAR=$?` capture, no branch or "
+            "`exit` on it) — printing a status is not inspecting it")
+
+
 def find_unread_set_plus_e(body: str, folded: bool) -> list[str]:
-    """W2: `set +e` regions in which `$?` is never read.
+    """W2: `set +e` regions that do not immediately capture and act on the status.
 
     A region runs from `set +e` to the next `set -e` (or the end of the body).
-    Reading `$?` anywhere inside it means the tolerated failure IS inspected —
-    the disciplined `set +e / cmd / rc=$? / set -e` idiom all 7 live sites use.
+    The obligation is discharged only by the disciplined `set +e / cmd / rc=$? /
+    set -e` idiom all 7 live sites use: the status read must be the statement
+    IMMEDIATELY after the tolerated command (otherwise it is some other
+    command's status), and it must enforce something. See W2 in the header for
+    the one bound this does not cover.
     """
     lines = logical_lines(body, folded)
+    masked_lines = [mask_quotes_and_expressions(line) for line in lines]
     offences: list[str] = []
-    open_at: int | None = None
-    for index, line in enumerate(lines):
-        masked = mask_quotes_and_expressions(line)
-        if open_at is None:
-            if SET_PLUS_E_RE.search(masked):
-                open_at = index
+    index = 0
+    while index < len(lines):
+        opener_match = SET_PLUS_E_RE.search(masked_lines[index])
+        if not opener_match:
+            index += 1
             continue
-        if SET_MINUS_E_RE.search(masked):
-            if not any(STATUS_READ_RE.search(l) for l in lines[open_at:index + 1]):
-                offences.append(lines[open_at])
-            open_at = None
-    if open_at is not None:
-        if not any(STATUS_READ_RE.search(l) for l in lines[open_at:]):
-            offences.append(lines[open_at])
+        opener = index
+        end = opener + 1
+        while end < len(lines) and not SET_MINUS_E_RE.search(masked_lines[end]):
+            end += 1
+
+        # (real, masked, index-of-the-line-it-came-from). A `set +e` can share a
+        # line with the command it tolerates (`set +e; ./gate`), so the opener's
+        # remainder is the region's first statement when it is non-empty.
+        region: list[tuple[str, str, int]] = []
+        tail_real = lines[opener][opener_match.end():]
+        if tail_real.strip(" ;&|"):
+            region.append((tail_real, masked_lines[opener][opener_match.end():], opener))
+        region.extend((lines[i], masked_lines[i], i) for i in range(opener + 1, end))
+
+        kinds = [_statement_kind(m) for _, m, _ in region]
+        if "command" in kinds:
+            first = kinds.index("command")
+            statement = region[first][0].strip()
+            if first + 1 >= len(region) or kinds[first + 1] != "status":
+                offences.append(
+                    f"opens a `set +e` region whose first tolerated command "
+                    f"{statement[:120]!r} is not followed IMMEDIATELY by a status "
+                    f"read — the next statement runs first, so any later `$?` is "
+                    f"that statement's status, not this command's"
+                )
+            else:
+                real, masked, line_index = region[first + 1]
+                why = _status_is_enforcing(masked, real, lines[line_index + 1:])
+                if why:
+                    offences.append(
+                        f"opens a `set +e` region whose tolerated command "
+                        f"{statement[:120]!r} {why}"
+                    )
+        index = end + 1 if end < len(lines) else len(lines)
     return offences
 
 
@@ -337,14 +421,13 @@ def scan(root: Path) -> tuple[list[dict], list[str]]:
                         "job_name": job["name"],
                         **hit,
                     })
-                for opener in find_unread_set_plus_e(body, folded):
+                for detail in find_unread_set_plus_e(body, folded):
                     set_e_offences.append(
                         f"W2: {path.name}: gating job {job['name']!r} (job_id "
-                        f"{job['id']}) opens a `set +e` region whose exit status "
-                        f"is never read (`$?` appears nowhere before it closes): "
-                        f"{opener!r}. Tolerating a failure and never inspecting "
-                        f"it is indistinguishable from not running the command. "
-                        f"Capture it (`rc=$?`) and branch, or drop the `set +e`."
+                        f"{job['id']}) {detail}. Tolerating a failure and never "
+                        f"inspecting it is indistinguishable from not running the "
+                        f"command. Capture the status on the very next statement "
+                        f"(`rc=$?`) and branch on it, or drop the `set +e`."
                     )
     return sites, set_e_offences
 
@@ -414,8 +497,6 @@ def check(root: Path) -> list[str]:
 
     used: set[int] = set()
     for site in sites:
-        if site["head"] in OBSERVATIONAL_COMMANDS:
-            continue
         matched = [i for i, w in enumerate(waivers) if waiver_matches(w, site)]
         if matched:
             used.update(matched)
@@ -471,59 +552,67 @@ def _scan_text(workflow_text: str, registry: dict) -> tuple[list[dict], list[str
     return sites, set_e
 
 
-def _unwaived(sites: list[dict]) -> list[dict]:
-    return [s for s in sites if s["head"] not in OBSERVATIONAL_COMMANDS]
-
-
 def _w1_cases() -> int:
+    """Each case pins the HEADS of the flagged sites, so the parser tests assert
+    what the parser actually resolved instead of leaning on an exemption list."""
     cases = [
         ("W1-negative: a repo script silenced in a gating job",
-         _wf("g", "hard gate", "python3 scripts/coverage-gate.py --check || true"), {}, 1),
+         _wf("g", "hard gate", "python3 scripts/coverage-gate.py --check || true"),
+         {}, ["python3"]),
         ("W1-clean: the same swallow in a DECLARED advisory job",
          _wf("g", "hard gate", "python3 scripts/coverage-gate.py --check || true"),
-         {"hard gate": {}}, 0),
-        ("W1-clean: grep no-match is a DATA outcome, not a failure",
-         _wf("g", "hard gate", "count=\"$(grep -c foo bar.txt || true)\""), {}, 0),
-        ("W1-clean: diagnostic cat of an optional file",
-         _wf("g", "hard gate", "cat shard.stderr || true"), {}, 0),
+         {"hard gate": {}}, []),
+        # No head is exempt: these three are the counter-examples that killed the
+        # OBSERVATIONAL_COMMANDS idea. Each is an ASSERTION whose verdict `|| true`
+        # deletes, spelled with a head that "reads like" a passive probe.
+        ("W1-negative: `grep` can be the assertion itself, not a data probe",
+         _wf("g", "hard gate", "grep -q 'expected result' out.log || true"), {}, ["grep"]),
+        ("W1-negative: `find -exec` runs an arbitrary validator",
+         _wf("g", "hard gate",
+             "find . -name '*.ttl' -exec ./scripts/validate.sh {} \\; || true"), {}, ["find"]),
+        ("W1-negative: `cat` of a REQUIRED generated artifact is a check",
+         _wf("g", "hard gate", "cat target/generated-manifest.json || true"), {}, ["cat"]),
         ("W1-negative: `|| :` is the same swallow spelled differently",
-         _wf("g", "hard gate", "cargo test --all || :"), {}, 1),
+         _wf("g", "hard gate", "cargo test --all || :"), {}, ["cargo"]),
         ("W1-clean: `|| :.foo` is not a swallow (`:` is not the whole command)",
-         _wf("g", "hard gate", "cargo test --all || :.foo"), {}, 0),
-        # The parsing bugs found while measuring main's real inventory.
+         _wf("g", "hard gate", "cargo test --all || :.foo"), {}, []),
+        # The parsing bugs found while measuring main's real inventory. These assert
+        # the resolved head verb — the thing that was wrong before the fix.
         ("W1-parse: FOLDED scalar — the command is on earlier source lines",
          _wf("g", "hard gate",
              "cargo miri nextest run -p sparq-core\n> shard.jsonl 2> shard.stderr\n|| true",
-             folded=True), {}, 1),
+             folded=True), {}, ["cargo"]),
         ("W1-parse: backslash continuation joins into one command",
          _wf("g", "hard gate",
              "python3 scripts/cone_coverage.py \\\n  --mode report \\\n  --summary-file x || true"),
-         {}, 1),
+         {}, ["python3"]),
         ("W1-parse: shell metacharacters inside a QUOTED argument are payload",
          _wf("g", "hard gate",
-             "gh issue comment 1 --body \"quarantined (see |x| and {y})\" || true"), {}, 1),
+             "gh issue comment 1 --body \"quarantined (see |x| and {y})\" || true"),
+         {}, ["gh"]),
         ("W1-parse: a redirection is not the command word",
-         _wf("g", "hard gate", "ls -la target/release >&2 || true"), {}, 0),
+         _wf("g", "hard gate", "ls -la target/release >&2 || true"), {}, ["ls"]),
         ("W1-parse: an env-var prefix is not the command word",
-         _wf("g", "hard gate", "FOO=1 BAR=2 ./scripts/thing.sh || true"), {}, 1),
+         _wf("g", "hard gate", "FOO=1 BAR=2 ./scripts/thing.sh || true"),
+         {}, ["thing.sh"]),
         ("W1-parse: `sudo`/`env` wrappers resolve to the wrapped command",
-         _wf("g", "hard gate", "sudo cat /var/log/x || true"), {}, 0),
-        # Both of these read as a NEEDS-WAIVER `head` of junk (`'n'`, `' '`) before
-        # the mask/real index alignment and the process-substitution normalisation.
+         _wf("g", "hard gate", "sudo cat /var/log/x || true"), {}, ["cat"]),
+        # Both of these read as a `head` of junk (`'n'`, `' '`) before the mask/real
+        # index alignment and the process-substitution normalisation.
         ("W1-parse: an `a || b || true` chain reads b, not a redirection target",
          _wf("g", "hard gate",
              "git fetch --unshallow origin 2>/dev/null || "
-             "git fetch --deepen=200 origin 2>/dev/null || true"), {}, 1),
+             "git fetch --deepen=200 origin 2>/dev/null || true"), {}, ["git"]),
         ("W1-parse: process substitution `< <(…)` does not eat the command word",
          _wf("g", "hard gate",
              "done < <(git ls-tree -d --name-only origin/x dev/ "
-             "| grep -E '^dev/bench' || true)"), {}, 0),
+             "| grep -E '^dev/bench' || true)"), {}, ["grep"]),
         ("W1-clean: a swallow in a COMMENT is not an invocation",
-         _wf("g", "hard gate", "# cargo test --all || true\necho ok"), {}, 0),
+         _wf("g", "hard gate", "# cargo test --all || true\necho ok"), {}, []),
     ]
     failures = 0
     for label, text, registry, expected in cases:
-        got = len(_unwaived(_scan_text(text, registry)[0]))
+        got = [site["head"] for site in _scan_text(text, registry)[0]]
         ok = got == expected
         print(f"  [{'PASS' if ok else 'FAIL'}] {label}: {got} (want {expected})")
         if not ok:
@@ -550,13 +639,44 @@ def _w2_cases() -> int:
     )
     unread = "set +e\ncargo test --all\necho done\nexit 0"
     unread_restored = "set +e\ncargo test --all\nset -e\necho done"
+    # The three ways a region can read `$?` and still swallow the verdict.
+    overwritten = (
+        "set +e\n"
+        "./scripts/gate.sh\n"
+        "echo 'diagnostic'\n"
+        "rc=$?\n"
+        "set -e\n"
+        "if [ \"$rc\" != \"0\" ]; then exit \"$rc\"; fi"
+    )
+    printed_only = "set +e\n./scripts/gate.sh\necho $?\nset -e"
+    captured_unused = "set +e\n./scripts/gate.sh\nrc=$?\nset -e\necho done"
+    branch_direct = (
+        "set +e\n"
+        "./scripts/gate.sh\n"
+        "if [ $? -ne 0 ]; then exit 1; fi\n"
+        "set -e"
+    )
+    inline_capture = "set +e\n./scripts/gate.sh || rc=$?\nset -e\nexit \"${rc:-0}\""
+    same_line_opener = "set +e; cargo test --all\nset -e"
     cases = [
         ("W2-clean: the disciplined set +e / rc=$? / set -e idiom", disciplined, {}, 0),
         ("W2-clean: status captured and routed to an output, no set -e restore",
          captured_no_restore, {}, 0),
+        ("W2-clean: the status is branched on directly (`if [ $? -ne 0 ]`)",
+         branch_direct, {}, 0),
+        ("W2-clean: the capture shares the command's statement (`cmd || rc=$?`)",
+         inline_capture, {}, 0),
         ("W2-negative: set +e region where `$?` is never read", unread, {}, 1),
         ("W2-negative: set +e ... set -e with no `$?` read in between",
          unread_restored, {}, 1),
+        ("W2-negative: an intervening command OVERWRITES the status before `rc=$?`",
+         overwritten, {}, 1),
+        ("W2-negative: `echo $?` prints the status but enforces nothing",
+         printed_only, {}, 1),
+        ("W2-negative: the captured status is never read again",
+         captured_unused, {}, 1),
+        ("W2-negative: `set +e; cmd` on ONE line still owes a capture",
+         same_line_opener, {}, 1),
         ("W2-clean: the same unread region in a DECLARED advisory job",
          unread, {"hard gate": {}}, 0),
     ]
@@ -647,15 +767,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.inventory:
         sites, set_e = scan(args.root)
+        waivers, _ = load_waivers(args.root)
+        undeclared = 0
         for site in sites:
-            kind = "observational" if site["head"] in OBSERVATIONAL_COMMANDS else "NEEDS-WAIVER"
+            declared = any(waiver_matches(w, site) for w in waivers)
+            kind = "waived" if declared else "NEEDS-WAIVER"
+            undeclared += 0 if declared else 1
             print(f"{kind:14} {site['workflow']}:{site['job_id']} "
                   f"head={site['head']!r}  {site['command'][:120]}")
         for offence in set_e:
             print(offence)
-        print(f"\n{len(sites)} swallow site(s), "
-              f"{sum(1 for s in sites if s['head'] not in OBSERVATIONAL_COMMANDS)} "
-              f"needing a waiver; {len(set_e)} unread `set +e` region(s).")
+        print(f"\n{len(sites)} swallow site(s), {undeclared} needing a waiver; "
+              f"{len(set_e)} unguarded `set +e` region(s).")
         return 0
 
     offences = check(args.root)
