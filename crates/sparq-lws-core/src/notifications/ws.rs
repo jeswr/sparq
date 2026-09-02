@@ -184,9 +184,9 @@ impl<S: Store> NotifyState<S> {
                 .into_response()),
             // A transient storage failure must never read as "allowed"; it is also NOT mapped to
             // 403/404, which would let a storage blip masquerade as an access decision.
-            Err(_) => Err(
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response(),
-            ),
+            Err(_) => {
+                Err((StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response())
+            }
         }
     }
 
