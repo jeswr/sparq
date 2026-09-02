@@ -73,9 +73,9 @@ checkout, not of the branch as a whole.
 
 `CompositeStore::mint_blob_key` (`crates/sparq-lws-core/src/store/mod.rs:333`) mints a
 fresh unguessable key per write rather than deriving one from the IRI, and it is used at
-both write sites (`store/mod.rs:452` for `write`, `:495` for `create_in_container`). It
+both write sites (`store/mod.rs:452` for `write`, `:496` for `create_in_container`). It
 is **fallible** — an unavailable OS RNG fails the write closed rather than minting a
-weak, possibly-colliding key (`store/mod.rs:762`).
+weak, possibly-colliding key (`store/mod.rs:763`).
 
 This is load-bearing well beyond "two writes collide". The orphan reconciler's
 correctness argument rests on it: because an overwrite never reuses a candidate's key,
@@ -99,8 +99,8 @@ compose, and the composition is explicit in the code rather than incidental.** T
 `put_handler` authorizes through the WAC engine *before* any existence probe, and says
 why: authorizing a create against the target's inherited ACL (not the weaker parent
 `acl:Append`) is what makes create and forbidden-overwrite indistinguishable
-(`ldp/handler.rs:1104-1126`). V4's conditional-request guard runs next, still before the
-probe (`:1133`), and only then does the handler call `store.meta()` (`:1136`). The
+(`ldp/handler.rs:1106-1128`). V4's conditional-request guard runs next, still before the
+probe (`:1135`), and only then does the handler call `store.meta()` (`:1139`). The
 ordering *is* the non-disclosure property; a future reviewer moving the existence probe
 above the authorize call would silently reopen the V1 oracle.
 
@@ -123,7 +123,7 @@ brief attached to that condition does not fire.
 **Verdict: HOLD/UNVERIFIED — the pin, lockfile, and cargo-vet delta the branch is named
 for are all present in-tree; the branch itself was not inspected, so any further delta on
 it is unknown (§1).** The verifier is pinned to an exact rev, not a floating branch
-(`crates/sparq-lws-core/Cargo.toml:230`), `Cargo.lock:4801` resolves that same rev, and
+(`crates/sparq-lws-core/Cargo.toml:234`), `Cargo.lock:4801` resolves that same rev, and
 the security payload the branch existed for is real: `hickory-proto` resolves at
 `0.26.1` (`Cargo.lock:2119-2121`), the patched version that closes
 `GHSA-q2qq-hmj6-3wpp`. The supply-chain delta is complete too — `hickory-net`,
@@ -153,11 +153,11 @@ the code. Verified present:
 
 | Area | Tests |
 |---|---|
-| Unique blob keys | `store/mod.rs:716` unique-per-call for the same IRI; `:737` IRI-derived prefix retained for traceability; `:762` fallible, fails closed on RNG failure; `store/blob.rs:563` concurrent writes get unique strictly-ordered generations |
+| Unique blob keys | `store/mod.rs:717` unique-per-call for the same IRI; `:738` IRI-derived prefix retained for traceability; `:763` fallible, fails closed on RNG failure; `store/blob.rs:563` concurrent writes get unique strictly-ordered generations |
 | Blob-key collision, end to end | `tests/store.rs:100` each write to the same IRI mints a distinct key; `:141` concurrent writes to the same IRI do not collide; `:770` an empty-container delete does not clobber a concurrent same-IRI recreate |
-| Existence non-disclosure, V6 | `ldp/handler.rs:4104` the append-dropbox POST oracle is closed; `:4186` an owner still gets a true 404; `:4337` a read-less writer's store fault folds to the denial, not a 500 |
-| Existence non-disclosure, V4/V5 | `ldp/handler.rs:5078` an unauthorized caller gets the denial, not a 304; `:5712` the container `ETag` only reaches a reader |
-| Existence non-disclosure, end to end | `tests/adversarial_invariants.rs:146` existing-forbidden and non-existent return the same status to a foreign reader; `tests/ldp_http.rs:838` a missing-resource DELETE is a uniform denial, not a 404; `ldp/handler.rs:3994` an authorized reader still gets a true 404; `:6029` the `solid:where` PATCH is not an existence oracle |
+| Existence non-disclosure, V6 | `ldp/handler.rs:4106` the append-dropbox POST oracle is closed; `:4188` an owner still gets a true 404; `:4339` a read-less writer's store fault folds to the denial, not a 500 |
+| Existence non-disclosure, V4/V5 | `ldp/handler.rs:5080` an unauthorized caller gets the denial, not a 304; `:5714` the container `ETag` only reaches a reader |
+| Existence non-disclosure, end to end | `tests/adversarial_invariants.rs:146` existing-forbidden and non-existent return the same status to a foreign reader; `tests/ldp_http.rs:838` a missing-resource DELETE is a uniform denial, not a 404; `ldp/handler.rs:3996` an authorized reader still gets a true 404; `:6031` the `solid:where` PATCH is not an existence oracle |
 | Verifier pin | not unit-testable — the evidence is the lockfile resolution and the vet exemptions cited in §2.3 |
 
 No new tests are added by this bead, because no new behaviour is added. Writing a test
@@ -197,7 +197,7 @@ filing a bead for the latter would be filing a bead for nothing.
 | Marker | Claimed | Actually |
 |---|---|---|
 | `ldp/mod.rs:16` | "full WAC authorization" is unimplemented, "needs the SPARQ access-control design" | the in-Rust WAC engine exists (`authz/wac.rs`, `authz/acl.rs`, `authz/mode.rs`) and `authz/mod.rs:4-6` states it *supersedes* the interim posture |
-| `ldp/handler.rs:1089` | on `put_handler`: "a mutation from a public caller is a 403 (the WAC seam is M2-next)" | `put_handler` calls `state.authorize("PUT", …)` at `:1126` and the surrounding comment describes the full WAC create/overwrite mode analysis |
+| `ldp/handler.rs:1089` | on `put_handler`: "a mutation from a public caller is a 403 (the WAC seam is M2-next)" | `put_handler` calls `state.authorize("PUT", …)` at `:1128` and the surrounding comment describes the full WAC create/overwrite mode analysis |
 | `lib.rs:55`, item "the reconciler" | not yet written | `store/reconcile.rs` implements `reconcile_orphans` (`:231`) and `spawn_periodic` (`:554`), with `tests/reconcile_periodic.rs` |
 | `lib.rs:55`, item "multipart Range" | not yet written | `ldp/range.rs:46` `encode_multipart`, with `tests/ldp_range_multipart.rs` |
 | `store/mod.rs:489`, `:531` | orphaned bytes are GC'd by "the reconciler (M2-next)" | the reconciler exists; only the *object-store backend* part is still future |
@@ -222,7 +222,7 @@ run must not write `.beads/`. Ordered by priority.
    (§2.2) and would not fail any test if a future change emitted that `ETag` off the
    Read-gated path. The lock-step note at `ldp/handler.rs:894-901` asks for exactly this.
 3. **`object_store` is a declared but entirely unused dependency.** `object_store =
-   "0.14"` (`Cargo.toml:253`) is a non-optional native dependency with zero non-comment
+   "0.14"` (`Cargo.toml:257`) is a non-optional native dependency with zero non-comment
    references in the crate — the S3/GCS/Azure tree is in the build graph purely in
    anticipation of the adapter in §5.1. Either build the adapter or make the dependency
    optional behind its feature.
@@ -230,7 +230,7 @@ run must not write `.beads/`. Ordered by priority.
 5. **N-Triples / N-Quads / N3 read formats** (`ldp/content.rs:20`).
 6. **`acl:agentGroup` resolution** (`authz/acl.rs:17`).
 7. **Re-pin the verifier to a tagged release** once upstream cuts one — the block's own
-   standing `FOLLOW-UP` (`Cargo.toml:83`), which would also retire the accumulated
+   standing `FOLLOW-UP` (`Cargo.toml:87`), which would also retire the accumulated
    rationale log that §2.3 had to repair.
 
 ## 7. What genuinely needs the maintainer
