@@ -39,13 +39,14 @@ UI_SURFACE_LABELS = ("area:site", "surface:frontend", "dashboard")
 # UI_SURFACE_LABELS above and therefore derived role:site — which made the carve-out inexpressible,
 # because role:site also covers area:site / surface:frontend / dashboard, and those are NOT in the
 # carve-out. Splitting the label out is what lets orchestration/routing.toml give role:gui a
-# sol-first chain while role:site takes the opus5-first default like everything else.
+# [GPT-5.6] The current protocol makes both role:gui and role:site Sol-first; role:site
+# historically took the Opus-first default.
 # EXACT label, never a substring: a substring test would match "guide"/"guidance".
 #
 # THIS IS NOT WHERE THE CARVE-OUT BINDS. This rule fires only for an issue with NO explicit role —
 # the explicit-role branch in _role() returns first — and 35 of 35 open area:gui issues already
 # carry one (33 role:impl, 1 role:perf, 1 role:research), so on its own it reached NONE of the live
-# backlog and GUI work silently took the opus5-first default. The binding rule is
+# backlog and GUI work silently took the then-opus5-first default. The binding rule is
 # scripts/route-resolve.py `gui_carve_out()`, which reads `area:gui` directly at plan time
 # regardless of role. Keep the two label sets in sync — `test_both_gui_selectors_agree`.
 GUI_SURFACE_LABELS = ("area:gui",)
@@ -112,7 +113,8 @@ def _role(labels, issue_type):
     # precedence slot otherwise (after security, an explicit role:*, and kind).
     if any(lb in GUI_SURFACE_LABELS for lb in labels):
         return "gui"
-    # [FABLE-5] UI-surface labels derive role:site (now the opus5-first default chain) before the
+    # [GPT-5.6] UI-surface labels derive role:site (now the common Sol-first implementation
+    # chain) before the
     # generic type map, after kind (so kind:docs about the site stays docs) and after an explicit
     # role:* label. NOTE: area:gui is deliberately NOT here — see GUI_SURFACE_LABELS.
     if any(lb in UI_SURFACE_LABELS for lb in labels):
@@ -212,7 +214,7 @@ def _self_test():
     # role:gui — that is the exact property, asserted independently of which non-gui role each
     # one happens to take (area:site -> site; the narrower area:site-specs / area:site-papers are
     # not exact UI_SURFACE_LABELS and fall through to the type map, which is fine: every one of
-    # those roles is on the opus5-first default).
+    # those roles historically used the opus5-first default).
     for _area in ("area:site", "area:site-specs", "area:site-papers", "area:sitemap"):
         chk(f"{_area} does NOT derive role:gui (not swept into the sol carve-out)",
             triage(["priority:P2", _area], "task")["role"] == "gui", False)
