@@ -35,6 +35,13 @@ key: that a `workflow_run:` under a workflow's top-level `on:` carries a
 `workflows:` filter with at least one entry.  It is not an actionlint substitute
 and makes no claim about the rest of the trigger block.
 
+Both spellings of the trigger body are parsed structurally — the block mapping
+(`workflows:` on its own line) and the flow mapping (`workflow_run: {workflows:
+[CI]}`).  In each case the EXACT `workflows` key must be present and name at
+least one entry; a neighbouring key, a quoted scalar or an empty list does not
+satisfy it.  An inline value that is not a well-formed flow mapping is reported
+rather than assumed to be fine.
+
 Pure stdlib (no PyYAML), so the gate runs identically on a bare runner and in a
 local worktree.  The parse is indentation-scoped to the top-level `on:` block, so
 the string `workflow_run` appearing in a `run:` script or a comment is not a match.
@@ -119,12 +126,102 @@ def _strip_comment(rest: str) -> str:
     return rest
 
 
+def _split_flow_items(body: str) -> list[str] | None:
+    """The top-level comma-separated items of a flow collection's interior.
+
+    Returns ``None`` when brackets or quotes are unbalanced, so an unparseable
+    construct is never mistaken for a well-formed one.
+    """
+    items: list[str] = []
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    start = 0
+    for pos, ch in enumerate(body):
+        if quote:
+            if escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif ch == "," and depth == 0:
+            items.append(body[start:pos])
+            start = pos + 1
+    if depth or quote:
+        return None
+    items.append(body[start:])
+    return [item for item in items if item.strip()]
+
+
+def _flow_key_value(item: str) -> tuple[str, str] | None:
+    """Split one flow-mapping entry on its top-level `:`; ``None`` if it has none."""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for pos, ch in enumerate(item):
+        if quote:
+            if escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            return _unquote(item[:pos].strip()), item[pos + 1 :].strip()
+    return None
+
+
+def _flow_mapping(inline: str) -> dict[str, str] | None:
+    """Parse `{k: v, ...}` into its top-level entries; ``None`` if not a flow mapping.
+
+    Structural, so only the EXACT `workflows` key counts — `not_workflows`, or the
+    word appearing inside a quoted scalar, does not satisfy the filter.
+    """
+    if not (inline.startswith("{") and inline.endswith("}")):
+        return None
+    items = _split_flow_items(inline[1:-1])
+    if items is None:
+        return None
+    entries: dict[str, str] = {}
+    for item in items:
+        pair = _flow_key_value(item)
+        if pair is None:
+            return None
+        entries[pair[0]] = pair[1]
+    return entries
+
+
+def _flow_value_is_populated(value: str) -> bool:
+    """Does a flow-style value name at least one entry?  `[]` and null do not."""
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        return bool(_split_flow_items(value[1:-1]))
+    return value not in ("", "~", "null", "Null", "NULL")
+
+
 def _filter_is_populated(lines: list[str], idx: int, rest: str, indent: int) -> bool:
     """Does the `workflows:` key at ``idx`` name at least one workflow?"""
     inline = _strip_comment(rest).strip()
     if inline:
         # Flow sequence (`[a, b]`) or a bare scalar; `[]` is an explicit empty list.
-        return inline.replace("[", "").replace("]", "").strip() != ""
+        return _flow_value_is_populated(inline)
     # Block sequence on the following lines.
     return any(line.strip().startswith("-") for _, line in _block(lines, idx, indent))
 
@@ -147,10 +244,20 @@ def find_violations(text: str) -> list[str]:
                 continue
             inline = _strip_comment(wr_rest).strip()
             if inline:
-                # Inline mapping such as `workflow_run: {workflows: [CI]}`.
-                if "workflows" not in inline:
+                # Inline (flow) mapping such as `workflow_run: {workflows: [CI]}`.
+                entries = _flow_mapping(inline)
+                if entries is None:
+                    problems.append(
+                        f"line {wr_idx + 1}: `workflow_run` has an UNPARSEABLE inline value; "
+                        "write it as a mapping carrying an explicit `workflows:` filter"
+                    )
+                elif "workflows" not in entries:
                     problems.append(
                         f"line {wr_idx + 1}: `workflow_run` has no `workflows:` filter"
+                    )
+                elif not _flow_value_is_populated(entries["workflows"]):
+                    problems.append(
+                        f"line {wr_idx + 1}: `workflow_run` has an EMPTY `workflows:` filter"
                     )
                 continue
             filters = _child_keys(_block(lines, wr_idx, wr_indent))
@@ -273,6 +380,40 @@ on:
     types: [completed]
 """
 
+# Flow-style trigger bodies get the SAME structural treatment as block mappings.  A
+# substring test for "workflows" accepts every one of the four rejects below — an
+# empty list, a neighbouring key that merely contains the word, the word quoted as a
+# value, and a truncated mapping — so these are what make the flow branch non-vacuous.
+_FLOW_CLEAN = """\
+name: downstream
+on:
+  workflow_run: {workflows: [CI], types: [completed]}
+"""
+
+_FLOW_EMPTY = """\
+name: aggregator
+on:
+  workflow_run: {workflows: [], types: [completed]}
+"""
+
+_FLOW_WRONG_KEY = """\
+name: aggregator
+on:
+  workflow_run: {not_workflows: [CI], types: [completed]}
+"""
+
+_FLOW_QUOTED_SCALAR = """\
+name: aggregator
+on:
+  workflow_run: {types: ["workflows"]}
+"""
+
+_FLOW_UNPARSEABLE = """\
+name: aggregator
+on:
+  workflow_run: {workflows: [CI]
+"""
+
 # Each case asserts the exact DIAGNOSIS, not merely the finding count.  The two
 # violation branches ("no filter" / "EMPTY filter") always report the SAME count for a
 # given trigger, so a count-only assertion is vacuous: disabling the missing-key branch
@@ -288,6 +429,11 @@ _SELF_TEST_CASES = [
     ("quoted on: key", _QUOTED_ON, ["has no `workflows:` filter"]),
     ("trailing comments on a clean trigger", _TRAILING_COMMENT_CLEAN, []),
     ("trailing comment after an empty list", _TRAILING_COMMENT_EMPTY, ["has an EMPTY `workflows:` filter"]),
+    ("flow mapping with a populated filter", _FLOW_CLEAN, []),
+    ("flow mapping with an empty list", _FLOW_EMPTY, ["has an EMPTY `workflows:` filter"]),
+    ("flow mapping with a neighbouring key", _FLOW_WRONG_KEY, ["has no `workflows:` filter"]),
+    ("flow mapping with the word only as a value", _FLOW_QUOTED_SCALAR, ["has no `workflows:` filter"]),
+    ("unparseable inline value", _FLOW_UNPARSEABLE, ["has an UNPARSEABLE inline value"]),
 ]
 
 
