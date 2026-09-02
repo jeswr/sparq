@@ -108,7 +108,7 @@ pub use write_through::AclWriteOutcome;
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;
 use sparq_core::Graph;
-use sparq_engine::{DatasetView, DefaultGraphMode, FxHashSet, QueryResult};
+use sparq_engine::{DatasetView, DefaultGraphMode, FxHashSet, QueryBudget, QueryResult};
 use std::sync::{Arc, OnceLock};
 
 /// The reserved named graph holding the materialized authorization view.
@@ -1249,22 +1249,86 @@ impl PodStore {
     /// # Ok::<(), String>(())
     /// ```
     pub fn update_as(&mut self, s: &Session, sparql: &str) -> Result<(), String> {
-        self.update_inner(s, sparql, false)
+        self.update_inner(s, sparql, false, &QueryBudget::unlimited())
     }
 
     /// [`PodStore::update_as`] for **ACP** pods: identical write-access enforcement, but
     /// a permitted control-doc/group write re-materializes the ACP view
     /// ([`PodStore::materialize_acp`]) instead of the WAC one. [OPUS-4.8] sq-xor3.
     pub fn update_as_acp(&mut self, s: &Session, sparql: &str) -> Result<(), String> {
-        self.update_inner(s, sparql, true)
+        self.update_inner(s, sparql, true, &QueryBudget::unlimited())
     }
 
-    fn update_inner(&mut self, s: &Session, sparql: &str, acp: bool) -> Result<(), String> {
+    /// [`PodStore::update_as`] under a cooperative [`QueryBudget`] — the write-path twin of
+    /// the budgeted read entry points, for a caller that must bound *every* evaluation it
+    /// issues (an agent tool surface, an HTTP handler). [FABLE-5] sq-yhlf0.
+    ///
+    /// The budget covers BOTH evaluations an update can perform:
+    ///
+    /// - the authorization check's `GRAPH ?var` binding SELECT (see the precise-resolution
+    ///   note on [`PodStore::update_as`]) — an exhausted budget there is a **deny**, and
+    ///   nothing is mutated;
+    /// - the apply's `DELETE`/`INSERT … WHERE` evaluation, via
+    ///   [`sparq_engine::update_in_place_with_budget`].
+    ///
+    /// Everything else is bounded by its operand size: as the engine documents, the
+    /// non-WHERE operations (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`/`LOAD`) do not
+    /// consult the budget at all, so a caller that also needs to bound *those* must cap the
+    /// update text it accepts. Authorization is unchanged — a budget can only turn a
+    /// permitted update into an error, never a denied one into a write.
+    ///
+    /// Failure semantics are otherwise exactly [`PodStore::update_as`]'s, including its
+    /// engine-inherited **non-atomicity on error**: a budget that trips part-way through a
+    /// multi-operation (`;`-separated) request leaves the earlier operations' prefix
+    /// applied. A single operation's WHERE is fully evaluated before any of its delta is
+    /// applied, so the common case — one over-budget `DELETE/INSERT … WHERE` — mutates
+    /// nothing. A caller needing all-or-nothing request semantics should wrap this in its
+    /// own fork/commit, exactly as it must around [`PodStore::update_as`].
+    ///
+    /// An unlimited budget is byte-for-byte [`PodStore::update_as`].
+    ///
+    /// # Errors
+    ///
+    /// [`PodStore::update_as`]'s errors, plus the engine's cooperative-budget abort
+    /// (`"query budget exceeded (timeout|max-rows|max-bytes|cancelled)"`) from either
+    /// evaluation above.
+    pub fn update_as_with_budget(
+        &mut self,
+        s: &Session,
+        sparql: &str,
+        budget: &QueryBudget,
+    ) -> Result<(), String> {
+        self.update_inner(s, sparql, false, budget)
+    }
+
+    /// [`PodStore::update_as_with_budget`] for **ACP** pods — the budgeted twin of
+    /// [`PodStore::update_as_acp`] (a permitted control-doc/group write re-materializes the
+    /// ACP view instead of the WAC one). [FABLE-5] sq-yhlf0.
+    ///
+    /// # Errors
+    ///
+    /// As [`PodStore::update_as_with_budget`].
+    pub fn update_as_acp_with_budget(
+        &mut self,
+        s: &Session,
+        sparql: &str,
+        budget: &QueryBudget,
+    ) -> Result<(), String> {
+        self.update_inner(s, sparql, true, budget)
+    }
+
+    fn update_inner(
+        &mut self,
+        s: &Session,
+        sparql: &str,
+        acp: bool,
+        budget: &QueryBudget,
+    ) -> Result<(), String> {
         // Authorize against the CURRENT auth view before mutating anything (fail-closed).
         let auth = Arc::clone(&self.auth);
-        let permit = update::check(&self.graph, &auth, s, sparql, self.group_docs())?;
-        // Authorized: apply through the engine's in-place delta path.
-        sparq_engine::update_in_place(&mut self.graph, sparql)?;
+        let permit = update::check(&self.graph, &auth, s, sparql, self.group_docs(), budget)?;
+        // Authorized: apply through the engine's in-place delta path, under the same budget.
+        sparq_engine::update_in_place_with_budget(&mut self.graph, sparql, budget)?;
         // A change to the access-control rules invalidates the auth view.
         if permit.rematerialize {
             if acp {

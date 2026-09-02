@@ -144,8 +144,14 @@
 //! - RDF sources only: `content_type` must be Turtle or N-Triples (or JSON-LD when the
 //!   opt-in `jsonld` feature is enabled) — see the non-RDF scope-out above. [GPT-5.6]
 //! - The SPARQL `update` tool delegates to the session-checked
-//!   `PodStore::update_as` / `update_as_acp`, which applies the per-graph write
-//!   permission check but not the wall-clock/row budget the read tools enforce.
+//!   `PodStore::update_as_with_budget` / `update_as_acp_with_budget`, so it applies the
+//!   per-graph write permission check AND the same wall-clock/row budget the read tools
+//!   enforce ([FABLE-5] sq-yhlf0). The budget reaches the two evaluations an update
+//!   performs — the authorization check's `GRAPH ?var` binding SELECT and the apply's
+//!   `DELETE`/`INSERT … WHERE`. It does NOT bound the bulk-data operations
+//!   (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`), which the engine costs by operand
+//!   size; those are bounded by the size of the update text the transport accepted, so an
+//!   embedder serving untrusted callers should cap the request body.
 //! - Time-windowed conditional grants fail closed unless [`SolidServerConfig::now`]
 //!   supplies a request clock.
 
@@ -1240,8 +1246,15 @@ impl SolidMcpServer {
         Ok(json!({}))
     }
 
-    /// `update`: session-checked SPARQL Update (`PodStore::update_as` — every touched
-    /// graph needs this session's write permission, fail-closed, atomic).
+    /// `update`: session-checked SPARQL Update (`PodStore::update_as_with_budget` — every
+    /// touched graph needs this session's write permission, fail-closed) under the SAME
+    /// per-call [budget](Self::budget) the read tools enforce, so a tool-issued update is
+    /// bounded exactly as a tool-issued query is (draft §9.4). [FABLE-5] sq-yhlf0.
+    ///
+    /// The budget bounds the two places an update evaluates SPARQL: the authorization
+    /// check's `GRAPH ?var` binding SELECT and the apply's `DELETE`/`INSERT … WHERE`. The
+    /// bulk-data operations (`INSERT`/`DELETE DATA`, `CLEAR`/`DROP`/`CREATE`) are bounded
+    /// instead by the size of the update text the transport accepted.
     fn tool_update(&mut self, args: &Value) -> Result<String, String> {
         let sparql = arg_str(args, "sparql")?.to_string();
         let config = self.config.clone();
@@ -1251,10 +1264,11 @@ impl SolidMcpServer {
             issuer: config.issuer.as_deref(),
             now: config.now.as_deref(),
         };
+        let budget = self.budget();
         if self.config.acp {
-            self.store.update_as_acp(&session, &sparql)?;
+            self.store.update_as_acp_with_budget(&session, &sparql, &budget)?;
         } else {
-            self.store.update_as(&session, &sparql)?;
+            self.store.update_as_with_budget(&session, &sparql, &budget)?;
         }
         Ok("ok".to_string())
     }

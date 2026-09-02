@@ -3,6 +3,7 @@
 
 use sparq_core::Graph;
 use sparq_solid::fixture::{acp_fixture, ALICE, APP, BOB, CAROL, DAVE};
+use sparq_engine::QueryBudget;
 use sparq_solid::{AccessProvenance, Mode, PodStore, Session};
 
 fn store() -> PodStore {
@@ -118,6 +119,59 @@ fn acp_write_enforcement_matches_grants() {
     assert!(
         s.update_as_acp(&Session { agent: Some(DAVE), client: None, issuer: None, now: None }, &ins(team2)).is_err(),
         "dave denied write on team2"
+    );
+}
+
+/// How many triples the named graph `name` currently holds (0 if absent).
+fn graph_len(store: &PodStore, name: &str) -> usize {
+    let term = oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(name));
+    store
+        .graph
+        .named
+        .iter()
+        .find(|(n, _)| *n == term)
+        .map(|(_, g)| {
+            let pat: sparq_core::store::Pattern = [None, None, None];
+            g.store.scan(&pat).rows.len()
+        })
+        .unwrap_or(0)
+}
+
+/// [FABLE-5] sq-yhlf0: the ACP twin of the budgeted write path. `update_as_acp_with_budget`
+/// must enforce the SAME ACP grants as `update_as_acp` and, on top of that, abort when the
+/// caller's budget is exhausted — leaving the store untouched. (The WAC side's fuller matrix
+/// lives in tests/update.rs; this pins that the ACP entry point is wired to the same path
+/// rather than quietly dropping the budget.)
+#[test]
+fn acp_budgeted_write_enforces_grants_and_the_budget() {
+    let mut s = store();
+    let priv0 = "https://pod.ex/priv0/c4/g0/d0.ttl";
+    // A WHERE-bearing update: the engine's bulk-data operations do not consult the budget.
+    let sparql = format!(
+        "INSERT {{ GRAPH <{priv0}> {{ <{priv0}#it> <https://ex.dev/ns#k> \"v\" }} }} \
+         WHERE {{ GRAPH <{priv0}> {{ ?s ?p ?o }} }}"
+    );
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let before = graph_len(&s, priv0);
+
+    // Exhausted deadline -> abort, nothing written (alice DOES hold the grant, so this can
+    // only be the budget).
+    let mut expired = QueryBudget::unlimited();
+    expired.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+    let e = s
+        .update_as_acp_with_budget(&alice, &sparql, &expired)
+        .expect_err("an exhausted deadline aborts the ACP write path too");
+    assert!(e.contains("query budget exceeded"), "{e}");
+    assert_eq!(graph_len(&s, priv0), before, "an aborted ACP update mutates nothing");
+
+    // Unlimited budget -> the same update applies, and BOB is still denied.
+    s.update_as_acp_with_budget(&alice, &sparql, &QueryBudget::unlimited())
+        .expect("alice (cumulative owner) writes priv0 under an unlimited budget");
+    assert_eq!(graph_len(&s, priv0), before + 1, "the unbudgeted-equivalent write applied");
+    let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
+    assert!(
+        s.update_as_acp_with_budget(&bob, &sparql, &QueryBudget::unlimited()).is_err(),
+        "the budget never widens authorization: bob still has no write on priv0"
     );
 }
 
