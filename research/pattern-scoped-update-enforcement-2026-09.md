@@ -178,16 +178,25 @@ into a `USING` expression ("determines which existing rows are visible to the us
 `WITH CHECK` expression ("determines which new or modified rows are allowed to be written
 back") — `SELECT`/`DELETE` consult `USING` only, `INSERT` consults `WITH CHECK` only, and
 `UPDATE` consults both. Crucially the two differ in *failure mode*: a row failing `USING`
-is **silently filtered**, a row failing `WITH CHECK` **raises an error**. That asymmetry is
-not an accident and §3's laws reproduce it.
+is **silently filtered**, a row failing `WITH CHECK` **raises an error**.
+
+That asymmetry is not an accident, but the analogy must be drawn precisely, because this
+design has **three** predicates where Postgres has two — and the extra one is the reason a
+naive reading of the analogy is wrong. Postgres's `USING` does double duty: it is both the
+visibility predicate and the delete-authority predicate, so "invisible" and "may not be
+deleted" are the same condition and share one failure mode. This design **splits** them: a
+principal can see a triple (`R`) and still have no authority to remove it (`Wdel`). Only the
+visibility half inherits `USING`'s silent filtering; the write-authority half — `Wdel` no
+less than `Wins` — is a `WITH CHECK`-shaped predicate whose failure mode is **denial**. L2
+states the split and §5.1 step 6 implements it.
 
 So a write scope is a **pair**, never a single predicate:
 
-| Symbol | ODRL source (proposed) | Role |
-|---|---|---|
-| `R(g)` | `odrl:read` on a `PatternAsset` | read scope — the existing `GraphScope` (`USING`) |
-| `Wdel(g)` | `odrl:modify` / `odrl:delete` on a `PatternAsset` | which existing triples may be REMOVED |
-| `Wins(g)` | `odrl:modify` / `odrl:append` on a `PatternAsset` | which triples may be ADDED (`WITH CHECK`) |
+| Symbol | ODRL source (proposed) | Role | Failure mode |
+|---|---|---|---|
+| `R(g)` | `odrl:read` on a `PatternAsset` | read scope — the existing `GraphScope`; the only visibility predicate (`USING`) | silently filtered (the triple is simply absent) |
+| `Wdel(g)` | `odrl:modify` / `odrl:delete` on a `PatternAsset` | which existing **visible** triples may be REMOVED | **DENY** (L2) |
+| `Wins(g)` | `odrl:modify` / `odrl:append` on a `PatternAsset` | which triples may be ADDED (`WITH CHECK`) | **DENY** (L3) |
 
 ### L1 — Refinement, never widening
 
@@ -198,16 +207,35 @@ composes per layer.
 
 ### L2 — Delete implies read: no blind delete
 
-A quad may be deleted only if it is **both** in `Wdel(g)` **and** visible under `R(g)`.
+A quad may be deleted only if it is **both** visible under `R(g)` **and** in `Wdel(g)`. The
+two conjuncts fail **differently**, and collapsing them into one "`Wdel` is `USING`" rule is
+the error §3's preamble warns about:
 
-This is Postgres's `USING` law and it is the direct answer to §2.4's *delete-visibility*
-question. Deleting a triple you cannot see is a probe: the delete either changes the store
-or does not, and any later observation (a read-back, a re-insert, a subsequent conditional
-update) distinguishes the two. Under §5's algorithm the law is **automatic** — the fork is
-the masked replica, so a masked triple is not there to be matched by a `DELETE … WHERE` and
-a `DELETE DATA` naming it is a no-op on the fork and therefore absent from the captured
-delta. Corollary, and it is a good one: a principal with write-but-no-read on a graph has
-`R(g) = ∅`, so it can delete **nothing** — fail-closed with no special case.
+* **Not visible under `R(g)`** — the quad is not there to be matched, so no delete effect is
+  produced, nothing is denied, and the operation succeeds as a no-op. This is the silent
+  filtering, and it is the *mask's* behaviour, not the write scope's. Under §5's algorithm
+  it is **automatic**: the fork is the masked replica, so a masked triple is not there to be
+  matched by a `DELETE … WHERE`, and a `DELETE DATA` naming it is a no-op on the fork and
+  therefore absent from the captured delta.
+* **Visible under `R(g)` but outside `Wdel(g)`** — a delete effect *is* captured, and §5.1
+  step 6 **denies the whole update**, uniformly per L7. It is not silently dropped and the
+  operation does not partially apply.
+
+Denying in the second case reveals nothing beyond `R(g)`, and the argument is short: every
+quad that can reach step 6's delete check was matched on the fork, so it is visible under
+`R(g)` by construction and the principal could have read it directly. The deny therefore
+describes the principal's own write-scope boundary over data it can already see — the same
+reason L3's error is safe. Silent filtering here would be strictly worse for the same reason
+it is worse under L3: the principal would believe it had removed data that is still there,
+and the resulting read-back becomes an oracle for the scope boundary instead.
+
+This is the direct answer to §2.4's *delete-visibility* question. Deleting a triple you
+cannot see is a probe: the delete either changes the store or does not, and any later
+observation (a read-back, a re-insert, a subsequent conditional update) distinguishes the
+two — which is why the first case must be a no-op on a replica that genuinely lacks the
+triple, rather than a filter applied to a real match. Corollary, and it is a good one: a
+principal with write-but-no-read on a graph has `R(g) = ∅`, so it can delete **nothing** —
+fail-closed with no special case.
 
 Note this makes `Mode::Append` structurally safe: append cannot delete at all, so L2 is
 vacuous for it.
@@ -217,12 +245,16 @@ vacuous for it.
 Every concrete quad the apply would insert must be in `Wins(g)`. A quad outside it
 **denies the whole update** with an error — it is not silently dropped.
 
-Silently dropping is the tempting choice (it mirrors L2's silent filtering) and it is
+Silently dropping is the tempting choice (it looks like L2's first clause) and it is
 wrong: the principal would believe it had written data that is not there, and a subsequent
 read-back returning nothing becomes an oracle for the *scope boundary* rather than for the
 data. An error is safe here precisely because the inserted quad is the principal's **own
 input** — telling it "this quad is outside your write scope" reveals nothing it did not
 already supply. This is exactly the Postgres `WITH CHECK` failure mode, for the same reason.
+
+L2's second clause is this same law on the delete side, and the resemblance to its *first*
+clause is only superficial: silence there is the mask reporting that a triple is absent,
+not the write scope declining a request it did receive.
 
 ### L4 — You may only write where you can read: `Wins(g) ⊆ visible(R(g))` and `Wdel(g) ⊆ visible(R(g))`
 
@@ -284,11 +316,22 @@ message. Otherwise the error string is itself the oracle L2 and L4 exist to clos
 
 Note carefully what this law does *not* say. Under §5.1 a `DELETE` naming a triple that is
 absent — or masked, which is the same thing on the fork — produces no delete effect and so
-no deny at all; it succeeds as a no-op (§4). "The triple you named does not exist" therefore
-never reaches an error string in the first place, and there is no message to make
-indistinguishable from anything. The indistinguishability that matters is *within* the deny
-path, and it is an INSERT property: an out-of-scope insert must deny identically whether or
-not the quad it names is already present behind the mask (§5.3 item 4).
+no deny at all; it succeeds as a no-op (§4, L2 first clause). "The triple you named does not
+exist" therefore never reaches an error string in the first place, and there is no message
+to make indistinguishable from anything. The indistinguishability that matters is *within*
+the deny path, and there are **two** such paths, not one:
+
+* **L3, insert outside `Wins`** — must deny identically whether or not the quad it names is
+  already present behind the mask, and identically across differing attacker-supplied term
+  text (§5.3 item 4).
+* **L2 second clause, delete of a *visible* quad outside `Wdel`** — must deny identically
+  across differing term text. This path exists because `Wdel` may be strictly narrower than
+  `R` (L4 gives `Wdel = patterns ∩ visible(R)`), so a matched, readable quad can still be
+  unauthorized to remove.
+
+A deny under each law names the scope it violated (`Wins` or `Wdel`) and nothing else; the
+two laws' messages may differ from one another, since which law was broken is a fact about
+the principal's own grant, but messages *within* a law must be byte-identical.
 
 The cautionary prior art is Postgres's own documented residual channel: *"they are
 not applied when the system is performing internal referential integrity checks or
@@ -336,6 +379,14 @@ absent" contract, extended to writes, and any other answer reintroduces L2's pro
 mean the property only holds for deltas whose quads are all in scope, which is what L3's
 deny (rather than a silent drop) enforces.
 
+Note the sharp contrast one line over, because the two cases look alike and behave
+oppositely: if that same principal's scope *does* show `ex:phone` but its `Wdel` excludes
+it, the identical update **denies** rather than quietly doing nothing (L2, second clause).
+Silence is a property of the **mask** and only of the mask; every failure of *write
+authority*, delete or insert, is loud. The equivalence above is stated over the masked
+world precisely so that this stays true: it says what the masked triples do to the
+transition, not what an insufficient write scope does to the verdict.
+
 ## 5. Proposed mechanism (W-E), for review — NOT implemented
 
 A new OFF-by-default feature `pattern-scope-write` (implying `pattern-scope`), adding ONE
@@ -354,10 +405,19 @@ update_scoped_as(session, sparql, scopes) -> Result<(), String>:
   5. effects = sparq_engine::update_in_place_capturing(&mut F, sparql, budget)?
   6. for each effect:
        Delta { slot: Some(g), inserts, deletes } =>
-           every d in deletes must satisfy  Wdel(g).visible(d)   else DENY   # L2 (masked
-                                                                            # triples are
-                                                                            # already absent
-                                                                            # from F)
+           every d in deletes must satisfy  Wdel(g).visible(d)   else DENY   # L2 2nd clause.
+                                                                            # Masked triples
+                                                                            # never reach
+                                                                            # here: absent
+                                                                            # from F, so no
+                                                                            # effect (L2 1st
+                                                                            # clause, silent
+                                                                            # no-op). A quad
+                                                                            # VISIBLE under R
+                                                                            # but outside
+                                                                            # Wdel denies —
+                                                                            # it is not
+                                                                            # filtered out.
            every i in inserts must satisfy  Wins(g).visible(i)   else DENY   # L3, L4
        Delta { slot: None, .. }                => DENY   # default graph, as today
        Clear | Drop | Create                   => DENY   # L8
@@ -416,23 +476,37 @@ Not "would be nice" — the acceptance bar, mirroring what the read path already
    ORACLE `PodStore` whose masked triples were physically deleted, then re-merging the
    masked triples untouched. Non-vacuity: a no-op mask must flip it red. This is the write
    twin of `pattern_scope_fuzz.rs` and should reuse its SplitMix64 harness.
-2. **L2 probe battery.** Every shape that could reveal a masked triple through a delete:
-   `DELETE DATA` naming it, `DELETE … WHERE` matching it, `DELETE/INSERT` with the masked
-   triple in an `OPTIONAL`/`MINUS`/`EXISTS` inside the WHERE.
+2. **L2 probe battery — both clauses.** *First clause (silent no-op):* every shape that could
+   reveal a **masked** triple through a delete — `DELETE DATA` naming it, `DELETE … WHERE`
+   matching it, `DELETE/INSERT` with the masked triple in an `OPTIONAL`/`MINUS`/`EXISTS`
+   inside the WHERE — must succeed, change nothing, and be indistinguishable from the same
+   update against a store where the triple is genuinely absent. *Second clause (deny):* a
+   target **visible under `R` but outside `Wdel`** must **DENY**, leave the store
+   canonically identical (no partial application of the operation's other, authorized
+   effects), and do so for `DELETE DATA` and `DELETE … WHERE` alike. Both halves are
+   required and they are the non-vacuity check on each other: an implementation that
+   silently filtered `Wdel` failures would pass the first half alone, and one that denied on
+   masked triples would pass the second half alone.
 3. **L4 membership-oracle battery.** Insert a triple that is masked-and-present vs
    masked-and-absent; the observable outcome (verdict, store, subsequent read) must be
    identical in both cases.
 4. **L7 uniform-denial battery.** Compare messages only across pairs that *both* actually
    deny. Under §5.1 a `DELETE` of an absent or masked quad does not deny — it is a silent
-   no-op (§4, L7) — so it has no message to compare, and the delete-side obligation is
-   discharged as *successful* indistinguishability by item 2, not here. The two denying
-   pairs, both under L3 (an insert outside `Wins`):
-   * **Content independence.** Two out-of-scope inserts whose offending quads carry
+   no-op (§4, L2 first clause) — so it has no message to compare, and *that* half of the
+   delete obligation is discharged as *successful* indistinguishability by item 2. The
+   denying pairs, two under L3 (an insert outside `Wins`) and one under L2's second clause
+   (a delete of a visible quad outside `Wdel`):
+   * **L3 content independence.** Two out-of-scope inserts whose offending quads carry
      *different* attacker-supplied term text must produce byte-identical messages — the
      message names the violated scope and nothing about the quad.
-   * **Scope-boundary indistinguishability.** Item 3's pair — a quad masked-and-present vs
+   * **L3 scope-boundary indistinguishability.** Item 3's pair — a quad masked-and-present vs
      masked-and-absent, both outside `Wins` by L4 and so both denied — must produce
      byte-identical messages in addition to item 3's identical store and subsequent read.
+   * **L2 content independence.** Two deletes of *visible* quads outside `Wdel` whose
+     offending quads carry different term text must likewise produce byte-identical
+     messages, naming `Wdel` and nothing about the quad. (Messages *across* the two laws may
+     differ — which of the principal's own scopes it exceeded is not a fact about the data;
+     see L7.)
 5. **Delta-parity guard.** The quads authorized in step 6 must equal the quads
    `apply_effects` writes in step 8 — the write twin of the existing
    `differential_writeset_tests` module.
@@ -508,10 +582,18 @@ Not "would be nice" — the acceptance bar, mirroring what the read path already
    the cheapest fail-closed rule and it makes the whole design fall out; but it forbids the
    blind drop-box, which is a real Solid pattern (`ldp:inbox`). If the drop-box is required,
    the design changes materially and phase 7 becomes a blocker rather than a follow-up.
-2. **Is §4's consequence acceptable?** A principal's own `DELETE` silently affects nothing in
-   its masked region and reports success. This record argues it is the only answer
-   consistent with the read-path contract; it is nevertheless surprising, and a maintainer
-   who wants an error instead should say so — an error is a (small, bounded) L2 probe.
+2. **Is §4's consequence — and the split failure mode it implies — acceptable?** A
+   principal's own `DELETE` silently affects nothing in its **masked** region and reports
+   success, while the same `DELETE` over a region that is **visible but outside `Wdel`**
+   denies loudly (L2's two clauses). This record argues the split is the only answer
+   consistent with the read-path contract: silence is a property of the mask, denial a
+   property of write authority. It is nevertheless surprising — two deletes that look alike
+   to the principal behave oppositely — and a maintainer who wants a uniform answer should
+   say so. Neither uniform option is free: erroring on the masked case is a (small, bounded)
+   L2 probe, and silently filtering the `Wdel` case makes the principal believe it removed
+   data that is still there and turns the read-back into a scope-boundary oracle. It would
+   also cost more to build, needing a second fork masked by `R ∩ Wdel` for delete matching
+   while the WHERE still reads through `R`.
 3. **Should the P0 fix require `Read` on WHERE graphs, or evaluate the WHERE over the
    authorized view?** The first denies more updates and is a visible behaviour change; the
    second silently changes results. This record leans to the first at graph granularity (a
