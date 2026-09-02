@@ -24,12 +24,15 @@
 //!   (`EXPERIMENTAL-dpop-sk-v1`) is pinned against the spec string.
 //! - **Solid-OIDC verification** — delegated (see Architecture above), not reimplemented here: the
 //!   `solid-oidc-verifier` git dependency is `rev`-pinned in this crate's `Cargo.toml`.
-//! - **`lws-spec`, `lws-ucs`** — **UNRESOLVED**. Location and content unknown; outside this note
-//!   neither name is referenced by any source file, dependency, or test vector in this repository,
-//!   and no shipped behaviour here is known to depend on either.
-//!   Promoting them out of UNRESOLVED takes what DPoP-SK already has — a maintainer-confirmed
-//!   reference **plus** an executed spec vector, not a prose citation. Until that pointer exists do
-//!   not cite a URL for them: a guessed one would read as a normative claim this crate cannot back.
+//! - **`lws-spec`, `lws-ucs`** — **LOCATED, STILL UNPINNED**. Both names now resolve
+//!   (`research/lws-spec-conformance-vectors.md` §1): `jeswr/lws-spec` is a personal, AI-authored
+//!   clean-slate Linked Web Storage design carrying SHACL shapes, an executable N3 access-decision
+//!   rule set, and 157 language-neutral conformance test vectors; `jeswr/lws-ucs` is a fork of the
+//!   W3C LWS Use Cases document, not a jeswr-authored spec. Locating them is NOT promotion: the bar
+//!   this note sets is what DPoP-SK already has — a maintainer-confirmed reference **plus** an
+//!   executed spec vector — and neither half is met. Nothing here is pinned to either document, no
+//!   shipped behaviour depends on either, and this crate implements no part of that design (it has
+//!   no JLWS surface at all). Treat both as unpinned prior art until a vector actually runs.
 //!
 //! ## Vertical slice (this crate)
 //! A coherent, compiling slice with clean trait seams + tests:
