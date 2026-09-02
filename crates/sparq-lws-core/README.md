@@ -80,11 +80,7 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
 - **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: the in-process
   engine (compiled by default, but selected only by `PSS_SPARQ_BACKEND=embedded` — the
   boot default stays the in-memory double), opt-in live SPARQ HTTP client, `object_store`.
-- **Notifications (WebSocketChannel2023)** — subscribe is authenticated AND
-  authorized: the WebID needs `acl:Read` on the topic (`acl:Control` for an `.acl`
-  topic), decided by the same WAC engine as the LDP routes. The WS receive upgrade
-  requires the minted receive token and re-runs that check against the token's bound
-  WebID, so a denial is a 403 with no socket and no registered subscriber.
+- **Notifications (WebSocketChannel2023)** — subscribe and the token-gated WS receive upgrade are both WAC-authorized by the same engine as the LDP routes (`acl:Read` on the topic, `acl:Control` for an `.acl`), so a denial is a 403 with no socket and no registered subscriber.
 - **Notification observability** — [GPT-5.6] process-wide backlog-overflow totals
   are available through `notifications::ws::NotificationMetrics::snapshot()`.
 - **Transport hardening** — HTTP/2 rapid-reset and HTTP/1 slowloris guards (explicit
