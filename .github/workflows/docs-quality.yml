@@ -1087,10 +1087,12 @@ jobs:
       # whitespace-only-cone no-op). Stdlib-only, no cargo/network.
       - name: Self-test cone_coverage.py (cone selector + cone report — sq-1cb6l)
         run: python3 scripts/tests/test_cone_coverage.py
-      # test_drift_scan.py (37 tests) — the periodic drift scanner
+      # test_drift_scan.py (42 tests) — the periodic drift scanner
       # (scripts/drift-scan.py): all 5 scanner classes (bench-missing,
       # skill-missing, explain-asymmetry, dashboard-row, conformance-split),
-      # the dedup-key stability contract, main(--dry-run), and the CI-guard
+      # both of gate G1's escape hatches mirrored (`publish = false` and, since
+      # #5701, the README `<!-- flow-on-exempt: reason -->` directive), the
+      # dedup-key stability contract, main(--dry-run), and the CI-guard
       # that refuses to mint issues outside CI. Stdlib-only, no gh/git/network.
       - name: Self-test drift-scan.py (all scanner classes + CI guard — sq-1cb6l)
         run: python3 scripts/tests/test_drift_scan.py

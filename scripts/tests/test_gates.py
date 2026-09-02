@@ -132,6 +132,109 @@ class G1Test(unittest.TestCase):
         self.assertEqual(g1.added_crates(added), [])
         self.assertEqual(g1.evaluate(changed, added), [])
 
+    # ----------------------------------------------------------------------- #
+    # [OPUS-5] (#5701) The `<!-- flow-on-exempt: reason -->` README escape hatch.
+    # AGENTS.md and design §2.1 documented it from the start; until #5701 no script
+    # read it, so a crate carrying it was still blocked by G1.
+    # ----------------------------------------------------------------------- #
+    def test_flow_on_exempt_crate_needs_only_readme(self):
+        # A PUBLISHABLE crate (publish != false) with NO bench and NO SKILL passes
+        # once its README carries a reasoned flow-on-exempt directive.
+        added = ["crates/sparq-foo/Cargo.toml", "crates/sparq-foo/README.md"]
+        changed, added_paths = g1.parse_status_lines(_statused(added))
+        violations = g1.evaluate(
+            changed,
+            added_paths,
+            stub_overrides={"sparq-foo": False},
+            bench_overrides={"sparq-foo": False},
+            exempt_overrides={"sparq-foo": "thin re-export; measured via sparq-cli"},
+        )
+        self.assertEqual(violations, [])
+
+    def test_without_the_exempt_marker_the_same_crate_fails(self):
+        # The control for the test above: identical inputs, marker absent → the
+        # bench + SKILL legs are still enforced. (If this passed too, the test
+        # above would be proving nothing.)
+        added = ["crates/sparq-foo/Cargo.toml", "crates/sparq-foo/README.md"]
+        changed, added_paths = g1.parse_status_lines(_statused(added))
+        violations = g1.evaluate(
+            changed,
+            added_paths,
+            stub_overrides={"sparq-foo": False},
+            bench_overrides={"sparq-foo": False},
+            exempt_overrides={"sparq-foo": None},
+        )
+        self.assertEqual(len(violations), 1)
+        joined = " ".join(violations[0][1])
+        self.assertIn("benchmark", joined)
+        self.assertIn("SKILL.md", joined)
+
+    def test_flow_on_exempt_crate_missing_readme_still_fails(self):
+        # The hatch lives IN the README, so it can never waive requirement (b).
+        changed, added = g1.parse_status_lines(
+            _statused(["crates/sparq-foo/Cargo.toml"])
+        )
+        violations = g1.evaluate(
+            changed,
+            added,
+            stub_overrides={"sparq-foo": False},
+            bench_overrides={"sparq-foo": False},
+            exempt_overrides={"sparq-foo": "reasoned waiver"},
+        )
+        self.assertEqual(len(violations), 1)
+        _, missing = violations[0]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("README", missing[0])
+
+    def test_readme_exempt_reason_parses_the_documented_form(self):
+        # The exact spelling AGENTS.md / design §2.1 advertise.
+        self.assertEqual(
+            g1.readme_exempt_reason(
+                "# sparq-foo\n\n<!-- flow-on-exempt: covered by the CLI harness -->\n"
+            ),
+            "covered by the CLI harness",
+        )
+        # A leading audit prefix inside the same comment is fine (the
+        # `internal-stub` directive is written this way throughout the repo).
+        self.assertEqual(
+            g1.readme_exempt_reason("<!-- [OPUS-5] sq-x: flow-on-exempt: thin shim -->"),
+            "thin shim",
+        )
+
+    def test_readme_exempt_reason_rejects_reasonless_and_prose_mentions(self):
+        # A reasonless directive waives NOTHING — the hatch cannot be used silently.
+        self.assertIsNone(g1.readme_exempt_reason("<!-- flow-on-exempt: -->"))
+        self.assertIsNone(g1.readme_exempt_reason("<!-- flow-on-exempt:    -->"))
+        # Bare prose mentioning the token is not a directive (mirrors the
+        # `internal-stub` gate's HTML-comment requirement).
+        self.assertIsNone(
+            g1.readme_exempt_reason("You can add flow-on-exempt: a reason here.\n")
+        )
+        self.assertIsNone(g1.readme_exempt_reason("# sparq-foo\n\nno directive\n"))
+
+    def test_flow_on_exempt_reason_read_from_disk(self):
+        # End-to-end through the on-disk reader: a crate README in the worktree.
+        # (crate_flow_on_exempt_reason resolves against the script's REPO_ROOT, so
+        # point that at a tmp tree for the duration of the test.)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "crates" / "sparq-tmp").mkdir(parents=True)
+            (root / "crates" / "sparq-tmp" / "README.md").write_text(
+                "# sparq-tmp\n\n<!-- flow-on-exempt: no standalone perf surface -->\n",
+                encoding="utf-8",
+            )
+            orig = g1.REPO_ROOT
+            g1.REPO_ROOT = root
+            try:
+                self.assertEqual(
+                    g1.crate_flow_on_exempt_reason("sparq-tmp"),
+                    "no standalone perf surface",
+                )
+                # An absent README is NOT an exemption (fail-closed).
+                self.assertIsNone(g1.crate_flow_on_exempt_reason("sparq-absent"))
+            finally:
+                g1.REPO_ROOT = orig
+
     def test_copied_crate_counts_as_added(self):
         # [OPUS-4.8] `git diff -C` reports a newly-introduced path as a copy
         # (`C`/`C100`, "C<score>\t<old>\t<new>"); the destination must still be

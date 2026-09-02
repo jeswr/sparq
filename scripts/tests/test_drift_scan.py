@@ -90,6 +90,12 @@ def make_dashboard(root: Path, featured_tokens: list[str]) -> None:
     _write(root, "bench/dashboard/dashboard.js", js)
 
 
+def make_readme(root: Path, crate: str, text: str) -> None:
+    """[OPUS-5] (#5701) Write crates/<crate>/README.md — the file G1's
+    `flow-on-exempt` escape hatch lives in."""
+    _write(root, f"crates/{crate}/README.md", text)
+
+
 def make_skill(root: Path, surface: str, text: str) -> None:
     _write(root, f"skills/{surface}/SKILL.md", text)
 
@@ -163,6 +169,52 @@ class BenchMissingTest(unittest.TestCase):
         self.assertIn("bench-missing:sparq-pubcrate", keys)
         self.assertNotIn("bench-missing:sparq-fedstub", keys)
 
+    # [OPUS-5] (#5701) The SECOND G1 hatch, mirrored for the same reason as the
+    # first: a crate the merge-time gate waived must not resurface as drift here.
+    def test_flow_on_exempt_crate_without_bench_not_flagged(self):
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-shim", public=True)
+        make_readme(root, "sparq-shim", "# sparq-shim\n\n<!-- flow-on-exempt: thin shim -->\n")
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])  # no ref to it
+        keys = {it.dedup_key for it in drift_scan.scan_bench_missing(root)}
+        self.assertNotIn("bench-missing:sparq-shim", keys)
+
+    def test_reasonless_exempt_marker_does_not_waive(self):
+        # The control: same tree, but the directive carries NO reason, so it is
+        # not an exemption and the crate is still flagged.
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-shim", public=True)
+        make_readme(root, "sparq-shim", "# sparq-shim\n\n<!-- flow-on-exempt: -->\n")
+        make_registry(root, sources=["crates/sparq-cli/src/main.rs"])
+        keys = {it.dedup_key for it in drift_scan.scan_bench_missing(root)}
+        self.assertIn("bench-missing:sparq-shim", keys)
+
+    def test_flow_on_exempt_predicate_is_gate_g1s_own(self):
+        # Single-source-of-truth guard: the scanner must not re-derive the
+        # directive's meaning — it delegates to gate G1's readme_exempt_reason, so
+        # the two can never disagree about what "exempt" means.
+        root = Path(self._tmp.name)
+        make_crate(root, "sparq-shim", public=True)
+        for text, expected in (
+            ("<!-- flow-on-exempt: measured via the CLI harness -->", True),
+            ("<!-- flow-on-exempt: -->", False),
+            ("prose saying flow-on-exempt: not in a comment", False),
+            ("# sparq-shim\n\nno directive at all\n", False),
+        ):
+            make_readme(root, "sparq-shim", text)
+            self.assertIs(
+                drift_scan.crate_is_flow_on_exempt(root, "sparq-shim"),
+                expected,
+                msg=f"README {text!r}",
+            )
+            self.assertIs(
+                drift_scan._g1.readme_exempt_reason(text) is not None,
+                expected,
+                msg=f"gate G1 predicate disagrees for {text!r}",
+            )
+        # An absent README is not an exemption in either tool.
+        self.assertFalse(drift_scan.crate_is_flow_on_exempt(root, "sparq-noreadme"))
+
     def test_exemption_predicate_matches_gate_g1(self):
         # Single-source-of-truth guard: the stub predicate scan_bench_missing uses
         # (crate_is_public is False) must be the EXACT inverse of G1's
@@ -200,6 +252,21 @@ class SkillMissingTest(unittest.TestCase):
         items = drift_scan.scan_skill_missing(self.root)
         keys = {it.dedup_key for it in items}
         self.assertNotIn("skill-missing:sparq-internal", keys)
+
+    # [OPUS-5] (#5701) G1's `flow-on-exempt` hatch waives requirement (c) — the
+    # SKILL.md — as well as the bench, so skill-missing must honour it too.
+    def test_flow_on_exempt_public_crate_not_flagged(self):
+        make_crate(self.root, "sparq-shim", public=True)
+        make_readme(self.root, "sparq-shim", "<!-- flow-on-exempt: internal shim -->")
+        items = drift_scan.scan_skill_missing(self.root)
+        self.assertNotIn("skill-missing:sparq-shim", {it.dedup_key for it in items})
+
+    def test_public_crate_with_reasonless_marker_still_flagged(self):
+        # Control: a marker with no reason waives nothing.
+        make_crate(self.root, "sparq-shim", public=True)
+        make_readme(self.root, "sparq-shim", "<!-- flow-on-exempt: -->")
+        items = drift_scan.scan_skill_missing(self.root)
+        self.assertIn("skill-missing:sparq-shim", {it.dedup_key for it in items})
 
     def test_mention_anywhere_counts(self):
         make_crate(self.root, "sparq-sim", public=True)
