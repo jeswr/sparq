@@ -302,8 +302,7 @@ impl PreparedSparql {
                 continue; // runtime query error → no solutions for this chunk (lenient)
             };
             let pos = |name: &str| result.vars.iter().position(|v| v.as_str() == name);
-            let (tpos, vpos, ppos, mpos) =
-                (pos("this"), pos("value"), pos("path"), pos("message"));
+            let (tpos, vpos, ppos, mpos) = (pos("this"), pos("value"), pos("path"), pos("message"));
             let result_vars: Vec<String> =
                 result.vars.iter().map(|v| v.as_str().to_string()).collect();
             for row in &result.rows {
@@ -313,8 +312,7 @@ impl PreparedSparql {
                 let Some(this) = tpos.and_then(|i| row.get(i)).and_then(|c| c.clone()) else {
                     continue;
                 };
-                let fields =
-                    row_to_fields(&this, row, vpos, ppos, mpos, &result_vars, constraint);
+                let fields = row_to_fields(&this, row, vpos, ppos, mpos, &result_vars, constraint);
                 let vr = make_result(&this, fields);
                 grouped.entry(this).or_default().push(vr);
             }
@@ -573,10 +571,7 @@ impl PreparedSelectExpr {
 ///   * a `BIND (… AS ?v)` (`Extend`) re-binding an in-scope pre-bound name `?v`
 ///     (`unsupported-sparql-005`, ASK `unsupported-sparql-006`). A
 ///     `BIND ($this AS ?other)` binding a NEW name is fine (`pre-binding-004`).
-fn check_pre_binding(
-    pattern: &GraphPattern,
-    in_scope: &[&str],
-) -> Result<(), PreBindingViolation> {
+fn check_pre_binding(pattern: &GraphPattern, in_scope: &[&str]) -> Result<(), PreBindingViolation> {
     match pattern {
         GraphPattern::Minus { .. } => Err(PreBindingViolation::Minus),
         GraphPattern::Values { .. } => Err(PreBindingViolation::Values),
@@ -1107,11 +1102,7 @@ pub(crate) struct ComponentResultFields {
 /// returns `true` when the value VIOLATES the constraint (ASK = false). A query
 /// that fails to pre-bind (inexpressible value) or errors at runtime is treated
 /// as conforming (lenient — never panics validate()).
-pub(crate) fn ask_violates(
-    query: &Query,
-    data: &sparq_core::Graph,
-    bindings: &[Binding],
-) -> bool {
+pub(crate) fn ask_violates(query: &Query, data: &sparq_core::Graph, bindings: &[Binding]) -> bool {
     let Some(bound) = pre_bind_ask(query, bindings) else {
         return false;
     };
@@ -2327,7 +2318,11 @@ mod tests {
         let before = exec_count();
         let grouped = expr.eval_batch(&data, &foci);
         // Anti-vacuity: 4 foci → 1 execution, not 4.
-        assert_eq!(exec_count() - before, 1, "eval_batch must fire exactly once");
+        assert_eq!(
+            exec_count() - before,
+            1,
+            "eval_batch must fire exactly once"
+        );
         // Every expressible focus gets an entry; each has its color literal.
         assert_eq!(grouped.len(), 4);
         assert_eq!(
@@ -2432,9 +2427,7 @@ mod tests {
             Err(PreBindingViolation::Values)
         );
         assert_eq!(
-            check_select(
-                "SELECT $this WHERE { $this ?x ?any . SERVICE <http://e/> { ?a ?b ?c } }"
-            ),
+            check_select("SELECT $this WHERE { $this ?x ?any . SERVICE <http://e/> { ?a ?b ?c } }"),
             Err(PreBindingViolation::Service)
         );
     }
@@ -2442,7 +2435,8 @@ mod tests {
     #[test]
     fn pre_binding_rejects_subselect_dropping_this() {
         // unsupported-sparql-004: a sub-SELECT that projects ?other ?b (drops $this).
-        let q = "SELECT $this WHERE { $this ?x ?any . { SELECT ?other ?b WHERE { ?other ?b ?c } } }";
+        let q =
+            "SELECT $this WHERE { $this ?x ?any . { SELECT ?other ?b WHERE { ?other ?b ?c } } }";
         assert_eq!(
             check_select(q),
             Err(PreBindingViolation::SubSelectDropsPreBound("this".into()))
@@ -2476,7 +2470,9 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            check_select("SELECT $this WHERE { BIND ($this AS ?that) FILTER (?that = <http://e/x>) }"),
+            check_select(
+                "SELECT $this WHERE { BIND ($this AS ?that) FILTER (?that = <http://e/x>) }"
+            ),
             Ok(())
         );
         assert_eq!(
@@ -2702,7 +2698,11 @@ mod tests {
             }
         });
         // Anti-vacuity: ONE execution for four focus nodes (not four).
-        assert_eq!(exec_count() - before, 1, "batched path must fire exactly once");
+        assert_eq!(
+            exec_count() - before,
+            1,
+            "batched path must fire exactly once"
+        );
         // Every focus has an entry; only the negative-age foci have a violation.
         assert_eq!(grouped.len(), 4);
         assert_eq!(grouped[&foci[0]].len(), 1); // ex:a age -1

@@ -15,9 +15,9 @@ use crate::cs::{CsSet, CsTable};
 use crate::exec::{goo_pick, goo_seed, prepare_bgp, record_pattern_ndv, CsCtx};
 use oxrdf::Variable;
 use rustc_hash::FxHashMap;
+use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use sparq_core::dict::Id;
 use sparq_core::Graph;
-use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use std::sync::Arc;
 
 /// The star BGP `?s <p1> ?o0 . ?s <p2> ?o1 . …` over the given predicate ids.
@@ -27,7 +27,9 @@ fn star_patterns(graph: &Graph, preds: &[Id]) -> Vec<TriplePattern> {
         .iter()
         .enumerate()
         .map(|(i, &p)| {
-            let oxrdf::Term::NamedNode(nn) = graph.dict.term(p) else { panic!("predicate is an IRI") };
+            let oxrdf::Term::NamedNode(nn) = graph.dict.term(p) else {
+                panic!("predicate is an IRI")
+            };
             TriplePattern {
                 subject: TermPattern::Variable(s.clone()),
                 predicate: NamedNodePattern::NamedNode(nn),
@@ -90,15 +92,23 @@ fn stats(mut qs: Vec<f64>) -> QStats {
     qs.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     let median = qs[qs.len() / 2];
     let gmean = (qs.iter().map(|q| q.ln()).sum::<f64>() / qs.len() as f64).exp();
-    QStats { median, gmean, max: *qs.last().unwrap() }
+    QStats {
+        median,
+        gmean,
+        max: *qs.last().unwrap(),
+    }
 }
 
 fn cs_table_of(graph: &Graph) -> Arc<CsTable> {
-    Arc::new(CsTable::new(sparq_introspect::characteristic_set_ids(graph).into_iter().map(|s| CsSet {
-        predicates: s.predicates,
-        subjects: s.subjects,
-        predicate_triples: s.predicate_triples,
-    })))
+    Arc::new(CsTable::new(
+        sparq_introspect::characteristic_set_ids(graph)
+            .into_iter()
+            .map(|s| CsSet {
+                predicates: s.predicates,
+                subjects: s.subjects,
+                predicate_triples: s.predicate_triples,
+            }),
+    ))
 }
 
 /// Builds the star workload from the graph's own characteristic sets: prefixes
@@ -108,7 +118,11 @@ fn cs_table_of(graph: &Graph) -> Arc<CsTable> {
 fn star_workload(graph: &Graph, top_sets: usize) -> Vec<Vec<Id>> {
     let sets = sparq_introspect::characteristic_set_ids(graph);
     let mut workload: Vec<Vec<Id>> = Vec::new();
-    let top: Vec<_> = sets.iter().filter(|s| s.predicates.len() >= 2).take(top_sets).collect();
+    let top: Vec<_> = sets
+        .iter()
+        .filter(|s| s.predicates.len() >= 2)
+        .take(top_sets)
+        .collect();
     for s in &top {
         for k in 2..=s.predicates.len().min(4) {
             workload.push(s.predicates[..k].to_vec());
@@ -119,7 +133,10 @@ fn star_workload(graph: &Graph, top_sets: usize) -> Vec<Vec<Id>> {
     }
     for i in 0..top.len() {
         for j in (i + 1)..top.len() {
-            let (a, b) = (top[i].predicates.last().unwrap(), top[j].predicates.last().unwrap());
+            let (a, b) = (
+                top[i].predicates.last().unwrap(),
+                top[j].predicates.last().unwrap(),
+            );
             if a != b {
                 let mut q = vec![*a, *b];
                 q.sort_unstable();
@@ -182,7 +199,9 @@ fn assert_cs_wins(name: &str, ps_q: Vec<f64>, cs_q: Vec<f64>) {
 #[test]
 fn cs_gate_synthetic_correlated_stars() {
     let mut nt = String::new();
-    let mut t = |s: &str, p: u32, o: String| nt.push_str(&format!("<http://ex/{s}> <http://ex/p{p}> {o} .\n"));
+    let mut t = |s: &str, p: u32, o: String| {
+        nt.push_str(&format!("<http://ex/{s}> <http://ex/p{p}> {o} .\n"))
+    };
     for i in 0..1000 {
         let s = format!("a{i}");
         t(&s, 1, format!("\"{i}\""));
@@ -206,7 +225,9 @@ fn cs_gate_synthetic_correlated_stars() {
     // Resolve predicate ids by IRI.
     let pid = |n: u32| {
         graph
-            .id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!("http://ex/p{n}"))))
+            .id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+                format!("http://ex/p{n}"),
+            )))
             .unwrap()
     };
     let workload: Vec<Vec<Id>> = vec![
@@ -235,7 +256,10 @@ fn cs_gate_synthetic_correlated_stars() {
     for q in &workload {
         let truth = true_card(&graph, q) as f64;
         let est = table.star_cardinality(q);
-        assert!((est - truth).abs() < 1e-6, "CS star estimate must be exact: Q={q:?} est={est} true={truth}");
+        assert!(
+            (est - truth).abs() < 1e-6,
+            "CS star estimate must be exact: Q={q:?} est={est} true={truth}"
+        );
     }
 
     let (ps_q, cs_q) = run_gate(&graph, &workload, true);
@@ -277,7 +301,8 @@ fn cs_table_never_changes_results() {
 #[test]
 #[ignore = "needs bench/qlever-olympics/olympics.nt — run in --release with --nocapture"]
 fn cs_gate_olympics() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/qlever-olympics/olympics.nt");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bench/qlever-olympics/olympics.nt");
     if !path.exists() {
         eprintln!("skipping: olympics.nt not present (downloaded benchmark fixture)");
         return;

@@ -287,21 +287,11 @@ impl IncrementalClassifier {
     /// unchanged (an RBox edit is rejected as [`FullReason::Vocabulary`]), but the delta may have
     /// minted new roles, so the automaton is rebuilt at the new role count — otherwise
     /// `super_roles` would index past its table.
-    fn resume(
-        sat: &mut classify::Saturation,
-        ex: &extract::Extracted,
-        first: usize,
-    ) -> usize {
+    fn resume(sat: &mut classify::Saturation, ex: &extract::Extracted, first: usize) -> usize {
         #[cfg(feature = "rbox")]
         {
             let role_box = crate::rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
-            classify::resaturate(
-                sat,
-                &ex.axioms,
-                &ex.axioms[first..],
-                &ex.names,
-                &role_box,
-            )
+            classify::resaturate(sat, &ex.axioms, &ex.axioms[first..], &ex.names, &role_box)
         }
         #[cfg(not(feature = "rbox"))]
         classify::resaturate(sat, &ex.axioms, &ex.axioms[first..], &ex.names)

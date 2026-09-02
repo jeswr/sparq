@@ -213,7 +213,10 @@ impl OverheadReport {
             "  \"environment\": {},\n",
             json_str(&self.environment)
         ));
-        s.push_str(&format!("  \"host_note\": {},\n", json_str(&self.host_note)));
+        s.push_str(&format!(
+            "  \"host_note\": {},\n",
+            json_str(&self.host_note)
+        ));
         s.push_str(&format!("  \"reps_min_of\": {},\n", self.reps));
         s.push_str(&format!("  \"all_kernels_agree\": {},\n", self.all_agree()));
         s.push_str(
@@ -1010,12 +1013,19 @@ mod tests {
                     (Some(Num::Float(h)), Some(Num::Float(s))) => (h.to_bits(), s.to_bits()),
                     other => panic!("float tier expected, got {:?}", other),
                 };
-                assert_eq!(hb, sb, "inline replica diverged from Num::binop for n={}", n);
+                assert_eq!(
+                    hb, sb,
+                    "inline replica diverged from Num::binop for n={}",
+                    n
+                );
                 assert_eq!(hb, want, "inline replica double-rounded n={}", n);
             }
         }
         // And the scaled-decimal promotion, which also routes through `Num::f32`.
-        let dec = Num::Dec(crate::numeric::Dec { mant: 46_116_862_933_052_948_481, scale: 1 });
+        let dec = Num::Dec(crate::numeric::Dec {
+            mant: 46_116_862_933_052_948_481,
+            scale: 1,
+        });
         let hand = inline_num_binop(dec, Num::Float(0.0), ArithOp::Add);
         let sub = dec.binop(Num::Float(0.0), ArithOp::Add);
         match (hand, sub) {

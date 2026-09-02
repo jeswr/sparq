@@ -18,13 +18,13 @@
 // host logic that runs WITHOUT the prover; the prover round-trips are already
 // covered by the `#[ignore]`d e2e tests for runs that have `bb`.
 
-use sparq_zk_compose::manifest::{
-    AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
-    ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
-};
 use sparq_zk_compose::build::{
     build_filter_decimal, build_filter_signed_int, derive_filter_decimal_id,
     derive_filter_signed_int_id,
+};
+use sparq_zk_compose::manifest::{
+    AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
+    ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
 };
 use sparq_zk_compose::toml::{
     canonical_digits, filter_decimal_prover_toml, filter_f64_prover_toml, filter_int_prover_toml,
@@ -64,10 +64,19 @@ fn filter_int_prover_toml_renders_every_field_in_declaration_order() {
                     digits = [\"49\", \"56\"]\n";
     assert_eq!(toml, expected);
     // declaration order is significant — the keys must appear in this sequence.
-    let order = ["challenge", "operand_enc", "op", "bound", "expected", "digits"];
+    let order = [
+        "challenge",
+        "operand_enc",
+        "op",
+        "bound",
+        "expected",
+        "digits",
+    ];
     let mut last = 0usize;
     for k in order {
-        let at = toml.find(&format!("{k} =")).unwrap_or_else(|| panic!("missing {k}"));
+        let at = toml
+            .find(&format!("{k} ="))
+            .unwrap_or_else(|| panic!("missing {k}"));
         assert!(at >= last, "{k} out of declaration order");
         last = at;
     }
@@ -78,7 +87,10 @@ fn filter_int_prover_toml_false_verdict_and_empty_digits() {
     let toml = filter_int_prover_toml(&fh("0x1"), &fh("0x2"), FilterOp::Lt.code(), 0, false, &[]);
     assert!(toml.contains("op = \"0\"\n"));
     assert!(toml.contains("expected = false\n"));
-    assert!(toml.contains("digits = []\n"), "empty digit list renders as []");
+    assert!(
+        toml.contains("digits = []\n"),
+        "empty digit list renders as []"
+    );
 }
 
 #[test]
@@ -95,7 +107,10 @@ fn filter_f64_prover_toml_renders_b_bits_not_bound() {
         b"42",
     );
     assert!(toml.contains(&format!("b_bits = \"{bits}\"\n")));
-    assert!(!toml.contains("bound ="), "f64 member uses b_bits, never bound");
+    assert!(
+        !toml.contains("bound ="),
+        "f64 member uses b_bits, never bound"
+    );
     assert!(toml.contains("op = \"3\"\n"));
     assert!(toml.contains("digits = [\"52\", \"50\"]\n"));
 }
@@ -160,16 +175,16 @@ fn filter_decimal_prover_toml_renders_scaled_bound_and_two_digit_arrays() {
 fn scan_prover_toml_renders_arrays_and_nested_enc() {
     let toml = scan_prover_toml(
         &fh("0xchal"),
-        &[fh("0xc0"), fh("0xc1")],         // 2 graphs
-        &[true, false, true],              // pattern_is_const
+        &[fh("0xc0"), fh("0xc1")], // 2 graphs
+        &[true, false, true],      // pattern_is_const
         &[fh("0xs"), fh("0x0"), fh("0xo")],
         &[[fh("0xr00"), fh("0xr01"), fh("0xr02")]], // one disclosed row
         1,
-        &[true, false],                    // attribution (length k=2)
-        &[1, 0],                           // per-graph counts
+        &[true, false], // attribution (length k=2)
+        &[1, 0],        // per-graph counts
         &[
             vec![[fh("0xe00"), fh("0xe01"), fh("0xe02")]], // graph 0
-            vec![],                                         // graph 1 (empty)
+            vec![],                                        // graph 1 (empty)
         ],
     );
     // commitments array
@@ -288,7 +303,10 @@ fn prover_toml_for_filter_signed_int_renders_via_witness() {
     let (id, toml) =
         prover_toml_for(&inputs, &fh("0xchal"), &[], &[], &[], None, Some(&witness)).unwrap();
     assert_eq!(id, CircuitId::FilterSignedInt { md: 2 });
-    assert!(toml.contains("bound_neg = false\n"), "bound +1 => not negative");
+    assert!(
+        toml.contains("bound_neg = false\n"),
+        "bound +1 => not negative"
+    );
     assert!(toml.contains("bound = \"1\"\n"));
     assert!(toml.contains("neg = true\n"), "operand -42 => neg true");
     assert!(toml.contains("mag_digits = [\"52\", \"50\"]\n"));
@@ -297,10 +315,21 @@ fn prover_toml_for_filter_signed_int_renders_via_witness() {
 #[test]
 fn prover_toml_for_filter_decimal_renders_via_witness() {
     // value = 123.45 (i3 f2), op GT against bound_scaled 12340.
-    let (inputs, witness) =
-        build_filter_decimal(fh("0xop"), false, "123", "45", FilterOp::Gt, false, 12340, true)
-            .expect("i3_f2 builds");
-    assert_eq!(*inputs.circuit_id(), CircuitId::FilterDecimal { id: 3, fd: 2 });
+    let (inputs, witness) = build_filter_decimal(
+        fh("0xop"),
+        false,
+        "123",
+        "45",
+        FilterOp::Gt,
+        false,
+        12340,
+        true,
+    )
+    .expect("i3_f2 builds");
+    assert_eq!(
+        *inputs.circuit_id(),
+        CircuitId::FilterDecimal { id: 3, fd: 2 }
+    );
     let (id, toml) =
         prover_toml_for(&inputs, &fh("0xchal"), &[], &[], &[], None, Some(&witness)).unwrap();
     assert_eq!(id, CircuitId::FilterDecimal { id: 3, fd: 2 });
@@ -375,8 +404,14 @@ fn derive_filter_decimal_id_exact_shape_match_only() {
 // emit a token that cannot match the committed literal).
 #[test]
 fn build_filter_decimal_rejects_non_digit_lexical_bytes() {
-    assert!(build_filter_decimal(fh("0xop"), false, "12x", "45", FilterOp::Gt, false, 1, true).is_none());
-    assert!(build_filter_decimal(fh("0xop"), false, "123", "4z", FilterOp::Gt, false, 1, true).is_none());
+    assert!(
+        build_filter_decimal(fh("0xop"), false, "12x", "45", FilterOp::Gt, false, 1, true)
+            .is_none()
+    );
+    assert!(
+        build_filter_decimal(fh("0xop"), false, "123", "4z", FilterOp::Gt, false, 1, true)
+            .is_none()
+    );
 }
 
 // build_filter_signed_int derives the operand sign from the value and renders the
@@ -386,9 +421,15 @@ fn build_filter_signed_int_positive_value_has_neg_false() {
     let (inputs, witness) =
         build_filter_signed_int(fh("0xop"), 42, FilterOp::Gt, -7, true).expect("d2 builds");
     assert!(!witness.neg, "+42 => neg false");
-    assert!(witness.frac_digits.is_empty(), "signed-int has no fraction digits");
+    assert!(
+        witness.frac_digits.is_empty(),
+        "signed-int has no fraction digits"
+    );
     assert_eq!(witness.int_digits, b"42".to_vec());
-    if let ProofInputs::FilterSignedInt { bound_neg, bound, .. } = inputs {
+    if let ProofInputs::FilterSignedInt {
+        bound_neg, bound, ..
+    } = inputs
+    {
         assert!(bound_neg, "bound -7 => negative");
         assert_eq!(bound, 7, "|bound| = 7");
     } else {
@@ -414,7 +455,8 @@ fn prover_toml_for_scan_pads_rows_and_enc_to_circuit_dimensions() {
         [fh("0xe00"), fh("0xe01"), fh("0xe02")],
         [fh("0xe10"), fh("0xe11"), fh("0xe12")],
     ]];
-    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[2], &scan_enc, &[], None, None).unwrap();
+    let (id, toml) =
+        prover_toml_for(&inputs, &fh("0xchal"), &[2], &scan_enc, &[], None, None).unwrap();
     assert_eq!(id, CircuitId::Scan { k: 1, n: 3, r: 2 });
     // rows padded from 1 -> 2 (the second row is the zero row).
     assert!(
@@ -446,7 +488,10 @@ fn filter_op_codes_are_the_circuit_globals() {
 
 #[test]
 fn circuit_id_package_names_every_member_family() {
-    assert_eq!(CircuitId::Scan { k: 2, n: 4, r: 1 }.package(), "scan_k2_n4_r1");
+    assert_eq!(
+        CircuitId::Scan { k: 2, n: 4, r: 1 }.package(),
+        "scan_k2_n4_r1"
+    );
     assert_eq!(CircuitId::FilterInt { d: 1 }.package(), "filter_int_d1");
     assert_eq!(CircuitId::FilterF64 { d: 3 }.package(), "filter_f64_d3");
     // [OPUS-4.8] sq-7lrq: signed-int / decimal package names.
@@ -458,8 +503,14 @@ fn circuit_id_package_names_every_member_family() {
         CircuitId::FilterDecimal { id: 3, fd: 2 }.package(),
         "filter_decimal_i3_f2"
     );
-    assert_eq!(CircuitId::RevokeUnset { depth: 10 }.package(), "revoke_unset_d10");
-    assert_eq!(CircuitId::HiddenIssuer { depth: 4 }.package(), "hidden_issuer_d4");
+    assert_eq!(
+        CircuitId::RevokeUnset { depth: 10 }.package(),
+        "revoke_unset_d10"
+    );
+    assert_eq!(
+        CircuitId::HiddenIssuer { depth: 4 }.package(),
+        "hidden_issuer_d4"
+    );
 }
 
 #[test]
@@ -496,7 +547,9 @@ fn proof_inputs_circuit_id_accessor_matches_each_variant() {
 
 #[test]
 fn binding_mode_challenge_accessor_for_both_variants() {
-    let plain = BindingMode::Challenge { challenge: fh("0xaa") };
+    let plain = BindingMode::Challenge {
+        challenge: fh("0xaa"),
+    };
     assert_eq!(plain.challenge(), &fh("0xaa"));
 
     let holder = BindingMode::HolderPop {
@@ -532,7 +585,10 @@ fn status_list_snapshot_bit_is_lsb_first_and_out_of_range_reads_revoked() {
     assert!(snap.bit(2), "bit 2 set");
     assert!(!snap.bit(3), "bit 3 unset");
     // crossing byte boundary: bit 8 is in byte 1, which is absent => fail-closed.
-    assert!(snap.bit(8), "out-of-range index reads as SET (revoked), fail-closed");
+    assert!(
+        snap.bit(8),
+        "out-of-range index reads as SET (revoked), fail-closed"
+    );
     assert!(snap.bit(999_999), "far out-of-range also reads revoked");
 }
 
@@ -564,7 +620,9 @@ fn proof_manifest_json_round_trips_and_defaults_type() {
         join_obligations: vec![("v".to_string(), 0, 1)],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: fh("0x2a") },
+        binding: BindingMode::Challenge {
+            challenge: fh("0x2a"),
+        },
         revocation: Some(RevocationStatus {
             ref_commitment: None,
             status_list: Some("http://ex/list".to_string()),
@@ -587,21 +645,23 @@ fn proof_manifest_json_round_trips_and_defaults_type() {
             },
             proof_hex: String::new(),
         }],
-        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        binding_edges: vec![BindingEdge {
+            from_proof: 0,
+            from_row: 0,
+            from_slot: 2,
+            to_proof: 1,
+        }],
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     };
     let json = manifest.to_json();
     let back = ProofManifest::from_json(&json).expect("round-trips");
     assert_eq!(back, manifest);
     // The default type-marker is applied when the field is absent from the JSON.
-    let stripped = json.replace(
-        "\"type\": \"urn:sparq:zk:ProofManifest\",\n  ",
-        "",
-    );
+    let stripped = json.replace("\"type\": \"urn:sparq:zk:ProofManifest\",\n  ", "");
     let defaulted = ProofManifest::from_json(&stripped).expect("type defaults");
     assert_eq!(defaulted.r#type, "urn:sparq:zk:ProofManifest");
 }
@@ -636,7 +696,10 @@ fn attested_status_ref_committed_index_serde_omits_clear_index() {
         index_commitment: Some(fh("0xc0mm")),
     };
     let json = serde_json::to_string(&r).unwrap();
-    assert!(!json.contains("\"index\""), "clear index omitted on committed path: {json}");
+    assert!(
+        !json.contains("\"index\""),
+        "clear index omitted on committed path: {json}"
+    );
     assert!(json.contains("index_commitment"));
     let back: AttestedStatusRef = serde_json::from_str(&json).unwrap();
     assert_eq!(back, r);
@@ -651,7 +714,10 @@ fn attested_status_ref_committed_index_serde_omits_clear_index() {
     let cjson = serde_json::to_string(&clear).unwrap();
     assert!(cjson.contains("\"index\":2"));
     assert!(!cjson.contains("index_commitment"));
-    assert_eq!(serde_json::from_str::<AttestedStatusRef>(&cjson).unwrap(), clear);
+    assert_eq!(
+        serde_json::from_str::<AttestedStatusRef>(&cjson).unwrap(),
+        clear
+    );
 }
 
 /// [OPUS-5] sq-kndw: the FULLY-HIDDEN reference serializes to the two commitments
@@ -669,14 +735,23 @@ fn fully_hidden_status_ref_serde_omits_iri_index_and_version() {
         assert!(!ajson.contains(absent), "{absent} must be absent: {ajson}");
     }
     assert!(ajson.contains("ref_commitment") && ajson.contains("index_commitment"));
-    assert_eq!(serde_json::from_str::<AttestedStatusRef>(&ajson).unwrap(), att);
+    assert_eq!(
+        serde_json::from_str::<AttestedStatusRef>(&ajson).unwrap(),
+        att
+    );
 
     let rev = RevocationStatus::fully_hidden(&rc, &ic);
     let rjson = serde_json::to_string(&rev).unwrap();
     for absent in ["\"index\"", "\"version\"", "\"status_list\""] {
-        assert!(!absent.is_empty() && !rjson.contains(absent), "{absent} must be absent: {rjson}");
+        assert!(
+            !absent.is_empty() && !rjson.contains(absent),
+            "{absent} must be absent: {rjson}"
+        );
     }
-    assert_eq!(serde_json::from_str::<RevocationStatus>(&rjson).unwrap(), rev);
+    assert_eq!(
+        serde_json::from_str::<RevocationStatus>(&rjson).unwrap(),
+        rev
+    );
 
     // The three constructors are mutually distinguishable by mode, so the
     // verifier's chokepoint can never confuse them.
@@ -710,14 +785,20 @@ fn driver_error_display_is_informative_for_every_variant() {
         source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
     };
     let s = format!("{spawn}");
-    assert!(s.contains("nargo") && s.contains("spawn"), "spawn display: {s}");
+    assert!(
+        s.contains("nargo") && s.contains("spawn"),
+        "spawn display: {s}"
+    );
 
     let tool = DriverError::Tool {
         tool: "bb".to_string(),
         stderr: "assertion failed".to_string(),
     };
     let t = format!("{tool}");
-    assert!(t.contains("bb") && t.contains("assertion failed"), "tool display: {t}");
+    assert!(
+        t.contains("bb") && t.contains("assertion failed"),
+        "tool display: {t}"
+    );
 
     let io = DriverError::Io(std::io::Error::other("disk"));
     assert!(format!("{io}").contains("io error"), "io display");
@@ -731,7 +812,10 @@ fn driver_error_display_is_informative_for_every_variant() {
 fn driver_error_from_io_error_maps_to_io_variant() {
     use sparq_zk_compose::driver::DriverError;
     let e: DriverError = std::io::Error::other("boom").into();
-    assert!(matches!(e, DriverError::Io(_)), "From<io::Error> -> Io variant");
+    assert!(
+        matches!(e, DriverError::Io(_)),
+        "From<io::Error> -> Io variant"
+    );
     assert!(format!("{e}").contains("boom"));
 }
 
@@ -755,9 +839,9 @@ fn proof_artifacts_clone_and_encode_blob_layout() {
     // length prefix. The verifier's (private) decoder splits exactly this layout;
     // here we pin the encoder's wire format without needing a real bb proof.
     let art = ProofArtifacts {
-        proof: vec![0xaa, 0xbb],          // 2 bytes
-        public_inputs: vec![0x01],         // 1 byte
-        vk: vec![0xff, 0xee, 0xdd],        // trailing vk (no length prefix)
+        proof: vec![0xaa, 0xbb],    // 2 bytes
+        public_inputs: vec![0x01],  // 1 byte
+        vk: vec![0xff, 0xee, 0xdd], // trailing vk (no length prefix)
     };
     let hex = encode_artifacts(&art);
     // lp(proof)        = 00000002 aabb
@@ -769,6 +853,10 @@ fn proof_artifacts_clone_and_encode_blob_layout() {
     assert_eq!(encode_artifacts(&art2), hex);
 
     // Empty segments still carry their (zero) length prefix.
-    let empty = ProofArtifacts { proof: vec![], public_inputs: vec![], vk: vec![] };
+    let empty = ProofArtifacts {
+        proof: vec![],
+        public_inputs: vec![],
+        vk: vec![],
+    };
     assert_eq!(encode_artifacts(&empty), "0000000000000000");
 }

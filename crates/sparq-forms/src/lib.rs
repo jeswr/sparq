@@ -119,15 +119,12 @@ pub fn derive_form_validated(
             .iter_mut()
             .flat_map(|group| &mut group.fields)
             .find(|field| {
-                field.editable
-                    && field.property_shape.is_some()
-                    && field.path == rendered_path
+                field.editable && field.property_shape.is_some() && field.path == rendered_path
             })
         else {
             continue;
         };
-        let message =
-            derive::pick_literal(result.messages).unwrap_or(result.default_message);
+        let message = derive::pick_literal(result.messages).unwrap_or(result.default_message);
         field.validation.push(ValidationHint {
             source_component: result.source_component,
             message,

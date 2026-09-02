@@ -39,8 +39,8 @@
 use std::collections::HashMap;
 
 use oxrdf::{Term, Triple, Variable};
-use sparq_engine::PreparedQuery;
 use spargebra::Query;
+use sparq_engine::PreparedQuery;
 
 use crate::budget::BudgetSpec;
 use crate::eval::{EvalMode, WindowEval};
@@ -277,7 +277,11 @@ impl ContinuousQuery {
         self.eval.late_dropped()
     }
 
-    fn emit(&mut self, flush: bool, on_result: &mut impl FnMut(WindowResult)) -> Result<(), String> {
+    fn emit(
+        &mut self,
+        flush: bool,
+        on_result: &mut impl FnMut(WindowResult),
+    ) -> Result<(), String> {
         let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev_rows = &mut self.prev_rows;
@@ -289,11 +293,14 @@ impl ContinuousQuery {
                 sparq_engine::query_prepared_with_budget(graph, prepared, &budget.window_budget())?;
             let rows = match r2s {
                 R2S::RStream => result.rows,
-                R2S::IStream | R2S::DStream => {
-                    diff_rows(r2s, result.rows, prev_rows)
-                }
+                R2S::IStream | R2S::DStream => diff_rows(r2s, result.rows, prev_rows),
             };
-            on_result(WindowResult { start, end, vars: result.vars, rows });
+            on_result(WindowResult {
+                start,
+                end,
+                vars: result.vars,
+                rows,
+            });
             Ok(())
         })
     }
@@ -440,7 +447,11 @@ impl ContinuousConstruct {
                 R2S::DStream => set_minus(prev, &cur),
             };
             *prev = cur;
-            on_result(GraphResult { start, end, triples });
+            on_result(GraphResult {
+                start,
+                end,
+                triples,
+            });
             Ok(())
         })
     }
@@ -595,7 +606,10 @@ fn multiset_minus(
 /// engine-deduplicated sets, so no multiset counting is needed).
 fn set_minus(keep: &[Triple], minus: &[Triple]) -> Vec<Triple> {
     let minus: rustc_hash::FxHashSet<&Triple> = minus.iter().collect();
-    keep.iter().filter(|t| !minus.contains(*t)).cloned().collect()
+    keep.iter()
+        .filter(|t| !minus.contains(*t))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

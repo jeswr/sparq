@@ -51,7 +51,12 @@ fn store() -> PodStore {
 }
 
 fn session(agent: &str) -> Session<'_> {
-    Session { agent: Some(agent), client: None, issuer: None, now: None }
+    Session {
+        agent: Some(agent),
+        client: None,
+        issuer: None,
+        now: None,
+    }
 }
 
 /// The fixture is only meaningful if bob really DOES hold Append on the container — i.e.
@@ -60,7 +65,10 @@ fn session(agent: &str) -> Session<'_> {
 fn fixture_actually_grants_the_attacker_append_on_the_container() {
     let s = store();
     let d = s.decide(&session(BOB), CONTAINER, Mode::Append);
-    assert!(d.allow, "the escalation premise: bob may append to the container");
+    assert!(
+        d.allow,
+        "the escalation premise: bob may append to the container"
+    );
     assert_eq!(d.status, AclStatus::Resolved);
 
     // …and the benign create therefore succeeds, so a refusal below is about the NAME.
@@ -124,7 +132,11 @@ fn requesting_a_different_mode_does_not_bypass_the_guard() {
     let s = store();
     for mode in [Mode::Read, Mode::Write, Mode::Append, Mode::Control] {
         let d = s.decide_create(&session(BOB), CONTAINER, "secret.acl", mode);
-        assert!(!d.allow, "mode {:?} bypassed the control-document guard", mode);
+        assert!(
+            !d.allow,
+            "mode {:?} bypassed the control-document guard",
+            mode
+        );
     }
 }
 
@@ -141,7 +153,10 @@ fn even_a_controller_cannot_mint_an_acl_document_through_create() {
     );
 
     let d = s.decide_create(&session(ALICE), CONTAINER, "secret.acl", Mode::Write);
-    assert!(!d.allow, "the create path is closed for everyone, controllers included");
+    assert!(
+        !d.allow,
+        "the create path is closed for everyone, controllers included"
+    );
     assert_eq!(d.status, AclStatus::Resolved);
 
     // The legitimate route is still open: WAC turns Control on `<R>` into Read+Write on
@@ -152,7 +167,10 @@ fn even_a_controller_cannot_mint_an_acl_document_through_create() {
         "a controller must still be able to write the container's own ACL"
     );
     // …and bob, holding only Append, cannot.
-    assert!(!s.decide(&session(BOB), "https://pod.ex/notes/.acl", Mode::Write).allow);
+    assert!(
+        !s.decide(&session(BOB), "https://pod.ex/notes/.acl", Mode::Write)
+            .allow
+    );
 }
 
 /// An attacker cannot SHADOW an existing ACL either: the refusal does not depend on
@@ -163,7 +181,11 @@ fn cannot_shadow_an_existing_acl_document() {
     // `/notes/.acl` exists in the fixture; `/notes/n1.acl` does not.
     for name in [".acl", "n1.acl"] {
         let d = s.decide_create(&session(BOB), CONTAINER, name, Mode::Append);
-        assert!(!d.allow, "`{}` must be refused whether or not it exists", name);
+        assert!(
+            !d.allow,
+            "`{}` must be refused whether or not it exists",
+            name
+        );
     }
 }
 
@@ -178,7 +200,12 @@ fn unusable_child_names_are_refused() {
         assert_eq!(d.status, AclStatus::Resolved);
     }
     // A non-container target is refused too (a create needs a container to create IN).
-    let d = s.decide_create(&session(BOB), "https://pod.ex/notes/n1", "child", Mode::Append);
+    let d = s.decide_create(
+        &session(BOB),
+        "https://pod.ex/notes/n1",
+        "child",
+        Mode::Append,
+    );
     assert!(!d.allow);
 }
 
@@ -202,7 +229,10 @@ fn unmaterialized_view_fails_closed_for_both_benign_and_hostile_names() {
     let benign = s.decide_create(&session(BOB), CONTAINER, "note1", Mode::Append);
     assert!(!benign.allow, "fail-closed with no auth view");
     assert_eq!(benign.status, AclStatus::Unloaded);
-    assert!(benign.status.is_retryable(), "operational, so retryable (503)");
+    assert!(
+        benign.status.is_retryable(),
+        "operational, so retryable (503)"
+    );
 
     let hostile = s.decide_create(&session(BOB), CONTAINER, "secret.acl", Mode::Append);
     assert!(!hostile.allow);
@@ -219,8 +249,14 @@ fn unmaterialized_view_fails_closed_for_both_benign_and_hostile_names() {
 fn anonymous_cannot_create_anything() {
     let s = store();
     let anon = Session::default();
-    assert!(!s.decide_create(&anon, CONTAINER, "note1", Mode::Append).allow);
-    assert!(!s.decide_create(&anon, CONTAINER, "secret.acl", Mode::Append).allow);
+    assert!(
+        !s.decide_create(&anon, CONTAINER, "note1", Mode::Append)
+            .allow
+    );
+    assert!(
+        !s.decide_create(&anon, CONTAINER, "secret.acl", Mode::Append)
+            .allow
+    );
 }
 
 /// The public predicate a resource server reuses at its own mint chokepoint agrees with
@@ -228,9 +264,18 @@ fn anonymous_cannot_create_anything() {
 #[test]
 fn the_public_predicate_agrees_with_the_decision() {
     let s = store();
-    for name in ["secret.acl", "secret.ACL", ".acr", "note1", "note.ttl", "aclremap"] {
+    for name in [
+        "secret.acl",
+        "secret.ACL",
+        ".acr",
+        "note1",
+        "note.ttl",
+        "aclremap",
+    ] {
         let refused_by_predicate = is_control_document_name(name);
-        let allowed = s.decide_create(&session(BOB), CONTAINER, name, Mode::Append).allow;
+        let allowed = s
+            .decide_create(&session(BOB), CONTAINER, name, Mode::Append)
+            .allow;
         assert_eq!(
             refused_by_predicate, !allowed,
             "`{}`: the predicate and the decision disagree",

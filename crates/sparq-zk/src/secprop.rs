@@ -277,10 +277,7 @@ pub fn parse_annotations() -> BTreeMap<String, MethodAnnotations> {
             (x.property.as_str(), x.level.as_deref())
                 .cmp(&(y.property.as_str(), y.level.as_deref()))
         });
-        out.insert(
-            method.clone(),
-            MethodAnnotations { method, assertions },
-        );
+        out.insert(method.clone(), MethodAnnotations { method, assertions });
     }
     out
 }
@@ -373,7 +370,10 @@ pub fn completeness_violations(
         .map(|iri| Violation {
             method: (*iri).to_owned(),
             kind: ViolationKind::MissingAnnotation,
-            detail: format!("production-selectable scheme {} has no annotation block", iri),
+            detail: format!(
+                "production-selectable scheme {} has no annotation block",
+                iri
+            ),
         })
         .collect()
 }
@@ -612,8 +612,7 @@ mod tests {
     /// constraint, even though the assertion exists on the method.
     #[test]
     fn source_layer_only_does_not_transfer_to_query_proof() {
-        const ILLUSTRATIVE_SOURCE: &str =
-            "https://sparq.dev/ns/zk#illustrative-source-bbs-2023";
+        const ILLUSTRATIVE_SOURCE: &str = "https://sparq.dev/ns/zk#illustrative-source-bbs-2023";
         use sparq_secprop_vocab::{
             SECX_CROSS_PRESENTATION as CROSS_PRESENTATION,
             SECX_UNLINKABILITY_SCOPE as UNLINKABILITY_SCOPE,
@@ -638,9 +637,18 @@ mod tests {
         // And the guard reports it as a transfer violation if a caller tries.
         let v = source_layer_transfer_violations(
             &ann,
-            &[(ILLUSTRATIVE_SOURCE, UNLINKABILITY_SCOPE, Some(CROSS_PRESENTATION))],
+            &[(
+                ILLUSTRATIVE_SOURCE,
+                UNLINKABILITY_SCOPE,
+                Some(CROSS_PRESENTATION),
+            )],
         );
-        assert_eq!(v.len(), 1, "expected exactly one transfer violation: {:?}", v);
+        assert_eq!(
+            v.len(),
+            1,
+            "expected exactly one transfer violation: {:?}",
+            v
+        );
         assert_eq!(v[0].kind, ViolationKind::SourceLayerTransfer);
     }
 

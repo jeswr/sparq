@@ -121,7 +121,9 @@ fn build_clustered_store(
         for _ in 0..per {
             let v: Vec<f32> = center
                 .iter()
-                .map(|x| x + ((splitmix64(state) >> 40) as f32 / (1u64 << 23) as f32 - 0.5) * spread)
+                .map(|x| {
+                    x + ((splitmix64(state) >> 40) as f32 / (1u64 << 23) as f32 - 0.5) * spread
+                })
                 .collect();
             store.put(id, &v).unwrap();
             id += 1;
@@ -132,13 +134,25 @@ fn build_clustered_store(
 }
 
 fn tmp(name: &str, seed: u64) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("sparq-vectors-bench-{name}-{seed}-{}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "sparq-vectors-bench-{name}-{seed}-{}",
+        std::process::id()
+    ))
 }
 
 fn main() {
-    let n: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_N);
-    let seed: u64 = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_SEED);
-    let iters: usize = std::env::args().nth(3).and_then(|a| a.parse().ok()).unwrap_or(3);
+    let n: usize = std::env::args()
+        .nth(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(CORPUS_N);
+    let seed: u64 = std::env::args()
+        .nth(2)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(CORPUS_SEED);
+    let iters: usize = std::env::args()
+        .nth(3)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(3);
     let iters = iters.max(1);
 
     // The PRNG seed words: derived from the run seed so a non-default seed yields a different
@@ -177,7 +191,12 @@ fn main() {
     // Exact ground truth, computed once (it is the same every iter).
     let exact: Vec<Vec<u32>> = queries
         .iter()
-        .map(|q| nearest_exact(&store, q, K).into_iter().map(|(id, _)| id).collect())
+        .map(|q| {
+            nearest_exact(&store, q, K)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        })
         .collect();
 
     {
@@ -193,7 +212,10 @@ fn main() {
             hits = h;
         }
         let recall = hits as f64 / (QUERIES * K) as f64;
-        eprintln!("[vector] HNSW recall@{K} = {recall:.4} (deficit {})", recall_deficit_milli(recall));
+        eprintln!(
+            "[vector] HNSW recall@{K} = {recall:.4} (deficit {})",
+            recall_deficit_milli(recall)
+        );
         rows.push(("hnsw_recall_at10".into(), recall_deficit_milli(recall), us));
     }
 
@@ -213,8 +235,15 @@ fn main() {
             hits = h;
         }
         let recall = hits as f64 / (QUERIES * K) as f64;
-        eprintln!("[vector] DiskANN recall@{K} = {recall:.4} (deficit {})", recall_deficit_milli(recall));
-        rows.push(("diskann_recall_at10".into(), recall_deficit_milli(recall), us));
+        eprintln!(
+            "[vector] DiskANN recall@{K} = {recall:.4} (deficit {})",
+            recall_deficit_milli(recall)
+        );
+        rows.push((
+            "diskann_recall_at10".into(),
+            recall_deficit_milli(recall),
+            us,
+        ));
         // Drop the index (which may hold the on-disk .spqg open) BEFORE unlinking it, so the
         // remove succeeds on platforms with mandatory file locks (e.g. Windows). No-op on Linux.
         drop(disk);
@@ -243,7 +272,12 @@ fn main() {
         };
         let pq_exact: Vec<Vec<u32>> = pq_queries
             .iter()
-            .map(|q| nearest_exact(&pq_store, q, K).into_iter().map(|(id, _)| id).collect())
+            .map(|q| {
+                nearest_exact(&pq_store, q, K)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect()
+            })
             .collect();
 
         let (mut hits, mut us) = (0usize, f64::INFINITY);
@@ -259,13 +293,19 @@ fn main() {
                     .collect();
                 rescored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
                 let reranked: Vec<u32> = rescored.into_iter().take(K).map(|(id, _)| id).collect();
-                h += reranked.iter().filter(|id| pq_exact[qi].contains(id)).count();
+                h += reranked
+                    .iter()
+                    .filter(|id| pq_exact[qi].contains(id))
+                    .count();
             }
             us = us.min(t.elapsed().as_secs_f64() * 1e6 / pq_queries.len() as f64);
             hits = h;
         }
         let recall = hits as f64 / (QUERIES * K) as f64;
-        eprintln!("[vector] PQ+re-rank recall@{K} = {recall:.4} (deficit {})", recall_deficit_milli(recall));
+        eprintln!(
+            "[vector] PQ+re-rank recall@{K} = {recall:.4} (deficit {})",
+            recall_deficit_milli(recall)
+        );
         rows.push(("pq_recall_at10".into(), recall_deficit_milli(recall), us));
         // Drop the encoded set + PQ + the file-backed store (which may hold `pq_path` open)
         // BEFORE unlinking, so the remove succeeds under mandatory file locks. No-op on Linux.

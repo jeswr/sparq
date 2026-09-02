@@ -516,7 +516,10 @@ fn lex_name_or_word(chars: &[char], start: usize, line: usize) -> Result<(Tok, u
     }
 
     if prefix.is_empty() {
-        return Err(err(line, &format!("unexpected character '{}'", chars[start])));
+        return Err(err(
+            line,
+            &format!("unexpected character '{}'", chars[start]),
+        ));
     }
     Ok((Tok::Word(prefix), i))
 }
@@ -663,7 +666,7 @@ impl Parser {
 
     fn prefix_decl(&mut self) -> Result<(), ScsError> {
         self.next(); // PREFIX
-        // PNAME_NS : `pfx:` (empty local).
+                     // PNAME_NS : `pfx:` (empty local).
         let pfx = match self.next() {
             Some(Tok::PName(p, l)) if l.is_empty() => p,
             _ => return Err(err(self.line(), "expected `prefix:` after PREFIX")),
@@ -1196,9 +1199,9 @@ impl Parser {
 
     fn iri(&mut self) -> Result<Term, ScsError> {
         match self.next() {
-            Some(Tok::IriRef(iri)) => {
-                Ok(Term::NamedNode(NamedNode::new_unchecked(self.resolve(&iri))))
-            }
+            Some(Tok::IriRef(iri)) => Ok(Term::NamedNode(NamedNode::new_unchecked(
+                self.resolve(&iri),
+            ))),
             Some(Tok::PName(p, l)) => self.prefixed(&p, &l),
             _ => Err(err(self.line(), "expected IRI or prefixed name")),
         }
@@ -1579,7 +1582,11 @@ mod tests {
 
     #[test]
     fn base_override_resolves_shape() {
-        let ts = parse("BASE <http://example.org/x>\nshape <#S> {\n}\n", DEFAULT_BASE).unwrap();
+        let ts = parse(
+            "BASE <http://example.org/x>\nshape <#S> {\n}\n",
+            DEFAULT_BASE,
+        )
+        .unwrap();
         assert!(ts.iter().any(|t| matches!(&t.subject,
             NamedOrBlankNode::NamedNode(n) if n.as_str() == "http://example.org/x#S")));
     }
@@ -1610,7 +1617,10 @@ mod tests {
             "turtle",
         )
         .unwrap();
-        assert!(crate::validate(&ok, &shapes).conforms, "expected conformance");
+        assert!(
+            crate::validate(&ok, &shapes).conforms,
+            "expected conformance"
+        );
 
         // Violating data: wrong datatype + missing value handled by the same shape.
         let bad = Graph::load_str(
@@ -1637,7 +1647,10 @@ mod tests {
             resolve_against("http://e.org/base", "http://other/x"),
             "http://other/x"
         );
-        assert_eq!(resolve_against("http://e.org/base", ""), "http://e.org/base");
+        assert_eq!(
+            resolve_against("http://e.org/base", ""),
+            "http://e.org/base"
+        );
         assert_eq!(
             resolve_against("http://e.org/path/file", "#f"),
             "http://e.org/path/file#f"

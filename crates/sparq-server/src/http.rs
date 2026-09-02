@@ -27,6 +27,8 @@ use std::net::SocketAddr; // [OPUS-4.8] sq-o4qf: bind_posture classifies the lis
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "federation-descriptors")]
+use axum::http::Uri;
 use axum::{
     body::Bytes,
     error_handling::HandleErrorLayer,
@@ -36,8 +38,6 @@ use axum::{
     routing::{any, get, post},
     BoxError, Router,
 };
-#[cfg(feature = "federation-descriptors")]
-use axum::http::Uri;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(feature = "response-compression")]
@@ -208,13 +208,17 @@ impl ShaclShapes {
         Self(Arc::new(graph))
     }
 
-    fn graph(&self) -> &Graph { &self.0 }
+    fn graph(&self) -> &Graph {
+        &self.0
+    }
 }
 
 #[cfg(feature = "shacl")]
 impl std::fmt::Debug for ShaclShapes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShaclShapes").field("triples", &self.0.len()).finish()
+        f.debug_struct("ShaclShapes")
+            .field("triples", &self.0.len())
+            .finish()
     }
 }
 
@@ -2155,7 +2159,10 @@ impl ApplyUpdates for ServerApplier {
         // `/shacl/validate` endpoint keeps the lenient W3C-report behaviour.
         #[cfg(feature = "shacl")]
         if self.config.shacl_guard {
-            let shapes = self.config.shacl_shapes.as_ref()
+            let shapes = self
+                .config
+                .shacl_shapes
+                .as_ref()
                 .expect("shacl_guard configuration validated at startup");
             let report = match sparq_shacl::validate_strict(working, shapes.graph()) {
                 Ok(report) => report,
@@ -2171,7 +2178,10 @@ impl ApplyUpdates for ServerApplier {
                 ));
             }
             if !report.conforms {
-                return Err(format!("{SHACL_GUARD_REJECTED_PREFIX}{}", shacl_report_to_json(&report)));
+                return Err(format!(
+                    "{SHACL_GUARD_REJECTED_PREFIX}{}",
+                    shacl_report_to_json(&report)
+                ));
             }
         }
         Ok(())
@@ -2517,7 +2527,9 @@ pub struct AppState {
     /// write-gated `PUT`/`DELETE` handlers in [`crate::templates`]. An `RwLock` because
     /// invocations (reads) dominate and never block each other.
     #[cfg(feature = "templates")]
-    templates: Arc<std::sync::RwLock<std::collections::BTreeMap<String, sparq_engine::templates::Template>>>,
+    templates: Arc<
+        std::sync::RwLock<std::collections::BTreeMap<String, sparq_engine::templates::Template>>,
+    >,
     /// [SONNET-4.6] (sq-qsm5z) The opt-in running-query registry backing `GET /queries` and
     /// `DELETE /queries/{id}`. Compiled only with the `query-registry` feature. The registry
     /// stores cancellation handles and metadata but never raw query text; cloned `AppState`
@@ -2653,7 +2665,10 @@ impl QueryRegistry {
                     cancel: Arc::clone(&cancel),
                 },
             );
-        let guard = QueryGuard { id, registry: Arc::clone(self) };
+        let guard = QueryGuard {
+            id,
+            registry: Arc::clone(self),
+        };
         (cancel, guard)
     }
 
@@ -2675,19 +2690,14 @@ impl QueryRegistry {
                 })
             })
             .collect();
-        entries.sort_unstable_by(|a, b| {
-            a["id"].as_str().cmp(&b["id"].as_str())
-        });
+        entries.sort_unstable_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
         entries
     }
 
     /// Flip the cancel flag for a registered query. Returns `false` if the id is not found.
     pub(crate) fn cancel_query(&self, id: &str) -> bool {
         use std::sync::atomic::Ordering;
-        let entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         match entries.get(id) {
             Some(e) => {
                 e.cancel.store(true, Ordering::Release);
@@ -3294,11 +3304,7 @@ impl AppState {
     /// the durable write-through opt-in applies to the base [`restore_from`](Self::restore_from)
     /// only in v1), blocking: call on the blocking pool.
     #[cfg(feature = "backup")]
-    pub fn restore_from_with_deltas(
-        &self,
-        base: &[u8],
-        deltas: &[Vec<u8>],
-    ) -> Result<u64, String> {
+    pub fn restore_from_with_deltas(&self, base: &[u8], deltas: &[Vec<u8>]) -> Result<u64, String> {
         self.guard_restore_supported()?;
         // Import + replay onto a PRIVATE graph first — fail-closed before any swap.
         let (mut graph, base_meta) = sparq_serve::backup_import(base).map_err(|e| e.to_string())?;
@@ -3441,8 +3447,14 @@ impl AppState {
                 Ok(meta.generation)
             }
             // A durable-swap failure: the OLD store is intact, the writer is alive (fail-closed).
-            Ok(Err(e)) => Err(format!("restore-into-durable failed (store unchanged): {}", e)),
-            Err(e) => Err(format!("restore-into-durable: update writer unavailable: {}", e)),
+            Ok(Err(e)) => Err(format!(
+                "restore-into-durable failed (store unchanged): {}",
+                e
+            )),
+            Err(e) => Err(format!(
+                "restore-into-durable: update writer unavailable: {}",
+                e
+            )),
         }
     }
 
@@ -3716,9 +3728,7 @@ impl TransportScheme {
 /// header, this falls back to plain HTTP and/or `localhost`, preserving the historical result.
 #[cfg(feature = "federation-descriptors")]
 fn request_base(headers: &HeaderMap, uri: &Uri, transport: Option<&str>) -> String {
-    let scheme = transport
-        .or_else(|| uri.scheme_str())
-        .unwrap_or("http");
+    let scheme = transport.or_else(|| uri.scheme_str()).unwrap_or("http");
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -3776,8 +3786,7 @@ mod request_base_tests {
 async fn well_known_void(
     State(state): State<AppState>,
     uri: Uri,
-    #[cfg(feature = "http2")]
-    transport: Option<axum::Extension<TransportScheme>>,
+    #[cfg(feature = "http2")] transport: Option<axum::Extension<TransportScheme>>,
     headers: HeaderMap,
 ) -> Response {
     if !state.config().federation_descriptors {
@@ -4850,7 +4859,10 @@ async fn admin_change_stream_rebase(
             Err(_) => return json_error(StatusCode::BAD_REQUEST, "request body must be JSON"),
         };
         let Some(fields) = parsed.as_object() else {
-            return json_error(StatusCode::BAD_REQUEST, "request body must be a JSON object");
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "request body must be a JSON object",
+            );
         };
         for (key, value) in fields {
             match key.as_str() {
@@ -5427,7 +5439,10 @@ mod header_read_timeout_config_tests {
         assert_eq!(cfg.header_read_timeout, Some(Duration::from_secs(3)));
         assert_eq!(cfg.query_timeout, Some(Duration::from_secs(99)));
         // It is opt-out-able (an operator who really wants the old unbounded behaviour).
-        let off = ServerConfig { header_read_timeout: None, ..ServerConfig::default() };
+        let off = ServerConfig {
+            header_read_timeout: None,
+            ..ServerConfig::default()
+        };
         assert_eq!(off.header_read_timeout, None);
     }
 
@@ -5456,7 +5471,10 @@ mod header_read_timeout_config_tests {
         assert_eq!(cfg.header_read_timeout, Some(Duration::from_secs(3)));
         assert_eq!(cfg.query_timeout, Some(Duration::from_secs(99)));
         // It is opt-out-able independently of the header guard.
-        let off = ServerConfig { body_read_timeout: None, ..ServerConfig::default() };
+        let off = ServerConfig {
+            body_read_timeout: None,
+            ..ServerConfig::default()
+        };
         assert_eq!(off.body_read_timeout, None);
         assert_eq!(off.header_read_timeout, Some(Duration::from_secs(15))); // header guard untouched
     }
@@ -5644,10 +5662,10 @@ fn with_generation_header(mut resp: Response, number: u64) -> Response {
 async fn sparql_endpoint(
     State(state): State<AppState>,
     method: Method,
-    #[cfg(feature = "federation-descriptors")]
-    uri: Uri,
-    #[cfg(all(feature = "federation-descriptors", feature = "http2"))]
-    transport: Option<axum::Extension<TransportScheme>>,
+    #[cfg(feature = "federation-descriptors")] uri: Uri,
+    #[cfg(all(feature = "federation-descriptors", feature = "http2"))] transport: Option<
+        axum::Extension<TransportScheme>,
+    >,
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
@@ -5737,12 +5755,7 @@ async fn sparql_endpoint(
                     let transport = transport.map(|extension| extension.0.as_str());
                     #[cfg(not(feature = "http2"))]
                     let transport = None;
-                    match service_description_response(
-                        &state,
-                        &headers,
-                        &uri,
-                        transport,
-                    ) {
+                    match service_description_response(&state, &headers, &uri, transport) {
                         Some(resp) => resp,
                         None => bad_request("missing 'query' parameter"),
                     }
@@ -6265,7 +6278,10 @@ async fn admin_restore(
     // [OPUS-4.8] (sq-ft7u) Opt in to writing the restore THROUGH to the durable `--persist` store
     // (so it survives a restart) via `?persist=true` (truthy: "1"/"true"/"yes"/"on"). Default off:
     // a restore is in-memory-only unless the operator explicitly asks for write-through.
-    let persist = params.get("persist").map(|v| env_truthy(v)).unwrap_or(false);
+    let persist = params
+        .get("persist")
+        .map(|v| env_truthy(v))
+        .unwrap_or(false);
     let durable = state.config().persist_dir.is_some();
     // 409 cases (the request is incompatible with the server's durability posture) are decided
     // HERE so any `Err` from `restore_from` below is unambiguously a corrupt/import problem (400).
@@ -6601,14 +6617,19 @@ async fn run_query_pinned(
             // call site is uniform in both feature states; it is moved into the blocking
             // closure and held alive for the entire engine call, then dropped on exit.
             #[cfg(feature = "query-registry")]
-            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) = {
+            let (budget, qr_guard): (
+                QueryBudget,
+                Option<Box<dyn std::any::Any + Send>>,
+            ) = {
                 let base = make_budget(&config, !is_ask);
                 let (cancel, guard) = state.running_queries.register(sparql);
                 (base.with_cancel(cancel), Some(Box::new(guard)))
             };
             #[cfg(not(feature = "query-registry"))]
-            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) =
-                (make_budget(&config, !is_ask), None);
+            let (budget, qr_guard): (
+                QueryBudget,
+                Option<Box<dyn std::any::Any + Send>>,
+            ) = (make_budget(&config, !is_ask), None);
             let cfg = config.clone();
             let allow = allow.clone();
             // [OPUS-4.8] (sq-7d3dj.34.2) SELECT → SPARQL-results JSON streams its body: the
@@ -6624,9 +6645,20 @@ async fn run_query_pinned(
                 // decides how a mid-stream truncation is signalled (trailer vs. an aborted
                 // chunked framing) — see `StreamingJsonBody`. Resolved here, while the
                 // request headers are still in scope.
-                let shape = StreamShape { head_only, trailers_ok: client_accepts_trailers(headers) };
-                return stream_select_json(gen, prepared.query, budget, shape, allow, qr_guard, &config)
-                    .await;
+                let shape = StreamShape {
+                    head_only,
+                    trailers_ok: client_accepts_trailers(headers),
+                };
+                return stream_select_json(
+                    gen,
+                    prepared.query,
+                    budget,
+                    shape,
+                    allow,
+                    qr_guard,
+                    &config,
+                )
+                .await;
             }
             let pquery = prepared.query;
             let select = prepared.runnable;
@@ -6675,14 +6707,19 @@ async fn run_query_pinned(
             let query = prepared.runnable;
             // [SONNET-4.6] (sq-qsm5z) Register with the running-query registry.
             #[cfg(feature = "query-registry")]
-            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) = {
+            let (budget, qr_guard): (
+                QueryBudget,
+                Option<Box<dyn std::any::Any + Send>>,
+            ) = {
                 let base = make_budget(&config, true);
                 let (cancel, guard) = state.running_queries.register(sparql);
                 (base.with_cancel(cancel), Some(Box::new(guard)))
             };
             #[cfg(not(feature = "query-registry"))]
-            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) =
-                (make_budget(&config, true), None);
+            let (budget, qr_guard): (
+                QueryBudget,
+                Option<Box<dyn std::any::Any + Send>>,
+            ) = (make_budget(&config, true), None);
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
                 let _guard = qr_guard;
@@ -6795,7 +6832,10 @@ fn tighter(a: Option<usize>, b: Option<usize>) -> Option<usize> {
 
 /// Awaits a blocking engine worker under the hard timeout cap; maps a worker panic to a
 /// 500 (CatchPanicLayer cannot see panics on the blocking pool — the JoinError carries them).
-pub(crate) async fn await_worker(task: tokio::task::JoinHandle<Response>, config: &ServerConfig) -> Response {
+pub(crate) async fn await_worker(
+    task: tokio::task::JoinHandle<Response>,
+    config: &ServerConfig,
+) -> Response {
     let joined = match config.query_timeout {
         Some(t) => match tokio::time::timeout(t + TIMEOUT_GRACE, task).await {
             Ok(j) => j,
@@ -6910,7 +6950,7 @@ fn render_select(
                 Format::Tsv => results::select_to_tsv_chunks(&result),
                 _ => unreachable!(),
             };
-            return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone())
+            return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone());
         }
         Format::Xml => {
             let result = match sparq_engine::query_with_budget(graph, select, budget) {
@@ -7266,7 +7306,10 @@ async fn stream_select_json(
     qr_guard: Option<Box<dyn std::any::Any + Send>>,
     config: &ServerConfig,
 ) -> Response {
-    let StreamShape { head_only, trailers_ok } = shape;
+    let StreamShape {
+        head_only,
+        trailers_ok,
+    } = shape;
     let ct = Format::Json.select_content_type();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamItem>(STREAM_CHANNEL_CAP);
     tokio::task::spawn_blocking(move || {
@@ -7274,13 +7317,17 @@ async fn stream_select_json(
         let _guard = qr_guard;
         with_engine_scope_allow(&allow, || {
             let graph = gen.snapshot();
-            let mut sink = |chunk: String| match tx.blocking_send(StreamItem::Chunk(Bytes::from(chunk.into_bytes()))) {
+            let mut sink = |chunk: String| match tx
+                .blocking_send(StreamItem::Chunk(Bytes::from(chunk.into_bytes())))
+            {
                 Ok(()) => std::ops::ControlFlow::Continue(()),
                 // The receiver was dropped — the client disconnected (or a HEAD request
                 // stopped reading). Abandon the rest of the work.
                 Err(_) => std::ops::ControlFlow::Break(()),
             };
-            let outcome = sparq_engine::query_json_stream_prepared_with_budget(graph, &query, &budget, &mut sink);
+            let outcome = sparq_engine::query_json_stream_prepared_with_budget(
+                graph, &query, &budget, &mut sink,
+            );
             // [SONNET-4.6] (sq-7d3dj.26) ALWAYS post a terminal marker: the body side treats
             // "channel closed without one" as a truncation (a panicking worker), so the
             // completion claim can only ever come from the engine actually returning `Ok`.
@@ -7447,7 +7494,11 @@ mod truncation_safety_tests {
             trailers_ok,
             state: BodyState::Streaming,
         };
-        let mut out = Drained { body: Vec::new(), trailers: None, failed: false };
+        let mut out = Drained {
+            body: Vec::new(),
+            trailers: None,
+            failed: false,
+        };
         loop {
             let frame =
                 std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await;
@@ -7498,8 +7549,15 @@ mod truncation_safety_tests {
             true,
         )
         .await;
-        assert_eq!(out.text(), HEAD, "the document-closing chunk must be withheld");
-        assert!(!out.text().ends_with("]}}"), "a truncated body must NOT be closed");
+        assert_eq!(
+            out.text(),
+            HEAD,
+            "the document-closing chunk must be withheld"
+        );
+        assert!(
+            !out.text().ends_with("]}}"),
+            "a truncated body must NOT be closed"
+        );
         serde_json::from_slice::<serde_json::Value>(&out.body)
             .expect_err("a truncated body MUST fail to parse as JSON");
         assert_eq!(out.trailer(TRAILER_TRUNCATED).as_deref(), Some("max-rows"));
@@ -7520,7 +7578,10 @@ mod truncation_safety_tests {
             false,
         )
         .await;
-        assert!(out.failed, "the aborted framing IS the signal without a trailer");
+        assert!(
+            out.failed,
+            "the aborted framing IS the signal without a trailer"
+        );
         assert_eq!(out.text(), HEAD);
         assert!(out.trailers.is_none());
         serde_json::from_slice::<serde_json::Value>(&out.body)
@@ -7637,7 +7698,11 @@ mod truncation_safety_tests {
 /// "10 rows, --max-results". Gating the `max_results` consideration on `apply_max_results`
 /// makes the message path-accurate (the 413 status itself was always correct — only the
 /// human-readable knob name / row number could be wrong).
-pub(crate) fn engine_error_response(e: &str, config: &ServerConfig, apply_max_results: bool) -> Response {
+pub(crate) fn engine_error_response(
+    e: &str,
+    config: &ServerConfig,
+    apply_max_results: bool,
+) -> Response {
     if e.contains("query budget exceeded (timeout)") {
         return timeout_response(config);
     }
@@ -7684,7 +7749,12 @@ pub(crate) fn engine_error_response(e: &str, config: &ServerConfig, apply_max_re
 fn update_rejection_response(e: &str, config: &ServerConfig) -> Response {
     #[cfg(feature = "shacl")]
     if let Some(report_json) = e.strip_prefix(SHACL_GUARD_REJECTED_PREFIX) {
-        return text_response(StatusCode::UNPROCESSABLE_ENTITY, "application/json; charset=utf-8", report_json.to_string(), false);
+        return text_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "application/json; charset=utf-8",
+            report_json.to_string(),
+            false,
+        );
     }
     // [FABLE-5] (PR #1999 security review) The guard could not FULLY evaluate its shapes
     // graph → the write was refused fail-CLOSED. This is the operator's guard
@@ -9548,10 +9618,7 @@ mod bind_posture_tests {
 ///
 /// **Auth:** READ-gated (fail-closed). Mirrors the posture of every other admin route.
 #[cfg(feature = "query-registry")]
-async fn list_queries_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn list_queries_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
         return resp;
     }
@@ -9596,7 +9663,7 @@ async fn cancel_query_handler(
 
 #[cfg(all(test, feature = "query-registry"))]
 mod query_registry_tests {
-    use super::{QueryRegistry, registry_fingerprint};
+    use super::{registry_fingerprint, QueryRegistry};
     use std::sync::Arc;
 
     // Fingerprint must be stable across calls with the same input.
@@ -9623,9 +9690,17 @@ mod query_registry_tests {
         let registry = Arc::new(QueryRegistry::default());
         {
             let (_cancel, _guard) = registry.register("SELECT * WHERE { ?s ?p ?o }");
-            assert_eq!(registry.list().len(), 1, "entry must be present while guard is alive");
+            assert_eq!(
+                registry.list().len(),
+                1,
+                "entry must be present while guard is alive"
+            );
         }
-        assert_eq!(registry.list().len(), 0, "entry must be removed after guard drops");
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "entry must be removed after guard drops"
+        );
     }
 
     // The RAII guard removes the entry even during a panic / unwind.
@@ -9639,7 +9714,11 @@ mod query_registry_tests {
         })
         .join();
         assert!(result.is_err(), "thread must have panicked");
-        assert_eq!(registry.list().len(), 0, "entry must be cleaned up after unwind");
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "entry must be cleaned up after unwind"
+        );
     }
 
     // Cancelling an entry flips the flag (non-vacuous: verify the flag starts false).
@@ -9652,7 +9731,10 @@ mod query_registry_tests {
         let id = registry.list()[0]["id"].as_str().unwrap().to_owned();
         let found = registry.cancel_query(&id);
         assert!(found, "cancel must return true for a known id");
-        assert!(cancel.load(Ordering::Acquire), "flag must be true after cancel");
+        assert!(
+            cancel.load(Ordering::Acquire),
+            "flag must be true after cancel"
+        );
     }
 
     // [SONNET-4.6] (sq-m9prn) A read query and an UPDATE are distinguishable in the listing,
@@ -9669,8 +9751,16 @@ mod query_registry_tests {
             .iter()
             .map(|e| e["kind"].as_str().unwrap_or_default().to_owned())
             .collect();
-        assert!(kinds.contains(&"query".to_string()), "read row must be kind=query: {:?}", kinds);
-        assert!(kinds.contains(&"update".to_string()), "update row must be kind=update: {:?}", kinds);
+        assert!(
+            kinds.contains(&"query".to_string()),
+            "read row must be kind=query: {:?}",
+            kinds
+        );
+        assert!(
+            kinds.contains(&"update".to_string()),
+            "update row must be kind=update: {:?}",
+            kinds
+        );
     }
 
     // [SONNET-4.6] (sq-m9prn) An update row is cancellable and RAII-cleaned exactly like a
@@ -9683,10 +9773,20 @@ mod query_registry_tests {
             let (cancel, _guard) = registry.register_update("DELETE WHERE { ?s ?p ?o }");
             assert!(!cancel.load(Ordering::Acquire), "flag must start false");
             let id = registry.list()[0]["id"].as_str().unwrap().to_owned();
-            assert!(registry.cancel_query(&id), "an update row must be cancellable by id");
-            assert!(cancel.load(Ordering::Acquire), "cancelling the update must flip its flag");
+            assert!(
+                registry.cancel_query(&id),
+                "an update row must be cancellable by id"
+            );
+            assert!(
+                cancel.load(Ordering::Acquire),
+                "cancelling the update must flip its flag"
+            );
         }
-        assert_eq!(registry.list().len(), 0, "update row must be removed once the apply returns");
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "update row must be removed once the apply returns"
+        );
     }
 
     // [SONNET-4.6] (sq-m9prn) The listing never carries raw query text — for updates too,
@@ -9718,7 +9818,10 @@ mod query_registry_tests {
         let registry = Arc::new(QueryRegistry::default());
         let secret = "INSERT DATA { <http://ex/s> <http://ex/p> \"sensitive-literal\" }";
         let (_cancel, _guard) = registry.register_update(secret);
-        let exposed = registry.list()[0]["fingerprint"].as_str().unwrap().to_owned();
+        let exposed = registry.list()[0]["fingerprint"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         // An attacker's offline dictionary — plausible bodies, one of which is the real one.
         let candidates = [
@@ -9726,8 +9829,11 @@ mod query_registry_tests {
             "INSERT DATA { <http://ex/s> <http://ex/p> \"sensitive-literal\" }",
             "DELETE WHERE { ?s ?p ?o }",
         ];
-        let recovered: Vec<&str> =
-            candidates.iter().copied().filter(|c| registry_fingerprint(c) == exposed).collect();
+        let recovered: Vec<&str> = candidates
+            .iter()
+            .copied()
+            .filter(|c| registry_fingerprint(c) == exposed)
+            .collect();
         assert_eq!(
             recovered,
             vec![secret],
@@ -9741,7 +9847,10 @@ mod query_registry_tests {
     #[test]
     fn cancel_unknown_id_returns_false() {
         let registry = Arc::new(QueryRegistry::default());
-        assert!(!registry.cancel_query("0000000000000000"), "unknown id must return false");
+        assert!(
+            !registry.cancel_query("0000000000000000"),
+            "unknown id must return false"
+        );
     }
 
     // Multiple simultaneous entries are all listed and all individually cancellable.
@@ -9756,7 +9865,10 @@ mod query_registry_tests {
         let id0 = list[0]["id"].as_str().unwrap().to_owned();
         registry.cancel_query(&id0);
         // Exactly one flag is now set.
-        let set_count = [c1, c2].iter().filter(|f| f.load(Ordering::Acquire)).count();
+        let set_count = [c1, c2]
+            .iter()
+            .filter(|f| f.load(Ordering::Acquire))
+            .count();
         assert_eq!(set_count, 1, "exactly one cancel flag must be set");
     }
 
@@ -9822,7 +9934,10 @@ mod query_registry_tests {
         );
         let id = registry.list()[0]["id"].as_str().unwrap().to_owned();
         let found = registry.cancel_query(&id);
-        assert!(found, "cancel_query must return true for the EXPLAIN entry id");
+        assert!(
+            found,
+            "cancel_query must return true for the EXPLAIN entry id"
+        );
         assert!(
             cancel.load(Ordering::Acquire),
             "cancel flag must be true after DELETE /queries/{id}"
@@ -10264,7 +10379,9 @@ mod json_error_tests {
     use axum::http::StatusCode;
 
     async fn body_of(resp: axum::response::Response) -> String {
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
@@ -10298,13 +10415,24 @@ mod json_error_tests {
         // ONLY the generic class message, never the `detail` (which may echo caller input, a
         // loaded-data fragment, or a filesystem path). The detail goes to the server-side log.
         let detail = "patient_alice_smith is not a valid subject (/srv/data/phi.ttl)";
-        let resp = super::sanitized_error(StatusCode::BAD_REQUEST, "parse_error", "invalid RDF in request body", detail);
+        let resp = super::sanitized_error(
+            StatusCode::BAD_REQUEST,
+            "parse_error",
+            "invalid RDF in request body",
+            detail,
+        );
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_of(resp).await;
         assert_eq!(body, "{\"error\":\"invalid RDF in request body\"}");
         // The sensitive fragments must not have leaked into the client-facing body.
-        assert!(!body.contains("alice_smith"), "leaked loaded-data fragment: {body}");
-        assert!(!body.contains("/srv/data"), "leaked filesystem path: {body}");
+        assert!(
+            !body.contains("alice_smith"),
+            "leaked loaded-data fragment: {body}"
+        );
+        assert!(
+            !body.contains("/srv/data"),
+            "leaked filesystem path: {body}"
+        );
     }
 }
 
@@ -10526,8 +10654,14 @@ mod gsp_helpers_tests {
         // The classic injection attempt — closing the term and appending an op — is neutralised:
         // the `>` and `{`/`}` and spaces are all encoded, so no second clause can form.
         let injected = escape_iri("http://ex/g> ;\nDROP ALL ;\n<x");
-        assert!(!injected.contains('>'), "unescaped '>' would close the IRIREF: {injected}");
-        assert!(!injected.contains(' '), "unescaped space is invalid in an IRIREF: {injected}");
+        assert!(
+            !injected.contains('>'),
+            "unescaped '>' would close the IRIREF: {injected}"
+        );
+        assert!(
+            !injected.contains(' '),
+            "unescaped space is invalid in an IRIREF: {injected}"
+        );
     }
 
     #[test]
@@ -10537,7 +10671,10 @@ mod gsp_helpers_tests {
         assert_eq!(graph_data_block(&GraphRef::Default, nt), nt);
         // A named graph is wrapped in `GRAPH <iri> { … }`, with the IRI escaped.
         let block = graph_data_block(&GraphRef::Named("http://ex/g".into()), nt);
-        assert!(block.starts_with("GRAPH <http://ex/g> {\n"), "block: {block}");
+        assert!(
+            block.starts_with("GRAPH <http://ex/g> {\n"),
+            "block: {block}"
+        );
         assert!(block.trim_end().ends_with('}'), "block: {block}");
         assert!(block.contains(nt), "block must carry the triples: {block}");
     }
@@ -10545,7 +10682,10 @@ mod gsp_helpers_tests {
     #[test]
     fn base_iri_is_the_named_graph_iri_or_none_for_default() {
         assert_eq!(base_iri(&GraphRef::Default), None);
-        assert_eq!(base_iri(&GraphRef::Named("http://ex/g".into())), Some("http://ex/g"));
+        assert_eq!(
+            base_iri(&GraphRef::Named("http://ex/g".into())),
+            Some("http://ex/g")
+        );
     }
 
     #[test]
@@ -10568,7 +10708,10 @@ mod gsp_helpers_tests {
     fn body_to_ntriples_roundtrips_valid_turtle_to_canonical_ntriples() {
         let body = Bytes::from_static(b"@prefix ex: <http://ex/> . ex:a ex:p ex:b .");
         let nt = body_to_ntriples(&body, "text/turtle", None).expect("valid turtle parses");
-        assert!(nt.contains("<http://ex/a> <http://ex/p> <http://ex/b> ."), "got: {nt}");
+        assert!(
+            nt.contains("<http://ex/a> <http://ex/p> <http://ex/b> ."),
+            "got: {nt}"
+        );
     }
 }
 
@@ -10588,7 +10731,9 @@ mod dataset_override_tests {
         assert_eq!(over.default, vec!["http://ex/a", "http://ex/b"]);
         assert_eq!(over.named, vec!["http://ex/n"]);
         // The §2.1.4 query override reads the `*-graph-uri` family; unrelated params are ignored.
-        let q = query_dataset_override("default-graph-uri=http://ex/d&query=SELECT&named-graph-uri=http://ex/n");
+        let q = query_dataset_override(
+            "default-graph-uri=http://ex/d&query=SELECT&named-graph-uri=http://ex/n",
+        );
         assert_eq!(q.default, vec!["http://ex/d"]);
         assert_eq!(q.named, vec!["http://ex/n"]);
     }
@@ -10596,8 +10741,15 @@ mod dataset_override_tests {
     #[test]
     fn rewrite_update_passes_through_when_no_override_is_present() {
         let over = update_dataset_override(""); // empty => is_empty() => verbatim
-        let rewritten = rewrite_update("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }", &over).unwrap();
-        assert_eq!(rewritten, "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }");
+        let rewritten = rewrite_update(
+            "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }",
+            &over,
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }"
+        );
     }
 
     #[test]
@@ -10635,7 +10787,11 @@ mod dataset_override_tests {
     fn parse_form_handles_pair_without_equals() {
         // A form pair with no `=` is treated as (key, "") — the None arm at line ~6184.
         let map = super::parse_form("keyonly&a=b");
-        assert_eq!(map.get("keyonly"), Some(&"".to_string()), "key-only pair must map to empty string");
+        assert_eq!(
+            map.get("keyonly"),
+            Some(&"".to_string()),
+            "key-only pair must map to empty string"
+        );
         assert_eq!(map.get("a"), Some(&"b".to_string()));
     }
 
@@ -10645,7 +10801,10 @@ mod dataset_override_tests {
         let vals = super::form_values("keyonly&a=v1&a=v2", "a");
         assert_eq!(vals, vec!["v1".to_string(), "v2".to_string()]);
         let none_vals = super::form_values("keyonly&a=v1", "keyonly");
-        assert!(none_vals.is_empty(), "key-only pair has no value, so it is skipped");
+        assert!(
+            none_vals.is_empty(),
+            "key-only pair has no value, so it is skipped"
+        );
     }
 
     #[test]
@@ -10718,7 +10877,9 @@ mod pure_helper_unit_tests {
         // It must return 500 and must NOT echo the engine detail into the body.
         let resp = execution_error("engine internal detail that must not leak");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(
             !body_str.contains("engine internal detail"),
@@ -10733,8 +10894,8 @@ mod pure_helper_unit_tests {
     #[tokio::test]
     async fn decode_error_unsupported_maps_to_415() {
         // The `DecodeError::Unsupported` arm of `into_response` must return 415.
-        let resp = DecodeError::Unsupported("identity encoding not supported".to_string())
-            .into_response();
+        let resp =
+            DecodeError::Unsupported("identity encoding not supported".to_string()).into_response();
         assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 }
@@ -10807,7 +10968,9 @@ mod budget_envelope_tests {
     use axum::http::StatusCode;
 
     async fn body_of(resp: axum::response::Response) -> String {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
@@ -10820,8 +10983,16 @@ mod budget_envelope_tests {
         let resp = engine_error_response("query budget exceeded (max-bytes)", &cfg, true);
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let body = body_of(resp).await;
-        assert!(body.contains("1000 bytes"), "expected '1000 bytes' in: {}", body);
-        assert!(body.contains("--max-query-bytes"), "expected '--max-query-bytes' in: {}", body);
+        assert!(
+            body.contains("1000 bytes"),
+            "expected '1000 bytes' in: {}",
+            body
+        );
+        assert!(
+            body.contains("--max-query-bytes"),
+            "expected '--max-query-bytes' in: {}",
+            body
+        );
     }
 
     #[tokio::test]
@@ -10857,7 +11028,11 @@ mod budget_envelope_tests {
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let body = body_of(resp).await;
         assert!(body.contains("50 rows"), "expected '50 rows' in: {}", body);
-        assert!(body.contains("--max-results"), "expected '--max-results' in: {}", body);
+        assert!(
+            body.contains("--max-results"),
+            "expected '--max-results' in: {}",
+            body
+        );
     }
 
     #[tokio::test]
@@ -10873,7 +11048,11 @@ mod budget_envelope_tests {
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let body = body_of(resp).await;
         assert!(body.contains("42 rows"), "expected '42 rows' in: {}", body);
-        assert!(body.contains("--max-results"), "expected '--max-results' in: {}", body);
+        assert!(
+            body.contains("--max-results"),
+            "expected '--max-results' in: {}",
+            body
+        );
     }
 
     #[tokio::test]
@@ -10934,9 +11113,15 @@ mod timeout_none_tests {
         };
         let resp = timeout_response(&cfg);
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(body.contains("0s"), "expected '0s' (no timeout configured) in: {}", body);
+        assert!(
+            body.contains("0s"),
+            "expected '0s' (no timeout configured) in: {}",
+            body
+        );
     }
 }
 
@@ -10952,10 +11137,19 @@ mod not_acceptable_head_tests {
     async fn not_acceptable_get_carries_json_error_body() {
         let resp = not_acceptable_response(false);
         assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(!body.is_empty(), "GET 406 must carry a non-empty JSON error body");
-        assert!(body.contains("error"), "body must contain the 'error' key: {}", body);
+        assert!(
+            !body.is_empty(),
+            "GET 406 must carry a non-empty JSON error body"
+        );
+        assert!(
+            body.contains("error"),
+            "body must contain the 'error' key: {}",
+            body
+        );
     }
 
     #[tokio::test]
@@ -10967,8 +11161,14 @@ mod not_acceptable_head_tests {
             StatusCode::NOT_ACCEPTABLE,
             "HEAD 406 must still be 406",
         );
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert!(bytes.is_empty(), "HEAD 406 must have an empty body; got: {:?}", bytes);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            bytes.is_empty(),
+            "HEAD 406 must have an empty body; got: {:?}",
+            bytes
+        );
     }
 }
 
@@ -10988,7 +11188,9 @@ mod json_error_bodies_middleware_tests {
     use axum::response::Response;
 
     async fn body_str(resp: Response) -> String {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
@@ -11041,7 +11243,11 @@ mod json_error_bodies_middleware_tests {
             "rewritten body must carry the original message: {}",
             body
         );
-        assert!(body.starts_with('{'), "rewritten body must be a JSON object: {}", body);
+        assert!(
+            body.starts_with('{'),
+            "rewritten body must be a JSON object: {}",
+            body
+        );
     }
 
     #[tokio::test]
@@ -11067,7 +11273,11 @@ mod json_error_bodies_middleware_tests {
             allow
         );
         let body = body_str(out).await;
-        assert!(body.contains("error"), "rewritten body must be a JSON error envelope: {}", body);
+        assert!(
+            body.contains("error"),
+            "rewritten body must be a JSON error envelope: {}",
+            body
+        );
     }
 }
 
@@ -11166,8 +11376,13 @@ mod gsp_empty_body_paths_tests {
             header::CONTENT_TYPE,
             "application/n-triples".parse().unwrap(),
         );
-        let setup_resp =
-            gsp_post(&state, GraphRef::Named(iri.into()), &setup_headers, &nt_body).await;
+        let setup_resp = gsp_post(
+            &state,
+            GraphRef::Named(iri.into()),
+            &setup_headers,
+            &nt_body,
+        )
+        .await;
         assert_eq!(
             setup_resp.status(),
             StatusCode::CREATED,
@@ -11204,18 +11419,21 @@ mod apply_update_mvcc_tests {
         .await
         .unwrap();
         let gen = result.expect("INSERT DATA must succeed");
-        assert!(gen > 0, "published generation must be positive, got {}", gen);
+        assert!(
+            gen > 0,
+            "published generation must be positive, got {}",
+            gen
+        );
     }
 
     #[tokio::test]
     async fn malformed_update_returns_err() {
         let state = AppState::new(Graph::default());
         let s = state.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            s.apply_update("NOT VALID SPARQL UPDATE !!!!")
-        })
-        .await
-        .unwrap();
+        let result =
+            tokio::task::spawn_blocking(move || s.apply_update("NOT VALID SPARQL UPDATE !!!!"))
+                .await
+                .unwrap();
         assert!(result.is_err(), "a malformed update must return Err");
     }
 
@@ -11224,18 +11442,14 @@ mod apply_update_mvcc_tests {
         let state = AppState::new(Graph::default());
         let s1 = state.clone();
         let gen1 = tokio::task::spawn_blocking(move || {
-            s1.apply_update(
-                "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/1> }",
-            )
+            s1.apply_update("INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/1> }")
         })
         .await
         .unwrap()
         .expect("first update must succeed");
         let s2 = state.clone();
         let gen2 = tokio::task::spawn_blocking(move || {
-            s2.apply_update(
-                "INSERT DATA { <http://ex/b> <http://ex/p> <http://ex/2> }",
-            )
+            s2.apply_update("INSERT DATA { <http://ex/b> <http://ex/p> <http://ex/2> }")
         })
         .await
         .unwrap()
@@ -11390,7 +11604,11 @@ mod change_stream_commit_hook_tests {
         assert!(stream.rebase(current, false).is_err());
         let gap = stream.rebase(current, true).expect("new-lineage rebase");
         assert_eq!((gap.seq, gap.generation, gap.rebase), (1, 1, true));
-        assert_eq!(stream.next_seq(), 2, "the gap record advances the tracked tail");
+        assert_eq!(
+            stream.next_seq(),
+            2,
+            "the gap record advances the tracked tail"
+        );
 
         // Recording resumes gapless from the restarted baseline — the recorder never stopped.
         writer
@@ -11458,12 +11676,11 @@ mod from_env_tests {
         // This covers the function's scaffolding (all `if let` condition sites) and
         // the `env_parse` function body (the fast-path that short-circuits on None).
         // The returned config must equal the default (no env var overrides the defaults).
-        let cfg = ServerConfig::from_env()
-            .expect("from_env must succeed when no SPARQ_* vars are set");
+        let cfg =
+            ServerConfig::from_env().expect("from_env must succeed when no SPARQ_* vars are set");
         let def = ServerConfig::default();
         assert_eq!(
-            cfg.max_concurrent,
-            def.max_concurrent,
+            cfg.max_concurrent, def.max_concurrent,
             "from_env with no overrides must equal the default max_concurrent",
         );
     }
@@ -11491,7 +11708,10 @@ mod from_env_tests {
         // `env_parse` returns None when the named env var is not set.
         // Using an implausible key so we don't accidentally hit a real var.
         let result: Option<u64> = env_parse("_SPARQ_QCNN19_NONEXISTENT_TEST_VAR_");
-        assert!(result.is_none(), "unset env var must yield None from env_parse");
+        assert!(
+            result.is_none(),
+            "unset env var must yield None from env_parse"
+        );
     }
 
     #[test]
@@ -11502,7 +11722,11 @@ mod from_env_tests {
         std::env::set_var(key, "123");
         let result: Option<u64> = env_parse(key);
         std::env::remove_var(key);
-        assert_eq!(result, Some(123u64), "env var set to '123' must parse to Some(123)");
+        assert_eq!(
+            result,
+            Some(123u64),
+            "env var set to '123' must parse to Some(123)"
+        );
     }
 
     #[test]
@@ -11513,7 +11737,10 @@ mod from_env_tests {
         std::env::set_var(key, "not-a-number");
         let result: Option<u64> = env_parse(key);
         std::env::remove_var(key);
-        assert!(result.is_none(), "unparseable env var value must yield None from env_parse");
+        assert!(
+            result.is_none(),
+            "unparseable env var value must yield None from env_parse"
+        );
     }
 
     // [OPUS-4.8] (sq-p7kk5) Adaptive group-commit: default ON, env toggle, and the
@@ -11674,7 +11901,9 @@ mod from_env_tests {
         std::env::remove_var("SPARQ_SERVICE_ALLOW");
         let cfg = result.expect("SPARQ_SERVICE_ALLOW=api.example.org must succeed");
         assert!(
-            cfg.service_allow.engine_entries().contains(&"api.example.org".to_string()),
+            cfg.service_allow
+                .engine_entries()
+                .contains(&"api.example.org".to_string()),
             "SPARQ_SERVICE_ALLOW must allowlist api.example.org",
         );
     }
@@ -11716,7 +11945,10 @@ mod from_env_tests {
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_BODY_BYTES");
         let cfg = result.expect("SPARQ_MAX_BODY_BYTES must succeed");
-        assert_eq!(cfg.max_body_bytes, 2097152, "SPARQ_MAX_BODY_BYTES must set max_body_bytes");
+        assert_eq!(
+            cfg.max_body_bytes, 2097152,
+            "SPARQ_MAX_BODY_BYTES must set max_body_bytes"
+        );
     }
 
     #[test]
@@ -11726,7 +11958,10 @@ mod from_env_tests {
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_CONCURRENT");
         let cfg = result.expect("SPARQ_MAX_CONCURRENT must succeed");
-        assert_eq!(cfg.max_concurrent, 8, "SPARQ_MAX_CONCURRENT must set max_concurrent");
+        assert_eq!(
+            cfg.max_concurrent, 8,
+            "SPARQ_MAX_CONCURRENT must set max_concurrent"
+        );
     }
 
     #[test]
@@ -11762,7 +11997,10 @@ mod from_env_tests {
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_ALLOW_REMOTE");
         let cfg = result.expect("SPARQ_ALLOW_REMOTE must succeed");
-        assert!(cfg.allow_remote, "SPARQ_ALLOW_REMOTE=1 must enable allow_remote");
+        assert!(
+            cfg.allow_remote,
+            "SPARQ_ALLOW_REMOTE=1 must enable allow_remote"
+        );
     }
 
     #[test]
@@ -11773,7 +12011,10 @@ mod from_env_tests {
         std::env::remove_var("SPARQ_LOG_FULL_REQUESTS");
         let cfg = result.expect("SPARQ_LOG_FULL_REQUESTS must succeed");
         // SPARQ_LOG_FULL_REQUESTS=1 opts out of redaction → redact_logs becomes false.
-        assert!(!cfg.redact_logs, "SPARQ_LOG_FULL_REQUESTS=1 must disable redact_logs");
+        assert!(
+            !cfg.redact_logs,
+            "SPARQ_LOG_FULL_REQUESTS=1 must disable redact_logs"
+        );
     }
 
     // [GPT-5.6] sq-lsp7k.5.2: direct config tests for the public facets runtime flag.
@@ -11794,7 +12035,10 @@ mod from_env_tests {
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_FACETS");
         let cfg = result.expect("SPARQ_FACETS=1 must succeed");
-        assert!(cfg.facets, "SPARQ_FACETS=1 must enable the facet-count route");
+        assert!(
+            cfg.facets,
+            "SPARQ_FACETS=1 must enable the facet-count route"
+        );
     }
 
     // [GPT-5.6] sq-lsp7k.9.3: direct config tests for the public completion runtime flag.

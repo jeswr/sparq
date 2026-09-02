@@ -63,12 +63,19 @@ impl Timeline {
         // ":" of "±hh:mm" at the right position.
         let (date, tz) = if let Some(d) = s.strip_suffix('Z') {
             (d, Some(0))
-        } else if s.len() > 10 && matches!(s.as_bytes()[s.len() - 6], b'+' | b'-') && s.as_bytes()[s.len() - 3] == b':' {
+        } else if s.len() > 10
+            && matches!(s.as_bytes()[s.len() - 6], b'+' | b'-')
+            && s.as_bytes()[s.len() - 3] == b':'
+        {
             (&s[..s.len() - 6], Some(parse_tz(&s[s.len() - 6..])?))
         } else {
             (s, None)
         };
-        Some(Timeline { secs: parse_civil_date(date)? * 86_400, frac: 0.0, tz })
+        Some(Timeline {
+            secs: parse_civil_date(date)? * 86_400,
+            frac: 0.0,
+            tz,
+        })
     }
 
     /// The absolute instant (treating an absent timezone as UTC) in seconds.
@@ -144,7 +151,10 @@ fn cmp_instants_total(ai: f64, a_tz: bool, bi: f64, b_tz: bool) -> Ordering {
         // first keeps `-0.0 == 0.0` — the verdict `cmp_instants` itself would give, so the
         // extension can never contradict the partial order it extends — with `total_cmp`
         // only for a NaN instant, which `partial_cmp` cannot place at all.
-        None => ai.partial_cmp(&bi).unwrap_or_else(|| ai.total_cmp(&bi)).then(a_tz.cmp(&b_tz)),
+        None => ai
+            .partial_cmp(&bi)
+            .unwrap_or_else(|| ai.total_cmp(&bi))
+            .then(a_tz.cmp(&b_tz)),
     }
 }
 
@@ -210,11 +220,17 @@ impl Temporal {
     /// temporals stay on the slow path, which yields the type-error semantics).
     pub fn of_lit(value: &str, datatype: &str) -> Option<Temporal> {
         let (kind, tl) = match datatype {
-            XSD_DATE_TIME | XSD_DATE_TIME_STAMP => (TemporalKind::DateTime, Timeline::parse_datetime(value)?),
+            XSD_DATE_TIME | XSD_DATE_TIME_STAMP => {
+                (TemporalKind::DateTime, Timeline::parse_datetime(value)?)
+            }
             XSD_DATE => (TemporalKind::Date, Timeline::parse_date(value)?),
             _ => return None,
         };
-        Some(Temporal { instant: tl.instant(), has_tz: tl.tz.is_some(), kind })
+        Some(Temporal {
+            instant: tl.instant(),
+            has_tz: tl.tz.is_some(),
+            kind,
+        })
     }
 
     /// XPath comparison of two cached temporals: `None` for cross-family operands
@@ -298,10 +314,19 @@ mod tests {
     #[test]
     fn cache_cell_matches_per_row_parse() {
         // The cell must carry EXACTLY the parsed Timeline's instant/tz-presence.
-        for lex in ["2024-03-15T13:45:30.123456Z", "2024-03-15T13:45:30-09:30", "-0044-03-15T12:00:00", "9999-12-31T23:59:59.999Z"] {
+        for lex in [
+            "2024-03-15T13:45:30.123456Z",
+            "2024-03-15T13:45:30-09:30",
+            "-0044-03-15T12:00:00",
+            "9999-12-31T23:59:59.999Z",
+        ] {
             let tl = Timeline::parse_datetime(lex).unwrap();
             let t = dt(lex);
-            assert_eq!(t.instant.to_bits(), tl.instant().to_bits(), "instant differs for {lex}");
+            assert_eq!(
+                t.instant.to_bits(),
+                tl.instant().to_bits(),
+                "instant differs for {lex}"
+            );
             assert_eq!(t.has_tz, tl.tz.is_some());
         }
     }
@@ -332,19 +357,33 @@ mod tests {
             ("2024-03-15T13:00:00.250Z", "2024-03-15T13:00:00.500Z"), // sub-second
         ] {
             let decided = Timeline::cmp_tl(p(a), p(b)).expect("pair is XPath-decidable");
-            assert_eq!(Timeline::cmp_tl_total(p(a), p(b)), decided, "extension contradicts cmp_tl on {a} vs {b}");
+            assert_eq!(
+                Timeline::cmp_tl_total(p(a), p(b)),
+                decided,
+                "extension contradicts cmp_tl on {a} vs {b}"
+            );
         }
         // The indeterminate window is now DECIDED: same instant, so timezone presence
         // breaks the tie — the floating value sorts before the zoned one.
         let (zoned, floating) = (p("2024-03-15T13:00:00Z"), p("2024-03-15T13:00:00"));
-        assert_eq!(Timeline::cmp_tl(zoned, floating), None, "still a relational type error");
+        assert_eq!(
+            Timeline::cmp_tl(zoned, floating),
+            None,
+            "still a relational type error"
+        );
         assert_eq!(Timeline::cmp_tl_total(floating, zoned), Less);
         assert_eq!(Timeline::cmp_tl_total(zoned, floating), Greater);
         // Inside the window but NOT the same instant: the instant still decides first.
-        assert_eq!(Timeline::cmp_tl_total(floating, p("2024-03-15T13:00:00.250Z")), Less);
+        assert_eq!(
+            Timeline::cmp_tl_total(floating, p("2024-03-15T13:00:00.250Z")),
+            Less
+        );
         // Reflexive, and equal-instant same-presence pairs stay Equal (no spurious order).
         assert_eq!(Timeline::cmp_tl_total(zoned, zoned), Equal);
-        assert_eq!(Timeline::cmp_tl_total(zoned, p("2024-03-15T08:00:00-05:00")), Equal);
+        assert_eq!(
+            Timeline::cmp_tl_total(zoned, p("2024-03-15T08:00:00-05:00")),
+            Equal
+        );
     }
 
     /// The WITNESS sq-2k5py closes: two zoned dateTimes are the same instant (so
@@ -355,7 +394,11 @@ mod tests {
     #[test]
     fn witness_indeterminate_window_lexical_fallback_was_intransitive() {
         let p = |s: &str| Timeline::parse_datetime(s).unwrap();
-        let (x, y, z) = ("2024-03-15T12:00:00-01:00", "2024-03-15T14:00:00+01:00", "2024-03-15T13:00:00");
+        let (x, y, z) = (
+            "2024-03-15T12:00:00-01:00",
+            "2024-03-15T14:00:00+01:00",
+            "2024-03-15T13:00:00",
+        );
         // x and y are the SAME instant; both are indeterminate against the floating z.
         assert_eq!(Timeline::cmp_tl(p(x), p(y)), Some(Equal));
         assert_eq!(Timeline::cmp_tl(p(x), p(z)), None);
@@ -375,18 +418,42 @@ mod tests {
     fn cmp_t_total_is_kind_first_and_total() {
         let d = |s: &str| Temporal::of_lit(s, XSD_DATE).expect("valid date");
         // Cross-family: kind rank decides, never a value or lexical coercion.
-        assert_eq!(Temporal::cmp_t(dt("2024-03-15T00:00:00Z"), d("1999-01-01")), None);
-        assert_eq!(Temporal::cmp_t_total(dt("2024-03-15T00:00:00Z"), d("1999-01-01")), Less);
-        assert_eq!(Temporal::cmp_t_total(d("1999-01-01"), dt("2024-03-15T00:00:00Z")), Greater);
+        assert_eq!(
+            Temporal::cmp_t(dt("2024-03-15T00:00:00Z"), d("1999-01-01")),
+            None
+        );
+        assert_eq!(
+            Temporal::cmp_t_total(dt("2024-03-15T00:00:00Z"), d("1999-01-01")),
+            Less
+        );
+        assert_eq!(
+            Temporal::cmp_t_total(d("1999-01-01"), dt("2024-03-15T00:00:00Z")),
+            Greater
+        );
         // Same family: agrees with `cmp_t` where it decides…
-        assert_eq!(Temporal::cmp_t_total(dt("2024-03-15T13:00:00Z"), dt("2024-03-15T14:00:00+01:00")), Equal);
-        assert_eq!(Temporal::cmp_t_total(dt("2024-03-15T13:00:00Z"), dt("2024-03-16T13:00:00Z")), Less);
+        assert_eq!(
+            Temporal::cmp_t_total(dt("2024-03-15T13:00:00Z"), dt("2024-03-15T14:00:00+01:00")),
+            Equal
+        );
+        assert_eq!(
+            Temporal::cmp_t_total(dt("2024-03-15T13:00:00Z"), dt("2024-03-16T13:00:00Z")),
+            Less
+        );
         // …and decides the indeterminate window by timezone presence.
-        assert_eq!(Temporal::cmp_t(dt("2024-03-15T13:00:00Z"), dt("2024-03-15T13:00:00")), None);
-        assert_eq!(Temporal::cmp_t_total(dt("2024-03-15T13:00:00"), dt("2024-03-15T13:00:00Z")), Less);
+        assert_eq!(
+            Temporal::cmp_t(dt("2024-03-15T13:00:00Z"), dt("2024-03-15T13:00:00")),
+            None
+        );
+        assert_eq!(
+            Temporal::cmp_t_total(dt("2024-03-15T13:00:00"), dt("2024-03-15T13:00:00Z")),
+            Less
+        );
         // The date family gets the same extension (a tz-less date vs a zoned one).
         assert_eq!(Temporal::cmp_t(d("2024-03-15"), d("2024-03-15Z")), None);
-        assert_eq!(Temporal::cmp_t_total(d("2024-03-15"), d("2024-03-15Z")), Less);
+        assert_eq!(
+            Temporal::cmp_t_total(d("2024-03-15"), d("2024-03-15Z")),
+            Less
+        );
     }
 
     // [OPUS-4.8] sq-bif — the tests below close real gaps in this module's default surface:
@@ -408,11 +475,20 @@ mod tests {
             Some(Equal),
         );
         // Both floating (no tz): a direct compare.
-        assert_eq!(Timeline::cmp_tl(p("2024-03-15T12:00:00"), p("2024-03-15T13:00:00")), Some(Less));
+        assert_eq!(
+            Timeline::cmp_tl(p("2024-03-15T12:00:00"), p("2024-03-15T13:00:00")),
+            Some(Less)
+        );
         // Mixed presence inside the ±14h window: indeterminate (a SPARQL type error).
-        assert_eq!(Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-15T13:00:00")), None);
+        assert_eq!(
+            Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-15T13:00:00")),
+            None
+        );
         // Mixed presence OUTSIDE the window: decidable.
-        assert_eq!(Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-17T13:00:00")), Some(Less));
+        assert_eq!(
+            Timeline::cmp_tl(p("2024-03-15T13:00:00Z"), p("2024-03-17T13:00:00")),
+            Some(Less)
+        );
 
         // And `cmp_tl` agrees with the cached `Temporal::cmp_t` on the same lexicals.
         for (a, b) in [
@@ -421,7 +497,11 @@ mod tests {
             ("2024-03-15T13:00:00Z", "2024-03-17T13:00:00"),
             ("2024-03-15T12:00:00", "2024-03-15T13:00:00"),
         ] {
-            assert_eq!(Timeline::cmp_tl(p(a), p(b)), Temporal::cmp_t(dt(a), dt(b)), "cmp_tl/cmp_t disagree on {a} vs {b}");
+            assert_eq!(
+                Timeline::cmp_tl(p(a), p(b)),
+                Temporal::cmp_t(dt(a), dt(b)),
+                "cmp_tl/cmp_t disagree on {a} vs {b}"
+            );
         }
     }
 
@@ -451,7 +531,10 @@ mod tests {
         // A NEGATIVE-YEAR bare date must not be read as having a trailing offset (its leading
         // `-` is the year sign, and there is no `:` six chars from the end).
         let bce = Timeline::parse_date("-0044-03-15").unwrap();
-        assert!(bce.tz.is_none(), "a BCE year sign must not be parsed as a timezone offset");
+        assert!(
+            bce.tz.is_none(),
+            "a BCE year sign must not be parsed as a timezone offset"
+        );
         assert!(bce.secs < 0, "44 BCE is before the epoch");
     }
 
@@ -485,11 +568,17 @@ mod tests {
         assert!(parse_civil_date("-0001-12-31").unwrap() < 0);
 
         // Rejections: month/day out of the 1..=12 / 1..=31 ranges, and an extra component.
-        assert!(parse_civil_date("2024-13-01").is_none(), "month 13 rejected");
+        assert!(
+            parse_civil_date("2024-13-01").is_none(),
+            "month 13 rejected"
+        );
         assert!(parse_civil_date("2024-00-01").is_none(), "month 0 rejected");
         assert!(parse_civil_date("2024-01-32").is_none(), "day 32 rejected");
         assert!(parse_civil_date("2024-01-00").is_none(), "day 0 rejected");
-        assert!(parse_civil_date("2024-01-01-01").is_none(), "extra component rejected");
+        assert!(
+            parse_civil_date("2024-01-01-01").is_none(),
+            "extra component rejected"
+        );
         assert!(parse_civil_date("notanumber").is_none());
     }
 
@@ -499,7 +588,11 @@ mod tests {
     #[test]
     fn datetime_and_datetimestamp_share_a_family_date_is_disjoint() {
         let stamp = Temporal::of_lit("2024-03-15T13:00:00Z", XSD_DATE_TIME_STAMP).unwrap();
-        assert_eq!(stamp.kind, TemporalKind::DateTime, "dateTimeStamp caches as the DateTime family");
+        assert_eq!(
+            stamp.kind,
+            TemporalKind::DateTime,
+            "dateTimeStamp caches as the DateTime family"
+        );
         let dttime = dt("2024-03-15T13:00:00Z");
         // Same instant, both in the DateTime family: comparable and Equal.
         assert_eq!(Temporal::cmp_t(stamp, dttime), Some(Equal));

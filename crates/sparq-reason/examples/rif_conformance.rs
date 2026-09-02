@@ -244,11 +244,9 @@ mod runner {
     fn atom_to_triple_terms(a: &Atom) -> Option<[Term; 3]> {
         match a {
             Atom::Frame { obj, pred, val } => Some([obj.clone(), pred.clone(), val.clone()]),
-            Atom::Member { obj, class } => Some([
-                obj.clone(),
-                Term::Iri(RDF_TYPE.to_string()),
-                class.clone(),
-            ]),
+            Atom::Member { obj, class } => {
+                Some([obj.clone(), Term::Iri(RDF_TYPE.to_string()), class.clone()])
+            }
             Atom::Subclass { sub, sup } => Some([
                 sub.clone(),
                 Term::Iri(RDFS_SUBCLASS_OF.to_string()),
@@ -261,9 +259,9 @@ mod runner {
     fn term_to_id(dict: &mut Dict, t: &Term) -> Option<Id> {
         use oxrdf::{Literal, NamedNode, Term as OxTerm};
         match t {
-            Term::Iri(iri) => Some(dict.intern(&OxTerm::NamedNode(NamedNode::new_unchecked(
-                iri.clone(),
-            )))),
+            Term::Iri(iri) => {
+                Some(dict.intern(&OxTerm::NamedNode(NamedNode::new_unchecked(iri.clone()))))
+            }
             Term::Lit { lex, datatype } => {
                 let lit = Literal::new_typed_literal(
                     lex.clone(),
@@ -311,7 +309,8 @@ mod runner {
                 }
             }
             if let Some(want) = want_num {
-                if let (Some(want_dec), oxrdf::Term::Literal(l)) = (want.to_dec(), dict.term(row[2]))
+                if let (Some(want_dec), oxrdf::Term::Literal(l)) =
+                    (want.to_dec(), dict.term(row[2]))
                 {
                     if let Some(got_dec) =
                         sparq_substrate::numeric::as_numeric(&l).and_then(|n| n.to_dec())

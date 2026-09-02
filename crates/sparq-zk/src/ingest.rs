@@ -107,7 +107,9 @@ pub struct SaltMint {
 impl SaltMint {
     /// A fresh mint with an empty seen-set.
     pub fn new() -> Self {
-        SaltMint { issued: HashSet::new() }
+        SaltMint {
+            issued: HashSet::new(),
+        }
     }
 
     /// Seeds the seen-set from an existing registry's salts so a persistent
@@ -115,7 +117,9 @@ impl SaltMint {
     /// the durability gap noted in the module docs). Salts already in the
     /// registry are treated as issued.
     pub fn from_registry(entries: &[RegistryEntry]) -> Self {
-        SaltMint { issued: entries.iter().map(|e| e.salt).collect() }
+        SaltMint {
+            issued: entries.iter().map(|e| e.salt).collect(),
+        }
     }
 
     /// The number of salts issued so far (for tests / introspection).
@@ -215,14 +219,19 @@ impl IngestedDataset {
             let Some((_, g)) = store.named.iter().find(|(n, _)| *n == gname) else {
                 return Err(IngestError::MissingGraph(name.as_str().to_string()));
             };
-            let triples = crate::canon::graph_triples(g)
-                .map_err(|e| IngestError::Content(name.as_str().to_string(), CommitError::Canon(e)))?;
+            let triples = crate::canon::graph_triples(g).map_err(|e| {
+                IngestError::Content(name.as_str().to_string(), CommitError::Canon(e))
+            })?;
             // sq-610: one fresh globally-unique salt per named graph.
             let salt = mint.mint()?;
             // sq-cn8: per-named-graph commitment under that salt.
             let commitment = commit_triples(&triples, salt)
                 .map_err(|e| IngestError::Commit(name.as_str().to_string(), e))?;
-            graphs.push(IngestedGraph { name: name.clone(), salt, commitment });
+            graphs.push(IngestedGraph {
+                name: name.clone(),
+                salt,
+                commitment,
+            });
         }
         Ok(IngestedDataset { graphs })
     }
@@ -239,7 +248,10 @@ impl IngestedDataset {
 
     /// The per-graph commitments `C(G)`, in ingest order.
     pub fn commitments(&self) -> Vec<Fr> {
-        self.graphs.iter().map(|g| g.commitment.commitment).collect()
+        self.graphs
+            .iter()
+            .map(|g| g.commitment.commitment)
+            .collect()
     }
 
     /// The `<urn:sparq:zk>` registry entries (unattested) for the ingested
@@ -302,7 +314,11 @@ mod tests {
         let salts = ds.salts();
         assert_eq!(salts.len(), 2);
         let distinct: HashSet<_> = salts.iter().collect();
-        assert_eq!(distinct.len(), salts.len(), "every per-graph salt must be unique");
+        assert_eq!(
+            distinct.len(),
+            salts.len(),
+            "every per-graph salt must be unique"
+        );
     }
 
     /// A forced collision (re-registering an already-issued salt) is detected
@@ -317,7 +333,10 @@ mod tests {
         let fresh = crate::encode::salt_from_bytes(&[0xABu8; 32]);
         assert!(mint.register(fresh).is_ok());
         // ...and re-registering THAT one now also collides.
-        assert!(matches!(mint.register(fresh), Err(IngestError::SaltCollision)));
+        assert!(matches!(
+            mint.register(fresh),
+            Err(IngestError::SaltCollision)
+        ));
     }
 
     /// `from_registry` seeds the seen-set so a prior salt cannot be re-minted
@@ -329,7 +348,10 @@ mod tests {
         let mut mint = SaltMint::from_registry(&entries);
         // Every previously-minted salt is already "issued" and refused.
         for e in &entries {
-            assert!(matches!(mint.register(e.salt), Err(IngestError::SaltCollision)));
+            assert!(matches!(
+                mint.register(e.salt),
+                Err(IngestError::SaltCollision)
+            ));
         }
         // A new mint draw is still fresh (distinct from all prior salts).
         let fresh = mint.mint().unwrap();
@@ -362,7 +384,10 @@ mod tests {
         assert_eq!(zk.graphs.len(), ds.graphs.len());
         for (zg, ig) in zk.graphs.iter().zip(&ds.graphs) {
             assert_eq!(zg.name, ig.name);
-            assert_eq!(zg.commitment.salt, ig.salt, "ZkDataset commits under the minted salt");
+            assert_eq!(
+                zg.commitment.salt, ig.salt,
+                "ZkDataset commits under the minted salt"
+            );
             assert_eq!(
                 zg.commitment.commitment, ig.commitment.commitment,
                 "the per-graph commitment must match the ingest's"

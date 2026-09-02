@@ -244,13 +244,27 @@ mod tests {
         let mut acp_only = PodStore::new(graph);
         acp_only.materialize_acp().expect("acp materializes");
         let inside = row("window-carol-inside");
-        assert!(inside.expect.allow, "precondition: the inside row expects allow");
+        assert!(
+            inside.expect.allow,
+            "precondition: the inside row expects allow"
+        );
         let bare = acp_only.decide(&inside.session(), inside.resource, inside.mode);
-        assert!(!bare.allow, "no bridged grant -> carol denied even inside the window");
-        assert_eq!(bare.status, AclStatus::Resolved, "the ACP view still governs");
+        assert!(
+            !bare.allow,
+            "no bridged grant -> carol denied even inside the window"
+        );
+        assert_eq!(
+            bare.status,
+            AclStatus::Resolved,
+            "the ACP view still governs"
+        );
 
         let bridged = build_window_store().expect("window store builds");
-        assert!(bridged.decide(&inside.session(), inside.resource, inside.mode).allow);
+        assert!(
+            bridged
+                .decide(&inside.session(), inside.resource, inside.mode)
+                .allow
+        );
     }
 
     #[test]
@@ -310,7 +324,11 @@ mod tests {
         let clocks: Vec<Option<&str>> = alice.iter().map(|row| row.now).collect();
         assert_eq!(clocks, vec![Some(INSIDE), Some(AFTER), None]);
         for row in &alice {
-            assert!(row.expect.allow, "unwindowed grant: {} must allow", row.name);
+            assert!(
+                row.expect.allow,
+                "unwindowed grant: {} must allow",
+                row.name
+            );
             assert_eq!(row.expect.granted_modes, RWC);
         }
     }
@@ -320,7 +338,10 @@ mod tests {
         // Mutation witness: claim carol is allowed AFTER the window closed -> red.
         let store = build_window_store().expect("window store builds");
         let mut wrong = row("window-carol-after-close");
-        assert!(!wrong.expect.allow, "precondition: the after-close row expects deny");
+        assert!(
+            !wrong.expect.allow,
+            "precondition: the after-close row expects deny"
+        );
         wrong.expect = resolved_default(true, READ);
         let report = run_vectors(&store, &[wrong]);
         assert!(!report.passed(), "a lapsed window must not decide allow");

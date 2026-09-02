@@ -133,7 +133,7 @@ fn late_push_is_counted() {
     let mut q = Rsp::select(&avg_query(), 10.0, 10.0, 0.0, "rstream").expect("register");
     q.push(SENSOR, READING, "1", 5.0).expect("push"); // [0,10)
     q.push(SENSOR, READING, "2", 25.0).expect("push"); // watermark 25 closes [0,10) and [10,20)
-    // [OPUS-4.8] sq-734a: lateDropped() now returns a JS Number (f64), so compare to f64.
+                                                       // [OPUS-4.8] sq-734a: lateDropped() now returns a JS Number (f64), so compare to f64.
     assert_eq!(q.late_dropped(), 0.0, "no late drops yet");
     // ts=3 now lands behind the closed [0,10): too late.
     q.push(SENSOR, READING, "9", 3.0).expect("push");

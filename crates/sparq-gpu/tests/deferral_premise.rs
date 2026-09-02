@@ -234,17 +234,27 @@ fn the_deferral_record_still_exists() {
 /// contains the word — `publish = ["false"]` publishes to a registry named `false`.
 #[test]
 fn publication_trip_wire_reads_the_boolean_not_the_substring() {
-    assert!(declares_unpublished("[package]\nname = \"x\"\npublish = false\n"));
-    assert!(declares_unpublished("[package]\npublish=false # prototype\n"));
+    assert!(declares_unpublished(
+        "[package]\nname = \"x\"\npublish = false\n"
+    ));
+    assert!(declares_unpublished(
+        "[package]\npublish=false # prototype\n"
+    ));
 
     assert!(!declares_unpublished("[package]\npublish = [\"false\"]\n"));
-    assert!(!declares_unpublished("[package]\npublish = [\"crates-io\"]\n"));
+    assert!(!declares_unpublished(
+        "[package]\npublish = [\"crates-io\"]\n"
+    ));
     assert!(!declares_unpublished("[package]\npublish = true\n"));
     assert!(!declares_unpublished("[package]\nname = \"x\"\n"));
     // Inherited: the value is not visible here, so fail closed rather than assume.
-    assert!(!declares_unpublished("[package]\npublish.workspace = true\n"));
+    assert!(!declares_unpublished(
+        "[package]\npublish.workspace = true\n"
+    ));
     // A `publish = false` outside `[package]` decides nothing.
-    assert!(!declares_unpublished("[package]\n[features]\npublish = false\n"));
+    assert!(!declares_unpublished(
+        "[package]\n[features]\npublish = false\n"
+    ));
 }
 
 /// Trigger (a) has to follow a rename: the member manifest that inherits
@@ -260,8 +270,14 @@ fn dependency_trip_wire_follows_renames_and_inherited_workspace_dependencies() {
     assert_eq!(names, ["accel", "gpu", CRATE]);
 
     assert!(depends_on("[dependencies]\ngpu.workspace = true\n", &names));
-    assert!(depends_on("[dependencies]\naccel = { workspace = true }\n", &names));
-    assert!(depends_on("[dev-dependencies.gpu]\nworkspace = true\n", &names));
+    assert!(depends_on(
+        "[dependencies]\naccel = { workspace = true }\n",
+        &names
+    ));
+    assert!(depends_on(
+        "[dev-dependencies.gpu]\nworkspace = true\n",
+        &names
+    ));
     assert!(depends_on(
         "[target.'cfg(unix)'.dependencies]\nsparq-gpu = { path = \"../sparq-gpu\" }\n",
         &names
@@ -274,7 +290,10 @@ fn dependency_trip_wire_follows_renames_and_inherited_workspace_dependencies() {
 
     // A different crate that shares a prefix is not a dependent...
     assert!(!depends_on("[dependencies]\nwgpu = \"30\"\n", &names));
-    assert!(!depends_on("[dependencies]\nsparq-gpu-shim = \"1\"\n", &names));
+    assert!(!depends_on(
+        "[dependencies]\nsparq-gpu-shim = \"1\"\n",
+        &names
+    ));
     // ...nor is the root's own alias table, which creates no edge until a member
     // inherits it.
     assert!(!depends_on(root, &names));

@@ -239,11 +239,7 @@ impl CanonTable {
     /// either orientation; every representative must be constant along a tree
     /// edge; the parent chain must run strictly backwards; members must be
     /// distinct. A table that fails any of these is rejected fail-closed.
-    pub fn check(
-        &self,
-        committed: &[[FieldHex; 3]],
-        sameas: &FieldHex,
-    ) -> Result<(), CanonError> {
+    pub fn check(&self, committed: &[[FieldHex; 3]], sameas: &FieldHex) -> Result<(), CanonError> {
         let triples: BTreeSet<[String; 3]> = committed
             .iter()
             .map(|t| {
@@ -351,7 +347,9 @@ mod tests {
         for (i, e) in table.entries.iter().enumerate() {
             assert!(e.parent <= i, "entry {i} points forward");
         }
-        table.check(&committed(), &fh(SAMEAS)).expect("honest witness must check");
+        table
+            .check(&committed(), &fh(SAMEAS))
+            .expect("honest witness must check");
     }
 
     #[test]
@@ -381,7 +379,10 @@ mod tests {
         assert_eq!(normalize_hex(&table.canon(&fh(C)).0), normalize_hex(&rep.0));
         // Not a member: its own representative (eq-ref).
         assert_eq!(normalize_hex(&table.canon(&fh(P)).0), normalize_hex(P));
-        assert_eq!(normalize_hex(&table.canon(&fh(GHOST)).0), normalize_hex(GHOST));
+        assert_eq!(
+            normalize_hex(&table.canon(&fh(GHOST)).0),
+            normalize_hex(GHOST)
+        );
         // Idempotence (L3).
         let once = table.canon(&fh(C));
         assert_eq!(normalize_hex(&table.canon(&once).0), normalize_hex(&once.0));
@@ -476,9 +477,21 @@ mod tests {
         // is why the builder emits a BFS chain.
         let table = CanonTable {
             entries: vec![
-                CanonEntry { member: fh(A), representative: fh(A), parent: 0 },
-                CanonEntry { member: fh(B), representative: fh(A), parent: 0 },
-                CanonEntry { member: fh(C), representative: fh(A), parent: 0 },
+                CanonEntry {
+                    member: fh(A),
+                    representative: fh(A),
+                    parent: 0,
+                },
+                CanonEntry {
+                    member: fh(B),
+                    representative: fh(A),
+                    parent: 0,
+                },
+                CanonEntry {
+                    member: fh(C),
+                    representative: fh(A),
+                    parent: 0,
+                },
             ],
         };
         assert_eq!(
@@ -494,8 +507,16 @@ mod tests {
         let committed_reverse = vec![[fh(B), fh(SAMEAS), fh(A)]];
         let table = CanonTable {
             entries: vec![
-                CanonEntry { member: fh(A), representative: fh(A), parent: 0 },
-                CanonEntry { member: fh(B), representative: fh(A), parent: 0 },
+                CanonEntry {
+                    member: fh(A),
+                    representative: fh(A),
+                    parent: 0,
+                },
+                CanonEntry {
+                    member: fh(B),
+                    representative: fh(A),
+                    parent: 0,
+                },
             ],
         };
         assert_eq!(table.check(&committed_reverse, &fh(SAMEAS)), Ok(()));
@@ -508,8 +529,16 @@ mod tests {
         // upper-case / unprefixed spelling is the same term.
         let table = CanonTable {
             entries: vec![
-                CanonEntry { member: fh("0xA1"), representative: fh("A1"), parent: 0 },
-                CanonEntry { member: fh("A2"), representative: fh("0xa1"), parent: 0 },
+                CanonEntry {
+                    member: fh("0xA1"),
+                    representative: fh("A1"),
+                    parent: 0,
+                },
+                CanonEntry {
+                    member: fh("A2"),
+                    representative: fh("0xa1"),
+                    parent: 0,
+                },
             ],
         };
         assert_eq!(table.check(&committed(), &fh("41")), Ok(()));
@@ -521,6 +550,9 @@ mod tests {
         let table = CanonTable::from_committed_sameas(&[[fh(A), fh(A)]]);
         assert_eq!(table.entries.len(), 1);
         assert_eq!(table.entries[0].parent, 0);
-        assert_eq!(table.check(&[[fh(A), fh(SAMEAS), fh(A)]], &fh(SAMEAS)), Ok(()));
+        assert_eq!(
+            table.check(&[[fh(A), fh(SAMEAS), fh(A)]], &fh(SAMEAS)),
+            Ok(())
+        );
     }
 }

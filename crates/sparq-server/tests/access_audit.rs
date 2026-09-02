@@ -56,8 +56,7 @@ async fn structured_sink_records_allow_and_deny_through_the_real_path() {
         access_audit: Some(SinkTarget::File(audit_path.clone())),
         ..ServerConfig::default()
     };
-    let graph =
-        Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
+    let graph = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
     let app = router(AppState::with_config(graph, config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -108,16 +107,25 @@ async fn structured_sink_records_allow_and_deny_through_the_real_path() {
     assert_eq!(allowed["fingerprint"], fingerprint(SELECT));
     assert_eq!(allowed["policy_basis"], "bearer-auth: allowed");
     let actor = allowed["actor"].as_str().unwrap();
-    assert!(actor.starts_with("token:"), "authed => token fingerprint actor");
+    assert!(
+        actor.starts_with("token:"),
+        "authed => token fingerprint actor"
+    );
     assert!(!actor.contains(TOKEN), "raw token must never be logged");
     assert!(allowed["duration_us"].is_u64(), "duration recorded");
-    assert!(allowed["ts"].as_str().unwrap().ends_with('Z'), "RFC-3339 UTC ts");
+    assert!(
+        allowed["ts"].as_str().unwrap().ends_with('Z'),
+        "RFC-3339 UTC ts"
+    );
 
     // ---- DENIED record: the ENFORCED decision + basis ----
     assert_eq!(denied["action"], "query");
     assert_eq!(denied["status"], 401);
     assert_eq!(denied["actor"], "anonymous", "no token => anonymous");
-    assert_eq!(denied["policy_basis"], "bearer-auth: missing or invalid token");
+    assert_eq!(
+        denied["policy_basis"],
+        "bearer-auth: missing or invalid token"
+    );
     // The fingerprint is still recorded (operator sees WHAT was attempted) — never the raw text.
     assert_eq!(denied["fingerprint"], fingerprint(SELECT));
 
@@ -127,8 +135,14 @@ async fn structured_sink_records_allow_and_deny_through_the_real_path() {
         !file.contains("SELECT") && !file.contains("?s") && !file.contains(TOKEN),
         "query content + raw token must never be written to the audit trail"
     );
-    assert!(file.contains("/sparql"), "resource IS recorded (the audit trail)");
-    assert!(file.contains("token:"), "actor identity IS recorded (the audit trail)");
+    assert!(
+        file.contains("/sparql"),
+        "resource IS recorded (the audit trail)"
+    );
+    assert!(
+        file.contains("token:"),
+        "actor identity IS recorded (the audit trail)"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -163,7 +177,11 @@ async fn graph_store_write_records_named_graph_resource() {
         .send()
         .await
         .unwrap();
-    assert!(put.status().is_success(), "GSP PUT should succeed: {}", put.status());
+    assert!(
+        put.status().is_success(),
+        "GSP PUT should succeed: {}",
+        put.status()
+    );
 
     let recs = read_records(&audit_path, 1).await;
     let rec = recs
@@ -173,7 +191,10 @@ async fn graph_store_write_records_named_graph_resource() {
     assert_eq!(rec["resource"], g, "the named-graph IRI is the resource");
     assert_eq!(rec["resource_kind"], "named_graph");
     assert_eq!(rec["decision"], "allow");
-    assert_eq!(rec["fingerprint"], "-", "a GSP body has no query to fingerprint");
+    assert_eq!(
+        rec["fingerprint"], "-",
+        "a GSP body has no query to fingerprint"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -194,8 +215,7 @@ async fn trusted_forwarded_webid_header_becomes_the_audit_actor() {
         audit_webid_header: Some("X-WebID".to_string()),
         ..ServerConfig::default()
     };
-    let graph =
-        Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
+    let graph = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
     let app = router(AppState::with_config(graph, config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -219,7 +239,10 @@ async fn trusted_forwarded_webid_header_becomes_the_audit_actor() {
     assert_eq!(ok.status(), 200, "unauthed open read should succeed");
 
     let recs = read_records(&audit_path, 1).await;
-    let rec = recs.iter().find(|r| r["decision"] == "allow").expect("an allow record");
+    let rec = recs
+        .iter()
+        .find(|r| r["decision"] == "allow")
+        .expect("an allow record");
     assert_eq!(
         rec["actor"],
         format!("webid:{webid}"),
@@ -245,8 +268,7 @@ async fn forwarded_identity_header_is_ignored_unless_a_trusted_header_is_configu
         access_audit: Some(SinkTarget::File(audit_path.clone())),
         ..ServerConfig::default()
     };
-    let graph =
-        Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
+    let graph = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
     let app = router(AppState::with_config(graph, config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -269,8 +291,14 @@ async fn forwarded_identity_header_is_ignored_unless_a_trusted_header_is_configu
     assert_eq!(ok.status(), 200);
 
     let recs = read_records(&audit_path, 1).await;
-    let rec = recs.iter().find(|r| r["decision"] == "allow").expect("an allow record");
-    assert_eq!(rec["actor"], "anonymous", "a spoofed header must NOT become the actor");
+    let rec = recs
+        .iter()
+        .find(|r| r["decision"] == "allow")
+        .expect("an allow record");
+    assert_eq!(
+        rec["actor"], "anonymous",
+        "a spoofed header must NOT become the actor"
+    );
     let file = std::fs::read_to_string(&audit_path).unwrap();
     assert!(
         !file.contains(spoofed),

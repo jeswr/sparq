@@ -69,7 +69,11 @@ fn select_binding_values(batch: &str, var: &str) -> Vec<String> {
 /// set of triples — while leaving the chunk-count / chunk-size assertions to enforce the
 /// partitioning. (Addresses Copilot review on PR #1239.)
 fn sorted_nt_lines(nt: &str) -> Vec<&str> {
-    let mut lines: Vec<&str> = nt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut lines: Vec<&str> = nt
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     lines.sort_unstable();
     lines
 }
@@ -652,12 +656,13 @@ mod explain_json {
     fn exported_explain_plan_analyze_json() {
         let store = Store::load(DATA, "turtle").unwrap();
         let json = store
-            .explain_plan_analyze_json(
-                "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }",
-            )
+            .explain_plan_analyze_json("PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }")
             .unwrap();
         assert!(json.contains("\"actual\":2"), "executed actuals: {json}");
-        assert!(!json.contains("\"nanos\":null"), "analyze fills nanos: {json}");
+        assert!(
+            !json.contains("\"nanos\":null"),
+            "analyze fills nanos: {json}"
+        );
     }
 }
 
@@ -759,7 +764,8 @@ mod forms {
     /// document the exported binding must return verbatim.
     fn direct_description(mode: sparq_forms::Mode, shape: Option<&str>) -> String {
         let data = sparq_core::Graph::load_dataset(FORM_DATA, "turtle").expect("data fixture");
-        let shapes = sparq_core::Graph::load_dataset(FORM_SHAPES, "turtle").expect("shapes fixture");
+        let shapes =
+            sparq_core::Graph::load_dataset(FORM_SHAPES, "turtle").expect("shapes fixture");
         let focus = oxrdf::Term::from(oxrdf::NamedNode::new_unchecked("http://example.org/alice"));
         let options = sparq_forms::FormOptions {
             mode,

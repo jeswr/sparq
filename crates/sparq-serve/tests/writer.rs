@@ -197,10 +197,7 @@ impl ApplyUpdates for MockApplier {
     fn restore_durable(&mut self, fresh: Log) -> Result<Log, String> {
         if !self.restore_durable_supported {
             // Exercise the trait's default no-op-error impl explicitly.
-            return ApplyUpdates::restore_durable(
-                &mut DefaultRestoreApplier,
-                Vec::new(),
-            );
+            return ApplyUpdates::restore_durable(&mut DefaultRestoreApplier, Vec::new());
         }
         self.restores.lock().unwrap().push(self.committed);
         if self.restore_fails.load(Ordering::SeqCst) > 0 {
@@ -567,7 +564,11 @@ fn adaptive_commit_still_batches_a_queued_backlog() {
     // sync's generation is the current one.
     assert_eq!(current.number(), generation);
     let expected: Log = (0..6).map(|i| format!("u{i}")).collect();
-    assert_eq!(*current.snapshot(), expected, "strict FIFO, nothing dropped");
+    assert_eq!(
+        *current.snapshot(),
+        expected,
+        "strict FIFO, nothing dropped"
+    );
     for i in 0..6 {
         assert_eq!(current.epochs().epoch(&PodId::from(format!("pod:{i}"))), 1);
     }
@@ -1086,7 +1087,10 @@ fn restore_publishes_new_generation_after_preceding_updates() {
 
     // Restore: the durable swap succeeds, publishing the restored snapshot as a new generation.
     let restored = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
-    let published = writer.restore(restored.clone()).unwrap().expect("restore ok");
+    let published = writer
+        .restore(restored.clone())
+        .unwrap()
+        .expect("restore ok");
     assert!(
         published > gen_before,
         "restore must publish a NEW generation ({published} > {gen_before})"
@@ -1133,7 +1137,10 @@ fn restore_failure_keeps_writer_alive_and_store_intact() {
 
     // First restore fails (inner Err): nothing published, the OLD store is intact.
     let r = writer.restore(vec!["discarded".to_string()]).unwrap();
-    assert!(r.is_err(), "armed restore failure must surface as Err, got {r:?}");
+    assert!(
+        r.is_err(),
+        "armed restore failure must surface as Err, got {r:?}"
+    );
     assert_eq!(
         ring.current().number(),
         gen_before,
@@ -1147,14 +1154,22 @@ fn restore_failure_keeps_writer_alive_and_store_intact() {
 
     // The writer survives — a later update commits…
     writer.submit("more".to_string(), pods(&["pod:a"])).unwrap();
-    assert_eq!(ring.current().snapshot().len(), 2, "writes work after a failed restore");
+    assert_eq!(
+        ring.current().snapshot().len(),
+        2,
+        "writes work after a failed restore"
+    );
 
     // …and a later restore now succeeds, replacing the store.
     let ok = writer
         .restore(vec!["final".to_string()])
         .unwrap()
         .expect("second restore ok");
-    assert_eq!(ring.current().number(), ok, "the successful restore is now served");
+    assert_eq!(
+        ring.current().number(),
+        ok,
+        "the successful restore is now served"
+    );
     assert_eq!(
         ring.current().snapshot(),
         &vec!["final".to_string()],
@@ -1193,7 +1208,10 @@ fn commit_hook_fires_once_per_publish_with_chained_pairs_before_ack() {
             ..WriterConfig::default()
         },
         move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
-            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+            pairs_hook
+                .lock()
+                .unwrap()
+                .push((from.number(), to.number()));
         },
     );
 
@@ -1270,7 +1288,10 @@ fn commit_hook_not_fired_for_restore_publish() {
             ..WriterConfig::default()
         },
         move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
-            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+            pairs_hook
+                .lock()
+                .unwrap()
+                .push((from.number(), to.number()));
         },
     );
 
@@ -1309,15 +1330,24 @@ fn commit_hook_fires_per_commute_group() {
             ..WriterConfig::default()
         },
         move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
-            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+            pairs_hook
+                .lock()
+                .unwrap()
+                .push((from.number(), to.number()));
         },
     );
 
     // Queue three fire-and-forget updates, then a sync one; barriers split the
     // (single) window into one generation per update.
-    writer.submit_detached("a".to_string(), pods(&["pod:a"])).unwrap();
-    writer.submit_detached("b".to_string(), pods(&["pod:a"])).unwrap();
-    writer.submit_detached("c".to_string(), pods(&["pod:a"])).unwrap();
+    writer
+        .submit_detached("a".to_string(), pods(&["pod:a"]))
+        .unwrap();
+    writer
+        .submit_detached("b".to_string(), pods(&["pod:a"]))
+        .unwrap();
+    writer
+        .submit_detached("c".to_string(), pods(&["pod:a"]))
+        .unwrap();
     let last = writer.submit("d".to_string(), pods(&["pod:a"])).unwrap();
     drop(writer);
 

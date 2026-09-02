@@ -193,7 +193,10 @@ impl KeySet {
     /// then rejected (fail closed). Useful as the explicit "no source is
     /// authoritative" policy and as a test default.
     pub fn empty() -> Self {
-        KeySet { keys: BTreeSet::new(), hidden_issuer_depth: None }
+        KeySet {
+            keys: BTreeSet::new(),
+            hidden_issuer_depth: None,
+        }
     }
 
     /// Build a trust anchor from the relying party's trusted issuer public keys
@@ -211,7 +214,10 @@ impl KeySet {
             .into_iter()
             .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
             .collect();
-        KeySet { keys, hidden_issuer_depth: None }
+        KeySet {
+            keys,
+            hidden_issuer_depth: None,
+        }
     }
 
     /// Enable the HIDDEN-ISSUER attestation path (sq-z9l) at Merkle depth `depth`
@@ -375,7 +381,10 @@ impl HolderRegistry {
     /// (`HolderRegistryEmpty`) — the explicit "holder binding not in use" anchor
     /// and the test default. (A `Challenge` binding is unaffected.)
     pub fn empty() -> Self {
-        HolderRegistry { holders: BTreeSet::new(), hidden_holder_set_depth: None }
+        HolderRegistry {
+            holders: BTreeSet::new(),
+            hidden_holder_set_depth: None,
+        }
     }
 
     /// Build a registry from the relying party's authorised holder public keys
@@ -391,7 +400,10 @@ impl HolderRegistry {
             .into_iter()
             .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
             .collect();
-        HolderRegistry { holders, hidden_holder_set_depth: None }
+        HolderRegistry {
+            holders,
+            hidden_holder_set_depth: None,
+        }
     }
 
     /// [OPUS-4.8] sq-3c00: OPT IN to the hidden-holder-SET anonymity tier at Merkle
@@ -610,7 +622,11 @@ impl Default for EntailmentPolicy {
 impl EntailmentPolicy {
     /// Accept ONLY `Simple` (no inference) — the fail-closed default.
     pub fn simple_only() -> Self {
-        EntailmentPolicy { accept_rdfs: false, accept_owl: false, require_completeness: false }
+        EntailmentPolicy {
+            accept_rdfs: false,
+            accept_owl: false,
+            require_completeness: false,
+        }
     }
 
     /// Additionally accept `Rdfs` manifests (with grounded derivation steps).
@@ -847,7 +863,8 @@ impl RevocationPolicy {
         I: IntoIterator<Item = StatusListSnapshot>,
     {
         for s in snapshots {
-            self.authoritative.insert((s.status_list.clone(), s.version), s);
+            self.authoritative
+                .insert((s.status_list.clone(), s.version), s);
         }
         self
     }
@@ -1114,7 +1131,9 @@ pub struct InMemorySeenNonces {
 
 impl InMemorySeenNonces {
     pub fn new() -> Self {
-        InMemorySeenNonces { seen: std::sync::Mutex::new(BTreeSet::new()) }
+        InMemorySeenNonces {
+            seen: std::sync::Mutex::new(BTreeSet::new()),
+        }
     }
 }
 
@@ -1193,7 +1212,9 @@ impl FileSeenNonces {
             .append(true)
             .create(true)
             .open(path.as_ref())?;
-        Ok(FileSeenNonces { file: std::sync::Mutex::new(file) })
+        Ok(FileSeenNonces {
+            file: std::sync::Mutex::new(file),
+        })
     }
 
     /// Whether `key` is already present in the (locked) file. Reads the WHOLE file
@@ -1288,7 +1309,11 @@ pub enum CheckError {
     Sparqzk(VerifyError),
     /// A sub-proof's declared circuit id does not match the id re-derived from
     /// its public inputs.
-    CircuitIdMismatch { proof: usize, declared: CircuitId, derived: Option<CircuitId> },
+    CircuitIdMismatch {
+        proof: usize,
+        declared: CircuitId,
+        derived: Option<CircuitId>,
+    },
     /// A binding edge references a non-existent proof / row / slot.
     DanglingEdge { edge: usize },
     /// A binding edge connects proofs whose kinds cannot be bound (e.g. the
@@ -1452,7 +1477,11 @@ pub enum CheckError {
     /// resurrecting the `[[0],[0]]` collapse forge. It MUST be present and EXACTLY
     /// `CircuitId.k` bits (no default/pad-to-false). `expected` = k.
     // [OPUS-4.8] codex 2221 MEDIUM: attribution must be present + exactly k bits.
-    AttributionMalformed { proof: usize, expected: usize, got: usize },
+    AttributionMalformed {
+        proof: usize,
+        expected: usize,
+        got: usize,
+    },
     /// A scan sub-proof's per-graph `commitments` are NOT strictly increasing on
     /// the field representative (plan S2.5, [OPUS-4.8]): two adjacent commitments
     /// are equal or out of order. `scan_check` step 1b enforces
@@ -2382,7 +2411,12 @@ impl From<DriverError> for CheckError {
 /// verifier never trusts the declared `id`).
 fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
     match inputs {
-        ProofInputs::Scan { commitments, rows, row_count, .. } => {
+        ProofInputs::Scan {
+            commitments,
+            rows,
+            row_count,
+            ..
+        } => {
             let k = commitments.len() as u32;
             // The verifier knows r (= declared rows length) and row_count, but
             // not the private graph sizes; n is part of the declared id and
@@ -2517,7 +2551,11 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
         // `(d, k, n)` to be an EXACTLY compiled member (a wrong `k` bucket => a
         // different / no derived id => `CircuitIdMismatch` upstream).
         #[cfg(feature = "extended-fragment")]
-        ProofInputs::PathReach { commitments, depth_bound, .. } => {
+        ProofInputs::PathReach {
+            commitments,
+            depth_bound,
+            ..
+        } => {
             let (d, n) = match inputs.circuit_id() {
                 CircuitId::PathReach { d, n, .. } => (*d, *n),
                 _ => return None,
@@ -2665,7 +2703,12 @@ fn prefilter_manifest_structure_impl(
         // reconstruction byte-binds — with NO default and NO pad-to-false. A
         // missing/empty/short/long attribution is rejected here, before any gate
         // can silently skip the omitted graphs.
-        if let ProofInputs::Scan { attribution, commitments, .. } = &sp.inputs {
+        if let ProofInputs::Scan {
+            attribution,
+            commitments,
+            ..
+        } = &sp.inputs
+        {
             let k = match &declared {
                 CircuitId::Scan { k, .. } => *k as usize,
                 _ => unreachable!("Scan inputs always carry a Scan circuit id"),
@@ -2959,9 +3002,10 @@ fn bind_issuer_attestations(
             // (compare as field elements, so 0x-padding differences don't slip
             // an unattested commitment past).
             let c_field = c.to_field();
-            let att = manifest.commitment_attestations.iter().find(|a| {
-                a.commitment.to_field().is_some() && a.commitment.to_field() == c_field
-            });
+            let att = manifest
+                .commitment_attestations
+                .iter()
+                .find(|a| a.commitment.to_field().is_some() && a.commitment.to_field() == c_field);
             let Some(att) = att else {
                 // [OPUS-4.8] sq-xxg: no CLEAR attestation. This is acceptable ONLY
                 // if a hidden-issuer proof covers this commitment (and the relying
@@ -2984,8 +3028,7 @@ fn bind_issuer_attestations(
                         // unreferenced (fail-closed) — so we record only a present,
                         // parseable salt here.
                         if let Some(salt_fr) = resolve_commitment_salt(manifest, &c_fr) {
-                            referenced_salt
-                                .insert(field_to_hex(&c_fr), field_to_hex(&salt_fr));
+                            referenced_salt.insert(field_to_hex(&c_fr), field_to_hex(&salt_fr));
                         }
                         continue;
                     }
@@ -3322,10 +3365,7 @@ fn resolve_status_ref(
     } else if att_committed {
         // Committed-index (sq-ayv). The disclosed reference must withhold the clear
         // index AND disclose a matching commitment + version.
-        let att_ic_hex = att_status
-            .index_commitment
-            .as_ref()
-            .expect("att_committed");
+        let att_ic_hex = att_status.index_commitment.as_ref().expect("att_committed");
         let Some(rev_ic) = &rev.index_commitment else {
             return Err(mode_invalid());
         };
@@ -3346,8 +3386,7 @@ fn resolve_status_ref(
         // The disclosed commitment must equal the issuer-signed one (compare as
         // field elements so 0x-padding cannot slip a different value past), and
         // the version must match.
-        let (Some(att_ic_fr), Some(rev_ic_fr)) = (att_ic_hex.to_field(), rev_ic.to_field())
-        else {
+        let (Some(att_ic_fr), Some(rev_ic_fr)) = (att_ic_hex.to_field(), rev_ic.to_field()) else {
             return Err(mode_invalid());
         };
         if att_ic_fr != rev_ic_fr || rev_version != att_version {
@@ -3471,10 +3510,7 @@ fn resolve_status_ref(
 // [OPUS-4.8] audit #12: verifier-side revocation / freshness check.
 // [OPUS-4.8] audit #12 re-audit (Option B): the bit decision reads the
 // AUTHORITATIVE (relying-party-resolved) snapshot, never the prover's bytes.
-fn bind_revocation(
-    manifest: &ProofManifest,
-    policy: &RevocationPolicy,
-) -> Result<(), CheckError> {
+fn bind_revocation(manifest: &ProofManifest, policy: &RevocationPolicy) -> Result<(), CheckError> {
     let Some(rev) = &manifest.revocation else {
         // No revocation reference. `bind_issuer_attestations` guarantees that a
         // scan-covering commitment forces one to be present (and bound), so
@@ -3543,13 +3579,19 @@ fn bind_revocation(
     // cannot slip through on an old "active" view, regardless of whether the
     // relying party still holds that old version's snapshot.
     if !policy.is_fresh(version) {
-        return Err(CheckError::StatusListStale { status_list: list, version });
+        return Err(CheckError::StatusListStale {
+            status_list: list,
+            version,
+        });
     }
     // Resolve the AUTHORITATIVE snapshot from the relying party's policy (NOT the
     // prover). No authoritative snapshot for the referenced (list, version) =>
     // the verifier cannot authenticate the liveness view => REJECT fail-closed.
     let Some(authoritative) = policy.authoritative_snapshot(&list, version) else {
-        return Err(CheckError::StatusSnapshotMissing { status_list: list, version });
+        return Err(CheckError::StatusSnapshotMissing {
+            status_list: list,
+            version,
+        });
     };
     // [OPUS-4.8] sq-ayv: the index-disclosure mode. A COMMITTED-index reference
     // (clear index withheld, `index_commitment` present) MOVES the liveness
@@ -3577,7 +3619,10 @@ fn bind_revocation(
             // reads the relying party's OWN authenticated bytes, so the verdict is
             // identical regardless of what snapshot the prover attached.
             if authoritative.bit(index) {
-                return Err(CheckError::CredentialRevoked { status_list: list.clone(), index });
+                return Err(CheckError::CredentialRevoked {
+                    status_list: list.clone(),
+                    index,
+                });
             }
         }
         _ => {
@@ -3605,7 +3650,10 @@ fn bind_revocation(
         .iter()
         .any(|s| s.status_list == list && s.version == version && s.bits != authoritative.bits)
     {
-        return Err(CheckError::StatusSnapshotTampered { status_list: list, version });
+        return Err(CheckError::StatusSnapshotTampered {
+            status_list: list,
+            version,
+        });
     }
     Ok(())
 }
@@ -3744,11 +3792,7 @@ fn bind_hidden_revocation(
     };
     // The proof's DECLARED public index commitment must byte-equal the issuer-signed
     // one (the prover cannot prove against a commitment the issuer did not sign).
-    let Some(declared_ic) = hidden
-        .index_commitment
-        .as_ref()
-        .and_then(|h| h.to_field())
-    else {
+    let Some(declared_ic) = hidden.index_commitment.as_ref().and_then(|h| h.to_field()) else {
         return Err(CheckError::HiddenRevocationIndexCommitmentMismatch);
     };
     if declared_ic != auth_index_commitment {
@@ -3792,7 +3836,12 @@ fn bind_hidden_revocation(
         .canonical_vk(&id, &sub_work.join("vk"))
         .map_err(CheckError::Driver)?;
     let ok = prover
-        .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+        .verify_with(
+            &art.proof,
+            &reconstructed,
+            &canonical_vk,
+            &sub_work.join("verify"),
+        )
         .map_err(CheckError::Driver)?;
     if !ok {
         return Err(CheckError::HiddenRevocationProofRejected);
@@ -3950,16 +3999,13 @@ fn bind_fully_hidden_revocation(
     // single-use. Recorded BEFORE the bb call, mirroring the audit-#4 nonce
     // burn-on-presentation policy — a rejected presentation must not be a free
     // retry that lets an attacker probe with the same linkage handle.
-    let linkage = VerifierNonce::from_field(linkage_tag(
-        &auth_ref_commitment,
-        &auth_index_commitment,
-    ));
+    let linkage =
+        VerifierNonce::from_field(linkage_tag(&auth_ref_commitment, &auth_index_commitment));
     if !seen.record_fresh(&linkage) {
         return Err(CheckError::FullyHiddenRevocationLinkageReplay);
     }
 
-    let blob =
-        hex_decode(&fh.proof_hex).ok_or(CheckError::FullyHiddenRevocationMalformedProof)?;
+    let blob = hex_decode(&fh.proof_hex).ok_or(CheckError::FullyHiddenRevocationMalformedProof)?;
     let art = decode_artifacts(&blob).ok_or(CheckError::FullyHiddenRevocationMalformedProof)?;
 
     // Public-input layout for revoke_hidden_ref_d{depth}_a{set_depth} main, in
@@ -4004,7 +4050,12 @@ fn bind_fully_hidden_revocation(
         .canonical_vk(&id, &sub_work.join("vk"))
         .map_err(CheckError::Driver)?;
     let ok = prover
-        .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+        .verify_with(
+            &art.proof,
+            &reconstructed,
+            &canonical_vk,
+            &sub_work.join("verify"),
+        )
         .map_err(CheckError::Driver)?;
     if !ok {
         return Err(CheckError::FullyHiddenRevocationProofRejected);
@@ -4156,7 +4207,12 @@ fn bind_hidden_issuer_attestations(
             .canonical_vk(&id, &sub_work.join("vk"))
             .map_err(CheckError::Driver)?;
         let ok = prover
-            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .verify_with(
+                &art.proof,
+                &reconstructed,
+                &canonical_vk,
+                &sub_work.join("verify"),
+            )
             .map_err(CheckError::Driver)?;
         if !ok {
             return Err(CheckError::HiddenIssuerProofRejected);
@@ -4337,7 +4393,12 @@ fn bind_holder_pok(
             .canonical_vk(&id, &sub_work.join("vk"))
             .map_err(CheckError::Driver)?;
         let ok = prover
-            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .verify_with(
+                &art.proof,
+                &reconstructed,
+                &canonical_vk,
+                &sub_work.join("verify"),
+            )
             .map_err(CheckError::Driver)?;
         if !ok {
             return Err(CheckError::HolderPokProofRejected {
@@ -4500,7 +4561,12 @@ fn bind_holder_set(
             .canonical_vk(&id, &sub_work.join("vk"))
             .map_err(CheckError::Driver)?;
         let ok = prover
-            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .verify_with(
+                &art.proof,
+                &reconstructed,
+                &canonical_vk,
+                &sub_work.join("verify"),
+            )
             .map_err(CheckError::Driver)?;
         if !ok {
             return Err(CheckError::HolderSetProofRejected {
@@ -4533,9 +4599,11 @@ fn bind_holder_set(
 // [OPUS-5] sq-93h: disclosure assessed NO-BUILD; the trip-wire guards the premise.
 fn resolve_commitment_salt(manifest: &ProofManifest, c_fr: &Fr) -> Option<Fr> {
     // Prefer the clear attestation's salt (the original sq-z9l additive path).
-    if let Some(att) = manifest.commitment_attestations.iter().find(|a| {
-        a.commitment.to_field().is_some() && a.commitment.to_field() == Some(*c_fr)
-    }) {
+    if let Some(att) = manifest
+        .commitment_attestations
+        .iter()
+        .find(|a| a.commitment.to_field().is_some() && a.commitment.to_field() == Some(*c_fr))
+    {
         if let Some(salt_hex) = &att.salt {
             if let Some(salt_fr) = salt_hex.to_field() {
                 return Some(salt_fr);
@@ -4582,7 +4650,9 @@ fn scan_referenced_messages(
         };
         for c in commitments {
             let Some(c_fr) = c.to_field() else { continue };
-            let Some(salt_fr) = resolve_commitment_salt(manifest, &c_fr) else { continue };
+            let Some(salt_fr) = resolve_commitment_salt(manifest, &c_fr) else {
+                continue;
+            };
             let m = commitment_message_with_status(&c_fr, &salt_fr, &status_ref);
             out.insert(field_to_hex(&c_fr), m);
         }
@@ -4654,9 +4724,11 @@ fn encode_pattern_slot(c: &Option<oxrdf::Term>) -> Option<FieldHex> {
 /// and a variable slot must be a variable on both sides.
 fn scan_matches_pattern(inputs: &ProofInputs, consts: &[Option<oxrdf::Term>; 3]) -> bool {
     let (is_const, const_enc) = match inputs {
-        ProofInputs::Scan { pattern_is_const, pattern_const_enc, .. } => {
-            (pattern_is_const, pattern_const_enc)
-        }
+        ProofInputs::Scan {
+            pattern_is_const,
+            pattern_const_enc,
+            ..
+        } => (pattern_is_const, pattern_const_enc),
         _ => return false,
     };
     for slot in 0..3 {
@@ -4750,7 +4822,10 @@ fn check_pattern_scans(manifest: &ProofManifest) -> Result<(), CheckError> {
                 .get(spi)
                 .is_some_and(|sp| scan_matches_pattern(&sp.inputs, &consts[pi]));
             if !answers {
-                return Err(CheckError::PatternScanMismatch { pattern: pi, proof: spi });
+                return Err(CheckError::PatternScanMismatch {
+                    pattern: pi,
+                    proof: spi,
+                });
             }
             declared_scans.insert(spi);
         }
@@ -4829,7 +4904,12 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
     // i.e. every active row of a filtered pattern must carry a true-verdict
     // filter_int sub-proof over that row's operand slot. A single missing/false
     // row makes the FILTER unproven for the disclosed set => REJECT.
-    for QueryFilter { variable, op, bound } in &filters {
+    for QueryFilter {
+        variable,
+        op,
+        bound,
+    } in &filters
+    {
         // The (pattern, slot) positions ?variable binds to. A FILTER over a
         // variable that never binds to a scanned column is unmappable.
         let positions: Vec<(usize, usize)> = var_slots
@@ -4838,7 +4918,9 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
             .map(|(_, p, s)| (*p, *s))
             .collect();
         if positions.is_empty() {
-            return Err(CheckError::UnmappableFilterVar { variable: variable.clone() });
+            return Err(CheckError::UnmappableFilterVar {
+                variable: variable.clone(),
+            });
         }
         // The FILTER must constrain at least one disclosed row (else it is
         // vacuously "satisfied" by an empty result while the query carries a
@@ -4847,7 +4929,9 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
         let mut any_scan_answered = false;
         for (spi, sp) in manifest.sub_proofs.iter().enumerate() {
             let (rows, row_count) = match &sp.inputs {
-                ProofInputs::Scan { rows, row_count, .. } => (rows, *row_count as usize),
+                ProofInputs::Scan {
+                    rows, row_count, ..
+                } => (rows, *row_count as usize),
                 _ => continue,
             };
             // EVERY slot ?v sits at across EVERY query pattern this scan
@@ -4881,7 +4965,9 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
             let slots: BTreeSet<usize> = positions
                 .iter()
                 .filter(|(pi, _)| {
-                    consts.get(*pi).is_some_and(|c| scan_matches_pattern(&sp.inputs, c))
+                    consts
+                        .get(*pi)
+                        .is_some_and(|c| scan_matches_pattern(&sp.inputs, c))
                 })
                 .map(|(_, si)| *si)
                 .collect();
@@ -4900,7 +4986,9 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
                             && filter_edge_true(manifest, edge.to_proof, *op, *bound)
                     });
                     if !gated {
-                        return Err(CheckError::UnboundFilter { variable: variable.clone() });
+                        return Err(CheckError::UnboundFilter {
+                            variable: variable.clone(),
+                        });
                     }
                 }
             }
@@ -4909,7 +4997,9 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
             // A FILTER whose variable binds in a pattern, but no scan answers
             // that pattern: the FILTER cannot be discharged (FILTER-add on a
             // manifest missing the filtered pattern's scan).
-            return Err(CheckError::UnboundFilter { variable: variable.clone() });
+            return Err(CheckError::UnboundFilter {
+                variable: variable.clone(),
+            });
         }
     }
     Ok(())
@@ -4996,7 +5086,9 @@ fn bind_repeated_pattern_slots(manifest: &ProofManifest) -> Result<(), CheckErro
 
         for (spi, sp) in manifest.sub_proofs.iter().enumerate() {
             let (rows, row_count) = match &sp.inputs {
-                ProofInputs::Scan { rows, row_count, .. } => (rows, *row_count as usize),
+                ProofInputs::Scan {
+                    rows, row_count, ..
+                } => (rows, *row_count as usize),
                 _ => continue,
             };
             if !scan_matches_pattern(&sp.inputs, c) {
@@ -5197,9 +5289,14 @@ fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
             _ => return Err(CheckError::JoinEdgeKindMismatch { edge: e }),
         };
         let (commit_a_join, commit_b_join, join_commitment, slot_a, slot_b) = match &join.inputs {
-            ProofInputs::JoinEq { commit_a, commit_b, join_commitment, slot_a, slot_b, .. } => {
-                (commit_a, commit_b, join_commitment, *slot_a, *slot_b)
-            }
+            ProofInputs::JoinEq {
+                commit_a,
+                commit_b,
+                join_commitment,
+                slot_a,
+                slot_b,
+                ..
+            } => (commit_a, commit_b, join_commitment, *slot_a, *slot_b),
             _ => return Err(CheckError::JoinEdgeKindMismatch { edge: e }),
         };
 
@@ -5260,9 +5357,7 @@ fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
     // edge per variable (the 2-way case) trivially passes. [OPUS-4.8] sq-r2s8.
     for (i, (var_i, commit_i, _)) in chain.iter().enumerate() {
         // Compare against the FIRST edge sharing this variable (the chain anchor).
-        if let Some((_, anchor_commit, _)) =
-            chain.iter().take(i).find(|(v, _, _)| v == var_i)
-        {
+        if let Some((_, anchor_commit, _)) = chain.iter().take(i).find(|(v, _, _)| v == var_i) {
             if !field_hex_eq(commit_i, anchor_commit) {
                 return Err(CheckError::JoinCommitmentChainMismatch { edge: chain[i].2 });
             }
@@ -5388,8 +5483,7 @@ fn global_attributions(manifest: &ProofManifest) -> Vec<BTreeSet<usize>> {
     // interning of a repeated identity), so ids are pairwise-distinct with NO
     // reliance on wraparound — removing the descending `usize::MAX` underflow
     // footgun. [OPUS-4.8] sq-en5dx (Copilot review): monotonic next_id.
-    let mut intern: std::collections::BTreeMap<[u8; 32], usize> =
-        std::collections::BTreeMap::new();
+    let mut intern: std::collections::BTreeMap<[u8; 32], usize> = std::collections::BTreeMap::new();
     let mut next_id: usize = 0;
 
     manifest
@@ -5492,16 +5586,14 @@ fn bind_attributions(manifest: &ProofManifest) -> Result<(), CheckError> {
 /// references the FILTER variable's scanned column) is enforced by the caller;
 /// the edge's scanned-slot encoding == the filter `operand_enc` is enforced by
 /// stage 2 over the now-bb-bound values (audit #7).
-fn filter_edge_true(
-    manifest: &ProofManifest,
-    to_proof: usize,
-    op: FilterCmp,
-    bound: u64,
-) -> bool {
+fn filter_edge_true(manifest: &ProofManifest, to_proof: usize, op: FilterCmp, bound: u64) -> bool {
     match manifest.sub_proofs.get(to_proof).map(|sp| &sp.inputs) {
-        Some(ProofInputs::FilterInt { op: f_op, bound: f_bound, expected, .. }) => {
-            f_op.code() == op.code() && *f_bound == bound && *expected
-        }
+        Some(ProofInputs::FilterInt {
+            op: f_op,
+            bound: f_bound,
+            expected,
+            ..
+        }) => f_op.code() == op.code() && *f_bound == bound && *expected,
         _ => false,
     }
 }
@@ -5558,7 +5650,12 @@ fn bind_holder_pop(
     let (holder, pop, cryptosuite) = match &manifest.binding {
         // A plain challenge binding requires no holder PoP.
         BindingMode::Challenge { .. } => return Ok(()),
-        BindingMode::HolderPop { holder, pop, cryptosuite, .. } => (holder, pop, cryptosuite),
+        BindingMode::HolderPop {
+            holder,
+            pop,
+            cryptosuite,
+            ..
+        } => (holder, pop, cryptosuite),
     };
 
     // (1) No trust anchor => cannot accept a holder PoP (fail-closed). This is the
@@ -5569,7 +5666,9 @@ fn bind_holder_pop(
     }
     // (2) The holder key must be authorised by the relying party's external set.
     if !holder_registry.contains_hex(holder) {
-        return Err(CheckError::HolderNotTrusted { holder: holder.clone() });
+        return Err(CheckError::HolderNotTrusted {
+            holder: holder.clone(),
+        });
     }
     // (3) Known cryptosuite + parseable key/signature (fail-closed on bad bytes).
     if SignatureScheme::from_cryptosuite_iri(cryptosuite).is_none() {
@@ -5588,7 +5687,9 @@ fn bind_holder_pop(
     // holder secret, freshly over the verifier's nonce.
     let message = holder_pop_message(&challenge_fr);
     if !sig_verify(&pk, &message, &sig) {
-        return Err(CheckError::HolderPopInvalid { holder: holder.clone() });
+        return Err(CheckError::HolderPopInvalid {
+            holder: holder.clone(),
+        });
     }
 
     // (5) [OPUS-4.8] sq-z8s7 (T3 / B1): bind THIS presented holder key to the
@@ -5915,10 +6016,7 @@ fn encode_iri_hex(iri: &str) -> Option<FieldHex> {
 /// before any other check, so the two obligations can never be conflated by
 /// reading an accept.
 // [OPUS-4.8] sq-314: entailment regime + derivation steps, end-to-end.
-fn bind_entailment(
-    manifest: &ProofManifest,
-    policy: &EntailmentPolicy,
-) -> Result<(), CheckError> {
+fn bind_entailment(manifest: &ProofManifest, policy: &EntailmentPolicy) -> Result<(), CheckError> {
     let regime = manifest.entailment_regime;
     let regime_name = match regime {
         EntailmentRegime::Simple => "simple",
@@ -5935,11 +6033,15 @@ fn bind_entailment(
     // over — see `require_completeness_under_entailment` for what that does and
     // does NOT assert.
     if policy.requires_completeness() && regime != EntailmentRegime::Simple {
-        return Err(CheckError::CompletenessUnderEntailmentUnavailable { regime: regime_name });
+        return Err(CheckError::CompletenessUnderEntailmentUnavailable {
+            regime: regime_name,
+        });
     }
     // (1) The regime must be accepted by the relying party.
     if !policy.accepts(regime) {
-        return Err(CheckError::EntailmentRegimeNotAccepted { regime: regime_name });
+        return Err(CheckError::EntailmentRegimeNotAccepted {
+            regime: regime_name,
+        });
     }
     let steps = &manifest.derivation_steps;
     // (2) Simple => no inference steps.
@@ -5951,14 +6053,19 @@ fn bind_entailment(
     }
     // (3) Non-Simple => steps required.
     if steps.is_empty() {
-        return Err(CheckError::MissingDerivationSteps { regime: regime_name });
+        return Err(CheckError::MissingDerivationSteps {
+            regime: regime_name,
+        });
     }
 
     // The asserted base: every triple disclosed by a scan sub-proof (active rows),
     // as [s, p, o] encodings — the ground set a step may chain from.
     let mut disclosed: BTreeSet<[String; 3]> = BTreeSet::new();
     for sp in &manifest.sub_proofs {
-        if let ProofInputs::Scan { rows, row_count, .. } = &sp.inputs {
+        if let ProofInputs::Scan {
+            rows, row_count, ..
+        } = &sp.inputs
+        {
             for row in rows.iter().take(*row_count as usize) {
                 disclosed.insert([
                     normalize_hex(&row[0].0),
@@ -5987,7 +6094,8 @@ fn bind_entailment(
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#domain"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#range"),
         encode_iri_hex(crate::sameas::OWL_SAME_AS),
-    ) else {
+    )
+    else {
         return Err(CheckError::MalformedDerivationStep { step: 0 });
     };
 
@@ -6240,8 +6348,7 @@ fn verify_manifest_impl(
             return Err(CheckError::MissingProof { proof: i });
         }
         // Hardening: prover-controlled bytes are rejected, never panicked on.
-        let blob = hex_decode(&sp.proof_hex)
-            .ok_or(CheckError::MalformedProof { proof: i })?;
+        let blob = hex_decode(&sp.proof_hex).ok_or(CheckError::MalformedProof { proof: i })?;
         let art = decode_artifacts(&blob).ok_or(CheckError::MalformedProof { proof: i })?;
 
         // (a) Reconstruct public inputs from the DECLARED statement (audit #1)
@@ -6272,7 +6379,12 @@ fn verify_manifest_impl(
         // the proof's, asserted above) so a single authentic vector is used end
         // to end.
         let ok = prover
-            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .verify_with(
+                &art.proof,
+                &reconstructed,
+                &canonical_vk,
+                &sub_work.join("verify"),
+            )
             .map_err(CheckError::Driver)?;
         if !ok {
             return Err(CheckError::ProofRejected { proof: i });
@@ -6363,10 +6475,19 @@ pub enum FragmentDispatchError {
     OutsideFragment(String),
     /// A [`crate::manifest::BranchWitness`] attributes a disclosed solution to a
     /// `UNION` branch index that does not exist (the "wrong branch" rejection).
-    BranchOutOfRange { witness: usize, branch: usize, branches: usize },
+    BranchOutOfRange {
+        witness: usize,
+        branch: usize,
+        branches: usize,
+    },
     /// A branch witness's per-obligation arity (`scan_proofs` / `path_proofs` /
     /// `values_rows`) does not match the re-derived branch's obligation count.
-    ObligationArityMismatch { witness: usize, what: &'static str, expected: usize, got: usize },
+    ObligationArityMismatch {
+        witness: usize,
+        what: &'static str,
+        expected: usize,
+        got: usize,
+    },
     /// A named `sub_proofs` index is out of range of the embedded manifest.
     DanglingProof { witness: usize, proof: usize },
     /// A sub-proof carries an unknown / uncompiled circuit id (`derive_id` =>
@@ -6378,9 +6499,17 @@ pub enum FragmentDispatchError {
     /// rejection (e.g. a `PathReach` declaring `k = 2` but carrying one
     /// commitment). Same invariant `prefilter_manifest_structure` stage-1b
     /// enforces, checked here too so the routing gate is self-contained.
-    CircuitIdMismatch { proof: usize, declared: CircuitId, derived: CircuitId },
+    CircuitIdMismatch {
+        proof: usize,
+        declared: CircuitId,
+        derived: CircuitId,
+    },
     /// A BGP-scan obligation's named sub-proof is not a [`ProofInputs::Scan`].
-    NotAScanProof { witness: usize, obligation: usize, proof: usize },
+    NotAScanProof {
+        witness: usize,
+        obligation: usize,
+        proof: usize,
+    },
     /// A bounded-path obligation has NO bound [`ProofInputs::PathReach`] sub-proof
     /// of the right member at its named index (the "path claimed without a bound
     /// sub-proof" rejection).
@@ -6390,15 +6519,29 @@ pub enum FragmentDispatchError {
     /// rejected EARLIER, by the id-hygiene check, as
     /// [`FragmentDispatchError::UnknownCircuit`] (`derive_id` returns `None` when
     /// `depth_bound != d`), so it never reaches this per-obligation stage.
-    PathReachMissing { witness: usize, obligation: usize, proof: usize },
+    PathReachMissing {
+        witness: usize,
+        obligation: usize,
+        proof: usize,
+    },
     /// A path sub-proof's `allow_zero` disagrees with the query-re-derived
     /// closure (`p+` cannot be presented as `p*`/`p?` or vice versa).
     PathClosureMismatch { witness: usize, obligation: usize },
     /// A FIXED-depth closure (`p?`, whose bound is pinned to 1) is bound to a
     /// member whose depth `d` exceeds that fixed bound.
-    PathDepthExceedsClosure { witness: usize, obligation: usize, member_d: u32, fixed: usize },
+    PathDepthExceedsClosure {
+        witness: usize,
+        obligation: usize,
+        member_d: u32,
+        fixed: usize,
+    },
     /// A VALUES-row index is out of range of the re-derived block's rows.
-    ValuesRowOutOfRange { witness: usize, block: usize, row: usize, rows: usize },
+    ValuesRowOutOfRange {
+        witness: usize,
+        block: usize,
+        row: usize,
+        rows: usize,
+    },
 }
 
 #[cfg(feature = "extended-fragment")]
@@ -6408,13 +6551,22 @@ impl std::fmt::Display for FragmentDispatchError {
             FragmentDispatchError::OutsideFragment(why) => {
                 write!(f, "query is outside the wave-1 extended fragment: {}", why)
             }
-            FragmentDispatchError::BranchOutOfRange { witness, branch, branches } => write!(
+            FragmentDispatchError::BranchOutOfRange {
+                witness,
+                branch,
+                branches,
+            } => write!(
                 f,
                 "branch witness {} attributes a solution to branch {} but the query \
                  re-derives only {} branch(es) (fail-closed: wrong branch)",
                 witness, branch, branches
             ),
-            FragmentDispatchError::ObligationArityMismatch { witness, what, expected, got } => write!(
+            FragmentDispatchError::ObligationArityMismatch {
+                witness,
+                what,
+                expected,
+                got,
+            } => write!(
                 f,
                 "branch witness {} has {} {} proof-refs but the branch has {} {} obligation(s)",
                 witness, got, what, expected, what
@@ -6429,29 +6581,49 @@ impl std::fmt::Display for FragmentDispatchError {
                 "sub-proof {} carries an unknown / uncompiled circuit id (fail-closed)",
                 proof
             ),
-            FragmentDispatchError::CircuitIdMismatch { proof, declared, derived } => write!(
+            FragmentDispatchError::CircuitIdMismatch {
+                proof,
+                declared,
+                derived,
+            } => write!(
                 f,
                 "sub-proof {}: declared circuit id {:?} but its public inputs re-derive {:?} \
                  (fail-closed: claim / circuit-member mismatch)",
                 proof, declared, derived
             ),
-            FragmentDispatchError::NotAScanProof { witness, obligation, proof } => write!(
+            FragmentDispatchError::NotAScanProof {
+                witness,
+                obligation,
+                proof,
+            } => write!(
                 f,
                 "branch witness {} BGP obligation {} names sub-proof {}, which is not a scan proof",
                 witness, obligation, proof
             ),
-            FragmentDispatchError::PathReachMissing { witness, obligation, proof } => write!(
+            FragmentDispatchError::PathReachMissing {
+                witness,
+                obligation,
+                proof,
+            } => write!(
                 f,
                 "branch witness {} path obligation {} names sub-proof {}, which is not a \
                  bound path_reach proof (fail-closed: path claimed without a bound sub-proof)",
                 witness, obligation, proof
             ),
-            FragmentDispatchError::PathClosureMismatch { witness, obligation } => write!(
+            FragmentDispatchError::PathClosureMismatch {
+                witness,
+                obligation,
+            } => write!(
                 f,
                 "branch witness {} path obligation {}: allow_zero disagrees with the query closure",
                 witness, obligation
             ),
-            FragmentDispatchError::PathDepthExceedsClosure { witness, obligation, member_d, fixed } => {
+            FragmentDispatchError::PathDepthExceedsClosure {
+                witness,
+                obligation,
+                member_d,
+                fixed,
+            } => {
                 write!(
                     f,
                     "branch witness {} path obligation {}: member depth {} exceeds the closure's fixed \
@@ -6459,7 +6631,12 @@ impl std::fmt::Display for FragmentDispatchError {
                     witness, obligation, member_d, fixed
                 )
             }
-            FragmentDispatchError::ValuesRowOutOfRange { witness, block, row, rows } => write!(
+            FragmentDispatchError::ValuesRowOutOfRange {
+                witness,
+                block,
+                row,
+                rows,
+            } => write!(
                 f,
                 "branch witness {} VALUES block {}: row index {} out of range ({} row(s))",
                 witness, block, row, rows
@@ -6543,14 +6720,14 @@ pub fn dispatch_fragment(
     }
 
     for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
-        let branch =
-            fq.branches
-                .get(bw.branch)
-                .ok_or(FragmentDispatchError::BranchOutOfRange {
-                    witness: wi,
-                    branch: bw.branch,
-                    branches: fq.branches.len(),
-                })?;
+        let branch = fq
+            .branches
+            .get(bw.branch)
+            .ok_or(FragmentDispatchError::BranchOutOfRange {
+                witness: wi,
+                branch: bw.branch,
+                branches: fq.branches.len(),
+            })?;
 
         // (3) Per-obligation arity: EXACTLY one bound sub-proof per BGP-scan and
         // per bounded-path obligation, and one chosen row per VALUES block.
@@ -6584,7 +6761,10 @@ pub fn dispatch_fragment(
             let sp = manifest
                 .sub_proofs
                 .get(pi)
-                .ok_or(FragmentDispatchError::DanglingProof { witness: wi, proof: pi })?;
+                .ok_or(FragmentDispatchError::DanglingProof {
+                    witness: wi,
+                    proof: pi,
+                })?;
             if !matches!(sp.inputs, ProofInputs::Scan { .. }) {
                 return Err(FragmentDispatchError::NotAScanProof {
                     witness: wi,
@@ -6602,7 +6782,10 @@ pub fn dispatch_fragment(
             let sp = manifest
                 .sub_proofs
                 .get(pi)
-                .ok_or(FragmentDispatchError::DanglingProof { witness: wi, proof: pi })?;
+                .ok_or(FragmentDispatchError::DanglingProof {
+                    witness: wi,
+                    proof: pi,
+                })?;
             let ProofInputs::PathReach { allow_zero, id, .. } = &sp.inputs else {
                 return Err(FragmentDispatchError::PathReachMissing {
                     witness: wi,
@@ -6625,7 +6808,10 @@ pub fn dispatch_fragment(
             // closure's minimum length is 0 (`*`/`?`), never for `+`.
             let expect_allow_zero = obligation.closure.min_len() == 0;
             if *allow_zero != expect_allow_zero {
-                return Err(FragmentDispatchError::PathClosureMismatch { witness: wi, obligation: oi });
+                return Err(FragmentDispatchError::PathClosureMismatch {
+                    witness: wi,
+                    obligation: oi,
+                });
             }
             // A fixed-depth closure (`p?`, bound pinned to 1) must not bind a
             // deeper member — that would let a 2-step chain masquerade as `p?`.
@@ -6703,7 +6889,11 @@ pub enum FragmentSolutionError {
     /// equal the encoding the verifier re-derives from the query-CONSTANT endpoint
     /// or the disclosed solution's binding for the endpoint VARIABLE — the proof's
     /// disclosed endpoint is not the term the presented solution claims.
-    PathEndpointMismatch { witness: usize, obligation: usize, endpoint: PathEndpoint },
+    PathEndpointMismatch {
+        witness: usize,
+        obligation: usize,
+        endpoint: PathEndpoint,
+    },
     /// A PROJECTED path endpoint VARIABLE is absent from the disclosed solution.
     /// The relying party MUST disclose every projected endpoint so it can be bound;
     /// omitting it to dodge the binding is fail-closed.
@@ -6716,13 +6906,27 @@ pub enum FragmentSolutionError {
     /// A `VALUES` cell for a PROJECTED variable does not match the disclosed
     /// solution's binding for that variable — a wrong disclosed row, or a solution
     /// term inconsistent with the query's inline `VALUES` data.
-    ValuesCellMismatch { witness: usize, block: usize, column: usize, var: String },
+    ValuesCellMismatch {
+        witness: usize,
+        block: usize,
+        column: usize,
+        var: String,
+    },
     /// A `VALUES` cell for a PROJECTED variable has NO disclosed-solution binding
     /// (fail-closed — a projected VALUES-constrained variable must be disclosed).
-    UnboundProjectedValuesVar { witness: usize, block: usize, column: usize, var: String },
+    UnboundProjectedValuesVar {
+        witness: usize,
+        block: usize,
+        column: usize,
+        var: String,
+    },
     /// A path endpoint slot was an unnamed wildcard (the property-path fragment
     /// never produces one; refused for totality).
-    WildcardEndpoint { witness: usize, obligation: usize, endpoint: PathEndpoint },
+    WildcardEndpoint {
+        witness: usize,
+        obligation: usize,
+        endpoint: PathEndpoint,
+    },
     /// A structural inconsistency the routing gate normally rules out first (a
     /// branch / obligation / row index out of range, or a path obligation naming a
     /// non-`PathReach` sub-proof). Kept so this gate is SELF-CONTAINED and never
@@ -6822,7 +7026,11 @@ fn bind_path_endpoint(
             if field_hex_is(enc, &want) {
                 Ok(())
             } else {
-                Err(FragmentSolutionError::PathEndpointMismatch { witness, obligation, endpoint })
+                Err(FragmentSolutionError::PathEndpointMismatch {
+                    witness,
+                    obligation,
+                    endpoint,
+                })
             }
         }
         SlotPattern::Var(v) => {
@@ -6839,14 +7047,18 @@ fn bind_path_endpoint(
                     var: v.clone(),
                 }),
                 Some(want) if field_hex_is(enc, want) => Ok(()),
-                Some(_) => {
-                    Err(FragmentSolutionError::PathEndpointMismatch { witness, obligation, endpoint })
-                }
+                Some(_) => Err(FragmentSolutionError::PathEndpointMismatch {
+                    witness,
+                    obligation,
+                    endpoint,
+                }),
             }
         }
-        SlotPattern::Wildcard => {
-            Err(FragmentSolutionError::WildcardEndpoint { witness, obligation, endpoint })
-        }
+        SlotPattern::Wildcard => Err(FragmentSolutionError::WildcardEndpoint {
+            witness,
+            obligation,
+            endpoint,
+        }),
     }
 }
 
@@ -6903,8 +7115,10 @@ pub fn bind_fragment_solution(
     // Re-derive the fragment from the query TEXT alone (never the manifest). An
     // outside-fragment / unparseable query is normally caught first by
     // `dispatch_fragment`; refuse fail-closed if we somehow reach here.
-    let fq = fragment_query(&manifest.query)
-        .map_err(|_| FragmentSolutionError::Structure { witness: 0, what: "query" })?;
+    let fq = fragment_query(&manifest.query).map_err(|_| FragmentSolutionError::Structure {
+        witness: 0,
+        what: "query",
+    })?;
     let projected: BTreeSet<String> = fq.projected.iter().cloned().collect();
     // IRIs / literals (the only disclosable term kinds, and every query constant /
     // VALUES cell) are salt-INDEPENDENT, so salt 0 matches the prover's encoding
@@ -6913,18 +7127,28 @@ pub fn bind_fragment_solution(
 
     for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
         let Some(branch) = fq.branches.get(bw.branch) else {
-            return Err(FragmentSolutionError::Structure { witness: wi, what: "branch" });
+            return Err(FragmentSolutionError::Structure {
+                witness: wi,
+                what: "branch",
+            });
         };
 
         // Re-encode the disclosed solution: var -> Fr, VERIFIER-recomputed (never a
         // prover-supplied encoding).
         let mut mu: std::collections::BTreeMap<String, Fr> = std::collections::BTreeMap::new();
         for sb in &bw.solution {
-            let term = sb.term.to_term().ok_or_else(|| {
-                FragmentSolutionError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
-            })?;
+            let term =
+                sb.term
+                    .to_term()
+                    .ok_or_else(|| FragmentSolutionError::MalformedSolutionTerm {
+                        witness: wi,
+                        var: sb.var.clone(),
+                    })?;
             let enc = encode_term(&term, &salt).ok_or_else(|| {
-                FragmentSolutionError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
+                FragmentSolutionError::MalformedSolutionTerm {
+                    witness: wi,
+                    var: sb.var.clone(),
+                }
             })?;
             mu.insert(sb.var.clone(), enc);
         }
@@ -6932,32 +7156,77 @@ pub fn bind_fragment_solution(
         // (1)+(2) Path predicate + endpoint binding.
         for (oi, &pi) in bw.path_proofs.iter().enumerate() {
             let Some(obl) = branch.path_reach.get(oi) else {
-                return Err(FragmentSolutionError::Structure { witness: wi, what: "path obligation" });
+                return Err(FragmentSolutionError::Structure {
+                    witness: wi,
+                    what: "path obligation",
+                });
             };
-            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentSolutionError::Structure {
-                witness: wi,
-                what: "path proof index",
-            })?;
-            let ProofInputs::PathReach { pred_enc, src_enc, dst_enc, .. } = &sp.inputs else {
-                return Err(FragmentSolutionError::Structure { witness: wi, what: "path proof kind" });
+            let sp = manifest
+                .sub_proofs
+                .get(pi)
+                .ok_or(FragmentSolutionError::Structure {
+                    witness: wi,
+                    what: "path proof index",
+                })?;
+            let ProofInputs::PathReach {
+                pred_enc,
+                src_enc,
+                dst_enc,
+                ..
+            } = &sp.inputs
+            else {
+                return Err(FragmentSolutionError::Structure {
+                    witness: wi,
+                    what: "path proof kind",
+                });
             };
             let want_pred = encode_term(&oxrdf::Term::NamedNode(obl.predicate.clone()), &salt)
-                .ok_or(FragmentSolutionError::PathPredMismatch { witness: wi, obligation: oi })?;
+                .ok_or(FragmentSolutionError::PathPredMismatch {
+                    witness: wi,
+                    obligation: oi,
+                })?;
             if !field_hex_is(pred_enc, &want_pred) {
-                return Err(FragmentSolutionError::PathPredMismatch { witness: wi, obligation: oi });
+                return Err(FragmentSolutionError::PathPredMismatch {
+                    witness: wi,
+                    obligation: oi,
+                });
             }
-            bind_path_endpoint(wi, oi, PathEndpoint::Src, &obl.subject, src_enc, &mu, &projected, &salt)?;
-            bind_path_endpoint(wi, oi, PathEndpoint::Dst, &obl.object, dst_enc, &mu, &projected, &salt)?;
+            bind_path_endpoint(
+                wi,
+                oi,
+                PathEndpoint::Src,
+                &obl.subject,
+                src_enc,
+                &mu,
+                &projected,
+                &salt,
+            )?;
+            bind_path_endpoint(
+                wi,
+                oi,
+                PathEndpoint::Dst,
+                &obl.object,
+                dst_enc,
+                &mu,
+                &projected,
+                &salt,
+            )?;
         }
 
         // (3) VALUES cell binding — the disclosed solution must agree with the
         // CHOSEN row's inline query constants for every PROJECTED variable.
         for (bi, &row) in bw.values_rows.iter().enumerate() {
             let Some(block) = branch.values.get(bi) else {
-                return Err(FragmentSolutionError::Structure { witness: wi, what: "values block" });
+                return Err(FragmentSolutionError::Structure {
+                    witness: wi,
+                    what: "values block",
+                });
             };
             let Some(cells) = block.rows.get(row) else {
-                return Err(FragmentSolutionError::Structure { witness: wi, what: "values row" });
+                return Err(FragmentSolutionError::Structure {
+                    witness: wi,
+                    what: "values row",
+                });
             };
             for (col, var) in block.variables.iter().enumerate() {
                 // A non-projected VALUES variable is existential here (not term-bound).
@@ -7016,7 +7285,11 @@ pub enum FragmentScanError {
     MalformedSolutionTerm { witness: usize, var: String },
     /// A BGP obligation names a sub-proof that is not a [`ProofInputs::Scan`] (the
     /// routing gate normally rules this out; kept so this gate is self-contained).
-    NotAScanProof { witness: usize, obligation: usize, proof: usize },
+    NotAScanProof {
+        witness: usize,
+        obligation: usize,
+        proof: usize,
+    },
     /// A structural inconsistency the routing gate normally rules out first (a
     /// branch / obligation / proof index out of range). Kept so this gate never
     /// panics on an index — a fail-closed refusal even if reached directly.
@@ -7033,22 +7306,46 @@ pub enum FragmentScanError {
     MissingRowSelection { witness: usize, obligation: usize },
     /// The selected supporting row index is outside the scan's ACTIVE disclosed
     /// rows (`min(row_count, rows.len())`).
-    RowOutOfRange { witness: usize, obligation: usize, row: usize, active: usize },
+    RowOutOfRange {
+        witness: usize,
+        obligation: usize,
+        row: usize,
+        active: usize,
+    },
     /// A PROJECTED (disclosed) variable occupies a scan slot but is absent from the
     /// disclosed solution — omitting it to dodge the binding is refused fail-closed.
-    UnboundProjectedScanVar { witness: usize, obligation: usize, slot: usize, var: String },
+    UnboundProjectedScanVar {
+        witness: usize,
+        obligation: usize,
+        slot: usize,
+        var: String,
+    },
     /// The selected row's slot value does not equal the encoding the verifier
     /// re-derives from the disclosed solution's binding for that PROJECTED variable
     /// (the row does not support the claimed solution) — refused fail-closed.
-    ScanSlotMismatch { witness: usize, obligation: usize, slot: usize, var: String },
+    ScanSlotMismatch {
+        witness: usize,
+        obligation: usize,
+        slot: usize,
+        var: String,
+    },
     /// Two atoms in the SAME branch that share an EXISTENTIAL (non-projected)
     /// variable selected rows whose slot values for it disagree (join incoherence —
     /// there is no single witness for the shared variable), mirroring the flat
     /// `bind_joins` / disclosed-row join gate. Refused fail-closed.
-    JoinIncoherent { witness: usize, obligation: usize, slot: usize, var: String },
+    JoinIncoherent {
+        witness: usize,
+        obligation: usize,
+        slot: usize,
+        var: String,
+    },
     /// A scan pattern slot is an unnamed wildcard (the BGP fragment never produces
     /// one; refused for totality).
-    WildcardSlot { witness: usize, obligation: usize, slot: usize },
+    WildcardSlot {
+        witness: usize,
+        obligation: usize,
+        slot: usize,
+    },
 }
 
 #[cfg(feature = "extended-fragment")]
@@ -7188,8 +7485,10 @@ pub fn bind_fragment_scans(
     // Re-derive the fragment from the query TEXT alone (never the manifest). An
     // outside-fragment / unparseable query is normally caught first by
     // `dispatch_fragment`; refuse fail-closed if we somehow reach here.
-    let fq = fragment_query(&manifest.query)
-        .map_err(|_| FragmentScanError::Structure { witness: 0, what: "query" })?;
+    let fq = fragment_query(&manifest.query).map_err(|_| FragmentScanError::Structure {
+        witness: 0,
+        what: "query",
+    })?;
     let projected: BTreeSet<String> = fq.projected.iter().cloned().collect();
     // IRIs / literals (the only disclosable term kinds) are salt-INDEPENDENT, so
     // salt 0 matches the prover's encoding for a projected variable's term. The
@@ -7199,17 +7498,27 @@ pub fn bind_fragment_scans(
 
     for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
         let Some(branch) = fq.branches.get(bw.branch) else {
-            return Err(FragmentScanError::Structure { witness: wi, what: "branch" });
+            return Err(FragmentScanError::Structure {
+                witness: wi,
+                what: "branch",
+            });
         };
 
         // Re-encode the disclosed solution: var -> Fr, VERIFIER-recomputed.
         let mut mu: std::collections::BTreeMap<String, Fr> = std::collections::BTreeMap::new();
         for sb in &bw.solution {
-            let term = sb.term.to_term().ok_or_else(|| {
-                FragmentScanError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
-            })?;
+            let term =
+                sb.term
+                    .to_term()
+                    .ok_or_else(|| FragmentScanError::MalformedSolutionTerm {
+                        witness: wi,
+                        var: sb.var.clone(),
+                    })?;
             let enc = encode_term(&term, &salt).ok_or_else(|| {
-                FragmentScanError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
+                FragmentScanError::MalformedSolutionTerm {
+                    witness: wi,
+                    var: sb.var.clone(),
+                }
             })?;
             mu.insert(sb.var.clone(), enc);
         }
@@ -7221,21 +7530,40 @@ pub fn bind_fragment_scans(
 
         for (oi, &pi) in bw.scan_proofs.iter().enumerate() {
             let Some(pattern) = branch.patterns.get(oi) else {
-                return Err(FragmentScanError::Structure { witness: wi, what: "scan obligation" });
+                return Err(FragmentScanError::Structure {
+                    witness: wi,
+                    what: "scan obligation",
+                });
             };
-            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentScanError::Structure {
-                witness: wi,
-                what: "scan proof index",
-            })?;
-            let ProofInputs::Scan { rows, row_count, .. } = &sp.inputs else {
-                return Err(FragmentScanError::NotAScanProof { witness: wi, obligation: oi, proof: pi });
+            let sp = manifest
+                .sub_proofs
+                .get(pi)
+                .ok_or(FragmentScanError::Structure {
+                    witness: wi,
+                    what: "scan proof index",
+                })?;
+            let ProofInputs::Scan {
+                rows, row_count, ..
+            } = &sp.inputs
+            else {
+                return Err(FragmentScanError::NotAScanProof {
+                    witness: wi,
+                    obligation: oi,
+                    proof: pi,
+                });
             };
 
             // A wildcard slot never comes from a parsed BGP; refuse for totality.
-            if let Some(slot) =
-                pattern.slots.iter().position(|s| matches!(s, SlotPattern::Wildcard))
+            if let Some(slot) = pattern
+                .slots
+                .iter()
+                .position(|s| matches!(s, SlotPattern::Wildcard))
             {
-                return Err(FragmentScanError::WildcardSlot { witness: wi, obligation: oi, slot });
+                return Err(FragmentScanError::WildcardSlot {
+                    witness: wi,
+                    obligation: oi,
+                    slot,
+                });
             }
 
             // (1) The scan must answer this query BGP pattern (constant/shape
@@ -7244,11 +7572,17 @@ pub fn bind_fragment_scans(
             // constant slots to those, so we only bind the VARIABLE slots below.
             let consts = pattern_slot_consts(&pattern.slots);
             if !scan_matches_pattern(&sp.inputs, &consts) {
-                return Err(FragmentScanError::ScanPatternMismatch { witness: wi, obligation: oi });
+                return Err(FragmentScanError::ScanPatternMismatch {
+                    witness: wi,
+                    obligation: oi,
+                });
             }
 
             // A pattern with no variable slot is fully bound by (1); no row needed.
-            let has_var = pattern.slots.iter().any(|s| matches!(s, SlotPattern::Var(_)));
+            let has_var = pattern
+                .slots
+                .iter()
+                .any(|s| matches!(s, SlotPattern::Var(_)));
             if !has_var {
                 continue;
             }
@@ -7256,7 +7590,10 @@ pub fn bind_fragment_scans(
             // (2) A variable pattern needs a selected supporting disclosed row that
             // lies within the scan's ACTIVE rows.
             let Some(&row) = bw.scan_rows.get(oi) else {
-                return Err(FragmentScanError::MissingRowSelection { witness: wi, obligation: oi });
+                return Err(FragmentScanError::MissingRowSelection {
+                    witness: wi,
+                    obligation: oi,
+                });
             };
             let active = (*row_count as usize).min(rows.len());
             if row >= active {
@@ -7348,7 +7685,11 @@ pub enum FragmentJoinError {
     /// A proof-bound endpoint encoding / disclosed row slot (`src_enc` / `dst_enc` /
     /// a scan row slot) is not a valid field element — refused fail-closed (the
     /// crypto stage additionally rejects it as [`CheckError::MalformedField`]).
-    MalformedField { witness: usize, obligation: usize, what: &'static str },
+    MalformedField {
+        witness: usize,
+        obligation: usize,
+        what: &'static str,
+    },
     /// Two atoms in the SAME branch that share a variable resolve it to DISAGREEING
     /// disclosed values — the join has no single witness. `obligation` is the atom
     /// (combined index: `0..patterns.len()` are BGP scans, `patterns.len()..` are
@@ -7357,7 +7698,11 @@ pub enum FragmentJoinError {
     /// [`bind_fragment_scans`]) AND the NEW scan↔path / path↔path edges: a path
     /// claiming a different node than its supporting scan row (or another path
     /// endpoint) supports is refused, both directions.
-    Incoherent { witness: usize, obligation: usize, var: String },
+    Incoherent {
+        witness: usize,
+        obligation: usize,
+        var: String,
+    },
     /// A [`ProofInputs::PathReach`] sub-proof whose proof-bound attribution admits
     /// MORE THAN ONE committed graph (`obligation` is its combined index). The path's
     /// interior chain nodes then cross graph boundaries; the flat cross-graph
@@ -7492,12 +7837,17 @@ pub fn bind_fragment_join_coherence(
 ) -> Result<(), FragmentJoinError> {
     let manifest = &fm.manifest;
     // Re-derive the fragment from the query TEXT alone (never the manifest).
-    let fq = fragment_query(&manifest.query)
-        .map_err(|_| FragmentJoinError::Structure { witness: 0, what: "query" })?;
+    let fq = fragment_query(&manifest.query).map_err(|_| FragmentJoinError::Structure {
+        witness: 0,
+        what: "query",
+    })?;
 
     for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
         let Some(branch) = fq.branches.get(bw.branch) else {
-            return Err(FragmentJoinError::Structure { witness: wi, what: "branch" });
+            return Err(FragmentJoinError::Structure {
+                witness: wi,
+                what: "branch",
+            });
         };
         let n_scans = branch.patterns.len();
 
@@ -7521,28 +7871,53 @@ pub fn bind_fragment_join_coherence(
                 witness: wi,
                 what: "scan obligation",
             })?;
-            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentJoinError::Structure {
-                witness: wi,
-                what: "scan proof index",
-            })?;
-            let ProofInputs::Scan { rows, row_count, commitments, attribution, .. } = &sp.inputs
+            let sp = manifest
+                .sub_proofs
+                .get(pi)
+                .ok_or(FragmentJoinError::Structure {
+                    witness: wi,
+                    what: "scan proof index",
+                })?;
+            let ProofInputs::Scan {
+                rows,
+                row_count,
+                commitments,
+                attribution,
+                ..
+            } = &sp.inputs
             else {
-                return Err(FragmentJoinError::Structure { witness: wi, what: "scan proof kind" });
+                return Err(FragmentJoinError::Structure {
+                    witness: wi,
+                    what: "scan proof kind",
+                });
             };
-            scan_attrs.push(intern_attribution(commitments, attribution, &mut intern, &mut next_id)
-                .ok_or(FragmentJoinError::Structure { witness: wi, what: "scan attribution" })?);
+            scan_attrs.push(
+                intern_attribution(commitments, attribution, &mut intern, &mut next_id).ok_or(
+                    FragmentJoinError::Structure {
+                        witness: wi,
+                        what: "scan attribution",
+                    },
+                )?,
+            );
 
             // Disclosed value map for THIS scan's variable slots (from the selected
             // supporting row). A constant-only pattern needs no row.
             let mut map = std::collections::BTreeMap::new();
-            if pattern.slots.iter().any(|s| matches!(s, SlotPattern::Var(_))) {
+            if pattern
+                .slots
+                .iter()
+                .any(|s| matches!(s, SlotPattern::Var(_)))
+            {
                 let &row = bw.scan_rows.get(oi).ok_or(FragmentJoinError::Structure {
                     witness: wi,
                     what: "scan row selection",
                 })?;
                 let active = (*row_count as usize).min(rows.len());
                 if row >= active {
-                    return Err(FragmentJoinError::Structure { witness: wi, what: "scan row range" });
+                    return Err(FragmentJoinError::Structure {
+                        witness: wi,
+                        what: "scan row range",
+                    });
                 }
                 for (slot, s) in pattern.slots.iter().enumerate() {
                     if let SlotPattern::Var(v) = s {
@@ -7567,17 +7942,34 @@ pub fn bind_fragment_join_coherence(
                 witness: wi,
                 what: "path obligation",
             })?;
-            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentJoinError::Structure {
-                witness: wi,
-                what: "path proof index",
-            })?;
-            let ProofInputs::PathReach { src_enc, dst_enc, commitments, attribution, .. } =
-                &sp.inputs
+            let sp = manifest
+                .sub_proofs
+                .get(pi)
+                .ok_or(FragmentJoinError::Structure {
+                    witness: wi,
+                    what: "path proof index",
+                })?;
+            let ProofInputs::PathReach {
+                src_enc,
+                dst_enc,
+                commitments,
+                attribution,
+                ..
+            } = &sp.inputs
             else {
-                return Err(FragmentJoinError::Structure { witness: wi, what: "path proof kind" });
+                return Err(FragmentJoinError::Structure {
+                    witness: wi,
+                    what: "path proof kind",
+                });
             };
-            path_attrs.push(intern_attribution(commitments, attribution, &mut intern, &mut next_id)
-                .ok_or(FragmentJoinError::Structure { witness: wi, what: "path attribution" })?);
+            path_attrs.push(
+                intern_attribution(commitments, attribution, &mut intern, &mut next_id).ok_or(
+                    FragmentJoinError::Structure {
+                        witness: wi,
+                        what: "path attribution",
+                    },
+                )?,
+            );
 
             // A VARIABLE path endpoint's value IS the public `src_enc`/`dst_enc`
             // (directly comparable to a scan row slot — the #1678 clean-extension
@@ -7585,19 +7977,23 @@ pub fn bind_fragment_join_coherence(
             let combined = n_scans + oi;
             let mut map = std::collections::BTreeMap::new();
             if let SlotPattern::Var(v) = &obligation.subject {
-                let val = src_enc.to_field().ok_or(FragmentJoinError::MalformedField {
-                    witness: wi,
-                    obligation: combined,
-                    what: "path src_enc",
-                })?;
+                let val = src_enc
+                    .to_field()
+                    .ok_or(FragmentJoinError::MalformedField {
+                        witness: wi,
+                        obligation: combined,
+                        what: "path src_enc",
+                    })?;
                 map.insert(v.clone(), val);
             }
             if let SlotPattern::Var(v) = &obligation.object {
-                let val = dst_enc.to_field().ok_or(FragmentJoinError::MalformedField {
-                    witness: wi,
-                    obligation: combined,
-                    what: "path dst_enc",
-                })?;
+                let val = dst_enc
+                    .to_field()
+                    .ok_or(FragmentJoinError::MalformedField {
+                        witness: wi,
+                        obligation: combined,
+                        what: "path dst_enc",
+                    })?;
                 map.insert(v.clone(), val);
             }
             per_obl.push(map);
@@ -7629,13 +8025,20 @@ pub fn bind_fragment_join_coherence(
         // obligations from the PROOF-BOUND attributions (the per-branch analogue of
         // the flat `recheck`). Arity is already validated by `dispatch_fragment`; a
         // mismatch here is refused fail-closed.
-        let obligations = branch_obligations(branch, &scan_attrs, &path_attrs)
-            .map_err(|_| FragmentJoinError::Structure { witness: wi, what: "branch obligations" })?;
+        let obligations = branch_obligations(branch, &scan_attrs, &path_attrs).map_err(|_| {
+            FragmentJoinError::Structure {
+                witness: wi,
+                what: "branch obligations",
+            }
+        })?;
 
         // (3) A multi-graph path's interior-chain non-bnode obligation is not
         // verifier-dischargeable from disclosed data — refuse fail-closed.
         if let Some(&p) = obligations.path_link_non_bnode.first() {
-            return Err(FragmentJoinError::MultiGraphPath { witness: wi, obligation: n_scans + p });
+            return Err(FragmentJoinError::MultiGraphPath {
+                witness: wi,
+                obligation: n_scans + p,
+            });
         }
 
         // (2) Every required cross-graph join edge's shared variable MUST be covered
@@ -7644,8 +8047,12 @@ pub fn bind_fragment_join_coherence(
         // data does not cover is refused fail-closed (branch-local `recheck`).
         for edge in &obligations.join_edges {
             let (i, j) = edge.patterns;
-            let covered = per_obl.get(i).is_some_and(|m| m.contains_key(&edge.variable))
-                && per_obl.get(j).is_some_and(|m| m.contains_key(&edge.variable));
+            let covered = per_obl
+                .get(i)
+                .is_some_and(|m| m.contains_key(&edge.variable))
+                && per_obl
+                    .get(j)
+                    .is_some_and(|m| m.contains_key(&edge.variable));
             if !covered {
                 return Err(FragmentJoinError::UncoveredCrossGraphJoin {
                     witness: wi,
@@ -7907,7 +8314,12 @@ fn reconstruct_public_inputs(
             // zero rows (matching the prover's pad_rows / the circuit's R).
             let r = match inputs.circuit_id() {
                 CircuitId::Scan { r, .. } => *r as usize,
-                _ => return Err(CheckError::MalformedField { proof, what: "scan id" }),
+                _ => {
+                    return Err(CheckError::MalformedField {
+                        proof,
+                        what: "scan id",
+                    })
+                }
             };
             for j in 0..r {
                 match rows.get(j) {
@@ -7938,14 +8350,25 @@ fn reconstruct_public_inputs(
             // shape because the structural gate runs unconditionally before here.
             let k = match inputs.circuit_id() {
                 CircuitId::Scan { k, .. } => *k as usize,
-                _ => return Err(CheckError::MalformedField { proof, what: "scan id" }),
+                _ => {
+                    return Err(CheckError::MalformedField {
+                        proof,
+                        what: "scan id",
+                    })
+                }
             };
             for g in 0..k {
                 let bit = attribution.get(g).copied().unwrap_or(false);
                 push_uint(&mut out, u64::from(bit));
             }
         }
-        ProofInputs::FilterInt { operand_enc, op, bound, expected, .. } => {
+        ProofInputs::FilterInt {
+            operand_enc,
+            op,
+            bound,
+            expected,
+            ..
+        } => {
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *bound);
@@ -7955,7 +8378,13 @@ fn reconstruct_public_inputs(
         // `main` declaration order: challenge (pushed above), operand_enc, op,
         // b_bits (the constant double's IEEE-754 bit pattern as a u64 word),
         // expected.
-        ProofInputs::FilterF64 { operand_enc, op, b_bits, expected, .. } => {
+        ProofInputs::FilterF64 {
+            operand_enc,
+            op,
+            b_bits,
+            expected,
+            ..
+        } => {
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *b_bits);
@@ -7965,7 +8394,14 @@ fn reconstruct_public_inputs(
         // declaration order: challenge (pushed above), operand_enc, op, bound_neg
         // (bool -> {0,1}), bound (the constant's u64 magnitude), expected.
         // Cross-reference `zk/compose/filter_signed_int_d{md}/src/main.nr`.
-        ProofInputs::FilterSignedInt { operand_enc, op, bound_neg, bound, expected, .. } => {
+        ProofInputs::FilterSignedInt {
+            operand_enc,
+            op,
+            bound_neg,
+            bound,
+            expected,
+            ..
+        } => {
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, u64::from(*bound_neg));
@@ -7976,7 +8412,14 @@ fn reconstruct_public_inputs(
         // declaration order: challenge (pushed above), operand_enc, op, bound_neg
         // (bool -> {0,1}), bound_scaled (the host-prescaled constant magnitude),
         // expected. Cross-reference `zk/compose/filter_decimal_i{id}_f{fd}/src/main.nr`.
-        ProofInputs::FilterDecimal { operand_enc, op, bound_neg, bound_scaled, expected, .. } => {
+        ProofInputs::FilterDecimal {
+            operand_enc,
+            op,
+            bound_neg,
+            bound_scaled,
+            expected,
+            ..
+        } => {
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, u64::from(*bound_neg));
@@ -7995,7 +8438,14 @@ fn reconstruct_public_inputs(
         // scan-binding gate are the dispatch matrix `crate::dispatch` (sq-cfmv) and
         // the host-encoding wiring (sq-j506), gated behind sq-qhy4.)
         #[cfg(feature = "dual-leaf")]
-        ProofInputs::FilterValueDl { operand_enc, op, bound, datatype_const, expected, .. } => {
+        ProofInputs::FilterValueDl {
+            operand_enc,
+            op,
+            bound,
+            datatype_const,
+            expected,
+            ..
+        } => {
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *bound);
@@ -8009,7 +8459,14 @@ fn reconstruct_public_inputs(
         // `zk/compose/filter_value_dl_f64/src/main.nr`. `operand_enc` is the
         // DUAL-LEAF leaf over the CANONICAL IEEE bits.
         #[cfg(feature = "dual-leaf")]
-        ProofInputs::FilterValueDlF64 { operand_enc, op, b_bits, datatype_const, expected, .. } => {
+        ProofInputs::FilterValueDlF64 {
+            operand_enc,
+            op,
+            b_bits,
+            datatype_const,
+            expected,
+            ..
+        } => {
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *b_bits);
@@ -8076,7 +8533,14 @@ fn reconstruct_public_inputs(
         // step 4 (sq-sfsi). Reconstructing the vector here only lets a `join_eq`
         // sub-proof's bb verification run; it bypasses no check, because no check
         // beyond plain bb verification is wired for joins until sq-sfsi.
-        ProofInputs::JoinEq { commit_a, commit_b, join_commitment, slot_a, slot_b, .. } => {
+        ProofInputs::JoinEq {
+            commit_a,
+            commit_b,
+            join_commitment,
+            slot_a,
+            slot_b,
+            ..
+        } => {
             push_field(&mut out, commit_a, proof, "commit_a")?;
             push_field(&mut out, commit_b, proof, "commit_b")?;
             push_field(&mut out, join_commitment, proof, "join_commitment")?;
@@ -8115,7 +8579,12 @@ fn reconstruct_public_inputs(
             push_uint(&mut out, u64::from(*depth_bound));
             let k = match inputs.circuit_id() {
                 CircuitId::PathReach { k, .. } => *k as usize,
-                _ => return Err(CheckError::MalformedField { proof, what: "path id" }),
+                _ => {
+                    return Err(CheckError::MalformedField {
+                        proof,
+                        what: "path id",
+                    })
+                }
             };
             for g in 0..k {
                 let bit = attribution.get(g).copied().unwrap_or(false);
@@ -8312,7 +8781,10 @@ mod tests {
     fn hidden_issuer_root_uses_sparse_builder_and_scales() {
         use sparq_zk::sig::{key_set_leaf, public_key_to_hex, SecretKey};
         let sks: Vec<SecretKey> = (0u64..5).map(|s| SecretKey::from_seed(9000 + s)).collect();
-        let hexes: Vec<String> = sks.iter().map(|sk| public_key_to_hex(&sk.public_key())).collect();
+        let hexes: Vec<String> = sks
+            .iter()
+            .map(|sk| public_key_to_hex(&sk.public_key()))
+            .collect();
         let k = KeySet::from_hex_keys(hexes).with_hidden_issuer_depth(8);
         let ordered = k.ordered_keys();
         assert_eq!(ordered.len(), 5, "all five real keys are trusted");
@@ -8404,7 +8876,10 @@ mod tests {
         for declared in [3u32, 5, 0, 31] {
             m.hidden_issuer_attestations = vec![mk(declared)];
             match bind_hidden_issuer_attestations(&m, &k, &prover, &work, &fh("0x2a")) {
-                Err(CheckError::HiddenIssuerDepthMismatch { declared: d, policy: p }) => {
+                Err(CheckError::HiddenIssuerDepthMismatch {
+                    declared: d,
+                    policy: p,
+                }) => {
                     assert_eq!(d, declared, "the REJECTED declared depth is reported");
                     assert_eq!(p, policy_depth, "the POLICY depth is reported");
                 }
@@ -8612,7 +9087,10 @@ mod tests {
         };
         let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
         assert_eq!(got.len(), 192);
-        assert_eq!(got, bb, "filter_signed_int reconstruction must byte-match bb");
+        assert_eq!(
+            got, bb,
+            "filter_signed_int reconstruction must byte-match bb"
+        );
     }
 
     /// [OPUS-4.8] sq-7lrq: EMPIRICAL anchor for the composable
@@ -8725,12 +9203,36 @@ mod tests {
             pattern_is_const: [false, true, false],
             pattern_const_enc: [z(), age(), z()],
             rows: vec![
-                [subj(), age(), fh("0x08a387a1d4e98da1fcf28c25bc413f88d5ff771682c18f432f0f03971fad9602")],
-                [subj(), age(), fh("0x1aff50a8f430c8288c8a386adefff02a20c75db111a6ef0dcb71e3d63c36e39e")],
-                [subj(), age(), fh("0x1e76b7d5b462137832e8c482bf0e84cd27acff5af29ab19f584b7e4e5279c3c6")],
-                [subj(), age(), fh("0x132fa587351bf3f12fd3cbed64d5526f28791099d1d40870f94595873c78fa72")],
-                [subj(), age(), fh("0x30202cbdd89765b9370d4790b6f7f073a95ef2ffbd731b53ce49cd2eb86614f0")],
-                [subj(), age(), fh("0x16cd94467389dbde075372360eadb589f417d9e8c79507a34293ef3478b2d68b")],
+                [
+                    subj(),
+                    age(),
+                    fh("0x08a387a1d4e98da1fcf28c25bc413f88d5ff771682c18f432f0f03971fad9602"),
+                ],
+                [
+                    subj(),
+                    age(),
+                    fh("0x1aff50a8f430c8288c8a386adefff02a20c75db111a6ef0dcb71e3d63c36e39e"),
+                ],
+                [
+                    subj(),
+                    age(),
+                    fh("0x1e76b7d5b462137832e8c482bf0e84cd27acff5af29ab19f584b7e4e5279c3c6"),
+                ],
+                [
+                    subj(),
+                    age(),
+                    fh("0x132fa587351bf3f12fd3cbed64d5526f28791099d1d40870f94595873c78fa72"),
+                ],
+                [
+                    subj(),
+                    age(),
+                    fh("0x30202cbdd89765b9370d4790b6f7f073a95ef2ffbd731b53ce49cd2eb86614f0"),
+                ],
+                [
+                    subj(),
+                    age(),
+                    fh("0x16cd94467389dbde075372360eadb589f417d9e8c79507a34293ef3478b2d68b"),
+                ],
             ],
             row_count: 6,
             attribution: vec![true, true],
@@ -8759,7 +9261,10 @@ mod tests {
         }
         assert_ne!(v0, reconstruct_public_inputs(&m, &fh("0x2a"), 0).unwrap());
         // Flip the challenge.
-        assert_ne!(v0, reconstruct_public_inputs(&base, &fh("0x2b"), 0).unwrap());
+        assert_ne!(
+            v0,
+            reconstruct_public_inputs(&base, &fh("0x2b"), 0).unwrap()
+        );
     }
 
     /// Malformed `proof_hex` is rejected, never panics (audit hardening).
@@ -8812,7 +9317,10 @@ mod tests {
         {
             let store = FileSeenNonces::open(&path).expect("open durable store");
             assert!(store.record_fresh(&n), "first sight must be fresh");
-            assert!(!store.record_fresh(&n), "replay rejected within the session");
+            assert!(
+                !store.record_fresh(&n),
+                "replay rejected within the session"
+            );
         }
 
         // Session 2: a COMPLETELY FRESH store reopened from the SAME path. The
@@ -8825,14 +9333,20 @@ mod tests {
             );
             // A different nonce is independently fresh in the reopened store.
             let n2 = VerifierNonce::from_hex("0x2b").unwrap();
-            assert!(store.record_fresh(&n2), "an unseen nonce is fresh after restart");
+            assert!(
+                store.record_fresh(&n2),
+                "an unseen nonce is fresh after restart"
+            );
         }
 
         // Session 3: confirm the second nonce is now ALSO durable.
         {
             let store = FileSeenNonces::open(&path).expect("reopen durable store");
             let n2 = VerifierNonce::from_hex("0x2b").unwrap();
-            assert!(!store.record_fresh(&n2), "the post-restart nonce is durable too");
+            assert!(
+                !store.record_fresh(&n2),
+                "the post-restart nonce is durable too"
+            );
         }
 
         let _ = std::fs::remove_file(&path);
@@ -8877,7 +9391,10 @@ mod tests {
         .unwrap();
         let bare = VerifierNonce::from_hex("0x2a").unwrap();
         assert!(store.record_fresh(&padded), "first sight fresh");
-        assert!(!store.record_fresh(&bare), "same field, different spelling => replay");
+        assert!(
+            !store.record_fresh(&bare),
+            "same field, different spelling => replay"
+        );
     }
 
     /// Audit #4: the nonce round-trips to the FieldHex the reconstruction binds
@@ -8900,8 +9417,7 @@ mod tests {
             bound: 18,
             expected: true,
         };
-        let via_nonce =
-            reconstruct_public_inputs(&inputs, &n.as_field_hex(), 0).unwrap();
+        let via_nonce = reconstruct_public_inputs(&inputs, &n.as_field_hex(), 0).unwrap();
         let via_hex = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
         assert_eq!(via_nonce, via_hex);
     }
@@ -8926,7 +9442,10 @@ mod tests {
         };
         assert!(matches!(
             reconstruct_public_inputs(&inputs, &fh("0x2a"), 0),
-            Err(CheckError::MalformedField { proof: 0, what: "operand_enc" })
+            Err(CheckError::MalformedField {
+                proof: 0,
+                what: "operand_enc"
+            })
         ));
     }
 
@@ -8946,7 +9465,9 @@ mod tests {
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
-            binding: BindingMode::Challenge { challenge: fh("0x2a") },
+            binding: BindingMode::Challenge {
+                challenge: fh("0x2a"),
+            },
             revocation: None,
             status_snapshots: vec![],
             sub_proofs: vec![],
@@ -9006,8 +9527,10 @@ mod tests {
         };
         // Attested + salt-bound => the flat scan passes the issuer + salt gate.
         let mut ok = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
-        ok.sub_proofs =
-            vec![crate::manifest::SubProof { inputs: scan, proof_hex: String::new() }];
+        ok.sub_proofs = vec![crate::manifest::SubProof {
+            inputs: scan,
+            proof_hex: String::new(),
+        }];
         ok.commitment_attestations = vec![test_attestation(commit, Fr::from(7u64), &sk)];
         ok.revocation = Some(test_revocation());
         assert!(
@@ -9090,8 +9613,7 @@ mod tests {
         // also match it.
         m.revocation = Some(test_revocation());
 
-        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
-            .unwrap_err();
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()).unwrap_err();
         assert!(
             matches!(err, CheckError::RevocationReferenceMismatch { .. }),
             "two credentials on distinct status slots must be refused at the reference gate (sq-cuvmj fail-closed), got {err:?}"
@@ -9249,7 +9771,11 @@ mod tests {
     // ---------------------------------------------------------------
 
     fn status_snapshot(list: &str, version: u64, bits: Vec<u8>) -> StatusListSnapshot {
-        StatusListSnapshot { status_list: list.to_string(), version, bits }
+        StatusListSnapshot {
+            status_list: list.to_string(),
+            version,
+            bits,
+        }
     }
 
     /// A policy accepting versions 8..=10 with three attached snapshots — one
@@ -9282,7 +9808,10 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![("http://ex/a".to_string(), 9), ("http://ex/b".to_string(), 10)],
+            vec![
+                ("http://ex/a".to_string(), 9),
+                ("http://ex/b".to_string(), 10)
+            ],
             "stale v7 excluded; the rest in sorted (list, version) order"
         );
         assert_eq!(policy.min_version(), 8, "now=10, window=2");
@@ -9295,8 +9824,8 @@ mod tests {
         );
 
         // A FUTURE-dated snapshot (beyond `now`) is likewise excluded.
-        let with_future = accepted_set_policy()
-            .with_snapshot(status_snapshot("http://ex/c", 11, vec![0u8, 0]));
+        let with_future =
+            accepted_set_policy().with_snapshot(status_snapshot("http://ex/c", 11, vec![0u8, 0]));
         assert_eq!(
             with_future.accepted_member_index("http://ex/c", 11),
             None,
@@ -9428,7 +9957,10 @@ mod fragment_dispatch_tests {
     }
 
     fn sub(inputs: ProofInputs) -> SubProof {
-        SubProof { inputs, proof_hex: String::new() }
+        SubProof {
+            inputs,
+            proof_hex: String::new(),
+        }
     }
 
     fn base_manifest(query: &str, sub_proofs: Vec<SubProof>) -> ProofManifest {
@@ -9443,7 +9975,9 @@ mod fragment_dispatch_tests {
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
-            binding: BindingMode::Challenge { challenge: fh("0x2a") },
+            binding: BindingMode::Challenge {
+                challenge: fh("0x2a"),
+            },
             revocation: None,
             status_snapshots: vec![],
             sub_proofs,
@@ -9457,15 +9991,18 @@ mod fragment_dispatch_tests {
         }
     }
 
-    fn fm(query: &str, sub_proofs: Vec<SubProof>, witnesses: Vec<BranchWitness>) -> FragmentManifest {
+    fn fm(
+        query: &str,
+        sub_proofs: Vec<SubProof>,
+        witnesses: Vec<BranchWitness>,
+    ) -> FragmentManifest {
         FragmentManifest::new(base_manifest(query, sub_proofs), witnesses)
     }
 
     const PLUS: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>+ ?o }";
     const STAR: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>* ?o }";
     const OPT: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>? ?o }";
-    const UNION: &str =
-        "SELECT * WHERE { { ?s <http://ex/p> ?o } UNION { ?o <http://ex/q> ?s } }";
+    const UNION: &str = "SELECT * WHERE { { ?s <http://ex/p> ?o } UNION { ?o <http://ex/q> ?s } }";
     const VALUES: &str =
         "SELECT * WHERE { ?s <http://ex/p> ?o VALUES ?o { <http://ex/x> <http://ex/y> } }";
 
@@ -9485,14 +10022,22 @@ mod fragment_dispatch_tests {
     #[test]
     fn accepts_bounded_plus_path_with_a_bound_member() {
         // `p+` => allow_zero false; a d=4,k=1,n=16 member is a valid bound.
-        let m = fm(PLUS, vec![sub(path_ok(4, 1, 16, false))], vec![bw(0, vec![], vec![0], vec![])]);
+        let m = fm(
+            PLUS,
+            vec![sub(path_ok(4, 1, 16, false))],
+            vec![bw(0, vec![], vec![0], vec![])],
+        );
         assert_eq!(dispatch_fragment(&m), Ok(()));
     }
 
     #[test]
     fn accepts_star_path_zero_length_admitted() {
         // `p*` => allow_zero true.
-        let m = fm(STAR, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        let m = fm(
+            STAR,
+            vec![sub(path_ok(4, 1, 16, true))],
+            vec![bw(0, vec![], vec![0], vec![])],
+        );
         assert_eq!(dispatch_fragment(&m), Ok(()));
     }
 
@@ -9502,7 +10047,10 @@ mod fragment_dispatch_tests {
         let m = fm(
             UNION,
             vec![sub(scan_min()), sub(scan_min())],
-            vec![bw(0, vec![0], vec![], vec![]), bw(1, vec![1], vec![], vec![])],
+            vec![
+                bw(0, vec![0], vec![], vec![]),
+                bw(1, vec![1], vec![], vec![]),
+            ],
         );
         assert_eq!(dispatch_fragment(&m), Ok(()));
     }
@@ -9532,10 +10080,18 @@ mod fragment_dispatch_tests {
     fn rejects_path_obligation_pointing_at_a_scan_proof() {
         // The path obligation names sub-proof 0, which is a SCAN (not a bound
         // path_reach) => PathReachMissing (fail-closed).
-        let m = fm(PLUS, vec![sub(scan_min())], vec![bw(0, vec![], vec![0], vec![])]);
+        let m = fm(
+            PLUS,
+            vec![sub(scan_min())],
+            vec![bw(0, vec![], vec![0], vec![])],
+        );
         assert!(matches!(
             dispatch_fragment(&m),
-            Err(FragmentDispatchError::PathReachMissing { witness: 0, obligation: 0, proof: 0 })
+            Err(FragmentDispatchError::PathReachMissing {
+                witness: 0,
+                obligation: 0,
+                proof: 0
+            })
         ));
     }
 
@@ -9545,7 +10101,10 @@ mod fragment_dispatch_tests {
         let m = fm(PLUS, vec![], vec![bw(0, vec![], vec![0], vec![])]);
         assert!(matches!(
             dispatch_fragment(&m),
-            Err(FragmentDispatchError::DanglingProof { witness: 0, proof: 0 })
+            Err(FragmentDispatchError::DanglingProof {
+                witness: 0,
+                proof: 0
+            })
         ));
     }
 
@@ -9603,10 +10162,18 @@ mod fragment_dispatch_tests {
     fn rejects_branch_attribution_out_of_range() {
         // The UNION query has 2 branches; attributing a solution to branch 5 =>
         // BranchOutOfRange (the "wrong branch" rejection).
-        let m = fm(UNION, vec![sub(scan_min())], vec![bw(5, vec![0], vec![], vec![])]);
+        let m = fm(
+            UNION,
+            vec![sub(scan_min())],
+            vec![bw(5, vec![0], vec![], vec![])],
+        );
         assert!(matches!(
             dispatch_fragment(&m),
-            Err(FragmentDispatchError::BranchOutOfRange { witness: 0, branch: 5, branches: 2 })
+            Err(FragmentDispatchError::BranchOutOfRange {
+                witness: 0,
+                branch: 5,
+                branches: 2
+            })
         ));
     }
 
@@ -9636,10 +10203,17 @@ mod fragment_dispatch_tests {
     fn rejects_plus_presented_as_star() {
         // A `p+` obligation (allow_zero expected false) bound to a path proof with
         // allow_zero = true => PathClosureMismatch.
-        let m = fm(PLUS, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        let m = fm(
+            PLUS,
+            vec![sub(path_ok(4, 1, 16, true))],
+            vec![bw(0, vec![], vec![0], vec![])],
+        );
         assert!(matches!(
             dispatch_fragment(&m),
-            Err(FragmentDispatchError::PathClosureMismatch { witness: 0, obligation: 0 })
+            Err(FragmentDispatchError::PathClosureMismatch {
+                witness: 0,
+                obligation: 0
+            })
         ));
     }
 
@@ -9648,7 +10222,11 @@ mod fragment_dispatch_tests {
         // `p?` pins the depth bound to 1, but the smallest compiled member is d=2:
         // binding a d=4 member (allow_zero true, matching the ? closure) still
         // rejects because d != the fixed bound => PathDepthExceedsClosure.
-        let m = fm(OPT, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        let m = fm(
+            OPT,
+            vec![sub(path_ok(4, 1, 16, true))],
+            vec![bw(0, vec![], vec![0], vec![])],
+        );
         assert!(matches!(
             dispatch_fragment(&m),
             Err(FragmentDispatchError::PathDepthExceedsClosure {
@@ -9671,14 +10249,22 @@ mod fragment_dispatch_tests {
         );
         assert!(matches!(
             dispatch_fragment(&m),
-            Err(FragmentDispatchError::NotAScanProof { witness: 0, obligation: 0, proof: 0 })
+            Err(FragmentDispatchError::NotAScanProof {
+                witness: 0,
+                obligation: 0,
+                proof: 0
+            })
         ));
     }
 
     #[test]
     fn rejects_values_row_out_of_range() {
         // The VALUES block has 2 rows (indices 0,1); claiming row 2 => out of range.
-        let m = fm(VALUES, vec![sub(scan_min())], vec![bw(0, vec![0], vec![], vec![2])]);
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw(0, vec![0], vec![], vec![2])],
+        );
         assert!(matches!(
             dispatch_fragment(&m),
             Err(FragmentDispatchError::ValuesRowOutOfRange {
@@ -9741,7 +10327,11 @@ mod fragment_dispatch_tests {
             attribution: vec![true, false],
         };
         let bytes = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
-        assert_eq!(bytes.len(), 10 * 32, "1 challenge + 2 commit + 3 enc + allow_zero + depth + 2 attr");
+        assert_eq!(
+            bytes.len(),
+            10 * 32,
+            "1 challenge + 2 commit + 3 enc + allow_zero + depth + 2 attr"
+        );
         // allow_zero (word index 6) is 1, depth_bound (word 7) is 4.
         assert_eq!(bytes[6 * 32 + 31], 1, "allow_zero = true -> 1");
         assert_eq!(bytes[7 * 32 + 31], 4, "depth_bound word = 4");
@@ -9776,30 +10366,53 @@ mod fragment_dispatch_tests {
         // Cheap Display coverage (the error is `pub` + `impl Error`).
         let errs = [
             FragmentDispatchError::OutsideFragment("x".into()),
-            FragmentDispatchError::BranchOutOfRange { witness: 0, branch: 1, branches: 1 },
+            FragmentDispatchError::BranchOutOfRange {
+                witness: 0,
+                branch: 1,
+                branches: 1,
+            },
             FragmentDispatchError::ObligationArityMismatch {
                 witness: 0,
                 what: "path",
                 expected: 1,
                 got: 0,
             },
-            FragmentDispatchError::DanglingProof { witness: 0, proof: 9 },
+            FragmentDispatchError::DanglingProof {
+                witness: 0,
+                proof: 9,
+            },
             FragmentDispatchError::UnknownCircuit { proof: 0 },
             FragmentDispatchError::CircuitIdMismatch {
                 proof: 0,
                 declared: CircuitId::PathReach { d: 4, k: 2, n: 16 },
                 derived: CircuitId::PathReach { d: 4, k: 1, n: 16 },
             },
-            FragmentDispatchError::NotAScanProof { witness: 0, obligation: 0, proof: 0 },
-            FragmentDispatchError::PathReachMissing { witness: 0, obligation: 0, proof: 0 },
-            FragmentDispatchError::PathClosureMismatch { witness: 0, obligation: 0 },
+            FragmentDispatchError::NotAScanProof {
+                witness: 0,
+                obligation: 0,
+                proof: 0,
+            },
+            FragmentDispatchError::PathReachMissing {
+                witness: 0,
+                obligation: 0,
+                proof: 0,
+            },
+            FragmentDispatchError::PathClosureMismatch {
+                witness: 0,
+                obligation: 0,
+            },
             FragmentDispatchError::PathDepthExceedsClosure {
                 witness: 0,
                 obligation: 0,
                 member_d: 4,
                 fixed: 1,
             },
-            FragmentDispatchError::ValuesRowOutOfRange { witness: 0, block: 0, row: 2, rows: 2 },
+            FragmentDispatchError::ValuesRowOutOfRange {
+                witness: 0,
+                block: 0,
+                row: 2,
+                rows: 2,
+            },
         ];
         for e in &errs {
             assert!(!format!("{}", e).is_empty());
@@ -9809,8 +10422,7 @@ mod fragment_dispatch_tests {
     // --- sq-h732x: end-to-end verify_fragment_manifest routing -------------
 
     /// A query OUTSIDE the wave-1 fragment (`OPTIONAL`).
-    const OUTSIDE: &str =
-        "SELECT * WHERE { ?s <http://ex/p> ?o OPTIONAL { ?o <http://ex/q> ?r } }";
+    const OUTSIDE: &str = "SELECT * WHERE { ?s <http://ex/p> ?o OPTIONAL { ?o <http://ex/q> ?r } }";
 
     fn dummy_prover() -> CircuitProver {
         // Never invoked in these tests — every case rejects before the sub-proof
@@ -9852,10 +10464,13 @@ mod fragment_dispatch_tests {
         // CheckError::FragmentDispatch, never a silent fallthrough.
         let m = fm(OUTSIDE, vec![], vec![]);
         let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
-        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
-            .unwrap_err();
+        let err =
+            verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen).unwrap_err();
         assert!(
-            matches!(err, CheckError::FragmentDispatch(FragmentDispatchError::OutsideFragment(_))),
+            matches!(
+                err,
+                CheckError::FragmentDispatch(FragmentDispatchError::OutsideFragment(_))
+            ),
             "outside-fragment must fail-closed as FragmentDispatch, got {err:?}"
         );
     }
@@ -9882,8 +10497,20 @@ mod fragment_dispatch_tests {
             UNION,
             vec![sub(sc0), sub(sc1)],
             vec![
-                bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s0"), ("o", "http://ex/o0")])),
-                bw_scan(1, vec![1], vec![0], vec![], sol(&[("o", "http://ex/o1"), ("s", "http://ex/s1")])),
+                bw_scan(
+                    0,
+                    vec![0],
+                    vec![0],
+                    vec![],
+                    sol(&[("s", "http://ex/s0"), ("o", "http://ex/o0")]),
+                ),
+                bw_scan(
+                    1,
+                    vec![1],
+                    vec![0],
+                    vec![],
+                    sol(&[("o", "http://ex/o1"), ("s", "http://ex/s1")]),
+                ),
             ],
         );
         // Fragment path: routes past stage-1a; fails at the (empty-K) issuer gate.
@@ -9898,11 +10525,23 @@ mod fragment_dispatch_tests {
         // stage-1 with the same structured error as before this bead.
         let (p2, w2, ks2, rp2, hr2, hbp2, ep2, n2, seen2) = empty_verify_env();
         let flat_err = verify_manifest(
-            &m.manifest, &p2, &w2, &ks2, &rp2, &hr2, &hbp2, &ep2, &n2, &seen2,
+            &m.manifest,
+            &p2,
+            &w2,
+            &ks2,
+            &rp2,
+            &hr2,
+            &hbp2,
+            &ep2,
+            &n2,
+            &seen2,
         )
         .unwrap_err();
         assert!(
-            matches!(flat_err, CheckError::Sparqzk(VerifyError::UnsupportedFragment(_))),
+            matches!(
+                flat_err,
+                CheckError::Sparqzk(VerifyError::UnsupportedFragment(_))
+            ),
             "flat verify_manifest must still reject UNION at stage-1, got {flat_err:?}"
         );
     }
@@ -9920,7 +10559,10 @@ mod fragment_dispatch_tests {
             false,
         );
         assert!(
-            matches!(flat, Err(CheckError::Sparqzk(VerifyError::UnsupportedFragment(_)))),
+            matches!(
+                flat,
+                Err(CheckError::Sparqzk(VerifyError::UnsupportedFragment(_)))
+            ),
             "flat regime rejects UNION at stage-1a, got {flat:?}"
         );
         let ext = prefilter_manifest_structure_impl(
@@ -9987,7 +10629,15 @@ mod fragment_dispatch_tests {
     }
 
     /// A `PathReach` input with REAL pred/src/dst encodings (over IRIs).
-    fn path_real(d: u32, k: u32, n: u32, allow_zero: bool, pred: &str, src: &str, dst: &str) -> ProofInputs {
+    fn path_real(
+        d: u32,
+        k: u32,
+        n: u32,
+        allow_zero: bool,
+        pred: &str,
+        src: &str,
+        dst: &str,
+    ) -> ProofInputs {
         ProofInputs::PathReach {
             id: CircuitId::PathReach { d, k, n },
             commitments: (0..k).map(|i| fh(&format!("0x{:x}", i + 1))).collect(),
@@ -10006,7 +10656,9 @@ mod fragment_dispatch_tests {
             .iter()
             .map(|(v, i)| SolutionBinding {
                 var: v.to_string(),
-                term: DisclosedTerm::Iri { value: i.to_string() },
+                term: DisclosedTerm::Iri {
+                    value: i.to_string(),
+                },
             })
             .collect()
     }
@@ -10054,11 +10706,21 @@ mod fragment_dispatch_tests {
     /// matched rows as `[Term; 3]` (already the right slot encodings).
     fn scan_real(consts: [Option<&str>; 3], rows: Vec<[oxrdf::Term; 3]>) -> ProofInputs {
         let z = fh("0x0");
-        let is_const = [consts[0].is_some(), consts[1].is_some(), consts[2].is_some()];
+        let is_const = [
+            consts[0].is_some(),
+            consts[1].is_some(),
+            consts[2].is_some(),
+        ];
         let const_enc = [
-            consts[0].map(|s| enc_hex(&iri(s))).unwrap_or_else(|| z.clone()),
-            consts[1].map(|s| enc_hex(&iri(s))).unwrap_or_else(|| z.clone()),
-            consts[2].map(|s| enc_hex(&iri(s))).unwrap_or_else(|| z.clone()),
+            consts[0]
+                .map(|s| enc_hex(&iri(s)))
+                .unwrap_or_else(|| z.clone()),
+            consts[1]
+                .map(|s| enc_hex(&iri(s)))
+                .unwrap_or_else(|| z.clone()),
+            consts[2]
+                .map(|s| enc_hex(&iri(s)))
+                .unwrap_or_else(|| z.clone()),
         ];
         let enc_rows: Vec<[FieldHex; 3]> = rows
             .iter()
@@ -10086,8 +10748,22 @@ mod fragment_dispatch_tests {
         // pred_enc = enc(<p>), src_enc = enc(<a>), dst_enc = enc(<b>) all consistent.
         let m = fm(
             PLUS,
-            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
-            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+            vec![sub(path_real(
+                4,
+                1,
+                16,
+                false,
+                "http://ex/p",
+                "http://ex/a",
+                "http://ex/b",
+            ))],
+            vec![bw_sol(
+                0,
+                vec![],
+                vec![0],
+                vec![],
+                sol(&[("o", "http://ex/b")]),
+            )],
         );
         assert_eq!(bind_fragment_solution(&m), Ok(()));
     }
@@ -10097,12 +10773,29 @@ mod fragment_dispatch_tests {
         // pred_enc encodes <q>, but the query names <p> => PathPredMismatch.
         let m = fm(
             PLUS,
-            vec![sub(path_real(4, 1, 16, false, "http://ex/q", "http://ex/a", "http://ex/b"))],
-            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+            vec![sub(path_real(
+                4,
+                1,
+                16,
+                false,
+                "http://ex/q",
+                "http://ex/a",
+                "http://ex/b",
+            ))],
+            vec![bw_sol(
+                0,
+                vec![],
+                vec![0],
+                vec![],
+                sol(&[("o", "http://ex/b")]),
+            )],
         );
         assert_eq!(
             bind_fragment_solution(&m),
-            Err(FragmentSolutionError::PathPredMismatch { witness: 0, obligation: 0 })
+            Err(FragmentSolutionError::PathPredMismatch {
+                witness: 0,
+                obligation: 0
+            })
         );
     }
 
@@ -10112,8 +10805,22 @@ mod fragment_dispatch_tests {
         // => PathEndpointMismatch{Src}. This is the load-bearing sq-1zf94 negative.
         let m = fm(
             VPATH,
-            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/zzz", "http://ex/b"))],
-            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("s", "http://ex/a"), ("o", "http://ex/b")]))],
+            vec![sub(path_real(
+                4,
+                1,
+                16,
+                false,
+                "http://ex/p",
+                "http://ex/zzz",
+                "http://ex/b",
+            ))],
+            vec![bw_sol(
+                0,
+                vec![],
+                vec![0],
+                vec![],
+                sol(&[("s", "http://ex/a"), ("o", "http://ex/b")]),
+            )],
         );
         assert_eq!(
             bind_fragment_solution(&m),
@@ -10130,8 +10837,22 @@ mod fragment_dispatch_tests {
         // PLUS: object ?o disclosed = <b>, but dst_enc encodes <other> => Dst mismatch.
         let m = fm(
             PLUS,
-            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/other"))],
-            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+            vec![sub(path_real(
+                4,
+                1,
+                16,
+                false,
+                "http://ex/p",
+                "http://ex/a",
+                "http://ex/other",
+            ))],
+            vec![bw_sol(
+                0,
+                vec![],
+                vec![0],
+                vec![],
+                sol(&[("o", "http://ex/b")]),
+            )],
         );
         assert_eq!(
             bind_fragment_solution(&m),
@@ -10148,8 +10869,22 @@ mod fragment_dispatch_tests {
         // VPATH: ?s is projected but the solution omits it => UnboundProjectedEndpoint.
         let m = fm(
             VPATH,
-            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
-            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+            vec![sub(path_real(
+                4,
+                1,
+                16,
+                false,
+                "http://ex/p",
+                "http://ex/a",
+                "http://ex/b",
+            ))],
+            vec![bw_sol(
+                0,
+                vec![],
+                vec![0],
+                vec![],
+                sol(&[("o", "http://ex/b")]),
+            )],
         );
         assert_eq!(
             bind_fragment_solution(&m),
@@ -10168,7 +10903,13 @@ mod fragment_dispatch_tests {
         let m = fm(
             VALUES,
             vec![sub(scan_min())],
-            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/y")]))],
+            vec![bw_sol(
+                0,
+                vec![0],
+                vec![],
+                vec![1],
+                sol(&[("o", "http://ex/y")]),
+            )],
         );
         assert_eq!(bind_fragment_solution(&m), Ok(()));
     }
@@ -10179,7 +10920,13 @@ mod fragment_dispatch_tests {
         let m = fm(
             VALUES,
             vec![sub(scan_min())],
-            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/z")]))],
+            vec![bw_sol(
+                0,
+                vec![0],
+                vec![],
+                vec![1],
+                sol(&[("o", "http://ex/z")]),
+            )],
         );
         assert_eq!(
             bind_fragment_solution(&m),
@@ -10199,7 +10946,13 @@ mod fragment_dispatch_tests {
         let m = fm(
             VALUES,
             vec![sub(scan_min())],
-            vec![bw_sol(0, vec![0], vec![], vec![0], sol(&[("o", "http://ex/y")]))],
+            vec![bw_sol(
+                0,
+                vec![0],
+                vec![],
+                vec![0],
+                sol(&[("o", "http://ex/y")]),
+            )],
         );
         assert_eq!(
             bind_fragment_solution(&m),
@@ -10215,7 +10968,11 @@ mod fragment_dispatch_tests {
     #[test]
     fn bind_solution_rejects_a_projected_values_var_with_no_disclosure() {
         // ?o is a projected VALUES variable but the solution is empty => fail-closed.
-        let m = fm(VALUES, vec![sub(scan_min())], vec![bw_sol(0, vec![0], vec![], vec![1], vec![])]);
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![1], vec![])],
+        );
         assert_eq!(
             bind_fragment_solution(&m),
             Err(FragmentSolutionError::UnboundProjectedValuesVar {
@@ -10232,12 +10989,29 @@ mod fragment_dispatch_tests {
         // A disclosed IRI that does not parse => MalformedSolutionTerm (fail-closed).
         let m = fm(
             VPATH,
-            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
-            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("s", "not an iri"), ("o", "http://ex/b")]))],
+            vec![sub(path_real(
+                4,
+                1,
+                16,
+                false,
+                "http://ex/p",
+                "http://ex/a",
+                "http://ex/b",
+            ))],
+            vec![bw_sol(
+                0,
+                vec![],
+                vec![0],
+                vec![],
+                sol(&[("s", "not an iri"), ("o", "http://ex/b")]),
+            )],
         );
         assert_eq!(
             bind_fragment_solution(&m),
-            Err(FragmentSolutionError::MalformedSolutionTerm { witness: 0, var: "s".to_string() })
+            Err(FragmentSolutionError::MalformedSolutionTerm {
+                witness: 0,
+                var: "s".to_string()
+            })
         );
     }
 
@@ -10249,7 +11023,15 @@ mod fragment_dispatch_tests {
         let ask = "ASK { ?s <http://ex/p>+ ?o }";
         let m = fm(
             ask,
-            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/whatever", "http://ex/junk"))],
+            vec![sub(path_real(
+                4,
+                1,
+                16,
+                false,
+                "http://ex/p",
+                "http://ex/whatever",
+                "http://ex/junk",
+            ))],
             vec![bw_sol(0, vec![], vec![0], vec![], vec![])],
         );
         assert_eq!(bind_fragment_solution(&m), Ok(()));
@@ -10263,11 +11045,17 @@ mod fragment_dispatch_tests {
         let m = fm(
             VALUES,
             vec![sub(scan_min())],
-            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/z")]))],
+            vec![bw_sol(
+                0,
+                vec![0],
+                vec![],
+                vec![1],
+                sol(&[("o", "http://ex/z")]),
+            )],
         );
         let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
-        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
-            .unwrap_err();
+        let err =
+            verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -10302,8 +11090,8 @@ mod fragment_dispatch_tests {
             )],
         );
         let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
-        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
-            .unwrap_err();
+        let err =
+            verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen).unwrap_err();
         assert!(
             matches!(err, CheckError::UnattestedCommitment { .. }),
             "a consistent solution must route past the bindings into the attestation gate, got {err:?}"
@@ -10314,8 +11102,14 @@ mod fragment_dispatch_tests {
     fn fragment_solution_error_display_is_non_empty_for_each_variant() {
         // Cheap Display coverage (the error is `pub` + `impl Error`).
         let errs = [
-            FragmentSolutionError::MalformedSolutionTerm { witness: 0, var: "s".into() },
-            FragmentSolutionError::PathPredMismatch { witness: 0, obligation: 0 },
+            FragmentSolutionError::MalformedSolutionTerm {
+                witness: 0,
+                var: "s".into(),
+            },
+            FragmentSolutionError::PathPredMismatch {
+                witness: 0,
+                obligation: 0,
+            },
             FragmentSolutionError::PathEndpointMismatch {
                 witness: 0,
                 obligation: 0,
@@ -10344,7 +11138,10 @@ mod fragment_dispatch_tests {
                 obligation: 0,
                 endpoint: PathEndpoint::Src,
             },
-            FragmentSolutionError::Structure { witness: 0, what: "branch" },
+            FragmentSolutionError::Structure {
+                witness: 0,
+                what: "branch",
+            },
         ];
         for e in &errs {
             assert!(!format!("{}", e).is_empty());
@@ -10362,8 +11159,7 @@ mod fragment_dispatch_tests {
     /// A single-scan BGP (both endpoints projected).
     const SCANQ: &str = "SELECT * WHERE { ?s <http://ex/p> ?o }";
     /// A two-scan BGP joined on an EXISTENTIAL variable ?x (projected: ?s ?o).
-    const JOINQ: &str =
-        "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q> ?o }";
+    const JOINQ: &str = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q> ?o }";
 
     /// A scan answering `?s <http://ex/p> ?o` with one row `(<s1>, <p>, <o1>)`.
     fn scan_sp_o(o: &str) -> ProofInputs {
@@ -10378,7 +11174,13 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(scan_sp_o("http://ex/o1"))],
-            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![0],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(bind_fragment_scans(&m), Ok(()));
     }
@@ -10389,11 +11191,22 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(scan_sp_o("http://ex/other"))],
-            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![0],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::ScanSlotMismatch { witness: 0, obligation: 0, slot: 2, var: "o".to_string() })
+            Err(FragmentScanError::ScanSlotMismatch {
+                witness: 0,
+                obligation: 0,
+                slot: 2,
+                var: "o".to_string()
+            })
         );
     }
 
@@ -10410,12 +11223,23 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(sc)],
-            vec![bw_scan(0, vec![0], vec![1], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![1],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         // Row 1 slot 0 (?s = <s2>) disagrees with the disclosed ?s = <s1>.
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::ScanSlotMismatch { witness: 0, obligation: 0, slot: 0, var: "s".to_string() })
+            Err(FragmentScanError::ScanSlotMismatch {
+                witness: 0,
+                obligation: 0,
+                slot: 0,
+                var: "s".to_string()
+            })
         );
     }
 
@@ -10424,11 +11248,22 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(scan_sp_o("http://ex/o1"))],
-            vec![bw_scan(0, vec![0], vec![3], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![3],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::RowOutOfRange { witness: 0, obligation: 0, row: 3, active: 1 })
+            Err(FragmentScanError::RowOutOfRange {
+                witness: 0,
+                obligation: 0,
+                row: 3,
+                active: 1
+            })
         );
     }
 
@@ -10438,11 +11273,20 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(scan_sp_o("http://ex/o1"))],
-            vec![bw_scan(0, vec![0], vec![], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::MissingRowSelection { witness: 0, obligation: 0 })
+            Err(FragmentScanError::MissingRowSelection {
+                witness: 0,
+                obligation: 0
+            })
         );
     }
 
@@ -10452,11 +11296,22 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(scan_sp_o("http://ex/o1"))],
-            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![0],
+                vec![],
+                sol(&[("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::UnboundProjectedScanVar { witness: 0, obligation: 0, slot: 0, var: "s".to_string() })
+            Err(FragmentScanError::UnboundProjectedScanVar {
+                witness: 0,
+                obligation: 0,
+                slot: 0,
+                var: "s".to_string()
+            })
         );
     }
 
@@ -10470,11 +11325,20 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(sc)],
-            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![0],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::ScanPatternMismatch { witness: 0, obligation: 0 })
+            Err(FragmentScanError::ScanPatternMismatch {
+                witness: 0,
+                obligation: 0
+            })
         );
     }
 
@@ -10484,11 +11348,21 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(path_ok(4, 1, 16, false))],
-            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![0],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::NotAScanProof { witness: 0, obligation: 0, proof: 0 })
+            Err(FragmentScanError::NotAScanProof {
+                witness: 0,
+                obligation: 0,
+                proof: 0
+            })
         );
     }
 
@@ -10497,11 +11371,20 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(scan_sp_o("http://ex/o1"))],
-            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "not an iri"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![0],
+                vec![],
+                sol(&[("s", "not an iri"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::MalformedSolutionTerm { witness: 0, var: "s".to_string() })
+            Err(FragmentScanError::MalformedSolutionTerm {
+                witness: 0,
+                var: "s".to_string()
+            })
         );
     }
 
@@ -10519,7 +11402,13 @@ mod fragment_dispatch_tests {
         let m = fm(
             JOINQ,
             vec![sub(sc0), sub(sc1)],
-            vec![bw_scan(0, vec![0, 1], vec![0, 0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0, 1],
+                vec![0, 0],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(bind_fragment_scans(&m), Ok(()));
     }
@@ -10538,11 +11427,22 @@ mod fragment_dispatch_tests {
         let m = fm(
             JOINQ,
             vec![sub(sc0), sub(sc1)],
-            vec![bw_scan(0, vec![0, 1], vec![0, 0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0, 1],
+                vec![0, 0],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_scans(&m),
-            Err(FragmentScanError::JoinIncoherent { witness: 0, obligation: 1, slot: 0, var: "x".to_string() })
+            Err(FragmentScanError::JoinIncoherent {
+                witness: 0,
+                obligation: 1,
+                slot: 0,
+                var: "x".to_string()
+            })
         );
     }
 
@@ -10551,10 +11451,18 @@ mod fragment_dispatch_tests {
         // A fully-ground BGP pattern needs no disclosed row (bound by scan_matches_pattern).
         const GROUND: &str = "ASK { <http://ex/a> <http://ex/p> <http://ex/b> }";
         let sc = scan_real(
-            [Some("http://ex/a"), Some("http://ex/p"), Some("http://ex/b")],
+            [
+                Some("http://ex/a"),
+                Some("http://ex/p"),
+                Some("http://ex/b"),
+            ],
             vec![[iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b")]],
         );
-        let m = fm(GROUND, vec![sub(sc)], vec![bw_scan(0, vec![0], vec![], vec![], vec![])]);
+        let m = fm(
+            GROUND,
+            vec![sub(sc)],
+            vec![bw_scan(0, vec![0], vec![], vec![], vec![])],
+        );
         assert_eq!(bind_fragment_scans(&m), Ok(()));
     }
 
@@ -10566,13 +11474,22 @@ mod fragment_dispatch_tests {
         let m = fm(
             SCANQ,
             vec![sub(scan_sp_o("http://ex/other"))],
-            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![0],
+                vec![],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
-        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
-            .unwrap_err();
+        let err =
+            verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen).unwrap_err();
         assert!(
-            matches!(err, CheckError::FragmentScan(FragmentScanError::ScanSlotMismatch { .. })),
+            matches!(
+                err,
+                CheckError::FragmentScan(FragmentScanError::ScanSlotMismatch { .. })
+            ),
             "an inconsistent scan row must fail-closed as FragmentScan, got {err:?}"
         );
     }
@@ -10580,16 +11497,56 @@ mod fragment_dispatch_tests {
     #[test]
     fn fragment_scan_error_display_is_non_empty_for_each_variant() {
         let errs = [
-            FragmentScanError::MalformedSolutionTerm { witness: 0, var: "s".into() },
-            FragmentScanError::NotAScanProof { witness: 0, obligation: 0, proof: 0 },
-            FragmentScanError::Structure { witness: 0, what: "branch" },
-            FragmentScanError::ScanPatternMismatch { witness: 0, obligation: 0 },
-            FragmentScanError::MissingRowSelection { witness: 0, obligation: 0 },
-            FragmentScanError::RowOutOfRange { witness: 0, obligation: 0, row: 3, active: 1 },
-            FragmentScanError::UnboundProjectedScanVar { witness: 0, obligation: 0, slot: 0, var: "s".into() },
-            FragmentScanError::ScanSlotMismatch { witness: 0, obligation: 0, slot: 2, var: "o".into() },
-            FragmentScanError::JoinIncoherent { witness: 0, obligation: 1, slot: 0, var: "x".into() },
-            FragmentScanError::WildcardSlot { witness: 0, obligation: 0, slot: 0 },
+            FragmentScanError::MalformedSolutionTerm {
+                witness: 0,
+                var: "s".into(),
+            },
+            FragmentScanError::NotAScanProof {
+                witness: 0,
+                obligation: 0,
+                proof: 0,
+            },
+            FragmentScanError::Structure {
+                witness: 0,
+                what: "branch",
+            },
+            FragmentScanError::ScanPatternMismatch {
+                witness: 0,
+                obligation: 0,
+            },
+            FragmentScanError::MissingRowSelection {
+                witness: 0,
+                obligation: 0,
+            },
+            FragmentScanError::RowOutOfRange {
+                witness: 0,
+                obligation: 0,
+                row: 3,
+                active: 1,
+            },
+            FragmentScanError::UnboundProjectedScanVar {
+                witness: 0,
+                obligation: 0,
+                slot: 0,
+                var: "s".into(),
+            },
+            FragmentScanError::ScanSlotMismatch {
+                witness: 0,
+                obligation: 0,
+                slot: 2,
+                var: "o".into(),
+            },
+            FragmentScanError::JoinIncoherent {
+                witness: 0,
+                obligation: 1,
+                slot: 0,
+                var: "x".into(),
+            },
+            FragmentScanError::WildcardSlot {
+                witness: 0,
+                obligation: 0,
+                slot: 0,
+            },
         ];
         for e in &errs {
             assert!(!format!("{}", e).is_empty());
@@ -10606,11 +11563,9 @@ mod fragment_dispatch_tests {
 
     /// A BGP scan joined to a `+` path on an EXISTENTIAL ?x (the path SUBJECT).
     /// Projected ?s ?o; ?x is not projected.
-    const SCANPATH_SRC: &str =
-        "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q>+ ?o }";
+    const SCANPATH_SRC: &str = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q>+ ?o }";
     /// A BGP scan joined to a `+` path on an EXISTENTIAL ?x (the path OBJECT).
-    const SCANPATH_DST: &str =
-        "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?o <http://ex/q>+ ?x }";
+    const SCANPATH_DST: &str = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?o <http://ex/q>+ ?x }";
 
     /// A branch witness carrying scan proofs, path proofs, VALUES rows, per-scan row
     /// selection, and the disclosed solution together (sq-ygk6x tests).
@@ -10623,12 +11578,23 @@ mod fragment_dispatch_tests {
         scan_rows: Vec<usize>,
         solution: Vec<SolutionBinding>,
     ) -> BranchWitness {
-        BranchWitness { branch, scan_proofs, path_proofs, values_rows, scan_rows, solution }
+        BranchWitness {
+            branch,
+            scan_proofs,
+            path_proofs,
+            values_rows,
+            scan_rows,
+            solution,
+        }
     }
 
     /// [`scan_real`] over a SPECIFIC committed graph (so two scans can be attributed
     /// to DISTINCT graphs for the cross-graph tests).
-    fn scan_real_c(consts: [Option<&str>; 3], rows: Vec<[oxrdf::Term; 3]>, commit: &str) -> ProofInputs {
+    fn scan_real_c(
+        consts: [Option<&str>; 3],
+        rows: Vec<[oxrdf::Term; 3]>,
+        commit: &str,
+    ) -> ProofInputs {
         match scan_real(consts, rows) {
             ProofInputs::Scan {
                 id,
@@ -10658,11 +11624,26 @@ mod fragment_dispatch_tests {
             [None, Some("http://ex/p"), None],
             vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
         );
-        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/x1", "http://ex/o1");
+        let pa = path_real(
+            4,
+            1,
+            16,
+            false,
+            "http://ex/q",
+            "http://ex/x1",
+            "http://ex/o1",
+        );
         let m = fm(
             SCANPATH_SRC,
             vec![sub(sc), sub(pa)],
-            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_full(
+                0,
+                vec![0],
+                vec![1],
+                vec![],
+                vec![0],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(bind_fragment_join_coherence(&m), Ok(()));
     }
@@ -10675,15 +11656,34 @@ mod fragment_dispatch_tests {
             [None, Some("http://ex/p"), None],
             vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
         );
-        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/zzz", "http://ex/o1");
+        let pa = path_real(
+            4,
+            1,
+            16,
+            false,
+            "http://ex/q",
+            "http://ex/zzz",
+            "http://ex/o1",
+        );
         let m = fm(
             SCANPATH_SRC,
             vec![sub(sc), sub(pa)],
-            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_full(
+                0,
+                vec![0],
+                vec![1],
+                vec![],
+                vec![0],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_join_coherence(&m),
-            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+            Err(FragmentJoinError::Incoherent {
+                witness: 0,
+                obligation: 1,
+                var: "x".to_string()
+            })
         );
     }
 
@@ -10695,15 +11695,34 @@ mod fragment_dispatch_tests {
             [None, Some("http://ex/p"), None],
             vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
         );
-        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/o1", "http://ex/zzz");
+        let pa = path_real(
+            4,
+            1,
+            16,
+            false,
+            "http://ex/q",
+            "http://ex/o1",
+            "http://ex/zzz",
+        );
         let m = fm(
             SCANPATH_DST,
             vec![sub(sc), sub(pa)],
-            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_full(
+                0,
+                vec![0],
+                vec![1],
+                vec![],
+                vec![0],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_join_coherence(&m),
-            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+            Err(FragmentJoinError::Incoherent {
+                witness: 0,
+                obligation: 1,
+                var: "x".to_string()
+            })
         );
     }
 
@@ -10715,11 +11734,21 @@ mod fragment_dispatch_tests {
         let m = fm(
             PLUS,
             vec![sub(pa)],
-            vec![bw_full(0, vec![], vec![0], vec![], vec![], sol(&[("o", "http://ex/b")]))],
+            vec![bw_full(
+                0,
+                vec![],
+                vec![0],
+                vec![],
+                vec![],
+                sol(&[("o", "http://ex/b")]),
+            )],
         );
         assert_eq!(
             bind_fragment_join_coherence(&m),
-            Err(FragmentJoinError::MultiGraphPath { witness: 0, obligation: 0 })
+            Err(FragmentJoinError::MultiGraphPath {
+                witness: 0,
+                obligation: 0
+            })
         );
     }
 
@@ -10741,11 +11770,22 @@ mod fragment_dispatch_tests {
         let m = fm(
             JOINQ,
             vec![sub(sc0), sub(sc1)],
-            vec![bw_full(0, vec![0, 1], vec![], vec![], vec![0, 0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_full(
+                0,
+                vec![0, 1],
+                vec![],
+                vec![],
+                vec![0, 0],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(
             bind_fragment_join_coherence(&m),
-            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+            Err(FragmentJoinError::Incoherent {
+                witness: 0,
+                obligation: 1,
+                var: "x".to_string()
+            })
         );
     }
 
@@ -10767,7 +11807,14 @@ mod fragment_dispatch_tests {
         let m = fm(
             JOINQ,
             vec![sub(sc0), sub(sc1)],
-            vec![bw_full(0, vec![0, 1], vec![], vec![], vec![0, 0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_full(
+                0,
+                vec![0, 1],
+                vec![],
+                vec![],
+                vec![0, 0],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         assert_eq!(bind_fragment_join_coherence(&m), Ok(()));
     }
@@ -10782,17 +11829,35 @@ mod fragment_dispatch_tests {
             [None, Some("http://ex/p"), None],
             vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
         );
-        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/zzz", "http://ex/o1");
+        let pa = path_real(
+            4,
+            1,
+            16,
+            false,
+            "http://ex/q",
+            "http://ex/zzz",
+            "http://ex/o1",
+        );
         let m = fm(
             SCANPATH_SRC,
             vec![sub(sc), sub(pa)],
-            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_full(
+                0,
+                vec![0],
+                vec![1],
+                vec![],
+                vec![0],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
-        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
-            .unwrap_err();
+        let err =
+            verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen).unwrap_err();
         assert!(
-            matches!(err, CheckError::FragmentJoin(FragmentJoinError::Incoherent { .. })),
+            matches!(
+                err,
+                CheckError::FragmentJoin(FragmentJoinError::Incoherent { .. })
+            ),
             "an incoherent scan↔path join must fail-closed as FragmentJoin, got {err:?}"
         );
     }
@@ -10806,15 +11871,30 @@ mod fragment_dispatch_tests {
             [None, Some("http://ex/p"), None],
             vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
         );
-        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/x1", "http://ex/o1");
+        let pa = path_real(
+            4,
+            1,
+            16,
+            false,
+            "http://ex/q",
+            "http://ex/x1",
+            "http://ex/o1",
+        );
         let m = fm(
             SCANPATH_SRC,
             vec![sub(sc), sub(pa)],
-            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+            vec![bw_full(
+                0,
+                vec![0],
+                vec![1],
+                vec![],
+                vec![0],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]),
+            )],
         );
         let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
-        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
-            .unwrap_err();
+        let err =
+            verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen).unwrap_err();
         assert!(
             matches!(err, CheckError::UnattestedCommitment { .. }),
             "a coherent scan↔path solution must route past the bindings into the attestation gate, got {err:?}"
@@ -10824,11 +11904,28 @@ mod fragment_dispatch_tests {
     #[test]
     fn fragment_join_error_display_is_non_empty_for_each_variant() {
         let errs = [
-            FragmentJoinError::Structure { witness: 0, what: "branch" },
-            FragmentJoinError::MalformedField { witness: 0, obligation: 1, what: "path src_enc" },
-            FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".into() },
-            FragmentJoinError::MultiGraphPath { witness: 0, obligation: 0 },
-            FragmentJoinError::UncoveredCrossGraphJoin { witness: 0, variable: "x".into() },
+            FragmentJoinError::Structure {
+                witness: 0,
+                what: "branch",
+            },
+            FragmentJoinError::MalformedField {
+                witness: 0,
+                obligation: 1,
+                what: "path src_enc",
+            },
+            FragmentJoinError::Incoherent {
+                witness: 0,
+                obligation: 1,
+                var: "x".into(),
+            },
+            FragmentJoinError::MultiGraphPath {
+                witness: 0,
+                obligation: 0,
+            },
+            FragmentJoinError::UncoveredCrossGraphJoin {
+                witness: 0,
+                variable: "x".into(),
+            },
         ];
         for e in &errs {
             assert!(!format!("{}", e).is_empty());
@@ -10878,8 +11975,7 @@ mod fragment_dispatch_tests {
         let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
         let mut m = base_manifest(PLUS, vec![sub(path_with_commit(Fr::from(100u64)))]);
         m.revocation = Some(test_revocation());
-        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
-            .unwrap_err();
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()).unwrap_err();
         assert!(
             matches!(err, CheckError::UnattestedCommitment { proof: 0, .. }),
             "an unattested PATH commitment must be refused at the issuer gate, got {err:?}"
@@ -10901,11 +11997,12 @@ mod fragment_dispatch_tests {
             SCANPATH_SRC,
             vec![sub(scan_with_commit(c_scan)), sub(path_with_commit(c_path))],
         );
-        m.commitment_attestations =
-            vec![test_attestation(c_scan, salt, &sk), test_attestation(c_path, salt, &sk)];
+        m.commitment_attestations = vec![
+            test_attestation(c_scan, salt, &sk),
+            test_attestation(c_path, salt, &sk),
+        ];
         m.revocation = Some(test_revocation());
-        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
-            .unwrap_err();
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()).unwrap_err();
         assert!(
             matches!(err, CheckError::SaltReused { .. }),
             "a scan-graph <-> single-graph-path-graph salt collision must be refused (audit #9), got {err:?}"

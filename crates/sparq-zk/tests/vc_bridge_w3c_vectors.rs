@@ -382,7 +382,11 @@ fn sparq_canonicalization_reproduces_w3c_canonical_documents() {
         let canonical = canonicalize_triples(&triples(nq))
             .expect("vendored vector must canonicalize")
             .to_nquads();
-        assert_eq!(canonical, nq, "{} canonical N-Quads diverge from W3C", label);
+        assert_eq!(
+            canonical, nq,
+            "{} canonical N-Quads diverge from W3C",
+            label
+        );
     }
 }
 
@@ -482,9 +486,7 @@ fn w3c_issued_proofs_verify_by_cryptosuite_token() {
             &multibase_public_key(v),
             &proof_value_signature(v),
         )
-        .unwrap_or_else(|e| {
-            panic!("published {} proof must verify by token: {}", v.label, e)
-        });
+        .unwrap_or_else(|e| panic!("published {} proof must verify by token: {}", v.label, e));
     }
 }
 

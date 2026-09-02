@@ -616,7 +616,10 @@ fn run_expand(root: &Path, entries: &[Entry]) -> Score {
             check_expected_error(&mut s, e, outcome.as_ref().err());
             continue;
         }
-        let expect_rel = e.expect.as_deref().expect("positive cases carry an expect doc");
+        let expect_rel = e
+            .expect
+            .as_deref()
+            .expect("positive cases carry an expect doc");
         match outcome {
             Ok(got) => compare_expected(&mut s, root, e, expect_rel, &got, "expand"),
             Err(why) => s.fail(&e.id, format!("expand() error: {why}")),
@@ -690,7 +693,10 @@ fn run_compact(root: &Path, entries: &[Entry]) -> Score {
             check_expected_error(&mut s, e, outcome.as_ref().err());
             continue;
         }
-        let expect_rel = e.expect.as_deref().expect("positive cases carry an expect doc");
+        let expect_rel = e
+            .expect
+            .as_deref()
+            .expect("positive cases carry an expect doc");
         match outcome {
             Ok(got) => compare_expected(&mut s, root, e, expect_rel, &got, "compact"),
             Err(why) => s.fail(&e.id, format!("compact() error: {why}")),

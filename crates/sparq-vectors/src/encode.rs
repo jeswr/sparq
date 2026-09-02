@@ -209,7 +209,8 @@ fn parse_gyear(lexical: &str) -> Option<i64> {
     // for ordering purposes.
     let core = if let Some(stripped) = s.strip_suffix('Z') {
         stripped
-    } else if s.len() > 6 && (s.as_bytes()[s.len() - 6] == b'+' || s.as_bytes()[s.len() - 6] == b'-')
+    } else if s.len() > 6
+        && (s.as_bytes()[s.len() - 6] == b'+' || s.as_bytes()[s.len() - 6] == b'-')
         && s.as_bytes()[s.len() - 3] == b':'
     {
         &s[..s.len() - 6]
@@ -267,7 +268,10 @@ impl NumericEncoder {
     pub fn fit(observed: impl IntoIterator<Item = f64>, dim: usize) -> NumericEncoder {
         let mut sorted: Vec<f64> = observed.into_iter().filter(|v| v.is_finite()).collect();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-        NumericEncoder { sorted, dim: dim.max(1) }
+        NumericEncoder {
+            sorted,
+            dim: dim.max(1),
+        }
     }
 
     /// The block width (number of `f32` dimensions).
@@ -405,7 +409,9 @@ impl DateEncoder {
     /// Fit from the predicate's observed temporal **epoch-seconds** values (e.g. mapped through
     /// [`temporal_value`]). `dim` is the temporal block width.
     pub fn fit(observed_epochs: impl IntoIterator<Item = f64>, dim: usize) -> DateEncoder {
-        DateEncoder { inner: NumericEncoder::fit(observed_epochs, dim) }
+        DateEncoder {
+            inner: NumericEncoder::fit(observed_epochs, dim),
+        }
     }
 
     /// The block width (number of `f32` dimensions).
@@ -415,7 +421,12 @@ impl DateEncoder {
 
     /// Encode a temporal `(lexical, datatype)` into `out` (length [`dim`](Self::dim)). Returns
     /// `Err` on a length mismatch or an unparseable/unsupported temporal literal.
-    pub fn encode_into(&self, lexical: &str, datatype: &str, out: &mut [f32]) -> Result<(), String> {
+    pub fn encode_into(
+        &self,
+        lexical: &str,
+        datatype: &str,
+        out: &mut [f32],
+    ) -> Result<(), String> {
         let epoch = temporal_value(lexical, datatype)
             .ok_or_else(|| format!("DateEncoder: unsupported/ill-formed temporal {}", datatype))?;
         self.inner.encode_into(epoch, out)
@@ -488,7 +499,13 @@ impl Block {
     /// default). This is the constructor the typed encoders and the byte parser use; attach a
     /// provenance-derived weight afterwards with [`with_weight`](Self::with_weight). [OPUS-4.8]
     pub fn new(encoder: Encoder, metric: Metric, offset: usize, width: usize) -> Block {
-        Block { encoder, metric, offset, width, weight: None }
+        Block {
+            encoder,
+            metric,
+            offset,
+            width,
+            weight: None,
+        }
     }
 
     /// This block with its per-block fusion `weight` set to `w` (clamped to `>= 0` and finite; a
@@ -583,7 +600,10 @@ impl SchemaHeader {
             }
             expected = b.end();
         }
-        Ok(SchemaHeader { dim: expected, blocks })
+        Ok(SchemaHeader {
+            dim: expected,
+            blocks,
+        })
     }
 
     /// Total `f32` dimension of the row.
@@ -598,7 +618,9 @@ impl SchemaHeader {
 
     /// The block covering dimension `index`, if any (`None` for an out-of-range index).
     pub fn block_of(&self, index: usize) -> Option<&Block> {
-        self.blocks.iter().find(|b| index >= b.offset && index < b.end())
+        self.blocks
+            .iter()
+            .find(|b| index >= b.offset && index < b.end())
     }
 
     /// The **metric-correctness guard** (design §6.A): `Ok(())` only if **every** block is
@@ -696,8 +718,7 @@ impl SchemaHeader {
         }
         // Re-validate contiguity via `new`, which also recomputes `dim` from the blocks; cross-check
         // it against the stored dim field so a tampered header that lies about dim is rejected.
-        let stored_dim =
-            u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        let stored_dim = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
         let header = SchemaHeader::new(blocks)?;
         if header.dim != stored_dim {
             return Err(format!(
@@ -828,7 +849,12 @@ mod tests {
         assert_eq!(route(dt::FLOAT), Encoder::Numeric);
         // Derived integer subtypes route to numeric via the local-name match.
         for sub in dt::NUMERIC_SUBTYPES {
-            assert_eq!(route(&format!("{}{}", dt::XSD, sub)), Encoder::Numeric, "subtype {}", sub);
+            assert_eq!(
+                route(&format!("{}{}", dt::XSD, sub)),
+                Encoder::Numeric,
+                "subtype {}",
+                sub
+            );
         }
         assert_eq!(route(dt::BOOLEAN), Encoder::Boolean);
         assert_eq!(route(dt::DATE), Encoder::Date);
@@ -836,12 +862,24 @@ mod tests {
         assert_eq!(route(dt::DATE_TIME_STAMP), Encoder::Date);
         assert_eq!(route(dt::G_YEAR), Encoder::Date);
         // String / langString / IRI-shaped / unknown all route to the (non-P1) Other lane.
-        assert_eq!(route("http://www.w3.org/2001/XMLSchema#string"), Encoder::Other);
-        assert_eq!(route("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"), Encoder::Other);
+        assert_eq!(
+            route("http://www.w3.org/2001/XMLSchema#string"),
+            Encoder::Other
+        );
+        assert_eq!(
+            route("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"),
+            Encoder::Other
+        );
         assert_eq!(route("http://example.org/customType"), Encoder::Other);
         // A look-alike that is NOT a real numeric subtype must NOT mis-route to numeric.
-        assert_eq!(route("http://www.w3.org/2001/XMLSchema#string"), Encoder::Other);
-        assert_eq!(route("http://www.w3.org/2001/XMLSchema#anyURI"), Encoder::Other);
+        assert_eq!(
+            route("http://www.w3.org/2001/XMLSchema#string"),
+            Encoder::Other
+        );
+        assert_eq!(
+            route("http://www.w3.org/2001/XMLSchema#anyURI"),
+            Encoder::Other
+        );
     }
 
     // ---- numeric encoder: ORDER-PRESERVATION metamorphic test (the provable gate) ----
@@ -849,8 +887,20 @@ mod tests {
     #[test]
     fn numeric_global_order_preservation() {
         // Observed values spanning a wide range with a long, sparse tail.
-        let observed: Vec<f64> =
-            vec![1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 30.0, 31.0, 70.0, 100.0, 5000.0, 1_000_000.0];
+        let observed: Vec<f64> = vec![
+            1.0,
+            2.0,
+            3.0,
+            5.0,
+            8.0,
+            13.0,
+            30.0,
+            31.0,
+            70.0,
+            100.0,
+            5000.0,
+            1_000_000.0,
+        ];
         let enc = NumericEncoder::fit(observed.clone(), 16);
 
         let mut sorted = observed.clone();
@@ -893,7 +943,10 @@ mod tests {
         let lo = enc.encode(10.0);
         let hi = enc.encode(90.0);
         for (a, b) in lo.iter().zip(hi.iter()) {
-            assert!(*a >= 0.0 && *b >= 0.0, "thermometer code must be non-negative");
+            assert!(
+                *a >= 0.0 && *b >= 0.0,
+                "thermometer code must be non-negative"
+            );
             assert!(*b >= *a - 1e-6, "higher value dominates coordinatewise");
         }
     }
@@ -985,8 +1038,10 @@ mod tests {
             ("2100-01-01", dt::DATE),
             ("3000-01-01", dt::DATE),
         ];
-        let epochs: Vec<f64> =
-            lexs.iter().map(|(l, d)| temporal_value(l, d).unwrap()).collect();
+        let epochs: Vec<f64> = lexs
+            .iter()
+            .map(|(l, d)| temporal_value(l, d).unwrap())
+            .collect();
         let enc = DateEncoder::fit(epochs.clone(), 16);
 
         let mut sorted = epochs.clone();
@@ -997,7 +1052,9 @@ mod tests {
         // encode_into through the (lexical, datatype) path agrees with the numeric encoder.
         let mut out = vec![0.0f32; 16];
         enc.encode_into("2020-06-15", dt::DATE, &mut out).unwrap();
-        let direct = enc.numeric().encode(temporal_value("2020-06-15", dt::DATE).unwrap());
+        let direct = enc
+            .numeric()
+            .encode(temporal_value("2020-06-15", dt::DATE).unwrap());
         assert_eq!(out, direct);
 
         // Unsupported temporal → Err, never a silent zero block.
@@ -1090,7 +1147,11 @@ mod tests {
         ])
         .unwrap();
         let err = h.check_euclidean().unwrap_err();
-        assert!(err.contains("NonEuclidean"), "guard must name the non-Euclidean block: {}", err);
+        assert!(
+            err.contains("NonEuclidean"),
+            "guard must name the non-Euclidean block: {}",
+            err
+        );
     }
 
     #[test]
@@ -1101,17 +1162,29 @@ mod tests {
         assert_eq!(h, back, "schema header must round-trip through bytes");
 
         // Fail-closed parsing.
-        assert!(SchemaHeader::from_bytes(b"XXXX").is_err(), "bad magic / too short");
+        assert!(
+            SchemaHeader::from_bytes(b"XXXX").is_err(),
+            "bad magic / too short"
+        );
         let mut bad_magic = bytes.clone();
         bad_magic[0] = b'Z';
-        assert!(SchemaHeader::from_bytes(&bad_magic).is_err(), "bad magic rejected");
+        assert!(
+            SchemaHeader::from_bytes(&bad_magic).is_err(),
+            "bad magic rejected"
+        );
         let mut truncated = bytes.clone();
         truncated.truncate(bytes.len() - 1);
-        assert!(SchemaHeader::from_bytes(&truncated).is_err(), "truncated body rejected");
+        assert!(
+            SchemaHeader::from_bytes(&truncated).is_err(),
+            "truncated body rejected"
+        );
         // A tampered dim field (claims a different total) is rejected.
         let mut bad_dim = bytes.clone();
         bad_dim[8] = bad_dim[8].wrapping_add(1);
-        assert!(SchemaHeader::from_bytes(&bad_dim).is_err(), "dim mismatch rejected");
+        assert!(
+            SchemaHeader::from_bytes(&bad_dim).is_err(),
+            "dim mismatch rejected"
+        );
     }
 
     #[test]
@@ -1163,12 +1236,18 @@ mod tests {
         // (tests/structure_shacl.rs + the byte round-trip) stable across weight presence.
         let plain = Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4);
         let weighted = plain.with_weight(0.2);
-        assert_eq!(plain, weighted, "weight must not change block identity (PartialEq)");
+        assert_eq!(
+            plain, weighted,
+            "weight must not change block identity (PartialEq)"
+        );
 
         // And a header is equal regardless of one side carrying weights.
         let h_plain = SchemaHeader::new(vec![plain]).unwrap();
         let h_weighted = SchemaHeader::new(vec![weighted]).unwrap();
-        assert_eq!(h_plain, h_weighted, "header identity ignores per-block weight");
+        assert_eq!(
+            h_plain, h_weighted,
+            "header identity ignores per-block weight"
+        );
     }
 
     #[test]
@@ -1180,15 +1259,18 @@ mod tests {
         ])
         .unwrap();
         let back = SchemaHeader::from_bytes(&weighted.to_bytes()).unwrap();
-        assert_eq!(back, weighted, "layout round-trips (identity ignores weight)");
+        assert_eq!(
+            back, weighted,
+            "layout round-trips (identity ignores weight)"
+        );
         // The resolved fusion weight survives the round-trip.
         assert!((back.blocks()[0].fusion_weight() - 0.25).abs() < 1e-6);
         assert_eq!(back.blocks()[1].fusion_weight(), 1.0);
 
         // A defaulted (weight-None) block round-trips to a defaulted block: a serialised 1.0 reads
         // back as None, so the value is PartialEq-stable AND fusion_weight-stable.
-        let plain = SchemaHeader::new(vec![Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4)])
-            .unwrap();
+        let plain =
+            SchemaHeader::new(vec![Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4)]).unwrap();
         let back_plain = SchemaHeader::from_bytes(&plain.to_bytes()).unwrap();
         assert_eq!(back_plain.blocks()[0].weight, None);
         assert_eq!(back_plain.blocks()[0].fusion_weight(), 1.0);
@@ -1215,13 +1297,19 @@ mod tests {
         let back = SchemaHeader::from_bytes(&v1).expect("v1 header must parse");
         assert_eq!(back, h, "v1 layout must equal the current header");
         for b in back.blocks() {
-            assert_eq!(b.weight, None, "v1 blocks read back with no weight (fail-open 1.0)");
+            assert_eq!(
+                b.weight, None,
+                "v1 blocks read back with no weight (fail-open 1.0)"
+            );
             assert_eq!(b.fusion_weight(), 1.0);
         }
         // A v1 header with a wrong body length (claims one too many blocks) is still fail-closed.
         let mut bad = v1.clone();
         bad[12] = bad[12].wrapping_add(1);
-        assert!(SchemaHeader::from_bytes(&bad).is_err(), "v1 body-length mismatch rejected");
+        assert!(
+            SchemaHeader::from_bytes(&bad).is_err(),
+            "v1 body-length mismatch rejected"
+        );
     }
 
     #[test]
@@ -1229,6 +1317,9 @@ mod tests {
         let h = sample_header();
         let mut bytes = h.to_bytes();
         bytes[4] = 99; // an unknown version
-        assert!(SchemaHeader::from_bytes(&bytes).is_err(), "unknown version must fail-closed");
+        assert!(
+            SchemaHeader::from_bytes(&bytes).is_err(),
+            "unknown version must fail-closed"
+        );
     }
 }

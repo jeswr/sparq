@@ -40,8 +40,8 @@ use std::collections::HashMap;
 use oxjsonld::{JsonLdParser, JsonLdRemoteDocument};
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::Store;
 
@@ -60,7 +60,10 @@ fn contexts_from_pairs(contexts: &js_sys::Array) -> Result<HashMap<String, Strin
             ))
         })?;
         let url = pair.get(0).as_string().ok_or_else(|| {
-            JsError::new(&format!("contexts[{}][0] (the context URL) must be a string", i))
+            JsError::new(&format!(
+                "contexts[{}][0] (the context URL) must be a string",
+                i
+            ))
         })?;
         let document = pair.get(1).as_string().ok_or_else(|| {
             JsError::new(&format!(
@@ -207,9 +210,8 @@ mod tests {
         // rdf:type + credentialSubject.
         assert_eq!(g.len(), 2, "both statements of the credential are interned");
 
-        let nt =
-            sparq_engine::construct_ntriples(&g, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
-                .unwrap();
+        let nt = sparq_engine::construct_ntriples(&g, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+            .unwrap();
         assert!(
             nt.contains("https://www.w3.org/2018/credentials#VerifiableCredential"),
             "the `type` term resolved through the remote context: {}",
@@ -253,7 +255,10 @@ mod tests {
     fn a_different_supplied_context_does_not_satisfy_the_reference() {
         let vc = r#"{"@context": "https://example.org/a.jsonld", "type": "Thing"}"#;
         let mut contexts = HashMap::new();
-        contexts.insert("https://example.org/b.jsonld".to_string(), VC_CONTEXT.to_string());
+        contexts.insert(
+            "https://example.org/b.jsonld".to_string(),
+            VC_CONTEXT.to_string(),
+        );
         let Err(err) = parse_jsonld_with_contexts(vc, contexts) else {
             panic!("an exact-match miss must fail closed");
         };
@@ -287,13 +292,20 @@ mod tests {
           "nick": "Al"
         }"#;
         let mut contexts = HashMap::new();
-        contexts.insert("https://example.org/outer.jsonld".to_string(), outer.to_string());
+        contexts.insert(
+            "https://example.org/outer.jsonld".to_string(),
+            outer.to_string(),
+        );
         contexts.insert(
             "https://example.org/inner.jsonld".to_string(),
             r#"{"@context": {"name": "http://schema.org/name"}}"#.to_string(),
         );
         let g = parse_jsonld_with_contexts(doc, contexts).unwrap();
-        assert_eq!(g.len(), 2, "both the inner- and outer-defined terms resolved");
+        assert_eq!(
+            g.len(),
+            2,
+            "both the inner- and outer-defined terms resolved"
+        );
     }
 
     /// Malformed JSON is still an `Err` (the loader changes context resolution only, not

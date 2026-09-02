@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use sparq_jsonld::context::ActiveContext;
 use sparq_jsonld::{
-    DocumentLoader, Direction, FsLoader, Json, JsonLdError, JsonLdErrorCode, JsonLdOptions,
+    Direction, DocumentLoader, FsLoader, Json, JsonLdError, JsonLdErrorCode, JsonLdOptions,
     NoopLoader, Override, ProcessingMode, RemoteDocument,
 };
 
@@ -22,7 +22,12 @@ fn json(s: &str) -> Json {
 /// Processes a context fragment against a fresh active context based at [`BASE`], using the
 /// deny-by-default loader.
 fn process(ctx: &str) -> Result<ActiveContext, JsonLdError> {
-    ActiveContext::new(Some(BASE)).process(&json(ctx), Some(BASE), &NoopLoader, &JsonLdOptions::default())
+    ActiveContext::new(Some(BASE)).process(
+        &json(ctx),
+        Some(BASE),
+        &NoopLoader,
+        &JsonLdOptions::default(),
+    )
 }
 
 /// Like [`process`] but asserts success.
@@ -73,12 +78,10 @@ fn type_container_and_id_type_mapping() {
 
 #[test]
 fn language_and_index_containers() {
-    let ac = ok(
-        r#"{
+    let ac = ok(r#"{
             "label": {"@id": "http://example.org/label", "@container": "@language"},
             "byIdx": {"@id": "http://example.org/idx", "@container": "@index", "@index": "http://example.org/key"}
-        }"#,
-    );
+        }"#);
     assert_eq!(
         ac.term_definition("label").unwrap().container(),
         &["@language".to_string()]
@@ -91,9 +94,7 @@ fn language_and_index_containers() {
 #[test]
 fn graph_container_combinations_are_valid() {
     // `@container: [@graph, @id]` is one of the allowed 1.1 combinations.
-    let ac = ok(
-        r#"{"g": {"@id": "http://example.org/g", "@container": ["@graph", "@id"]}}"#,
-    );
+    let ac = ok(r#"{"g": {"@id": "http://example.org/g", "@container": ["@graph", "@id"]}}"#);
     let c = ac.term_definition("g").unwrap().container();
     assert!(c.contains(&"@graph".to_string()) && c.contains(&"@id".to_string()));
 }
@@ -125,15 +126,16 @@ fn scoped_context_is_stored_on_the_term() {
 
 #[test]
 fn term_scoped_language_and_direction_are_tri_state() {
-    let ac = ok(
-        r#"{
+    let ac = ok(r#"{
             "@language": "en",
             "plain": {"@id": "http://example.org/plain", "@language": null},
             "fr": {"@id": "http://example.org/fr", "@language": "fr", "@direction": "rtl"}
-        }"#,
-    );
+        }"#);
     // Explicit null suppresses the language; a value binds it.
-    assert_eq!(ac.term_definition("plain").unwrap().language(), &Override::Null);
+    assert_eq!(
+        ac.term_definition("plain").unwrap().language(),
+        &Override::Null
+    );
     assert_eq!(
         ac.term_definition("fr").unwrap().language(),
         &Override::Set("fr".to_string())
@@ -143,11 +145,7 @@ fn term_scoped_language_and_direction_are_tri_state() {
         &Override::Set(Direction::Rtl)
     );
     // An unset term keeps the fall-through-to-default marker.
-    assert!(!ac
-        .term_definition("plain")
-        .unwrap()
-        .direction()
-        .is_set());
+    assert!(!ac.term_definition("plain").unwrap().direction().is_set());
 }
 
 #[test]
@@ -202,7 +200,12 @@ fn base_is_set_reset_and_resolved_relatively() {
 fn null_context_resets_terms() {
     let base = ok(r#"{"@vocab": "http://schema.org/", "name": "http://schema.org/name"}"#);
     let reset = base
-        .process(&json("null"), Some(BASE), &NoopLoader, &JsonLdOptions::default())
+        .process(
+            &json("null"),
+            Some(BASE),
+            &NoopLoader,
+            &JsonLdOptions::default(),
+        )
         .unwrap();
     assert_eq!(reset.term_count(), 0);
     assert_eq!(reset.vocabulary_mapping(), None);
@@ -244,7 +247,10 @@ fn expand_non_prefix_term_leaves_compact_iri_unexpanded() {
     // compact IRI using it is treated as an already-absolute IRI (returned unchanged).
     let ac = ok(r#"{"ex": {"@id": "http://example.org/vocab"}}"#);
     assert!(!ac.term_definition("ex").unwrap().is_prefix());
-    assert_eq!(ac.expand_iri("ex:foo", false, true).as_deref(), Some("ex:foo"));
+    assert_eq!(
+        ac.expand_iri("ex:foo", false, true).as_deref(),
+        Some("ex:foo")
+    );
 }
 
 #[test]
@@ -261,7 +267,10 @@ fn expand_explicit_prefix_flag() {
 fn expand_keywords_and_document_relative() {
     let ac = ok(r#"{}"#);
     // Keywords expand to themselves; keyword-shaped non-keywords expand to null.
-    assert_eq!(ac.expand_iri("@type", false, true).as_deref(), Some("@type"));
+    assert_eq!(
+        ac.expand_iri("@type", false, true).as_deref(),
+        Some("@type")
+    );
     assert_eq!(ac.expand_iri("@bogus", false, true), None);
     // A document-relative reference resolves against the base IRI.
     assert_eq!(
@@ -312,7 +321,12 @@ fn protected_term_redefinition_is_rejected_but_identical_is_allowed() {
 fn nullifying_a_context_with_protected_terms_fails() {
     let base = ok(r#"{"@protected": true, "name": "http://schema.org/name"}"#);
     let e = base
-        .process(&json("null"), Some(BASE), &NoopLoader, &JsonLdOptions::default())
+        .process(
+            &json("null"),
+            Some(BASE),
+            &NoopLoader,
+            &JsonLdOptions::default(),
+        )
         .unwrap_err();
     assert_eq!(e.code(), JsonLdErrorCode::InvalidContextNullification);
 }
@@ -323,12 +337,18 @@ fn nullifying_a_context_with_protected_terms_fails() {
 
 #[test]
 fn keyword_redefinition_error() {
-    assert_eq!(err_code(r#"{"@id": "http://example.org/"}"#), JsonLdErrorCode::KeywordRedefinition);
+    assert_eq!(
+        err_code(r#"{"@id": "http://example.org/"}"#),
+        JsonLdErrorCode::KeywordRedefinition
+    );
 }
 
 #[test]
 fn cyclic_iri_mapping_error() {
-    assert_eq!(err_code(r#"{"a": "b:x", "b": "a:y"}"#), JsonLdErrorCode::CyclicIriMapping);
+    assert_eq!(
+        err_code(r#"{"a": "b:x", "b": "a:y"}"#),
+        JsonLdErrorCode::CyclicIriMapping
+    );
 }
 
 #[test]
@@ -366,17 +386,26 @@ fn invalid_keyword_alias_to_context() {
 
 #[test]
 fn invalid_vocab_mapping_error() {
-    assert_eq!(err_code(r#"{"@vocab": ["not-a-string"]}"#), JsonLdErrorCode::InvalidVocabMapping);
+    assert_eq!(
+        err_code(r#"{"@vocab": ["not-a-string"]}"#),
+        JsonLdErrorCode::InvalidVocabMapping
+    );
 }
 
 #[test]
 fn invalid_propagate_value_error() {
-    assert_eq!(err_code(r#"{"@propagate": "yes"}"#), JsonLdErrorCode::InvalidPropagateValue);
+    assert_eq!(
+        err_code(r#"{"@propagate": "yes"}"#),
+        JsonLdErrorCode::InvalidPropagateValue
+    );
 }
 
 #[test]
 fn invalid_import_value_error() {
-    assert_eq!(err_code(r#"{"@import": true}"#), JsonLdErrorCode::InvalidImportValue);
+    assert_eq!(
+        err_code(r#"{"@import": true}"#),
+        JsonLdErrorCode::InvalidImportValue
+    );
 }
 
 #[test]
@@ -400,7 +429,12 @@ fn processing_mode_conflict_error() {
     let mut opts = JsonLdOptions::default();
     opts.processing_mode = ProcessingMode::JsonLd10;
     let e = ActiveContext::new(Some(BASE))
-        .process(&json(r#"{"@version": 1.1}"#), Some(BASE), &NoopLoader, &opts)
+        .process(
+            &json(r#"{"@version": 1.1}"#),
+            Some(BASE),
+            &NoopLoader,
+            &opts,
+        )
         .unwrap_err();
     assert_eq!(e.code(), JsonLdErrorCode::ProcessingModeConflict);
 }
@@ -510,7 +544,11 @@ fn fs_loader_serves_a_remote_context_from_a_fixture_file() {
     let dir = std::env::temp_dir().join(format!("sparq-jsonld-ctx-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let fixture = dir.join("ctx.jsonld");
-    std::fs::write(&fixture, r#"{"@context": {"title": "http://purl.org/dc/terms/title"}}"#).unwrap();
+    std::fs::write(
+        &fixture,
+        r#"{"@context": {"title": "http://purl.org/dc/terms/title"}}"#,
+    )
+    .unwrap();
 
     let loader = FsLoader::new().map_prefix("http://vocab.example/", &dir);
     let ac = ActiveContext::new(Some(BASE))

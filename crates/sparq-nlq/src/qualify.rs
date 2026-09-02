@@ -672,8 +672,7 @@ ex:bare a pkg:Finding ;
         let q = qualify_result(&g, &r, &QualifyConfig::default());
         // The field must be exactly UNCALIBRATED_NOTICE (not a dynamic string, not empty).
         assert_eq!(
-            q.calibration_notice,
-            UNCALIBRATED_NOTICE,
+            q.calibration_notice, UNCALIBRATED_NOTICE,
             "calibration_notice must be UNCALIBRATED_NOTICE on every AnswerQualification"
         );
         assert!(
@@ -688,8 +687,7 @@ ex:bare a pkg:Finding ;
         // must be present regardless of whether any supporting bindings were resolved.
         let empty = qualify_records(&[], &QualifyConfig::default());
         assert_eq!(
-            empty.calibration_notice,
-            UNCALIBRATED_NOTICE,
+            empty.calibration_notice, UNCALIBRATED_NOTICE,
             "vacuous (empty-records) qualification must also carry UNCALIBRATED_NOTICE"
         );
     }

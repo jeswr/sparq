@@ -86,10 +86,9 @@ impl std::fmt::Display for N3PatchError {
         match self {
             // Generic — never interpolates the body's parse-error text (which can quote tokens).
             N3PatchError::Parse(_) => write!(f, "malformed N3-Patch body"),
-            N3PatchError::NoPatch => write!(
-                f,
-                "N3-Patch body has no solid:InsertDeletePatch resource"
-            ),
+            N3PatchError::NoPatch => {
+                write!(f, "N3-Patch body has no solid:InsertDeletePatch resource")
+            }
             N3PatchError::MultiplePatches => write!(
                 f,
                 "N3-Patch body must describe exactly one solid:InsertDeletePatch resource"
@@ -208,13 +207,12 @@ pub fn parse(body: &[u8], base: Option<&str>) -> Result<N3Patch, N3PatchError> {
             Some("inserts") => "inserts",
             _ => continue,
         };
-        let formula_key = formula_object_key(&q.object).ok_or(N3PatchError::NotAFormula(
-            match prop {
+        let formula_key =
+            formula_object_key(&q.object).ok_or(N3PatchError::NotAFormula(match prop {
                 "where" => "where",
                 "deletes" => "deletes",
                 _ => "inserts",
-            },
-        ))?;
+            }))?;
         match prop {
             "where" => {
                 if where_seen {
@@ -376,7 +374,9 @@ _:p a solid:InsertDeletePatch; solid:inserts { ex:s ex:p ex:o. }.
         let p = parse(doc, None).unwrap();
         assert!(!p.has_where);
         assert!(p.deletes.is_empty());
-        assert!(p.inserts.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."));
+        assert!(p
+            .inserts
+            .contains("<http://ex/s> <http://ex/p> <http://ex/o> ."));
     }
 
     #[test]

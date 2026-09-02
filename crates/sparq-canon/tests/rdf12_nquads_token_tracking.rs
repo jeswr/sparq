@@ -262,12 +262,9 @@ fn nested_triple_term_token_byte_exact() {
 /// at the top level.
 #[test]
 fn directional_language_token_byte_exact() {
-    let rtl = Literal::new_directional_language_tagged_literal(
-        "שלום",
-        "he",
-        oxrdf::BaseDirection::Rtl,
-    )
-    .unwrap();
+    let rtl =
+        Literal::new_directional_language_tagged_literal("שלום", "he", oxrdf::BaseDirection::Rtl)
+            .unwrap();
     let line = canon_line(tt(
         NamedOrBlankNode::NamedNode(iri("http://ex/s")),
         iri("http://ex/p"),
@@ -282,10 +279,7 @@ fn directional_language_token_byte_exact() {
         Literal::new_directional_language_tagged_literal("hello", "en", oxrdf::BaseDirection::Ltr)
             .unwrap();
     let line = canon_line(Term::Literal(ltr));
-    assert_eq!(
-        line,
-        r#"<http://ex/a> <http://ex/says> "hello"@en--ltr ."#
-    );
+    assert_eq!(line, r#"<http://ex/a> <http://ex/says> "hello"@en--ltr ."#);
 }
 
 /// Canonical string escaping inside a triple-term literal: ECHAR forms for
@@ -309,7 +303,8 @@ fn literal_escaping_in_triple_term_byte_exact() {
 
 /// Expectation of [`literal_escaping_vt_and_upper_c0_controls_byte_exact`],
 /// shared with [`canonical_token_lines_round_trip_through_oxttl`].
-const VT_AND_UPPER_C0_LINE: &str = "<http://ex/a> <http://ex/says> <<( <http://ex/s> <http://ex/p> \
+const VT_AND_UPPER_C0_LINE: &str =
+    "<http://ex/a> <http://ex/says> <<( <http://ex/s> <http://ex/p> \
      \"lf:\\n vt:\\u000B ff:\\f hi:\\u000E\\u000F\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\
      \\u0017\\u0018\\u0019\\u001A\\u001B\\u001C\\u001D\\u001E\\u001F\" )>> .";
 

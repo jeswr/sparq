@@ -1363,7 +1363,10 @@ mod tests {
             purpose: StatusPurpose::Revocation,
         };
         assert!(d.affects(&entry(0)), "same list, changed slot");
-        assert!(!d.affects(&other), "a delta says nothing about another list");
+        assert!(
+            !d.affects(&other),
+            "a delta says nothing about another list"
+        );
     }
 
     #[test]
@@ -1407,7 +1410,7 @@ mod tests {
     fn delta_over_the_limit_demands_full_recheck() {
         let prev = StatusBitstring::from_bits(vec![0x00], 1000);
         let next = StatusBitstring::from_bits(vec![0xff], 1100); // 8 changes
-        // A limit of 7 is exceeded by 8 changes ⇒ fail closed rather than enumerate.
+                                                                 // A limit of 7 is exceeded by 8 changes ⇒ fail closed rather than enumerate.
         let d = StatusDelta::between_with_limit(list_iri(), &prev, &next, 7);
         assert!(d.requires_full_recheck());
         assert_eq!(d.unbounded_reason(), Some(DeltaUnbounded::LimitExceeded));
@@ -1437,7 +1440,10 @@ mod tests {
             DeltaUnbounded::CoverageChanged.reason(),
             "delta-coverage-changed"
         );
-        assert_eq!(DeltaUnbounded::LimitExceeded.reason(), "delta-limit-exceeded");
+        assert_eq!(
+            DeltaUnbounded::LimitExceeded.reason(),
+            "delta-limit-exceeded"
+        );
     }
 
     /// **The load-bearing soundness guard.** Exhaustively over every pair of single-byte
@@ -1522,12 +1528,24 @@ mod tests {
         let next = StatusBitstring::from_bits(vec![0x00], 2000); // future relative to `now`
         let d = StatusDelta::between(list_iri(), &prev, &next);
         let e = entry(1);
-        assert!(!d.affects(&e), "no bit moved, so the per-slot selection is silent");
+        assert!(
+            !d.affects(&e),
+            "no bit moved, so the per-slot selection is silent"
+        );
         // Against `prev` the grant is Live; against `next` it is Stale — a skip would be wrong.
-        assert_eq!(status_from_snapshot(&prev, &e, 3600, 1500), LiveStatus::Live);
-        assert_eq!(status_from_snapshot(&next, &e, 3600, 1500), LiveStatus::Stale);
+        assert_eq!(
+            status_from_snapshot(&prev, &e, 3600, 1500),
+            LiveStatus::Live
+        );
+        assert_eq!(
+            status_from_snapshot(&next, &e, 3600, 1500),
+            LiveStatus::Stale
+        );
         // The whole-list precondition catches it: no skip is permitted at this instant.
-        assert!(!d.valid_at(1500, 3600), "future successor is not valid to skip against");
+        assert!(
+            !d.valid_at(1500, 3600),
+            "future successor is not valid to skip against"
+        );
         assert_eq!(d.successor_as_of_unix_secs(), 2000);
         // …and once `now` catches up, the delta becomes usable again.
         assert!(d.valid_at(2500, 3600));
@@ -1575,7 +1593,10 @@ mod tests {
         // Re-check ONLY the affected entry through the unchanged gate ⇒ Set (deny).
         assert_eq!(check_with(&next_bits, 1100, 3600, 1500, 1), LiveStatus::Set);
         // The skipped entry is still Live, exactly as a full re-run would have found it.
-        assert_eq!(check_with(&next_bits, 1100, 3600, 1500, 2), LiveStatus::Live);
+        assert_eq!(
+            check_with(&next_bits, 1100, 3600, 1500, 2),
+            LiveStatus::Live
+        );
     }
 
     // --- verified status-list VC: the list's OWN issuer signature (sq-pfae.13) ------------

@@ -2,10 +2,9 @@ name: CI
 
 # Correctness gate (roadmap G1). Build + test the whole workspace on every push to main and every
 # PR — the regression safety net the "no regressions in functionality" constraint requires.
-# clippy now GATES with -D warnings (the workspace is warning-clean). rustfmt runs informationally
-# until the one-time `cargo fmt --all` reformat lands (deferred behind the in-flight branches —
-# see rustfmt.toml); flip it to a hard gate once that reformat merges. Heavy benchmarks live in
-# bench.yml / bench-ec2.yml, NOT here.
+# clippy GATES with -D warnings (the workspace is warning-clean) and, since sq-0lk, so does
+# rustfmt: the one-time `cargo fmt --all` reformat has landed, so `cargo fmt --all --check` is a
+# hard gate (see rustfmt.toml). Heavy benchmarks live in bench.yml / bench-ec2.yml, NOT here.
 on:
   push:
     branches: [main]
@@ -1327,15 +1326,19 @@ jobs:
   # panics — needed by the panic-surface test). No duplicate job here. [OPUS-4.8]
 
   lint:
-    # [OPUS-4.8] sq-wjth: the display name must NOT contain the words "informational"
-    # or "advisory" — the ci-summary gate treats any check whose NAME contains either
-    # (case-insensitive) as NON-GATING. clippy here GATES (it's the `-D warnings` hard
-    # gate); only the fmt step is non-blocking. So name it "fmt (non-blocking)" to keep
-    # the meaning while staying out of the advisory exclusion set. (The collision: the
-    # former name "clippy (gate) + fmt (informational)" was wrongly matched by that rule
-    # and would have stopped the clippy gate from gating — verified by hand-tracing the
-    # jq filter against every check name.)
-    name: clippy (gate) + fmt (non-blocking)
+    # [OPUS-4.8] sq-wjth: the display name must NOT contain "informational" or
+    # "advisory". Originally that was because the ci-summary gate INFERRED advisory
+    # status from the name; #3773 replaced that inference with the explicit
+    # .github/advisory-registry.json, so today the rule is enforced by
+    # scripts/check-advisory-registry.py C2 — a job whose name carries either token
+    # must be DECLARED in that registry or drop the token. Every leg in this job GATES
+    # (clippy -D warnings, both rustdoc passes, bench/dict, and rustfmt), so it is
+    # undeclared and carries neither.
+    # [OPUS-5] sq-0lk: was "clippy (gate) + fmt (non-blocking)" while `cargo fmt --all
+    # --check` ran under continue-on-error. The reformat has landed and the fmt step now
+    # gates too, so both halves are gates and the name says so. "non-blocking" is not a
+    # C2 token, but it is now simply false here.
+    name: clippy + fmt (gate)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -1419,17 +1422,20 @@ jobs:
         run: |
           cargo clippy --manifest-path bench/dict/Cargo.toml --all-targets -- -D warnings
           cargo run --manifest-path bench/dict/Cargo.toml -- selftest
-      # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).
+      # [OPUS-5] sq-0lk: GATES. The one-time `cargo fmt --all` reformat has landed (773
+      # files / 61 crates, entirely tool-generated), so the tree is a rustfmt fixed point
+      # and this check is a hard failure like clippy above — it was `continue-on-error:
+      # true` before.
       # The formatter VERSION is pinned by rust-toolchain.toml (channel + the `rustfmt`
-      # component), so this check is reproducible in a local checkout even while it is
-      # non-blocking — issue #2360 reported the opposite, a workspace-wide failure on
-      # unchanged files under an ambient rustfmt. Echo the version so any future
+      # component), which is what makes gating here SAFE: issue #2360 was a workspace-wide
+      # failure on unchanged files under an *ambient* rustfmt, and the pin is what removed
+      # that. `cargo fmt` inside this checkout resolves to the pinned toolchain, so CI and
+      # a local checkout run the same formatter. Echo the version first so any future
       # disagreement between this log and a contributor's box names its own cause.
-      - name: rustfmt (informational)
+      - name: rustfmt (deny diffs)
         run: |
           cargo fmt --version
           cargo fmt --all --check
-        continue-on-error: true
 
   msrv:
     # [OPUS-4.8] sq-ucwf: ENFORCE the declared MSRV. The workspace pins

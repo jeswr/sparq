@@ -72,16 +72,12 @@ pub mod quad;
 pub mod summary;
 pub mod sync;
 
-pub use envelope::{Admission, DeltaEnvelope, DottedAdd, Limits, ObservedRemove, envelope_hash};
+pub use envelope::{envelope_hash, Admission, DeltaEnvelope, DottedAdd, Limits, ObservedRemove};
 pub use id::{DatasetId, Dot, EnvelopeId, ReplicaId};
-pub use journal::{
-    AppendOutcome, Journal, Snapshot, read_snapshot_file, write_snapshot_file,
-};
+pub use journal::{read_snapshot_file, write_snapshot_file, AppendOutcome, Journal, Snapshot};
 pub use quad::CanonicalQuad;
 pub use summary::CausalSummary;
-pub use sync::{
-    Membership, SequenceInterval, StabilityTracker, SyncHello, missing_intervals,
-};
+pub use sync::{missing_intervals, Membership, SequenceInterval, StabilityTracker, SyncHello};
 
 /// Unified error type for every fallible operation in this crate.
 ///
@@ -177,7 +173,10 @@ impl fmt::Display for CrdtError {
                 write!(f, "wrong dataset: expected <{expected}>, found <{found}>")
             }
             CrdtError::WrongEpoch { expected, found } => {
-                write!(f, "wrong membership epoch: expected {expected}, found {found}")
+                write!(
+                    f,
+                    "wrong membership epoch: expected {expected}, found {found}"
+                )
             }
             CrdtError::UnsupportedFormat { found } => {
                 write!(f, "unsupported format version: {found:?}")
@@ -225,7 +224,11 @@ mod tests {
     fn error_display_is_specific_per_variant() {
         let cases: Vec<(CrdtError, &str)> = vec![
             (
-                CrdtError::Oversized { what: "envelope bytes", len: 9, max: 3 },
+                CrdtError::Oversized {
+                    what: "envelope bytes",
+                    len: 9,
+                    max: 3,
+                },
                 "oversized envelope bytes",
             ),
             (
@@ -235,27 +238,59 @@ mod tests {
                 },
                 "wrong dataset",
             ),
-            (CrdtError::WrongEpoch { expected: 1, found: 2 }, "wrong membership epoch"),
             (
-                CrdtError::UnsupportedFormat { found: "sparq-crdt-delta/9".into() },
+                CrdtError::WrongEpoch {
+                    expected: 1,
+                    found: 2,
+                },
+                "wrong membership epoch",
+            ),
+            (
+                CrdtError::UnsupportedFormat {
+                    found: "sparq-crdt-delta/9".into(),
+                },
                 "unsupported format",
             ),
-            (CrdtError::NonCanonical { reason: "x".into() }, "non-canonical"),
-            (CrdtError::Invalid { what: "quad", reason: "x".into() }, "invalid quad"),
-            (CrdtError::DuplicateDot { replica: "cGVlcg".into(), counter: 3 }, "duplicate dot"),
             (
-                CrdtError::ConflictingEnvelope { origin: "cGVlcg".into(), sequence: 4 },
+                CrdtError::NonCanonical { reason: "x".into() },
+                "non-canonical",
+            ),
+            (
+                CrdtError::Invalid {
+                    what: "quad",
+                    reason: "x".into(),
+                },
+                "invalid quad",
+            ),
+            (
+                CrdtError::DuplicateDot {
+                    replica: "cGVlcg".into(),
+                    counter: 3,
+                },
+                "duplicate dot",
+            ),
+            (
+                CrdtError::ConflictingEnvelope {
+                    origin: "cGVlcg".into(),
+                    sequence: 4,
+                },
                 "conflicting envelope",
             ),
-            (CrdtError::CorruptJournal { offset: 12, reason: "x".into() }, "corrupt journal"),
             (
-                CrdtError::Io(std::io::Error::other("boom")),
-                "i/o error",
+                CrdtError::CorruptJournal {
+                    offset: 12,
+                    reason: "x".into(),
+                },
+                "corrupt journal",
             ),
+            (CrdtError::Io(std::io::Error::other("boom")), "i/o error"),
         ];
         for (err, needle) in cases {
             let shown = format!("{err}");
-            assert!(shown.contains(needle), "{shown:?} should contain {needle:?}");
+            assert!(
+                shown.contains(needle),
+                "{shown:?} should contain {needle:?}"
+            );
         }
     }
 
@@ -264,7 +299,10 @@ mod tests {
         use std::error::Error as _;
         let io = CrdtError::Io(std::io::Error::other("boom"));
         assert!(io.source().is_some());
-        let other = CrdtError::WrongEpoch { expected: 0, found: 1 };
+        let other = CrdtError::WrongEpoch {
+            expected: 0,
+            found: 1,
+        };
         assert!(other.source().is_none());
     }
 }

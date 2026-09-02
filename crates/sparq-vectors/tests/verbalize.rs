@@ -100,7 +100,11 @@ fn type_only_entities_are_skipped() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
     let cfg = EntityTextConfig::default();
     assert_eq!(verbalize(&g, &ex("silent"), &cfg), None);
-    assert_eq!(verbalize(&g, &ex("nowhere"), &cfg), None, "unknown term is None, not panic");
+    assert_eq!(
+        verbalize(&g, &ex("nowhere"), &cfg),
+        None,
+        "unknown term is None, not panic"
+    );
 }
 
 #[test]
@@ -108,9 +112,11 @@ fn extra_prefixed_literal_group_with_value_cap() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
     let mut cfg = EntityTextConfig::default();
     cfg.groups.push(
-        PropertyGroup::literal(vec![NamedNode::new("http://example.org/occupation").unwrap()])
-            .with_prefix("occupation: ")
-            .with_max_values(2),
+        PropertyGroup::literal(vec![
+            NamedNode::new("http://example.org/occupation").unwrap()
+        ])
+        .with_prefix("occupation: ")
+        .with_max_values(2),
     );
     let text = verbalize(&g, &ex("bolt"), &cfg).unwrap();
     assert!(
@@ -136,7 +142,10 @@ fn char_budget_truncates_but_keeps_the_label() {
         max_chars: "Usain Bolt. a athlete".chars().count(),
         ..Default::default()
     };
-    assert_eq!(verbalize(&g, &ex("bolt"), &cfg).unwrap(), "Usain Bolt. a athlete");
+    assert_eq!(
+        verbalize(&g, &ex("bolt"), &cfg).unwrap(),
+        "Usain Bolt. a athlete"
+    );
 
     // Mid-piece overflow: back off rather than cutting the second word.
     cfg.max_chars = 8;
@@ -239,8 +248,10 @@ fn embed_entities_covers_verbalizable_entities_and_is_deterministic() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
     let cfg = EntityTextConfig::default();
     let embedder = HashEmbedder::new(32);
-    let path = std::env::temp_dir()
-        .join(format!("sparq-vectors-verbalize-{}.spqv", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "sparq-vectors-verbalize-{}.spqv",
+        std::process::id()
+    ));
 
     let mut store = VectorStore::create(&path, 32).unwrap();
     let n = embed_entities(&g, &mut store, &embedder, &cfg).unwrap();
@@ -249,7 +260,10 @@ fn embed_entities_covers_verbalizable_entities_and_is_deterministic() {
     store.finalize().unwrap();
 
     let id = |t: &Term| g.id_of(t).unwrap();
-    assert!(store.get(id(&ex("silent"))).is_none(), "type-only entity not embedded");
+    assert!(
+        store.get(id(&ex("silent"))).is_none(),
+        "type-only entity not embedded"
+    );
 
     // Each stored vector is exactly the embedding of the entity's verbalization —
     // verbalize() is the inspectable contract for what got embedded.
@@ -257,16 +271,25 @@ fn embed_entities_covers_verbalizable_entities_and_is_deterministic() {
         let t = ex(who);
         let text = verbalize(&g, &t, &cfg).unwrap();
         let expect = &embedder.embed(&[&text]).unwrap()[0];
-        assert_eq!(store.get(id(&t)).unwrap(), &expect[..], "vector for {who} = embed(verbalize)");
+        assert_eq!(
+            store.get(id(&t)).unwrap(),
+            &expect[..],
+            "vector for {who} = embed(verbalize)"
+        );
     }
 
     // Determinism: a second run (batch=1 to exercise chunking) produces identical bytes.
-    let path2 = std::env::temp_dir()
-        .join(format!("sparq-vectors-verbalize2-{}.spqv", std::process::id()));
+    let path2 = std::env::temp_dir().join(format!(
+        "sparq-vectors-verbalize2-{}.spqv",
+        std::process::id()
+    ));
     let mut store2 = VectorStore::create(&path2, 32).unwrap();
     let mut cfg2 = cfg.clone();
     cfg2.batch = 1;
-    assert_eq!(embed_entities(&g, &mut store2, &embedder, &cfg2).unwrap(), 6);
+    assert_eq!(
+        embed_entities(&g, &mut store2, &embedder, &cfg2).unwrap(),
+        6
+    );
     store2.finalize().unwrap();
     for who in ["bolt", "both", "paris", "dog", "mixed"] {
         let t = ex(who);
@@ -280,11 +303,18 @@ fn embed_entities_covers_verbalizable_entities_and_is_deterministic() {
 #[test]
 fn embed_entities_rejects_dim_mismatch() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
-    let path = std::env::temp_dir()
-        .join(format!("sparq-vectors-verbalize3-{}.spqv", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "sparq-vectors-verbalize3-{}.spqv",
+        std::process::id()
+    ));
     let mut store = VectorStore::create(&path, 8).unwrap();
-    let err = embed_entities(&g, &mut store, &HashEmbedder::new(16), &EntityTextConfig::default())
-        .unwrap_err();
+    let err = embed_entities(
+        &g,
+        &mut store,
+        &HashEmbedder::new(16),
+        &EntityTextConfig::default(),
+    )
+    .unwrap_err();
     assert!(err.contains("dim"), "{err}");
     let _ = std::fs::remove_file(&path);
 }

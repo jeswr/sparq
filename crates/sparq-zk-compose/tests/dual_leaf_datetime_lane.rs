@@ -178,7 +178,9 @@ fn lane_constants_equal_the_host_encoders_datatype_const() {
         fr(&datetime_datatype_const())
     );
     assert_eq!(
-        encode_date(&date_lit("2001-09-09Z")).unwrap().datatype_const,
+        encode_date(&date_lit("2001-09-09Z"))
+            .unwrap()
+            .datatype_const,
         fr(&date_datatype_const())
     );
 }
@@ -225,8 +227,12 @@ fn builder_witnesses_rebind_to_the_committed_operand_enc() {
             fr(&datetime_datatype_const()),
         ),
         (
-            build_filter_value_dl_date(&date_lit("1969-12-31Z"), FilterOp::Lt, &date_lit("1970-01-01Z"))
-                .unwrap(),
+            build_filter_value_dl_date(
+                &date_lit("1969-12-31Z"),
+                FilterOp::Lt,
+                &date_lit("1970-01-01Z"),
+            )
+            .unwrap(),
             fr(&date_datatype_const()),
         ),
     ];
@@ -258,7 +264,10 @@ fn the_epoch_is_never_witnessed_as_negative_zero() {
         &dt_lit("1970-01-01T00:00:00Z"),
     )
     .unwrap();
-    assert!(!built.value_neg, "a zero magnitude must report non-negative");
+    assert!(
+        !built.value_neg,
+        "a zero magnitude must report non-negative"
+    );
     assert_eq!(fr(&built.value_hook_scaled), Fr::from(0u64));
     let p = unpack(&built.inputs);
     assert!(!p.bound_neg && p.bound_scaled_epoch == 0);
@@ -408,8 +417,7 @@ fn builder_discloses_the_honest_verdict_for_every_op() {
         ("1969-01-01T00:00:00Z", "1968-01-01T00:00:00Z"),
     ] {
         for op in ALL_OPS {
-            let built =
-                build_filter_value_dl_datetime(&dt_lit(value), op, &dt_lit(bound)).unwrap();
+            let built = build_filter_value_dl_datetime(&dt_lit(value), op, &dt_lit(bound)).unwrap();
             let p = unpack(&built.inputs);
             let want = signed_epoch_verdict(
                 built.value_neg,
@@ -435,14 +443,14 @@ fn builder_discloses_the_honest_verdict_for_every_op() {
 fn non_canonical_lexicals_are_fail_closed_on_both_operands() {
     let ok = dt_lit("2020-01-01T00:00:00Z");
     for bad in [
-        "2020-01-01T12:00:00",       // bare — order-indeterminate (§13.2(1))
-        "2020-01-01T12:00:00+01:00", // non-Z offset (§13.2(2))
-        "2020-01-01T12:00:00+00:00", // spells Z but is NON-canonical
-        "2020-01-01T24:00:00Z",      // two lexicals for one value
-        "2016-12-31T23:59:60Z",      // leap second — not an XSD lexical
-        "2020-01-01T12:00:00.1234Z", // more than FS digits — would need rounding
-        "2020-01-01T12:00:00.500Z",  // trailing zero — non-canonical
-        "2023-02-29T00:00:00Z",      // not a real calendar day
+        "2020-01-01T12:00:00",          // bare — order-indeterminate (§13.2(1))
+        "2020-01-01T12:00:00+01:00",    // non-Z offset (§13.2(2))
+        "2020-01-01T12:00:00+00:00",    // spells Z but is NON-canonical
+        "2020-01-01T24:00:00Z",         // two lexicals for one value
+        "2016-12-31T23:59:60Z",         // leap second — not an XSD lexical
+        "2020-01-01T12:00:00.1234Z",    // more than FS digits — would need rounding
+        "2020-01-01T12:00:00.500Z",     // trailing zero — non-canonical
+        "2023-02-29T00:00:00Z",         // not a real calendar day
         "999999999999-01-01T00:00:00Z", // scaled epoch overflows u64
     ] {
         assert!(
@@ -462,7 +470,11 @@ fn non_canonical_lexicals_are_fail_closed_on_both_operands() {
     }
     // Bare dates too — same §13.2 reason.
     assert!(matches!(
-        build_filter_value_dl_date(&date_lit("2020-01-01"), FilterOp::Lt, &date_lit("2021-01-01Z")),
+        build_filter_value_dl_date(
+            &date_lit("2020-01-01"),
+            FilterOp::Lt,
+            &date_lit("2021-01-01Z")
+        ),
         Err(DualLeafError::NonCanonicalValue(_))
     ));
 }
@@ -554,7 +566,10 @@ fn prover_toml_matches_the_member_main_declaration_order() {
     assert!(lines[4].starts_with("bound_scaled_epoch = "));
     assert!(lines[5].starts_with("datatype_const = "));
     assert!(lines[6].starts_with("expected = "));
-    assert!(lines[7] == "value_neg = true", "pre-epoch value is negative");
+    assert!(
+        lines[7] == "value_neg = true",
+        "pre-epoch value is negative"
+    );
     assert!(lines[8].starts_with("value_hook_scaled = "));
     assert!(lines[9].starts_with("lexical_component = "));
     assert_eq!(lines.len(), 10, "no stray field");

@@ -29,11 +29,13 @@
 
 use crate::cq::{ConjunctiveQuery, CqError, ValuesBlock};
 use crate::dllite::rdf_type_iri;
-use crate::perfectref::{Atom, Cq, Term};
 use crate::dllite::Role;
+use crate::perfectref::{Atom, Cq, Term};
 use rustc_hash::FxHashMap;
 use spargebra::algebra::GraphPattern;
-use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
+use spargebra::term::{
+    GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable,
+};
 
 /// Map the gated CQ's triple patterns to internal atoms + the answer-variable names. Returns the
 /// (atoms, answer) pair PerfectRef consumes. Errors (OutOfScope) if a triple pattern is not a
@@ -72,11 +74,8 @@ pub fn cq_to_atoms(cq: &ConjunctiveQuery) -> Result<(Vec<Atom>, Vec<String>), Cq
         };
         if pred == rdf_type {
             // Class atom: subject is the arg, object must be a NAMED class.
-            let arg = term_pattern_to_term_with_bnode(
-                &tp.subject,
-                &mut bnode_ids,
-                &mut next_bnode_id,
-            )?;
+            let arg =
+                term_pattern_to_term_with_bnode(&tp.subject, &mut bnode_ids, &mut next_bnode_id)?;
             let class = match &tp.object {
                 TermPattern::NamedNode(c) => c.as_str().to_string(),
                 // Defence in depth: `rdf:type _:b` is rejected — a blank node is not a named
@@ -100,16 +99,10 @@ pub fn cq_to_atoms(cq: &ConjunctiveQuery) -> Result<(Vec<Atom>, Vec<String>), Cq
             // Role atom: subject + object are terms, predicate is the role IRI.
             // B2: literals are now permitted in object position. [SONNET-4.6] sq-pbz04.3.1
             // sq-pbz04.3.6: blank nodes in subject/object positions are now existentials.
-            let s = term_pattern_to_term_with_bnode(
-                &tp.subject,
-                &mut bnode_ids,
-                &mut next_bnode_id,
-            )?;
-            let o = term_pattern_to_term_with_bnode(
-                &tp.object,
-                &mut bnode_ids,
-                &mut next_bnode_id,
-            )?;
+            let s =
+                term_pattern_to_term_with_bnode(&tp.subject, &mut bnode_ids, &mut next_bnode_id)?;
+            let o =
+                term_pattern_to_term_with_bnode(&tp.object, &mut bnode_ids, &mut next_bnode_id)?;
             atoms.push(Atom::Role {
                 role: Role::named(pred.as_str()),
                 s,
@@ -117,7 +110,11 @@ pub fn cq_to_atoms(cq: &ConjunctiveQuery) -> Result<(Vec<Atom>, Vec<String>), Cq
             });
         }
     }
-    let answer = cq.distinguished.iter().map(|v| v.as_str().to_string()).collect();
+    let answer = cq
+        .distinguished
+        .iter()
+        .map(|v| v.as_str().to_string())
+        .collect();
     Ok((atoms, answer))
 }
 
@@ -251,7 +248,9 @@ pub fn ucq_to_pattern_per_branch(branches: Vec<(Vec<Cq>, &ConjunctiveQuery)>) ->
 fn apply_values_blocks(body: GraphPattern, blocks: &[ValuesBlock]) -> GraphPattern {
     blocks.iter().fold(body, |acc, vb| {
         // Convert `Vec<Vec<GroundTerm>>` back to `Vec<Vec<Option<GroundTerm>>>` as spargebra expects.
-        let bindings: Vec<Vec<Option<GroundTerm>>> = vb.bindings.iter()
+        let bindings: Vec<Vec<Option<GroundTerm>>> = vb
+            .bindings
+            .iter()
             .map(|row| row.iter().map(|gt| Some(gt.clone())).collect())
             .collect();
         GraphPattern::Join {
@@ -266,7 +265,10 @@ fn apply_values_blocks(body: GraphPattern, blocks: &[ValuesBlock]) -> GraphPatte
 
 /// Wrap `body` in `Filter { expr, inner: body }` for each collected FILTER expression.
 /// Multiple FILTERs are applied innermost-first (the order they were collected). [SONNET-4.6]
-fn apply_filter_exprs(body: GraphPattern, exprs: &[spargebra::algebra::Expression]) -> GraphPattern {
+fn apply_filter_exprs(
+    body: GraphPattern,
+    exprs: &[spargebra::algebra::Expression],
+) -> GraphPattern {
     exprs.iter().fold(body, |acc, expr| GraphPattern::Filter {
         expr: expr.clone(),
         inner: Box::new(acc),
@@ -370,10 +372,7 @@ fn term_to_pattern(t: &Term, fresh: &mut impl FnMut(u32) -> Variable) -> TermPat
                 Literal::new_language_tagged_literal(lv.clone(), lang.clone())
                     .unwrap_or_else(|_| Literal::new_simple_literal(lv.clone()))
             } else {
-                Literal::new_typed_literal(
-                    lv.clone(),
-                    NamedNode::new_unchecked(ld.clone()),
-                )
+                Literal::new_typed_literal(lv.clone(), NamedNode::new_unchecked(ld.clone()))
             };
             TermPattern::Literal(lit)
         }

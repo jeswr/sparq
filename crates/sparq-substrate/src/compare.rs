@@ -520,7 +520,7 @@ mod kani_proofs {
         -18_014_398_509_481_984, // -(2^54)
         0,                       // -0.0 — exactly equal to +0.0
         0,
-        1, // 0.5
+        1,                      // 0.5
         18_014_398_509_481_984, // 2^54
         18_014_398_509_481_988, // 2^54 + 4
     ];
@@ -713,7 +713,10 @@ mod kani_proofs {
             (Ordering::Less, Ordering::Less)
             | (Ordering::Less, Ordering::Equal)
             | (Ordering::Equal, Ordering::Less) => {
-                assert!(xz == Some(Ordering::Less), "transitivity: x<=y<=z (strict leg) => x<z");
+                assert!(
+                    xz == Some(Ordering::Less),
+                    "transitivity: x<=y<=z (strict leg) => x<z"
+                );
             }
             (Ordering::Equal, Ordering::Equal) => {
                 assert!(xz == Some(Ordering::Equal), "transitivity: x~y~z => x~z");
@@ -849,7 +852,10 @@ mod kani_proofs {
     fn assert_antisymmetric_at(x: &M, y: &M) {
         match compare_terms(x, y) {
             Some(o) => {
-                assert!(compare_terms(y, x) == Some(o.reverse()), "antisymmetry: mirror");
+                assert!(
+                    compare_terms(y, x) == Some(o.reverse()),
+                    "antisymmetry: mirror"
+                );
             }
             None => assert!(compare_terms(y, x).is_none(), "antisymmetry: None mirror"),
         }
@@ -860,7 +866,9 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(3)]
     fn antisymmetry_numeric_pairs_incl_nan() {
-        for_each_numeric(true, |x| for_each_numeric(true, |y| assert_antisymmetric_at(x, y)));
+        for_each_numeric(true, |x| {
+            for_each_numeric(true, |y| assert_antisymmetric_at(x, y))
+        });
     }
 
     /// ANTISYMMETRY: numeric (NaN included) × non-numeric scalar — the mixed-kind literal
@@ -917,7 +925,10 @@ mod kani_proofs {
     fn within_class_totality_literals_incl_nan() {
         for_each_literal(|x| {
             for_each_literal(|y| {
-                assert!(compare_terms(x, y).is_some(), "within-class totality: literals");
+                assert!(
+                    compare_terms(x, y).is_some(),
+                    "within-class totality: literals"
+                );
             });
         });
     }
@@ -929,7 +940,10 @@ mod kani_proofs {
     #[kani::unwind(4)]
     fn within_class_totality_nonliterals() {
         let tot = |x: &M, y: &M| {
-            assert!(compare_terms(x, y).is_some(), "within-class totality: non-literals");
+            assert!(
+                compare_terms(x, y).is_some(),
+                "within-class totality: non-literals"
+            );
         };
         match kani::any::<u8>() {
             0 => tot(&M::Err, &M::Err),
@@ -1050,12 +1064,18 @@ mod kani_proofs {
                     "cf domain: Int range must be collapse-free"
                 );
             }
-            M::Dbl(i) => assert!(usize::from(*i) < DBLS.len(), "cf domain: Dbl index in-table"),
+            M::Dbl(i) => assert!(
+                usize::from(*i) < DBLS.len(),
+                "cf domain: Dbl index in-table"
+            ),
             _ => unreachable!("for_each_cf_numeric emits only Int/Dbl"),
         });
         // The signed-zero pair: numerically equal, lexically distinct.
         assert!(DBLS[1] == DBLS[2], "signed zeros compare numerically equal");
-        assert!(DBL_STRS[1] != DBL_STRS[2], "signed zeros are lexically distinct");
+        assert!(
+            DBL_STRS[1] != DBL_STRS[2],
+            "signed zeros are lexically distinct"
+        );
     }
 
     /// TRANSITIVITY: plain-string literals (lexical order; includes the empty string and a
@@ -1135,10 +1155,16 @@ mod kani_proofs {
         while i < DBLS.len() {
             // Exact f64 comparison: fidelity IS bit-level agreement (×2 only bumps the
             // exponent, and every X2 value is within f64's exact-integer range).
-            assert!(DBL_X2[i] as f64 == DBLS[i] * 2.0, "X2 must be exactly twice DBLS");
+            assert!(
+                DBL_X2[i] as f64 == DBLS[i] * 2.0,
+                "X2 must be exactly twice DBLS"
+            );
             i += 1;
         }
-        assert!(DBL_X2[1] == 0 && DBL_X2[2] == 0, "signed zeros are exactly equal");
+        assert!(
+            DBL_X2[1] == 0 && DBL_X2[2] == 0,
+            "signed zeros are exactly equal"
+        );
     }
 
     /// FIXED — former FINDING 1 (bead sq-wjl8i; this harness pins the FIX and goes red
@@ -1210,7 +1236,11 @@ mod tests {
         /// recheck arm is exercised: two of these can share an `f` yet differ exactly —
         /// modelling an `xsd:integer` beyond 2^53 (`scale` 0) and a high-precision
         /// `xsd:decimal` (`scale > 0`). [OPUS-4.8] sq-rikm7
-        ExactNum { f: f64, mant: i128, scale: u32 },
+        ExactNum {
+            f: f64,
+            mant: i128,
+            scale: u32,
+        },
         /// A plain-string literal (orders by string form; `strict_cmp` decides equal
         /// strings, else `None` → string fallback).
         StrLit(String),
@@ -1246,7 +1276,12 @@ mod tests {
             return format!("{}{}", sign, mag);
         }
         if mag.len() > s {
-            format!("{}{}.{}", sign, &mag[..mag.len() - s], &mag[mag.len() - s..])
+            format!(
+                "{}{}.{}",
+                sign,
+                &mag[..mag.len() - s],
+                &mag[mag.len() - s..]
+            )
         } else {
             format!("{}0.{}{}", sign, "0".repeat(s - mag.len()), mag)
         }
@@ -1261,7 +1296,11 @@ mod tests {
                 None => (false, s),
             };
             let (int, frac) = s.split_once('.').unwrap_or((s, ""));
-            (neg, int.trim_start_matches('0').to_string(), frac.trim_end_matches('0').to_string())
+            (
+                neg,
+                int.trim_start_matches('0').to_string(),
+                frac.trim_end_matches('0').to_string(),
+            )
         };
         let (na, ia, fa) = split(a);
         let (nb, ib, fb) = split(b);
@@ -1270,18 +1309,22 @@ mod tests {
         if a_zero && b_zero {
             return Ordering::Equal;
         }
-        let mag = ia.len().cmp(&ib.len()).then_with(|| ia.cmp(&ib)).then_with(|| {
-            let n = fa.len().max(fb.len());
-            (0..n)
-                .map(|i| {
-                    (
-                        fa.as_bytes().get(i).copied().unwrap_or(b'0'),
-                        fb.as_bytes().get(i).copied().unwrap_or(b'0'),
-                    )
-                })
-                .find_map(|(x, y)| if x != y { Some(x.cmp(&y)) } else { None })
-                .unwrap_or(Ordering::Equal)
-        });
+        let mag = ia
+            .len()
+            .cmp(&ib.len())
+            .then_with(|| ia.cmp(&ib))
+            .then_with(|| {
+                let n = fa.len().max(fb.len());
+                (0..n)
+                    .map(|i| {
+                        (
+                            fa.as_bytes().get(i).copied().unwrap_or(b'0'),
+                            fb.as_bytes().get(i).copied().unwrap_or(b'0'),
+                        )
+                    })
+                    .find_map(|(x, y)| if x != y { Some(x.cmp(&y)) } else { None })
+                    .unwrap_or(Ordering::Equal)
+            });
         match (na && !a_zero, nb && !b_zero) {
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
@@ -1296,7 +1339,9 @@ mod tests {
                 T::ErrorOrUnbound => TermClass::ErrorOrUnbound,
                 T::Blank(_) => TermClass::Blank,
                 T::Iri(_) => TermClass::Iri,
-                T::NumLit(_) | T::ExactNum { .. } | T::StrLit(_) | T::Strict(_) => TermClass::Literal,
+                T::NumLit(_) | T::ExactNum { .. } | T::StrLit(_) | T::Strict(_) => {
+                    TermClass::Literal
+                }
                 T::Triple(..) => TermClass::Triple,
             }
         }
@@ -1330,7 +1375,18 @@ mod tests {
                 // Align both scaled integers to the common (max) scale, then compare the
                 // mantissas exactly (mirrors the substrate `Dec::cmp` the engine's numeric
                 // tower uses). [OPUS-4.8] sq-rikm7
-                (T::ExactNum { mant: am, scale: asc, .. }, T::ExactNum { mant: bm, scale: bsc, .. }) => {
+                (
+                    T::ExactNum {
+                        mant: am,
+                        scale: asc,
+                        ..
+                    },
+                    T::ExactNum {
+                        mant: bm,
+                        scale: bsc,
+                        ..
+                    },
+                ) => {
                     let scale = (*asc).max(*bsc);
                     let a = am.checked_mul(10i128.checked_pow(scale - asc)?)?;
                     let b = bm.checked_mul(10i128.checked_pow(scale - bsc)?)?;
@@ -1340,7 +1396,9 @@ mod tests {
                 // exact decimal expansion — the engine's `Num::cmp_total` mixed arm
                 // (witness 1 of sq-wjl8i: leaving this `None` keeps the collapsed f64
                 // tie, which is intransitive against the exact int/int order).
-                (T::ExactNum { mant, scale, .. }, T::NumLit(f)) => Some(cmp_exact_vs_f64(*mant, *scale, *f)),
+                (T::ExactNum { mant, scale, .. }, T::NumLit(f)) => {
+                    Some(cmp_exact_vs_f64(*mant, *scale, *f))
+                }
                 (T::NumLit(f), T::ExactNum { mant, scale, .. }) => {
                     Some(cmp_exact_vs_f64(*mant, *scale, *f).reverse())
                 }
@@ -1380,7 +1438,11 @@ mod tests {
         let blank = T::Blank("z".into());
         let iri = T::Iri("a".into());
         let lit = T::NumLit(-1.0);
-        let triple = T::Triple(Box::new(T::Iri("a".into())), Box::new(T::Iri("a".into())), Box::new(T::Iri("a".into())));
+        let triple = T::Triple(
+            Box::new(T::Iri("a".into())),
+            Box::new(T::Iri("a".into())),
+            Box::new(T::Iri("a".into())),
+        );
         assert_eq!(compare_terms(&unbound, &blank), Some(Ordering::Less));
         assert_eq!(compare_terms(&blank, &iri), Some(Ordering::Less));
         assert_eq!(compare_terms(&iri, &lit), Some(Ordering::Less));
@@ -1391,21 +1453,39 @@ mod tests {
 
     #[test]
     fn within_class_error_is_equal() {
-        assert_eq!(compare_terms(&T::ErrorOrUnbound, &T::ErrorOrUnbound), Some(Ordering::Equal));
+        assert_eq!(
+            compare_terms(&T::ErrorOrUnbound, &T::ErrorOrUnbound),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]
     fn blanks_and_iris_order_by_string() {
-        assert_eq!(compare_terms(&T::Blank("a".into()), &T::Blank("b".into())), Some(Ordering::Less));
-        assert_eq!(compare_terms(&T::Iri("http://b".into()), &T::Iri("http://a".into())), Some(Ordering::Greater));
-        assert_eq!(compare_terms(&T::Iri("x".into()), &T::Iri("x".into())), Some(Ordering::Equal));
+        assert_eq!(
+            compare_terms(&T::Blank("a".into()), &T::Blank("b".into())),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_terms(&T::Iri("http://b".into()), &T::Iri("http://a".into())),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            compare_terms(&T::Iri("x".into()), &T::Iri("x".into())),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]
     fn numeric_literals_order_by_value_not_lexical() {
         // 9 < 10 by value even though "10" < "9" lexically — the numeric arm wins.
-        assert_eq!(compare_terms(&T::NumLit(9.0), &T::NumLit(10.0)), Some(Ordering::Less));
-        assert_eq!(compare_terms(&T::NumLit(2.5), &T::NumLit(2.5)), Some(Ordering::Equal));
+        assert_eq!(
+            compare_terms(&T::NumLit(9.0), &T::NumLit(10.0)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_terms(&T::NumLit(2.5), &T::NumLit(2.5)),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]
@@ -1415,14 +1495,26 @@ mod tests {
         // them ordered by value, so ORDER BY / MIN / MAX agree with relational =/<. This
         // assertion FAILS if the recheck in `compare_terms` is reverted (it would be Equal).
         let two53 = 9_007_199_254_740_992.0_f64;
-        let a = T::ExactNum { f: two53, mant: 9_007_199_254_740_992, scale: 0 };
-        let b = T::ExactNum { f: two53, mant: 9_007_199_254_740_993, scale: 0 };
+        let a = T::ExactNum {
+            f: two53,
+            mant: 9_007_199_254_740_992,
+            scale: 0,
+        };
+        let b = T::ExactNum {
+            f: two53,
+            mant: 9_007_199_254_740_993,
+            scale: 0,
+        };
         // The f64 keys are byte-equal: the collapse the recheck must repair.
         assert_eq!(a.as_f64(), b.as_f64());
         assert_eq!(compare_terms(&a, &b), Some(Ordering::Less));
         assert_eq!(compare_terms(&b, &a), Some(Ordering::Greater));
         // Genuinely equal exact values stay Equal (no spurious inequality introduced).
-        let a2 = T::ExactNum { f: two53, mant: 9_007_199_254_740_992, scale: 0 };
+        let a2 = T::ExactNum {
+            f: two53,
+            mant: 9_007_199_254_740_992,
+            scale: 0,
+        };
         assert_eq!(compare_terms(&a, &a2), Some(Ordering::Equal));
     }
 
@@ -1432,15 +1524,34 @@ mod tests {
         // digit and round to the SAME f64 (its shortest form is 0.12345678901234568); the
         // `f` field is that shared collapsed f64. The exact recheck orders them by value.
         let f = 0.12345678901234568_f64;
-        let a = T::ExactNum { f, mant: 123_456_789_012_345_678, scale: 18 };
-        let b = T::ExactNum { f, mant: 123_456_789_012_345_679, scale: 18 };
+        let a = T::ExactNum {
+            f,
+            mant: 123_456_789_012_345_678,
+            scale: 18,
+        };
+        let b = T::ExactNum {
+            f,
+            mant: 123_456_789_012_345_679,
+            scale: 18,
+        };
         assert_eq!(a.as_f64(), b.as_f64()); // f64 COLLAPSES them
         assert_eq!(compare_terms(&a, &b), Some(Ordering::Less));
         assert_eq!(compare_terms(&b, &a), Some(Ordering::Greater));
         // Different scales still align exactly: 0.10 (mant 10, scale 2) == 0.1 (mant 1, scale 1).
-        let ten_hundredths = T::ExactNum { f: 0.1, mant: 10, scale: 2 };
-        let one_tenth = T::ExactNum { f: 0.1, mant: 1, scale: 1 };
-        assert_eq!(compare_terms(&ten_hundredths, &one_tenth), Some(Ordering::Equal));
+        let ten_hundredths = T::ExactNum {
+            f: 0.1,
+            mant: 10,
+            scale: 2,
+        };
+        let one_tenth = T::ExactNum {
+            f: 0.1,
+            mant: 1,
+            scale: 1,
+        };
+        assert_eq!(
+            compare_terms(&ten_hundredths, &one_tenth),
+            Some(Ordering::Equal)
+        );
         // The MIXED exact/inexact pair also decides exactly (sq-wjl8i): the double f is
         // exactly 0.12345678901234567736…, so BOTH high-precision decimals (…678, …679)
         // sit strictly above the double they collapse onto — mirrored in both directions.
@@ -1449,21 +1560,34 @@ mod tests {
         assert_eq!(compare_terms(&a, &T::NumLit(f)), Some(Ordering::Greater));
         assert_eq!(compare_terms(&T::NumLit(f), &b), Some(Ordering::Less));
         // An exact value that IS its double stays a true tie.
-        let half = T::ExactNum { f: 0.5, mant: 5, scale: 1 };
+        let half = T::ExactNum {
+            f: 0.5,
+            mant: 5,
+            scale: 1,
+        };
         assert_eq!(compare_terms(&half, &T::NumLit(0.5)), Some(Ordering::Equal));
     }
 
     #[test]
     fn strict_arm_decides_when_numeric_arm_cannot() {
         // Two Strict literals: as_f64 is None, strict_cmp decides by the timeline-like order.
-        assert_eq!(compare_terms(&T::Strict(100), &T::Strict(200)), Some(Ordering::Less));
-        assert_eq!(compare_terms(&T::Strict(5), &T::Strict(5)), Some(Ordering::Equal));
+        assert_eq!(
+            compare_terms(&T::Strict(100), &T::Strict(200)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_terms(&T::Strict(5), &T::Strict(5)),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]
     fn string_fallback_when_no_numeric_and_no_strict() {
         // Two plain string literals (same kind): strict_cmp None → lexical string order.
-        assert_eq!(compare_terms(&T::StrLit("apple".into()), &T::StrLit("banana".into())), Some(Ordering::Less));
+        assert_eq!(
+            compare_terms(&T::StrLit("apple".into()), &T::StrLit("banana".into())),
+            Some(Ordering::Less)
+        );
     }
 
     #[test]
@@ -1471,11 +1595,23 @@ mod tests {
         // [FABLE-5] sq-wjl8i: a numeric vs a string literal ranks by LiteralKind
         // (Numeric < String) — NEVER by the lexical form. "0" < "1" lexically would
         // put the string first; the kind rank keeps every numeric below every string.
-        assert_eq!(compare_terms(&T::NumLit(1.0), &T::StrLit("0".into())), Some(Ordering::Less));
-        assert_eq!(compare_terms(&T::StrLit("0".into()), &T::NumLit(1.0)), Some(Ordering::Greater));
+        assert_eq!(
+            compare_terms(&T::NumLit(1.0), &T::StrLit("0".into())),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_terms(&T::StrLit("0".into()), &T::NumLit(1.0)),
+            Some(Ordering::Greater)
+        );
         // Numeric < DateTime-kind (strict) < String, per the documented rank.
-        assert_eq!(compare_terms(&T::NumLit(1.0), &T::Strict(0)), Some(Ordering::Less));
-        assert_eq!(compare_terms(&T::Strict(0), &T::StrLit("".into())), Some(Ordering::Less));
+        assert_eq!(
+            compare_terms(&T::NumLit(1.0), &T::Strict(0)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_terms(&T::Strict(0), &T::StrLit("".into())),
+            Some(Ordering::Less)
+        );
         // The enum rank order itself (the documented extension).
         assert!(LiteralKind::Numeric < LiteralKind::Boolean);
         assert!(LiteralKind::Boolean < LiteralKind::DateTime);
@@ -1488,24 +1624,47 @@ mod tests {
     #[test]
     fn triple_terms_order_componentwise_recursively() {
         let mk = |s: &str, p: &str, o: f64| {
-            T::Triple(Box::new(T::Iri(s.into())), Box::new(T::Iri(p.into())), Box::new(T::NumLit(o)))
+            T::Triple(
+                Box::new(T::Iri(s.into())),
+                Box::new(T::Iri(p.into())),
+                Box::new(T::NumLit(o)),
+            )
         };
         // Equal subject+predicate, object 1 < 2 by numeric value.
-        assert_eq!(compare_terms(&mk("s", "p", 1.0), &mk("s", "p", 2.0)), Some(Ordering::Less));
+        assert_eq!(
+            compare_terms(&mk("s", "p", 1.0), &mk("s", "p", 2.0)),
+            Some(Ordering::Less)
+        );
         // Predicate decides before object: p1 < p2 even though o is greater.
-        assert_eq!(compare_terms(&mk("s", "p1", 99.0), &mk("s", "p2", 1.0)), Some(Ordering::Less));
+        assert_eq!(
+            compare_terms(&mk("s", "p1", 99.0), &mk("s", "p2", 1.0)),
+            Some(Ordering::Less)
+        );
         // Subject decides first.
-        assert_eq!(compare_terms(&mk("s1", "p", 1.0), &mk("s2", "p", 1.0)), Some(Ordering::Less));
+        assert_eq!(
+            compare_terms(&mk("s1", "p", 1.0), &mk("s2", "p", 1.0)),
+            Some(Ordering::Less)
+        );
         // Nested triple in subject position recurses.
         let nested = |inner_o: f64| {
             T::Triple(
-                Box::new(T::Triple(Box::new(T::Iri("a".into())), Box::new(T::Iri("b".into())), Box::new(T::NumLit(inner_o)))),
+                Box::new(T::Triple(
+                    Box::new(T::Iri("a".into())),
+                    Box::new(T::Iri("b".into())),
+                    Box::new(T::NumLit(inner_o)),
+                )),
                 Box::new(T::Iri("p".into())),
                 Box::new(T::Iri("o".into())),
             )
         };
-        assert_eq!(compare_terms(&nested(1.0), &nested(2.0)), Some(Ordering::Less));
-        assert_eq!(compare_terms(&nested(2.0), &nested(2.0)), Some(Ordering::Equal));
+        assert_eq!(
+            compare_terms(&nested(1.0), &nested(2.0)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_terms(&nested(2.0), &nested(2.0)),
+            Some(Ordering::Equal)
+        );
     }
 
     // --- FIXED BUG WITNESSES (sq-wjl8i; formerly `#[ignore]`d red pins of the broken
@@ -1528,14 +1687,34 @@ mod tests {
     fn witness1_mixed_exact_inexact_at_2p53_now_transitive() {
         let two53: f64 = 9_007_199_254_740_992.0;
         // x = xsd:integer 2^53 (exact tier)
-        let x = T::ExactNum { f: two53, mant: 9_007_199_254_740_992_i128, scale: 0 };
+        let x = T::ExactNum {
+            f: two53,
+            mant: 9_007_199_254_740_992_i128,
+            scale: 0,
+        };
         // y = xsd:double 2^53 (inexact tier — its value IS the f64)
         let y = T::NumLit(two53);
         // z = xsd:integer 2^53+1 (exact tier; shares its f64 image with x and y)
-        let z = T::ExactNum { f: two53, mant: 9_007_199_254_740_993_i128, scale: 0 };
-        assert_eq!(compare_terms(&x, &y), Some(Ordering::Equal), "x IS y exactly");
-        assert_eq!(compare_terms(&y, &z), Some(Ordering::Less), "the collapse no longer ties (was Equal)");
-        assert_eq!(compare_terms(&x, &z), Some(Ordering::Less), "transitive: x = y < z => x < z");
+        let z = T::ExactNum {
+            f: two53,
+            mant: 9_007_199_254_740_993_i128,
+            scale: 0,
+        };
+        assert_eq!(
+            compare_terms(&x, &y),
+            Some(Ordering::Equal),
+            "x IS y exactly"
+        );
+        assert_eq!(
+            compare_terms(&y, &z),
+            Some(Ordering::Less),
+            "the collapse no longer ties (was Equal)"
+        );
+        assert_eq!(
+            compare_terms(&x, &z),
+            Some(Ordering::Less),
+            "transitive: x = y < z => x < z"
+        );
         assert_eq!(compare_terms(&z, &y), Some(Ordering::Greater), "mirror");
     }
 
@@ -1547,12 +1726,32 @@ mod tests {
     /// and plain strings sorts consistently again. [FABLE-5] sq-wjl8i
     #[test]
     fn witness2_numeric_vs_string_now_ranked_by_kind() {
-        let x = T::ExactNum { f: 10.0, mant: 10, scale: 0 };
-        let z = T::ExactNum { f: 2.0, mant: 2, scale: 0 };
+        let x = T::ExactNum {
+            f: 10.0,
+            mant: 10,
+            scale: 0,
+        };
+        let z = T::ExactNum {
+            f: 2.0,
+            mant: 2,
+            scale: 0,
+        };
         let y = T::StrLit("11".into());
-        assert_eq!(compare_terms(&x, &y), Some(Ordering::Less), "Numeric < String by kind rank");
-        assert_eq!(compare_terms(&y, &z), Some(Ordering::Greater), "String > Numeric (was lexical \"11\" < \"2\")");
-        assert_eq!(compare_terms(&x, &z), Some(Ordering::Greater), "10 > 2 numerically — consistent");
+        assert_eq!(
+            compare_terms(&x, &y),
+            Some(Ordering::Less),
+            "Numeric < String by kind rank"
+        );
+        assert_eq!(
+            compare_terms(&y, &z),
+            Some(Ordering::Greater),
+            "String > Numeric (was lexical \"11\" < \"2\")"
+        );
+        assert_eq!(
+            compare_terms(&x, &z),
+            Some(Ordering::Greater),
+            "10 > 2 numerically — consistent"
+        );
     }
 
     /// FIXED witness 3 — NaN no longer makes the comparator partial: it is totalised
@@ -1565,12 +1764,31 @@ mod tests {
         let nan = T::NumLit(f64::NAN);
         let zero = T::NumLit(0.0);
         let neg_inf = T::NumLit(f64::NEG_INFINITY);
-        assert_eq!(compare_terms(&nan, &zero), Some(Ordering::Less), "NaN sorts first");
-        assert_eq!(compare_terms(&zero, &nan), Some(Ordering::Greater), "mirror");
-        assert_eq!(compare_terms(&nan, &neg_inf), Some(Ordering::Less), "NaN before -INF");
-        assert_eq!(compare_terms(&nan, &nan), Some(Ordering::Equal), "NaN ties with itself");
+        assert_eq!(
+            compare_terms(&nan, &zero),
+            Some(Ordering::Less),
+            "NaN sorts first"
+        );
+        assert_eq!(
+            compare_terms(&zero, &nan),
+            Some(Ordering::Greater),
+            "mirror"
+        );
+        assert_eq!(
+            compare_terms(&nan, &neg_inf),
+            Some(Ordering::Less),
+            "NaN before -INF"
+        );
+        assert_eq!(
+            compare_terms(&nan, &nan),
+            Some(Ordering::Equal),
+            "NaN ties with itself"
+        );
         // And against another kind, NaN ranks as a numeric (kind rank, not lexical "NaN").
-        assert_eq!(compare_terms(&nan, &T::StrLit("A".into())), Some(Ordering::Less));
+        assert_eq!(
+            compare_terms(&nan, &T::StrLit("A".into())),
+            Some(Ordering::Less)
+        );
     }
 
     /// An `xsd:dateTime`-kind literal model for the sq-2k5py contract: the parsed instant
@@ -1607,13 +1825,18 @@ mod tests {
         fn strict_cmp(&self, other: &Self) -> Option<Ordering> {
             // XPath: same (or no) timezone compares directly, and MIXED presence is
             // decidable only outside the ±14h window.
-            let decidable = self.has_tz == other.has_tz || (self.instant - other.instant).abs() > 14 * 3600;
+            let decidable =
+                self.has_tz == other.has_tz || (self.instant - other.instant).abs() > 14 * 3600;
             if decidable {
                 return Some(self.instant.cmp(&other.instant));
             }
             // The indeterminate window: `None` (the relational type error) unless the
             // implementation honours the totality contract.
-            self.total.then(|| self.instant.cmp(&other.instant).then(self.has_tz.cmp(&other.has_tz)))
+            self.total.then(|| {
+                self.instant
+                    .cmp(&other.instant)
+                    .then(self.has_tz.cmp(&other.has_tz))
+            })
         }
         fn triple_parts(&self) -> Option<[Self; 3]> {
             None
@@ -1631,7 +1854,12 @@ mod tests {
     fn witness4_datetime_kind_indeterminate_window_needs_a_total_strict_cmp() {
         // 13:00 UTC as "12:00:00-01:00" (zoned), as "14:00:00+01:00" (zoned), and the
         // tz-less "13:00:00" — one instant, three lexicals.
-        let at = |lex: &'static str, has_tz: bool, total: bool| TzLit { instant: 13 * 3600, has_tz, lex, total };
+        let at = |lex: &'static str, has_tz: bool, total: bool| TzLit {
+            instant: 13 * 3600,
+            has_tz,
+            lex,
+            total,
+        };
         let mk = |total: bool| {
             (
                 at("2024-03-15T12:00:00-01:00", true, total),
@@ -1643,23 +1871,64 @@ mod tests {
         // PARTIAL `strict_cmp` (the pre-fix behaviour): x ~ y, but z falls lexically
         // BETWEEN them — `sort_by` is fed an inconsistent comparator.
         let (x, y, z) = mk(false);
-        assert_eq!(x.strict_cmp(&z), None, "the pair really is XPath-indeterminate");
-        assert_eq!(compare_terms(&x, &y), Some(Ordering::Equal), "same instant, both zoned");
-        assert_eq!(compare_terms(&x, &z), Some(Ordering::Less), "lexical fallback: \"…T12:00:00-01:00\" < \"…T13:00:00\"");
-        assert_eq!(compare_terms(&z, &y), Some(Ordering::Less), "lexical fallback: \"…T13:00:00\" < \"…T14:00:00+01:00\"");
+        assert_eq!(
+            x.strict_cmp(&z),
+            None,
+            "the pair really is XPath-indeterminate"
+        );
+        assert_eq!(
+            compare_terms(&x, &y),
+            Some(Ordering::Equal),
+            "same instant, both zoned"
+        );
+        assert_eq!(
+            compare_terms(&x, &z),
+            Some(Ordering::Less),
+            "lexical fallback: \"…T12:00:00-01:00\" < \"…T13:00:00\""
+        );
+        assert_eq!(
+            compare_terms(&z, &y),
+            Some(Ordering::Less),
+            "lexical fallback: \"…T13:00:00\" < \"…T14:00:00+01:00\""
+        );
         // `x ~ y` and `z < y` force `z < x` if the comparator is consistent. It is not:
-        assert_ne!(compare_terms(&z, &x), Some(Ordering::Less), "INTRANSITIVE: z < y and y ~ x, yet z > x");
+        assert_ne!(
+            compare_terms(&z, &x),
+            Some(Ordering::Less),
+            "INTRANSITIVE: z < y and y ~ x, yet z > x"
+        );
 
         // TOTAL `strict_cmp` (the contract): the equal-instant class is ordered by
         // timezone presence, so the tz-less value sits strictly below BOTH zoned ones.
         let (x, y, z) = mk(true);
-        assert_eq!(compare_terms(&x, &y), Some(Ordering::Equal), "same instant, both zoned — still Equal");
-        assert_eq!(compare_terms(&z, &x), Some(Ordering::Less), "tz-less before zoned");
-        assert_eq!(compare_terms(&z, &y), Some(Ordering::Less), "…consistently, for both members of the class");
-        assert_eq!(compare_terms(&x, &z), Some(Ordering::Greater), "antisymmetric");
+        assert_eq!(
+            compare_terms(&x, &y),
+            Some(Ordering::Equal),
+            "same instant, both zoned — still Equal"
+        );
+        assert_eq!(
+            compare_terms(&z, &x),
+            Some(Ordering::Less),
+            "tz-less before zoned"
+        );
+        assert_eq!(
+            compare_terms(&z, &y),
+            Some(Ordering::Less),
+            "…consistently, for both members of the class"
+        );
+        assert_eq!(
+            compare_terms(&x, &z),
+            Some(Ordering::Greater),
+            "antisymmetric"
+        );
         // The window is the ONLY thing that changed: a decidable pair still orders by
         // instant, tz-less or not (here 20h apart, outside the ±14h window).
-        let far = TzLit { instant: 13 * 3600 - 20 * 3600, has_tz: false, lex: "2024-03-14T17:00:00", total: true };
+        let far = TzLit {
+            instant: 13 * 3600 - 20 * 3600,
+            has_tz: false,
+            lex: "2024-03-14T17:00:00",
+            total: true,
+        };
         assert_eq!(compare_terms(&far, &x), Some(Ordering::Less));
     }
 }

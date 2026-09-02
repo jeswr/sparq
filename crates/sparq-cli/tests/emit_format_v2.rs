@@ -80,7 +80,9 @@ fn perm_magics(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     for i in 0..6 {
         let path = dir.join(format!("perm{i}.bin"));
-        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
         if bytes.len() < 8 {
             continue;
         }
@@ -95,7 +97,11 @@ fn perm_magics(dir: &Path) -> Vec<String> {
 /// Asserts every compressed perm in `dir` carries `expect`, and that there was at least one.
 fn assert_all_magics(dir: &Path, expect: &str) {
     let magics = perm_magics(dir);
-    assert!(!magics.is_empty(), "no block-compressed perm written to {}", dir.display());
+    assert!(
+        !magics.is_empty(),
+        "no block-compressed perm written to {}",
+        dir.display()
+    );
     for m in &magics {
         assert_eq!(m, expect, "perm magic in {}: {:?}", dir.display(), magics);
     }
@@ -127,10 +133,16 @@ fn format_v2_without_compressed_exits_2() {
     let data = write_nt(&dir);
     let idx = dir.join("idx");
 
-    let (code, _out, err) = run3(None, &["save", s(&data), "ntriples", s(&idx), "--format-v2"]);
+    let (code, _out, err) = run3(
+        None,
+        &["save", s(&data), "ntriples", s(&idx), "--format-v2"],
+    );
     assert_eq!(code, 2, "raw perms have no block-stream version: {err}");
     assert!(err.contains("compressed"), "stderr: {err}");
-    assert!(!idx.exists(), "the flag must be rejected BEFORE anything is written");
+    assert!(
+        !idx.exists(),
+        "the flag must be rejected BEFORE anything is written"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -140,8 +152,21 @@ fn unknown_flag_exits_2() {
     let data = write_nt(&dir);
     let idx = dir.join("idx");
 
-    let (code, _out, err) = run3(None, &["save", s(&data), "ntriples", s(&idx), "compressed", "--frmat-v2"]);
-    assert_eq!(code, 2, "a typo'd flag must never be silently ignored: {err}");
+    let (code, _out, err) = run3(
+        None,
+        &[
+            "save",
+            s(&data),
+            "ntriples",
+            s(&idx),
+            "compressed",
+            "--frmat-v2",
+        ],
+    );
+    assert_eq!(
+        code, 2,
+        "a typo'd flag must never be silently ignored: {err}"
+    );
     assert!(err.contains("unknown flag --frmat-v2"), "stderr: {err}");
 
     let (rcode, _rout, rerr) = run3(None, &["recompress", s(&idx), s(&dir.join("dst")), "--vv2"]);
@@ -179,9 +204,22 @@ fn flag_without_the_feature_exits_2() {
     let data = write_nt(&dir);
     let idx = dir.join("idx");
 
-    let (code, _out, err) = run3(None, &["save", s(&data), "ntriples", s(&idx), "compressed", "--format-v2"]);
+    let (code, _out, err) = run3(
+        None,
+        &[
+            "save",
+            s(&data),
+            "ntriples",
+            s(&idx),
+            "compressed",
+            "--format-v2",
+        ],
+    );
     assert_eq!(code, 2, "a build without `spqcprm2` cannot emit V2: {err}");
-    assert!(err.contains("spqcprm2"), "the error must name the missing feature: {err}");
+    assert!(
+        err.contains("spqcprm2"),
+        "the error must name the missing feature: {err}"
+    );
     assert!(!idx.exists(), "nothing may be written on the rejected path");
 
     // Same for `recompress`, on a directory that really exists (so this is the FLAG failing,
@@ -208,10 +246,26 @@ fn save_format_v2_emits_v2_and_queries_identically() {
     let v1 = dir.join("v1");
     let v2 = dir.join("v2");
 
-    assert_eq!(run3(None, &["save", s(&data), "ntriples", s(&v1), "compressed"]).0, 0);
-    let (code, _out, err) = run3(None, &["save", s(&data), "ntriples", s(&v2), "compressed", "--format-v2"]);
+    assert_eq!(
+        run3(None, &["save", s(&data), "ntriples", s(&v1), "compressed"]).0,
+        0
+    );
+    let (code, _out, err) = run3(
+        None,
+        &[
+            "save",
+            s(&data),
+            "ntriples",
+            s(&v2),
+            "compressed",
+            "--format-v2",
+        ],
+    );
     assert_eq!(code, 0, "save stderr: {err}");
-    assert!(err.contains("SPQCPRM2"), "the report must name the format written: {err}");
+    assert!(
+        err.contains("SPQCPRM2"),
+        "the report must name the format written: {err}"
+    );
 
     assert_all_magics(&v1, "SPQCPRM1");
     assert_all_magics(&v2, "SPQCPRM2");
@@ -238,7 +292,10 @@ fn recompress_v2_emits_v2_and_queries_identically() {
     assert_eq!(run3(None, &["recompress", s(&raw), s(&v1)]).0, 0);
     let (code, _out, err) = run3(None, &["recompress", s(&raw), s(&v2), "--v2"]);
     assert_eq!(code, 0, "recompress stderr: {err}");
-    assert!(err.contains("SPQCPRM2"), "the report must name the format written: {err}");
+    assert!(
+        err.contains("SPQCPRM2"),
+        "the report must name the format written: {err}"
+    );
 
     assert_all_magics(&v1, "SPQCPRM1");
     assert_all_magics(&v2, "SPQCPRM2");
@@ -261,13 +318,26 @@ fn flag_beats_env_var_and_env_var_still_works() {
 
     // Env alone selects V2 (the pre-existing path).
     let env_only = dir.join("env-only");
-    let (c, _o, e) = run3(Some("v2"), &["save", s(&data), "ntriples", s(&env_only), "compressed"]);
+    let (c, _o, e) = run3(
+        Some("v2"),
+        &["save", s(&data), "ntriples", s(&env_only), "compressed"],
+    );
     assert_eq!(c, 0, "save stderr: {e}");
     assert_all_magics(&env_only, "SPQCPRM2");
 
     // Flag wins over an env value that does NOT select V2.
     let flag_wins = dir.join("flag-wins");
-    let (c, _o, e) = run3(Some("v1"), &["save", s(&data), "ntriples", s(&flag_wins), "compressed", "--format-v2"]);
+    let (c, _o, e) = run3(
+        Some("v1"),
+        &[
+            "save",
+            s(&data),
+            "ntriples",
+            s(&flag_wins),
+            "compressed",
+            "--format-v2",
+        ],
+    );
     assert_eq!(c, 0, "save stderr: {e}");
     assert_all_magics(&flag_wins, "SPQCPRM2");
     let _ = std::fs::remove_dir_all(&dir);

@@ -666,7 +666,10 @@ mod tests {
         );
         // The plain-EL part must still classify, and the skipped axioms derive nothing.
         let (e, f) = (iri(&dict, "http://ex/E"), iri(&dict, "http://ex/F"));
-        assert!(h.is_subclass_of(e, f), "the EL part (E ⊑ F) must still classify");
+        assert!(
+            h.is_subclass_of(e, f),
+            "the EL part (E ⊑ F) must still classify"
+        );
         let (d, c) = (iri(&dict, "http://ex/D"), iri(&dict, "http://ex/C"));
         assert!(
             !h.is_subclass_of(d, c),
@@ -687,7 +690,11 @@ mod tests {
         let h = Classifier::classify(&dict, &triples);
         let (a, b) = (iri(&dict, "http://ex/A"), iri(&dict, "http://ex/B"));
         assert!(h.is_subclass_of(a, b), "A ⊑ ∃r.{{a}} ⊑ B must classify");
-        assert_eq!(h.report().skipped_axioms, 0, "safe nominals are in-fragment now");
+        assert_eq!(
+            h.report().skipped_axioms,
+            0,
+            "safe nominals are in-fragment now"
+        );
     }
 
     #[test]
@@ -728,7 +735,10 @@ mod tests {
             );
         }
         let (g, hh) = (iri(&dict, "http://ex/G"), iri(&dict, "http://ex/H"));
-        assert!(h.is_subclass_of(g, hh), "the EL part (G ⊑ H) must still classify");
+        assert!(
+            h.is_subclass_of(g, hh),
+            "the EL part (G ⊑ H) must still classify"
+        );
     }
 
     #[test]
@@ -746,7 +756,11 @@ mod tests {
         let h = Classifier::classify(&dict, &triples);
         let (a, d) = (iri(&dict, "http://ex/A"), iri(&dict, "http://ex/D"));
         assert!(h.is_subclass_of(a, d), "A ⊑ ∃r.Self ⊑ D must classify");
-        assert_eq!(h.report().skipped_axioms, 0, "owl:hasSelf is in-fragment (CR-Self)");
+        assert_eq!(
+            h.report().skipped_axioms,
+            0,
+            "owl:hasSelf is in-fragment (CR-Self)"
+        );
     }
 
     #[test]
@@ -768,7 +782,11 @@ mod tests {
             !h.is_subclass_of(a, d),
             "a general (A,A) link is not ∃r.Self — CR-Self-2 must not fire"
         );
-        assert_eq!(h.report().skipped_axioms, 0, "someValuesFrom + hasSelf are both in-fragment");
+        assert_eq!(
+            h.report().skipped_axioms,
+            0,
+            "someValuesFrom + hasSelf are both in-fragment"
+        );
     }
 
     #[test]
@@ -791,9 +809,15 @@ mod tests {
             "hasSelf false + hasSelf-without-onProperty are both counted skips"
         );
         let (e, f) = (iri(&dict, "http://ex/E"), iri(&dict, "http://ex/F"));
-        assert!(h.is_subclass_of(e, f), "the EL part (E ⊑ F) still classifies");
+        assert!(
+            h.is_subclass_of(e, f),
+            "the EL part (E ⊑ F) still classifies"
+        );
         let a = iri(&dict, "http://ex/A");
-        assert!(h.super_classes(a).is_empty(), "a skipped hasSelf axiom fabricates no subsumption");
+        assert!(
+            h.super_classes(a).is_empty(),
+            "a skipped hasSelf axiom fabricates no subsumption"
+        );
     }
 
     #[test]

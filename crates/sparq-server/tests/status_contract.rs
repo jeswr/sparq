@@ -328,10 +328,16 @@ async fn result_byte_cap_is_permanent_413_honest_refusal() {
         .unwrap();
     let status = resp.status().as_u16();
     assert_eq!(status, 413, "exceeding the byte cap is a 413, not a 5xx");
-    assert!(!is_transient(status), "413 byte-cap must classify as PERMANENT");
+    assert!(
+        !is_transient(status),
+        "413 byte-cap must classify as PERMANENT"
+    );
     let body = resp.text().await.unwrap();
     assert_structured_error(&body);
-    assert!(!body.contains("bindings"), "must refuse, not truncate: {body}");
+    assert!(
+        !body.contains("bindings"),
+        "must refuse, not truncate: {body}"
+    );
     assert!(
         body.contains("byte limit"),
         "byte-cap 413 body carries the documented generic 'byte limit' sentinel: {body}"
@@ -353,9 +359,16 @@ async fn result_under_byte_cap_succeeds() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 200, "a query under the byte cap must succeed");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "a query under the byte cap must succeed"
+    );
     let body = resp.text().await.unwrap();
-    assert!(body.contains("bindings"), "a 200 result returns its bindings: {body}");
+    assert!(
+        body.contains("bindings"),
+        "a 200 result returns its bindings: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -502,8 +515,14 @@ async fn blocked_service_egress_is_permanent_403() {
         .await
         .unwrap();
     let status = resp.status().as_u16();
-    assert_eq!(status, 403, "a blocked SERVICE egress is a 403 policy refusal");
-    assert!(!is_transient(status), "403 must classify as PERMANENT (allowlist the host)");
+    assert_eq!(
+        status, 403,
+        "a blocked SERVICE egress is a 403 policy refusal"
+    );
+    assert!(
+        !is_transient(status),
+        "403 must classify as PERMANENT (allowlist the host)"
+    );
     let body = resp.text().await.unwrap();
     assert_structured_error(&body);
     // The refused host detail is sanitized out of the body (classify on status, not text).

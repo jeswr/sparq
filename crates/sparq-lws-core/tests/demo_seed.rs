@@ -15,9 +15,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{
-    jwks_provider, mint_access_token_for, mint_dpop_proof, KeyKit, BASE_URL, WEBID,
-};
+use common::{jwks_provider, mint_access_token_for, mint_dpop_proof, KeyKit, BASE_URL, WEBID};
 
 /// A SECOND, DIFFERENT authenticated visitor — the shared playground's disclosed
 /// cross-visitor overwrite/delete is only demonstrable with two distinct WebIDs.
@@ -92,7 +90,8 @@ impl Harness {
         content_type: Option<&str>,
         body: Body,
     ) -> axum::http::Response<Body> {
-        self.request_as(WEBID, method, path, content_type, body).await
+        self.request_as(WEBID, method, path, content_type, body)
+            .await
     }
 
     /// An AUTHENTICATED request as an ARBITRARY `webid`. The playground grant is
@@ -107,8 +106,7 @@ impl Harness {
         content_type: Option<&str>,
         body: Body,
     ) -> axum::http::Response<Body> {
-        let access =
-            mint_access_token_for(&self.issuer_key, &self.client_key.thumbprint, webid);
+        let access = mint_access_token_for(&self.issuer_key, &self.client_key.thumbprint, webid);
         let htu = format!("{BASE_URL}{path}");
         let proof = mint_dpop_proof(&self.client_key, method, &htu, &access);
         let mut builder = Request::builder()
@@ -152,12 +150,19 @@ impl Harness {
 async fn demo_seed_authenticated_put_under_playground_creates() {
     let h = Harness::new(true).await;
     let put = h
-        .request("PUT", "/playground/note", Some("text/turtle"), Body::from(TURTLE))
+        .request(
+            "PUT",
+            "/playground/note",
+            Some("text/turtle"),
+            Body::from(TURTLE),
+        )
         .await;
     assert_eq!(put.status(), StatusCode::CREATED);
 
     // And any authenticated agent (incl. the same one) reads it back.
-    let get = h.request("GET", "/playground/note", None, Body::empty()).await;
+    let get = h
+        .request("GET", "/playground/note", None, Body::empty())
+        .await;
     assert_eq!(get.status(), StatusCode::OK);
 }
 
@@ -167,7 +172,12 @@ async fn demo_seed_authenticated_put_under_playground_creates() {
 async fn demo_seed_anonymous_put_under_playground_is_unauthorized() {
     let h = Harness::new(true).await;
     let put = h
-        .unauth_request("PUT", "/playground/anon", Some("text/turtle"), Body::from(TURTLE))
+        .unauth_request(
+            "PUT",
+            "/playground/anon",
+            Some("text/turtle"),
+            Body::from(TURTLE),
+        )
         .await;
     assert_eq!(put.status(), StatusCode::UNAUTHORIZED);
 }
@@ -176,7 +186,9 @@ async fn demo_seed_anonymous_put_under_playground_is_unauthorized() {
 #[tokio::test]
 async fn demo_seed_anonymous_get_readme_is_public() {
     let h = Harness::new(true).await;
-    let get = h.unauth_request("GET", "/README", None, Body::empty()).await;
+    let get = h
+        .unauth_request("GET", "/README", None, Body::empty())
+        .await;
     assert_eq!(get.status(), StatusCode::OK);
     // The playground container itself is anonymously readable too (all data public-readable).
     let list = h
@@ -271,7 +283,13 @@ async fn demo_seed_flag_on_grants_nothing_outside_the_playground_and_readme() {
         );
     }
     // Anonymous: no grant ⇒ 401.
-    for path in ["/", "/other", "/playgroundX", "/playground/.acl", "/README.acl"] {
+    for path in [
+        "/",
+        "/other",
+        "/playgroundX",
+        "/playground/.acl",
+        "/README.acl",
+    ] {
         let get = h.unauth_request("GET", path, None, Body::empty()).await;
         assert_eq!(
             get.status(),
@@ -310,7 +328,12 @@ async fn demo_seed_anonymous_get_of_a_playground_child_inherits_public_read() {
     let h = Harness::new(true).await;
     // An authenticated visitor creates the child (public Write is deliberately absent).
     let put = h
-        .request("PUT", "/playground/note", Some("text/turtle"), Body::from(TURTLE))
+        .request(
+            "PUT",
+            "/playground/note",
+            Some("text/turtle"),
+            Body::from(TURTLE),
+        )
         .await;
     assert_eq!(put.status(), StatusCode::CREATED);
 
@@ -364,7 +387,13 @@ async fn demo_seed_anonymous_get_of_a_playground_child_inherits_public_read() {
         overwrite.status()
     );
     let delete = h
-        .request_as(OTHER_WEBID, "DELETE", "/playground/note", None, Body::empty())
+        .request_as(
+            OTHER_WEBID,
+            "DELETE",
+            "/playground/note",
+            None,
+            Body::empty(),
+        )
         .await;
     assert!(
         delete.status().is_success(),
@@ -391,7 +420,9 @@ async fn demo_seed_readme_banner_discloses_the_shared_write_consequences() {
         "not isolated",
     ] {
         assert!(
-            banner.to_ascii_lowercase().contains(&claim.to_ascii_lowercase()),
+            banner
+                .to_ascii_lowercase()
+                .contains(&claim.to_ascii_lowercase()),
             "DEMO_README_BANNER must disclose {claim:?} — the shared-Write posture is \
              ratified (research/lws-demo-architecture.md §3.2, proceed-and-document #2329), \
              so it must be DISCLOSED, not silently carried: {banner}"
@@ -399,7 +430,9 @@ async fn demo_seed_readme_banner_discloses_the_shared_write_consequences() {
     }
     // ...and the banner really is what a visitor gets when they dereference /README.
     let h = Harness::new(true).await;
-    let get = h.unauth_request("GET", "/README", None, Body::empty()).await;
+    let get = h
+        .unauth_request("GET", "/README", None, Body::empty())
+        .await;
     assert_eq!(get.status(), StatusCode::OK);
     let body = axum::body::to_bytes(get.into_body(), 64 * 1024)
         .await
@@ -428,10 +461,17 @@ async fn demo_seed_flag_off_boot_has_no_playground() {
     assert_eq!(get.status(), StatusCode::FORBIDDEN);
     // Authenticated PUT into the (nonexistent) playground: denied, nothing is auto-granted.
     let put = h
-        .request("PUT", "/playground/note", Some("text/turtle"), Body::from(TURTLE))
+        .request(
+            "PUT",
+            "/playground/note",
+            Some("text/turtle"),
+            Body::from(TURTLE),
+        )
         .await;
     assert_eq!(put.status(), StatusCode::FORBIDDEN);
     // The README does not exist / is not readable either.
-    let readme = h.unauth_request("GET", "/README", None, Body::empty()).await;
+    let readme = h
+        .unauth_request("GET", "/README", None, Body::empty())
+        .await;
     assert_eq!(readme.status(), StatusCode::UNAUTHORIZED);
 }

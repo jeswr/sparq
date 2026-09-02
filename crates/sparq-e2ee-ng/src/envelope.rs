@@ -13,9 +13,7 @@ use crate::cbor::{
     enc_array, enc_bytes, enc_map, enc_text, enc_uint, read_struct_map, Limits, Reader,
 };
 use crate::error::{Error, Result};
-use crate::ids::{
-    AuthorKeyId, BlockId, BranchId, CommitId, Epoch, ObjectId, RepoId, Secret32,
-};
+use crate::ids::{AuthorKeyId, BlockId, BranchId, CommitId, Epoch, ObjectId, RepoId, Secret32};
 use crate::keyschedule::{block_key, object_key};
 use crate::sign::{PublicVerifyingKey, SecretSigningKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use crate::suite::{aead_open, aead_seal, check_suite, AEAD_NONCE_LEN, SUITE_V0};
@@ -52,9 +50,7 @@ pub struct BlockContext {
 /// Padding length classes (§8.3 field 9). A block's padded plaintext is grown to
 /// the smallest class that fits `4 + plaintext_len` bytes, so on-wire ciphertext
 /// size reveals only a coarse bucket, not the exact plaintext length.
-pub const PAD_CLASSES: [usize; 8] = [
-    256, 1024, 4096, 16384, 65536, 262144, 1_048_576, 4_194_304,
-];
+pub const PAD_CLASSES: [usize; 8] = [256, 1024, 4096, 16384, 65536, 262144, 1_048_576, 4_194_304];
 
 /// Pad `plaintext` to the smallest fitting class. Layout: 4-byte big-endian real
 /// length, then the plaintext, then zero padding to the class size. Returns the
@@ -296,17 +292,22 @@ pub fn seal_block_random(
     let block = BlockId::random();
     let mut nonce = [0u8; AEAD_NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
-    seal_block(k_read, ctx, object, &block, chunk_index, chunk_count, nonce, plaintext)
+    seal_block(
+        k_read,
+        ctx,
+        object,
+        &block,
+        chunk_index,
+        chunk_count,
+        nonce,
+        plaintext,
+    )
 }
 
 /// Open a block, rebuilding the associated data from `ctx`. Fails closed if the
 /// key, tag, or any bound field (including the opaque-header repo/branch/epoch/
 /// kind and chunk position) does not match.
-pub fn open_block(
-    k_read: &Secret32,
-    ctx: &BlockContext,
-    env: &BlockEnvelope,
-) -> Result<Vec<u8>> {
+pub fn open_block(k_read: &Secret32, ctx: &BlockContext, env: &BlockEnvelope) -> Result<Vec<u8>> {
     check_suite(&env.suite)?;
     let ok = object_key(k_read, &ctx.repo, &ctx.branch, ctx.epoch, &env.object_id);
     let bk = block_key(&ok, &env.block_id, env.chunk_index);
@@ -418,7 +419,9 @@ impl Commit {
 
     /// Verify the author signature against the commit's own author key id.
     pub fn verify(&self) -> Result<()> {
-        let sig = self.author_sig.ok_or(Error::Schema("missing author signature"))?;
+        let sig = self
+            .author_sig
+            .ok_or(Error::Schema("missing author signature"))?;
         let pk = PublicVerifyingKey::from_bytes(self.author.as_bytes())?;
         pk.verify(&self.signing_bytes(), &sig)
     }

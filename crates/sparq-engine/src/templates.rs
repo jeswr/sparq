@@ -211,7 +211,10 @@ fn auto_term(name: &str, v: &Value) -> Result<Term, String> {
 fn auto_object_term(name: &str, obj: &Map<String, Value>) -> Result<Term, String> {
     let known = ["iri", "value", "datatype", "lang"];
     if let Some(k) = obj.keys().find(|k| !known.contains(&k.as_str())) {
-        return Err(format!("parameter `{}`: unknown key `{}` in value object", name, k));
+        return Err(format!(
+            "parameter `{}`: unknown key `{}` in value object",
+            name, k
+        ));
     }
     let get = |k: &str| obj.get(k).and_then(Value::as_str);
     match (get("iri"), get("value"), get("datatype"), get("lang")) {
@@ -478,7 +481,14 @@ impl Template {
         let obj = v
             .as_object()
             .ok_or_else(|| "template definition must be a JSON object".to_string())?;
-        let known = ["name", "text", "sparql", "parameters", "description", "kind"];
+        let known = [
+            "name",
+            "text",
+            "sparql",
+            "parameters",
+            "description",
+            "kind",
+        ];
         if let Some(k) = obj.keys().find(|k| !known.contains(&k.as_str())) {
             return Err(format!("unknown key `{}` in template definition", k));
         }
@@ -490,7 +500,9 @@ impl Template {
             .get("text")
             .or_else(|| obj.get("sparql"))
             .and_then(Value::as_str)
-            .ok_or_else(|| "template definition requires a string `text` (or `sparql`)".to_string())?;
+            .ok_or_else(|| {
+                "template definition requires a string `text` (or `sparql`)".to_string()
+            })?;
         let description = match obj.get("description") {
             None | Some(Value::Null) => None,
             Some(Value::String(s)) => Some(s.clone()),
@@ -501,9 +513,9 @@ impl Template {
             None | Some(Value::Null) => {}
             Some(Value::Object(m)) => {
                 for (pname, ptype) in m {
-                    let ptype = ptype.as_str().ok_or_else(|| {
-                        format!("parameter `{}` type must be a string", pname)
-                    })?;
+                    let ptype = ptype
+                        .as_str()
+                        .ok_or_else(|| format!("parameter `{}` type must be a string", pname))?;
                     params.insert(pname.clone(), ParamType::parse(ptype)?);
                 }
             }
@@ -573,11 +585,16 @@ mod tests {
     // ParamType::parse — every keyword + a datatype IRI + fail-closed unknown.
     #[test]
     fn param_type_parse_round_trips() {
-        for tok in ["auto", "iri", "string", "boolean", "integer", "decimal", "double"] {
+        for tok in [
+            "auto", "iri", "string", "boolean", "integer", "decimal", "double",
+        ] {
             assert_eq!(ParamType::parse(tok).unwrap().as_str(), tok);
         }
         let dt = "http://www.w3.org/2001/XMLSchema#date";
-        assert_eq!(ParamType::parse(dt).unwrap(), ParamType::Datatype(dt.to_string()));
+        assert_eq!(
+            ParamType::parse(dt).unwrap(),
+            ParamType::Datatype(dt.to_string())
+        );
         assert_eq!(ParamType::parse(dt).unwrap().as_str(), dt);
         assert!(ParamType::parse("intt").is_err());
         assert!(ParamType::parse("not an iri:").is_err());
@@ -660,7 +677,10 @@ mod tests {
         };
         let rows = query_prepared(&g(), &pq).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/bob>");
+        assert_eq!(
+            rows.rows[0][0].as_ref().unwrap().to_string(),
+            "<http://ex/bob>"
+        );
     }
 
     // bind_json — fail-closed: unknown / missing / wrong-shape / non-object arguments.
@@ -704,14 +724,20 @@ mod tests {
         };
         assert_eq!(query_prepared(&g(), &pq).unwrap().len(), 1);
         // Explicit IRI object binds an IRI (matches nothing here, but binds cleanly).
-        assert!(t.bind_json(&json!({"v": {"iri": "http://ex/alice"}})).is_ok());
+        assert!(t
+            .bind_json(&json!({"v": {"iri": "http://ex/alice"}}))
+            .is_ok());
         // Explicit datatype + lang objects.
         assert!(t
             .bind_json(&json!({"v": {"value": "30", "datatype": "http://www.w3.org/2001/XMLSchema#integer"}}))
             .is_ok());
-        assert!(t.bind_json(&json!({"v": {"value": "chat", "lang": "fr"}})).is_ok());
+        assert!(t
+            .bind_json(&json!({"v": {"value": "chat", "lang": "fr"}}))
+            .is_ok());
         // Fail-closed object shapes: unknown key / conflicting keys / bad IRI.
-        assert!(t.bind_json(&json!({"v": {"iri": "http://ex/a", "value": "x"}})).is_err());
+        assert!(t
+            .bind_json(&json!({"v": {"iri": "http://ex/a", "value": "x"}}))
+            .is_err());
         assert!(t.bind_json(&json!({"v": {"wat": "x"}})).is_err());
         assert!(t.bind_json(&json!({"v": {"iri": "not an iri"}})).is_err());
         // Auto numbers/booleans type themselves.
@@ -733,7 +759,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let hostile = r#"x" } ; DROP ALL ; INSERT DATA { <http://ex/evil> <http://ex/p> <http://ex/o> } # "#;
+        let hostile =
+            r#"x" } ; DROP ALL ; INSERT DATA { <http://ex/evil> <http://ex/p> <http://ex/o> } # "#;
         let Bound::Update(pu) = t.bind_json(&json!({ "note": hostile })).unwrap() else {
             panic!("update template must bind to Bound::Update")
         };
@@ -771,9 +798,11 @@ mod tests {
         }))
         .is_ok());
         // Fail-closed: unknown key, missing name/text, bad parameter type, kind mismatch.
-        assert!(Template::from_json(&json!({"name": "t", "text": "ASK { ?s ?p ?o }", "extra": 1}))
-            .unwrap_err()
-            .contains("unknown key `extra`"));
+        assert!(
+            Template::from_json(&json!({"name": "t", "text": "ASK { ?s ?p ?o }", "extra": 1}))
+                .unwrap_err()
+                .contains("unknown key `extra`")
+        );
         assert!(Template::from_json(&json!({"text": "ASK { ?s ?p ?o }"})).is_err());
         assert!(Template::from_json(&json!({"name": "t"})).is_err());
         assert!(Template::from_json(&json!({

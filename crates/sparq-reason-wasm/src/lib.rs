@@ -67,8 +67,11 @@ fn n3_new_ntriples(n3: &str) -> Result<String, String> {
     let mut dict = sparq_core::dict::Dict::default();
     let (_closure, steps) = sparq_reason::reason_n3_proof(&mut dict, n3)?;
     let mut seen = std::collections::HashSet::new();
-    let derived: Vec<[sparq_core::dict::Id; 3]> =
-        steps.into_iter().map(|s| s.conclusion).filter(|c| seen.insert(*c)).collect();
+    let derived: Vec<[sparq_core::dict::Id; 3]> = steps
+        .into_iter()
+        .map(|s| s.conclusion)
+        .filter(|c| seen.insert(*c))
+        .collect();
     let graph = Graph::from_parts(dict, derived);
     sparq_engine::construct_ntriples(&graph, ECHO_CONSTRUCT)
 }
@@ -355,7 +358,10 @@ mod tests {
     #[test]
     fn n3_new_is_the_derivations_delta() {
         let nt = n3_new_ntriples(SOCRATES_N3_DATA).expect("derivations delta");
-        assert!(nt.contains(SOC_MORTAL), "derived Mortal typing present: {nt}");
+        assert!(
+            nt.contains(SOC_MORTAL),
+            "derived Mortal typing present: {nt}"
+        );
         assert!(
             !nt.contains(SOC_HUMAN),
             "asserted `Socrates a Human` must NOT be in the derivations delta: {nt}"
@@ -372,10 +378,19 @@ mod tests {
     #[test]
     fn n3_query_selects_over_closure() {
         let nt = n3_query_ntriples(SOCRATES_N3_DATA, SOCRATES_N3_QUERY).expect("query filter");
-        assert!(nt.contains(SOC_MORTAL), "entailed Mortal typing selected: {nt}");
-        assert!(nt.contains(SOC_HUMAN), "asserted Human typing selected: {nt}");
+        assert!(
+            nt.contains(SOC_MORTAL),
+            "entailed Mortal typing selected: {nt}"
+        );
+        assert!(
+            nt.contains(SOC_HUMAN),
+            "asserted Human typing selected: {nt}"
+        );
         // The subClassOf axiom does NOT match the query pattern `:Socrates a ?WHAT`.
-        assert!(!nt.contains("subClassOf"), "non-matching axiom excluded: {nt}");
+        assert!(
+            !nt.contains("subClassOf"),
+            "non-matching axiom excluded: {nt}"
+        );
     }
 
     /// [OPUS-5] sq-xqchl.1 (GH #3144) — a builtin in the query premise is EVALUATED (it used to
@@ -389,7 +404,10 @@ mod tests {
 { ?x :age ?n. ?n math:greaterThan 18 } => { ?x a :Adult }."#;
         let nt = n3_query_ntriples(data, query).expect("builtin query filter");
         assert!(nt.contains("<http://ex/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Adult> ."), "{nt}");
-        assert!(!nt.contains("<http://ex/b>"), ":b is 12 — the builtin must filter it out: {nt}");
+        assert!(
+            !nt.contains("<http://ex/b>"),
+            ":b is 12 — the builtin must filter it out: {nt}"
+        );
     }
 
     /// A first-class `( … )` list in the query premise (also previously fail-closed): the
@@ -401,8 +419,14 @@ mod tests {
 @prefix : <http://ex/>.
 { ?p :children ?l. ?l list:member ?c } => { ?c :parent ?p }."#;
         let nt = n3_query_ntriples(data, query).expect("list query filter");
-        assert!(nt.contains("<http://ex/bob> <http://ex/parent> <http://ex/alice> ."), "{nt}");
-        assert!(nt.contains("<http://ex/carol> <http://ex/parent> <http://ex/alice> ."), "{nt}");
+        assert!(
+            nt.contains("<http://ex/bob> <http://ex/parent> <http://ex/alice> ."),
+            "{nt}"
+        );
+        assert!(
+            nt.contains("<http://ex/carol> <http://ex/parent> <http://ex/alice> ."),
+            "{nt}"
+        );
     }
 
     /// A query document with no forward rule still fails LOUDLY (an empty answer would read

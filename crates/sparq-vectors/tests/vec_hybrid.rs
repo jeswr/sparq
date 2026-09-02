@@ -20,15 +20,13 @@
 #![cfg(feature = "vec-predicate")]
 
 use oxrdf::{NamedNode, Term};
+use sparq_core::dict::Id;
 #[cfg(feature = "filtered-ann")]
 use sparq_core::dict::INLINE_BASE;
-use sparq_core::dict::Id;
 use sparq_core::Graph;
 #[cfg(feature = "filtered-ann")]
 use sparq_vectors::hybrid::MAX_ARM_PAGE;
-use sparq_vectors::hybrid::{
-    ArmQuery, FusedHit, HybridConfig, RerankPolicy, Reranker, Rescored,
-};
+use sparq_vectors::hybrid::{ArmQuery, FusedHit, HybridConfig, RerankPolicy, Reranker, Rescored};
 use sparq_vectors::{
     parse_provenance, query_vec, query_vec_hybrid, query_vec_hybrid_with_budget,
     rewrite_query_hybrid, QueryResult, VectorStore,
@@ -188,9 +186,11 @@ fn an_arm_changes_the_answer_consensus_outranks_a_single_arm() {
     );
 
     // A muted dense arm (weight 0) is a pure sparse ranking: ONLY the text arm's items appear.
-    let sparse_only = HybridConfig::new()
-        .vector_weight(0.0)
-        .arm("text", 1.0, fixed_arm(vec![(id(&g, "b"), 8.0)]));
+    let sparse_only = HybridConfig::new().vector_weight(0.0).arm(
+        "text",
+        1.0,
+        fixed_arm(vec![(id(&g, "b"), 8.0)]),
+    );
     let only = rows(&query_vec_hybrid(&g, HYBRID_Q, &store, &sparse_only).unwrap());
     assert_eq!(only.len(), 1);
     assert_eq!((only[0].0.as_str(), only[0].3.as_str()), ("b", "text=1"));
@@ -226,9 +226,16 @@ fn the_second_stage_reorders_and_marks_its_provenance() {
     let cfg = HybridConfig::new().reranker(&reranker, RerankPolicy::FailClosed);
     let out = rows(&query_vec_hybrid(&g, HYBRID_Q, &store, &cfg).unwrap());
 
-    assert_eq!(out.len(), 2, "the reranker dropped the remaining candidates");
+    assert_eq!(
+        out.len(),
+        2,
+        "the reranker dropped the remaining candidates"
+    );
     assert_eq!(out[0].0, "c", "the fused runner-up was promoted to rank 1");
-    assert_eq!(out[0].1, 42.0, "?score is the SECOND-STAGE score once reranked");
+    assert_eq!(
+        out[0].1, 42.0,
+        "?score is the SECOND-STAGE score once reranked"
+    );
     assert_eq!(out[0].3, "vector=2;rerank=1");
     assert_eq!(out[1].3, "vector=1;rerank=2");
     // The rank provenance survives the round trip through SPARQL.
@@ -305,11 +312,14 @@ SELECT ?node ?score ?rank ?prov WHERE {
             }),
         );
     let out = rows(&query_vec_hybrid(&g, TEXT_Q, &store, &cfg).unwrap());
-    assert_eq!(out.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
+    assert_eq!(
+        out.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+        vec!["a", "c"]
+    );
 
     // An embedder whose dimension disagrees with the store is rejected, not silently scored.
-    let wrong = HybridConfig::new()
-        .query_embedder(Box::new(|_t: &str, _l: &str| Ok(vec![1.0, 0.0, 0.0])));
+    let wrong =
+        HybridConfig::new().query_embedder(Box::new(|_t: &str, _l: &str| Ok(vec![1.0, 0.0, 0.0])));
     let err = query_vec_hybrid(&g, TEXT_Q, &store, &wrong).unwrap_err();
     assert!(err.contains("3 dims but the store has 2"), "got: {}", err);
 }
@@ -419,7 +429,9 @@ fn the_budget_and_algebra_entry_points_agree_with_the_query_one() {
 
     // And so is the algebra-level rewrite evaluated through the engine directly: the rewrite is
     // the whole mechanism — no engine change is involved.
-    let parsed = spargebra::SparqlParser::new().parse_query(HYBRID_Q).unwrap();
+    let parsed = spargebra::SparqlParser::new()
+        .parse_query(HYBRID_Q)
+        .unwrap();
     let rewritten = rewrite_query_hybrid(parsed, &g, &store, &cfg).unwrap();
     let out = sparq_vectors::query_prepared(&g, &rewritten.into()).unwrap();
     assert_eq!(rows(&out), want);
@@ -536,7 +548,10 @@ fn the_candidate_mask_corrects_the_arm_ranks_of_qualifying_hits() {
     )
     .unwrap();
     let rows = rows(&r);
-    assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), vec!["c"]);
+    assert_eq!(
+        rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+        vec!["c"]
+    );
     assert_eq!(
         rows[0].3, "vector=1;text=1",
         "the text arm's rank for c is its position among the ADMISSIBLE candidates"

@@ -8,11 +8,11 @@
 //! its member (brief: "derive the circuit-family id from the proof manifest").
 
 use crate::manifest::{CircuitId, FieldHex, FilterOp, ProofInputs};
+use oxrdf::{NamedNode, Term};
 use sparq_zk::commit::GraphCommitment;
 use sparq_zk::encode::encode_term;
 use sparq_zk::field::{field_to_be_bytes_32, field_to_hex, Fr};
 use sparq_zk::sig::join_value_commitment;
-use oxrdf::{NamedNode, Term};
 
 /// Compiled slot buckets (`n`) of the scan family, ascending.
 pub const SCAN_N_BUCKETS: &[u32] = &[16, 64];
@@ -335,10 +335,7 @@ fn encode_slot(slot: &Slot, salt: &Fr) -> (bool, FieldHex, Option<Fr>) {
 /// regardless of the order the caller supplied its graphs in. If the caller
 /// supplies two graphs with the SAME commitment (a genuine duplicate), the sort
 /// places them adjacent and the in-circuit `<` then rejects -- the gate's intent.
-pub fn build_scan(
-    commitments: &[GraphCommitment],
-    pattern: &Pattern,
-) -> Option<BuiltScan> {
+pub fn build_scan(commitments: &[GraphCommitment], pattern: &Pattern) -> Option<BuiltScan> {
     let k = commitments.len() as u32;
     // S2.5: canonicalise graph order ascending by the commitment's field
     // representative so the strict-ordering gate (`scan_check` step 1b) is
@@ -375,7 +372,10 @@ pub fn build_scan(
     // Each graph shares no single salt for IRIs/literals (those are
     // salt-independent), so constant encodings are stable across graphs; use
     // graph 0's salt as the reference (bnodes are never query constants).
-    let ref_salt = commitments.first().map(|c| c.salt).unwrap_or(Fr::from(0u64));
+    let ref_salt = commitments
+        .first()
+        .map(|c| c.salt)
+        .unwrap_or(Fr::from(0u64));
     let (sc, se, sf) = encode_slot(&pattern.s, &ref_salt);
     let (pc, pe, pf) = encode_slot(&pattern.p, &ref_salt);
     let (oc, oe, of) = encode_slot(&pattern.o, &ref_salt);
@@ -409,8 +409,7 @@ pub fn build_scan(
     let max_graph = counts.iter().copied().max().unwrap_or(0);
     let id = derive_scan_id(k, max_graph, row_count)?;
 
-    let commitments_hex: Vec<FieldHex> =
-        commitments.iter().map(|c| hexf(&c.commitment)).collect();
+    let commitments_hex: Vec<FieldHex> = commitments.iter().map(|c| hexf(&c.commitment)).collect();
 
     Some(BuiltScan {
         inputs: ProofInputs::Scan {
@@ -441,7 +440,13 @@ pub fn build_filter_int(
     let id = derive_filter_int_id(digits.len() as u32)?;
     let digit_bytes: Vec<u8> = digits.bytes().collect();
     Some((
-        ProofInputs::FilterInt { id, operand_enc, op, bound, expected },
+        ProofInputs::FilterInt {
+            id,
+            operand_enc,
+            op,
+            bound,
+            expected,
+        },
         digit_bytes,
     ))
 }
@@ -543,7 +548,13 @@ pub fn build_filter_value_dl_boolean(
 /// all six operators are meaningful for `xsd:dateTime` / `xsd:date`.
 // [OPUS-5] sq-wz99x: dateTime/date value-lane verdict oracle. Opt-in (`dual-leaf`).
 #[cfg(feature = "dual-leaf")]
-pub fn signed_epoch_verdict(v_neg: bool, v_mag: u64, b_neg: bool, b_mag: u64, op: FilterOp) -> bool {
+pub fn signed_epoch_verdict(
+    v_neg: bool,
+    v_mag: u64,
+    b_neg: bool,
+    b_mag: u64,
+    op: FilterOp,
+) -> bool {
     let eq = v_neg == b_neg && v_mag == b_mag;
     let lt = match (v_neg, b_neg) {
         (true, false) => true,
@@ -731,8 +742,8 @@ pub fn encode_int_literal(value: u64) -> FieldHex {
         value.to_string(),
         NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
     );
-    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
-        .expect("integer literal is committable");
+    let enc =
+        encode_term(&Term::Literal(lit), &Fr::from(0u64)).expect("integer literal is committable");
     hexf(&enc)
 }
 
@@ -770,7 +781,13 @@ pub fn build_filter_f64(
     let id = derive_filter_f64_id(digits.len() as u32)?;
     let digit_bytes: Vec<u8> = digits.bytes().collect();
     Some((
-        ProofInputs::FilterF64 { id, operand_enc, op, b_bits: bound.to_bits(), expected },
+        ProofInputs::FilterF64 {
+            id,
+            operand_enc,
+            op,
+            b_bits: bound.to_bits(),
+            expected,
+        },
         digit_bytes,
     ))
 }
@@ -782,12 +799,10 @@ pub fn build_filter_f64(
 /// `filter_f64_composable_check` token rebuild. (Salt-independent for literals.)
 // [OPUS-4.8] sq-q7e + sq-tat.
 pub fn encode_double_literal(value: u64) -> FieldHex {
-    let lit = oxrdf::Literal::new_typed_literal(
-        value.to_string(),
-        NamedNode::new(XSD_DOUBLE).unwrap(),
-    );
-    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
-        .expect("double literal is committable");
+    let lit =
+        oxrdf::Literal::new_typed_literal(value.to_string(), NamedNode::new(XSD_DOUBLE).unwrap());
+    let enc =
+        encode_term(&Term::Literal(lit), &Fr::from(0u64)).expect("double literal is committable");
     hexf(&enc)
 }
 
@@ -875,9 +890,7 @@ pub fn build_filter_decimal(
     bound_scaled: u64,
     expected: bool,
 ) -> Option<(ProofInputs, FilterSignedWitness)> {
-    if !int_part.bytes().all(|b| b.is_ascii_digit())
-        || !frac.bytes().all(|b| b.is_ascii_digit())
-    {
+    if !int_part.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let id = derive_filter_decimal_id(int_part.len() as u32, frac.len() as u32)?;
@@ -928,12 +941,10 @@ pub struct FilterSignedWitness {
 /// lexical form through verbatim). (Salt-independent for literals.)
 /// [OPUS-4.8] sq-1q9h.
 pub fn encode_signed_int_literal(value: i64) -> FieldHex {
-    let lit = oxrdf::Literal::new_typed_literal(
-        value.to_string(),
-        NamedNode::new(XSD_INTEGER).unwrap(),
-    );
-    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
-        .expect("integer literal is committable");
+    let lit =
+        oxrdf::Literal::new_typed_literal(value.to_string(), NamedNode::new(XSD_INTEGER).unwrap());
+    let enc =
+        encode_term(&Term::Literal(lit), &Fr::from(0u64)).expect("integer literal is committable");
     hexf(&enc)
 }
 
@@ -949,8 +960,8 @@ pub fn encode_decimal_literal(neg: bool, int_part: u64, frac: &str) -> FieldHex 
     let sign = if neg { "-" } else { "" };
     let lexical = format!("{sign}{int_part}.{frac}");
     let lit = oxrdf::Literal::new_typed_literal(lexical, NamedNode::new(XSD_DECIMAL).unwrap());
-    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
-        .expect("decimal literal is committable");
+    let enc =
+        encode_term(&Term::Literal(lit), &Fr::from(0u64)).expect("decimal literal is committable");
     hexf(&enc)
 }
 
@@ -1455,8 +1466,15 @@ mod derive_id_tests {
             assert_eq!(derive_filter_f64_id(d), Some(CircuitId::FilterF64 { d }));
         }
         assert_eq!(derive_filter_f64_id(0), Some(CircuitId::FilterF64 { d: 1 }));
-        assert_eq!(derive_filter_f64_id(5), None, "no f64 member past the compiled range");
-        assert!(derive_filter_f64_id(16).is_none(), "16 digits is past the f64 family");
+        assert_eq!(
+            derive_filter_f64_id(5),
+            None,
+            "no f64 member past the compiled range"
+        );
+        assert!(
+            derive_filter_f64_id(16).is_none(),
+            "16 digits is past the f64 family"
+        );
     }
 
     // --- filter_signed_int (md magnitude-digit) ---------------------------
@@ -1479,8 +1497,15 @@ mod derive_id_tests {
             "md=3 is not compiled ({{2,4}} only); exact match returns None, not md=4"
         );
         // 1 clamps from 0 but is also uncompiled.
-        assert_eq!(derive_filter_signed_int_id(0), None, "md clamps to 1, which is uncompiled");
-        assert!(derive_filter_signed_int_id(5).is_none(), "md=5 out of family");
+        assert_eq!(
+            derive_filter_signed_int_id(0),
+            None,
+            "md clamps to 1, which is uncompiled"
+        );
+        assert!(
+            derive_filter_signed_int_id(5).is_none(),
+            "md=5 out of family"
+        );
     }
 
     // --- filter_decimal (id, fd) pair ------------------------------------
@@ -1500,10 +1525,25 @@ mod derive_id_tests {
             );
         }
         // The lone compiled member is (3, 2). Either coordinate off => None.
-        assert_eq!(derive_filter_decimal_id(3, 2), Some(CircuitId::FilterDecimal { id: 3, fd: 2 }));
-        assert_eq!(derive_filter_decimal_id(2, 2), None, "wrong integer-digit count");
-        assert_eq!(derive_filter_decimal_id(3, 3), None, "wrong fraction-digit count");
-        assert_eq!(derive_filter_decimal_id(4, 2), None, "wrong integer-digit count");
+        assert_eq!(
+            derive_filter_decimal_id(3, 2),
+            Some(CircuitId::FilterDecimal { id: 3, fd: 2 })
+        );
+        assert_eq!(
+            derive_filter_decimal_id(2, 2),
+            None,
+            "wrong integer-digit count"
+        );
+        assert_eq!(
+            derive_filter_decimal_id(3, 3),
+            None,
+            "wrong fraction-digit count"
+        );
+        assert_eq!(
+            derive_filter_decimal_id(4, 2),
+            None,
+            "wrong integer-digit count"
+        );
         // int_digits clamps to >=1 (canonical "0.xx" has one integer digit).
         assert_eq!(
             derive_filter_decimal_id(0, 2),
@@ -1519,21 +1559,45 @@ mod derive_id_tests {
     /// four `(16|64, 16|64)` combinations are all reachable.
     #[test]
     fn join_eq_id_buckets_each_side_independently() {
-        assert_eq!(derive_join_eq_id(10, 10), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
-        assert_eq!(derive_join_eq_id(16, 64), Some(CircuitId::JoinEq { n_a: 16, n_b: 64 }));
-        assert_eq!(derive_join_eq_id(64, 16), Some(CircuitId::JoinEq { n_a: 64, n_b: 16 }));
-        assert_eq!(derive_join_eq_id(17, 50), Some(CircuitId::JoinEq { n_a: 64, n_b: 64 }));
+        assert_eq!(
+            derive_join_eq_id(10, 10),
+            Some(CircuitId::JoinEq { n_a: 16, n_b: 16 })
+        );
+        assert_eq!(
+            derive_join_eq_id(16, 64),
+            Some(CircuitId::JoinEq { n_a: 16, n_b: 64 })
+        );
+        assert_eq!(
+            derive_join_eq_id(64, 16),
+            Some(CircuitId::JoinEq { n_a: 64, n_b: 16 })
+        );
+        assert_eq!(
+            derive_join_eq_id(17, 50),
+            Some(CircuitId::JoinEq { n_a: 64, n_b: 64 })
+        );
         // Exactly-N boundary selects that bucket.
-        assert_eq!(derive_join_eq_id(16, 16), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+        assert_eq!(
+            derive_join_eq_id(16, 16),
+            Some(CircuitId::JoinEq { n_a: 16, n_b: 16 })
+        );
         // Clamp zero to the smallest bucket on either side.
-        assert_eq!(derive_join_eq_id(0, 0), Some(CircuitId::JoinEq { n_a: 16, n_b: 16 }));
+        assert_eq!(
+            derive_join_eq_id(0, 0),
+            Some(CircuitId::JoinEq { n_a: 16, n_b: 16 })
+        );
     }
 
     /// Either side past every compiled bucket returns `None`, never a wrong-N member.
     #[test]
     fn join_eq_id_out_of_family_is_none() {
-        assert!(derive_join_eq_id(65, 16).is_none(), "n_a=65 exceeds the largest bucket");
-        assert!(derive_join_eq_id(16, 65).is_none(), "n_b=65 exceeds the largest bucket");
+        assert!(
+            derive_join_eq_id(65, 16).is_none(),
+            "n_a=65 exceeds the largest bucket"
+        );
+        assert!(
+            derive_join_eq_id(16, 65).is_none(),
+            "n_b=65 exceeds the largest bucket"
+        );
     }
 
     // --- package() name determinism + distinctness -----------------------
@@ -1566,14 +1630,30 @@ mod derive_id_tests {
         let total = names.len();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), total, "every distinct id maps to a distinct package dir");
+        assert_eq!(
+            names.len(),
+            total,
+            "every distinct id maps to a distinct package dir"
+        );
         // Spot-check the exact wire names the zk/compose/ directories use.
-        assert_eq!(CircuitId::Scan { k: 2, n: 64, r: 8 }.package(), "scan_k2_n64_r8");
+        assert_eq!(
+            CircuitId::Scan { k: 2, n: 64, r: 8 }.package(),
+            "scan_k2_n64_r8"
+        );
         assert_eq!(CircuitId::FilterInt { d: 3 }.package(), "filter_int_d3");
         assert_eq!(CircuitId::FilterF64 { d: 2 }.package(), "filter_f64_d2");
-        assert_eq!(CircuitId::FilterSignedInt { md: 4 }.package(), "filter_signed_int_d4");
-        assert_eq!(CircuitId::FilterDecimal { id: 3, fd: 2 }.package(), "filter_decimal_i3_f2");
-        assert_eq!(CircuitId::JoinEq { n_a: 64, n_b: 64 }.package(), "join_eq_na64_nb64");
+        assert_eq!(
+            CircuitId::FilterSignedInt { md: 4 }.package(),
+            "filter_signed_int_d4"
+        );
+        assert_eq!(
+            CircuitId::FilterDecimal { id: 3, fd: 2 }.package(),
+            "filter_decimal_i3_f2"
+        );
+        assert_eq!(
+            CircuitId::JoinEq { n_a: 64, n_b: 64 }.package(),
+            "join_eq_na64_nb64"
+        );
     }
 
     /// The scan / filter_int builders thread the SAME derive-id discipline: the
@@ -1586,7 +1666,10 @@ mod derive_id_tests {
         let (inputs, digits) =
             build_filter_int(enc, 123, FilterOp::Gt, 100, true).expect("3-digit operand has d3");
         assert_eq!(*inputs.circuit_id(), CircuitId::FilterInt { d: 3 });
-        assert_eq!(digits, b"123", "digit witness is the canonical decimal bytes");
+        assert_eq!(
+            digits, b"123",
+            "digit witness is the canonical decimal bytes"
+        );
         // A 5-digit operand is out of family -> the builder returns None (sq-wto),
         // exactly as derive_filter_int_id(5) does.
         let enc5 = encode_int_literal(12345);
@@ -1674,7 +1757,10 @@ mod path_tests {
             .expect("chain a -> b -> c exists within depth");
 
         // Smallest k=1 member covering a 2-step chain is d=2.
-        assert_eq!(built.inputs.circuit_id(), &CircuitId::PathReach { d: 2, k: 1, n: 16 });
+        assert_eq!(
+            built.inputs.circuit_id(),
+            &CircuitId::PathReach { d: 2, k: 1, n: 16 }
+        );
         let ProofInputs::PathReach {
             commitments,
             src_enc,
@@ -1711,7 +1797,12 @@ mod path_tests {
         // `p*` self-path a->a: zero-length, admitted because a occurs (as subject).
         let built = build_path_reach(std::slice::from_ref(&g), &iri("http://ex/p"), &a, &a, true)
             .expect("zero-length path admitted");
-        let ProofInputs::PathReach { allow_zero, attribution, .. } = &built.inputs else {
+        let ProofInputs::PathReach {
+            allow_zero,
+            attribution,
+            ..
+        } = &built.inputs
+        else {
             panic!("expected PathReach inputs");
         };
         assert!(*allow_zero);
@@ -1734,16 +1825,30 @@ mod path_tests {
     #[test]
     fn build_path_reach_two_graph_chain_attributes_both() {
         // Chain a->b in graph 1, b->c in graph 2: k=2 (only d=4), both attributed.
-        let g1 = commit_triples(&[t("http://ex/a", "http://ex/p", "http://ex/b")], Fr::from(1u64))
-            .unwrap();
-        let g2 = commit_triples(&[t("http://ex/b", "http://ex/p", "http://ex/c")], Fr::from(2u64))
-            .unwrap();
+        let g1 = commit_triples(
+            &[t("http://ex/a", "http://ex/p", "http://ex/b")],
+            Fr::from(1u64),
+        )
+        .unwrap();
+        let g2 = commit_triples(
+            &[t("http://ex/b", "http://ex/p", "http://ex/c")],
+            Fr::from(2u64),
+        )
+        .unwrap();
         let src = Term::NamedNode(iri("http://ex/a"));
         let dst = Term::NamedNode(iri("http://ex/c"));
         let built = build_path_reach(&[g1, g2], &iri("http://ex/p"), &src, &dst, false)
             .expect("cross-graph chain a -> b -> c");
-        assert_eq!(built.inputs.circuit_id(), &CircuitId::PathReach { d: 4, k: 2, n: 16 });
-        let ProofInputs::PathReach { depth_bound, attribution, .. } = &built.inputs else {
+        assert_eq!(
+            built.inputs.circuit_id(),
+            &CircuitId::PathReach { d: 4, k: 2, n: 16 }
+        );
+        let ProofInputs::PathReach {
+            depth_bound,
+            attribution,
+            ..
+        } = &built.inputs
+        else {
             panic!("expected PathReach inputs");
         };
         assert_eq!(*depth_bound, 4);

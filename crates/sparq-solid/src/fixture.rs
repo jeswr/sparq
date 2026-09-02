@@ -61,7 +61,13 @@ fn tree_sized(out: &mut String, extra: usize) {
                 for d in 0..4 {
                     let doc = format!("{POD}{top}/c{j}/g{k}/d{d}.ttl");
                     for n in 0..extra {
-                        quad_lit(out, &format!("{doc}#it"), &format!("{EX}note{n}"), &format!("filler {n}"), &doc);
+                        quad_lit(
+                            out,
+                            &format!("{doc}#it"),
+                            &format!("{EX}note{n}"),
+                            &format!("filler {n}"),
+                            &doc,
+                        );
                     }
                 }
             }
@@ -83,15 +89,33 @@ fn tree(out: &mut String) {
                     let doc = format!("{c3}d{d}.ttl");
                     quad(out, &c3, LDP_CONTAINS, &doc, &c3);
                     let it = format!("{doc}#it");
-                    quad_lit(out, &it, &format!("{EX}title"), &format!("doc {i}-{j}-{k}-{d}"), &doc);
-                    quad(out, &it, &format!("{EX}inSubtree"), &format!("{POD}{top}/"), &doc);
+                    quad_lit(
+                        out,
+                        &it,
+                        &format!("{EX}title"),
+                        &format!("doc {i}-{j}-{k}-{d}"),
+                        &doc,
+                    );
+                    quad(
+                        out,
+                        &it,
+                        &format!("{EX}inSubtree"),
+                        &format!("{POD}{top}/"),
+                        &doc,
+                    );
                 }
             }
         }
     }
     // the group document is a pod resource too
     let g = format!("{TEAM_GROUP_DOC}#g");
-    quad(out, &g, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", &format!("{VCARD}Group"), TEAM_GROUP_DOC);
+    quad(
+        out,
+        &g,
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        &format!("{VCARD}Group"),
+        TEAM_GROUP_DOC,
+    );
     quad(out, &g, &format!("{VCARD}hasMember"), BOB, TEAM_GROUP_DOC);
     quad(out, &g, &format!("{VCARD}hasMember"), CAROL, TEAM_GROUP_DOC);
 }
@@ -127,7 +151,13 @@ fn acl_doc(out: &mut String, resource: &str, auths: &[Auth]) {
     let g = format!("{resource}.acl");
     for a in auths {
         let s = format!("{g}#{}", a.frag);
-        quad(out, &s, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", &format!("{ACL}Authorization"), &g);
+        quad(
+            out,
+            &s,
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            &format!("{ACL}Authorization"),
+            &g,
+        );
         if a.access_to {
             quad(out, &s, &format!("{ACL}accessTo"), resource, &g);
         }
@@ -182,50 +212,108 @@ pub fn wac_fixture_sized(extra: usize) -> String {
     let mut out = String::with_capacity(1 << 20);
     tree_sized(&mut out, extra);
     let rwc: &[&str] = &["Read", "Write", "Control"];
-    let owner = |frag| Auth { frag, agents: &[ALICE], modes: rwc, ..Auth::default() };
+    let owner = |frag| Auth {
+        frag,
+        agents: &[ALICE],
+        modes: rwc,
+        ..Auth::default()
+    };
 
     // root: alice owns everything (until a deeper ACL shadows it)
     acl_doc(&mut out, POD, &[owner("owner")]);
     // pub1: public read + owner re-grant
-    acl_doc(&mut out, &format!("{POD}pub1/"), &[
-        Auth { frag: "pub", agent_classes: &[FOAF_AGENT], ..Auth::default() },
-        owner("owner"),
-    ]);
+    acl_doc(
+        &mut out,
+        &format!("{POD}pub1/"),
+        &[
+            Auth {
+                frag: "pub",
+                agent_classes: &[FOAF_AGENT],
+                ..Auth::default()
+            },
+            owner("owner"),
+        ],
+    );
     // team2: GROUP read+write, NO alice re-grant (nearest-ACL shadows the root owner!)
-    acl_doc(&mut out, &format!("{POD}team2/"), &[Auth {
-        frag: "team",
-        agent_groups: &[&format!("{TEAM_GROUP_DOC}#g")],
-        modes: &["Read", "Write"],
-        ..Auth::default()
-    }]);
+    acl_doc(
+        &mut out,
+        &format!("{POD}team2/"),
+        &[Auth {
+            frag: "team",
+            agent_groups: &[&format!("{TEAM_GROUP_DOC}#g")],
+            modes: &["Read", "Write"],
+            ..Auth::default()
+        }],
+    );
     // friends3: bob may read MEMBERS (default only); alice owns the container (accessTo only)
-    acl_doc(&mut out, &format!("{POD}friends3/"), &[
-        Auth { frag: "bob", access_to: false, agents: &[BOB], ..Auth::default() },
-        Auth { frag: "owner", default: false, agents: &[ALICE], modes: rwc, ..Auth::default() },
-    ]);
+    acl_doc(
+        &mut out,
+        &format!("{POD}friends3/"),
+        &[
+            Auth {
+                frag: "bob",
+                access_to: false,
+                agents: &[BOB],
+                ..Auth::default()
+            },
+            Auth {
+                frag: "owner",
+                default: false,
+                agents: &[ALICE],
+                modes: rwc,
+                ..Auth::default()
+            },
+        ],
+    );
     // mixed4: any AUTHENTICATED agent reads members; alice owns
-    acl_doc(&mut out, &format!("{POD}mixed4/"), &[
-        Auth { frag: "authd", agent_classes: &[&format!("{ACL}AuthenticatedAgent")], ..Auth::default() },
-        owner("owner"),
-    ]);
+    acl_doc(
+        &mut out,
+        &format!("{POD}mixed4/"),
+        &[
+            Auth {
+                frag: "authd",
+                agent_classes: &[&format!("{ACL}AuthenticatedAgent")],
+                ..Auth::default()
+            },
+            owner("owner"),
+        ],
+    );
     // origin5: bob ONLY through client/origin https://app.ex; alice owns
-    acl_doc(&mut out, &format!("{POD}origin5/"), &[
-        Auth { frag: "app", access_to: false, agents: &[BOB], origin: Some(APP), ..Auth::default() },
-        owner("owner"),
-    ]);
+    acl_doc(
+        &mut out,
+        &format!("{POD}origin5/"),
+        &[
+            Auth {
+                frag: "app",
+                access_to: false,
+                agents: &[BOB],
+                origin: Some(APP),
+                ..Auth::default()
+            },
+            owner("owner"),
+        ],
+    );
     // deep override: mixed4/c0 — carol only (alice + authenticated lose this subtree)
-    acl_doc(&mut out, &format!("{POD}mixed4/c0/"), &[Auth {
-        frag: "deep",
-        agents: &[CAROL],
-        ..Auth::default()
-    }]);
+    acl_doc(
+        &mut out,
+        &format!("{POD}mixed4/c0/"),
+        &[Auth {
+            frag: "deep",
+            agents: &[CAROL],
+            ..Auth::default()
+        }],
+    );
     // resource-specific override: ONE document readable by bob only
-    acl_doc(&mut out, &format!("{POD}mixed4/c1/g0/d0.ttl"), &[Auth {
-        frag: "doc",
-        default: false,
-        agents: &[BOB],
-        ..Auth::default()
-    }]);
+    acl_doc(
+        &mut out,
+        &format!("{POD}mixed4/c1/g0/d0.ttl"),
+        &[Auth {
+            frag: "doc",
+            default: false,
+            agents: &[BOB],
+            ..Auth::default()
+        }],
+    );
     // deeper container ACLs (~10% of the 259 containers have an own ACL). Most RESTATE
     // the parent's effective semantics; some deliberately diverge (nearest-ACL coverage):
     //   • friends3/c0,c1 WIDEN — alice gains acl:default rights she lacks at friends3/
@@ -235,24 +323,44 @@ pub fn wac_fixture_sized(extra: usize) -> String {
         acl_doc(&mut out, &format!("{POD}{c}"), &[owner("owner")]);
     }
     for c in ["pub1/c0/", "pub1/c1/", "pub1/c3/", "pub1/c4/"] {
-        acl_doc(&mut out, &format!("{POD}{c}"), &[
-            Auth { frag: "pub", agent_classes: &[FOAF_AGENT], ..Auth::default() },
-            owner("owner"),
-        ]);
+        acl_doc(
+            &mut out,
+            &format!("{POD}{c}"),
+            &[
+                Auth {
+                    frag: "pub",
+                    agent_classes: &[FOAF_AGENT],
+                    ..Auth::default()
+                },
+                owner("owner"),
+            ],
+        );
     }
     for c in ["team2/c0/", "team2/c1/", "team2/c2/"] {
-        acl_doc(&mut out, &format!("{POD}{c}"), &[Auth {
-            frag: "team",
-            agent_groups: &[&format!("{TEAM_GROUP_DOC}#g")],
-            modes: &["Read", "Write"],
-            ..Auth::default()
-        }]);
+        acl_doc(
+            &mut out,
+            &format!("{POD}{c}"),
+            &[Auth {
+                frag: "team",
+                agent_groups: &[&format!("{TEAM_GROUP_DOC}#g")],
+                modes: &["Read", "Write"],
+                ..Auth::default()
+            }],
+        );
     }
     for c in ["friends3/c0/", "friends3/c1/"] {
-        acl_doc(&mut out, &format!("{POD}{c}"), &[
-            Auth { frag: "bob", agents: &[BOB], ..Auth::default() },
-            owner("owner"),
-        ]);
+        acl_doc(
+            &mut out,
+            &format!("{POD}{c}"),
+            &[
+                Auth {
+                    frag: "bob",
+                    agents: &[BOB],
+                    ..Auth::default()
+                },
+                owner("owner"),
+            ],
+        );
     }
     for c in ["mixed4/c2/", "origin5/c0/", "origin5/c1/"] {
         acl_doc(&mut out, &format!("{POD}{c}"), &[owner("owner")]);
@@ -271,7 +379,11 @@ fn acr_doc(
     quad(out, &g, &format!("{ACP}resource"), resource, &g);
     for p in policies {
         let control = format!("{g}#ctl-{}", p.frag);
-        let pred = if p.member { "memberAccessControl" } else { "accessControl" };
+        let pred = if p.member {
+            "memberAccessControl"
+        } else {
+            "accessControl"
+        };
         quad(out, &g, &format!("{ACP}{pred}"), &control, &g);
         let pol = format!("{g}#pol-{}", p.frag);
         quad(out, &control, &format!("{ACP}apply"), &pol, &g);
@@ -281,9 +393,11 @@ fn acr_doc(
         for m in p.deny {
             quad(out, &pol, &format!("{ACP}deny"), &format!("{ACL}{m}"), &g);
         }
-        for (combinator, matchers) in
-            [("allOf", p.all_of), ("anyOf", p.any_of), ("noneOf", p.none_of)]
-        {
+        for (combinator, matchers) in [
+            ("allOf", p.all_of),
+            ("anyOf", p.any_of),
+            ("noneOf", p.none_of),
+        ] {
             for (i, (agent, client)) in matchers.iter().enumerate() {
                 let m = format!("{g}#m-{}-{combinator}{i}", p.frag);
                 quad(out, &pol, &format!("{ACP}{combinator}"), &m, &g);
@@ -313,7 +427,15 @@ struct AcpPolicy<'a> {
 
 impl Default for AcpPolicy<'_> {
     fn default() -> Self {
-        AcpPolicy { frag: "p", member: true, allow: &["Read"], deny: &[], all_of: &[], any_of: &[], none_of: &[] }
+        AcpPolicy {
+            frag: "p",
+            member: true,
+            allow: &["Read"],
+            deny: &[],
+            all_of: &[],
+            any_of: &[],
+            none_of: &[],
+        }
     }
 }
 
@@ -341,49 +463,84 @@ pub fn acp_fixture() -> String {
     };
     acr_doc(&mut out, POD, &[alice_all(false), alice_all(true)]);
     // pub1: public read for members (alice keeps access via the root — cumulative)
-    acr_doc(&mut out, &format!("{POD}pub1/"), &[AcpPolicy {
-        frag: "pub",
-        any_of: &[(Some(&public_agent), None)],
-        ..AcpPolicy::default()
-    }]);
+    acr_doc(
+        &mut out,
+        &format!("{POD}pub1/"),
+        &[AcpPolicy {
+            frag: "pub",
+            any_of: &[(Some(&public_agent), None)],
+            ..AcpPolicy::default()
+        }],
+    );
     // team2: bob + carol read/write (ACP has no groups; enumerate)
-    acr_doc(&mut out, &format!("{POD}team2/"), &[AcpPolicy {
-        frag: "team",
-        allow: &["Read", "Write"],
-        any_of: &[(Some(BOB), None), (Some(CAROL), None)],
-        ..AcpPolicy::default()
-    }]);
+    acr_doc(
+        &mut out,
+        &format!("{POD}team2/"),
+        &[AcpPolicy {
+            frag: "team",
+            allow: &["Read", "Write"],
+            any_of: &[(Some(BOB), None), (Some(CAROL), None)],
+            ..AcpPolicy::default()
+        }],
+    );
     // friends3: the native user/app PAIR — agent bob AND client app.ex (allOf)
-    acr_doc(&mut out, &format!("{POD}friends3/"), &[AcpPolicy {
-        frag: "pair",
-        all_of: &[(Some(BOB), None), (None, Some(APP))],
-        ..AcpPolicy::default()
-    }]);
+    acr_doc(
+        &mut out,
+        &format!("{POD}friends3/"),
+        &[AcpPolicy {
+            frag: "pair",
+            all_of: &[(Some(BOB), None), (None, Some(APP))],
+            ..AcpPolicy::default()
+        }],
+    );
     // mixed4: public read, but DENY dave (deny-overrides)
-    acr_doc(&mut out, &format!("{POD}mixed4/"), &[
-        AcpPolicy { frag: "pub", any_of: &[(Some(&public_agent), None)], ..AcpPolicy::default() },
-        AcpPolicy {
-            frag: "nodave",
-            allow: &[],
-            deny: &["Read"],
-            any_of: &[(Some(DAVE), None)],
-            ..AcpPolicy::default()
-        },
-    ]);
+    acr_doc(
+        &mut out,
+        &format!("{POD}mixed4/"),
+        &[
+            AcpPolicy {
+                frag: "pub",
+                any_of: &[(Some(&public_agent), None)],
+                ..AcpPolicy::default()
+            },
+            AcpPolicy {
+                frag: "nodave",
+                allow: &[],
+                deny: &["Read"],
+                any_of: &[(Some(DAVE), None)],
+                ..AcpPolicy::default()
+            },
+        ],
+    );
     // origin5: public read EXCEPT carol (noneOf -> conditional grant)
-    acr_doc(&mut out, &format!("{POD}origin5/"), &[AcpPolicy {
-        frag: "nocarol",
-        any_of: &[(Some(&public_agent), None)],
-        none_of: &[(Some(CAROL), None)],
-        ..AcpPolicy::default()
-    }]);
-    // a few extra ACRs (cumulative ⇒ harmless re-grants), keeping density comparable
-    for c in ["priv0/c0/", "priv0/c1/", "pub1/c0/", "team2/c0/", "friends3/c0/", "origin5/c0/"] {
-        acr_doc(&mut out, &format!("{POD}{c}"), &[AcpPolicy {
-            frag: "regrant",
-            all_of: &[(Some(ALICE), None)],
+    acr_doc(
+        &mut out,
+        &format!("{POD}origin5/"),
+        &[AcpPolicy {
+            frag: "nocarol",
+            any_of: &[(Some(&public_agent), None)],
+            none_of: &[(Some(CAROL), None)],
             ..AcpPolicy::default()
-        }]);
+        }],
+    );
+    // a few extra ACRs (cumulative ⇒ harmless re-grants), keeping density comparable
+    for c in [
+        "priv0/c0/",
+        "priv0/c1/",
+        "pub1/c0/",
+        "team2/c0/",
+        "friends3/c0/",
+        "origin5/c0/",
+    ] {
+        acr_doc(
+            &mut out,
+            &format!("{POD}{c}"),
+            &[AcpPolicy {
+                frag: "regrant",
+                all_of: &[(Some(ALICE), None)],
+                ..AcpPolicy::default()
+            }],
+        );
     }
     out
 }

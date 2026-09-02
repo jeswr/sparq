@@ -68,8 +68,7 @@ use sparq_geo::{geof_registry, geosparql_rewrite, GeoError};
 /// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
 /// ONE `const` and cannot drift (replacing the old textual re-read of this file).
 /// Raise it THERE; the measurement narrative stays here.
-const OGC_QUERY_REWRITE_FLOOR: usize =
-    sparq_conformance_floors::geo::OGC_QUERY_REWRITE_FLOOR;
+const OGC_QUERY_REWRITE_FLOOR: usize = sparq_conformance_floors::geo::OGC_QUERY_REWRITE_FLOOR;
 
 /// A named WKT geometry body assigned to a feature in the test graph.
 struct Feature {
@@ -138,67 +137,199 @@ const OVERLAP: &str = "POLYGON((3 3, 6 3, 6 6, 3 6, 3 3))";
 /// corner-tangent region, an edge-adjacent region, a far region, and an
 /// overlapping region. Pairwise relations cover the sf/eh/rcc8 truth tables.
 const REGIONS: &[Feature] = &[
-    Feature { name: "big", wkt: BIG },
-    Feature { name: "small", wkt: SMALL_INSIDE },
-    Feature { name: "tangent", wkt: CORNER_TANGENT },
-    Feature { name: "adjacent", wkt: EDGE_ADJACENT },
-    Feature { name: "far", wkt: FAR },
-    Feature { name: "overlap", wkt: OVERLAP },
+    Feature {
+        name: "big",
+        wkt: BIG,
+    },
+    Feature {
+        name: "small",
+        wkt: SMALL_INSIDE,
+    },
+    Feature {
+        name: "tangent",
+        wkt: CORNER_TANGENT,
+    },
+    Feature {
+        name: "adjacent",
+        wkt: EDGE_ADJACENT,
+    },
+    Feature {
+        name: "far",
+        wkt: FAR,
+    },
+    Feature {
+        name: "overlap",
+        wkt: OVERLAP,
+    },
 ];
 
 /// A mixed point/line/polygon corpus for the Simple-Features cases.
 const MIXED: &[Feature] = &[
-    Feature { name: "ptIn", wkt: "POINT(2 2)" },
-    Feature { name: "ptBoundary", wkt: "POINT(0 2)" },
-    Feature { name: "ptOut", wkt: "POINT(9 9)" },
-    Feature { name: "lineCross", wkt: "LINESTRING(-1 2, 5 2)" },
-    Feature { name: "lineInside", wkt: "LINESTRING(1 1, 3 3)" },
-    Feature { name: "region", wkt: BIG },
+    Feature {
+        name: "ptIn",
+        wkt: "POINT(2 2)",
+    },
+    Feature {
+        name: "ptBoundary",
+        wkt: "POINT(0 2)",
+    },
+    Feature {
+        name: "ptOut",
+        wkt: "POINT(9 9)",
+    },
+    Feature {
+        name: "lineCross",
+        wkt: "LINESTRING(-1 2, 5 2)",
+    },
+    Feature {
+        name: "lineInside",
+        wkt: "LINESTRING(1 1, 3 3)",
+    },
+    Feature {
+        name: "region",
+        wkt: BIG,
+    },
 ];
 
 /// The query-rewrite conformance corpus. Each case is driven in both
 /// orientations; expected feature sets are derived from [`relation_for`].
 const CASES: &[Case] = &[
     // ---- Simple Features over the mixed point/line/polygon corpus -----------
-    Case { relation: "sfWithin", features: MIXED, fixed: "region" },
-    Case { relation: "sfContains", features: MIXED, fixed: "region" },
-    Case { relation: "sfIntersects", features: MIXED, fixed: "region" },
-    Case { relation: "sfDisjoint", features: MIXED, fixed: "region" },
-    Case { relation: "sfTouches", features: MIXED, fixed: "region" },
+    Case {
+        relation: "sfWithin",
+        features: MIXED,
+        fixed: "region",
+    },
+    Case {
+        relation: "sfContains",
+        features: MIXED,
+        fixed: "region",
+    },
+    Case {
+        relation: "sfIntersects",
+        features: MIXED,
+        fixed: "region",
+    },
+    Case {
+        relation: "sfDisjoint",
+        features: MIXED,
+        fixed: "region",
+    },
+    Case {
+        relation: "sfTouches",
+        features: MIXED,
+        fixed: "region",
+    },
     // ---- Simple Features over the region corpus -----------------------------
-    Case { relation: "sfOverlaps", features: REGIONS, fixed: "big" },
-    Case { relation: "sfEquals", features: REGIONS, fixed: "big" },
+    Case {
+        relation: "sfOverlaps",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "sfEquals",
+        features: REGIONS,
+        fixed: "big",
+    },
     // [SONNET-4.6] sq-lk3aw.2 — sfCrosses: a line that enters and exits the
     // big polygon crosses it; the MIXED corpus contains `lineCross` which does
     // exactly that. sfCrosses is undefined for point-polygon (always false in
     // DE-9IM), so only `lineCross` matches in the subject orientation.
-    Case { relation: "sfCrosses", features: MIXED, fixed: "region" },
+    Case {
+        relation: "sfCrosses",
+        features: MIXED,
+        fixed: "region",
+    },
     // ---- Egenhofer over the region corpus -----------------------------------
-    Case { relation: "ehInside", features: REGIONS, fixed: "big" },
-    Case { relation: "ehContains", features: REGIONS, fixed: "big" },
-    Case { relation: "ehCoveredBy", features: REGIONS, fixed: "big" },
-    Case { relation: "ehDisjoint", features: REGIONS, fixed: "far" },
-    Case { relation: "ehMeet", features: REGIONS, fixed: "big" },
-    Case { relation: "ehOverlap", features: REGIONS, fixed: "big" },
+    Case {
+        relation: "ehInside",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "ehContains",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "ehCoveredBy",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "ehDisjoint",
+        features: REGIONS,
+        fixed: "far",
+    },
+    Case {
+        relation: "ehMeet",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "ehOverlap",
+        features: REGIONS,
+        fixed: "big",
+    },
     // [SONNET-4.6] sq-lk3aw.2 — ehEquals: reflexive on `big`; the only pair
     // in REGIONS with the same WKT is (big, big). ehCovers(A, B): A covers B
     // (every point of B is in the closure of A's interior); `big` covers all
     // contained regions (`small`, `tangent`). Both fixed on "big".
-    Case { relation: "ehEquals", features: REGIONS, fixed: "big" },
-    Case { relation: "ehCovers", features: REGIONS, fixed: "big" },
+    Case {
+        relation: "ehEquals",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "ehCovers",
+        features: REGIONS,
+        fixed: "big",
+    },
     // ---- RCC8 over the region corpus ----------------------------------------
-    Case { relation: "rcc8ntpp", features: REGIONS, fixed: "big" },
-    Case { relation: "rcc8ntppi", features: REGIONS, fixed: "big" },
-    Case { relation: "rcc8tpp", features: REGIONS, fixed: "big" },
-    Case { relation: "rcc8ec", features: REGIONS, fixed: "big" },
-    Case { relation: "rcc8dc", features: REGIONS, fixed: "far" },
-    Case { relation: "rcc8po", features: REGIONS, fixed: "big" },
+    Case {
+        relation: "rcc8ntpp",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "rcc8ntppi",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "rcc8tpp",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "rcc8ec",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "rcc8dc",
+        features: REGIONS,
+        fixed: "far",
+    },
+    Case {
+        relation: "rcc8po",
+        features: REGIONS,
+        fixed: "big",
+    },
     // [SONNET-4.6] sq-lk3aw.2 — rcc8eq: reflexive on `big`. rcc8tppi(A, B)
     // means B is a Tangential Proper Part of A; with fixed="tangent" the
     // subject orientation finds `big` (which has `tangent` as a TPP sharing
     // the corner-vertex boundary).
-    Case { relation: "rcc8eq", features: REGIONS, fixed: "big" },
-    Case { relation: "rcc8tppi", features: REGIONS, fixed: "tangent" },
+    Case {
+        relation: "rcc8eq",
+        features: REGIONS,
+        fixed: "big",
+    },
+    Case {
+        relation: "rcc8tppi",
+        features: REGIONS,
+        fixed: "tangent",
+    },
 ];
 
 /// Build the Turtle for a feature corpus: each feature resolves through
@@ -358,7 +489,8 @@ fn ogc_query_rewrite_compliance_ratchet() {
     println!("pass {pass} / fail {fail} (floor {OGC_QUERY_REWRITE_FLOOR})");
 
     assert_eq!(
-        fail, 0,
+        fail,
+        0,
         "OGC query-rewrite compliance regressions:\n{}",
         failures.join("\n")
     );
@@ -447,8 +579,8 @@ fn semantics_preserving_rewrite_matches_explicit_filter_form() {
 
     // Execute property form through the rewrite.
     let rewrite_prepared = geosparql_rewrite(&prop_sparql).expect("rewrite parse");
-    let rewrite_result =
-        with_functions(&reg, || query_prepared(&graph, &rewrite_prepared)).expect("rewrite execute");
+    let rewrite_result = with_functions(&reg, || query_prepared(&graph, &rewrite_prepared))
+        .expect("rewrite execute");
 
     // Execute FILTER form through the STANDARD engine (geof: functions registered).
     let filter_result =

@@ -191,8 +191,7 @@ impl AcpModel {
         // [GPT-5.6] sq-61uvs: an ACR is a control document, not an ordinary member
         // resource. A member Read/Write policy must not disclose it. ACP has no WAC-style
         // Control-to-control-document translation, so this corpus surface fails closed.
-        if req.resource.ends_with(ACR_SUFFIX)
-            && matches!(req.mode, RefMode::Read | RefMode::Write)
+        if req.resource.ends_with(ACR_SUFFIX) && matches!(req.mode, RefMode::Read | RefMode::Write)
         {
             return RefDecision::Deny;
         }

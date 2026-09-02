@@ -32,7 +32,12 @@ fn serve_handles_a_line_delimited_session() {
 
     let text = String::from_utf8(out).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 2, "two responses, the notification produced none: {:?}", lines);
+    assert_eq!(
+        lines.len(),
+        2,
+        "two responses, the notification produced none: {:?}",
+        lines
+    );
 
     let init: Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(init["id"], 1);
@@ -77,12 +82,19 @@ fn serve_carries_a_batch_on_a_single_line_each_way() {
 
     let batch: Value = serde_json::from_str(lines[0]).unwrap();
     let batch = batch.as_array().expect("the batch line holds an array");
-    assert_eq!(batch.len(), 2, "the notification element contributes nothing");
+    assert_eq!(
+        batch.len(),
+        2,
+        "the notification element contributes nothing"
+    );
     assert_eq!(batch[0]["id"], 1);
     assert_eq!(batch[1]["id"], 2);
 
     let single: Value = serde_json::from_str(lines[1]).unwrap();
-    assert!(!single.is_array(), "a single request still gets a bare object");
+    assert!(
+        !single.is_array(),
+        "a single request still gets a bare object"
+    );
     assert_eq!(single["id"], 3);
 }
 

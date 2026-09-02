@@ -125,8 +125,7 @@ fn target_predicate_set(shape: &ShapeRef) -> std::collections::BTreeSet<String> 
                 oxrdf::NamedOrBlankNode::BlankNode(b) => format!("B{}", b.as_str()),
                 oxrdf::NamedOrBlankNode::NamedNode(n) => format!("I{}", n.as_str()),
             };
-            subj == root
-                && t.predicate.as_str() == "http://www.w3.org/ns/shacl#targetSubjectsOf"
+            subj == root && t.predicate.as_str() == "http://www.w3.org/ns/shacl#targetSubjectsOf"
         })
         .filter_map(|t| match &t.object {
             Term::NamedNode(n) => Some(n.as_str().to_string()),
@@ -202,7 +201,12 @@ fn assert_no_derivation(anchors: &[TrustRule], certs: &[Certification]) {
 #[test]
 fn positive_certified_issuer_admitted_within_intersected_scope() {
     let (anchor_rule, cert, iss_pk) = good_cert();
-    let out = derive_effective_rules(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert), NOW, 1);
+    let out = derive_effective_rules(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+        NOW,
+        1,
+    );
     assert_eq!(out.len(), 2, "anchor + one derived rule");
     // Anchor first, verbatim.
     assert_eq!(out[0].source.as_str(), GOV);
@@ -211,7 +215,11 @@ fn positive_certified_issuer_admitted_within_intersected_scope() {
     let d = &out[1];
     assert_eq!(d.source.as_str(), ISSUER);
     assert_eq!(public_key_to_hex(&d.issuer_key), public_key_to_hex(&iss_pk));
-    assert_eq!(d.scope.as_str(), RES, "resource scope is the certifier ceiling, unchanged");
+    assert_eq!(
+        d.scope.as_str(),
+        RES,
+        "resource scope is the certifier ceiling, unchanged"
+    );
     assert!(
         d.fresh_within_secs <= anchor_rule.fresh_within_secs,
         "attenuation: derived freshness never exceeds the anchor's"
@@ -252,7 +260,12 @@ fn zero_certifications_is_direct_rules_byte_identical() {
     let (_sk, pk) = keypair(1);
     let rules = vec![
         anchor("https://a.ex", pk, predicate_shape(AGE), "https://pod.ex/"),
-        anchor("https://b.ex", pk, predicate_shape(NAME), "https://pod.ex/x"),
+        anchor(
+            "https://b.ex",
+            pk,
+            predicate_shape(NAME),
+            "https://pod.ex/x",
+        ),
     ];
     let out = derive_effective_rules(&rules, &[], NOW, 1);
     assert_eq!(out.len(), rules.len(), "no certs ⇒ no derived rules");
@@ -278,12 +291,44 @@ fn all_edges_denied_leaves_direct_rules_byte_identical() {
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
 
     // forged (attacker-signed), expired, self-cert cycle, no-anchor
-    let mut forged = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let mut forged = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
     forged.signature_hex = SecretKey::from_seed(9).sign_commitment(&certification_message(&forged));
-    let expired = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 100, NOW - 50);
-    let self_cert = signed_cert(GOV, &gov_sk, GOV, atk_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let expired = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 100,
+        NOW - 50,
+    );
+    let self_cert = signed_cert(
+        GOV,
+        &gov_sk,
+        GOV,
+        atk_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
     let (unknown_sk, _unknown_pk) = keypair(7);
-    let no_anchor = signed_cert("https://rogue.ex", &unknown_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let no_anchor = signed_cert(
+        "https://rogue.ex",
+        &unknown_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
 
     assert_no_derivation(
         std::slice::from_ref(&anchor_rule),
@@ -300,14 +345,25 @@ fn forged_certifier_signature_is_denied() {
     let (gov_sk, gov_pk) = keypair(1);
     let (_iss_sk, iss_pk) = keypair(2);
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
-    let mut cert = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let mut cert = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
     // Re-sign under an attacker key while leaving certifier_key = GOV's key.
     cert.signature_hex = SecretKey::from_seed(42).sign_commitment(&certification_message(&cert));
     assert!(matches!(
         explain_edge(std::slice::from_ref(&anchor_rule), &cert, NOW, 1),
         Err(EdgeRejection::SignatureInvalid)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+    );
 }
 
 #[test]
@@ -318,7 +374,10 @@ fn absent_signature_is_denied() {
         explain_edge(std::slice::from_ref(&anchor_rule), &cert, NOW, 1),
         Err(EdgeRejection::SignatureInvalid)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+    );
 }
 
 #[test]
@@ -358,7 +417,10 @@ fn key_substitution_on_certified_issuer_is_denied() {
         explain_edge(std::slice::from_ref(&anchor_rule), &cert, NOW, 1),
         Err(EdgeRejection::SignatureInvalid)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+    );
 }
 
 #[test]
@@ -382,7 +444,10 @@ fn no_matching_anchor_is_denied() {
         explain_edge(std::slice::from_ref(&anchor_rule), &cert, NOW, 1),
         Err(EdgeRejection::NoAnchor)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+    );
 }
 
 #[test]
@@ -395,12 +460,23 @@ fn certifier_named_with_wrong_key_is_denied() {
     let (_iss_sk, iss_pk) = keypair(2);
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
     // signed_cert sets certifier_key = wrong_sk.public_key(); the IRI is GOV.
-    let cert = signed_cert(GOV, &wrong_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let cert = signed_cert(
+        GOV,
+        &wrong_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
     assert!(matches!(
         explain_edge(std::slice::from_ref(&anchor_rule), &cert, NOW, 1),
         Err(EdgeRejection::NoAnchor)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+    );
 }
 
 #[test]
@@ -424,7 +500,10 @@ fn scope_broadening_shape_cert_is_denied() {
         explain_edge(std::slice::from_ref(&narrow_anchor), &broadening, NOW, 1),
         Err(EdgeRejection::Broadening)
     ));
-    assert_no_derivation(std::slice::from_ref(&narrow_anchor), std::slice::from_ref(&broadening));
+    assert_no_derivation(
+        std::slice::from_ref(&narrow_anchor),
+        std::slice::from_ref(&broadening),
+    );
 }
 
 #[test]
@@ -462,7 +541,10 @@ fn partial_shape_dropping_an_anchor_constraint_is_denied() {
         ),
         "a cert shape that DROPS an anchor constraint admits more nodes ⇒ broadening ⇒ denied"
     );
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+    );
 }
 
 #[test]
@@ -486,7 +568,10 @@ fn cert_shape_for_a_different_predicate_is_denied() {
         explain_edge(std::slice::from_ref(&anchor_rule), &cert, NOW, 1),
         Err(EdgeRejection::Broadening)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+    );
 }
 
 #[test]
@@ -497,7 +582,15 @@ fn any_service_cert_over_shape_scoped_anchor_never_broadens_shape() {
     let (gov_sk, gov_pk) = keypair(1);
     let (_iss_sk, iss_pk) = keypair(2);
     let narrow_anchor = anchor(GOV, gov_pk, narrower_shape(AGE), RES);
-    let cert = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let cert = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
     let d = explain_edge(std::slice::from_ref(&narrow_anchor), &cert, NOW, 1)
         .expect("AnyService inherits the anchor shape (a valid narrowing = identity)");
     assert_eq!(
@@ -512,12 +605,23 @@ fn expired_certification_is_denied() {
     let (gov_sk, gov_pk) = keypair(1);
     let (_iss_sk, iss_pk) = keypair(2);
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
-    let expired = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 100, NOW - 50);
+    let expired = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 100,
+        NOW - 50,
+    );
     assert!(matches!(
         explain_edge(std::slice::from_ref(&anchor_rule), &expired, NOW, 1),
         Err(EdgeRejection::OutOfWindow)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&expired));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&expired),
+    );
 }
 
 #[test]
@@ -525,12 +629,23 @@ fn not_yet_valid_certification_is_denied() {
     let (gov_sk, gov_pk) = keypair(1);
     let (_iss_sk, iss_pk) = keypair(2);
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
-    let future = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW + 50, NOW + 100);
+    let future = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW + 50,
+        NOW + 100,
+    );
     assert!(matches!(
         explain_edge(std::slice::from_ref(&anchor_rule), &future, NOW, 1),
         Err(EdgeRejection::OutOfWindow)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&future));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&future),
+    );
 }
 
 #[test]
@@ -540,12 +655,23 @@ fn inverted_window_certification_is_denied() {
     let (gov_sk, gov_pk) = keypair(1);
     let (_iss_sk, iss_pk) = keypair(2);
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
-    let inverted = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW + 100, NOW - 100);
+    let inverted = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW + 100,
+        NOW - 100,
+    );
     assert!(matches!(
         explain_edge(std::slice::from_ref(&anchor_rule), &inverted, NOW, 1),
         Err(EdgeRejection::OutOfWindow)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&inverted));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&inverted),
+    );
 }
 
 #[test]
@@ -555,12 +681,23 @@ fn self_certification_cycle_is_denied() {
     let (gov_sk, gov_pk) = keypair(1);
     let (_atk_sk, atk_pk) = keypair(9);
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
-    let self_cert = signed_cert(GOV, &gov_sk, GOV, atk_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let self_cert = signed_cert(
+        GOV,
+        &gov_sk,
+        GOV,
+        atk_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
     assert!(matches!(
         explain_edge(std::slice::from_ref(&anchor_rule), &self_cert, NOW, 1),
         Err(EdgeRejection::Cyclic)
     ));
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&self_cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&self_cert),
+    );
 }
 
 #[test]
@@ -572,7 +709,15 @@ fn certified_issuer_already_anchoring_certifier_is_a_cycle_and_denied() {
     let (_iss_sk, iss_pk) = keypair(2);
     let gov_anchor = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
     let issuer_anchor = anchor(ISSUER, iss_pk, predicate_shape(NAME), RES);
-    let cert = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let cert = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
     let anchors = vec![gov_anchor, issuer_anchor];
     assert!(matches!(
         explain_edge(&anchors, &cert, NOW, 1),
@@ -591,7 +736,12 @@ fn over_depth_is_denied_at_depth_zero() {
         explain_edge(std::slice::from_ref(&anchor_rule), &cert, NOW, 0),
         Err(EdgeRejection::OverDepth)
     ));
-    let out = derive_effective_rules(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert), NOW, 0);
+    let out = derive_effective_rules(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+        NOW,
+        0,
+    );
     assert_eq!(out.len(), 1, "depth 0 ⇒ anchors only");
 }
 
@@ -605,7 +755,15 @@ fn derived_rule_is_never_reused_as_an_anchor_no_transitive_chain() {
     let (iss_sk, iss_pk) = keypair(2);
     let (_third_sk, third_pk) = keypair(3);
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
-    let gov_to_issuer = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let gov_to_issuer = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
     // ISSUER signs an edge to a THIRD party — but ISSUER is not a direct anchor.
     let issuer_to_third = signed_cert(
         ISSUER,
@@ -623,7 +781,11 @@ fn derived_rule_is_never_reused_as_an_anchor_no_transitive_chain() {
         1,
     );
     // anchor + ISSUER only — THIRD is NOT derived (depth-1; no transitive chaining).
-    assert_eq!(out.len(), 2, "only the direct GOV→ISSUER edge derives; ISSUER→THIRD does not");
+    assert_eq!(
+        out.len(),
+        2,
+        "only the direct GOV→ISSUER edge derives; ISSUER→THIRD does not"
+    );
     assert!(out.iter().all(|r| r.source.as_str() != "https://third.ex"));
 }
 
@@ -658,7 +820,10 @@ fn attribute_scoped_issuer_cannot_meta_escalate_to_certify_another_issuer() {
         ),
         "certifying an issuer for a predicate OUTSIDE the certifier's own scope is a broadening"
     );
-    assert_no_derivation(std::slice::from_ref(&issuer_anchor), std::slice::from_ref(&escalation));
+    assert_no_derivation(
+        std::slice::from_ref(&issuer_anchor),
+        std::slice::from_ref(&escalation),
+    );
 }
 
 #[test]
@@ -697,7 +862,15 @@ fn derived_freshness_is_capped_by_the_certification_window() {
     let (gov_sk, gov_pk) = keypair(1);
     let (_iss_sk, iss_pk) = keypair(2);
     let anchor_rule = anchor(GOV, gov_pk, predicate_shape(AGE), RES); // FRESH = 30d
-    let short = signed_cert(GOV, &gov_sk, ISSUER, iss_pk, CertScope::AnyService, NOW - 10, NOW + 100);
+    let short = signed_cert(
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 100,
+    );
     let d = explain_edge(std::slice::from_ref(&anchor_rule), &short, NOW, 1)
         .expect("in-window, signed, narrowing edge is admitted");
     assert!(
@@ -740,7 +913,10 @@ fn additive_target_predicate_cert_is_denied_as_broadening() {
         ),
         "an ADDITIVE target predicate WIDENS the admitted set ⇒ broadening ⇒ denied"
     );
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&broadening));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&broadening),
+    );
 }
 
 #[test]
@@ -760,18 +936,31 @@ fn every_derived_rule_target_set_is_subset_of_the_anchor_target_set() {
 
     let email = "https://schema.org/email";
     let broadening = signed_cert(
-        GOV, &gov_sk, ISSUER, iss_pk,
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
         CertScope::Shape(additive_target_shape(AGE, email)),
-        NOW - 10, NOW + 10,
+        NOW - 10,
+        NOW + 10,
     );
     let narrowing = signed_cert(
-        GOV, &gov_sk, "https://issuer.example/two", iss2_pk,
+        GOV,
+        &gov_sk,
+        "https://issuer.example/two",
+        iss2_pk,
         CertScope::Shape(narrower_shape(AGE)),
-        NOW - 10, NOW + 10,
+        NOW - 10,
+        NOW + 10,
     );
     let anyservice = signed_cert(
-        GOV, &gov_sk, "https://issuer.example/three", keypair(5).1,
-        CertScope::AnyService, NOW - 10, NOW + 10,
+        GOV,
+        &gov_sk,
+        "https://issuer.example/three",
+        keypair(5).1,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
     );
 
     let out = derive_effective_rules(
@@ -782,7 +971,11 @@ fn every_derived_rule_target_set_is_subset_of_the_anchor_target_set() {
     );
     // The broadening edge must contribute nothing; the two legitimate narrowings do. Anchor +
     // (narrowing, anyservice) = 3 rules; the additive-target broadening is dropped.
-    assert_eq!(out.len(), 3, "additive-target broadening dropped; two narrowings derived");
+    assert_eq!(
+        out.len(),
+        3,
+        "additive-target broadening dropped; two narrowings derived"
+    );
     // EVERY derived rule (index ≥ 1) must target a SUBSET of the anchor's target predicates.
     for derived in &out[1..] {
         let derived_targets = target_predicate_set(&derived.shape);
@@ -796,7 +989,9 @@ fn every_derived_rule_target_set_is_subset_of_the_anchor_target_set() {
     }
     // And no derived rule may target `email` (the predicate the broadening tried to smuggle).
     assert!(
-        out[1..].iter().all(|r| !target_predicate_set(&r.shape).contains(email)),
+        out[1..]
+            .iter()
+            .all(|r| !target_predicate_set(&r.shape).contains(email)),
         "no derived rule may target the smuggled `email` predicate"
     );
 }
@@ -822,9 +1017,13 @@ fn un_modelled_selection_predicate_cert_fails_closed() {
         ));
     }
     let cert = signed_cert(
-        GOV, &gov_sk, ISSUER, iss_pk,
+        GOV,
+        &gov_sk,
+        ISSUER,
+        iss_pk,
         CertScope::Shape(shape),
-        NOW - 10, NOW + 10,
+        NOW - 10,
+        NOW + 10,
     );
     assert!(
         matches!(
@@ -833,5 +1032,8 @@ fn un_modelled_selection_predicate_cert_fails_closed() {
         ),
         "an un-modelled / extra SHACL target predicate ⇒ fail-closed (Broadening), never admitted"
     );
-    assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+    assert_no_derivation(
+        std::slice::from_ref(&anchor_rule),
+        std::slice::from_ref(&cert),
+    );
 }

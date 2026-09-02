@@ -20,7 +20,12 @@ const ALICE: &str = "https://alice.ex/card#me";
 const BOB: &str = "https://bob.ex/card#me";
 
 fn sess(agent: &str) -> Session<'_> {
-    Session { agent: Some(agent), client: None, issuer: None, now: None }
+    Session {
+        agent: Some(agent),
+        client: None,
+        issuer: None,
+        now: None,
+    }
 }
 
 /// Two pods (a.ex, b.ex). Alice may Read both; Bob may Read only b.ex.
@@ -44,7 +49,11 @@ fn two_pod_store() -> PodStore {
 }
 
 fn read_iris(store: &PodStore, s: &Session) -> Vec<String> {
-    store.accessible(s, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect()
+    store
+        .accessible(s, Mode::Read)
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect()
 }
 
 #[test]
@@ -63,15 +72,26 @@ fn many_threads_share_one_ref_and_get_session_scoped_results() {
                 let alice = read_iris(&store, &sess(ALICE));
                 assert_eq!(alice.len(), 2, "alice reads both pods (thread {t})");
                 let bob = read_iris(&store, &sess(BOB));
-                assert_eq!(bob, vec!["https://b.ex/m1".to_owned()], "bob reads only b.ex");
+                assert_eq!(
+                    bob,
+                    vec!["https://b.ex/m1".to_owned()],
+                    "bob reads only b.ex"
+                );
                 // A full query goes through the same &self view path concurrently.
                 let n = store
-                    .query_as(&sess(ALICE), Mode::Read, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }")
+                    .query_as(
+                        &sess(ALICE),
+                        Mode::Read,
+                        "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }",
+                    )
                     .expect("query ok")
                     .rows
                     .len();
                 assert_eq!(n, 2, "alice's concurrent query sees both pod docs");
-                assert!(read_iris(&store, &Session::default()).is_empty(), "anon fail-closed");
+                assert!(
+                    read_iris(&store, &Session::default()).is_empty(),
+                    "anon fail-closed"
+                );
             }
         }));
     }
@@ -124,7 +144,9 @@ fn invalidation_under_concurrent_read_is_snapshot_consistent() {
             // Exclusive lock only for the write; the &mut is needed for put_acl (the reindex
             // seam). Readers proceed on either side; both snapshots are individually correct.
             let mut guard = store.write().expect("wlock");
-            guard.put_acl("https://a.ex/.acl", "", "ntriples").expect("revoke");
+            guard
+                .put_acl("https://a.ex/.acl", "", "ntriples")
+                .expect("revoke");
         })
     };
 
@@ -135,12 +157,20 @@ fn invalidation_under_concurrent_read_is_snapshot_consistent() {
 
     // After the dust settles, every reader sees exactly the revoked view.
     let guard = store.read().expect("rlock");
-    assert_eq!(read_iris(&guard, &sess(ALICE)), post, "converged on revoked view");
+    assert_eq!(
+        read_iris(&guard, &sess(ALICE)),
+        post,
+        "converged on revoked view"
+    );
     // And it equals a from-scratch rebuild — no stale grant survived the concurrent churn.
     let fresh: Vec<String> = sparq_solid::AuthIndex::from_graph(&guard.graph)
         .accessible(&sess(ALICE), Mode::Read)
         .iter()
         .map(|n| n.as_str().to_owned())
         .collect();
-    assert_eq!(read_iris(&guard, &sess(ALICE)), fresh, "no stale grant after churn");
+    assert_eq!(
+        read_iris(&guard, &sess(ALICE)),
+        fresh,
+        "no stale grant after churn"
+    );
 }

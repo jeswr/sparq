@@ -27,13 +27,11 @@ const ROUNDS_F: usize = 8;
 const ROUNDS_P: usize = 56;
 const RATE: usize = 3;
 
-static INTERNAL_MATRIX_DIAGONAL: LazyLock<[Fr; 4]> = LazyLock::new(|| {
-    INTERNAL_MATRIX_DIAGONAL_HEX.map(field_from_hex)
-});
+static INTERNAL_MATRIX_DIAGONAL: LazyLock<[Fr; 4]> =
+    LazyLock::new(|| INTERNAL_MATRIX_DIAGONAL_HEX.map(field_from_hex));
 
-static ROUND_CONSTANT: LazyLock<[[Fr; 4]; 64]> = LazyLock::new(|| {
-    ROUND_CONSTANT_HEX.map(|round| round.map(field_from_hex))
-});
+static ROUND_CONSTANT: LazyLock<[[Fr; 4]; 64]> =
+    LazyLock::new(|| ROUND_CONSTANT_HEX.map(|round| round.map(field_from_hex)));
 
 #[inline]
 fn single_box(x: Fr) -> Fr {
@@ -191,7 +189,15 @@ mod tests {
     fn hash_empty_input_runs_final_permutation() {
         let e = hash(&[]);
         assert_eq!(e, hash(&[]), "empty-input hash is deterministic");
-        assert_ne!(e, Fr::from(0u64), "empty input runs the final permutation, not identity");
-        assert_ne!(e, hash(&[Fr::from(0u64)]), "length enters the IV (0 vs 1 element)");
+        assert_ne!(
+            e,
+            Fr::from(0u64),
+            "empty input runs the final permutation, not identity"
+        );
+        assert_ne!(
+            e,
+            hash(&[Fr::from(0u64)]),
+            "length enters the IV (0 vs 1 element)"
+        );
     }
 }

@@ -343,9 +343,12 @@ fn json_response_with_link(status: StatusCode, body: String, acl_link: Option<&s
 fn parse_request(body: &Bytes) -> Result<AuthzRequest, Response> {
     let v: serde_json::Value = serde_json::from_slice(body)
         .map_err(|_| json_error(StatusCode::BAD_REQUEST, "request body is not valid JSON"))?;
-    let obj = v
-        .as_object()
-        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "request body must be a JSON object"))?;
+    let obj = v.as_object().ok_or_else(|| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "request body must be a JSON object",
+        )
+    })?;
     // [SONNET-4.6] sq-snopa.8 — the stateless/stateful switch. Only an ABSENT key defaults to
     // `body` (the historical behaviour, byte-identical). A key that is PRESENT but not a string
     // (`null`, `false`, a number, an array/object) is a fail-closed client error, NOT an absent
@@ -442,10 +445,7 @@ fn parse_request(body: &Bytes) -> Result<AuthzRequest, Response> {
 fn build_store(req: &AuthzRequest) -> Result<PodStore, Response> {
     let graph = sparq_core::Graph::load_dataset(&req.dataset, "nquads").map_err(|_| {
         // The parser's detail is withheld from the client (info-leak posture); the class is enough.
-        json_error(
-            StatusCode::BAD_REQUEST,
-            "'dataset' is not valid N-Quads",
-        )
+        json_error(StatusCode::BAD_REQUEST, "'dataset' is not valid N-Quads")
     })?;
     let view = req.view.unwrap_or_else(|| infer_view(&req.dataset));
     let mut store = PodStore::new(graph);
@@ -640,13 +640,12 @@ async fn server_store(
 /// Both lanes are fail-closed; neither can yield a store that silently grants.
 // [SONNET-4.6] `Response` is large; same `result_large_err` allow as the rest of this module.
 #[allow(clippy::result_large_err)]
-async fn resolve_store(
-    state: &AppState,
-    req: &AuthzRequest,
-) -> Result<ResolvedStore, Response> {
+async fn resolve_store(state: &AppState, req: &AuthzRequest) -> Result<ResolvedStore, Response> {
     match req.source {
         AuthzSource::Body => build_store(req).map(|s| ResolvedStore::Owned(Box::new(s))),
-        AuthzSource::Server => server_store(state, req.view).await.map(ResolvedStore::Shared),
+        AuthzSource::Server => server_store(state, req.view)
+            .await
+            .map(ResolvedStore::Shared),
     }
 }
 
@@ -691,7 +690,10 @@ pub(crate) async fn decide_endpoint(
     let resource = match v.get("resource").and_then(|r| r.as_str()) {
         Some(r) => r.to_owned(),
         None => {
-            return json_error(StatusCode::BAD_REQUEST, "'resource' (IRI string) is required");
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "'resource' (IRI string) is required",
+            );
         }
     };
     // An unknown / absent mode is a fail-closed deny: an un-parseable mode can never be granted, so
@@ -943,84 +945,146 @@ struct WireCredential {
 /// [SONNET-4.6] (sq-pfae.17) Parse a `WireTrustRule` from a JSON object. Fail-closed: any
 /// missing/mistyped field => `Err(reason)`.
 #[cfg(feature = "solid-authz-trust")]
-fn parse_wire_rule(obj: &serde_json::Map<String, serde_json::Value>) -> Result<WireTrustRule, &'static str> {
-    let source = obj.get("source").and_then(|v| v.as_str())
+fn parse_wire_rule(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<WireTrustRule, &'static str> {
+    let source = obj
+        .get("source")
+        .and_then(|v| v.as_str())
         .ok_or("trust rule missing 'source'")?
         .to_owned();
-    let issuer_key_hex = obj.get("issuerKeyHex").and_then(|v| v.as_str())
+    let issuer_key_hex = obj
+        .get("issuerKeyHex")
+        .and_then(|v| v.as_str())
         .ok_or("trust rule missing 'issuerKeyHex'")?
         .to_owned();
-    let scope_iri = obj.get("scopeIri").and_then(|v| v.as_str())
+    let scope_iri = obj
+        .get("scopeIri")
+        .and_then(|v| v.as_str())
         .ok_or("trust rule missing 'scopeIri'")?
         .to_owned();
-    let fresh_within_secs = obj.get("freshWithinSecs").and_then(|v| v.as_i64())
+    let fresh_within_secs = obj
+        .get("freshWithinSecs")
+        .and_then(|v| v.as_i64())
         .ok_or("trust rule missing/invalid 'freshWithinSecs'")?;
-    let shape_predicate_iri = obj.get("shapePredicateIri").and_then(|v| v.as_str())
+    let shape_predicate_iri = obj
+        .get("shapePredicateIri")
+        .and_then(|v| v.as_str())
         .ok_or("trust rule missing 'shapePredicateIri'")?
         .to_owned();
-    Ok(WireTrustRule { source, issuer_key_hex, scope_iri, fresh_within_secs, shape_predicate_iri })
+    Ok(WireTrustRule {
+        source,
+        issuer_key_hex,
+        scope_iri,
+        fresh_within_secs,
+        shape_predicate_iri,
+    })
 }
 
 /// [SONNET-4.6] (sq-pfae.17) Parse a `WireCertification` from a JSON object. Fail-closed.
 #[cfg(feature = "solid-authz-trust")]
-fn parse_wire_certification(obj: &serde_json::Map<String, serde_json::Value>) -> Result<WireCertification, &'static str> {
-    let certifier_iri = obj.get("certifierIri").and_then(|v| v.as_str())
+fn parse_wire_certification(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<WireCertification, &'static str> {
+    let certifier_iri = obj
+        .get("certifierIri")
+        .and_then(|v| v.as_str())
         .ok_or("certification missing 'certifierIri'")?
         .to_owned();
-    let certifier_key_hex = obj.get("certifierKeyHex").and_then(|v| v.as_str())
+    let certifier_key_hex = obj
+        .get("certifierKeyHex")
+        .and_then(|v| v.as_str())
         .ok_or("certification missing 'certifierKeyHex'")?
         .to_owned();
-    let certified_issuer_iri = obj.get("certifiedIssuerIri").and_then(|v| v.as_str())
+    let certified_issuer_iri = obj
+        .get("certifiedIssuerIri")
+        .and_then(|v| v.as_str())
         .ok_or("certification missing 'certifiedIssuerIri'")?
         .to_owned();
-    let certified_key_hex = obj.get("certifiedKeyHex").and_then(|v| v.as_str())
+    let certified_key_hex = obj
+        .get("certifiedKeyHex")
+        .and_then(|v| v.as_str())
         .ok_or("certification missing 'certifiedKeyHex'")?
         .to_owned();
-    let valid_from_unix_secs = obj.get("validFromUnixSecs").and_then(|v| v.as_i64())
+    let valid_from_unix_secs = obj
+        .get("validFromUnixSecs")
+        .and_then(|v| v.as_i64())
         .ok_or("certification missing/invalid 'validFromUnixSecs'")?;
-    let valid_until_unix_secs = obj.get("validUntilUnixSecs").and_then(|v| v.as_i64())
+    let valid_until_unix_secs = obj
+        .get("validUntilUnixSecs")
+        .and_then(|v| v.as_i64())
         .ok_or("certification missing/invalid 'validUntilUnixSecs'")?;
-    let signature_hex = obj.get("signatureHex").and_then(|v| v.as_str())
+    let signature_hex = obj
+        .get("signatureHex")
+        .and_then(|v| v.as_str())
         .ok_or("certification missing 'signatureHex'")?
         .to_owned();
     // Fail-closed on scope kind: only the two explicitly modelled kinds are accepted; an
     // absent or unrecognised scope kind denies (never silently widened to AnyService).
-    let scope_kind = obj.get("scopeKind").and_then(|v| v.as_str())
+    let scope_kind = obj
+        .get("scopeKind")
+        .and_then(|v| v.as_str())
         .ok_or("certification missing 'scopeKind'")?;
     let scope = match scope_kind {
         "anyService" => WireCertScope::AnyService,
         // [SONNET-4.6] (sq-sllu4) A shape scope MUST carry the predicate IRI it is scoped to:
         // a "shape" kind with no predicate is not a wider scope, it is an unspecified one.
         "shape" => WireCertScope::Shape {
-            predicate_iri: obj.get("scopeShapePredicateIri").and_then(|v| v.as_str())
+            predicate_iri: obj
+                .get("scopeShapePredicateIri")
+                .and_then(|v| v.as_str())
                 .ok_or("certification 'shape' scope missing 'scopeShapePredicateIri'")?
                 .to_owned(),
         },
         _ => return Err("certification 'scopeKind' must be 'anyService' or 'shape'"),
     };
     Ok(WireCertification {
-        certifier_iri, certifier_key_hex, certified_issuer_iri, certified_key_hex,
-        valid_from_unix_secs, valid_until_unix_secs, signature_hex, scope,
+        certifier_iri,
+        certifier_key_hex,
+        certified_issuer_iri,
+        certified_key_hex,
+        valid_from_unix_secs,
+        valid_until_unix_secs,
+        signature_hex,
+        scope,
     })
 }
 
 /// [SONNET-4.6] (sq-pfae.17) Parse a `WireCredential` from a JSON object. Fail-closed.
 #[cfg(feature = "solid-authz-trust")]
-fn parse_wire_credential(obj: &serde_json::Map<String, serde_json::Value>) -> Result<WireCredential, &'static str> {
-    let graph_nquads = obj.get("graphNquads").and_then(|v| v.as_str())
+fn parse_wire_credential(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<WireCredential, &'static str> {
+    let graph_nquads = obj
+        .get("graphNquads")
+        .and_then(|v| v.as_str())
         .ok_or("credential missing 'graphNquads'")?
         .to_owned();
-    let issuer_signature_hex = obj.get("issuerSignatureHex").and_then(|v| v.as_str())
+    let issuer_signature_hex = obj
+        .get("issuerSignatureHex")
+        .and_then(|v| v.as_str())
         .ok_or("credential missing 'issuerSignatureHex'")?
         .to_owned();
-    let salt_hex = obj.get("saltHex").and_then(|v| v.as_str())
+    let salt_hex = obj
+        .get("saltHex")
+        .and_then(|v| v.as_str())
         .ok_or("credential missing 'saltHex'")?
         .to_owned();
-    let issued_at_unix_secs = obj.get("issuedAtUnixSecs").and_then(|v| v.as_i64())
+    let issued_at_unix_secs = obj
+        .get("issuedAtUnixSecs")
+        .and_then(|v| v.as_i64())
         .ok_or("credential missing/invalid 'issuedAtUnixSecs'")?;
-    let revoked = obj.get("revoked").and_then(|v| v.as_bool())
+    let revoked = obj
+        .get("revoked")
+        .and_then(|v| v.as_bool())
         .ok_or("credential missing/invalid 'revoked'")?;
-    Ok(WireCredential { graph_nquads, issuer_signature_hex, salt_hex, issued_at_unix_secs, revoked })
+    Ok(WireCredential {
+        graph_nquads,
+        issuer_signature_hex,
+        salt_hex,
+        issued_at_unix_secs,
+        revoked,
+    })
 }
 
 /// [SONNET-4.6] (sq-pfae.17) Decode a 64-hex-char (32-byte) salt from a hex string. Fail-closed.
@@ -1121,14 +1185,13 @@ fn predicate_shape_with_labels(
 ) -> Option<sparq_trust::policy::ShapeRef> {
     use oxrdf::{Literal, NamedNode, Term, Triple};
     let pred = NamedNode::new(predicate_iri).ok()?;
-    let sh_target_subjects_of = NamedNode::new("http://www.w3.org/ns/shacl#targetSubjectsOf")
-        .expect("static IRI is valid");
-    let sh_property = NamedNode::new("http://www.w3.org/ns/shacl#property")
-        .expect("static IRI is valid");
-    let sh_path = NamedNode::new("http://www.w3.org/ns/shacl#path")
-        .expect("static IRI is valid");
-    let sh_mincount = NamedNode::new("http://www.w3.org/ns/shacl#minCount")
-        .expect("static IRI is valid");
+    let sh_target_subjects_of =
+        NamedNode::new("http://www.w3.org/ns/shacl#targetSubjectsOf").expect("static IRI is valid");
+    let sh_property =
+        NamedNode::new("http://www.w3.org/ns/shacl#property").expect("static IRI is valid");
+    let sh_path = NamedNode::new("http://www.w3.org/ns/shacl#path").expect("static IRI is valid");
+    let sh_mincount =
+        NamedNode::new("http://www.w3.org/ns/shacl#minCount").expect("static IRI is valid");
     Some(sparq_trust::policy::ShapeRef {
         root: Term::BlankNode(root.clone()),
         triples: vec![
@@ -1183,13 +1246,13 @@ fn trust_authz_decide(
     mode: sparq_solid::Mode,
     full_body: &serde_json::Value,
 ) -> Response {
-    use sparq_trust::{
-        admit, derive_effective_rules, policy::TrustRule, AdmittedFact,
-        PresentedCredential, Session as TrustSession,
-    };
-    use sparq_trust::graph::{Certification, CertScope};
-    use sparq_zk::sig::public_key_from_hex;
     use oxrdf::NamedNode;
+    use sparq_trust::graph::{CertScope, Certification};
+    use sparq_trust::{
+        admit, derive_effective_rules, policy::TrustRule, AdmittedFact, PresentedCredential,
+        Session as TrustSession,
+    };
+    use sparq_zk::sig::public_key_from_hex;
 
     // ── 1. Parse the trust block object ──────────────────────────────────────
     let trust_obj = match trust_val.as_object() {
@@ -1230,7 +1293,10 @@ fn trust_authz_decide(
             );
         }
     };
-    let trust_session = TrustSession { agent: agent_iri.clone(), now_unix_secs };
+    let trust_session = TrustSession {
+        agent: agent_iri.clone(),
+        now_unix_secs,
+    };
 
     // ── 3. Parse direct trust rules ─────────────────────────────────────────
     let rules_val = match trust_obj.get("rules").and_then(|v| v.as_array()) {
@@ -1296,7 +1362,13 @@ fn trust_authz_decide(
                 );
             }
         };
-        direct_rules.push(TrustRule { source, issuer_key, shape, scope, fresh_within_secs: wire_rule.fresh_within_secs });
+        direct_rules.push(TrustRule {
+            source,
+            issuer_key,
+            shape,
+            scope,
+            fresh_within_secs: wire_rule.fresh_within_secs,
+        });
     }
 
     // ── 4. Parse certifications ──────────────────────────────────────────────
@@ -1505,11 +1577,15 @@ fn trust_authz_decide(
     } else {
         None
     };
-    let mut body_obj = match serde_json::from_str::<serde_json::Value>(&decision_to_json(&decision)) {
+    let mut body_obj = match serde_json::from_str::<serde_json::Value>(&decision_to_json(&decision))
+    {
         Ok(v) => v,
         Err(_) => {
             // decision_to_json is infallible for valid WacDecision; this branch is unreachable.
-            return json_response(StatusCode::FORBIDDEN, trust_deny_json("internal serialisation error"));
+            return json_response(
+                StatusCode::FORBIDDEN,
+                trust_deny_json("internal serialisation error"),
+            );
         }
     };
     if let Some(j) = justification {
@@ -1565,18 +1641,13 @@ fn build_store_with_admitted(
         let _ = writeln!(
             &mut augmented,
             "{} {} {} <{}> .",
-            fact.triple.subject,
-            fact.triple.predicate,
-            fact.triple.object,
-            acl_graph,
+            fact.triple.subject, fact.triple.predicate, fact.triple.object, acl_graph,
         );
         // Default-graph position: reachable via SPARQL query on the full dataset.
         let _ = writeln!(
             &mut augmented,
             "{} {} {} .",
-            fact.triple.subject,
-            fact.triple.predicate,
-            fact.triple.object,
+            fact.triple.subject, fact.triple.predicate, fact.triple.object,
         );
     }
     // Delegate to the unchanged build_store path (WAC/ACP inference + materialisation).
@@ -1650,7 +1721,10 @@ pub(crate) async fn wac_allow_endpoint(
     let resource_iri = match v.get("resource").and_then(|r| r.as_str()) {
         Some(r) => r.to_owned(),
         None => {
-            return json_error(StatusCode::BAD_REQUEST, "'resource' (IRI string) is required");
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "'resource' (IRI string) is required",
+            );
         }
     };
     // `wac_allow` takes a `NamedNode`; an un-IRI resource is a fail-closed 400 (never a grant).
@@ -1794,7 +1868,11 @@ fn union_policy_graph(dataset: &str) -> Result<sparq_core::Graph, String> {
         let quad = quad.map_err(|e| e.to_string())?;
         // oxrdf Display emits canonical N-Triples term syntax (no re-wrapping — the
         // sq-zza2h double-wrap lesson); the graph name is deliberately dropped.
-        let _ = writeln!(&mut nt, "{} {} {} .", quad.subject, quad.predicate, quad.object);
+        let _ = writeln!(
+            &mut nt,
+            "{} {} {} .",
+            quad.subject, quad.predicate, quad.object
+        );
     }
     sparq_core::Graph::load_str(&nt, "ntriples")
 }
@@ -1936,7 +2014,10 @@ pub(crate) async fn query_endpoint(
     let query = match v.get("query").and_then(|q| q.as_str()) {
         Some(q) => q.to_owned(),
         None => {
-            return json_error(StatusCode::BAD_REQUEST, "'query' (SPARQL string) is required");
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "'query' (SPARQL string) is required",
+            );
         }
     };
     // A query is a READ; default the mode to Read. An explicit unknown mode is a fail-closed 400
@@ -2104,7 +2185,10 @@ mod tests {
         };
         mask_decision_to_mode(&mut d, Mode::Read);
         assert_eq!(d.granted_modes, vec![Mode::Read]);
-        assert!(d.allow, "the allow bit is untouched by the advertisement mask");
+        assert!(
+            d.allow,
+            "the allow bit is untouched by the advertisement mask"
+        );
         // A mode the session does not hold is not conjured up (fail-closed direction only).
         let mut none = fail_closed_decision();
         mask_decision_to_mode(&mut none, Mode::Read);
@@ -2125,7 +2209,10 @@ mod tests {
             read_scoped_wac_allow(r#"user="write",public="read""#),
             r#"user="",public="""#
         );
-        assert_eq!(read_scoped_wac_allow(r#"user="",public="""#), r#"user="",public="""#);
+        assert_eq!(
+            read_scoped_wac_allow(r#"user="",public="""#),
+            r#"user="",public="""#
+        );
         // A value not in the crate-controlled format advertises NOTHING (fail-closed).
         assert_eq!(read_scoped_wac_allow("garbage"), r#"user="",public="""#);
     }
@@ -2229,7 +2316,8 @@ mod tests {
 
         // `Resolved` deny: the ACL governs `notes/n1`, but grants an anonymous requester
         // nothing. Alice's counterpart is her missing Write.
-        let anon_resolved = store.decide(&Session::default(), "https://pod.ex/notes/n1", Mode::Read);
+        let anon_resolved =
+            store.decide(&Session::default(), "https://pod.ex/notes/n1", Mode::Read);
         let auth_resolved = store.decide(&alice, "https://pod.ex/notes/n1", Mode::Write);
         // `NoAcl`: a pod with no discoverable access-control document anywhere up the chain.
         let no_acl_store = {
@@ -2354,7 +2442,6 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
     }
-
 }
 
 // ── [FABLE-5] sq-lrtc3.1 — unit tests for the ODRL lane helpers ─────────────
@@ -2414,8 +2501,16 @@ mod odrl_tests {
     }
 
     fn reads_n1(store: &PodStore, agent: &str) -> bool {
-        let s = Session { agent: Some(agent), client: None, issuer: None, now: None };
-        store.accessible(&s, Mode::Read).iter().any(|g| g.as_str() == N1)
+        let s = Session {
+            agent: Some(agent),
+            client: None,
+            issuer: None,
+            now: None,
+        };
+        store
+            .accessible(&s, Mode::Read)
+            .iter()
+            .any(|g| g.as_str() == N1)
     }
 
     #[test]
@@ -2450,7 +2545,11 @@ mod odrl_tests {
             .collect::<String>();
         let g = union_policy_graph(&named).expect("projection parses");
         let policy = sparq_policy::parse_policy(&g).expect("policy parses");
-        assert_eq!(policy.permissions.len(), 1, "named-graph rule must be visible");
+        assert_eq!(
+            policy.permissions.len(),
+            1,
+            "named-graph rule must be visible"
+        );
         assert_eq!(policy.permissions[0].target.as_deref(), Some(N1));
     }
 
@@ -2483,11 +2582,17 @@ mod odrl_tests {
         // WITHOUT the ODRL prohibition the WAC grant admits alice (guards vacuity).
         let req_wac = authz_req(wac.to_owned(), Some(ALICE));
         let store_wac = build_store(&req_wac).expect("fixture materialises");
-        assert!(reads_n1(&store_wac, ALICE), "static WAC grant must admit alice");
+        assert!(
+            reads_n1(&store_wac, ALICE),
+            "static WAC grant must admit alice"
+        );
         // WITH it, the bridged deny wins.
         let req = authz_req(format!("{wac}{}", prohibit_nq(ALICE)), Some(ALICE));
         let store = lane(&req, Mode::Read).expect("lane applies");
-        assert!(!reads_n1(&store, ALICE), "ODRL prohibition must beat the WAC grant");
+        assert!(
+            !reads_n1(&store, ALICE),
+            "ODRL prohibition must beat the WAC grant"
+        );
     }
 
     #[test]
@@ -2514,7 +2619,9 @@ mod odrl_tests {
              _:proh <http://www.w3.org/ns/odrl/2/action> <http://www.w3.org/ns/odrl/2/read> .\n\
              _:proh <http://www.w3.org/ns/odrl/2/assignee> <https://alice.ex/card#me> .\n";
         let req = authz_req(format!("{CONTENT}{targetless}"), Some(ALICE));
-        let err = lane(&req, Mode::Read).err().expect("targetless rule must refuse");
+        let err = lane(&req, Mode::Read)
+            .err()
+            .expect("targetless rule must refuse");
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -2537,12 +2644,16 @@ mod odrl_tests {
         // The predicate IRI appearing INSIDE A LITERAL is a detection false positive:
         // the parsed policy has no rules, nothing materialises, and the WAC-only
         // behaviour is preserved (the fail-closed direction).
-        let literal_marker = "<urn:x> <urn:note> \"see http://www.w3.org/ns/odrl/2/permission> docs\" .\n";
+        let literal_marker =
+            "<urn:x> <urn:note> \"see http://www.w3.org/ns/odrl/2/permission> docs\" .\n";
         let dataset = format!("{CONTENT}{literal_marker}");
         assert!(dataset_carries_odrl(&dataset), "scan fires on the literal");
         let req = authz_req(dataset, Some(ALICE));
         let store = lane(&req, Mode::Read).expect("rule-less policy is a no-op");
-        assert!(!reads_n1(&store, ALICE), "no grant appears from a literal marker");
+        assert!(
+            !reads_n1(&store, ALICE),
+            "no grant appears from a literal marker"
+        );
     }
 
     // ── [SONNET-4.6] sq-snopa.8 — the stateful lane's ODRL refusal ────────
@@ -2594,111 +2705,117 @@ mod odrl_tests {
 mod trust_wire_tests {
     use super::*;
 
-// ── [SONNET-4.6] sq-sllu4 — the `CertScope::Shape` certification wire format ─────────
-//
-// Direct unit tests for the two functions the shape-scope wire format adds: the parser
-// branch and the CANONICAL desugaring. The end-to-end derivation (a signed shape-scoped
-// edge deriving a rule that grants) is pinned by
-// `tests/solid_authz_trust.rs::shape_scoped_certification_derives_rule_and_grants`.
+    // ── [SONNET-4.6] sq-sllu4 — the `CertScope::Shape` certification wire format ─────────
+    //
+    // Direct unit tests for the two functions the shape-scope wire format adds: the parser
+    // branch and the CANONICAL desugaring. The end-to-end derivation (a signed shape-scoped
+    // edge deriving a rule that grants) is pinned by
+    // `tests/solid_authz_trust.rs::shape_scoped_certification_derives_rule_and_grants`.
 
-/// Parse a JSON object literal into the map `parse_wire_certification` consumes.
-#[cfg(feature = "solid-authz-trust")]
-fn cert_obj(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
-    v.as_object().expect("test fixture is an object").clone()
-}
-
-/// A wire certification object with every non-scope field present and well-formed.
-#[cfg(feature = "solid-authz-trust")]
-fn cert_fixture(scope: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
-    let mut obj = cert_obj(serde_json::json!({
-        "certifierIri": "https://gov.example/framework",
-        "certifierKeyHex": "00",
-        "certifiedIssuerIri": "https://issuer.example/dvs",
-        "certifiedKeyHex": "00",
-        "validFromUnixSecs": 0_i64,
-        "validUntilUnixSecs": 9_999_999_999_i64,
-        "signatureHex": "aabbcc"
-    }));
-    for (k, v) in cert_obj(scope) {
-        obj.insert(k, v);
+    /// Parse a JSON object literal into the map `parse_wire_certification` consumes.
+    #[cfg(feature = "solid-authz-trust")]
+    fn cert_obj(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().expect("test fixture is an object").clone()
     }
-    obj
-}
 
-#[cfg(feature = "solid-authz-trust")]
-#[test]
-fn wire_cert_scope_kinds_parse_or_fail_closed() {
-    // "anyService" — the pre-existing kind, unchanged.
-    let any = parse_wire_certification(&cert_fixture(
-        serde_json::json!({ "scopeKind": "anyService" }),
-    ))
-    .expect("anyService parses");
-    assert!(matches!(any.scope, WireCertScope::AnyService));
-
-    // "shape" + a predicate IRI — the new kind.
-    let shaped = parse_wire_certification(&cert_fixture(serde_json::json!({
-        "scopeKind": "shape",
-        "scopeShapePredicateIri": "https://schema.org/age"
-    })))
-    .expect("shape + predicate parses");
-    match shaped.scope {
-        WireCertScope::Shape { ref predicate_iri } => {
-            // [SONNET-4.6] POSITIONAL format args (CodeQL guard).
-            assert_eq!(predicate_iri, "https://schema.org/age");
+    /// A wire certification object with every non-scope field present and well-formed.
+    #[cfg(feature = "solid-authz-trust")]
+    fn cert_fixture(scope: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        let mut obj = cert_obj(serde_json::json!({
+            "certifierIri": "https://gov.example/framework",
+            "certifierKeyHex": "00",
+            "certifiedIssuerIri": "https://issuer.example/dvs",
+            "certifiedKeyHex": "00",
+            "validFromUnixSecs": 0_i64,
+            "validUntilUnixSecs": 9_999_999_999_i64,
+            "signatureHex": "aabbcc"
+        }));
+        for (k, v) in cert_obj(scope) {
+            obj.insert(k, v);
         }
-        _ => panic!("expected a shape scope"),
+        obj
     }
 
-    // "shape" with NO predicate is UNSPECIFIED, not wider — fail closed.
-    assert!(
-        parse_wire_certification(&cert_fixture(serde_json::json!({ "scopeKind": "shape" })))
-            .is_err(),
-        "a 'shape' scope without 'scopeShapePredicateIri' must fail closed"
-    );
-    // An unmodelled kind is never silently widened to AnyService.
-    assert!(
-        parse_wire_certification(&cert_fixture(
-            serde_json::json!({ "scopeKind": "somethingElse" })
+    #[cfg(feature = "solid-authz-trust")]
+    #[test]
+    fn wire_cert_scope_kinds_parse_or_fail_closed() {
+        // "anyService" — the pre-existing kind, unchanged.
+        let any = parse_wire_certification(&cert_fixture(
+            serde_json::json!({ "scopeKind": "anyService" }),
         ))
-        .is_err(),
-        "an unknown scopeKind must fail closed"
-    );
-}
+        .expect("anyService parses");
+        assert!(matches!(any.scope, WireCertScope::AnyService));
 
-#[cfg(feature = "solid-authz-trust")]
-#[test]
-fn cert_scope_shape_is_canonical_and_reproducible() {
-    // The load-bearing property: the desugaring is a FUNCTION of the predicate IRI alone.
-    // `certification_message` hashes each scope triple (blank nodes BY LABEL, in listed
-    // order), so a certifier signing its own copy of this shape must reconstruct the same
-    // preimage the server does. Fresh labels would break that on every request.
-    let a = cert_scope_predicate_shape("https://schema.org/age").expect("valid predicate");
-    let b = cert_scope_predicate_shape("https://schema.org/age").expect("valid predicate");
-    assert_eq!(a.root, b.root, "the shape root is canonical, not fresh");
-    assert_eq!(a.triples, b.triples, "the shape triples are canonical, in a fixed order");
-    assert_eq!(
-        a.root.to_string(),
-        format!("_:{}", CERT_SCOPE_SHAPE_LABEL),
-        "the root carries the documented canonical label"
-    );
-    assert_eq!(a.triples.len(), 4, "the documented four-triple desugaring");
+        // "shape" + a predicate IRI — the new kind.
+        let shaped = parse_wire_certification(&cert_fixture(serde_json::json!({
+            "scopeKind": "shape",
+            "scopeShapePredicateIri": "https://schema.org/age"
+        })))
+        .expect("shape + predicate parses");
+        match shaped.scope {
+            WireCertScope::Shape { ref predicate_iri } => {
+                // [SONNET-4.6] POSITIONAL format args (CodeQL guard).
+                assert_eq!(predicate_iri, "https://schema.org/age");
+            }
+            _ => panic!("expected a shape scope"),
+        }
 
-    // A different predicate is a different shape (the scope actually scopes something).
-    let other = cert_scope_predicate_shape("https://schema.org/name").expect("valid");
-    assert_ne!(a.triples, other.triples, "the predicate is bound into the shape");
+        // "shape" with NO predicate is UNSPECIFIED, not wider — fail closed.
+        assert!(
+            parse_wire_certification(&cert_fixture(serde_json::json!({ "scopeKind": "shape" })))
+                .is_err(),
+            "a 'shape' scope without 'scopeShapePredicateIri' must fail closed"
+        );
+        // An unmodelled kind is never silently widened to AnyService.
+        assert!(
+            parse_wire_certification(&cert_fixture(
+                serde_json::json!({ "scopeKind": "somethingElse" })
+            ))
+            .is_err(),
+            "an unknown scopeKind must fail closed"
+        );
+    }
 
-    // The fresh-label sibling is deliberately NOT canonical — the two differ by label.
-    let fresh_a = predicate_shape("https://schema.org/age").expect("valid");
-    let fresh_b = predicate_shape("https://schema.org/age").expect("valid");
-    assert_ne!(
-        fresh_a.root, fresh_b.root,
-        "predicate_shape mints fresh labels (only the cert-scope variant is canonical)"
-    );
+    #[cfg(feature = "solid-authz-trust")]
+    #[test]
+    fn cert_scope_shape_is_canonical_and_reproducible() {
+        // The load-bearing property: the desugaring is a FUNCTION of the predicate IRI alone.
+        // `certification_message` hashes each scope triple (blank nodes BY LABEL, in listed
+        // order), so a certifier signing its own copy of this shape must reconstruct the same
+        // preimage the server does. Fresh labels would break that on every request.
+        let a = cert_scope_predicate_shape("https://schema.org/age").expect("valid predicate");
+        let b = cert_scope_predicate_shape("https://schema.org/age").expect("valid predicate");
+        assert_eq!(a.root, b.root, "the shape root is canonical, not fresh");
+        assert_eq!(
+            a.triples, b.triples,
+            "the shape triples are canonical, in a fixed order"
+        );
+        assert_eq!(
+            a.root.to_string(),
+            format!("_:{}", CERT_SCOPE_SHAPE_LABEL),
+            "the root carries the documented canonical label"
+        );
+        assert_eq!(a.triples.len(), 4, "the documented four-triple desugaring");
 
-    // Fail-closed on a predicate that is not an IRI.
-    assert!(
-        cert_scope_predicate_shape("not an iri").is_none(),
-        "an invalid predicate IRI must fail closed"
-    );
-}
+        // A different predicate is a different shape (the scope actually scopes something).
+        let other = cert_scope_predicate_shape("https://schema.org/name").expect("valid");
+        assert_ne!(
+            a.triples, other.triples,
+            "the predicate is bound into the shape"
+        );
+
+        // The fresh-label sibling is deliberately NOT canonical — the two differ by label.
+        let fresh_a = predicate_shape("https://schema.org/age").expect("valid");
+        let fresh_b = predicate_shape("https://schema.org/age").expect("valid");
+        assert_ne!(
+            fresh_a.root, fresh_b.root,
+            "predicate_shape mints fresh labels (only the cert-scope variant is canonical)"
+        );
+
+        // Fail-closed on a predicate that is not an IRI.
+        assert!(
+            cert_scope_predicate_shape("not an iri").is_none(),
+            "an invalid predicate IRI must fail closed"
+        );
+    }
 }

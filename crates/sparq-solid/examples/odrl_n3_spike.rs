@@ -121,7 +121,8 @@ fn n3_auth_set(s: &Scenario) -> AuthSet {
         if !pred.as_str().starts_with(AUTH_NS) {
             continue;
         }
-        let (Term::NamedNode(subj), Term::NamedNode(obj)) = (dict.term(t[0]), dict.term(t[2])) else {
+        let (Term::NamedNode(subj), Term::NamedNode(obj)) = (dict.term(t[0]), dict.term(t[2]))
+        else {
             continue;
         };
         set.push((
@@ -296,10 +297,22 @@ fn main() {
     let t_n3_parse = best_ns(20, 400, || {
         let _ = parser::parse(&src).unwrap();
     });
-    println!("  Rust evaluate (policy pre-parsed)      {:>12.0} ns/op", t_eval);
-    println!("  Rust parse_policy_str + evaluate       {:>12.0} ns/op", t_rust_text);
-    println!("  N3   reason_n3 (parse + fixpoint)      {:>12.0} ns/op", t_n3);
-    println!("  N3   parser::parse only                {:>12.0} ns/op", t_n3_parse);
+    println!(
+        "  Rust evaluate (policy pre-parsed)      {:>12.0} ns/op",
+        t_eval
+    );
+    println!(
+        "  Rust parse_policy_str + evaluate       {:>12.0} ns/op",
+        t_rust_text
+    );
+    println!(
+        "  N3   reason_n3 (parse + fixpoint)      {:>12.0} ns/op",
+        t_n3
+    );
+    println!(
+        "  N3   parser::parse only                {:>12.0} ns/op",
+        t_n3_parse
+    );
     println!(
         "  ratios: N3/Rust(pre-parsed) = {:.0}x ; N3/Rust(from-text) = {:.1}x ; N3-parse share = {:.0}%\n",
         t_n3 / t_eval,
@@ -340,12 +353,30 @@ fn main() {
         let _ = reason_n3(&mut d, &wac_rules).unwrap();
     }) / 1e6;
 
-    println!("  WAC fixture: {} named graphs; ACP fixture: {} named graphs", n_wac, n_acp);
-    println!("  WAC materialize (full pipeline)        {:>10.3} ms", t_wac_full);
-    println!("  ACP materialize (full pipeline, 3x)    {:>10.3} ms", t_acp_full);
-    println!("  parse WAC rule text only               {:>10.3} ms", t_wac_ruleparse);
-    println!("  parse ACP rule text only               {:>10.3} ms", t_acp_ruleparse);
-    println!("  reason_n3 WAC rules-only (no facts)    {:>10.3} ms", t_wac_rulesonly);
+    println!(
+        "  WAC fixture: {} named graphs; ACP fixture: {} named graphs",
+        n_wac, n_acp
+    );
+    println!(
+        "  WAC materialize (full pipeline)        {:>10.3} ms",
+        t_wac_full
+    );
+    println!(
+        "  ACP materialize (full pipeline, 3x)    {:>10.3} ms",
+        t_acp_full
+    );
+    println!(
+        "  parse WAC rule text only               {:>10.3} ms",
+        t_wac_ruleparse
+    );
+    println!(
+        "  parse ACP rule text only               {:>10.3} ms",
+        t_acp_ruleparse
+    );
+    println!(
+        "  reason_n3 WAC rules-only (no facts)    {:>10.3} ms",
+        t_wac_rulesonly
+    );
     println!(
         "  => rule-parse share of materialize: WAC ~{:.2}% , ACP ~{:.2}%",
         100.0 * t_wac_ruleparse / t_wac_full,
@@ -359,9 +390,18 @@ fn main() {
 
     // 4. BUILD-SIZE of carrying the N3 rules (parse-at-runtime baseline).
     println!("--- 4. BUILD-SIZE delta of carrying the N3 rules (parse-at-runtime baseline) ---");
-    println!("  odrl-spike.n3 embedded rule text       {:>6} bytes", RULES.len());
-    println!("  (for scale) WAC rule text              {:>6} bytes", wac_rules.len());
-    println!("  (for scale) ACP rule text              {:>6} bytes", acp_rules.len());
+    println!(
+        "  odrl-spike.n3 embedded rule text       {:>6} bytes",
+        RULES.len()
+    );
+    println!(
+        "  (for scale) WAC rule text              {:>6} bytes",
+        wac_rules.len()
+    );
+    println!(
+        "  (for scale) ACP rule text              {:>6} bytes",
+        acp_rules.len()
+    );
     println!(
         "  NOTE: the N3 parser is ALREADY linked into sparq-solid (WAC/ACP call reason_n3),\n\
          \x20     so embedding ODRL rules adds only the rule TEXT bytes to the sparq-solid\n\
@@ -377,7 +417,9 @@ fn main() {
         );
         std::process::exit(1);
     }
-    println!("SPIKE OK: N3 and Rust agree on every scenario decision; timings above are non-canonical.");
+    println!(
+        "SPIKE OK: N3 and Rust agree on every scenario decision; timings above are non-canonical."
+    );
 }
 
 // ── the ONE representative policy, in three variants (same target/assignee) ────────────

@@ -370,10 +370,24 @@ fn gen_filter(rng: &mut Rng, var: &str) -> String {
 /// so adding a category here means adding a shard there too. `categories_have_a_shard`
 /// (below) pins the two lists together.
 const CATEGORIES: &[&str] = &[
-    "bgp", "filter", "equality", "optional", "union", "minus", "limit", "distinct", "order",
+    "bgp",
+    "filter",
+    "equality",
+    "optional",
+    "union",
+    "minus",
+    "limit",
+    "distinct",
+    "order",
     // sq-j80vk: the SPARQL 1.1 surfaces that previously had ZERO standing
     // wrong-answer differential vs the Oxigraph oracle.
-    "path", "aggregate", "subquery", "exists", "values", "bind", "graph",
+    "path",
+    "aggregate",
+    "subquery",
+    "exists",
+    "values",
+    "bind",
+    "graph",
     // sq-avd75: the `OPTIONAL … FILTER(!bound(?v))` negation idiom — the TRIGGER
     // shape of rewrite (b) of the `algebra-rewrite` pass (#1735), which this crate
     // builds ON (see Cargo.toml). Without it the pass's anti-join half had no
@@ -383,7 +397,10 @@ const CATEGORIES: &[&str] = &[
     // boolean/beyond-i128-integer/double-with-specials columns), the SPARQL 1.1 string
     // functions (§17.4.3), and the two non-`SELECT` RESULT FORMS — which `compare_ask` /
     // `compare_graph` were wired for by sq-qcnn.5 but which nothing generated.
-    "typed", "strfn", "ask", "construct",
+    "typed",
+    "strfn",
+    "ask",
+    "construct",
 ];
 
 /// A random query in the chosen category. **Every category must keep these
@@ -825,7 +842,10 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
             ),
             // Doubles, where the constant straddles zero and the column carries
             // `INF`/`-INF`/`NaN` (`NaN` compares false against everything, in both).
-            8 => format!("?s ex:dbl ?d FILTER(?d > {}.0)", rng.below(200) as i64 - 100),
+            8 => format!(
+                "?s ex:dbl ?d FILTER(?d > {}.0)",
+                rng.below(200) as i64 - 100
+            ),
             // `DATATYPE` over the duration column, which is the one column carrying three
             // DIFFERENT datatypes over a shared value space: this projects the datatype
             // IRI as a TERM, so the subtype has to survive the store round-trip and come
@@ -849,9 +869,7 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
                 4 => format!("?s ex:name ?n FILTER(STRLEN(STR(?n)) > {k})"),
                 5 => "?s ex:name ?n BIND(UCASE(?n) AS ?u) FILTER(STRSTARTS(STR(?u), \"NM\"))"
                     .to_string(),
-                6 => format!(
-                    "?s ex:name ?n BIND(LCASE(STR(?n)) AS ?u) FILTER(STRLEN(?u) > {k})"
-                ),
+                6 => format!("?s ex:name ?n BIND(LCASE(STR(?n)) AS ?u) FILTER(STRLEN(?u) > {k})"),
                 7 => "?s ex:name ?n BIND(SUBSTR(STR(?n), 2, 2) AS ?u) \
                       FILTER(STRSTARTS(?u, \"m\"))"
                     .to_string(),
@@ -876,19 +894,13 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
             let t = rng.below(120);
             return match rng.below(6) {
                 0 => format!("{pfx}ASK WHERE {{ ?s ex:age ?a FILTER(?a > {t}) }}"),
-                1 => format!(
-                    "{pfx}ASK WHERE {{ ?s ex:p ?o . ?o ex:age ?a FILTER(?a > {t}) }}"
-                ),
+                1 => format!("{pfx}ASK WHERE {{ ?s ex:p ?o . ?o ex:age ?a FILTER(?a > {t}) }}"),
                 2 => format!(
                     "{pfx}ASK WHERE {{ ?s ex:name ?n \
                      FILTER NOT EXISTS {{ ?s ex:age ?a . FILTER(?a < {t}) }} }}"
                 ),
-                3 => format!(
-                    "{pfx}ASK WHERE {{ ?s ex:p+ ?o . ?o ex:age ?a FILTER(?a > {t}) }}"
-                ),
-                4 => format!(
-                    "{pfx}ASK WHERE {{ ?s ex:when ?w . ?s ex:age ?a FILTER(?a > {t}) }}"
-                ),
+                3 => format!("{pfx}ASK WHERE {{ ?s ex:p+ ?o . ?o ex:age ?a FILTER(?a > {t}) }}"),
+                4 => format!("{pfx}ASK WHERE {{ ?s ex:when ?w . ?s ex:age ?a FILTER(?a > {t}) }}"),
                 _ => format!(
                     "{pfx}ASK WHERE {{ {{ SELECT ?s (COUNT(?o) AS ?c) WHERE {{ ?s ex:p ?o }} \
                      GROUP BY ?s }} FILTER(?c > {}) }}",
@@ -1514,7 +1526,11 @@ fn oxi_solutions(store: &Store, q: &str) -> Option<Answer> {
     match store.query(q).ok()? {
         oxigraph::sparql::QueryResults::Solutions(s) => {
             // The header must be read BEFORE the iterator is consumed.
-            let vars: Vec<String> = s.variables().iter().map(|v| v.as_str().to_string()).collect();
+            let vars: Vec<String> = s
+                .variables()
+                .iter()
+                .map(|v| v.as_str().to_string())
+                .collect();
             let mut rows: Solutions = Vec::new();
             for sol in s {
                 let sol = sol.ok()?;
@@ -1605,7 +1621,10 @@ fn order_detail(sparq: &Solutions, oxi: &Solutions, sort_vars: &[&str]) -> Strin
     };
     let (ka, kb) = (keys(sparq), keys(oxi));
     let at = match ka.iter().zip(&kb).position(|(a, b)| a != b) {
-        Some(i) => format!("; first differing sort key at row {i}: sparq={:?} oxi={:?}", ka[i], kb[i]),
+        Some(i) => format!(
+            "; first differing sort key at row {i}: sparq={:?} oxi={:?}",
+            ka[i], kb[i]
+        ),
         None => String::new(),
     };
     multiset_detail(
@@ -2399,7 +2418,10 @@ ex:n4 ex:val "s2" .
         );
         let s = std::fs::read_to_string(path).expect("committed allowlist readable");
         let a = DivergenceAllowlist::from_json(&s, path);
-        assert!(a.cross_family_eq_type_error, "sq-eibog class must be listed");
+        assert!(
+            a.cross_family_eq_type_error,
+            "sq-eibog class must be listed"
+        );
         assert!(a.bnode_iri_inequality, "sq-ai2wa class must be listed");
         // …and the file lists NOTHING this comparator lacks a detector for (an
         // undetectable entry would be a claimed-but-unenforced allowlisting).
@@ -2450,8 +2472,7 @@ ex:n4 ex:val "s2" .
         store
             .load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes())
             .unwrap();
-        let q_iri =
-            "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:val ?v FILTER(?v != ex:n0) }";
+        let q_iri = "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:val ?v FILTER(?v != ex:n0) }";
         assert!(
             is_bnode_iri_inequality(&store, q_iri),
             "bnode-vs-IRI != must be detected"
@@ -2743,7 +2764,10 @@ ex:n4 ex:val "s2" .
             }
         }
         assert!(fired > 0, "no seed exercised the REWRITTEN anti-join path");
-        assert!(declined_theta > 0, "no seed exercised the theta DECLINE path");
+        assert!(
+            declined_theta > 0,
+            "no seed exercised the theta DECLINE path"
+        );
         assert!(
             declined_disjoint > 0,
             "no seed exercised the no-shared-variable DECLINE path"
@@ -2783,10 +2807,22 @@ ex:n4 ex:val "s2" .
             ("boolean (canonical false)", &["ex:flag false"]),
             ("boolean (non-canonical 1)", &["ex:flag \"1\"^^xsd:boolean"]),
             ("boolean (non-canonical 0)", &["ex:flag \"0\"^^xsd:boolean"]),
-            ("integer beyond i128::MAX", &["\"170141183460469231731687303715884105728\""]),
-            ("its last-digit twin", &["\"170141183460469231731687303715884105729\""]),
-            ("integer beyond i128::MIN", &["\"-170141183460469231731687303715884105729\""]),
-            ("41-digit integer", &["\"99999999999999999999999999999999999999999\""]),
+            (
+                "integer beyond i128::MAX",
+                &["\"170141183460469231731687303715884105728\""],
+            ),
+            (
+                "its last-digit twin",
+                &["\"170141183460469231731687303715884105729\""],
+            ),
+            (
+                "integer beyond i128::MIN",
+                &["\"-170141183460469231731687303715884105729\""],
+            ),
+            (
+                "41-digit integer",
+                &["\"99999999999999999999999999999999999999999\""],
+            ),
             ("double INF", &["\"INF\"^^xsd:double"]),
             ("double -INF", &["\"-INF\"^^xsd:double"]),
             ("double NaN", &["\"NaN\"^^xsd:double"]),
@@ -2824,7 +2860,10 @@ ex:n4 ex:val "s2" .
                     continue;
                 };
                 let lex = rest.split('"').next().expect("a closing quote");
-                assert!(lex.len() >= 10, "an ex:day lexical starts with a date: {lex}");
+                assert!(
+                    lex.len() >= 10,
+                    "an ex:day lexical starts with a date: {lex}"
+                );
                 match &lex[10..] {
                     "" => bare_date += 1,
                     tail if tail.starts_with('T') => bare_datetime += 1,
@@ -2832,7 +2871,10 @@ ex:n4 ex:val "s2" .
                 }
             }
         }
-        assert!(bare_date > 0, "no BARE (untimezoned) xsd:date was generated");
+        assert!(
+            bare_date > 0,
+            "no BARE (untimezoned) xsd:date was generated"
+        );
         assert!(tz_date > 0, "no TIMEZONED xsd:date was generated");
         assert!(
             bare_datetime > 0,
@@ -2865,8 +2907,7 @@ ex:n4 ex:val "s2" .
             let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
             let store = oxi_store(&ttl);
             for (i, col) in COLUMNS.iter().enumerate() {
-                let q =
-                    format!("PREFIX ex: <http://ex/>\nSELECT ?s ?v WHERE {{ ?s ex:{col} ?v }}");
+                let q = format!("PREFIX ex: <http://ex/>\nSELECT ?s ?v WHERE {{ ?s ex:{col} ?v }}");
                 let sparq = sparq_solutions(&g, &q).expect("sparq answers the projection");
                 let oxi = oxi_solutions(&store, &q).expect("oxigraph answers the projection");
                 if !sparq.rows.is_empty() {
@@ -2897,7 +2938,8 @@ ex:n4 ex:val "s2" .
         );
         // MUTATION GUARD: equality here is by value, not a blanket pass. Change one bound
         // VALUE and the multiset comparison must fail.
-        let ttl = "@prefix ex: <http://ex/> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+        let ttl =
+            "@prefix ex: <http://ex/> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
                    ex:n0 ex:flag \"1\"^^xsd:boolean .\n";
         let g = sparq_core::Graph::load_str(ttl, "turtle").unwrap();
         let store = oxi_store(ttl);
@@ -3076,8 +3118,15 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
 
         // sparq "returns" 3 where the fixture's answer is 4 — one row either way.
         let wrong = vec![nsol(&[("c", nint("3"))])];
-        assert!(!multiset_equal(&wrong, &sparq), "the mutation must change the VALUE");
-        assert_eq!(wrong.len(), sparq.len(), "the mutation preserves cardinality");
+        assert!(
+            !multiset_equal(&wrong, &sparq),
+            "the mutation must change the VALUE"
+        );
+        assert_eq!(
+            wrong.len(),
+            sparq.len(),
+            "the mutation preserves cardinality"
+        );
         assert!(
             !multiset_equal(&wrong, &oxi),
             "a wrong aggregate VALUE at the right cardinality must fail the oracle"
@@ -3106,7 +3155,11 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
             "the mutation must change the VALUE"
         );
         wrong[0].insert("o".to_string(), neutral_term(&redirected));
-        assert_eq!(wrong.len(), sparq.len(), "the mutation preserves cardinality");
+        assert_eq!(
+            wrong.len(),
+            sparq.len(),
+            "the mutation preserves cardinality"
+        );
         assert!(
             !multiset_equal(&wrong, &oxi),
             "a wrong path ENDPOINT at the right cardinality must fail the oracle"
@@ -3170,7 +3223,10 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
             !is_total_order(&["a".into()], &projected),
             "a strict SUBSET leaves tie runs whose row choice is arbitrary"
         );
-        assert!(!is_total_order(&[], &projected), "no ORDER BY is not a total order");
+        assert!(
+            !is_total_order(&[], &projected),
+            "no ORDER BY is not a total order"
+        );
         // A projection nothing ever binds cannot be ordered totally by an empty key either.
         assert!(!is_total_order(&[], &BTreeSet::new()));
     }
@@ -3200,7 +3256,10 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
         assert!(order_by_equal(&sparq, &sparq, &["a", "o"]));
         // The repro message names the sort key and the first differing row.
         let detail = order_detail(&sparq, &reordered, &["a"]);
-        assert!(detail.contains("first differing sort key at row 0"), "{detail}");
+        assert!(
+            detail.contains("first differing sort key at row 0"),
+            "{detail}"
+        );
     }
 
     /// End-to-end on both `order` shapes over a real pair of engines: the total-sort-key shape
@@ -3241,8 +3300,14 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
                 total_shapes += 1;
             }
         }
-        assert!(total_shapes > 0, "the total-sort-key shape is never generated");
-        assert!(subset_shapes > 0, "the subset-sort-key shape is never generated");
+        assert!(
+            total_shapes > 0,
+            "the total-sort-key shape is never generated"
+        );
+        assert!(
+            subset_shapes > 0,
+            "the subset-sort-key shape is never generated"
+        );
         assert!(
             with_ties * 4 >= subset_shapes,
             "only {with_ties}/{subset_shapes} subset-sort seeds contain a TIE RUN — the \
@@ -3290,7 +3355,10 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
                 bare_n += 1;
             }
         }
-        assert!(bare_n > 0, "the bare early-termination window is never generated");
+        assert!(
+            bare_n > 0,
+            "the bare early-termination window is never generated"
+        );
         assert!(
             tiebroken_n > 0,
             "the total-tiebreaker window is never generated, so no LIMIT shape is ever \
@@ -3415,11 +3483,15 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
             ("ordered", format!("SELECT ?a ?o {where_} ORDER BY ?a")),
             // Without the header check this one reaches `skipped(row-choice)` — a COUNTED
             // non-testable case, which is exactly as wrong as a pass.
-            ("window", format!("SELECT ?a ?o {where_} ORDER BY ?a LIMIT 1")),
+            (
+                "window",
+                format!("SELECT ?a ?o {where_} ORDER BY ?a LIMIT 1"),
+            ),
         ] {
             for (a, b) in [(&full, &dropped), (&dropped, &full)] {
-                let err = compare_answers(a, b, &q)
-                    .expect_err(&format!("{path}: a dropped projected variable must not pass"));
+                let err = compare_answers(a, b, &q).expect_err(&format!(
+                    "{path}: a dropped projected variable must not pass"
+                ));
                 assert!(err.contains("result HEADER differs"), "{path}: {err}");
                 assert!(
                     err.contains("\"o\""),
@@ -3553,10 +3625,7 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
         // A ground answer over the same graph is compared as a plain multiset — so the
         // isomorphism path is reached by the blank node, not by anything else about the case.
         let ground_q = "PREFIX ex: <http://ex/>\nSELECT ?a WHERE { ex:n0 ex:age ?a }";
-        assert_eq!(
-            compare_select(&g, &store, ground_q),
-            Ok(Compared::Multiset)
-        );
+        assert_eq!(compare_select(&g, &store, ground_q), Ok(Compared::Multiset));
         // ...and a bare `LIMIT` still lands in the DISTINCT row-choice bucket.
         let limit_q = "PREFIX ex: <http://ex/>\nSELECT ?a WHERE { ?s ex:age ?a } LIMIT 1";
         assert_eq!(
@@ -3571,10 +3640,18 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
     #[test]
     fn query_form_classifies_every_result_form() {
         let pfx = "PREFIX ex: <http://ex/>\n";
-        assert_eq!(query_form(&format!("{pfx}SELECT * WHERE {{ ?s ?p ?o }}")), Form::Select);
-        assert_eq!(query_form(&format!("{pfx}ASK WHERE {{ ?s ex:age ?a }}")), Form::Ask);
         assert_eq!(
-            query_form(&format!("{pfx}CONSTRUCT {{ ?s ex:age ?a }} WHERE {{ ?s ex:age ?a }}")),
+            query_form(&format!("{pfx}SELECT * WHERE {{ ?s ?p ?o }}")),
+            Form::Select
+        );
+        assert_eq!(
+            query_form(&format!("{pfx}ASK WHERE {{ ?s ex:age ?a }}")),
+            Form::Ask
+        );
+        assert_eq!(
+            query_form(&format!(
+                "{pfx}CONSTRUCT {{ ?s ex:age ?a }} WHERE {{ ?s ex:age ?a }}"
+            )),
             Form::Graph
         );
         assert_eq!(query_form(&format!("{pfx}DESCRIBE ex:n0")), Form::Graph);
@@ -3640,7 +3717,11 @@ ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
         assert!(!truth.is_empty(), "the fixture must construct triples");
         let mut wrong = truth.clone();
         wrong[0][2] = neutral_term(&nint("999"));
-        assert_eq!(wrong.len(), truth.len(), "the mutation preserves the triple COUNT");
+        assert_eq!(
+            wrong.len(),
+            truth.len(),
+            "the mutation preserves the triple COUNT"
+        );
         assert_eq!(
             graph_isomorphic(&wrong, &truth),
             Ok(false),

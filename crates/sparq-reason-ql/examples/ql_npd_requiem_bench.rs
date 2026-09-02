@@ -352,9 +352,8 @@ fn witness_nt_per_disjunct(queries: &[&Query]) -> Result<Vec<String>, &'static s
         for (di, bgp) in bgps.iter().enumerate() {
             // One fresh constant per (query, disjunct, kind, name) — shared variables
             // within a disjunct freeze to the SAME constant, so joins are satisfied.
-            let frozen = |kind: &str, name: &str| {
-                format!("<{}q{}d{}{}{}>", WITNESS, qi, di, kind, name)
-            };
+            let frozen =
+                |kind: &str, name: &str| format!("<{}q{}d{}{}{}>", WITNESS, qi, di, kind, name);
             let mut nt = String::new();
             for tp in bgp.iter() {
                 let s = match &tp.subject {
@@ -411,17 +410,28 @@ fn witness_aboxes(queries: &[&Query]) -> Result<Vec<Graph>, &'static str> {
 fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option<&str>) {
     let tbox = load_triples(tbox_path);
     let real_abox: Option<Graph> = abox_path.map(|p| {
-        let text = std::fs::read_to_string(p)
-            .unwrap_or_else(|e| panic!("cannot read ABox {}: {}", p, e));
-        let fmt = if p.ends_with(".nt") || p.ends_with(".ntriples") { "ntriples" } else { "turtle" };
+        let text =
+            std::fs::read_to_string(p).unwrap_or_else(|e| panic!("cannot read ABox {}: {}", p, e));
+        let fmt = if p.ends_with(".nt") || p.ends_with(".ntriples") {
+            "ntriples"
+        } else {
+            "turtle"
+        };
         Graph::load_str(&text, fmt).unwrap_or_else(|e| panic!("ABox {} load: {}", p, e))
     });
-    let data_label = if real_abox.is_some() { "abox" } else { "witness-abox" };
+    let data_label = if real_abox.is_some() {
+        "abox"
+    } else {
+        "witness-abox"
+    };
 
     let mut query_files: Vec<std::path::PathBuf> = std::fs::read_dir(queries_dir)
         .unwrap_or_else(|e| panic!("cannot read queries dir {}: {}", queries_dir, e))
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|ext| ext == "rq" || ext == "sparql"))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|ext| ext == "rq" || ext == "sparql")
+        })
         .collect();
     query_files.sort();
     assert!(
@@ -443,7 +453,9 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
              across instances); FILTER/VALUES queries fail closed to needs-abox (no timing row)"
         )
     );
-    println!("# regime: *_rewrite_ms = rewriter-phase only (in-process rewrite/rewrite_production);");
+    println!(
+        "# regime: *_rewrite_ms = rewriter-phase only (in-process rewrite/rewrite_production);"
+    );
     println!("#         exec_ms = minimised-UCQ execution over the loaded data; e2e_ms = rewrite+execute (comparable to an end-to-end competitor column)");
     println!("suite\tcase\tstatus\traw_disjuncts\tmin_disjuncts\tskipped_axioms\traw_rewrite_ms\tmin_rewrite_ms\tequivalence\tanswers\texec_ms\te2e_ms");
 
@@ -483,8 +495,9 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
         };
         let raw_ms = ms(t_raw);
         let t_min = Instant::now();
-        let minimised = rewrite_production(&query, &tbox)
-            .unwrap_or_else(|e| panic!("{}: raw rewrite succeeded but production failed: {}", id, e));
+        let minimised = rewrite_production(&query, &tbox).unwrap_or_else(|e| {
+            panic!("{}: raw rewrite succeeded but production failed: {}", id, e)
+        });
         let min_ms = ms(t_min);
 
         // UCQ-equivalence sanity check BEFORE the timing row (the sq-hmd7l.9 invariant).
@@ -649,9 +662,7 @@ mod tests {
     fn query_has_join(p: &GraphPattern) -> bool {
         match p {
             GraphPattern::Join { .. } => true,
-            GraphPattern::Union { left, right } => {
-                query_has_join(left) || query_has_join(right)
-            }
+            GraphPattern::Union { left, right } => query_has_join(left) || query_has_join(right),
             GraphPattern::Project { inner, .. }
             | GraphPattern::Distinct { inner }
             | GraphPattern::Reduced { inner }
@@ -702,7 +713,8 @@ mod tests {
             "the literal-object disjunct must match its own frozen instance"
         );
         assert!(
-            dbs.iter().any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
+            dbs.iter()
+                .any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
             "dropping a non-subsumed disjunct must surface as a result-set mismatch on some \
              disjunct's isolated instance"
         );
@@ -719,7 +731,10 @@ mod tests {
             .iter()
             .map(|g| assert_ucq_equivalence(g, &raw, &equiv, "equivalent-ucqs"))
             .sum();
-        assert!(answers > 0, "the agreement must be over a non-empty row set");
+        assert!(
+            answers > 0,
+            "the agreement must be over a non-empty row set"
+        );
     }
 
     /// The vacuity a modifier-blind witness has under FILTER: reproduce the pre-fix path
@@ -785,7 +800,8 @@ mod tests {
             "the shared-variable join disjunct must match its own frozen instance"
         );
         assert!(
-            dbs.iter().any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
+            dbs.iter()
+                .any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
             "dropping the non-subsumed join disjunct must surface as a result-set mismatch on \
              some disjunct's isolated instance"
         );
@@ -801,8 +817,8 @@ mod tests {
     fn isolated_witness_detects_constant_bridge_masking() {
         let raw = parse_query(BRIDGE_RAW_UCQ);
         let wrong = parse_query(BRIDGE_WRONG_MIN_UCQ);
-        let per_disjunct = witness_nt_per_disjunct(&[&raw, &wrong])
-            .expect("modifier-free UCQs must synthesise");
+        let per_disjunct =
+            witness_nt_per_disjunct(&[&raw, &wrong]).expect("modifier-free UCQs must synthesise");
 
         // Pre-fix construction: unioning the per-disjunct instances into ONE graph shares the
         // `:c` constant across instances and masks the drop — raw and wrong agree vacuously.
@@ -823,7 +839,8 @@ mod tests {
             .map(|nt| Graph::load_str(nt, "ntriples").expect("isolated database must load"))
             .collect();
         assert!(
-            dbs.iter().any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
+            dbs.iter()
+                .any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
             "per-disjunct isolation must detect the wrongly dropped disjunct D as a result-set \
              mismatch on its own canonical instance"
         );
@@ -845,14 +862,18 @@ mod tests {
     /// dead-at-test-time; the smoke path above covers the closed-form correctness pins.
     #[test]
     fn gather_harness_runs_witness_and_abox_modes() {
-        let dir = std::env::temp_dir().join(format!("ql_npd_requiem_gather_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ql_npd_requiem_gather_{}", std::process::id()));
         let qdir = dir.join("queries");
         std::fs::create_dir_all(&qdir).expect("temp queries dir must create");
 
         // In-scope class query (witness mode proceeds; UCQ has no re-applied modifier).
         std::fs::write(
             qdir.join("in_scope.rq"),
-            format!("{}SELECT DISTINCT ?x WHERE {{ ?x a :Employee }}", SPARQL_PREFIXES),
+            format!(
+                "{}SELECT DISTINCT ?x WHERE {{ ?x a :Employee }}",
+                SPARQL_PREFIXES
+            ),
         )
         .expect("in-scope query must write");
         // OPTIONAL is out of the fail-closed CQ gate — `rewrite` rejects it (out-of-scope row).
@@ -874,7 +895,12 @@ mod tests {
             format!("{}:Manager rdfs:subClassOf :Employee .", TURTLE_PREFIXES),
         )
         .expect("Turtle TBox must write");
-        run_gather("temp-witness", tbox_ttl.to_str().unwrap(), qdir.to_str().unwrap(), None);
+        run_gather(
+            "temp-witness",
+            tbox_ttl.to_str().unwrap(),
+            qdir.to_str().unwrap(),
+            None,
+        );
 
         // Real-ABox mode: N-Triples TBox + ABox exercise the N-Triples branch of
         // `load_triples` and the `Some(real_abox)` execution path in `run_gather`.

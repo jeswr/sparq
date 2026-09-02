@@ -256,11 +256,7 @@ fn compact_value(value: serde_json::Value) -> serde_json::Value {
         return value;
     };
     if map.len() == 1 && map.contains_key("@value") {
-        return map
-            .into_iter()
-            .next()
-            .map(|(_, v)| v)
-            .unwrap_or_default();
+        return map.into_iter().next().map(|(_, v)| v).unwrap_or_default();
     }
     serde_json::Value::Object(map)
 }
@@ -334,11 +330,7 @@ impl NegotiatedFormat {
     /// registration — so a client can see which document form the server actually honoured.
     pub fn content_type(&self) -> String {
         match self.jsonld_profile {
-            Some(profile) => format!(
-                "{};profile=\"{}\"",
-                self.format.media_type(),
-                profile.iri()
-            ),
+            Some(profile) => format!("{};profile=\"{}\"", self.format.media_type(), profile.iri()),
             None => self.format.media_type().to_string(),
         }
     }

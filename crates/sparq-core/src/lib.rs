@@ -53,10 +53,10 @@ type ChunkPartials = Vec<(Dict, Vec<[Id; 3]>)>;
 use oxjsonld::JsonLdParser;
 // [OPUS-4.8] sq-f47w1 (survey §B1): RDF/XML parser is OPT-IN behind the `rdfxml` feature
 // so the default (lean) wasm bundle never links `oxrdfxml` (which pulls `quick-xml`).
-#[cfg(feature = "rdfxml")]
-use oxrdfxml::RdfXmlParser;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
+#[cfg(feature = "rdfxml")]
+use oxrdfxml::RdfXmlParser;
 use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
 use store::{Pattern, TripleStore};
 
@@ -199,7 +199,10 @@ enum NumData {
     /// `Mapped`'s grow-over-immutable-base shape. Lookup: base first, side map as the
     /// fallback (the side map only ever holds ids the base does not cover).
     /// INVARIANT: the inner cache is never itself `Forked` (fork flattens one level).
-    Forked { base: std::sync::Arc<NumData>, extra: rustc_hash::FxHashMap<Id, f64> },
+    Forked {
+        base: std::sync::Arc<NumData>,
+        extra: rustc_hash::FxHashMap<Id, f64>,
+    },
 }
 
 impl NumData {
@@ -228,9 +231,7 @@ impl NumData {
                 None => extra.get(&id).copied(),
             },
             NumData::Owned(_) => unreachable!("Owned handled by lookup"),
-            NumData::Forked { base, extra } => {
-                base.lookup(id).or_else(|| extra.get(&id).copied())
-            }
+            NumData::Forked { base, extra } => base.lookup(id).or_else(|| extra.get(&id).copied()),
         }
     }
 
@@ -317,7 +318,10 @@ impl NumData {
                     // `fork` never freezes a Forked or Mapped base (invariant above).
                     _ => unreachable!("a forked numeric cache's base is Owned or Sparse"),
                 };
-                NumData::Forked { base: std::sync::Arc::new(folded), extra: rustc_hash::FxHashMap::default() }
+                NumData::Forked {
+                    base: std::sync::Arc::new(folded),
+                    extra: rustc_hash::FxHashMap::default(),
+                }
             }
             other => other,
         }
@@ -399,7 +403,10 @@ enum TempData {
     Sparse(rustc_hash::FxHashMap<Id, Temporal>),
     /// A FORKED graph's cache — see [`NumData::Forked`]: shared immutable base + a
     /// per-fork side map for terms interned after the fork.
-    Forked { base: std::sync::Arc<TempData>, extra: rustc_hash::FxHashMap<Id, Temporal> },
+    Forked {
+        base: std::sync::Arc<TempData>,
+        extra: rustc_hash::FxHashMap<Id, Temporal>,
+    },
 }
 
 /// Dense-cache flag byte of a temporal value: kind + timezone presence. 0 = not temporal.
@@ -421,7 +428,11 @@ fn temp_unflag(flag: u8, instant: f64) -> Option<Temporal> {
         4 => (temporal::TemporalKind::Date, true),
         _ => return None,
     };
-    Some(Temporal { instant, has_tz, kind })
+    Some(Temporal {
+        instant,
+        has_tz,
+        kind,
+    })
 }
 
 impl TempData {
@@ -464,8 +475,14 @@ impl TempData {
             let t = temporal_of_id(dict, id);
             match self {
                 TempData::Owned(cells) => cells.push(match t {
-                    Some(t) => TempCell { instant: t.instant, flag: temp_flag(t) },
-                    None => TempCell { instant: f64::NAN, flag: 0 },
+                    Some(t) => TempCell {
+                        instant: t.instant,
+                        flag: temp_flag(t),
+                    },
+                    None => TempCell {
+                        instant: f64::NAN,
+                        flag: 0,
+                    },
                 }),
                 TempData::Sparse(m) => {
                     if let Some(t) = t {
@@ -509,7 +526,10 @@ impl TempData {
                 // SAFETY: instants are `n` little-endian f64 at offset 0 (page-aligned).
                 let instants = unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<f64>(), n) };
                 let cells: Vec<TempCell> = (0..n)
-                    .map(|i| TempCell { instant: instants[i], flag: m[n * 8 + i] })
+                    .map(|i| TempCell {
+                        instant: instants[i],
+                        flag: m[n * 8 + i],
+                    })
                     .collect();
                 TempData::Forked {
                     base: std::sync::Arc::new(TempData::Owned(cells)),
@@ -527,9 +547,18 @@ impl TempData {
                 let folded = match &*base {
                     TempData::Owned(cells) => {
                         let mut cells = cells.clone();
-                        cells.resize(dict_len, TempCell { instant: f64::NAN, flag: 0 });
+                        cells.resize(
+                            dict_len,
+                            TempCell {
+                                instant: f64::NAN,
+                                flag: 0,
+                            },
+                        );
                         for (&id, &t) in &extra {
-                            cells[(id - 1) as usize] = TempCell { instant: t.instant, flag: temp_flag(t) };
+                            cells[(id - 1) as usize] = TempCell {
+                                instant: t.instant,
+                                flag: temp_flag(t),
+                            };
                         }
                         TempData::Owned(cells)
                     }
@@ -540,7 +569,10 @@ impl TempData {
                     }
                     _ => unreachable!("a forked temporal cache's base is Owned or Sparse"),
                 };
-                TempData::Forked { base: std::sync::Arc::new(folded), extra: rustc_hash::FxHashMap::default() }
+                TempData::Forked {
+                    base: std::sync::Arc::new(folded),
+                    extra: rustc_hash::FxHashMap::default(),
+                }
             }
             other => other,
         }
@@ -587,7 +619,11 @@ impl TempData {
 /// (no `Term` materialisation). `None` for non-temporal terms and ill-formed lexicals.
 fn temporal_of_id(dict: &Dict, id: Id) -> Option<Temporal> {
     match dict.term_parts(id) {
-        dict::TermParts::Lit { value, datatype, lang: None } => Temporal::of_lit(value, datatype),
+        dict::TermParts::Lit {
+            value,
+            datatype,
+            lang: None,
+        } => Temporal::of_lit(value, datatype),
         _ => None,
     }
 }
@@ -606,8 +642,14 @@ fn temporals_of(dict: &Dict) -> Vec<TempCell> {
     let n = dict.len();
     let cell = |i: usize| -> TempCell {
         match temporal_of_id(dict, i as Id + 1) {
-            Some(t) => TempCell { instant: t.instant, flag: temp_flag(t) },
-            None => TempCell { instant: f64::NAN, flag: 0 },
+            Some(t) => TempCell {
+                instant: t.instant,
+                flag: temp_flag(t),
+            },
+            None => TempCell {
+                instant: f64::NAN,
+                flag: 0,
+            },
         }
     };
     #[cfg(feature = "parallel")]
@@ -628,7 +670,12 @@ fn write_temporals(path: &std::path::Path, flags: &[u8], instants: &[f64]) -> st
     use std::io::Write;
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     // SAFETY: reinterpret the contiguous f64 column as bytes for writing.
-    let ibytes = unsafe { std::slice::from_raw_parts(instants.as_ptr().cast::<u8>(), std::mem::size_of_val(instants)) };
+    let ibytes = unsafe {
+        std::slice::from_raw_parts(
+            instants.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(instants),
+        )
+    };
     f.write_all(ibytes)?;
     f.write_all(flags)?;
     f.flush()
@@ -673,7 +720,12 @@ pub fn parse_xsd_f64(v: &str) -> Option<f64> {
         "-INF" => Some(f64::NEG_INFINITY),
         // Only ASCII digits / sign / point / exponent letters reach Rust's parser, which
         // excludes every non-XSD spelling (`inf`/`infinity`/`nan`/hex/`_` separators …).
-        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => v.parse::<f64>().ok(),
+        _ if v
+            .bytes()
+            .all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) =>
+        {
+            v.parse::<f64>().ok()
+        }
         _ => None,
     }
 }
@@ -724,7 +776,9 @@ fn numeric_datatype_wellformed(v: &str, datatype: &str) -> bool {
         // i128-fit of the concatenated mantissa (leading `+`/`-` already stripped).
         let mut mag: i128 = 0;
         for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
-            mag = mag.checked_mul(10).and_then(|m| m.checked_add((ch - b'0') as i128))?;
+            mag = mag
+                .checked_mul(10)
+                .and_then(|m| m.checked_add((ch - b'0') as i128))?;
         }
         // Normalised scale: trailing fraction zeros are insignificant (`Dec::parse` drops
         // them), so `"5.00"` is scale-0, matching `of_literal`'s scale-0 integer acceptance.
@@ -740,7 +794,8 @@ fn numeric_datatype_wellformed(v: &str, datatype: &str) -> bool {
         return scan_decimal(v).is_some();
     }
     // float / double: the datatype-agnostic XSD doubleRep space is already `of_literal`'s.
-    (datatype == xsd::FLOAT.as_str() || datatype == xsd::DOUBLE.as_str()) && parse_xsd_f64(v).is_some()
+    (datatype == xsd::FLOAT.as_str() || datatype == xsd::DOUBLE.as_str())
+        && parse_xsd_f64(v).is_some()
 }
 
 /// The DATATYPE-AWARE cached f64 of a numeric literal `(value, datatype)`, or `NaN` (the
@@ -783,7 +838,9 @@ pub fn numeric_cache_value(value: &str, datatype: &str) -> Option<f64> {
 /// evaluator type-errors it. [FABLE-5] (sq-9781x / sq-74oy4 / sq-6b1lj)
 fn numeric_of(term: &Term) -> f64 {
     match term {
-        Term::Literal(l) if is_numeric_dt(l) => cached_numeric_f64(l.value(), l.datatype().as_str()),
+        Term::Literal(l) if is_numeric_dt(l) => {
+            cached_numeric_f64(l.value(), l.datatype().as_str())
+        }
         _ => f64::NAN,
     }
 }
@@ -809,7 +866,9 @@ fn decimal_significant_digits(s: &str) -> usize {
     let s = s.trim();
     let s = s.strip_prefix(['+', '-']).unwrap_or(s);
     let (int, frac) = s.split_once('.').unwrap_or((s, ""));
-    if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
+    if (int.is_empty() && frac.is_empty())
+        || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit())
+    {
         return usize::MAX;
     }
     let int = int.trim_start_matches('0');
@@ -1018,8 +1077,14 @@ impl Graph {
             }};
         }
         match format {
-            "ntriples" | "n-triples" | "nt" | "application/n-triples" | "nquads" | "n-quads"
-            | "nq" | "application/n-quads" => {
+            "ntriples"
+            | "n-triples"
+            | "nt"
+            | "application/n-triples"
+            | "nquads"
+            | "n-quads"
+            | "nq"
+            | "application/n-quads" => {
                 return Self::parse_to_triples(text, format);
             }
             "trig" | "application/trig" => {
@@ -1168,7 +1233,11 @@ impl Graph {
 
     /// [FABLE-5] (sq-tonhr.2) [`load_dataset_serial`] with an optional base IRI — the shared
     /// body behind the no-base serial loader and [`load_dataset_with_base`].
-    fn load_dataset_serial_base(text: &str, format: &str, base: Option<&str>) -> Result<Graph, String> {
+    fn load_dataset_serial_base(
+        text: &str,
+        format: &str,
+        base: Option<&str>,
+    ) -> Result<Graph, String> {
         use oxrdf::GraphName;
         use std::collections::HashMap;
         let bytes = text.as_bytes();
@@ -1189,9 +1258,11 @@ impl Graph {
                         groups.push((g.clone(), Vec::new()));
                         groups.len() - 1
                     });
-                    groups[slot]
-                        .1
-                        .push([subject_term(&q.subject), Term::NamedNode(q.predicate), q.object]);
+                    groups[slot].1.push([
+                        subject_term(&q.subject),
+                        Term::NamedNode(q.predicate),
+                        q.object,
+                    ]);
                 }
             };
         }
@@ -1227,8 +1298,10 @@ impl Graph {
         }
         let build_terms = |triples: &[[Term; 3]]| -> Graph {
             let mut dict = Dict::new();
-            let ids: Vec<[Id; 3]> =
-                triples.iter().map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)]).collect();
+            let ids: Vec<[Id; 3]> = triples
+                .iter()
+                .map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)])
+                .collect();
             Self::build(dict, ids)
         };
         let mut g: Option<Graph> = None;
@@ -1316,7 +1389,10 @@ impl Graph {
         // serially. Otherwise aim for ~4 chunks/thread (the Turtle policy), capped by document size.
         let threads = rayon::current_num_threads().max(1);
         if threads == 1 {
-            return Self::load_dataset_serial(std::str::from_utf8(bytes).map_err(|e| e.to_string())?, "trig");
+            return Self::load_dataset_serial(
+                std::str::from_utf8(bytes).map_err(|e| e.to_string())?,
+                "trig",
+            );
         }
         let target = (threads * 4).min(bytes.len() / 8192 + 1).max(1);
         Self::load_trig_chunked(bytes, target)
@@ -1341,8 +1417,10 @@ impl Graph {
             _ => return serial(),
         };
         type ChunkBuckets = Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)>;
-        let per_chunk: Result<Vec<ChunkBuckets>, String> =
-            chunks.par_iter().map(|chunk| parse_trig_chunk(chunk)).collect();
+        let per_chunk: Result<Vec<ChunkBuckets>, String> = chunks
+            .par_iter()
+            .map(|chunk| parse_trig_chunk(chunk))
+            .collect();
         let per_chunk = match per_chunk {
             Ok(p) => p,
             // An over-eager split produced invalid TriG — redo the whole document serially. This is
@@ -1445,7 +1523,10 @@ impl Graph {
         // re-entered a path that locks the same mutex. The snapshot of matches is taken
         // while the lock is held, so correctness is preserved.
         let matches: Vec<u32> = {
-            let mut guard = self.graph_prefix_index.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self
+                .graph_prefix_index
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let order: &Vec<u32> = match guard.as_ref() {
                 Some((len, idx)) if *len == n => idx,
                 _ => {
@@ -1575,7 +1656,10 @@ impl Graph {
     /// pool, stage 3 (the caller's thread) merges dictionaries — so decode overlaps
     /// parse+merge and streaming ingest approaches max(decode, parse).
     #[cfg(feature = "parallel")]
-    pub fn load_reader_parallel<R: std::io::Read + Send>(reader: R, format: &str) -> Result<Graph, String> {
+    pub fn load_reader_parallel<R: std::io::Read + Send>(
+        reader: R,
+        format: &str,
+    ) -> Result<Graph, String> {
         if !matches!(format, "ntriples" | "n-triples") {
             return Self::load_reader(reader, format);
         }
@@ -1586,7 +1670,10 @@ impl Graph {
     /// as a parameter so tests can exercise the multi-block / boundary-straddling paths
     /// cheaply (production always passes 32 MiB).
     #[cfg(feature = "parallel")]
-    fn load_ntriples_pipelined<R: std::io::Read + Send>(reader: R, block_size: usize) -> Result<Graph, String> {
+    fn load_ntriples_pipelined<R: std::io::Read + Send>(
+        reader: R,
+        block_size: usize,
+    ) -> Result<Graph, String> {
         use std::sync::mpsc::sync_channel;
         // ≥2 rayon threads: ONE sharded dict spans all blocks, so the per-block dict merge
         // — the measured serial `merge_remap` that capped load scaling at ~1.8× on 4
@@ -1613,7 +1700,9 @@ impl Graph {
                 loop {
                     let mut filled = 0;
                     while filled < block_size {
-                        let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+                        let n = reader
+                            .read(&mut readbuf[filled..])
+                            .map_err(|e| e.to_string())?;
                         if n == 0 {
                             break;
                         }
@@ -1664,8 +1753,12 @@ impl Graph {
                 }
             }
             // Join parse first (it feeds stage 3 — surface a parse error), then the producer.
-            parser.join().map_err(|_| "parse thread panicked".to_string())??;
-            producer.join().map_err(|_| "read thread panicked".to_string())?
+            parser
+                .join()
+                .map_err(|_| "parse thread panicked".to_string())??;
+            producer
+                .join()
+                .map_err(|_| "read thread panicked".to_string())?
         })?;
         if sharded {
             let (dict, ids) = finish_sharded(sd, all);
@@ -1753,10 +1846,10 @@ impl Graph {
         std::fs::create_dir_all(dir)?;
         self.store.save(dir)?; // folds any delta-overlay into the persisted permutations
         self.dict.save_mmap(dir)?; // includes appended (delta-overlay) terms
-        // [OPUS-4.8] (sq-7ph8) STREAM the numeric/temporal caches block-by-block straight from
-        // the in-RAM cache instead of materialising a whole-dictionary dense intermediate
-        // (`dense_numerics`/`dense_temporals`) first — bounding the finalize RSS peak for a
-        // SPARSE/FORKED cache (the common non-numeric/non-temporal case).
+                                   // [OPUS-4.8] (sq-7ph8) STREAM the numeric/temporal caches block-by-block straight from
+                                   // the in-RAM cache instead of materialising a whole-dictionary dense intermediate
+                                   // (`dense_numerics`/`dense_temporals`) first — bounding the finalize RSS peak for a
+                                   // SPARSE/FORKED cache (the common non-numeric/non-temporal case).
         let n = self.dict.len();
         stream_write_numerics(&dir.join("numerics.bin"), n, &self.numerics)?;
         stream_write_temporals(&dir.join("temporals.bin"), n, &self.temporals)?;
@@ -1837,7 +1930,9 @@ impl Graph {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
-        let bad = |msg: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("named.bin: {msg}"));
+        let bad = |msg: &str| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("named.bin: {msg}"))
+        };
         if bytes.len() < 12 {
             return Err(bad("manifest too short for header"));
         }
@@ -1917,7 +2012,10 @@ impl Graph {
         let numerics = match std::fs::File::open(&np) {
             Ok(f) if f.metadata()?.len() as usize == dict.len() * std::mem::size_of::<f64>() => {
                 // SAFETY: the file is owned by this graph for its lifetime and not mutated.
-                NumData::Mapped(unsafe { memmap2::Mmap::map(&f)? }, rustc_hash::FxHashMap::default())
+                NumData::Mapped(
+                    unsafe { memmap2::Mmap::map(&f)? },
+                    rustc_hash::FxHashMap::default(),
+                )
             }
             _ => NumData::Owned(numerics_of(&dict)),
         };
@@ -1925,7 +2023,10 @@ impl Graph {
         let temporals = match std::fs::File::open(&tp) {
             Ok(f) if f.metadata()?.len() as usize == dict.len() * 9 => {
                 // SAFETY: the file is owned by this graph for its lifetime and not mutated.
-                TempData::Mapped(unsafe { memmap2::Mmap::map(&f)? }, rustc_hash::FxHashMap::default())
+                TempData::Mapped(
+                    unsafe { memmap2::Mmap::map(&f)? },
+                    rustc_hash::FxHashMap::default(),
+                )
             }
             // Absent or stale (a graph saved before this cache existed): recompute —
             // backward compatible, like the numerics cache.
@@ -1977,7 +2078,8 @@ impl Graph {
         // simply redoes the (idempotent) frame again on the next open.
         let txn_records = TxnJournal::replay(dir)?;
         for (insert, slot, t) in txn_records {
-            g.redo_txn_record(insert, slot, t).map_err(std::io::Error::other)?;
+            g.redo_txn_record(insert, slot, t)
+                .map_err(std::io::Error::other)?;
         }
         // Every committed record is now durably in a per-graph WAL (fsync'd by `apply_delta`); only
         // NOW is it safe to truncate the journal that was the sole durable home of those records.
@@ -2003,7 +2105,12 @@ impl Graph {
     /// replays with set semantics (re-inserting a present triple / deleting an absent one is a
     /// no-op), so a re-crash mid-redo simply redoes the (idempotent) frame again.
     #[cfg(feature = "mmap")]
-    fn redo_txn_record(&mut self, insert: bool, slot: Option<Term>, t: [Term; 3]) -> Result<(), String> {
+    fn redo_txn_record(
+        &mut self,
+        insert: bool,
+        slot: Option<Term>,
+        t: [Term; 3],
+    ) -> Result<(), String> {
         match slot {
             None => {
                 if insert {
@@ -2171,7 +2278,9 @@ impl Graph {
                     // the running dict), the user-requested "parallelise parsing of the file".
                     // Still bounded-memory: one ~64 MiB buffer + its partials at a time.
                     #[cfg(feature = "parallel")]
-                    build_external_ntriples_parallel(reader, &mut dict, &mut buf, &mut runs, &tmp, chunk)?;
+                    build_external_ntriples_parallel(
+                        reader, &mut dict, &mut buf, &mut runs, &tmp, chunk,
+                    )?;
                     #[cfg(not(feature = "parallel"))]
                     for t in NTriplesParser::new().for_reader(reader) {
                         let t = t.map_err(|e| e.to_string())?;
@@ -2193,7 +2302,12 @@ impl Graph {
             } else {
                 (build_timing::PathKind::Serial, None)
             };
-            build_timing::report("parse+intern+spill done", kind, cons, _t_build.elapsed().as_secs_f64());
+            build_timing::report(
+                "parse+intern+spill done",
+                kind,
+                cons,
+                _t_build.elapsed().as_secs_f64(),
+            );
         }
 
         // Merge the SPO runs into the SPO permutation file (deduplicating).
@@ -2201,7 +2315,10 @@ impl Graph {
         extsort::kway_merge(&runs, &spo_path).map_err(|e| e.to_string())?;
         #[cfg(all(feature = "mmap", feature = "parallel"))]
         if build_timing::enabled() {
-            eprintln!("[build-timing] kway_merge SPO done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+            eprintln!(
+                "[build-timing] kway_merge SPO done | {:.2}s wall to here",
+                _t_build.elapsed().as_secs_f64()
+            );
         }
         for r in &runs {
             std::fs::remove_file(r).ok();
@@ -2232,7 +2349,8 @@ impl Graph {
                 extsort::external_sort_compressed(spo.iter().copied(), perm.order(), &out, sub, per)
                     .map_err(|e| e.to_string())
             } else {
-                extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+                extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per)
+                    .map_err(|e| e.to_string())
             }
         };
         // The sibling sorts are independent — run them CONCURRENTLY (each in its own tmp
@@ -2247,10 +2365,14 @@ impl Graph {
             let dict_ref = &dict;
             let finalize = scope.spawn(move || -> Result<(), String> {
                 dict_ref.save_mmap(dir).map_err(|e| e.to_string())?;
-                write_numerics(&dir.join("numerics.bin"), &numerics_of(dict_ref)).map_err(|e| e.to_string())?;
+                write_numerics(&dir.join("numerics.bin"), &numerics_of(dict_ref))
+                    .map_err(|e| e.to_string())?;
                 let (tf, ti) = {
                     let cells = temporals_of(dict_ref);
-                    (cells.iter().map(|c| c.flag).collect::<Vec<u8>>(), cells.iter().map(|c| c.instant).collect::<Vec<f64>>())
+                    (
+                        cells.iter().map(|c| c.flag).collect::<Vec<u8>>(),
+                        cells.iter().map(|c| c.instant).collect::<Vec<f64>>(),
+                    )
                 };
                 write_temporals(&dir.join("temporals.bin"), &tf, &ti).map_err(|e| e.to_string())?;
                 Ok(())
@@ -2259,21 +2381,26 @@ impl Graph {
             {
                 use rayon::prelude::*;
                 let per = (chunk / siblings.len().max(1)).max(1 << 16);
-                siblings
-                    .par_iter()
-                    .try_for_each(|&perm| sib_sort(perm, &tmp.join(format!("p{}", perm as usize)), per))?;
+                siblings.par_iter().try_for_each(|&perm| {
+                    sib_sort(perm, &tmp.join(format!("p{}", perm as usize)), per)
+                })?;
             }
             #[cfg(not(feature = "parallel"))]
             for &perm in &siblings {
                 sib_sort(perm, &tmp, chunk)?;
             }
-            finalize.join().map_err(|_| "dict-finalize thread panicked".to_string())??;
+            finalize
+                .join()
+                .map_err(|_| "dict-finalize thread panicked".to_string())??;
             Ok(())
         })?;
         drop(map);
         #[cfg(all(feature = "mmap", feature = "parallel"))]
         if build_timing::enabled() {
-            eprintln!("[build-timing] sibling sorts ∥ dict-save done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+            eprintln!(
+                "[build-timing] sibling sorts ∥ dict-save done | {:.2}s wall to here",
+                _t_build.elapsed().as_secs_f64()
+            );
         }
 
         // [OPUS-4.8] sq-vkz7: the siblings are already `SPQCPRM1`; compress SPO LAST, now
@@ -2343,10 +2470,7 @@ impl Graph {
         // did that first and only THEN rejected an unsupported `format`, we would have already
         // destroyed an existing dataset at `dir` (data loss) while returning `Err`. So the
         // format check happens up-front, before `create_dir_all`/`remove_dir_all`.
-        if !matches!(
-            format,
-            "nquads" | "n-quads" | "trig" | "application/trig"
-        ) {
+        if !matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
             return Err(format!(
                 "build_external_quads: unsupported quad format {format:?} (expected nquads or trig)"
             ));
@@ -2377,7 +2501,10 @@ impl Graph {
                 }
             }
         }
-        let mut spill_guard = SpillGuard { dir: spill_dir.clone(), armed: true };
+        let mut spill_guard = SpillGuard {
+            dir: spill_dir.clone(),
+            armed: true,
+        };
 
         // Stale-state hygiene mirroring `save_named`: a re-build into the same directory must
         // not inherit a previous build's named subtree/manifest. This is destructive, so it
@@ -2487,8 +2614,7 @@ impl Graph {
         macro_rules! route {
             ($q:expr) => {{
                 let q = $q.map_err(|e| e.to_string())?;
-                let triple =
-                    TripleRef::new(&q.subject, q.predicate.as_ref(), q.object.as_ref());
+                let triple = TripleRef::new(&q.subject, q.predicate.as_ref(), q.object.as_ref());
                 let slot = match q.graph_name {
                     GraphName::DefaultGraph => {
                         have_default = true;
@@ -2512,7 +2638,8 @@ impl Graph {
                     }
                 };
                 let w = pool.writer(slot)?;
-                ser.serialize_triple(triple, &mut *w).map_err(|e| e.to_string())?;
+                ser.serialize_triple(triple, &mut *w)
+                    .map_err(|e| e.to_string())?;
             }};
         }
 
@@ -2552,7 +2679,8 @@ impl Graph {
             let named_dir = dir.join(NAMED_SUBDIR);
             std::fs::create_dir_all(&named_dir).map_err(|e| e.to_string())?;
             for i in 0..names.len() {
-                let f = std::fs::File::open(spill_dir.join(format!("g{i}.nt"))).map_err(|e| e.to_string())?;
+                let f = std::fs::File::open(spill_dir.join(format!("g{i}.nt")))
+                    .map_err(|e| e.to_string())?;
                 Self::build_external(f, "ntriples", &named_dir.join(i.to_string()), chunk)?;
             }
             write_named_manifest(dir, &names).map_err(|e| e.to_string())?;
@@ -2591,8 +2719,8 @@ impl Graph {
         build_timing::reset();
 
         // Stages 1-3: decompress + parallel parse + bounded-cache resolve + stage.
-        let mut interner =
-            dictspill::SpillInterner::new(default_shards(), &tmp, cfg).map_err(|e| e.to_string())?;
+        let mut interner = dictspill::SpillInterner::new(default_shards(), &tmp, cfg)
+            .map_err(|e| e.to_string())?;
         build_external_ntriples_dictspill(reader, &mut interner)?;
         if build_timing::enabled() {
             // [OPUS-4.8 sq-3l43] The spill path's "merge" bucket is the bounded PARALLEL
@@ -2612,7 +2740,10 @@ impl Graph {
         let t_cons = std::time::Instant::now();
         let plan = dictspill::consolidate(interner, dir, &tmp, cfg)?;
         if build_timing::enabled() {
-            eprintln!("[build-timing] dict consolidate (spilled): {:.2}s", t_cons.elapsed().as_secs_f64());
+            eprintln!(
+                "[build-timing] dict consolidate (spilled): {:.2}s",
+                t_cons.elapsed().as_secs_f64()
+            );
         }
 
         // Phase 5: remap the staged triples to final dense ids, spilling SPO-sorted runs.
@@ -2626,7 +2757,10 @@ impl Graph {
         let spo_path = dir.join(format!("perm{}.bin", Perm::Spo as usize));
         extsort::kway_merge(&runs, &spo_path).map_err(|e| e.to_string())?;
         if build_timing::enabled() {
-            eprintln!("[build-timing] kway_merge SPO done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+            eprintln!(
+                "[build-timing] kway_merge SPO done | {:.2}s wall to here",
+                _t_build.elapsed().as_secs_f64()
+            );
         }
         for r in &runs {
             std::fs::remove_file(r).ok();
@@ -2649,19 +2783,23 @@ impl Graph {
                 extsort::external_sort_compressed(spo.iter().copied(), perm.order(), &out, sub, per)
                     .map_err(|e| e.to_string())
             } else {
-                extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+                extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per)
+                    .map_err(|e| e.to_string())
             }
         };
         {
             use rayon::prelude::*;
             let per = (chunk / siblings.len().max(1)).max(1 << 16);
-            siblings
-                .par_iter()
-                .try_for_each(|&perm| sib_sort(perm, &tmp.join(format!("p{}", perm as usize)), per))?;
+            siblings.par_iter().try_for_each(|&perm| {
+                sib_sort(perm, &tmp.join(format!("p{}", perm as usize)), per)
+            })?;
         }
         drop(map);
         if build_timing::enabled() {
-            eprintln!("[build-timing] sibling sorts done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+            eprintln!(
+                "[build-timing] sibling sorts done | {:.2}s wall to here",
+                _t_build.elapsed().as_secs_f64()
+            );
         }
         // SPO compressed last, now that no sibling sort needs it raw (see `build_external_opts`).
         if compressed {
@@ -2714,9 +2852,11 @@ impl Graph {
             return Some((id - dict::INLINE_BASE).to_string());
         }
         match self.dict.term_parts(id) {
-            dict::TermParts::Lit { value, datatype, lang: None }
-                if is_integer_datatype(datatype) || datatype == xsd::DECIMAL.as_str() =>
-            {
+            dict::TermParts::Lit {
+                value,
+                datatype,
+                lang: None,
+            } if is_integer_datatype(datatype) || datatype == xsd::DECIMAL.as_str() => {
                 Some(value.to_string())
             }
             _ => None,
@@ -2746,9 +2886,11 @@ impl Graph {
             2 => true,
             1 => false,
             _ => {
-                let found = (1..=self.dict.len() as Id)
-                    .any(|id| self.numerics.lookup(id).is_some() && is_high_precision_decimal(&self.dict, id));
-                self.high_precision_decimal.store(if found { 2 } else { 1 }, Relaxed);
+                let found = (1..=self.dict.len() as Id).any(|id| {
+                    self.numerics.lookup(id).is_some() && is_high_precision_decimal(&self.dict, id)
+                });
+                self.high_precision_decimal
+                    .store(if found { 2 } else { 1 }, Relaxed);
                 found
             }
         }
@@ -2765,7 +2907,10 @@ impl Graph {
     /// A rough estimate of the graph's in-memory footprint in bytes (dictionary +
     /// the six permutation indexes), for benchmarking.
     pub fn heap_bytes(&self) -> usize {
-        self.dict.heap_bytes() + self.store.heap_bytes() + self.numerics.heap_bytes() + self.temporals.heap_bytes()
+        self.dict.heap_bytes()
+            + self.store.heap_bytes()
+            + self.numerics.heap_bytes()
+            + self.temporals.heap_bytes()
     }
 
     /// Resolves a term to its id, or `None` if the term is absent (so a pattern
@@ -2848,14 +2993,20 @@ impl Graph {
     /// fall out of run boundaries; for distinct objects use
     /// [`iter_ids_sorted`](Self::iter_ids_sorted)`(2)`.
     pub fn iter_ids(&self) -> TripleIdIter<'_> {
-        TripleIdIter { scan: self.store.scan(&[None, None, None]), i: 0 }
+        TripleIdIter {
+            scan: self.store.scan(&[None, None, None]),
+            i: 0,
+        }
     }
 
     /// [`iter_ids`](Self::iter_ids) sorted by the canonical column `col`
     /// (0 = subject, 1 = predicate, 2 = object) — e.g. `iter_ids_sorted(2)` yields
     /// object-sorted triples so distinct objects are adjacent.
     pub fn iter_ids_sorted(&self, col: usize) -> TripleIdIter<'_> {
-        TripleIdIter { scan: self.store.scan_sorted(&[None, None, None], col), i: 0 }
+        TripleIdIter {
+            scan: self.store.scan_sorted(&[None, None, None], col),
+            i: 0,
+        }
     }
 
     // ---- Structural fork (snapshot generations) --------------------------------------
@@ -2890,7 +3041,11 @@ impl Graph {
             temporals: self.temporals.fork(),
             // sq-lr2ii: the fork shares the same values; recompute the guard lazily.
             high_precision_decimal: std::sync::atomic::AtomicU8::new(0),
-            named: self.named.iter().map(|(name, g)| (name.clone(), g.fork())).collect(),
+            named: self
+                .named
+                .iter()
+                .map(|(name, g)| (name.clone(), g.fork()))
+                .collect(),
             // A fork is a fresh logical copy; rebuild the prefix index lazily on first use.
             graph_prefix_index: std::sync::Mutex::new(None),
             #[cfg(feature = "mmap")]
@@ -2931,7 +3086,11 @@ impl Graph {
     pub fn pending_delta_len(&self) -> usize {
         self.store.overlay_len()
             + self.dict.appended_len()
-            + self.named.iter().map(|(_, g)| g.pending_delta_len()).sum::<usize>()
+            + self
+                .named
+                .iter()
+                .map(|(_, g)| g.pending_delta_len())
+                .sum::<usize>()
     }
 
     // ---- Incremental updates (T17): delta-overlay + WAL durability ------------------
@@ -2944,13 +3103,18 @@ impl Graph {
     /// batch is appended to the write-ahead log and fsync'd BEFORE it is applied, so a
     /// crash replays it on the next open. Fold the overlay back into the immutable base
     /// periodically with [`compact`](Self::compact).
-    pub fn apply_delta(&mut self, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) -> Result<(), String> {
+    pub fn apply_delta(
+        &mut self,
+        inserts: &[[Term; 3]],
+        deletes: &[[Term; 3]],
+    ) -> Result<(), String> {
         if inserts.is_empty() && deletes.is_empty() {
             return Ok(());
         }
         #[cfg(feature = "mmap")]
         if let Some(w) = &mut self.wal {
-            w.append_batch(inserts, deletes).map_err(|e| format!("WAL append failed: {e}"))?;
+            w.append_batch(inserts, deletes)
+                .map_err(|e| format!("WAL append failed: {e}"))?;
         }
         self.apply_delta_mem(inserts, deletes);
         Ok(())
@@ -3006,10 +3170,15 @@ impl Graph {
     /// materialisation, [`open`](Self::open) redoes this frame idempotently. A NO-OP (returns `Ok`)
     /// for an IN-MEMORY graph (no journal) and for an empty record set, so the in-memory live
     /// update path is byte-for-byte unchanged.
-    pub fn commit_txn(&mut self, records: &[(bool, Option<Term>, [Term; 3])]) -> Result<(), String> {
+    pub fn commit_txn(
+        &mut self,
+        records: &[(bool, Option<Term>, [Term; 3])],
+    ) -> Result<(), String> {
         #[cfg(feature = "mmap")]
         if let Some(j) = &mut self.txn {
-            return j.append(records).map_err(|e| format!("txn journal commit failed: {e}"));
+            return j
+                .append(records)
+                .map_err(|e| format!("txn journal commit failed: {e}"));
         }
         #[cfg(not(feature = "mmap"))]
         let _ = records;
@@ -3023,7 +3192,9 @@ impl Graph {
     pub fn clear_txn(&mut self) -> Result<(), String> {
         #[cfg(feature = "mmap")]
         if let Some(j) = &mut self.txn {
-            return j.truncate().map_err(|e| format!("txn journal clear failed: {e}"));
+            return j
+                .truncate()
+                .map_err(|e| format!("txn journal clear failed: {e}"));
         }
         Ok(())
     }
@@ -3045,7 +3216,11 @@ impl Graph {
                     .iter()
                     .map(|r| {
                         let spo = scan.to_spo(r);
-                        [self.dict.term(spo[0]), self.dict.term(spo[1]), self.dict.term(spo[2])]
+                        [
+                            self.dict.term(spo[0]),
+                            self.dict.term(spo[1]),
+                            self.dict.term(spo[2]),
+                        ]
                     })
                     .collect()
             };
@@ -3123,7 +3298,11 @@ impl Graph {
     /// (see that method's docs for the crash-safe swap protocol). Split out so the public method
     /// stays free of `mmap`-only fields.
     #[cfg(feature = "mmap")]
-    fn drop_named_durable_dir(&mut self, idx: usize, dir: &std::path::Path) -> Result<bool, String> {
+    fn drop_named_durable_dir(
+        &mut self,
+        idx: usize,
+        dir: &std::path::Path,
+    ) -> Result<bool, String> {
         // [OPUS-4.8] (Copilot #123, Issue 1) Drop the entry in memory first; `self.named` is now
         // the SURVIVING set in final order. RELEASE the removed sub-graph's mmap/WAL handles
         // IMMEDIATELY (it is gone) so no live map points into `named/<idx>/` before the directory
@@ -3202,7 +3381,8 @@ impl Graph {
         let mut names: Vec<Term> = Vec::with_capacity(self.named.len());
         for (i, (name, sub)) in self.named.iter_mut().enumerate() {
             sub.wal = None;
-            sub.save(&new_dir.join(i.to_string())).map_err(|e| e.to_string())?;
+            sub.save(&new_dir.join(i.to_string()))
+                .map_err(|e| e.to_string())?;
             names.push(name.clone());
         }
         fsync_dir(&new_dir).map_err(|e| e.to_string())?;
@@ -3254,7 +3434,14 @@ impl Graph {
                     GraphName::NamedNode(n) => Some(Term::NamedNode(n)),
                     GraphName::BlankNode(b) => Some(Term::BlankNode(b)),
                 };
-                out.push((slot, [subject_term(&q.subject), Term::NamedNode(q.predicate), q.object]));
+                out.push((
+                    slot,
+                    [
+                        subject_term(&q.subject),
+                        Term::NamedNode(q.predicate),
+                        q.object,
+                    ],
+                ));
             }
             Ok(out)
         }
@@ -3363,7 +3550,8 @@ impl Graph {
             self.named.push((name.clone(), g));
             return Ok(self.named.len() - 1);
         }
-        self.named.push((name.clone(), Graph::from_parts(Dict::new(), Vec::new())));
+        self.named
+            .push((name.clone(), Graph::from_parts(Dict::new(), Vec::new())));
         Ok(self.named.len() - 1)
     }
 
@@ -3379,7 +3567,13 @@ impl Graph {
         let old_len = self.dict.len();
         let ins_ids: Vec<[Id; 3]> = inserts
             .iter()
-            .map(|[s, p, o]| [self.dict.intern(s), self.dict.intern(p), self.dict.intern(o)])
+            .map(|[s, p, o]| {
+                [
+                    self.dict.intern(s),
+                    self.dict.intern(p),
+                    self.dict.intern(o),
+                ]
+            })
             .collect();
         // Keep the numeric- and temporal-filter caches covering the grown dictionary.
         self.numerics.extend_for(&self.dict, old_len);
@@ -3416,9 +3610,15 @@ impl Graph {
         if self.dict.is_forked() {
             self.dict = self.dict.compacted();
             let n = self.dict.len();
-            let numerics = std::mem::replace(&mut self.numerics, NumData::Sparse(rustc_hash::FxHashMap::default()));
+            let numerics = std::mem::replace(
+                &mut self.numerics,
+                NumData::Sparse(rustc_hash::FxHashMap::default()),
+            );
             self.numerics = numerics.fold(n);
-            let temporals = std::mem::replace(&mut self.temporals, TempData::Sparse(rustc_hash::FxHashMap::default()));
+            let temporals = std::mem::replace(
+                &mut self.temporals,
+                TempData::Sparse(rustc_hash::FxHashMap::default()),
+            );
             self.temporals = temporals.fold(n);
         }
         if self.store.has_overlay() {
@@ -3464,8 +3664,8 @@ impl Graph {
         // away with `dir`), then run the shared crash-safe swap, writing `self`'s CURRENT image as
         // the new base. Adopt the re-opened directory-backed graph in place. [OPUS-4.8] (sq-ft7u)
         self.wal = None;
-        let reopened = swap_dir_to_new_base(dir, |new_dir| self.save(new_dir))
-            .map_err(|e| e.to_string())?;
+        let reopened =
+            swap_dir_to_new_base(dir, |new_dir| self.save(new_dir)).map_err(|e| e.to_string())?;
         *self = reopened;
         Ok(())
     }
@@ -3495,10 +3695,7 @@ impl Graph {
     /// concurrently — the caller must quiesce the durable writer that owns `dir` before invoking
     /// this, exactly as the in-process compaction swap runs only on the single writer thread.
     #[cfg(feature = "mmap")]
-    pub fn restore_into_durable(
-        dir: &std::path::Path,
-        fresh: Graph,
-    ) -> std::io::Result<Graph> {
+    pub fn restore_into_durable(dir: &std::path::Path, fresh: Graph) -> std::io::Result<Graph> {
         swap_dir_to_new_base(dir, |new_dir| fresh.save(new_dir))
     }
 
@@ -3577,7 +3774,11 @@ impl Graph {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    [self.dict.term(spo[0]), self.dict.term(spo[1]), self.dict.term(spo[2])]
+                    [
+                        self.dict.term(spo[0]),
+                        self.dict.term(spo[1]),
+                        self.dict.term(spo[2]),
+                    ]
                 })
                 .collect()
         };
@@ -3846,17 +4047,29 @@ fn encode_graph_name(buf: &mut Vec<u8>, name: &Term) {
 /// asset, but the loader stays memory-safe under corruption like the rest of `open`).
 #[cfg(feature = "mmap")]
 fn decode_graph_name(bytes: &[u8], pos: usize) -> Result<(Term, usize), String> {
-    let kind = *bytes.get(pos).ok_or("truncated manifest (missing kind byte)")?;
+    let kind = *bytes
+        .get(pos)
+        .ok_or("truncated manifest (missing kind byte)")?;
     let lo = pos + 1;
     let len_end = lo + 4;
-    let len_bytes = bytes.get(lo..len_end).ok_or("truncated manifest (missing length)")?;
+    let len_bytes = bytes
+        .get(lo..len_end)
+        .ok_or("truncated manifest (missing length)")?;
     let len = u32::from_le_bytes(len_bytes.try_into().expect("4 bytes")) as usize;
     let val_end = len_end + len;
-    let val_bytes = bytes.get(len_end..val_end).ok_or("truncated manifest (length exceeds buffer)")?;
-    let val = std::str::from_utf8(val_bytes).map_err(|_| "non-UTF-8 graph name in manifest".to_string())?;
+    let val_bytes = bytes
+        .get(len_end..val_end)
+        .ok_or("truncated manifest (length exceeds buffer)")?;
+    let val = std::str::from_utf8(val_bytes)
+        .map_err(|_| "non-UTF-8 graph name in manifest".to_string())?;
     let term = match kind {
-        0 => Term::NamedNode(oxrdf::NamedNode::new(val).map_err(|e| format!("invalid IRI graph name: {e}"))?),
-        1 => Term::BlankNode(oxrdf::BlankNode::new(val).map_err(|e| format!("invalid blank-node graph name: {e}"))?),
+        0 => Term::NamedNode(
+            oxrdf::NamedNode::new(val).map_err(|e| format!("invalid IRI graph name: {e}"))?,
+        ),
+        1 => Term::BlankNode(
+            oxrdf::BlankNode::new(val)
+                .map_err(|e| format!("invalid blank-node graph name: {e}"))?,
+        ),
         k => return Err(format!("unknown graph-name kind byte {k}")),
     };
     Ok((term, val_end))
@@ -3899,8 +4112,14 @@ impl Wal {
     }
 
     fn open(dir: &std::path::Path) -> std::io::Result<Wal> {
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(Self::path(dir))?;
-        Ok(Wal { file, dir: dir.to_path_buf() })
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(Self::path(dir))?;
+        Ok(Wal {
+            file,
+            dir: dir.to_path_buf(),
+        })
     }
 
     /// FNV-1a 64-bit checksum (no extra deps; deterministic across runs/platforms).
@@ -3917,7 +4136,11 @@ impl Wal {
     /// `apply_delta` applies them) — framed with a header + checksum + commit marker, and
     /// fsyncs, so the WHOLE batch is durable as a unit BEFORE it is applied in memory. A
     /// crash mid-append leaves an uncommitted tail that `replay` discards entirely.
-    fn append_batch(&mut self, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) -> std::io::Result<()> {
+    fn append_batch(
+        &mut self,
+        inserts: &[[Term; 3]],
+        deletes: &[[Term; 3]],
+    ) -> std::io::Result<()> {
         use std::io::Write;
         let mut body = Vec::new();
         let mut n_records = 0u32;
@@ -3977,23 +4200,30 @@ impl Wal {
             if bstart + 12 > bytes.len() {
                 break; // torn header
             }
-            let rd = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            let rd =
+                |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
             if rd(bstart) != Self::BATCH_MAGIC {
                 break; // not a batch frame (corruption / torn tail)
             }
             let n_records = rd(bstart + 4) as usize;
             let body_len = rd(bstart + 8) as usize;
             let body_start = bstart + 12;
-            let Some(body_end) = body_start.checked_add(body_len).filter(|&e| e <= bytes.len()) else {
+            let Some(body_end) = body_start
+                .checked_add(body_len)
+                .filter(|&e| e <= bytes.len())
+            else {
                 break; // torn body
             };
             // Commit trailer: checksum (8) + marker (4).
             let Some(trailer_end) = body_end.checked_add(12).filter(|&e| e <= bytes.len()) else {
                 break; // trailer not yet written — uncommitted batch
             };
-            let stored_crc = u64::from_le_bytes(bytes[body_end..body_end + 8].try_into().expect("8 bytes"));
+            let stored_crc =
+                u64::from_le_bytes(bytes[body_end..body_end + 8].try_into().expect("8 bytes"));
             let marker = rd(body_end + 8);
-            if marker != Self::COMMIT_MARKER || Self::checksum(&bytes[bstart..body_end]) != stored_crc {
+            if marker != Self::COMMIT_MARKER
+                || Self::checksum(&bytes[bstart..body_end]) != stored_crc
+            {
                 break; // uncommitted / corrupt batch — discard the tail
             }
             // The batch is committed: parse its records. (A parse failure here would mean a
@@ -4121,7 +4351,10 @@ impl TxnJournal {
     }
 
     fn open(dir: &std::path::Path) -> std::io::Result<TxnJournal> {
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(Self::path(dir))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(Self::path(dir))?;
         Ok(TxnJournal { file })
     }
 
@@ -4186,23 +4419,29 @@ impl TxnJournal {
             if bstart + 12 > bytes.len() {
                 break; // torn header
             }
-            let rd = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            let rd =
+                |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
             if rd(bstart) != Self::TXN_MAGIC {
                 break; // not a txn frame (corruption / torn tail)
             }
             let n_records = rd(bstart + 4) as usize;
             let body_len = rd(bstart + 8) as usize;
             let body_start = bstart + 12;
-            let Some(body_end) = body_start.checked_add(body_len).filter(|&e| e <= bytes.len()) else {
+            let Some(body_end) = body_start
+                .checked_add(body_len)
+                .filter(|&e| e <= bytes.len())
+            else {
                 break; // torn body
             };
             // Commit trailer: checksum (8) + marker (4).
             let Some(trailer_end) = body_end.checked_add(12).filter(|&e| e <= bytes.len()) else {
                 break; // trailer not yet written — uncommitted frame
             };
-            let stored_crc = u64::from_le_bytes(bytes[body_end..body_end + 8].try_into().expect("8 bytes"));
+            let stored_crc =
+                u64::from_le_bytes(bytes[body_end..body_end + 8].try_into().expect("8 bytes"));
             let marker = rd(body_end + 8);
-            if marker != Wal::COMMIT_MARKER || Wal::checksum(&bytes[bstart..body_end]) != stored_crc {
+            if marker != Wal::COMMIT_MARKER || Wal::checksum(&bytes[bstart..body_end]) != stored_crc
+            {
                 break; // uncommitted / corrupt frame — discard the tail
             }
             // The frame is committed: parse its records. A parse failure here means a
@@ -4253,7 +4492,11 @@ impl TxnJournal {
 fn parse_nt_record(bytes: &[u8]) -> Option<[Term; 3]> {
     let mut it = NTriplesParser::new().for_slice(bytes);
     let t = it.next()?.ok()?;
-    Some([subject_term(&t.subject), Term::NamedNode(t.predicate), t.object])
+    Some([
+        subject_term(&t.subject),
+        Term::NamedNode(t.predicate),
+        t.object,
+    ])
 }
 
 /// The numeric-value cache for a dictionary: `numerics[id-1]` is the f64 value of term
@@ -4276,9 +4519,11 @@ fn numerics_of(dict: &Dict) -> Vec<f64> {
             // (`"1.5"^^xsd:integer`, `"1E2"^^xsd:decimal`, an i128-overflow decimal — sq-6b1lj):
             // they now fold to the NaN cache-miss sentinel, so the sargable `=`/`<` fast path
             // and `JKey::Num` value-join defer to the exact evaluator and agree with it.
-            dict::TermParts::Lit { value, datatype, lang: None } if is_numeric_datatype_str(datatype) => {
-                cached_numeric_f64(value, datatype)
-            }
+            dict::TermParts::Lit {
+                value,
+                datatype,
+                lang: None,
+            } if is_numeric_datatype_str(datatype) => cached_numeric_f64(value, datatype),
             _ => f64::NAN,
         }
     };
@@ -4298,7 +4543,9 @@ fn numerics_of(dict: &Dict) -> Vec<f64> {
 #[cfg(feature = "mmap")]
 fn write_numerics(path: &std::path::Path, nums: &[f64]) -> std::io::Result<()> {
     // SAFETY: reinterpret the contiguous f64 cache as bytes for writing.
-    let bytes = unsafe { std::slice::from_raw_parts(nums.as_ptr().cast::<u8>(), std::mem::size_of_val(nums)) };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(nums.as_ptr().cast::<u8>(), std::mem::size_of_val(nums))
+    };
     std::fs::write(path, bytes)
 }
 
@@ -4318,7 +4565,9 @@ fn stream_write_numerics(path: &std::path::Path, n: usize, num: &NumData) -> std
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     const BLOCK: usize = 1 << 16; // ids per flush (512 KiB of f64)
     let mut buf: Vec<f64> = Vec::with_capacity(BLOCK.min(n));
-    let flush = |w: &mut std::io::BufWriter<std::fs::File>, buf: &mut Vec<f64>| -> std::io::Result<()> {
+    let flush = |w: &mut std::io::BufWriter<std::fs::File>,
+                 buf: &mut Vec<f64>|
+     -> std::io::Result<()> {
         // SAFETY: reinterpret the contiguous f64 block as bytes for writing. (sq-7ph8)
         // - `buf` is a live `Vec<f64>` of `buf.len()` initialised elements; `size_of_val(&buf[..])`
         //   = `len * 8` covers exactly that contiguous, fully-initialised region (no over-read).
@@ -4331,7 +4580,9 @@ fn stream_write_numerics(path: &std::path::Path, n: usize, num: &NumData) -> std
         //   native-endian read in `NumData::as_slice`: this cache is rebuilt locally, never shipped
         //   cross-arch, so write-native + read-native round-trips. Byte-identical to the old dense
         //   write (asserted by `streamed_caches_byte_identical_to_dense`).
-        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..])) };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..]))
+        };
         w.write_all(bytes)?;
         buf.clear();
         Ok(())
@@ -4360,14 +4611,20 @@ fn stream_write_numerics(path: &std::path::Path, n: usize, num: &NumData) -> std
 /// in a second pass through a small `u8` block. Peak resident memory is the block size, not
 /// the dictionary — matching the streamed dict-spill write. Output bytes are identical.
 #[cfg(feature = "mmap")]
-fn stream_write_temporals(path: &std::path::Path, n: usize, temp: &TempData) -> std::io::Result<()> {
+fn stream_write_temporals(
+    path: &std::path::Path,
+    n: usize,
+    temp: &TempData,
+) -> std::io::Result<()> {
     use std::io::Write;
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     const BLOCK: usize = 1 << 16;
     // Pass 1: the f64 instant column (NaN for non-temporal ids — temp_flag 0 carries the
     // "not temporal" decode, so the instant value of a flag-0 cell is irrelevant on read).
     let mut fbuf: Vec<f64> = Vec::with_capacity(BLOCK.min(n));
-    let flush_f = |w: &mut std::io::BufWriter<std::fs::File>, buf: &mut Vec<f64>| -> std::io::Result<()> {
+    let flush_f = |w: &mut std::io::BufWriter<std::fs::File>,
+                   buf: &mut Vec<f64>|
+     -> std::io::Result<()> {
         // SAFETY: reinterpret the contiguous f64 instant block as bytes for writing. (sq-7ph8)
         // Same invariants as `stream_write_numerics::flush`: `size_of_val(&buf[..]) = len*8` views
         // exactly the live, initialised `Vec<f64>` region; `u8` has align 1 so no misalignment;
@@ -4375,7 +4632,9 @@ fn stream_write_temporals(path: &std::path::Path, n: usize, temp: &TempData) -> 
         // (consumed before `buf.clear()`); native-endian, symmetric with the native-endian temporal
         // read path and byte-identical to `write_temporals`. The trailing flag column below is a
         // plain `Vec<u8>` write (no unsafe).
-        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..])) };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(&buf[..]))
+        };
         w.write_all(bytes)?;
         buf.clear();
         Ok(())
@@ -4621,7 +4880,12 @@ impl ExactSizeIterator for TripleIdIter<'_> {}
 pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
     // Cheap deterministic LCG scatter (no rand dep, no Date/Random harness restrictions).
     let mut x: u64 = 0x9E3779B97F4A7C15;
-    let mut next = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x };
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
     let ds = dict_size.max(1) as u64;
     let mut triples: Vec<[Id; 3]> = Vec::with_capacity(n);
     for _ in 0..n {
@@ -4640,7 +4904,9 @@ pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
         remap_extend(&mut out, triples.clone(), &remap);
         let ms = t.elapsed().as_secs_f64() * 1e3;
         std::hint::black_box(&out);
-        if ms < best { best = ms; }
+        if ms < best {
+            best = ms;
+        }
     }
     best
 }
@@ -4692,7 +4958,8 @@ fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
     // referencing an unpopulated slot. `parse_block` produces well-formed partials (children
     // precede their parent triple in arena order), so an error here is an internal invariant
     // breach, not recoverable input. Surface it loudly.
-    sharded_extend(&mut sd, &partials, &mut all).expect("sharded merge: well-formed partials must not error");
+    sharded_extend(&mut sd, &partials, &mut all)
+        .expect("sharded merge: well-formed partials must not error");
     finish_sharded(sd, all)
 }
 
@@ -4786,8 +5053,18 @@ fn sharded_extend(
     let remaps = sd.intern_partials(partials)?;
     for (pidx, (_, ptriples)) in partials.iter().enumerate() {
         let rm = &remaps[pidx];
-        let map = |id: Id| if id >= dict::INLINE_BASE { id } else { rm[id as usize] };
-        all.par_extend(ptriples.par_iter().map(|&[s, p, o]| [map(s), map(p), map(o)]));
+        let map = |id: Id| {
+            if id >= dict::INLINE_BASE {
+                id
+            } else {
+                rm[id as usize]
+            }
+        };
+        all.par_extend(
+            ptriples
+                .par_iter()
+                .map(|&[s, p, o]| [map(s), map(p), map(o)]),
+        );
     }
     Ok(())
 }
@@ -4835,9 +5112,11 @@ fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
     match o {
         Term::NamedNode(n) => dict.intern_iri(n.as_str()),
         Term::BlankNode(b) => dict.intern_blank(b.as_str()),
-        Term::Literal(l) => {
-            dict.intern_lit(l.value(), l.datatype().as_str(), crate::dict::lang_with_dir(l).as_deref())
-        }
+        Term::Literal(l) => dict.intern_lit(
+            l.value(),
+            l.datatype().as_str(),
+            crate::dict::lang_with_dir(l).as_deref(),
+        ),
         // RDF 1.2 triple term: rare; fall back to the owned-Term path (handles nesting +
         // content-addressed triple ids identically to the serial parser).
         Term::Triple(_) => dict.intern(o),
@@ -4961,11 +5240,12 @@ fn next_sparql_directive_end(bytes: &[u8], start: usize) -> Option<usize> {
     let n = bytes.len();
     // Past the keyword: `PREFIX` is 6 bytes, `BASE` is 4. `is_sparql_directive_start` guarantees
     // one of them matches at `start` followed by whitespace.
-    let kw_len = if bytes[start..].len() >= 6 && bytes[start..start + 6].eq_ignore_ascii_case(b"prefix") {
-        6
-    } else {
-        4 // base
-    };
+    let kw_len =
+        if bytes[start..].len() >= 6 && bytes[start..start + 6].eq_ignore_ascii_case(b"prefix") {
+            6
+        } else {
+            4 // base
+        };
     // Skip whitespace/comments up to the IRIREF (for PREFIX the PNAME_NS sits in between; we
     // don't need to validate it — the only `<` before the directive's own IRIREF is that IRIREF,
     // and oxttl validates the PNAME_NS when it re-parses the snapshot).
@@ -5041,12 +5321,10 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
             (Some(x), Some(y)) => x.min(y),
         };
         match bytes[i] {
-            b'#' => {
-                match memchr::memchr(b'\n', &bytes[i..]) {
-                    Some(off) => i += off + 1,
-                    None => i = n,
-                }
-            }
+            b'#' => match memchr::memchr(b'\n', &bytes[i..]) {
+                Some(off) => i += off + 1,
+                None => i = n,
+            },
             b'<' => {
                 i += 1;
                 // clippy::question_mark (rust-clippy 1.97): an unterminated `<` (no closing
@@ -5064,7 +5342,11 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
                         }
                         if bytes[i] == b'\\' {
                             i += 2;
-                        } else if bytes[i] == q && i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q {
+                        } else if bytes[i] == q
+                            && i + 2 < n
+                            && bytes[i + 1] == q
+                            && bytes[i + 2] == q
+                        {
                             i += 3;
                             break;
                         } else {
@@ -5082,12 +5364,10 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
                     i += 1;
                 }
             }
-            b'.' => {
-                match bytes.get(i + 1) {
-                    None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'#') => return Some(i + 1),
-                    _ => i += 1,
-                }
-            }
+            b'.' => match bytes.get(i + 1) {
+                None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'#') => return Some(i + 1),
+                _ => i += 1,
+            },
             // [OPUS-4.8] PN_LOCAL_ESC (review 1398): a prefixed-name local can contain an
             // escaped reserved char, e.g. `ex:foo\#bar` or `ex:a\.b`. Skip the backslash AND
             // the escaped byte so an escaped `#` is NOT read as a comment start (which would
@@ -5185,7 +5465,11 @@ fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
         if is_directive {
             dirs.push((j, end));
         } else {
-            stmts.push(Stmt { start: j, end, dirs_before: dirs.len() });
+            stmts.push(Stmt {
+                start: j,
+                end,
+                dirs_before: dirs.len(),
+            });
         }
         j = skip_ws_comments(bytes, end);
     }
@@ -5326,9 +5610,7 @@ fn scan_graph_label(bytes: &[u8], start: usize) -> Option<usize> {
         // the precise PN grammar on re-parse — a malformed label makes that chunk fail → serial.)
         b'_' | b':' | b'A'..=b'Z' | b'a'..=b'z' | 0x80..=0xff => {
             let mut i = start;
-            while i < n
-                && !matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | b'#' | b'{' | b'}')
-            {
+            while i < n && !matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | b'#' | b'{' | b'}') {
                 i += 1;
             }
             // A label must be non-empty; the caller checks that a `{` follows (after ws/comments).
@@ -5398,7 +5680,12 @@ fn trig_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
                     continue;
                 }
                 let end = next_terminator(bytes, j)?;
-                stmts.push(TrigStmt { start: j, end, graph: label, dirs_before: dirs.len() });
+                stmts.push(TrigStmt {
+                    start: j,
+                    end,
+                    graph: label,
+                    dirs_before: dirs.len(),
+                });
                 j = skip_ws_comments(bytes, end);
             }
             // ── Top level: directive, graph block, or a default-graph triple. ─────────────────
@@ -5450,7 +5737,12 @@ fn trig_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
                             }
                         }
                         let end = next_terminator(bytes, j)?;
-                        stmts.push(TrigStmt { start: j, end, graph: None, dirs_before: dirs.len() });
+                        stmts.push(TrigStmt {
+                            start: j,
+                            end,
+                            graph: None,
+                            dirs_before: dirs.len(),
+                        });
                         j = skip_ws_comments(bytes, end);
                     }
                     // Any other top-level statement start (a `[` blank-property-list subject, a `(`
@@ -5460,7 +5752,12 @@ fn trig_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
                     // re-parse and the loader would fall back to serial.)
                     _ => {
                         let end = next_terminator(bytes, j)?;
-                        stmts.push(TrigStmt { start: j, end, graph: None, dirs_before: dirs.len() });
+                        stmts.push(TrigStmt {
+                            start: j,
+                            end,
+                            graph: None,
+                            dirs_before: dirs.len(),
+                        });
                         j = skip_ws_comments(bytes, end);
                     }
                 }
@@ -5530,7 +5827,10 @@ fn trig_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
 fn matches_kw_ws(bytes: &[u8], k: usize, kw: &[u8]) -> bool {
     bytes.len() > k + kw.len()
         && bytes[k..k + kw.len()].eq_ignore_ascii_case(kw)
-        && matches!(bytes.get(k + kw.len()), Some(b' ' | b'\t' | b'\n' | b'\r' | b'#'))
+        && matches!(
+            bytes.get(k + kw.len()),
+            Some(b' ' | b'\t' | b'\n' | b'\r' | b'#')
+        )
 }
 
 /// [OPUS-4.8] (sq-ev37) Parse one self-contained TriG chunk into per-graph buckets — the per-chunk
@@ -5542,7 +5842,9 @@ fn matches_kw_ws(bytes: &[u8], k: usize, kw: &[u8]) -> bool {
 /// the loader can redo the document serially.
 #[cfg(feature = "parallel")]
 #[allow(clippy::type_complexity)]
-fn parse_trig_chunk(bytes: &[u8]) -> Result<Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)>, String> {
+fn parse_trig_chunk(
+    bytes: &[u8],
+) -> Result<Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)>, String> {
     use oxrdf::GraphName;
     use std::collections::HashMap;
     let mut buckets: Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)> = Vec::new();
@@ -5588,8 +5890,8 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
 ) -> Result<(), String> {
     use std::sync::mpsc::sync_channel;
     const BLOCK: usize = 64 << 20; // 64 MiB
-    // [OPUS-4.8] (review 1357) Cache timing-enabled ONCE; the hot per-block merge/remap loop
-    // then takes no `Instant::now()` and no atomic update when SPARQ_BUILD_TIMING is unset.
+                                   // [OPUS-4.8] (review 1357) Cache timing-enabled ONCE; the hot per-block merge/remap loop
+                                   // then takes no `Instant::now()` and no atomic update when SPARQ_BUILD_TIMING is unset.
     let timing = build_timing::enabled();
     let (tx, rx) = sync_channel::<Vec<u8>>(3);
     // Parsed partials flow parse-thread -> merge (this thread). A small bound keeps memory
@@ -5610,7 +5912,9 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
                 // Fill the read buffer (a single read may return less than requested).
                 let mut filled = 0;
                 while filled < BLOCK {
-                    let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+                    let n = reader
+                        .read(&mut readbuf[filled..])
+                        .map_err(|e| e.to_string())?;
                     if n == 0 {
                         break;
                     }
@@ -5660,7 +5964,13 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
                 let remap = dict.merge_remap(&pd);
                 build_timing::record(t_merge, &build_timing::MERGE_NS);
                 let t_remap = build_timing::start(timing);
-                let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
+                let map = |id: Id| {
+                    if id >= dict::INLINE_BASE {
+                        id
+                    } else {
+                        remap[(id - 1) as usize]
+                    }
+                };
                 // Prefetch the remap gather DIST triples ahead — the large-global-dict gather
                 // is the build-path bottleneck (per-ISA hint, correctness-neutral).
                 let base = remap.as_ptr();
@@ -5683,8 +5993,12 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
             }
         }
         // Join parse first (it feeds stage 3 — surface a parse error), then the producer.
-        parser.join().map_err(|_| "parse thread panicked".to_string())??;
-        producer.join().map_err(|_| "decompression thread panicked".to_string())?
+        parser
+            .join()
+            .map_err(|_| "parse thread panicked".to_string())??;
+        producer
+            .join()
+            .map_err(|_| "decompression thread panicked".to_string())?
     })
 }
 
@@ -5719,7 +6033,9 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
             loop {
                 let mut filled = 0;
                 while filled < BLOCK {
-                    let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+                    let n = reader
+                        .read(&mut readbuf[filled..])
+                        .map_err(|e| e.to_string())?;
                     if n == 0 {
                         break;
                     }
@@ -5773,8 +6089,17 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
                 let t_remap = build_timing::start(timing);
                 for (pidx, (_, ptriples)) in partials.iter().enumerate() {
                     let rm = &remaps[pidx];
-                    let map = |id: Id| if id >= dict::INLINE_BASE { id } else { rm[id as usize] };
-                    ptriples.par_iter().map(|&[s, p, o]| [map(s), map(p), map(o)]).collect_into_vec(&mut scratch);
+                    let map = |id: Id| {
+                        if id >= dict::INLINE_BASE {
+                            id
+                        } else {
+                            rm[id as usize]
+                        }
+                    };
+                    ptriples
+                        .par_iter()
+                        .map(|&[s, p, o]| [map(s), map(p), map(o)])
+                        .collect_into_vec(&mut scratch);
                     let mut rest: &[[Id; 3]] = &scratch;
                     while !rest.is_empty() {
                         let take = (chunk - buf.len()).min(rest.len());
@@ -5808,10 +6133,16 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
         };
         let fed = feed();
         drop(rtx); // close the channel so stage 4 drains and exits
-        remapper.join().map_err(|_| "remap thread panicked".to_string())??;
+        remapper
+            .join()
+            .map_err(|_| "remap thread panicked".to_string())??;
         fed?;
-        parser.join().map_err(|_| "parse thread panicked".to_string())??;
-        producer.join().map_err(|_| "decompression thread panicked".to_string())?
+        parser
+            .join()
+            .map_err(|_| "parse thread panicked".to_string())??;
+        producer
+            .join()
+            .map_err(|_| "decompression thread panicked".to_string())?
     })
 }
 
@@ -5820,7 +6151,11 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
 /// already-sorted, deduplicated file stays sorted — no re-sort needed.
 #[cfg(all(feature = "mmap", feature = "parallel"))]
 fn remap_perm_file(path: &std::path::Path, base: &[u64], stride: u32) -> Result<(), String> {
-    let f = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| e.to_string())?;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
     let len = f.metadata().map_err(|e| e.to_string())?.len() as usize;
     if len == 0 {
         return Ok(());
@@ -5830,9 +6165,11 @@ fn remap_perm_file(path: &std::path::Path, base: &[u64], stride: u32) -> Result<
     // SAFETY: the mmap base is page-aligned (≥ 4-byte u32 align) and the file is a whole
     // number of [u32;3] rows, so `len/4` u32 cells are in-bounds; the `MmapMut` is
     // exclusively owned here and the rayon writes below are disjoint by index. [OPUS-4.8 sq-8wbn]
-    let ids: &mut [u32] = unsafe { std::slice::from_raw_parts_mut(mmap.as_mut_ptr().cast::<u32>(), len / 4) };
+    let ids: &mut [u32] =
+        unsafe { std::slice::from_raw_parts_mut(mmap.as_mut_ptr().cast::<u32>(), len / 4) };
     use rayon::prelude::*;
-    ids.par_iter_mut().for_each(|id| *id = dict::remap_sharded(*id, base, stride));
+    ids.par_iter_mut()
+        .for_each(|id| *id = dict::remap_sharded(*id, base, stride));
     mmap.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -5873,7 +6210,9 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
             loop {
                 let mut filled = 0;
                 while filled < BLOCK {
-                    let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+                    let n = reader
+                        .read(&mut readbuf[filled..])
+                        .map_err(|e| e.to_string())?;
                     if n == 0 {
                         break;
                     }
@@ -5917,8 +6256,12 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
             interner.intern_batch(&partials)?;
             build_timing::record(t_merge, &build_timing::MERGE_NS);
         }
-        parser.join().map_err(|_| "parse thread panicked".to_string())??;
-        producer.join().map_err(|_| "decompression thread panicked".to_string())?
+        parser
+            .join()
+            .map_err(|_| "parse thread panicked".to_string())??;
+        producer
+            .join()
+            .map_err(|_| "decompression thread panicked".to_string())?
     })
 }
 
@@ -5987,7 +6330,10 @@ mod build_timing {
     #[inline]
     pub fn record(start: Option<std::time::Instant>, counter: &AtomicU64) {
         if let Some(t) = start {
-            counter.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            counter.fetch_add(
+                t.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
     }
     /// Which interning topology produced the `MERGE_NS`/`REMAP_NS` buckets — they are NOT
@@ -6041,9 +6387,10 @@ mod build_timing {
         // buckets are overlapped per-stage occupancy (see `PathKind`).
         let (merge_lbl, remap_lbl) = match kind {
             PathKind::Serial => ("merge_remap(serial)", "triple-remap(serial)"),
-            PathKind::Pipelined => {
-                ("intern(parallel-occupancy)", "triple-remap(pipelined-occupancy)")
-            }
+            PathKind::Pipelined => (
+                "intern(parallel-occupancy)",
+                "triple-remap(pipelined-occupancy)",
+            ),
         };
         let cons = match consolidate_secs {
             Some(c) => format!(" | dict-consolidate(serial) {c:.2}s"),
@@ -6080,7 +6427,10 @@ mod build_timing {
             let line = format_report("parse+intern+spill done", PathKind::Serial, None, 221.2);
             assert!(line.contains("merge_remap(serial) 137.90s"), "{line}");
             assert!(line.contains("triple-remap(serial) 62.20s"), "{line}");
-            assert!(!line.contains("dict-consolidate"), "serial path folds consolidation into merge_remap: {line}");
+            assert!(
+                !line.contains("dict-consolidate"),
+                "serial path folds consolidation into merge_remap: {line}"
+            );
             assert!(!line.contains("parallel-occupancy"), "{line}");
         }
 
@@ -6096,12 +6446,20 @@ mod build_timing {
             MERGE_NS.store(40_000_000_000, Relaxed); // 40 s intern occupancy
             REMAP_NS.store(60_000_000_000, Relaxed); // 60 s remap occupancy
             PARSE_NS.store(138_000_000_000, Relaxed);
-            let line = format_report("parse+intern+spill done", PathKind::Pipelined, Some(3.5), 150.0);
+            let line = format_report(
+                "parse+intern+spill done",
+                PathKind::Pipelined,
+                Some(3.5),
+                150.0,
+            );
             // The whole point of the bead: the dict-consolidation bucket is the small serial
             // `into_merged` term, distinct from the (overlapped) intern/remap occupancy.
             assert!(line.contains("dict-consolidate(serial) 3.50s"), "{line}");
             assert!(line.contains("intern(parallel-occupancy) 40.00s"), "{line}");
-            assert!(line.contains("triple-remap(pipelined-occupancy) 60.00s"), "{line}");
+            assert!(
+                line.contains("triple-remap(pipelined-occupancy) 60.00s"),
+                "{line}"
+            );
             // Must NOT mislabel the pipelined buckets as additive-serial.
             assert!(!line.contains("merge_remap(serial)"), "{line}");
             assert!(!line.contains("triple-remap(serial)"), "{line}");
@@ -6136,7 +6494,10 @@ mod tests {
         Term::NamedNode(NamedNode::new(s).unwrap())
     }
     fn lit_int(v: &str) -> Term {
-        Term::Literal(oxrdf::Literal::new_typed_literal(v, oxrdf::vocab::xsd::INTEGER))
+        Term::Literal(oxrdf::Literal::new_typed_literal(
+            v,
+            oxrdf::vocab::xsd::INTEGER,
+        ))
     }
     fn lit_str(v: &str) -> Term {
         Term::Literal(oxrdf::Literal::new_simple_literal(v))
@@ -6153,7 +6514,11 @@ mod tests {
                 [iri("http://ex/s"), iri("http://ex/p"), iri("http://ex/o")],
                 [iri("http://ex/s"), iri("http://ex/plain"), lit_str("hi")],
                 [iri("http://ex/s"), iri("http://ex/n"), lit_int("7")], // NON-inline? 7 inlines.
-                [iri("http://ex/s"), iri("http://ex/big"), lit_int("99999999999")], // dict literal
+                [
+                    iri("http://ex/s"),
+                    iri("http://ex/big"),
+                    lit_int("99999999999"),
+                ], // dict literal
                 [iri("http://ex/s"), iri("http://ex/b"), bnode("b0")],
             ],
             &[],
@@ -6161,23 +6526,44 @@ mod tests {
         .unwrap();
         // IRI object -> not a literal.
         let iri_id = g.id_of(&iri("http://ex/o")).unwrap();
-        assert!(!dict::is_literal_id(&g.dict, iri_id), "IRI id is not a literal");
+        assert!(
+            !dict::is_literal_id(&g.dict, iri_id),
+            "IRI id is not a literal"
+        );
         // bnode -> not a literal.
         let bn_id = g.id_of(&bnode("b0")).unwrap();
-        assert!(!dict::is_literal_id(&g.dict, bn_id), "bnode id is not a literal");
+        assert!(
+            !dict::is_literal_id(&g.dict, bn_id),
+            "bnode id is not a literal"
+        );
         // plain string literal -> literal (dictionary record).
         let s_id = g.id_of(&lit_str("hi")).unwrap();
-        assert!(dict::is_literal_id(&g.dict, s_id), "string literal id is a literal");
+        assert!(
+            dict::is_literal_id(&g.dict, s_id),
+            "string literal id is a literal"
+        );
         // inline integer -> literal (tagged-id path).
         let inline_id = g.id_of(&lit_int("7")).unwrap();
         assert!(dict::is_inline(inline_id), "small integer should inline");
-        assert!(dict::is_literal_id(&g.dict, inline_id), "inline integer is a literal");
+        assert!(
+            dict::is_literal_id(&g.dict, inline_id),
+            "inline integer is a literal"
+        );
         // large integer -> dictionary literal.
         let big_id = g.id_of(&lit_int("99999999999")).unwrap();
-        assert!(!dict::is_inline(big_id), "out-of-range integer stays in dict");
-        assert!(dict::is_literal_id(&g.dict, big_id), "dict integer literal is a literal");
+        assert!(
+            !dict::is_inline(big_id),
+            "out-of-range integer stays in dict"
+        );
+        assert!(
+            dict::is_literal_id(&g.dict, big_id),
+            "dict integer literal is a literal"
+        );
         // NO_ID -> not a literal.
-        assert!(!dict::is_literal_id(&g.dict, dict::NO_ID), "NO_ID is not a literal");
+        assert!(
+            !dict::is_literal_id(&g.dict, dict::NO_ID),
+            "NO_ID is not a literal"
+        );
     }
 
     #[test]
@@ -6186,14 +6572,34 @@ mod tests {
         g.apply_delta(
             &[
                 // creator: IRI-only objects (the SP2Bench dc:creator shape).
-                [iri("http://ex/paper1"), iri("http://ex/creator"), iri("http://ex/alice")],
-                [iri("http://ex/paper2"), iri("http://ex/creator"), iri("http://ex/bob")],
+                [
+                    iri("http://ex/paper1"),
+                    iri("http://ex/creator"),
+                    iri("http://ex/alice"),
+                ],
+                [
+                    iri("http://ex/paper2"),
+                    iri("http://ex/creator"),
+                    iri("http://ex/bob"),
+                ],
                 // creator also with a bnode object -> still literal-free.
-                [iri("http://ex/paper3"), iri("http://ex/creator"), bnode("anon")],
+                [
+                    iri("http://ex/paper3"),
+                    iri("http://ex/creator"),
+                    bnode("anon"),
+                ],
                 // title: literal objects.
-                [iri("http://ex/paper1"), iri("http://ex/title"), lit_str("A Paper")],
+                [
+                    iri("http://ex/paper1"),
+                    iri("http://ex/title"),
+                    lit_str("A Paper"),
+                ],
                 // year: inline-integer literal object.
-                [iri("http://ex/paper1"), iri("http://ex/year"), lit_int("2020")],
+                [
+                    iri("http://ex/paper1"),
+                    iri("http://ex/year"),
+                    lit_int("2020"),
+                ],
             ],
             &[],
         )
@@ -6205,12 +6611,24 @@ mod tests {
             !g.predicate_has_literal_object(creator),
             "creator has only IRI/bnode objects -> literal-free"
         );
-        assert!(g.predicate_has_literal_object(title), "title has a string literal object");
-        assert!(g.predicate_has_literal_object(year), "year has an inline-integer literal object");
+        assert!(
+            g.predicate_has_literal_object(title),
+            "title has a string literal object"
+        );
+        assert!(
+            g.predicate_has_literal_object(year),
+            "year has an inline-integer literal object"
+        );
         // An absent predicate id is vacuously literal-free.
-        assert!(!g.predicate_has_literal_object(dict::NO_ID), "NO_ID predicate is literal-free");
+        assert!(
+            !g.predicate_has_literal_object(dict::NO_ID),
+            "NO_ID predicate is literal-free"
+        );
         let absent = g.id_of(&iri("http://ex/creator")).unwrap() + 1_000_000;
-        assert!(!g.predicate_has_literal_object(absent), "unknown predicate has no objects");
+        assert!(
+            !g.predicate_has_literal_object(absent),
+            "unknown predicate has no objects"
+        );
     }
 
     #[test]
@@ -6221,15 +6639,26 @@ mod tests {
         // graph every eval rather than memoising across snapshots.
         let mut g = Graph::from_parts(Dict::new(), Vec::new());
         g.apply_delta(
-            &[[iri("http://ex/paper1"), iri("http://ex/creator"), iri("http://ex/alice")]],
+            &[[
+                iri("http://ex/paper1"),
+                iri("http://ex/creator"),
+                iri("http://ex/alice"),
+            ]],
             &[],
         )
         .unwrap();
         let creator = g.id_of(&iri("http://ex/creator")).unwrap();
-        assert!(!g.predicate_has_literal_object(creator), "literal-free before the update");
+        assert!(
+            !g.predicate_has_literal_object(creator),
+            "literal-free before the update"
+        );
         // UPDATE: insert a literal object for the same predicate.
         g.apply_delta(
-            &[[iri("http://ex/paper2"), iri("http://ex/creator"), lit_str("Anon Author")]],
+            &[[
+                iri("http://ex/paper2"),
+                iri("http://ex/creator"),
+                lit_str("Anon Author"),
+            ]],
             &[],
         )
         .unwrap();
@@ -6266,7 +6695,9 @@ mod tests {
             assert_eq!(g.len(), 3, "{fmt}: subject has three predicates");
             let terms = dump_terms(&g);
             let has = |s: &str, p: &str, o: &str| {
-                terms.iter().any(|(ts, tp, to)| ts == s && tp == p && to == o)
+                terms
+                    .iter()
+                    .any(|(ts, tp, to)| ts == s && tp == p && to == o)
             };
             assert!(
                 has("<http://ex/alice>", "<http://ex/name>", "\"Alice\""),
@@ -6309,9 +6740,11 @@ mod tests {
         let g = Graph::load_str_with_base(doc, "jsonld", "http://base.example/dir/").unwrap();
         let terms = dump_terms(&g);
         assert!(
-            terms.iter().any(|(s, p, o)| s == "<http://base.example/dir/alice>"
-                && p == "<http://ex/knows>"
-                && o == "<http://base.example/dir/bob>"),
+            terms
+                .iter()
+                .any(|(s, p, o)| s == "<http://base.example/dir/alice>"
+                    && p == "<http://ex/knows>"
+                    && o == "<http://base.example/dir/bob>"),
             "relative IRIs must resolve against the base: {terms:?}"
         );
     }
@@ -6376,7 +6809,9 @@ mod tests {
             assert_eq!(g.len(), 3, "{fmt}: subject has three predicates");
             let terms = dump_terms(&g);
             let has = |s: &str, p: &str, o: &str| {
-                terms.iter().any(|(ts, tp, to)| ts == s && tp == p && to == o)
+                terms
+                    .iter()
+                    .any(|(ts, tp, to)| ts == s && tp == p && to == o)
             };
             assert!(
                 has("<http://ex/alice>", "<http://ex/name>", "\"Alice\""),
@@ -6413,9 +6848,11 @@ mod tests {
         let g = Graph::load_str_with_base(doc, "rdfxml", "http://base.example/dir/").unwrap();
         let terms = dump_terms(&g);
         assert!(
-            terms.iter().any(|(s, p, o)| s == "<http://base.example/dir/alice>"
-                && p == "<http://ex/knows#knows>"
-                && o == "<http://base.example/dir/bob>"),
+            terms
+                .iter()
+                .any(|(s, p, o)| s == "<http://base.example/dir/alice>"
+                    && p == "<http://ex/knows#knows>"
+                    && o == "<http://base.example/dir/bob>"),
             "relative IRIs must resolve against the base: {terms:?}"
         );
     }
@@ -6473,7 +6910,8 @@ mod tests {
         // Serialise to RDF/XML. An in-memory writer cannot fail, so the `expect`s are inert.
         let mut ser = RdfXmlSerializer::new().for_writer(Vec::new());
         for t in &triples {
-            ser.serialize_triple(t.as_ref()).expect("serialise RDF/XML triple");
+            ser.serialize_triple(t.as_ref())
+                .expect("serialise RDF/XML triple");
         }
         let bytes = ser.finish().expect("finish RDF/XML serialisation");
         let xml = String::from_utf8(bytes).expect("RDF/XML serialiser emits UTF-8");
@@ -6497,7 +6935,10 @@ mod tests {
         .map(|(s, p, o)| (s.to_string(), p.to_string(), o.to_string()))
         .collect();
 
-        assert_eq!(got, want, "RDF/XML serialise→parse must round-trip the triple set");
+        assert_eq!(
+            got, want,
+            "RDF/XML serialise→parse must round-trip the triple set"
+        );
     }
 
     /// [OPUS-4.8] (sq-zz8z, gh-51) The graph-IRI prefix RANGE SCAN returns EXACTLY the named graphs
@@ -6523,9 +6964,15 @@ mod tests {
             v
         };
         // a/* = a/1, a/10, a/2 (note a/1 is a prefix of a/10 — both kept).
-        assert_eq!(collect(&g, "http://ex/a/"), ["http://ex/a/1", "http://ex/a/10", "http://ex/a/2"]);
+        assert_eq!(
+            collect(&g, "http://ex/a/"),
+            ["http://ex/a/1", "http://ex/a/10", "http://ex/a/2"]
+        );
         // exact-prefix that is a substring of another IRI: "a/1" matches a/1 AND a/10.
-        assert_eq!(collect(&g, "http://ex/a/1"), ["http://ex/a/1", "http://ex/a/10"]);
+        assert_eq!(
+            collect(&g, "http://ex/a/1"),
+            ["http://ex/a/1", "http://ex/a/10"]
+        );
         // empty prefix matches every graph.
         assert_eq!(collect(&g, "").len(), 4);
         // no match.
@@ -6535,10 +6982,16 @@ mod tests {
 
         // The cache is now populated (built during the queries above). MUTATE the graph set on the
         // SAME object: add a/3 (len changes -> cache must rebuild) and the new graph must appear.
-        g.ensure_named(&Term::NamedNode(NamedNode::new("http://ex/a/3").unwrap())).unwrap();
+        g.ensure_named(&Term::NamedNode(NamedNode::new("http://ex/a/3").unwrap()))
+            .unwrap();
         assert_eq!(
             collect(&g, "http://ex/a/"),
-            ["http://ex/a/1", "http://ex/a/10", "http://ex/a/2", "http://ex/a/3"]
+            [
+                "http://ex/a/1",
+                "http://ex/a/10",
+                "http://ex/a/2",
+                "http://ex/a/3"
+            ]
         );
     }
 
@@ -6577,8 +7030,10 @@ mod tests {
     #[test]
     fn parallel_turtle_matches_serial() {
         let decoded = |d: &Dict, t: &[[Id; 3]]| -> Vec<String> {
-            let mut v: Vec<String> =
-                t.iter().map(|&[s, p, o]| format!("{}|{}|{}", d.term(s), d.term(p), d.term(o))).collect();
+            let mut v: Vec<String> = t
+                .iter()
+                .map(|&[s, p, o]| format!("{}|{}|{}", d.term(s), d.term(p), d.term(o)))
+                .collect();
             v.sort();
             v
         };
@@ -6596,11 +7051,18 @@ mod tests {
             ));
         }
         assert!(ttl.len() > 8192);
-        assert!(turtle_chunks(ttl.as_bytes(), 32).is_some(), "blank-node-free doc should fan out");
+        assert!(
+            turtle_chunks(ttl.as_bytes(), 32).is_some(),
+            "blank-node-free doc should fan out"
+        );
         let (pd, pt) = parse_turtle_parallel(ttl.as_bytes()).unwrap();
         let mut sd = Dict::new();
         let st = parse_turtle_chunk(ttl.as_bytes(), &mut sd).unwrap();
-        assert_eq!(decoded(&pd, &pt), decoded(&sd, &st), "parallel split must equal serial");
+        assert_eq!(
+            decoded(&pd, &pt),
+            decoded(&sd, &st),
+            "parallel split must equal serial"
+        );
         assert!(pt.len() >= 1500);
 
         // Blank-node docs fan out too (the dict merge unifies labels by term equality — see
@@ -6610,7 +7072,10 @@ mod tests {
             "@prefix : <http://ex/> .\n{}",
             ":a :p [ :q :r ] .\n:x :y ( :i1 :i2 ) .\n_:b :z :w .\n".repeat(300)
         );
-        assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
+        assert!(
+            turtle_chunks(bn.as_bytes(), 32).is_some(),
+            "blank nodes must no longer bail to serial"
+        );
     }
 
     /// [OPUS-4.8] (sq-98w7z.1) Regression: the parallel Turtle terminator scan must be LINEAR in
@@ -6634,9 +7099,13 @@ mod tests {
         // shape that triggered the quadratic full-tail re-scan. 20k statements ⇒ ~1 MB, comfortably
         // over the fan-out threshold, and large enough that O(n²) is minutes while O(n) is < 1 s.
         let rows = 20_000usize;
-        let ttl: String =
-            (0..rows).map(|i| format!("<http://ex/s{}> <http://ex/p> <http://ex/o> .\n", i)).collect();
-        assert!(turtle_chunks(ttl.as_bytes(), 32).is_some(), "quote-free body should fan out");
+        let ttl: String = (0..rows)
+            .map(|i| format!("<http://ex/s{}> <http://ex/p> <http://ex/o> .\n", i))
+            .collect();
+        assert!(
+            turtle_chunks(ttl.as_bytes(), 32).is_some(),
+            "quote-free body should fan out"
+        );
         let t = std::time::Instant::now();
         let (_d, triples) = parse_turtle_parallel(ttl.as_bytes()).unwrap();
         let elapsed = t.elapsed();
@@ -6709,11 +7178,17 @@ mod tests {
         }
 
         // Byte-for-byte identical result: same count and same decoded S/P/O for every triple.
-        assert_eq!(presized.len(), reference.len(), "pre-sizing must not change the triple count");
+        assert_eq!(
+            presized.len(),
+            reference.len(),
+            "pre-sizing must not change the triple count"
+        );
         assert_eq!(presized.len(), 6000, "all 3*2000 triples must be emitted");
         let decode = |d: &Dict, t: &[[Id; 3]]| -> Vec<String> {
-            let mut v: Vec<String> =
-                t.iter().map(|&[s, p, o]| format!("{}|{}|{}", d.term(s), d.term(p), d.term(o))).collect();
+            let mut v: Vec<String> = t
+                .iter()
+                .map(|&[s, p, o]| format!("{}|{}|{}", d.term(s), d.term(p), d.term(o)))
+                .collect();
             v.sort();
             v
         };
@@ -6768,7 +7243,8 @@ mod tests {
 
         // (b) A DECIMAL inside the triple term (`3.5`) — the `.` is inside the `<…>`-skipped span,
         //     so it must NOT be read as a statement terminator. Plus a `.`-bearing IRI inside.
-        let mut decimals = String::from("@prefix : <http://ex/> .\n@prefix ex: <http://e.x/foo.bar#> .\n");
+        let mut decimals =
+            String::from("@prefix : <http://ex/> .\n@prefix ex: <http://e.x/foo.bar#> .\n");
         for i in 0..400 {
             decimals.push_str(&format!(
                 ":m{i} :stmt <<( ex:r{i} :weight {i}.5 )>> ; :note <<( :a :seeAlso <http://x.y/p.{i}> )>> .\n"
@@ -6782,7 +7258,9 @@ mod tests {
         //     survive chunking identically (anonymous reifier ids canonicalised by position).
         let mut annot = String::from("@prefix : <http://ex/> .\n");
         for i in 0..400 {
-            annot.push_str(&format!(":a{i} :age {i} {{| :certainty {i}.5 ; :by :src{i} |}} .\n"));
+            annot.push_str(&format!(
+                ":a{i} :age {i} {{| :certainty {i}.5 ; :by :src{i} |}} .\n"
+            ));
         }
         assert!(annot.len() > 8192);
         differential(&annot, 32, true);
@@ -6830,7 +7308,11 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                    (
+                        g.dict.term(spo[0]).to_string(),
+                        g.dict.term(spo[1]).to_string(),
+                        g.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
@@ -6844,43 +7326,79 @@ mod tests {
         )
         .unwrap();
         // The reifier `ex:r` carries `rdf:reifies <<( ex:s ex:p ex:o )>>` and the annotation.
-        let r = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r").unwrap()));
-        let reifies = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new(REIFIES).unwrap()));
+        let r = g.dict.lookup(&Term::NamedNode(
+            oxrdf::NamedNode::new("http://ex/r").unwrap(),
+        ));
+        let reifies = g
+            .dict
+            .lookup(&Term::NamedNode(oxrdf::NamedNode::new(REIFIES).unwrap()));
         let tt_id = g.dict.lookup(&tt);
-        assert!(tt_id != 0, "the triple term `<<( ex:s ex:p ex:o )>>` must be a first-class dict term");
-        let reifies_rows = g.store.scan(&[Some(r), Some(reifies), Some(tt_id)]).rows.len();
-        assert_eq!(reifies_rows, 1, "named reifier must carry exactly one `rdf:reifies <<( … )>>`");
+        assert!(
+            tt_id != 0,
+            "the triple term `<<( ex:s ex:p ex:o )>>` must be a first-class dict term"
+        );
+        let reifies_rows = g
+            .store
+            .scan(&[Some(r), Some(reifies), Some(tt_id)])
+            .rows
+            .len();
+        assert_eq!(
+            reifies_rows, 1,
+            "named reifier must carry exactly one `rdf:reifies <<( … )>>`"
+        );
         // The annotation triple `ex:r ex:certainty 0.9` is present.
-        let cert = g.dict.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/certainty").unwrap()));
-        assert_eq!(g.store.scan(&[Some(r), Some(cert), None]).rows.len(), 1, "annotation triple must load");
+        let cert = g.dict.lookup(&Term::NamedNode(
+            oxrdf::NamedNode::new("http://ex/certainty").unwrap(),
+        ));
+        assert_eq!(
+            g.store.scan(&[Some(r), Some(cert), None]).rows.len(),
+            1,
+            "annotation triple must load"
+        );
 
         // (2) Annotation block `{| … |}` desugars to: the ASSERTED base triple + a reifier
         //     (anon) `rdf:reifies <<( … )>>` + the annotation triple. The base triple is
         //     asserted (unlike the bare `<< … >>` reifier, which does NOT assert it).
-        let g2 =
-            Graph::load_str("@prefix ex: <http://ex/> . ex:s ex:p ex:o {| ex:certainty 0.9 |} .", "turtle").unwrap();
+        let g2 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:s ex:p ex:o {| ex:certainty 0.9 |} .",
+            "turtle",
+        )
+        .unwrap();
         let rows2 = dump(&g2);
         assert!(
-            rows2.iter().any(|(s, p, o)| s == "<http://ex/s>" && p == "<http://ex/p>" && o == "<http://ex/o>"),
+            rows2.iter().any(|(s, p, o)| s == "<http://ex/s>"
+                && p == "<http://ex/p>"
+                && o == "<http://ex/o>"),
             "annotation block must ASSERT the base triple, got {rows2:?}"
         );
         assert!(
             rows2.iter().any(|(_, p, _)| p == &format!("<{REIFIES}>")),
             "annotation block must emit an `rdf:reifies` reifier, got {rows2:?}"
         );
-        assert!(g2.dict.lookup(&tt) != 0, "the annotated base triple must appear as a triple TERM object");
+        assert!(
+            g2.dict.lookup(&tt) != 0,
+            "the annotated base triple must appear as a triple TERM object"
+        );
 
         // (3) reifiedTriple in SUBJECT position `<< s p o >> p2 o2` (a Turtle construct the
         //     legacy custom NT parser cannot express, here handled by the Turtle loader): the
         //     reifier is the SUBJECT of the annotation, the base triple is NOT asserted.
-        let g3 = Graph::load_str("@prefix ex: <http://ex/> . << ex:s ex:p ex:o >> ex:src ex:doc1 .", "turtle").unwrap();
+        let g3 = Graph::load_str(
+            "@prefix ex: <http://ex/> . << ex:s ex:p ex:o >> ex:src ex:doc1 .",
+            "turtle",
+        )
+        .unwrap();
         let rows3 = dump(&g3);
         assert!(
-            !rows3.iter().any(|(s, p, o)| s == "<http://ex/s>" && p == "<http://ex/p>" && o == "<http://ex/o>"),
+            !rows3.iter().any(|(s, p, o)| s == "<http://ex/s>"
+                && p == "<http://ex/p>"
+                && o == "<http://ex/o>"),
             "a bare `<< … >>` reifier must NOT assert the base triple, got {rows3:?}"
         );
         assert!(
-            rows3.iter().any(|(_, p, o)| p == &format!("<{REIFIES}>") && o.starts_with("<<(")),
+            rows3
+                .iter()
+                .any(|(_, p, o)| p == &format!("<{REIFIES}>") && o.starts_with("<<(")),
             "subject-position reifier must carry `rdf:reifies <<( … )>>`, got {rows3:?}"
         );
     }
@@ -6935,7 +7453,11 @@ mod tests {
         //    unify each label to ONE node, exactly like the serial document-scoped parse.
         let mut ttl = String::from("@prefix : <http://ex/> .\n_:shared :starts :here .\n");
         for i in 0..400 {
-            ttl.push_str(&format!(":s{i} :p :o{i} .\n_:b{} :links _:b{} .\n", i / 3, i / 3 + 1));
+            ttl.push_str(&format!(
+                ":s{i} :p :o{i} .\n_:b{} :links _:b{} .\n",
+                i / 3,
+                i / 3 + 1
+            ));
         }
         ttl.push_str("_:shared :ends :here .\n");
         differential(&ttl, 16);
@@ -7046,7 +7568,11 @@ mod tests {
             canon_bnodes(&sd, &st),
             "sharded chunked merge must equal serial up to anonymous bnode ids"
         );
-        assert!(pt.len() >= 2000, "expected the full triple set, got {}", pt.len());
+        assert!(
+            pt.len() >= 2000,
+            "expected the full triple set, got {}",
+            pt.len()
+        );
     }
 
     /// [OPUS-4.8] Regression for review 1398: a PN_LOCAL_ESC `\#` in a prefixed-name local
@@ -7070,12 +7596,19 @@ mod tests {
         }
         assert!(clean.len() > 8192);
         // The escaped-`#` doc must still split (no spurious comment-eating of terminators)…
-        assert!(turtle_chunks(clean.as_bytes(), 32).is_some(), "escaped # must not break the split");
+        assert!(
+            turtle_chunks(clean.as_bytes(), 32).is_some(),
+            "escaped # must not break the split"
+        );
         // …and parse identically to the serial parser.
         let (pd, pt) = parse_turtle_chunked(clean.as_bytes(), 32).unwrap();
         let mut sd = Dict::new();
         let st = parse_turtle_chunk(clean.as_bytes(), &mut sd).unwrap();
-        assert_eq!(canon_bnodes(&pd, &pt), canon_bnodes(&sd, &st), "escaped-# chunked parse must equal serial");
+        assert_eq!(
+            canon_bnodes(&pd, &pt),
+            canon_bnodes(&sd, &st),
+            "escaped-# chunked parse must equal serial"
+        );
         assert_eq!(pt.len(), 400);
 
         // (b) [OPUS-4.8] (T3) An interspersed `@base` AFTER an escaped `#` (with enough
@@ -7085,7 +7618,8 @@ mod tests {
         //     did, the relative IRIs would resolve against the stale `@base <http://first/>`.
         //     The check is the load-bearing one: chunked == serial. The base is also redefined a
         //     second time so the snapshot must carry BOTH `@base`s in order.
-        let mut interspersed = String::from("@prefix ex: <http://ex/> .\n@base <http://first/> .\n");
+        let mut interspersed =
+            String::from("@prefix ex: <http://ex/> .\n@base <http://first/> .\n");
         for i in 0..150 {
             interspersed.push_str(&format!("ex:s{i} ex:p <rel{i}> ; ex:e ex:foo\\#bar{i} .\n"));
         }
@@ -7099,7 +7633,10 @@ mod tests {
         }
         let chunks = turtle_chunks(interspersed.as_bytes(), 32)
             .expect("T3: interspersed @base no longer forces serial");
-        assert!(chunks.len() > 1, "must fan out across the interspersed @base");
+        assert!(
+            chunks.len() > 1,
+            "must fan out across the interspersed @base"
+        );
         let (pd, pt) = parse_turtle_chunked(interspersed.as_bytes(), 32).unwrap();
         let mut sd = Dict::new();
         let st = parse_turtle_chunk(interspersed.as_bytes(), &mut sd).unwrap();
@@ -7176,9 +7713,13 @@ mod tests {
         //    resolved against the running base, and prefixes introduced partway through.
         let mut sparql = String::from("PREFIX s: <http://s0/>\nBASE <http://base0/>\n");
         for round in 0..8 {
-            sparql.push_str(&format!("PREFIX s: <http://s{round}/>\nBASE <http://base{round}/>\n"));
+            sparql.push_str(&format!(
+                "PREFIX s: <http://s{round}/>\nBASE <http://base{round}/>\n"
+            ));
             for i in 0..120 {
-                sparql.push_str(&format!("s:longkey{round}_{i} s:longpred <relative-iri-{i}> .\n"));
+                sparql.push_str(&format!(
+                    "s:longkey{round}_{i} s:longpred <relative-iri-{i}> .\n"
+                ));
             }
         }
         assert!(sparql.len() > 8192);
@@ -7199,7 +7740,8 @@ mod tests {
         // 6. A `#`-comment containing `<` and `.` sitting BETWEEN the SPARQL keyword and its
         //    IRIREF — the directive delimiter must skip the whole comment line (so the in-comment
         //    `<`/`.` is never mistaken for the IRIREF / a terminator) and find the real IRIREF.
-        let mut commented = String::from("PREFIX p: # a comment with < and . inside\n  <http://c0/>\n");
+        let mut commented =
+            String::from("PREFIX p: # a comment with < and . inside\n  <http://c0/>\n");
         for round in 0..6 {
             commented.push_str(&format!(
                 "PREFIX p: #redef <bogus> .\n <http://c{round}/>\nBASE # base <x> .\n <http://b{round}/>\n"
@@ -7225,7 +7767,13 @@ mod tests {
         fn canon_graph(g: &Graph) -> Vec<[String; 3]> {
             let mut out: Vec<[String; 3]> = g
                 .iter_ids()
-                .map(|[s, p, o]| [g.dict.term(s).to_string(), g.dict.term(p).to_string(), g.dict.term(o).to_string()])
+                .map(|[s, p, o]| {
+                    [
+                        g.dict.term(s).to_string(),
+                        g.dict.term(p).to_string(),
+                        g.dict.term(o).to_string(),
+                    ]
+                })
                 .collect();
             out.sort();
             out
@@ -7251,7 +7799,11 @@ mod tests {
         let differential = |nq: &str, target: usize| {
             // Force >1 newline-aligned range so the per-graph routing is genuinely cross-chunk.
             let bounds = newline_chunk_bounds(nq.as_bytes(), target);
-            assert!(bounds.len() > 1, "doc must split into multiple ranges (len {})", nq.len());
+            assert!(
+                bounds.len() > 1,
+                "doc must split into multiple ranges (len {})",
+                nq.len()
+            );
             let par = Graph::load_nquads_chunked(nq.as_bytes(), target).unwrap();
             let ser = Graph::load_dataset_serial(nq, "nquads").unwrap();
             // Same default-graph length + same named-graph names IN ORDER (the deterministic
@@ -7260,7 +7812,11 @@ mod tests {
             let par_names: Vec<String> = par.named.iter().map(|(n, _)| n.to_string()).collect();
             let ser_names: Vec<String> = ser.named.iter().map(|(n, _)| n.to_string()).collect();
             assert_eq!(par_names, ser_names, "named-graph set/order differs");
-            assert_eq!(canon_dataset(&par), canon_dataset(&ser), "chunked dataset must equal serial");
+            assert_eq!(
+                canon_dataset(&par),
+                canon_dataset(&ser),
+                "chunked dataset must equal serial"
+            );
         };
 
         // 1. Multiple named graphs interleaved with the default graph, ground terms only — the
@@ -7270,7 +7826,9 @@ mod tests {
         for i in 0..600 {
             let g = i % 4; // 0 -> default, 1..3 -> named graphs g1..g3
             if g == 0 {
-                multi.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+                multi.push_str(&format!(
+                    "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"
+                ));
             } else {
                 multi.push_str(&format!(
                     "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> <http://ex/g{g}> .\n"
@@ -7315,7 +7873,11 @@ mod tests {
         //    oxttl produces, or this differential check fails on the language column.
         let mut lits = String::new();
         for i in 0..400 {
-            let g = if i % 3 == 0 { String::new() } else { format!(" <http://g.x/{}.n>", i % 3) };
+            let g = if i % 3 == 0 {
+                String::new()
+            } else {
+                format!(" <http://g.x/{}.n>", i % 3)
+            };
             lits.push_str(&format!(
                 "<http://ex/s{i}> <http://ex/p> \"val.{i} \\\"q\\\" x\"@en-us{g} .\n\
                  <http://ex/s{i}> <http://ex/m> \"mixed.{i}\"@en-US{g} .\n\
@@ -7342,7 +7904,9 @@ mod tests {
         for i in 0..400 {
             sparse.push_str("# a comment . with a dot\n\n");
             let g = if i % 2 == 0 { " <http://ex/g7>" } else { "" };
-            sparse.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}>{g} .\n"));
+            sparse.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}>{g} .\n"
+            ));
         }
         differential(&sparse, 16);
 
@@ -7379,14 +7943,22 @@ mod tests {
         let differential = |trig: &str, target: usize| {
             let chunks = trig_chunks(trig.as_bytes(), target)
                 .unwrap_or_else(|| panic!("doc must be splittable (len {})", trig.len()));
-            assert!(chunks.len() > 1, "doc must split into multiple chunks (len {})", trig.len());
+            assert!(
+                chunks.len() > 1,
+                "doc must split into multiple chunks (len {})",
+                trig.len()
+            );
             let par = Graph::load_trig_chunked(trig.as_bytes(), target).unwrap();
             let ser = Graph::load_dataset_serial(trig, "trig").unwrap();
             assert_eq!(par.len(), ser.len(), "default-graph triple count differs");
             let par_names: Vec<String> = par.named.iter().map(|(n, _)| n.to_string()).collect();
             let ser_names: Vec<String> = ser.named.iter().map(|(n, _)| n.to_string()).collect();
             assert_eq!(par_names, ser_names, "named-graph set/order differs");
-            assert_eq!(canon_dataset(&par), canon_dataset(&ser), "chunked TriG must equal serial");
+            assert_eq!(
+                canon_dataset(&par),
+                canon_dataset(&ser),
+                "chunked TriG must equal serial"
+            );
         };
 
         // 1. Many `GRAPH g { … }` blocks interleaved with top-level default-graph triples and an
@@ -7396,7 +7968,9 @@ mod tests {
         for i in 0..400 {
             match i % 4 {
                 0 => multi.push_str(&format!(":s{i} :p :o{i} .\n")), // default (top level)
-                1 => multi.push_str(&format!("GRAPH :g1 {{ :s{i} :p :o{i} . :s{i} :q :r{i} . }}\n")),
+                1 => multi.push_str(&format!(
+                    "GRAPH :g1 {{ :s{i} :p :o{i} . :s{i} :q :r{i} . }}\n"
+                )),
                 2 => multi.push_str(&format!(":g2 {{ :s{i} :p :o{i} . }}\n")), // label { … }
                 _ => multi.push_str(&format!("{{ :d{i} :p :o{i} . }}\n")),     // anon default block
             }
@@ -7407,9 +7981,15 @@ mod tests {
         //    the case the `label { … }` re-wrap exists for (a whole block bigger than a chunk). The
         //    same blank-node label `_:b{k}` recurs at the block's start and end and is chained
         //    between adjacent statements, so the per-graph dict merge must unify it across chunks.
-        let mut big = String::from("@prefix : <http://ex/> .\n:top :p :level .\nGRAPH :big {\n_:shared :starts :here .\n");
+        let mut big = String::from(
+            "@prefix : <http://ex/> .\n:top :p :level .\nGRAPH :big {\n_:shared :starts :here .\n",
+        );
         for i in 0..500 {
-            big.push_str(&format!(":s{i} :p :o{i} .\n_:n{} :next _:n{} .\n", i / 3, i / 3 + 1));
+            big.push_str(&format!(
+                ":s{i} :p :o{i} .\n_:n{} :next _:n{} .\n",
+                i / 3,
+                i / 3 + 1
+            ));
         }
         big.push_str("_:shared :ends :here .\n}\n");
         differential(&big, 24);
@@ -7417,7 +7997,8 @@ mod tests {
         // 3. A BLANK-NODE-named graph `_:g { … }` (label replayed verbatim across chunks) plus
         //    same-spelled `_:g` used as a normal subject/object in the default graph — the routing
         //    key must NOT be conflated with the in-graph bnode (mirrors the N-Quads case 3).
-        let mut bgraph = String::from("@prefix : <http://ex/> .\n_:g :is :a-default-subject .\n_:g {\n");
+        let mut bgraph =
+            String::from("@prefix : <http://ex/> .\n_:g :is :a-default-subject .\n_:g {\n");
         for i in 0..400 {
             bgraph.push_str(&format!(":s{i} :p _:x{i} .\n"));
         }
@@ -7427,7 +8008,9 @@ mod tests {
         // 4. The SAME named graph re-opened in non-adjacent blocks (first-occurrence ordering must
         //    survive: g_a, then g_b, then g_a again must keep [g_a, g_b]), plus prefixed names,
         //    typed/lang literals (incl. an interior `.`), and SPARQL-style `PREFIX` directives.
-        let mut reopen = String::from("PREFIX : <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n");
+        let mut reopen = String::from(
+            "PREFIX : <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n",
+        );
         for i in 0..300 {
             reopen.push_str(&format!(
                 "GRAPH :g_a {{ :s{i} :p \"v.{i}\"@en . }}\n\
@@ -7445,11 +8028,15 @@ mod tests {
         //    change and replays the in-scope directives verbatim).
         let mut redef = String::from("@prefix p: <http://a/> .\n");
         for i in 0..150 {
-            redef.push_str(&format!("p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"));
+            redef.push_str(&format!(
+                "p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"
+            ));
         }
         redef.push_str("@prefix p: <http://b/> .\n");
         for i in 0..150 {
-            redef.push_str(&format!("p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"));
+            redef.push_str(&format!(
+                "p:s{i} p:p p:o{i} .\nGRAPH p:g {{ p:s{i} p:p p:o{i} . }}\n"
+            ));
         }
         differential(&redef, 24);
 
@@ -7493,7 +8080,10 @@ mod tests {
         // The line-based / trig formats (and their `nt`/`nq` extension aliases) are
         // unaffected — they route to their own parser, not the catch-all.
         assert!(Graph::load_str(ttl, "ntriples").is_ok());
-        assert!(Graph::load_str(ttl, "nt").is_ok(), "nt is an N-Triples alias");
+        assert!(
+            Graph::load_str(ttl, "nt").is_ok(),
+            "nt is an N-Triples alias"
+        );
         assert!(Graph::parse_to_triples(ttl, "application/n-triples").is_ok());
 
         // Unknown / typo'd / unsupported strings now ERROR instead of silently parsing as
@@ -7515,7 +8105,10 @@ mod tests {
                 "with_base path must also reject {bogus:?}"
             );
             // The public `load_str` wrappers propagate the same error.
-            assert!(Graph::load_str(ttl, bogus).is_err(), "load_str must reject {bogus:?}");
+            assert!(
+                Graph::load_str(ttl, bogus).is_err(),
+                "load_str must reject {bogus:?}"
+            );
         }
 
         // [OPUS-4.8] sq-f47w1: with the OPT-IN `rdfxml` feature OFF, the RDF/XML aliases are
@@ -7614,7 +8207,11 @@ mod tests {
         let ser = Graph::load_dataset_serial(&trig, "trig").unwrap();
         assert_eq!(pub_g.len(), ser.len());
         assert_eq!(pub_g.named.len(), ser.named.len(), "named graph count");
-        assert_eq!(canon_dataset(&pub_g), canon_dataset(&ser), "public load_dataset must equal serial");
+        assert_eq!(
+            canon_dataset(&pub_g),
+            canon_dataset(&ser),
+            "public load_dataset must equal serial"
+        );
     }
 
     /// [FABLE-5] (sq-tonhr.2) `load_dataset_with_base` — the DATASET companion to
@@ -7635,13 +8232,23 @@ mod tests {
             "relative subject must resolve against the base"
         );
         let gname = Term::NamedNode(oxrdf::NamedNode::new("http://base.example/dir/g").unwrap());
-        let named = g.named_graph(&gname).expect("named graph resolved against the base");
+        let named = g
+            .named_graph(&gname)
+            .expect("named graph resolved against the base");
         assert_eq!(named.len(), 1, "named graph triple count");
         // N-Quads: absolute IRIs only — base has no effect, quads still bucket per graph.
         let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n";
         let g = Graph::load_dataset_with_base(nq, "nquads", "http://base.example/").unwrap();
-        assert_eq!(g.len(), 0, "N-Quads named-graph quad must not land in the default graph");
-        assert!(g.named_graph(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/g").unwrap())).is_some());
+        assert_eq!(
+            g.len(),
+            0,
+            "N-Quads named-graph quad must not land in the default graph"
+        );
+        assert!(g
+            .named_graph(&Term::NamedNode(
+                oxrdf::NamedNode::new("http://ex/g").unwrap()
+            ))
+            .is_some());
         // An invalid base IRI is a loud error, and a relative-IRI TriG doc with NO usable base
         // (the serial oxttl reference behaviour) stays an error through the with-base entry too.
         assert!(Graph::load_dataset_with_base(trig, "trig", "not a base iri").is_err());
@@ -7675,7 +8282,10 @@ mod tests {
         for src in cases {
             let serial_err = Graph::load_dataset_serial(src, "trig").is_err();
             let public_err = Graph::load_dataset(src, "trig").is_err();
-            assert_eq!(public_err, serial_err, "rejection parity differs for {src:?}");
+            assert_eq!(
+                public_err, serial_err,
+                "rejection parity differs for {src:?}"
+            );
             assert!(serial_err, "case was expected to be invalid TriG: {src:?}");
         }
     }
@@ -7697,7 +8307,11 @@ mod tests {
         let ser = Graph::load_dataset_serial(&nq, "nquads").unwrap();
         assert_eq!(pub_g.len(), ser.len());
         assert_eq!(pub_g.named.len(), ser.named.len(), "named graph count");
-        assert_eq!(canon_dataset(&pub_g), canon_dataset(&ser), "public load_dataset must equal serial");
+        assert_eq!(
+            canon_dataset(&pub_g),
+            canon_dataset(&ser),
+            "public load_dataset must equal serial"
+        );
     }
 
     /// [OPUS-4.8] (sq-25r3 / sq-ev37) Loading a small TriG dataset through the public
@@ -7715,7 +8329,11 @@ mod tests {
         let g = Graph::load_dataset(trig, "trig").unwrap();
         assert_eq!(g.len(), 1, "default graph triple");
         let names: Vec<String> = g.named.iter().map(|(n, _)| n.to_string()).collect();
-        assert_eq!(names, vec!["<http://ex/g1>".to_string(), "<http://ex/g2>".to_string()], "named graphs in document order");
+        assert_eq!(
+            names,
+            vec!["<http://ex/g1>".to_string(), "<http://ex/g2>".to_string()],
+            "named graphs in document order"
+        );
         assert_eq!(g.named[0].1.len(), 2, "g1 has 2 triples");
         assert_eq!(g.named[1].1.len(), 1, "g2 has 1 triple");
     }
@@ -8012,7 +8630,11 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                    (
+                        gg.dict.term(spo[0]).to_string(),
+                        gg.dict.term(spo[1]).to_string(),
+                        gg.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
@@ -8045,15 +8667,27 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         g.save(&dir).unwrap();
         // The manifest + one sub-directory per named graph must exist.
-        assert!(dir.join("named.bin").exists(), "named-graph manifest not persisted");
+        assert!(
+            dir.join("named.bin").exists(),
+            "named-graph manifest not persisted"
+        );
         for i in 0..3 {
-            assert!(dir.join("named").join(i.to_string()).join("perm0.bin").exists(), "named sub-graph {i} not persisted");
+            assert!(
+                dir.join("named")
+                    .join(i.to_string())
+                    .join("perm0.bin")
+                    .exists(),
+                "named sub-graph {i} not persisted"
+            );
         }
 
         let g2 = Graph::open(&dir).unwrap();
         assert_eq!(g2.named.len(), 3, "named graphs dropped on reopen");
         let after = dump_dataset(&g2);
-        assert_eq!(before, after, "named-graph dataset not losslessly round-tripped");
+        assert_eq!(
+            before, after,
+            "named-graph dataset not losslessly round-tripped"
+        );
 
         // Every reopened named graph must carry its OWN per-graph WAL (durable updates).
         for (_, sub) in &g2.named {
@@ -8078,7 +8712,10 @@ mod tests {
         let g2 = Graph::open(&dir).unwrap();
         assert_eq!(g2.named.len(), 2);
         let named_of = |gg: &Graph, name: &str| {
-            gg.named.iter().find(|(n, _)| n.to_string() == format!("<{name}>")).map(|(_, s)| s.len())
+            gg.named
+                .iter()
+                .find(|(n, _)| n.to_string() == format!("<{name}>"))
+                .map(|(_, s)| s.len())
         };
         assert_eq!(named_of(&g2, "http://res/x"), Some(1));
         assert_eq!(named_of(&g2, "http://res/y"), Some(1));
@@ -8091,13 +8728,20 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn default_only_save_has_no_named_artifacts() {
-        let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .\n", "ntriples").unwrap();
+        let g =
+            Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .\n", "ntriples").unwrap();
         assert!(g.named.is_empty());
         let dir = std::env::temp_dir().join(format!("sparq_default_only_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         g.save(&dir).unwrap();
-        assert!(!dir.join("named.bin").exists(), "default-only save must not write a named manifest");
-        assert!(!dir.join("named").exists(), "default-only save must not write a named subtree");
+        assert!(
+            !dir.join("named.bin").exists(),
+            "default-only save must not write a named manifest"
+        );
+        assert!(
+            !dir.join("named").exists(),
+            "default-only save must not write a named subtree"
+        );
         let g2 = Graph::open(&dir).unwrap();
         assert!(g2.named.is_empty());
         assert_eq!(g2.len(), 1);
@@ -8120,7 +8764,11 @@ mod tests {
         std::fs::write(dir.join("named.bin"), &bytes).unwrap();
         match Graph::open(&dir) {
             Ok(_) => panic!("unknown manifest version must NOT open silently"),
-            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "unknown version must be a hard InvalidData error"),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::InvalidData,
+                "unknown version must be a hard InvalidData error"
+            ),
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -8173,21 +8821,34 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         g.save(&dir).unwrap();
         // The atomic write must leave the canonical manifest and NO leftover temp file.
-        assert!(dir.join("named.bin").exists(), "canonical manifest missing after atomic write");
-        assert!(!dir.join("named.bin.tmp").exists(), "temp manifest must be renamed away, not left behind");
+        assert!(
+            dir.join("named.bin").exists(),
+            "canonical manifest missing after atomic write"
+        );
+        assert!(
+            !dir.join("named.bin.tmp").exists(),
+            "temp manifest must be renamed away, not left behind"
+        );
         // Simulate a crash mid-write of a *previous* attempt: a stale, GARBAGE temp file is on
         // disk. It must be IGNORED on open (only `named.bin` is the commit point) — `open_named`
         // reads `named.bin`, never `named.bin.tmp`, so the torn temp can never be misread.
         std::fs::write(dir.join("named.bin.tmp"), b"torn-garbage-not-a-manifest").unwrap();
         let g2 = Graph::open(&dir).unwrap();
-        assert_eq!(g2.named.len(), 2, "stale temp file must not affect the open");
+        assert_eq!(
+            g2.named.len(),
+            2,
+            "stale temp file must not affect the open"
+        );
         // A fresh atomic write (into a clean dir) must leave NO leftover temp file: the rename
         // consumed it. (We save the in-memory copy to a SEPARATE dir — re-saving an mmap'd
         // graph back over its own source files is unsupported on every save path here.)
         let dir2 = std::env::temp_dir().join(format!("sparq_named_atomic2_{}", std::process::id()));
         std::fs::remove_dir_all(&dir2).ok();
         g.save(&dir2).unwrap();
-        assert!(!dir2.join("named.bin.tmp").exists(), "atomic write must rename the temp file away");
+        assert!(
+            !dir2.join("named.bin.tmp").exists(),
+            "atomic write must rename the temp file away"
+        );
         let g3 = Graph::open(&dir2).unwrap();
         assert_eq!(g3.named.len(), 2, "named graphs lost after atomic write");
         std::fs::remove_dir_all(&dir).ok();
@@ -8209,20 +8870,43 @@ mod tests {
         {
             let mut g = Graph::open(&dir).unwrap();
             // Create a brand-new named graph (auto-created) and add a triple to it.
-            g.apply_delta_nquads("<http://res/a> <http://ex/p> <http://ex/o1> <http://res/a> .\n", "").unwrap();
+            g.apply_delta_nquads(
+                "<http://res/a> <http://ex/p> <http://ex/o1> <http://res/a> .\n",
+                "",
+            )
+            .unwrap();
             // A second batch into the SAME named graph (exercises the per-graph WAL append).
-            g.apply_delta_nquads("<http://res/a> <http://ex/p> <http://ex/o2> <http://res/a> .\n", "").unwrap();
+            g.apply_delta_nquads(
+                "<http://res/a> <http://ex/p> <http://ex/o2> <http://res/a> .\n",
+                "",
+            )
+            .unwrap();
             // A second named graph too.
-            g.apply_delta_nquads("<http://res/b> <http://ex/p> <http://ex/o3> <http://res/b> .\n", "").unwrap();
+            g.apply_delta_nquads(
+                "<http://res/b> <http://ex/p> <http://ex/o3> <http://res/b> .\n",
+                "",
+            )
+            .unwrap();
             // Deliberately DROP `g` WITHOUT save()/compact() — only the WALs are on disk.
         }
         // Reopen: the named graphs + every WAL-logged triple must recover.
         let g2 = Graph::open(&dir).unwrap();
         let named_of = |gg: &Graph, name: &str| {
-            gg.named.iter().find(|(n, _)| n.to_string() == format!("<{name}>")).map(|(_, s)| s.len())
+            gg.named
+                .iter()
+                .find(|(n, _)| n.to_string() == format!("<{name}>"))
+                .map(|(_, s)| s.len())
         };
-        assert_eq!(named_of(&g2, "http://res/a"), Some(2), "named graph a lost a WAL-logged triple");
-        assert_eq!(named_of(&g2, "http://res/b"), Some(1), "named graph b not recovered from WAL");
+        assert_eq!(
+            named_of(&g2, "http://res/a"),
+            Some(2),
+            "named graph a lost a WAL-logged triple"
+        );
+        assert_eq!(
+            named_of(&g2, "http://res/b"),
+            Some(1),
+            "named graph b not recovered from WAL"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -8233,7 +8917,8 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn single_triple_mutations_are_wal_durable() {
-        let dir = std::env::temp_dir().join(format!("sparq_single_triple_wal_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq_single_triple_wal_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         Graph::load_str("", "ntriples").unwrap().save(&dir).unwrap();
         let s = NamedNode::new_unchecked("http://ex/s");
@@ -8249,10 +8934,18 @@ mod tests {
             // Drop WITHOUT save()/compact(): only the WAL records are on disk.
         }
         let g2 = Graph::open(&dir).unwrap();
-        assert_eq!(g2.len(), 1, "exactly the un-retracted insert must recover from the WAL");
-        assert!(g2.id_of(&keep).is_some(), "the kept triple's object must be present");
+        assert_eq!(
+            g2.len(),
+            1,
+            "exactly the un-retracted insert must recover from the WAL"
+        );
         assert!(
-            g2.pattern(Some(&Term::NamedNode(s)), Some(&p), Some(&gone)).is_none()
+            g2.id_of(&keep).is_some(),
+            "the kept triple's object must be present"
+        );
+        assert!(
+            g2.pattern(Some(&Term::NamedNode(s)), Some(&p), Some(&gone))
+                .is_none()
                 || g2.store.scan(&[None, None, None]).rows.len() == 1,
             "the removed triple must not survive the reopen"
         );
@@ -8294,7 +8987,11 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                    (
+                        gg.dict.term(spo[0]).to_string(),
+                        gg.dict.term(spo[1]).to_string(),
+                        gg.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
@@ -8304,30 +9001,52 @@ mod tests {
 
         // The numeric-value cache must round-trip through its memory-mapped form: every
         // numeric literal resolves to the same f64 (and non-numerics to None) as before.
-        assert!(dir.join("numerics.bin").exists(), "numerics cache not persisted");
-        assert!(matches!(g2.numerics, NumData::Mapped(..)), "numerics not mmap'd on open");
+        assert!(
+            dir.join("numerics.bin").exists(),
+            "numerics cache not persisted"
+        );
+        assert!(
+            matches!(g2.numerics, NumData::Mapped(..)),
+            "numerics not mmap'd on open"
+        );
         for v in [0u32, 1, 42, 250, 499] {
             let lit = Term::Literal(Literal::new_typed_literal(v.to_string(), xsd::INTEGER));
             if let Some(id) = g.id_of(&lit) {
                 assert_eq!(g.numeric_value(id), Some(v as f64));
-                assert_eq!(g2.numeric_value(id), Some(v as f64), "mmap'd numeric differs for {v}");
+                assert_eq!(
+                    g2.numeric_value(id),
+                    Some(v as f64),
+                    "mmap'd numeric differs for {v}"
+                );
             }
         }
         // A non-numeric term (the language-tagged literal) must be None in both.
-        if let Some(id) = g.id_of(&Term::Literal(Literal::new_language_tagged_literal("café", "fr").unwrap())) {
+        if let Some(id) = g.id_of(&Term::Literal(
+            Literal::new_language_tagged_literal("café", "fr").unwrap(),
+        )) {
             assert_eq!(g2.numeric_value(id), None);
         }
 
         // The temporal-value cache must round-trip through its memory-mapped form too:
         // every cached cell (instant bits, tz presence, family) identical, and
         // non-temporal terms None in both.
-        assert!(dir.join("temporals.bin").exists(), "temporals cache not persisted");
-        assert!(matches!(g2.temporals, TempData::Mapped(..)), "temporals not mmap'd on open");
+        assert!(
+            dir.join("temporals.bin").exists(),
+            "temporals cache not persisted"
+        );
+        assert!(
+            matches!(g2.temporals, TempData::Mapped(..)),
+            "temporals not mmap'd on open"
+        );
         for i in 1..=g.dict.len() as Id {
             match (g.temporal_value(i), g2.temporal_value(i)) {
                 (None, None) => {}
                 (Some(a), Some(b)) => {
-                    assert_eq!(a.instant.to_bits(), b.instant.to_bits(), "mmap'd instant differs for id {i}");
+                    assert_eq!(
+                        a.instant.to_bits(),
+                        b.instant.to_bits(),
+                        "mmap'd instant differs for id {i}"
+                    );
                     assert_eq!(a.has_tz, b.has_tz);
                     assert_eq!(a.kind, b.kind);
                 }
@@ -8336,17 +9055,31 @@ mod tests {
         }
         // The dictionary is memory-mapped (zero resident term storage) and lookup still
         // round-trips: every term resolves to the same id and back to the same term.
-        assert!(dir.join("dict-terms.bin").exists(), "mmap dict not persisted");
+        assert!(
+            dir.join("dict-terms.bin").exists(),
+            "mmap dict not persisted"
+        );
         for s in 0..50u32 {
             let t = Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/n{}", s % 211)));
-            assert_eq!(g.id_of(&t), g2.id_of(&t), "mmap dict lookup differs for {t}");
+            assert_eq!(
+                g.id_of(&t),
+                g2.id_of(&t),
+                "mmap dict lookup differs for {t}"
+            );
         }
         // Per-predicate stats are persisted (no POS/PSO re-scan on open) and identical.
-        assert!(dir.join("predstats.bin").exists(), "pred stats not persisted");
+        assert!(
+            dir.join("predstats.bin").exists(),
+            "pred stats not persisted"
+        );
         for p in 0..13u32 {
             let pred = NamedNode::new_unchecked(format!("http://ex/p{p}"));
             if let Some(pid) = g.id_of(&Term::NamedNode(pred)) {
-                assert_eq!(g.store.pred_stat(pid), g2.store.pred_stat(pid), "pred_stat differs for p{p}");
+                assert_eq!(
+                    g.store.pred_stat(pid),
+                    g2.store.pred_stat(pid),
+                    "pred_stat differs for p{p}"
+                );
             }
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -8361,16 +9094,28 @@ mod tests {
     fn open_falls_back_to_legacy_dict_bin() {
         let mut nt = String::new();
         for i in 0..400u32 {
-            nt.push_str(&format!("<http://ex/n{}> <http://ex/p{}> <http://ex/o{}> .\n", i % 97, i % 7, i % 53));
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> <http://ex/o{}> .\n",
+                i % 97,
+                i % 7,
+                i % 53
+            ));
         }
         nt.push_str("<http://ex/n0> <http://ex/name> \"caf\\u00e9\"@fr .\n");
         let g = Graph::load_str(&nt, "ntriples").unwrap();
         // The in-memory build produces an arena dict (base == 0), so `Dict::save` applies.
-        let dir = std::env::temp_dir().join(format!("sparq_legacy_dict_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq_legacy_dict_test_{}", std::process::id()));
         g.save(&dir).unwrap();
         // Simulate a LEGACY directory: drop every mmap-dict file and write the single-file
         // `dict.bin` instead. The permutation/numerics/temporals files are left untouched.
-        for f in ["dict-meta.bin", "dict-terms.bin", "dict-offs.bin", "dict-hash.bin", "dict-hid.bin"] {
+        for f in [
+            "dict-meta.bin",
+            "dict-terms.bin",
+            "dict-offs.bin",
+            "dict-hash.bin",
+            "dict-hid.bin",
+        ] {
             std::fs::remove_file(dir.join(f)).ok();
         }
         g.dict.save(&dir.join("dict.bin")).unwrap();
@@ -8387,7 +9132,11 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                    (
+                        gg.dict.term(spo[0]).to_string(),
+                        gg.dict.term(spo[1]).to_string(),
+                        gg.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
@@ -8396,7 +9145,11 @@ mod tests {
         assert_eq!(dump(&g), dump(&g2), "legacy-dict-reopened store differs");
         for s in 0..50u32 {
             let t = Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/n{}", s % 97)));
-            assert_eq!(g.id_of(&t), g2.id_of(&t), "legacy dict lookup differs for {t}");
+            assert_eq!(
+                g.id_of(&t),
+                g2.id_of(&t),
+                "legacy dict lookup differs for {t}"
+            );
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -8418,9 +9171,17 @@ mod tests {
         }
         let mut g = Graph::load_str(&nt, "ntriples").unwrap();
         // A pending overlay (one delete + one insert) must be folded into the compressed save.
-        let del = [g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/n1"))).unwrap(),
-                   g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/p1"))).unwrap(),
-                   g.id_of(&Term::Literal(Literal::new_typed_literal("1", xsd::INTEGER))).unwrap()];
+        let del = [
+            g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/n1")))
+                .unwrap(),
+            g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/p1")))
+                .unwrap(),
+            g.id_of(&Term::Literal(Literal::new_typed_literal(
+                "1",
+                xsd::INTEGER,
+            )))
+            .unwrap(),
+        ];
         g.store.apply_delta(&[[del[0], del[1], del[0]]], &[del]);
         assert!(g.store.has_overlay());
 
@@ -8438,14 +9199,26 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                    (
+                        gg.dict.term(spo[0]).to_string(),
+                        gg.dict.term(spo[1]).to_string(),
+                        gg.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
             v
         };
-        assert_eq!(g.len(), b.len(), "overlay not folded into the compressed save");
-        assert_eq!(dump(&a), dump(&b), "compressed graph differs from raw graph");
+        assert_eq!(
+            g.len(),
+            b.len(),
+            "overlay not folded into the compressed save"
+        );
+        assert_eq!(
+            dump(&a),
+            dump(&b),
+            "compressed graph differs from raw graph"
+        );
         // Numerics still resolve through the compressed-opened graph.
         let lit = Term::Literal(Literal::new_typed_literal("42", xsd::INTEGER));
         if let Some(id) = b.id_of(&lit) {
@@ -8454,7 +9227,10 @@ mod tests {
         // Load-time decompression: identical content, perms now on the heap.
         let lazy_heap = b.store.heap_bytes();
         b.decompress_indexes();
-        assert!(b.store.heap_bytes() > lazy_heap, "decompress_indexes must move perms to the heap");
+        assert!(
+            b.store.heap_bytes() > lazy_heap,
+            "decompress_indexes must move perms to the heap"
+        );
         assert_eq!(dump(&a), dump(&b), "decompressed graph differs");
         std::fs::remove_dir_all(&base).ok();
     }
@@ -8475,7 +9251,9 @@ mod tests {
             ));
         }
         // A duplicate line (must be deduped) + a non-integer literal with a language tag.
-        nt.push_str("<http://ex/n0> <http://ex/p0> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n");
+        nt.push_str(
+            "<http://ex/n0> <http://ex/p0> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        );
         nt.push_str("<http://ex/n0> <http://ex/name> \"caf\\u00e9\"@fr .\n");
 
         let base = std::env::temp_dir().join(format!("sparq_ext_{}", std::process::id()));
@@ -8497,7 +9275,10 @@ mod tests {
             let f = format!("perm{}.bin", perm as usize);
             let a = std::fs::read(mem_dir.join(&f)).unwrap();
             let b = std::fs::read(ext_dir.join(&f)).unwrap();
-            assert_eq!(a, b, "permutation {f} differs between in-memory and external build");
+            assert_eq!(
+                a, b,
+                "permutation {f} differs between in-memory and external build"
+            );
         }
 
         // And the data round-trips through terms.
@@ -8508,7 +9289,11 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                    (
+                        gg.dict.term(spo[0]).to_string(),
+                        gg.dict.term(spo[1]).to_string(),
+                        gg.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
@@ -8569,7 +9354,9 @@ mod tests {
                 // Default-graph quad interleaved (no 4th term).
                 nq.push_str(&format!(
                     "<http://ex/s{}> <http://ex/d{}> \"{}\" .\n",
-                    i % 137, i % 7, i % 90
+                    i % 137,
+                    i % 7,
+                    i % 90
                 ));
             }
         }
@@ -8597,8 +9384,15 @@ mod tests {
             "out-of-core quad build is not lossless vs the in-RAM dataset load"
         );
         // The manifest must exist (there ARE named graphs) and the named-graph set must match.
-        assert!(ext_dir.join("named.bin").exists(), "named manifest not written by quad build");
-        assert_eq!(ext.named.len(), mem_g.named.len(), "named-graph count differs");
+        assert!(
+            ext_dir.join("named.bin").exists(),
+            "named manifest not written by quad build"
+        );
+        assert_eq!(
+            ext.named.len(),
+            mem_g.named.len(),
+            "named-graph count differs"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -8613,7 +9407,10 @@ mod tests {
         for i in 0..1500u32 {
             nq.push_str(&format!(
                 "<http://ex/s{}> <http://ex/p{}> <http://ex/o{}> <http://ex/graph/{}> .\n",
-                i % 97, i % 5, i % 60, i % 4
+                i % 97,
+                i % 5,
+                i % 60,
+                i % 4
             ));
         }
         nq.push_str("<http://ex/x> <http://ex/y> \"z\"@en .\n"); // default-graph quad
@@ -8638,7 +9435,10 @@ mod tests {
         // Named-graph ordering (manifest order = first-occurrence) must match.
         let mem_names: Vec<String> = mem.named.iter().map(|(n, _)| n.to_string()).collect();
         let ext_names: Vec<String> = ext.named.iter().map(|(n, _)| n.to_string()).collect();
-        assert_eq!(mem_names, ext_names, "named-graph manifest ordering differs");
+        assert_eq!(
+            mem_names, ext_names,
+            "named-graph manifest ordering differs"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -8653,11 +9453,21 @@ mod tests {
         let base = std::env::temp_dir().join(format!("sparq_extq_def_{}", std::process::id()));
         let ext_dir = base.join("ext");
         Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64).unwrap();
-        assert!(!ext_dir.join("named.bin").exists(), "default-only quad build must not write a manifest");
-        assert!(!ext_dir.join("named").exists(), "default-only quad build must not write a named subtree");
+        assert!(
+            !ext_dir.join("named.bin").exists(),
+            "default-only quad build must not write a manifest"
+        );
+        assert!(
+            !ext_dir.join("named").exists(),
+            "default-only quad build must not write a named subtree"
+        );
         let ext = Graph::open(&ext_dir).unwrap();
         let mem = Graph::load_dataset(nq, "nquads").unwrap();
-        assert_eq!(dump_quads(&mem), dump_quads(&ext), "default-only quad build not lossless");
+        assert_eq!(
+            dump_quads(&mem),
+            dump_quads(&ext),
+            "default-only quad build not lossless"
+        );
         assert!(ext.named.is_empty());
         std::fs::remove_dir_all(&base).ok();
     }
@@ -8677,7 +9487,11 @@ mod tests {
         assert_eq!(ext.len(), 0, "default graph must be empty");
         assert_eq!(ext.named.len(), 2, "two named graphs expected");
         let mem = Graph::load_dataset(nq, "nquads").unwrap();
-        assert_eq!(dump_quads(&mem), dump_quads(&ext), "empty-default quad build not lossless");
+        assert_eq!(
+            dump_quads(&mem),
+            dump_quads(&ext),
+            "empty-default quad build not lossless"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -8697,7 +9511,11 @@ mod tests {
         Graph::build_external_quads(trig.as_bytes(), "trig", &ext_dir, 64).unwrap();
         let ext = Graph::open(&ext_dir).unwrap();
         let mem = Graph::load_dataset(trig, "trig").unwrap();
-        assert_eq!(dump_quads(&mem), dump_quads(&ext), "TriG out-of-core build not lossless");
+        assert_eq!(
+            dump_quads(&mem),
+            dump_quads(&ext),
+            "TriG out-of-core build not lossless"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -8717,8 +9535,14 @@ mod tests {
                   <http://ex/d> <http://ex/e> <http://ex/f> <http://ex/g2> .\n\
                   <http://ex/x> <http://ex/y> <http://ex/z> .\n";
         Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64).unwrap();
-        assert!(ext_dir.join("named.bin").exists(), "precondition: manifest present");
-        assert!(ext_dir.join("named").exists(), "precondition: named subtree present");
+        assert!(
+            ext_dir.join("named.bin").exists(),
+            "precondition: manifest present"
+        );
+        assert!(
+            ext_dir.join("named").exists(),
+            "precondition: named subtree present"
+        );
         let before = dump_quads(&Graph::open(&ext_dir).unwrap());
 
         // Now call with an UNSUPPORTED format. It must return Err and leave `dir` untouched.
@@ -8727,11 +9551,23 @@ mod tests {
         assert!(err.contains("unsupported"), "unexpected error: {err}");
 
         // The prior dataset's on-disk artefacts must STILL be present and still open losslessly.
-        assert!(ext_dir.join("named.bin").exists(), "manifest was destroyed before format check");
-        assert!(ext_dir.join("named").exists(), "named subtree was destroyed before format check");
-        assert!(!ext_dir.join("quads-spill").exists(), "a spill dir leaked from the rejected call");
+        assert!(
+            ext_dir.join("named.bin").exists(),
+            "manifest was destroyed before format check"
+        );
+        assert!(
+            ext_dir.join("named").exists(),
+            "named subtree was destroyed before format check"
+        );
+        assert!(
+            !ext_dir.join("quads-spill").exists(),
+            "a spill dir leaked from the rejected call"
+        );
         let after = dump_quads(&Graph::open(&ext_dir).unwrap());
-        assert_eq!(before, after, "existing dataset corrupted by a rejected-format call");
+        assert_eq!(
+            before, after,
+            "existing dataset corrupted by a rejected-format call"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -8788,7 +9624,9 @@ mod tests {
         }
         // Plus some default-graph quads interleaved (the default slot shares the same pool).
         for round in 0..6u32 {
-            nq.push_str(&format!("<http://ex/d{round}> <http://ex/dp> <http://ex/do> .\n"));
+            nq.push_str(&format!(
+                "<http://ex/d{round}> <http://ex/dp> <http://ex/do> .\n"
+            ));
         }
 
         let base = std::env::temp_dir().join(format!("sparq_extq_fd_{}", std::process::id()));
@@ -8810,7 +9648,11 @@ mod tests {
             dump_quads(&ext),
             "bounded-writer-pool build not lossless (a reopen must append, not truncate)"
         );
-        assert_eq!(ext.named.len(), N_GRAPHS as usize, "all named graphs must be present");
+        assert_eq!(
+            ext.named.len(),
+            N_GRAPHS as usize,
+            "all named graphs must be present"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -8856,32 +9698,53 @@ mod tests {
         // SPILLED build with a tiny budget (forces cache eviction/epochs + many sort runs)
         // — drive build_external_spill DIRECTLY with an explicit SpillConfig (no env-var
         // race with parallel tests). disk_floor 0 so it never aborts in CI sandboxes.
-        let cfg = dictspill::SpillConfig { mem_budget: 64 << 10, disk_floor: 0 };
+        let cfg = dictspill::SpillConfig {
+            mem_budget: 64 << 10,
+            disk_floor: 0,
+        };
         Graph::build_external_spill(nt.as_bytes(), "ntriples", &spill_dir, 256, &cfg).unwrap();
 
         let shg = Graph::open(&sharded_dir).unwrap();
         let spg = Graph::open(&spill_dir).unwrap();
-        assert_eq!(shg.len(), spg.len(), "triple count differs (spill vs sharded)");
-        assert_eq!(shg.dict.len(), spg.dict.len(), "dict size differs (spill vs sharded)");
+        assert_eq!(
+            shg.len(),
+            spg.len(),
+            "triple count differs (spill vs sharded)"
+        );
+        assert_eq!(
+            shg.dict.len(),
+            spg.dict.len(),
+            "dict size differs (spill vs sharded)"
+        );
 
         // Every on-disk file the spill path streams must be byte-identical to the sharded
         // path's — the design's central claim.
         let files = [
-            "dict-meta.bin", "dict-terms.bin", "dict-offs.bin",
-            "dict-hash.bin", "dict-hid.bin", "numerics.bin", "temporals.bin",
+            "dict-meta.bin",
+            "dict-terms.bin",
+            "dict-offs.bin",
+            "dict-hash.bin",
+            "dict-hid.bin",
+            "numerics.bin",
+            "temporals.bin",
         ];
         for f in files {
-            let a = std::fs::read(sharded_dir.join(f))
-                .unwrap_or_else(|e| panic!("sharded {f}: {e}"));
-            let b = std::fs::read(spill_dir.join(f))
-                .unwrap_or_else(|e| panic!("spill {f}: {e}"));
-            assert_eq!(a, b, "dictionary file {f} differs between spill and sharded build");
+            let a =
+                std::fs::read(sharded_dir.join(f)).unwrap_or_else(|e| panic!("sharded {f}: {e}"));
+            let b = std::fs::read(spill_dir.join(f)).unwrap_or_else(|e| panic!("spill {f}: {e}"));
+            assert_eq!(
+                a, b,
+                "dictionary file {f} differs between spill and sharded build"
+            );
         }
         for &perm in BUILT {
             let f = format!("perm{}.bin", perm as usize);
             let a = std::fs::read(sharded_dir.join(&f)).unwrap();
             let b = std::fs::read(spill_dir.join(&f)).unwrap();
-            assert_eq!(a, b, "permutation {f} differs between spill and sharded build");
+            assert_eq!(
+                a, b,
+                "permutation {f} differs between spill and sharded build"
+            );
         }
 
         // And the materialized triples round-trip identically through terms.
@@ -8892,13 +9755,21 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                    (
+                        gg.dict.term(spo[0]).to_string(),
+                        gg.dict.term(spo[1]).to_string(),
+                        gg.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
             v
         };
-        assert_eq!(dump(&shg), dump(&spg), "spill-built store differs from sharded");
+        assert_eq!(
+            dump(&shg),
+            dump(&spg),
+            "spill-built store differs from sharded"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -8913,10 +9784,17 @@ mod tests {
     #[test]
     fn dict_spill_rejects_non_ntriples_and_opens_mmap() {
         let dir = std::env::temp_dir().join(format!("sparq_spill_fmt_{}", std::process::id()));
-        let cfg = dictspill::SpillConfig { mem_budget: 1 << 20, disk_floor: 0 };
-        let err = Graph::build_external_spill(b"@prefix : <x> .".as_slice(), "turtle", &dir, 256, &cfg)
-            .expect_err("spill build must reject non-ntriples");
-        assert!(err.contains("N-Triples"), "error must name the restriction: {err}");
+        let cfg = dictspill::SpillConfig {
+            mem_budget: 1 << 20,
+            disk_floor: 0,
+        };
+        let err =
+            Graph::build_external_spill(b"@prefix : <x> .".as_slice(), "turtle", &dir, 256, &cfg)
+                .expect_err("spill build must reject non-ntriples");
+        assert!(
+            err.contains("N-Triples"),
+            "error must name the restriction: {err}"
+        );
 
         // RDF 1.2 triple terms now build through the dict-spill path (sq-jvbr) and open.
         let tt = "<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
@@ -8931,7 +9809,10 @@ mod tests {
             oxrdf::NamedNode::new("http://ex/b").unwrap(),
             Term::NamedNode(oxrdf::NamedNode::new("http://ex/c").unwrap()),
         )));
-        assert!(tg.id_of(&ttobj).is_some(), "the triple term `<<( a b c )>>` must be a first-class dict term");
+        assert!(
+            tg.id_of(&ttobj).is_some(),
+            "the triple term `<<( a b c )>>` must be a first-class dict term"
+        );
 
         let nt = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
                   <http://ex/a> <http://ex/p> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
@@ -8984,17 +9865,29 @@ mod tests {
         // Nested triple term.
         nt.push_str("<http://ex/r3> <http://ex/nested> <<( <http://gamma.example/x> <http://delta.example/q> <<( <http://eps.example/a> <http://zeta.example/b> <http://eta.example/c> )>> )>> .\n");
 
-        let mem = Graph::load_str(&nt, "ntriples").expect("in-memory loader must accept triple terms");
+        let mem =
+            Graph::load_str(&nt, "ntriples").expect("in-memory loader must accept triple terms");
 
         let base = std::env::temp_dir().join(format!("sparq_spill_tt_{}", std::process::id()));
         let spill_dir = base.join("spill");
         // Tiny budget -> epoch resets + many sort runs (exercises the remap windows).
-        let cfg = dictspill::SpillConfig { mem_budget: 64 << 10, disk_floor: 0 };
+        let cfg = dictspill::SpillConfig {
+            mem_budget: 64 << 10,
+            disk_floor: 0,
+        };
         Graph::build_external_spill(nt.as_bytes(), "ntriples", &spill_dir, 256, &cfg)
             .expect("dict-spill build must accept triple terms (sq-jvbr)");
         let sp = Graph::open(&spill_dir).unwrap();
-        assert_eq!(sp.len(), mem.len(), "spill triple count differs from in-memory");
-        assert_eq!(sp.dict.len(), mem.dict.len(), "spill dict size differs from in-memory");
+        assert_eq!(
+            sp.len(),
+            mem.len(),
+            "spill triple count differs from in-memory"
+        );
+        assert_eq!(
+            sp.dict.len(),
+            mem.dict.len(),
+            "spill dict size differs from in-memory"
+        );
 
         let dump = |g: &Graph| {
             let scan = g.store.scan(&[None, None, None]);
@@ -9003,13 +9896,21 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                    (
+                        g.dict.term(spo[0]).to_string(),
+                        g.dict.term(spo[1]).to_string(),
+                        g.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
             v
         };
-        assert_eq!(dump(&sp), dump(&mem), "spill-built store differs from in-memory (triple terms)");
+        assert_eq!(
+            dump(&sp),
+            dump(&mem),
+            "spill-built store differs from in-memory (triple terms)"
+        );
 
         // The shared triple term must be ONE dict entry referenced by both reifiers.
         let tt = Term::Triple(Box::new(oxrdf::Triple::new(
@@ -9017,22 +9918,43 @@ mod tests {
             oxrdf::NamedNode::new("http://beta.example/age").unwrap(),
             Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)),
         )));
-        let tt_id = sp.id_of(&tt).expect("the shared triple term must be in the spill dict");
-        let r1 = sp.id_of(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1").unwrap())).unwrap();
-        let r1b = sp.id_of(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1b").unwrap())).unwrap();
+        let tt_id = sp
+            .id_of(&tt)
+            .expect("the shared triple term must be in the spill dict");
+        let r1 = sp
+            .id_of(&Term::NamedNode(
+                oxrdf::NamedNode::new("http://ex/r1").unwrap(),
+            ))
+            .unwrap();
+        let r1b = sp
+            .id_of(&Term::NamedNode(
+                oxrdf::NamedNode::new("http://ex/r1b").unwrap(),
+            ))
+            .unwrap();
         let obj_of = |s: Id| {
             let scan = sp.store.scan(&[Some(s), None, None]);
-            assert_eq!(scan.rows.len(), 1, "reifier must have exactly one statement");
+            assert_eq!(
+                scan.rows.len(),
+                1,
+                "reifier must have exactly one statement"
+            );
             scan.to_spo(&scan.rows[0])[2]
         };
         assert_eq!(obj_of(r1), tt_id, "<r1>'s object is the shared triple term");
-        assert_eq!(obj_of(r1b), tt_id, "<r1b>'s object is the SAME shared triple-term id");
+        assert_eq!(
+            obj_of(r1b),
+            tt_id,
+            "<r1b>'s object is the SAME shared triple-term id"
+        );
 
         // Sanity: the triple-term-free permutation/dict bytes are still produced (no perm
         // file is empty), proving the staged-triple remap fed every triple through.
         for &perm in BUILT {
             let f = spill_dir.join(format!("perm{}.bin", perm as usize));
-            assert!(std::fs::metadata(&f).map(|m| m.len() > 0).unwrap_or(false), "perm {f:?} must be non-empty");
+            assert!(
+                std::fs::metadata(&f).map(|m| m.len() > 0).unwrap_or(false),
+                "perm {f:?} must be non-empty"
+            );
         }
         std::fs::remove_dir_all(&base).ok();
     }
@@ -9090,7 +10012,8 @@ mod tests {
         // Reference paths: in-memory load (serial `merge_remap` fallback for triple terms)
         // and the SERIAL external build (sharded = false) — both intern triple terms
         // structurally and are byte-compatible with each other.
-        let mem = Graph::load_str(&nt, "ntriples").expect("in-memory loader must accept triple terms");
+        let mem =
+            Graph::load_str(&nt, "ntriples").expect("in-memory loader must accept triple terms");
 
         let base = std::env::temp_dir().join(format!("sparq_ext_tt_{}", std::process::id()));
         let ser_dir = base.join("serial");
@@ -9103,10 +10026,26 @@ mod tests {
 
         let ser = Graph::open(&ser_dir).unwrap();
         let sh = Graph::open(&sh_dir).unwrap();
-        assert_eq!(sh.len(), mem.len(), "sharded external triple count differs from in-memory");
-        assert_eq!(sh.len(), ser.len(), "sharded external triple count differs from serial");
-        assert_eq!(sh.dict.len(), mem.dict.len(), "sharded external dict size differs from in-memory");
-        assert_eq!(sh.dict.len(), ser.dict.len(), "sharded external dict size differs from serial");
+        assert_eq!(
+            sh.len(),
+            mem.len(),
+            "sharded external triple count differs from in-memory"
+        );
+        assert_eq!(
+            sh.len(),
+            ser.len(),
+            "sharded external triple count differs from serial"
+        );
+        assert_eq!(
+            sh.dict.len(),
+            mem.dict.len(),
+            "sharded external dict size differs from in-memory"
+        );
+        assert_eq!(
+            sh.dict.len(),
+            ser.dict.len(),
+            "sharded external dict size differs from serial"
+        );
 
         // Round-trip every stored triple back to its terms (recursively expanding triple
         // terms via `Dict::term`), sort, and compare — id-assignment-order independent. This
@@ -9120,7 +10059,11 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                    (
+                        g.dict.term(spo[0]).to_string(),
+                        g.dict.term(spo[1]).to_string(),
+                        g.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
@@ -9129,8 +10072,14 @@ mod tests {
         let d_mem = dump(&mem);
         let d_ser = dump(&ser);
         let d_sh = dump(&sh);
-        assert_eq!(d_sh, d_mem, "sharded external build differs from in-memory load (triple terms)");
-        assert_eq!(d_sh, d_ser, "sharded external build differs from serial external (triple terms)");
+        assert_eq!(
+            d_sh, d_mem,
+            "sharded external build differs from in-memory load (triple terms)"
+        );
+        assert_eq!(
+            d_sh, d_ser,
+            "sharded external build differs from serial external (triple terms)"
+        );
 
         // Cross-shard dedup is OBSERVABLE: the triple term shared by <r1>/<r1b> must be ONE
         // dictionary entry referenced by both statements, i.e. their objects share an id.
@@ -9139,9 +10088,19 @@ mod tests {
             oxrdf::NamedNode::new("http://beta.example/age").unwrap(),
             Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)),
         )));
-        let tt_id = sh.id_of(&tt).expect("the shared triple term must be in the sharded dict");
-        let r1 = sh.id_of(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1").unwrap())).unwrap();
-        let r1b = sh.id_of(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1b").unwrap())).unwrap();
+        let tt_id = sh
+            .id_of(&tt)
+            .expect("the shared triple term must be in the sharded dict");
+        let r1 = sh
+            .id_of(&Term::NamedNode(
+                oxrdf::NamedNode::new("http://ex/r1").unwrap(),
+            ))
+            .unwrap();
+        let r1b = sh
+            .id_of(&Term::NamedNode(
+                oxrdf::NamedNode::new("http://ex/r1b").unwrap(),
+            ))
+            .unwrap();
         let n_r1 = sh.store.scan(&[Some(r1), None, None]).rows.len();
         let n_r1b = sh.store.scan(&[Some(r1b), None, None]).rows.len();
         assert_eq!(n_r1, 1, "<r1> must have exactly one statement");
@@ -9152,7 +10111,11 @@ mod tests {
             scan.to_spo(&scan.rows[0])[2]
         };
         assert_eq!(obj_of(r1), tt_id, "<r1>'s object is the shared triple term");
-        assert_eq!(obj_of(r1b), tt_id, "<r1b>'s object is the SAME shared triple term id");
+        assert_eq!(
+            obj_of(r1b),
+            tt_id,
+            "<r1b>'s object is the SAME shared triple term id"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -9188,7 +10151,11 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                    (
+                        g.dict.term(spo[0]).to_string(),
+                        g.dict.term(spo[1]).to_string(),
+                        g.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
@@ -9217,7 +10184,9 @@ mod tests {
         nt.push_str("# a comment line\n");
         nt.push_str("<http://ex/s> <http://other.org/p> \"a \\\"q\\\" b\\nc \\\\ d \\u00e9\" .\n");
         nt.push_str("<http://ex/s> <http://ex/name> \"caf\\u00e9\"@fr .\n");
-        nt.push_str("<http://ex/s> <http://ex/v> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n");
+        nt.push_str(
+            "<http://ex/s> <http://ex/v> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n",
+        );
         nt.push_str("<http://ex/s> <http://ex/plain> \"just a string\" .\n");
         nt.push_str("<http://ex/s> <http://ex/big> \"\\U0001F600 grin\" .\n");
         // [OPUS-4.8] (sq-hxgb) RDF 1.2 triple-term objects `<<( s p o )>>` (object-only),
@@ -9240,7 +10209,11 @@ mod tests {
                 .iter()
                 .map(|r| {
                     let spo = scan.to_spo(r);
-                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                    (
+                        g.dict.term(spo[0]).to_string(),
+                        g.dict.term(spo[1]).to_string(),
+                        g.dict.term(spo[2]).to_string(),
+                    )
                 })
                 .collect();
             v.sort();
@@ -9286,7 +10259,13 @@ mod tests {
         let dump = |dict: &Dict, triples: &[[Id; 3]]| {
             let mut v: Vec<(String, String, String)> = triples
                 .iter()
-                .map(|&[s, p, o]| (dict.term(s).to_string(), dict.term(p).to_string(), dict.term(o).to_string()))
+                .map(|&[s, p, o]| {
+                    (
+                        dict.term(s).to_string(),
+                        dict.term(p).to_string(),
+                        dict.term(o).to_string(),
+                    )
+                })
                 .collect();
             v.sort();
             v
@@ -9305,8 +10284,16 @@ mod tests {
             .unwrap()
             .install(|| merge_partials(parse_block(bytes).unwrap()));
 
-        assert_eq!(sharded.1.len(), serial.1.len(), "sharded triple count differs from serial");
-        assert_eq!(sharded.0.len(), serial.0.len(), "sharded dict size differs from serial");
+        assert_eq!(
+            sharded.1.len(),
+            serial.1.len(),
+            "sharded triple count differs from serial"
+        );
+        assert_eq!(
+            sharded.0.len(),
+            serial.0.len(),
+            "sharded dict size differs from serial"
+        );
         assert_eq!(
             dump(&sharded.0, &sharded.1),
             dump(&serial.0, &serial.1),
@@ -9321,12 +10308,27 @@ mod tests {
             Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)),
         )));
         let tt_id = sharded.0.lookup(&tt);
-        assert!(tt_id != 0, "the shared triple term must be in the sharded dict");
-        let r1 = sharded.0.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1").unwrap()));
-        let r1b = sharded.0.lookup(&Term::NamedNode(oxrdf::NamedNode::new("http://ex/r1b").unwrap()));
+        assert!(
+            tt_id != 0,
+            "the shared triple term must be in the sharded dict"
+        );
+        let r1 = sharded.0.lookup(&Term::NamedNode(
+            oxrdf::NamedNode::new("http://ex/r1").unwrap(),
+        ));
+        let r1b = sharded.0.lookup(&Term::NamedNode(
+            oxrdf::NamedNode::new("http://ex/r1b").unwrap(),
+        ));
         let obj_of = |subj: Id| sharded.1.iter().find(|t| t[0] == subj).map(|t| t[2]);
-        assert_eq!(obj_of(r1), Some(tt_id), "<r1>'s object is the shared triple term");
-        assert_eq!(obj_of(r1b), Some(tt_id), "<r1b>'s object is the SAME shared triple-term id");
+        assert_eq!(
+            obj_of(r1),
+            Some(tt_id),
+            "<r1>'s object is the shared triple term"
+        );
+        assert_eq!(
+            obj_of(r1b),
+            Some(tt_id),
+            "<r1b>'s object is the SAME shared triple-term id"
+        );
     }
 
     /// [OPUS-4.8] (sq-7d3dj.2) End-to-end proof that pre-sizing the per-chunk partial `Dict` on
@@ -9346,7 +10348,10 @@ mod tests {
         let mut nt = String::new();
         for i in 0..2000u32 {
             nt.push_str(&format!("<http://ex/n{}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Person> .\n", i));
-            nt.push_str(&format!("<http://ex/n{}> <http://ex/name> \"name{}\"@en .\n", i, i));
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/name> \"name{}\"@en .\n",
+                i, i
+            ));
             nt.push_str(&format!("<http://ex/n{}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", i, i % 91));
             nt.push_str(&format!("_:b{} <http://ex/reifies> <<( <http://ex/n{}> <http://ex/knows> <http://ex/n{}> )>> .\n", i, i, (i + 1) % 2000));
         }
@@ -9373,16 +10378,31 @@ mod tests {
 
         // Consolidate BOTH through the identical merge under one fixed thread pool, so the two
         // runs take the same merge branch and differ only by the isolated capacity variable.
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
         let (dict_pre, tri_pre) = pool.install(|| merge_partials(build(true)));
         let (dict_plain, tri_plain) = pool.install(|| merge_partials(build(false)));
 
         // (1) Identical id-triples INCLUDING order.
-        assert_eq!(tri_pre, tri_plain, "pre-sizing changed the merged id-triples or their order");
+        assert_eq!(
+            tri_pre, tri_plain,
+            "pre-sizing changed the merged id-triples or their order"
+        );
         // (2) Identical term set + bijection.
-        assert_eq!(dict_pre.len(), dict_plain.len(), "pre-sizing changed the distinct-term count");
+        assert_eq!(
+            dict_pre.len(),
+            dict_plain.len(),
+            "pre-sizing changed the distinct-term count"
+        );
         for id in 1..=dict_pre.len() as Id {
-            assert_eq!(dict_pre.term(id), dict_plain.term(id), "pre-sizing changed the term for id {}", id);
+            assert_eq!(
+                dict_pre.term(id),
+                dict_plain.term(id),
+                "pre-sizing changed the term for id {}",
+                id
+            );
         }
         // (3) Identical FINAL dict footprint — `heap_bytes` counts `capacity()`, so this pins
         // that the partial reservation does NOT reach the ratcheted final dict.
@@ -9427,38 +10447,104 @@ mod tests {
         let seq = Graph::load_reader(nt.as_bytes(), "ntriples").unwrap();
         // 7 B forces hundreds of reads per line; the others land boundaries mid-line.
         for max in [7usize, 1024, 1 << 16] {
-            let par = Graph::load_reader_parallel(ShortReader { data: nt.as_bytes(), pos: 0, max }, "ntriples").unwrap();
+            let par = Graph::load_reader_parallel(
+                ShortReader {
+                    data: nt.as_bytes(),
+                    pos: 0,
+                    max,
+                },
+                "ntriples",
+            )
+            .unwrap();
             assert_eq!(par.len(), seq.len(), "triple count differs at max={max}");
-            assert_eq!(par.dict.len(), seq.dict.len(), "dict size differs at max={max}");
-            assert_eq!(dump_terms(&par), dump_terms(&seq), "stored triples differ at max={max}");
+            assert_eq!(
+                par.dict.len(),
+                seq.dict.len(),
+                "dict size differs at max={max}"
+            );
+            assert_eq!(
+                dump_terms(&par),
+                dump_terms(&seq),
+                "stored triples differ at max={max}"
+            );
         }
         // MULTI-BLOCK: a small block size (vs the production 32 MiB) makes the same
         // document span ~60 blocks, with triple lines (each ~70-100 B, never a multiple
         // of 4096) straddling every block boundary and partial lines carried across
         // pipelined rounds — and the per-block dict merges must still agree.
         for (block, max) in [(4096usize, 997usize), (4096, 1 << 16), (8192, 7)] {
-            let par = Graph::load_ntriples_pipelined(ShortReader { data: nt.as_bytes(), pos: 0, max }, block).unwrap();
-            assert_eq!(par.len(), seq.len(), "triple count differs at block={block} max={max}");
-            assert_eq!(par.dict.len(), seq.dict.len(), "dict size differs at block={block} max={max}");
-            assert_eq!(dump_terms(&par), dump_terms(&seq), "stored triples differ at block={block} max={max}");
+            let par = Graph::load_ntriples_pipelined(
+                ShortReader {
+                    data: nt.as_bytes(),
+                    pos: 0,
+                    max,
+                },
+                block,
+            )
+            .unwrap();
+            assert_eq!(
+                par.len(),
+                seq.len(),
+                "triple count differs at block={block} max={max}"
+            );
+            assert_eq!(
+                par.dict.len(),
+                seq.dict.len(),
+                "dict size differs at block={block} max={max}"
+            );
+            assert_eq!(
+                dump_terms(&par),
+                dump_terms(&seq),
+                "stored triples differ at block={block} max={max}"
+            );
         }
         // A single line LONGER than the block size (carry outgrows the block).
-        let long = format!("<http://ex/s> <http://ex/p> \"{}\" .\n<http://ex/s2> <http://ex/p> \"x\" .", "y".repeat(20_000));
+        let long = format!(
+            "<http://ex/s> <http://ex/p> \"{}\" .\n<http://ex/s2> <http://ex/p> \"x\" .",
+            "y".repeat(20_000)
+        );
         let lseq = Graph::load_reader(long.as_bytes(), "ntriples").unwrap();
-        let lpar = Graph::load_ntriples_pipelined(ShortReader { data: long.as_bytes(), pos: 0, max: 333 }, 4096).unwrap();
+        let lpar = Graph::load_ntriples_pipelined(
+            ShortReader {
+                data: long.as_bytes(),
+                pos: 0,
+                max: 333,
+            },
+            4096,
+        )
+        .unwrap();
         assert_eq!(lpar.len(), lseq.len());
         assert_eq!(dump_terms(&lpar), dump_terms(&lseq));
         // Empty input and input with no final newline at all.
-        let empty = Graph::load_reader_parallel(ShortReader { data: b"", pos: 0, max: 7 }, "ntriples").unwrap();
+        let empty = Graph::load_reader_parallel(
+            ShortReader {
+                data: b"",
+                pos: 0,
+                max: 7,
+            },
+            "ntriples",
+        )
+        .unwrap();
         assert_eq!(empty.len(), 0);
         let one = Graph::load_reader_parallel(
-            ShortReader { data: b"<http://ex/s> <http://ex/p> <http://ex/o> .", pos: 0, max: 3 },
+            ShortReader {
+                data: b"<http://ex/s> <http://ex/p> <http://ex/o> .",
+                pos: 0,
+                max: 3,
+            },
             "ntriples",
         )
         .unwrap();
         assert_eq!(one.len(), 1);
         // A malformed document must surface the parse error, not hang the pipeline.
-        let bad = Graph::load_reader_parallel(ShortReader { data: b"not ntriples\n", pos: 0, max: 5 }, "ntriples");
+        let bad = Graph::load_reader_parallel(
+            ShortReader {
+                data: b"not ntriples\n",
+                pos: 0,
+                max: 5,
+            },
+            "ntriples",
+        );
         assert!(bad.is_err());
     }
 
@@ -9500,14 +10586,35 @@ mod tests {
             xsd::UNSIGNED_SHORT,
             xsd::UNSIGNED_BYTE,
         ] {
-            assert!(is_integer_datatype(dt.as_str()), "{} must be an integer datatype", dt.as_str());
+            assert!(
+                is_integer_datatype(dt.as_str()),
+                "{} must be an integer datatype",
+                dt.as_str()
+            );
         }
         // Numeric-but-not-integer and non-numeric datatypes are rejected.
-        for dt in [xsd::DECIMAL, xsd::DOUBLE, xsd::FLOAT, xsd::STRING, xsd::BOOLEAN, xsd::DATE_TIME] {
-            assert!(!is_integer_datatype(dt.as_str()), "{} must NOT be an integer datatype", dt.as_str());
+        for dt in [
+            xsd::DECIMAL,
+            xsd::DOUBLE,
+            xsd::FLOAT,
+            xsd::STRING,
+            xsd::BOOLEAN,
+            xsd::DATE_TIME,
+        ] {
+            assert!(
+                !is_integer_datatype(dt.as_str()),
+                "{} must NOT be an integer datatype",
+                dt.as_str()
+            );
         }
-        assert!(!is_integer_datatype("http://ex/custom"), "an unknown IRI is not an integer datatype");
-        assert!(!is_integer_datatype(""), "the empty datatype is not an integer datatype");
+        assert!(
+            !is_integer_datatype("http://ex/custom"),
+            "an unknown IRI is not an integer datatype"
+        );
+        assert!(
+            !is_integer_datatype(""),
+            "the empty datatype is not an integer datatype"
+        );
     }
 
     /// [OPUS-4.8] sq-bif — `exact_numeric_lexical` is the disambiguator the engine reaches for
@@ -9539,22 +10646,50 @@ mod tests {
 
         let lexical = |value: &str, dt: oxrdf::NamedNodeRef| -> Option<String> {
             let lit = Term::Literal(Literal::new_typed_literal(value, dt));
-            g.exact_numeric_lexical(g.id_of(&lit).unwrap_or_else(|| panic!("{value} not interned")))
+            g.exact_numeric_lexical(
+                g.id_of(&lit)
+                    .unwrap_or_else(|| panic!("{value} not interned")),
+            )
         };
 
         // Inline integer (small, in range): the inline id formats its value directly.
-        let small_id = g.id_of(&Term::Literal(Literal::new_typed_literal("42", xsd::INTEGER))).unwrap();
+        let small_id = g
+            .id_of(&Term::Literal(Literal::new_typed_literal(
+                "42",
+                xsd::INTEGER,
+            )))
+            .unwrap();
         assert!(dict::is_inline(small_id), "42 is an inline integer");
         assert_eq!(g.exact_numeric_lexical(small_id).as_deref(), Some("42"));
 
         // Big dictionary integers: the EXACT lexical is preserved, disambiguating the f64 tie.
         assert_eq!(lexical(big, xsd::INTEGER).as_deref(), Some(big));
-        assert_eq!(lexical(big_neighbour, xsd::INTEGER).as_deref(), Some(big_neighbour));
+        assert_eq!(
+            lexical(big_neighbour, xsd::INTEGER).as_deref(),
+            Some(big_neighbour)
+        );
         // The two lexicals differ even though they are the same f64 (the whole point).
-        assert_eq!(g.numeric_value(g.id_of(&Term::Literal(Literal::new_typed_literal(big, xsd::INTEGER))).unwrap()),
-                   g.numeric_value(g.id_of(&Term::Literal(Literal::new_typed_literal(big_neighbour, xsd::INTEGER))).unwrap()),
-                   "the two big integers collapse to the same f64");
-        assert_ne!(lexical(big, xsd::INTEGER), lexical(big_neighbour, xsd::INTEGER));
+        assert_eq!(
+            g.numeric_value(
+                g.id_of(&Term::Literal(Literal::new_typed_literal(
+                    big,
+                    xsd::INTEGER
+                )))
+                .unwrap()
+            ),
+            g.numeric_value(
+                g.id_of(&Term::Literal(Literal::new_typed_literal(
+                    big_neighbour,
+                    xsd::INTEGER
+                )))
+                .unwrap()
+            ),
+            "the two big integers collapse to the same f64"
+        );
+        assert_ne!(
+            lexical(big, xsd::INTEGER),
+            lexical(big_neighbour, xsd::INTEGER)
+        );
 
         // An integer SUBTYPE (long) is also exact.
         assert_eq!(lexical("-5", xsd::LONG).as_deref(), Some("-5"));
@@ -9565,13 +10700,30 @@ mod tests {
         assert_eq!(lexical("1.5", xsd::DOUBLE), None);
         assert_eq!(lexical("1.5", xsd::FLOAT), None);
         // None: a plain string and a language-tagged literal are not numeric.
-        assert_eq!(g.exact_numeric_lexical(g.id_of(&Term::Literal(Literal::new_simple_literal("hello"))).unwrap()), None);
         assert_eq!(
-            g.exact_numeric_lexical(g.id_of(&Term::Literal(Literal::new_language_tagged_literal_unchecked("bonjour", "fr"))).unwrap()),
+            g.exact_numeric_lexical(
+                g.id_of(&Term::Literal(Literal::new_simple_literal("hello")))
+                    .unwrap()
+            ),
+            None
+        );
+        assert_eq!(
+            g.exact_numeric_lexical(
+                g.id_of(&Term::Literal(
+                    Literal::new_language_tagged_literal_unchecked("bonjour", "fr")
+                ))
+                .unwrap()
+            ),
             None
         );
         // None: an IRI is not numeric.
-        assert_eq!(g.exact_numeric_lexical(g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/s"))).unwrap()), None);
+        assert_eq!(
+            g.exact_numeric_lexical(
+                g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/s")))
+                    .unwrap()
+            ),
+            None
+        );
     }
 
     /// [OPUS-4.8] sq-lr2ii — `decimal_significant_digits` counts significant digits, ignoring
@@ -9580,11 +10732,27 @@ mod tests {
     fn decimal_significant_digits_counts() {
         assert_eq!(decimal_significant_digits("1"), 1);
         assert_eq!(decimal_significant_digits("1.5"), 2);
-        assert_eq!(decimal_significant_digits("007.50"), 2, "leading int zeros + trailing frac zeros dropped: 7.5");
-        assert_eq!(decimal_significant_digits("0.00123"), 3, "leading fractional zeros are not significant");
-        assert_eq!(decimal_significant_digits("-1.000000000000000001"), 19, "sign stripped; 19 sig digits");
+        assert_eq!(
+            decimal_significant_digits("007.50"),
+            2,
+            "leading int zeros + trailing frac zeros dropped: 7.5"
+        );
+        assert_eq!(
+            decimal_significant_digits("0.00123"),
+            3,
+            "leading fractional zeros are not significant"
+        );
+        assert_eq!(
+            decimal_significant_digits("-1.000000000000000001"),
+            19,
+            "sign stripped; 19 sig digits"
+        );
         assert_eq!(decimal_significant_digits("+2.5"), 2);
-        assert_eq!(decimal_significant_digits("0.0"), 0, "zero has no significant digits");
+        assert_eq!(
+            decimal_significant_digits("0.0"),
+            0,
+            "zero has no significant digits"
+        );
         // Non-decimal lexicals are treated as unsafe (usize::MAX > 15).
         assert_eq!(decimal_significant_digits("1e5"), usize::MAX);
         assert_eq!(decimal_significant_digits(""), usize::MAX);
@@ -9603,17 +10771,33 @@ mod tests {
         };
 
         // The bug value: 19-sig-digit decimal collapsing onto f64 1.0.
-        assert!(build(&format!("\"1.000000000000000001\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
+        assert!(
+            build(&format!("\"1.000000000000000001\"^^<{}>", xsd_("decimal")))
+                .has_high_precision_decimal()
+        );
         // A <1 high-precision decimal.
-        assert!(build(&format!("\"0.1234567890123456789\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
+        assert!(
+            build(&format!("\"0.1234567890123456789\"^^<{}>", xsd_("decimal")))
+                .has_high_precision_decimal()
+        );
 
         // NOT flagged: an exactly-representable decimal (<=15 sig digits).
         assert!(!build(&format!("\"1.5\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal());
-        assert!(!build(&format!("\"123456789012345\"^^<{}>", xsd_("decimal"))).has_high_precision_decimal(), "15 sig digits round-trips");
+        assert!(
+            !build(&format!("\"123456789012345\"^^<{}>", xsd_("decimal")))
+                .has_high_precision_decimal(),
+            "15 sig digits round-trips"
+        );
         // NOT flagged: a big integer (constant-side guard's job, not this one).
-        assert!(!build(&format!("\"9007199254740993\"^^<{}>", xsd_("integer"))).has_high_precision_decimal());
+        assert!(
+            !build(&format!("\"9007199254740993\"^^<{}>", xsd_("integer")))
+                .has_high_precision_decimal()
+        );
         // NOT flagged: a high-precision double — its value IS its f64.
-        assert!(!build(&format!("\"1.000000000000000001\"^^<{}>", xsd_("double"))).has_high_precision_decimal());
+        assert!(
+            !build(&format!("\"1.000000000000000001\"^^<{}>", xsd_("double")))
+                .has_high_precision_decimal()
+        );
         // NOT flagged: an empty / non-numeric graph.
         assert!(!build("\"hello\"").has_high_precision_decimal());
         assert!(!Graph::new().has_high_precision_decimal());
@@ -9623,15 +10807,25 @@ mod tests {
     /// decimal via a delta AFTER the flag was computed as `false` must flip it to `true`.
     #[test]
     fn has_high_precision_decimal_memo_survives_delta_insert() {
-        let mut g = Graph::load_str("<http://ex/s> <http://ex/p> \"3\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", "ntriples").unwrap();
+        let mut g = Graph::load_str(
+            "<http://ex/s> <http://ex/p> \"3\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "ntriples",
+        )
+        .unwrap();
         // Compute (and memoise) the flag as false over the integer-only graph.
         assert!(!g.has_high_precision_decimal());
         // Insert a high-precision decimal; the memo must be invalidated + recomputed to true.
         let s = Term::NamedNode(NamedNode::new_unchecked("http://ex/s"));
         let p = Term::NamedNode(NamedNode::new_unchecked("http://ex/d"));
-        let o = Term::Literal(Literal::new_typed_literal("2.000000000000000003", xsd::DECIMAL));
+        let o = Term::Literal(Literal::new_typed_literal(
+            "2.000000000000000003",
+            xsd::DECIMAL,
+        ));
         g.apply_delta(&[[s, p, o]], &[]).unwrap();
-        assert!(g.has_high_precision_decimal(), "delta-inserted inexact decimal must flip the memo");
+        assert!(
+            g.has_high_precision_decimal(),
+            "delta-inserted inexact decimal must flip the memo"
+        );
     }
 
     /// The full sorted term-triple set of a graph (overlay merged), for state comparison.
@@ -9642,7 +10836,11 @@ mod tests {
             .iter()
             .map(|r| {
                 let spo = scan.to_spo(r);
-                (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                (
+                    g.dict.term(spo[0]).to_string(),
+                    g.dict.term(spo[1]).to_string(),
+                    g.dict.term(spo[2]).to_string(),
+                )
             })
             .collect();
         v.sort();
@@ -9673,7 +10871,11 @@ mod tests {
         let mk = |r: &mut dyn FnMut() -> u32| -> [Term; 3] {
             // A small term universe so inserts/deletes collide often (the hard cases:
             // re-insert, delete-of-pending-insert, delete-absent, re-insert-of-deleted).
-            [term_iri(r() % 30, "s"), term_iri(r() % 5, "p"), term_iri(r() % 40, "o")]
+            [
+                term_iri(r() % 30, "s"),
+                term_iri(r() % 5, "p"),
+                term_iri(r() % 40, "o"),
+            ]
         };
         for batch in 0..200 {
             let n_ins = (rng() % 6) as usize;
@@ -9709,11 +10911,19 @@ mod tests {
     fn wal_replay_and_compact_roundtrip() {
         let mut nt = String::new();
         for i in 0..2000u32 {
-            nt.push_str(&format!("<http://ex/s{}> <http://ex/p{}> <http://ex/o{}> .\n", i % 97, i % 7, i % 311));
+            nt.push_str(&format!(
+                "<http://ex/s{}> <http://ex/p{}> <http://ex/o{}> .\n",
+                i % 97,
+                i % 7,
+                i % 311
+            ));
         }
         let dir = std::env::temp_dir().join(format!("sparq_wal_rt_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        Graph::load_str(&nt, "ntriples").unwrap().save(&dir).unwrap();
+        Graph::load_str(&nt, "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
 
         // Open from disk, apply two update batches (one with a NEW term + a numeric
         // literal — exercising dict append + numeric-cache growth), drop WITHOUT compacting.
@@ -9721,32 +10931,57 @@ mod tests {
             let mut g = Graph::open(&dir).unwrap();
             let lit = Term::Literal(Literal::new_typed_literal("31250000000", xsd::INTEGER));
             g.apply_delta(
-                &[[term_iri(1000, "s"), term_iri(50, "p"), lit.clone()], [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]],
+                &[
+                    [term_iri(1000, "s"), term_iri(50, "p"), lit.clone()],
+                    [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")],
+                ],
                 &[[term_iri(0, "s"), term_iri(0, "p"), term_iri(0, "o")]],
             )
             .unwrap();
-            g.apply_delta(&[], &[[term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]]).unwrap();
+            g.apply_delta(
+                &[],
+                &[[term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]],
+            )
+            .unwrap();
             assert!(g.store.has_overlay());
             // The appended numeric literal must be live in the numeric cache.
             let id = g.id_of(&lit).expect("appended literal must be interned");
             assert_eq!(g.numeric_value(id), Some(31_250_000_000.0));
             dump_terms(&g)
         };
-        assert!(dir.join("wal.log").metadata().unwrap().len() > 0, "WAL must persist the batches");
+        assert!(
+            dir.join("wal.log").metadata().unwrap().len() > 0,
+            "WAL must persist the batches"
+        );
 
         // Re-open: the WAL replays into the overlay — identical state.
         let mut g2 = Graph::open(&dir).unwrap();
-        assert!(g2.store.has_overlay(), "replayed WAL must rebuild the overlay");
-        assert_eq!(dump_terms(&g2), expected, "WAL replay must restore the exact state");
+        assert!(
+            g2.store.has_overlay(),
+            "replayed WAL must rebuild the overlay"
+        );
+        assert_eq!(
+            dump_terms(&g2),
+            expected,
+            "WAL replay must restore the exact state"
+        );
         let lit = Term::Literal(Literal::new_typed_literal("31250000000", xsd::INTEGER));
         let id = g2.id_of(&lit).expect("replayed literal must be interned");
-        assert_eq!(g2.numeric_value(id), Some(31_250_000_000.0), "numeric cache must cover replayed terms");
+        assert_eq!(
+            g2.numeric_value(id),
+            Some(31_250_000_000.0),
+            "numeric cache must cover replayed terms"
+        );
 
         // Compact: overlay folded, base re-persisted atomically, WAL truncated.
         g2.compact().unwrap();
         assert!(!g2.store.has_overlay());
         assert_eq!(dump_terms(&g2), expected);
-        assert_eq!(dir.join("wal.log").metadata().unwrap().len(), 0, "compact must truncate the WAL");
+        assert_eq!(
+            dir.join("wal.log").metadata().unwrap().len(),
+            0,
+            "compact must truncate the WAL"
+        );
         assert!(!dir.with_extension("compact-new").exists());
         assert!(!dir.with_extension("compact-old").exists());
         drop(g2);
@@ -9767,12 +11002,23 @@ mod tests {
     fn wal_torn_batch_replay() {
         let dir = std::env::temp_dir().join(format!("sparq_wal_torn_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        Graph::load_str("<http://ex/s0> <http://ex/p0> <http://ex/o0> .", "ntriples").unwrap().save(&dir).unwrap();
+        Graph::load_str("<http://ex/s0> <http://ex/p0> <http://ex/o0> .", "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
 
         {
             let mut g = Graph::open(&dir).unwrap();
-            g.apply_delta(&[[term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]], &[]).unwrap();
-            g.apply_delta(&[[term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")]], &[]).unwrap();
+            g.apply_delta(
+                &[[term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]],
+                &[],
+            )
+            .unwrap();
+            g.apply_delta(
+                &[[term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")]],
+                &[],
+            )
+            .unwrap();
         }
         let wal_path = dir.join("wal.log");
         let full = std::fs::read(&wal_path).unwrap();
@@ -9790,7 +11036,11 @@ mod tests {
         assert_eq!(got.len(), 2, "only the first committed batch replays");
         assert!(got.iter().any(|(s, _, _)| s.contains("s1")));
         assert!(!got.iter().any(|(s, _, _)| s.contains("s2")));
-        assert_eq!(std::fs::read(&wal_path).unwrap().len(), first_batch_len, "torn tail truncated to the batch boundary");
+        assert_eq!(
+            std::fs::read(&wal_path).unwrap().len(),
+            first_batch_len,
+            "torn tail truncated to the batch boundary"
+        );
 
         // (b) Corrupt the FIRST batch's body (flip a byte inside it): the checksum fails, so
         //     the whole batch is rejected and replay stops at the base — never a partial apply.
@@ -9798,8 +11048,16 @@ mod tests {
         corrupt[14] ^= 0xFF; // a byte inside the first record's body
         std::fs::write(&wal_path, &corrupt).unwrap();
         let g2 = Graph::open(&dir).unwrap();
-        assert_eq!(dump_terms(&g2).len(), 1, "checksum-failing batch must not apply");
-        assert_eq!(std::fs::read(&wal_path).unwrap().len(), 0, "corrupt leading batch truncates the whole log");
+        assert_eq!(
+            dump_terms(&g2).len(),
+            1,
+            "checksum-failing batch must not apply"
+        );
+        assert_eq!(
+            std::fs::read(&wal_path).unwrap().len(),
+            0,
+            "corrupt leading batch truncates the whole log"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -9811,7 +11069,10 @@ mod tests {
     fn wal_torn_multi_record_batch_is_all_or_nothing() {
         let dir = std::env::temp_dir().join(format!("sparq_wal_multi_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        Graph::load_str("<http://ex/s0> <http://ex/p0> <http://ex/o0> .", "ntriples").unwrap().save(&dir).unwrap();
+        Graph::load_str("<http://ex/s0> <http://ex/p0> <http://ex/o0> .", "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
         {
             let mut g = Graph::open(&dir).unwrap();
             // ONE batch of three inserts.
@@ -9829,8 +11090,16 @@ mod tests {
         std::fs::write(&wal_path, torn).unwrap();
         let g = Graph::open(&dir).unwrap();
         // NONE of the three records may have applied — only the base triple remains.
-        assert_eq!(dump_terms(&g).len(), 1, "uncommitted multi-record batch must apply nothing");
-        assert_eq!(std::fs::read(&wal_path).unwrap().len(), 0, "the torn batch is the whole log → truncated empty");
+        assert_eq!(
+            dump_terms(&g).len(),
+            1,
+            "uncommitted multi-record batch must apply nothing"
+        );
+        assert_eq!(
+            std::fs::read(&wal_path).unwrap().len(),
+            0,
+            "the torn batch is the whole log → truncated empty"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -9855,7 +11124,11 @@ mod tests {
     /// [OPUS-4.8] (sq-ycle) The single named-graph triple the torn-tail test starts with.
     #[cfg(feature = "mmap")]
     fn base_named() -> Vec<(String, String, String)> {
-        vec![("<http://ex/n0>".into(), "<http://ex/p>".into(), "<http://ex/o0>".into())]
+        vec![(
+            "<http://ex/n0>".into(),
+            "<http://ex/p>".into(),
+            "<http://ex/o0>".into(),
+        )]
     }
 
     /// [OPUS-4.8] (sq-ycle) TORN-TAIL guarantee: a multi-slot redo frame (a default-graph record
@@ -9881,8 +11154,16 @@ mod tests {
 
         // Write ONE valid frame with a default-slot insert AND a named-slot insert.
         let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![
-            (true, None, [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]),
-            (true, Some(named("g")), [term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")]),
+            (
+                true,
+                None,
+                [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")],
+            ),
+            (
+                true,
+                Some(named("g")),
+                [term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")],
+            ),
         ];
         {
             let mut j = TxnJournal::open(&dir).unwrap();
@@ -9898,10 +11179,26 @@ mod tests {
         let g = Graph::open(&dir).unwrap();
         // NONE of the journaled records applied: the state equals the pre-frame base, and neither
         // the default `s1` triple nor the named `s2` triple is present.
-        assert_eq!(dump_terms(&g), base, "torn frame must apply nothing to the default graph");
-        let gnamed = g.named.iter().find(|(n, _)| n == &named("g")).map(|(_, sub)| dump_terms(sub));
-        assert_eq!(gnamed, Some(base_named()), "torn frame must apply nothing to the named graph");
-        assert_eq!(std::fs::read(&path).unwrap().len(), 0, "torn journal is truncated to empty on open");
+        assert_eq!(
+            dump_terms(&g),
+            base,
+            "torn frame must apply nothing to the default graph"
+        );
+        let gnamed = g
+            .named
+            .iter()
+            .find(|(n, _)| n == &named("g"))
+            .map(|(_, sub)| dump_terms(sub));
+        assert_eq!(
+            gnamed,
+            Some(base_named()),
+            "torn frame must apply nothing to the named graph"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap().len(),
+            0,
+            "torn journal is truncated to empty on open"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -9925,12 +11222,16 @@ mod tests {
         let parent = named("parent");
         let child = [
             term_iri(1, "x"),
-            Term::NamedNode(NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")),
+            Term::NamedNode(NamedNode::new_unchecked(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            )),
             named("Resource"),
         ];
         let contains = [
             parent.clone(),
-            Term::NamedNode(NamedNode::new_unchecked("http://www.w3.org/ns/ldp#contains")),
+            Term::NamedNode(NamedNode::new_unchecked(
+                "http://www.w3.org/ns/ldp#contains",
+            )),
             r.clone(),
         ];
         let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![
@@ -9940,24 +11241,47 @@ mod tests {
         {
             let mut g = Graph::open(&dir).unwrap();
             g.commit_txn(&records).unwrap(); // THE commit point — NO materialisation follows.
-            assert!(TxnJournal::path(&dir).metadata().unwrap().len() > 0, "frame must be on disk");
+            assert!(
+                TxnJournal::path(&dir).metadata().unwrap().len() > 0,
+                "frame must be on disk"
+            );
             // Drop without materialising: simulates a crash right after the commit fsync.
         }
         // Reopen: the journal redo must reconstruct BOTH slots (child + containment), all-or-nothing.
         let g = Graph::open(&dir).unwrap();
-        let r_sub = g.named.iter().find(|(n, _)| n == &r).map(|(_, s)| dump_terms(s));
-        let p_sub = g.named.iter().find(|(n, _)| n == &parent).map(|(_, s)| dump_terms(s));
+        let r_sub = g
+            .named
+            .iter()
+            .find(|(n, _)| n == &r)
+            .map(|(_, s)| dump_terms(s));
+        let p_sub = g
+            .named
+            .iter()
+            .find(|(n, _)| n == &parent)
+            .map(|(_, s)| dump_terms(s));
         assert_eq!(
             r_sub,
-            Some(vec![(child[0].to_string(), child[1].to_string(), child[2].to_string())]),
+            Some(vec![(
+                child[0].to_string(),
+                child[1].to_string(),
+                child[2].to_string()
+            )]),
             "journal redo must materialise the child graph <r>"
         );
         assert_eq!(
             p_sub,
-            Some(vec![(contains[0].to_string(), contains[1].to_string(), contains[2].to_string())]),
+            Some(vec![(
+                contains[0].to_string(),
+                contains[1].to_string(),
+                contains[2].to_string()
+            )]),
             "journal redo must materialise the containment under <parent>"
         );
-        assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after redo");
+        assert_eq!(
+            std::fs::read(TxnJournal::path(&dir)).unwrap().len(),
+            0,
+            "journal truncated after redo"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -9975,33 +11299,56 @@ mod tests {
     fn txn_default_redo_survives_double_restart() {
         let dir = txn_tmp_dir("double_default");
         std::fs::remove_dir_all(&dir).ok();
-        Graph::load_str("<http://ex/base> <http://ex/p> <http://ex/o> .", "ntriples").unwrap().save(&dir).unwrap();
+        Graph::load_str("<http://ex/base> <http://ex/p> <http://ex/o> .", "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
 
         // Two default-graph inserts committed to the journal with NO materialisation, then dropped
         // — simulating a crash right after the single commit fsync, before any per-graph WAL write.
         let a = [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")];
         let b = [term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")];
-        let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![(true, None, a.clone()), (true, None, b.clone())];
+        let records: Vec<(bool, Option<Term>, [Term; 3])> =
+            vec![(true, None, a.clone()), (true, None, b.clone())];
         {
             let mut g = Graph::open(&dir).unwrap();
             g.commit_txn(&records).unwrap(); // THE commit point — NO materialisation follows.
-            assert!(TxnJournal::path(&dir).metadata().unwrap().len() > 0, "frame must be on disk");
+            assert!(
+                TxnJournal::path(&dir).metadata().unwrap().len() > 0,
+                "frame must be on disk"
+            );
         }
 
         let want = |g: &Graph| {
             let d = dump_terms(g);
-            assert!(d.iter().any(|(s, _, _)| s.contains("/s1")), "record a must be present");
-            assert!(d.iter().any(|(s, _, _)| s.contains("/s2")), "record b must be present");
-            assert!(d.iter().any(|(s, _, _)| s.contains("/base")), "base must be present");
+            assert!(
+                d.iter().any(|(s, _, _)| s.contains("/s1")),
+                "record a must be present"
+            );
+            assert!(
+                d.iter().any(|(s, _, _)| s.contains("/s2")),
+                "record b must be present"
+            );
+            assert!(
+                d.iter().any(|(s, _, _)| s.contains("/base")),
+                "base must be present"
+            );
         };
 
         // First reopen: recovery REDOES the frame INTO THE DURABLE WAL, then truncates `txn.log`.
         {
             let g = Graph::open(&dir).unwrap();
             want(&g);
-            assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after redo");
+            assert_eq!(
+                std::fs::read(TxnJournal::path(&dir)).unwrap().len(),
+                0,
+                "journal truncated after redo"
+            );
             // The WAL — not the (now empty) journal — must now hold the recovered records.
-            assert!(Wal::path(&dir).metadata().unwrap().len() > 0, "records must be durably in the per-graph WAL");
+            assert!(
+                Wal::path(&dir).metadata().unwrap().len() > 0,
+                "records must be durably in the per-graph WAL"
+            );
         }
         // SECOND reopen: `txn.log` is empty, so the data can ONLY come from the durable WAL. This is
         // the assertion the OLD in-memory-only redo failed.
@@ -10029,33 +11376,58 @@ mod tests {
         let parent = named("parent");
         let child = [
             term_iri(1, "x"),
-            Term::NamedNode(NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")),
+            Term::NamedNode(NamedNode::new_unchecked(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            )),
             named("Resource"),
         ];
         let contains = [
             parent.clone(),
-            Term::NamedNode(NamedNode::new_unchecked("http://www.w3.org/ns/ldp#contains")),
+            Term::NamedNode(NamedNode::new_unchecked(
+                "http://www.w3.org/ns/ldp#contains",
+            )),
             r.clone(),
         ];
-        let records: Vec<(bool, Option<Term>, [Term; 3])> =
-            vec![(true, Some(r.clone()), child.clone()), (true, Some(parent.clone()), contains.clone())];
+        let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![
+            (true, Some(r.clone()), child.clone()),
+            (true, Some(parent.clone()), contains.clone()),
+        ];
         {
             let mut g = Graph::open(&dir).unwrap();
             g.commit_txn(&records).unwrap(); // THE commit point — NO materialisation follows.
-            assert!(TxnJournal::path(&dir).metadata().unwrap().len() > 0, "frame must be on disk");
+            assert!(
+                TxnJournal::path(&dir).metadata().unwrap().len() > 0,
+                "frame must be on disk"
+            );
         }
 
         let want = |g: &Graph| {
-            let r_sub = g.named.iter().find(|(n, _)| n == &r).map(|(_, s)| dump_terms(s));
-            let p_sub = g.named.iter().find(|(n, _)| n == &parent).map(|(_, s)| dump_terms(s));
+            let r_sub = g
+                .named
+                .iter()
+                .find(|(n, _)| n == &r)
+                .map(|(_, s)| dump_terms(s));
+            let p_sub = g
+                .named
+                .iter()
+                .find(|(n, _)| n == &parent)
+                .map(|(_, s)| dump_terms(s));
             assert_eq!(
                 r_sub,
-                Some(vec![(child[0].to_string(), child[1].to_string(), child[2].to_string())]),
+                Some(vec![(
+                    child[0].to_string(),
+                    child[1].to_string(),
+                    child[2].to_string()
+                )]),
                 "child graph <r> must be present"
             );
             assert_eq!(
                 p_sub,
-                Some(vec![(contains[0].to_string(), contains[1].to_string(), contains[2].to_string())]),
+                Some(vec![(
+                    contains[0].to_string(),
+                    contains[1].to_string(),
+                    contains[2].to_string()
+                )]),
                 "containment under <parent> must be present"
             );
         };
@@ -10064,7 +11436,11 @@ mod tests {
         {
             let g = Graph::open(&dir).unwrap();
             want(&g);
-            assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after redo");
+            assert_eq!(
+                std::fs::read(TxnJournal::path(&dir)).unwrap().len(),
+                0,
+                "journal truncated after redo"
+            );
         }
         // SECOND reopen: `txn.log` empty → both records must come from the per-graph WALs (durable).
         {
@@ -10082,13 +11458,19 @@ mod tests {
     fn txn_uncommitted_frame_applies_nothing() {
         let dir = txn_tmp_dir("uncommitted");
         std::fs::remove_dir_all(&dir).ok();
-        Graph::load_str("<http://ex/base> <http://ex/p> <http://ex/o> .", "ntriples").unwrap().save(&dir).unwrap();
+        Graph::load_str("<http://ex/base> <http://ex/p> <http://ex/o> .", "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
         let base = dump_terms(&Graph::open(&dir).unwrap());
 
         // A valid frame, then strip JUST the commit trailer (the last 12 bytes) — header + body
         // present, no commit marker → an uncommitted frame.
-        let records: Vec<(bool, Option<Term>, [Term; 3])> =
-            vec![(true, None, [term_iri(9, "s"), term_iri(9, "p"), term_iri(9, "o")])];
+        let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![(
+            true,
+            None,
+            [term_iri(9, "s"), term_iri(9, "p"), term_iri(9, "o")],
+        )];
         {
             let mut j = TxnJournal::open(&dir).unwrap();
             j.append(&records).unwrap();
@@ -10099,7 +11481,11 @@ mod tests {
 
         let g = Graph::open(&dir).unwrap();
         assert_eq!(dump_terms(&g), base, "uncommitted frame must apply nothing");
-        assert_eq!(std::fs::read(&path).unwrap().len(), 0, "uncommitted tail truncated to empty");
+        assert_eq!(
+            std::fs::read(&path).unwrap().len(),
+            0,
+            "uncommitted tail truncated to empty"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10123,30 +11509,52 @@ mod tests {
 
         let g_default = [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")];
         let g_named = [term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")];
-        let records: Vec<(bool, Option<Term>, [Term; 3])> =
-            vec![(true, None, g_default.clone()), (true, Some(named("g")), g_named.clone())];
+        let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![
+            (true, None, g_default.clone()),
+            (true, Some(named("g")), g_named.clone()),
+        ];
         {
             let mut g = Graph::open(&dir).unwrap();
             // Commit the frame AND materialise the SAME records into the per-graph WALs (the
             // crash-free path: both the journal and the per-graph WALs hold the change).
             g.commit_txn(&records).unwrap();
-            g.apply_delta(std::slice::from_ref(&g_default), &[]).unwrap();
+            g.apply_delta(std::slice::from_ref(&g_default), &[])
+                .unwrap();
             let i = g.ensure_named(&named("g")).unwrap();
-            g.named[i].1.apply_delta(std::slice::from_ref(&g_named), &[]).unwrap();
+            g.named[i]
+                .1
+                .apply_delta(std::slice::from_ref(&g_named), &[])
+                .unwrap();
         }
         // Reopen: the per-graph WALs replay the records, THEN the journal redoes the SAME records —
         // set semantics means no duplicates; the committed set is present exactly once.
         let g = Graph::open(&dir).unwrap();
         let mut def = dump_terms(&g);
         def.retain(|(s, _, _)| s.contains("/s1"));
-        assert_eq!(def.len(), 1, "the default record is present exactly once (no duplicate)");
-        let nsub = g.named.iter().find(|(n, _)| n == &named("g")).map(|(_, s)| {
-            let mut v = dump_terms(s);
-            v.retain(|(x, _, _)| x.contains("/s2"));
-            v
-        });
-        assert_eq!(nsub.map(|v| v.len()), Some(1), "the named record is present exactly once");
-        assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after idempotent redo");
+        assert_eq!(
+            def.len(),
+            1,
+            "the default record is present exactly once (no duplicate)"
+        );
+        let nsub = g
+            .named
+            .iter()
+            .find(|(n, _)| n == &named("g"))
+            .map(|(_, s)| {
+                let mut v = dump_terms(s);
+                v.retain(|(x, _, _)| x.contains("/s2"));
+                v
+            });
+        assert_eq!(
+            nsub.map(|v| v.len()),
+            Some(1),
+            "the named record is present exactly once"
+        );
+        assert_eq!(
+            std::fs::read(TxnJournal::path(&dir)).unwrap().len(),
+            0,
+            "journal truncated after idempotent redo"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10156,15 +11564,19 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn compact_swap_crash_recovery() {
-        let base = std::env::temp_dir().join(format!("sparq_compact_recover_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("sparq_compact_recover_{}", std::process::id()));
         let dir = base.join("g");
         // Helper: build a graph dir with one triple naming `tag`.
         let build = |d: &std::path::Path, tag: &str| {
             std::fs::remove_dir_all(d).ok();
-            Graph::load_str(&format!("<http://ex/{tag}> <http://ex/p> <http://ex/o> ."), "ntriples")
-                .unwrap()
-                .save(d)
-                .unwrap();
+            Graph::load_str(
+                &format!("<http://ex/{tag}> <http://ex/p> <http://ex/o> ."),
+                "ntriples",
+            )
+            .unwrap()
+            .save(d)
+            .unwrap();
         };
 
         // (a) Crash BETWEEN the two renames: dir missing, both siblings present. Recovery must
@@ -10173,7 +11585,10 @@ mod tests {
         build(&dir.with_extension("compact-new"), "new");
         assert!(!dir.exists());
         let g = Graph::open(&dir).unwrap();
-        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/new")), "must promote compact-new");
+        assert!(
+            dump_terms(&g).iter().any(|(s, _, _)| s.contains("/new")),
+            "must promote compact-new"
+        );
         assert!(!dir.with_extension("compact-new").exists());
         assert!(!dir.with_extension("compact-old").exists());
 
@@ -10183,7 +11598,10 @@ mod tests {
         build(&dir.with_extension("compact-old"), "old");
         assert!(!dir.exists());
         let g = Graph::open(&dir).unwrap();
-        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")), "must roll back to compact-old");
+        assert!(
+            dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")),
+            "must roll back to compact-old"
+        );
         assert!(!dir.with_extension("compact-old").exists());
 
         std::fs::remove_dir_all(&base).ok();
@@ -10197,7 +11615,8 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn restore_into_durable_round_trips_and_is_wal_backed() {
-        let dir = std::env::temp_dir().join(format!("sparq_restore_durable_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq_restore_durable_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         // Establish an ORIGINAL durable store with one triple.
         Graph::load_str("<http://ex/orig> <http://ex/p> <http://ex/o> .", "ntriples")
@@ -10223,8 +11642,14 @@ mod tests {
         let restored = Graph::restore_into_durable(&dir, fresh).unwrap();
         // The original triple is GONE; the restored set is present (round-trip of the live set).
         let live = dump_terms(&restored);
-        assert!(!live.iter().any(|(s, _, _)| s.contains("/orig")), "original content replaced");
-        assert!(live.iter().any(|(s, _, _)| s.contains("/r1")), "restored content present");
+        assert!(
+            !live.iter().any(|(s, _, _)| s.contains("/orig")),
+            "original content replaced"
+        );
+        assert!(
+            live.iter().any(|(s, _, _)| s.contains("/r1")),
+            "restored content present"
+        );
         assert_eq!(restored.len(), 2, "two default-graph triples after restore");
         // No sibling leftovers from the swap.
         assert!(!dir.with_extension("compact-new").exists());
@@ -10232,18 +11657,32 @@ mod tests {
 
         // The restored graph is genuinely WAL-backed: a durable update + a fresh reopen sees it.
         let mut g = restored;
-        g.apply_delta_nquads("<http://ex/post> <http://ex/p> <http://ex/v> .", "").unwrap();
+        g.apply_delta_nquads("<http://ex/post> <http://ex/p> <http://ex/v> .", "")
+            .unwrap();
         drop(g);
         let reopened = Graph::open(&dir).unwrap();
         let live2 = dump_terms(&reopened);
-        assert!(live2.iter().any(|(s, _, _)| s.contains("/r1")), "restored content survives reopen");
-        assert!(live2.iter().any(|(s, _, _)| s.contains("/post")), "post-restore update is WAL-durable");
-        assert!(!live2.iter().any(|(s, _, _)| s.contains("/orig")), "original never resurrects");
+        assert!(
+            live2.iter().any(|(s, _, _)| s.contains("/r1")),
+            "restored content survives reopen"
+        );
+        assert!(
+            live2.iter().any(|(s, _, _)| s.contains("/post")),
+            "post-restore update is WAL-durable"
+        );
+        assert!(
+            !live2.iter().any(|(s, _, _)| s.contains("/orig")),
+            "original never resurrects"
+        );
         let g_name = Term::NamedNode(NamedNode::new_unchecked("http://ex/g".to_string()));
         let named = reopened
             .named_graph(&g_name)
             .expect("the restored named graph survives the reopen");
-        assert_eq!(named.len(), 1, "the named graph holds its one triple after reopen");
+        assert_eq!(
+            named.len(),
+            1,
+            "the named graph holds its one triple after reopen"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -10260,9 +11699,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         let mut nt = String::new();
         for i in 0..20u32 {
-            nt.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+            nt.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"
+            ));
         }
-        Graph::load_str(&nt, "ntriples").unwrap().save(&dir).unwrap();
+        Graph::load_str(&nt, "ntriples")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
 
         {
             let mut g = Graph::open(&dir).unwrap();
@@ -10273,7 +11717,11 @@ mod tests {
         }
         // Reopen: the WAL-logged retractions replay, so the graph stays empty.
         let g2 = Graph::open(&dir).unwrap();
-        assert_eq!(dump_terms(&g2).len(), 0, "durable CLEAR must survive the reopen");
+        assert_eq!(
+            dump_terms(&g2).len(),
+            0,
+            "durable CLEAR must survive the reopen"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10284,7 +11732,8 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn clear_named_durable_survives_reopen() {
-        let dir = std::env::temp_dir().join(format!("sparq_clear_named_durable_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq_clear_named_durable_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         Graph::load_dataset(
             "<http://ex/x> <http://ex/q> <http://ex/y> <http://ex/g1> .\n\
@@ -10294,22 +11743,34 @@ mod tests {
         .unwrap()
         .save(&dir)
         .unwrap();
-        let g1 = |g: &Graph| g.named.iter().find(|(n, _)| n.to_string().contains("g1")).map(|(_, s)| s.len());
+        let g1 = |g: &Graph| {
+            g.named
+                .iter()
+                .find(|(n, _)| n.to_string().contains("g1"))
+                .map(|(_, s)| s.len())
+        };
 
         {
             let mut g = Graph::open(&dir).unwrap();
             assert_eq!(g1(&g), Some(2));
-            let cleared =
-                g.clear_named_durable(&Term::NamedNode(NamedNode::new_unchecked("http://ex/g1"))).unwrap();
+            let cleared = g
+                .clear_named_durable(&Term::NamedNode(NamedNode::new_unchecked("http://ex/g1")))
+                .unwrap();
             assert!(cleared, "an existing graph reports cleared = true");
             assert_eq!(g1(&g), Some(0), "cleared in memory, slot kept");
             // A clear of an ABSENT graph is a no-op reporting false (CLEAR no-op-on-absent).
             assert!(!g
-                .clear_named_durable(&Term::NamedNode(NamedNode::new_unchecked("http://ex/absent")))
+                .clear_named_durable(&Term::NamedNode(NamedNode::new_unchecked(
+                    "http://ex/absent"
+                )))
                 .unwrap());
         }
         let g2 = Graph::open(&dir).unwrap();
-        assert_eq!(g1(&g2), Some(0), "durable CLEAR of a named graph survives the reopen (slot present, empty)");
+        assert_eq!(
+            g1(&g2),
+            Some(0),
+            "durable CLEAR of a named graph survives the reopen (slot present, empty)"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10322,7 +11783,8 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn drop_named_durable_removes_subdir_and_manifest_and_renumbers() {
-        let dir = std::env::temp_dir().join(format!("sparq_drop_named_durable_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq_drop_named_durable_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         Graph::load_dataset(
             "<http://ex/a1> <http://ex/p> <http://ex/o> <http://ex/g1> .\n\
@@ -10334,8 +11796,12 @@ mod tests {
         .save(&dir)
         .unwrap();
         let nn = |s: &str| Term::NamedNode(NamedNode::new_unchecked(s));
-        let count =
-            |g: &Graph, frag: &str| g.named.iter().find(|(n, _)| n.to_string().contains(frag)).map(|(_, s)| s.len());
+        let count = |g: &Graph, frag: &str| {
+            g.named
+                .iter()
+                .find(|(n, _)| n.to_string().contains(frag))
+                .map(|(_, s)| s.len())
+        };
 
         {
             let mut g = Graph::open(&dir).unwrap();
@@ -10343,13 +11809,23 @@ mod tests {
             // The on-disk sub-tree has 3 positional sub-dirs before the drop.
             assert!(dir.join("named").join("0").exists() && dir.join("named").join("2").exists());
             // Drop the MIDDLE graph; g3 must renumber down a slot.
-            assert!(g.drop_named_durable(&nn("http://ex/g2")).unwrap(), "existing graph reports dropped = true");
+            assert!(
+                g.drop_named_durable(&nn("http://ex/g2")).unwrap(),
+                "existing graph reports dropped = true"
+            );
             assert_eq!(g.named.len(), 2);
             assert_eq!(count(&g, "g2"), None);
             // The highest old sub-dir is gone (3 -> 2 sub-dirs after renumber).
-            assert!(!dir.join("named").join("2").exists(), "drop renumbered the sub-tree to 2 contiguous slots");
+            assert!(
+                !dir.join("named").join("2").exists(),
+                "drop renumbered the sub-tree to 2 contiguous slots"
+            );
             // A post-drop mutation of a survivor proves its WAL was re-indexed correctly.
-            g.apply_delta_nquads("<http://ex/extra> <http://ex/p> <http://ex/o> <http://ex/g3> .", "").unwrap();
+            g.apply_delta_nquads(
+                "<http://ex/extra> <http://ex/p> <http://ex/o> <http://ex/g3> .",
+                "",
+            )
+            .unwrap();
             assert_eq!(count(&g, "g3"), Some(2));
             // Dropping an ABSENT graph is a no-op reporting false (DROP no-op-on-absent).
             assert!(!g.drop_named_durable(&nn("http://ex/absent")).unwrap());
@@ -10357,9 +11833,17 @@ mod tests {
         // Reopen: dropped graph stays gone; survivors keep their (renumbered) contents.
         let g2 = Graph::open(&dir).unwrap();
         assert_eq!(g2.named.len(), 2, "exactly the two survivors after reopen");
-        assert_eq!(count(&g2, "g2"), None, "dropped graph is NOT resurrected on reopen");
+        assert_eq!(
+            count(&g2, "g2"),
+            None,
+            "dropped graph is NOT resurrected on reopen"
+        );
         assert_eq!(count(&g2, "g1"), Some(1));
-        assert_eq!(count(&g2, "g3"), Some(2), "renumbered survivor keeps its original + post-drop triple");
+        assert_eq!(
+            count(&g2, "g3"),
+            Some(2),
+            "renumbered survivor keeps its original + post-drop triple"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10369,7 +11853,8 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn drop_last_named_graph_clears_manifest_and_subtree() {
-        let dir = std::env::temp_dir().join(format!("sparq_drop_last_named_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq_drop_last_named_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         Graph::load_dataset(
             "<http://ex/d> <http://ex/p> <http://ex/e> .\n\
@@ -10387,9 +11872,16 @@ mod tests {
                 .unwrap());
             assert_eq!(g.named.len(), 0);
         }
-        assert!(!dir.join("named.bin").exists(), "manifest removed when the last named graph is dropped");
+        assert!(
+            !dir.join("named.bin").exists(),
+            "manifest removed when the last named graph is dropped"
+        );
         let g2 = Graph::open(&dir).unwrap();
-        assert_eq!(g2.named.len(), 0, "no named graphs resurrected; default graph intact");
+        assert_eq!(
+            g2.named.len(),
+            0,
+            "no named graphs resurrected; default graph intact"
+        );
         assert_eq!(g2.len(), 1, "the default-graph triple survives");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -10404,7 +11896,8 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn drop_all_named_durable_batch_survives_restart() {
-        let dir = std::env::temp_dir().join(format!("sparq_drop_all_named_batch_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq_drop_all_named_batch_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         Graph::load_dataset(
             "<http://ex/d> <http://ex/p> <http://ex/e> .\n\
@@ -10420,26 +11913,47 @@ mod tests {
         // Four positional sub-dirs + manifest before the batch drop.
         assert!(dir.join("named.bin").exists());
         for i in 0..4 {
-            assert!(dir.join("named").join(i.to_string()).exists(), "sub-dir {i} present before DROP ALL");
+            assert!(
+                dir.join("named").join(i.to_string()).exists(),
+                "sub-dir {i} present before DROP ALL"
+            );
         }
         {
             let mut g = Graph::open(&dir).unwrap();
             assert_eq!(g.named.len(), 4);
             // ONE batch call drops all four (no per-graph renumber/manifest-rewrite loop).
             g.drop_all_named_durable().unwrap();
-            assert_eq!(g.named.len(), 0, "every named graph gone in memory after the batch drop");
+            assert_eq!(
+                g.named.len(),
+                0,
+                "every named graph gone in memory after the batch drop"
+            );
             // A second batch drop is an idempotent no-op (nothing left to remove).
             g.drop_all_named_durable().unwrap();
             assert_eq!(g.named.len(), 0);
         }
         // The whole named sub-tree + manifest are gone on disk (no staging siblings left behind).
-        assert!(!dir.join("named.bin").exists(), "manifest removed by the batch drop");
-        assert!(!dir.join("named").exists(), "named/ sub-tree removed by the batch drop");
+        assert!(
+            !dir.join("named.bin").exists(),
+            "manifest removed by the batch drop"
+        );
+        assert!(
+            !dir.join("named").exists(),
+            "named/ sub-tree removed by the batch drop"
+        );
         assert!(!dir.join("named.drop-new").exists() && !dir.join("named.drop-old").exists());
         // Restart: all named graphs stay gone; the default graph survives.
         let g2 = Graph::open(&dir).unwrap();
-        assert_eq!(g2.named.len(), 0, "no named graph resurrected after restart");
-        assert_eq!(g2.len(), 1, "the default-graph triple survives the batch DROP ALL");
+        assert_eq!(
+            g2.named.len(),
+            0,
+            "no named graph resurrected after restart"
+        );
+        assert_eq!(
+            g2.len(),
+            1,
+            "the default-graph triple survives the batch DROP ALL"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10448,7 +11962,8 @@ mod tests {
     /// a clean error; line-based formats ignore the base.
     #[test]
     fn load_str_with_base_resolves_relative_iris() {
-        let g = Graph::load_str_with_base("<a> <p> <../up/o> .", "turtle", "http://ex/dir/").unwrap();
+        let g =
+            Graph::load_str_with_base("<a> <p> <../up/o> .", "turtle", "http://ex/dir/").unwrap();
         let scan = g.store.scan(&[None, None, None]);
         let t = scan.to_spo(&scan.rows.as_ref()[0]);
         assert_eq!(g.dict.term(t[0]).to_string(), "<http://ex/dir/a>");
@@ -10456,7 +11971,12 @@ mod tests {
         assert_eq!(g.dict.term(t[2]).to_string(), "<http://ex/up/o>");
 
         // A document's own @base still wins over the parameter (RFC 3986 layering).
-        let g = Graph::load_str_with_base("@base <http://other/> . <a> <p> <o> .", "turtle", "http://ex/").unwrap();
+        let g = Graph::load_str_with_base(
+            "@base <http://other/> . <a> <p> <o> .",
+            "turtle",
+            "http://ex/",
+        )
+        .unwrap();
         let scan = g.store.scan(&[None, None, None]);
         let t = scan.to_spo(&scan.rows.as_ref()[0]);
         assert_eq!(g.dict.term(t[0]).to_string(), "<http://other/a>");
@@ -10466,8 +11986,12 @@ mod tests {
         assert_eq!(g.len(), 1);
 
         // N-Triples has no relative IRIs: base is accepted and ignored.
-        let g = Graph::load_str_with_base("<http://ex/a> <http://ex/p> <http://ex/o> .", "ntriples", "http://b/")
-            .unwrap();
+        let g = Graph::load_str_with_base(
+            "<http://ex/a> <http://ex/p> <http://ex/o> .",
+            "ntriples",
+            "http://b/",
+        )
+        .unwrap();
         assert_eq!(g.len(), 1);
 
         assert!(Graph::load_str_with_base("<a> <p> <o> .", "turtle", "not a iri").is_err());
@@ -10483,9 +12007,16 @@ mod tests {
         )
         .unwrap();
         let d = &g.dict;
-        let items: Vec<(Id, String)> = d.iter().map(|(id, _)| (id, d.term(id).to_string())).collect();
+        let items: Vec<(Id, String)> = d
+            .iter()
+            .map(|(id, _)| (id, d.term(id).to_string()))
+            .collect();
         assert_eq!(items.len(), d.len());
-        assert_eq!(d.iter().len(), d.len(), "ExactSizeIterator must agree with len()");
+        assert_eq!(
+            d.iter().len(),
+            d.len(),
+            "ExactSizeIterator must agree with len()"
+        );
         for (i, (id, _)) in items.iter().enumerate() {
             assert_eq!(*id, (i + 1) as Id, "ids must be dense and 1-based");
         }
@@ -10505,10 +12036,16 @@ mod tests {
         .unwrap();
         let spo: Vec<[Id; 3]> = g.iter_ids().collect();
         assert_eq!(spo.len(), g.len());
-        assert!(spo.windows(2).all(|w| w[0] <= w[1]), "iter_ids must be (S,P,O)-sorted");
+        assert!(
+            spo.windows(2).all(|w| w[0] <= w[1]),
+            "iter_ids must be (S,P,O)-sorted"
+        );
         // Same triple set through the object-sorted order.
         let mut by_obj: Vec<[Id; 3]> = g.iter_ids_sorted(2).collect();
-        assert!(by_obj.windows(2).all(|w| w[0][2] <= w[1][2]), "col 2 must be sorted");
+        assert!(
+            by_obj.windows(2).all(|w| w[0][2] <= w[1][2]),
+            "col 2 must be sorted"
+        );
         let mut spo_sorted = spo.clone();
         spo_sorted.sort_unstable();
         by_obj.sort_unstable();
@@ -10544,9 +12081,15 @@ mod tests {
         let g2 = Graph::open(&dir).unwrap();
         assert_eq!(g2.len(), 3);
         // The numeric cache must have round-tripped: 1.5 / 2.5 still resolve.
-        let vals: Vec<f64> =
-            g2.dict.iter().filter_map(|(id, _)| g2.numeric_value(id)).collect();
-        assert!(vals.contains(&1.5) && vals.contains(&2.5), "numerics must survive: {vals:?}");
+        let vals: Vec<f64> = g2
+            .dict
+            .iter()
+            .filter_map(|(id, _)| g2.numeric_value(id))
+            .collect();
+        assert!(
+            vals.contains(&1.5) && vals.contains(&2.5),
+            "numerics must survive: {vals:?}"
+        );
         // And save_compressed takes the same path.
         std::fs::remove_dir_all(&dir).ok();
         g.save_compressed(&dir).unwrap();
@@ -10599,11 +12142,17 @@ mod tests {
             for compressed in [false, true] {
                 let g = {
                     let g = Graph::load_str(ttl, "turtle").unwrap();
-                    if sparse { g.into_compressed() } else { g }
+                    if sparse {
+                        g.into_compressed()
+                    } else {
+                        g
+                    }
                 };
                 let (want_num, want_temp) = reference(&g.dict);
-                let dir = std::env::temp_dir()
-                    .join(format!("sparq_stream_caches_{}_{sparse}_{compressed}", std::process::id()));
+                let dir = std::env::temp_dir().join(format!(
+                    "sparq_stream_caches_{}_{sparse}_{compressed}",
+                    std::process::id()
+                ));
                 std::fs::remove_dir_all(&dir).ok();
                 if compressed {
                     g.save_compressed(&dir).unwrap();
@@ -10614,19 +12163,47 @@ mod tests {
                 let got_num = std::fs::read(dir.join("numerics.bin")).unwrap();
                 let got_temp = std::fs::read(dir.join("temporals.bin")).unwrap();
                 let n = g.dict.len();
-                assert_eq!(got_num.len(), n * 8, "numerics.bin size (sparse={sparse} compressed={compressed})");
-                assert_eq!(got_temp.len(), n * 9, "temporals.bin size (sparse={sparse} compressed={compressed})");
-                assert_eq!(got_num, want_num, "streamed numerics != dense (sparse={sparse} compressed={compressed})");
-                assert_eq!(got_temp, want_temp, "streamed temporals != dense (sparse={sparse} compressed={compressed})");
+                assert_eq!(
+                    got_num.len(),
+                    n * 8,
+                    "numerics.bin size (sparse={sparse} compressed={compressed})"
+                );
+                assert_eq!(
+                    got_temp.len(),
+                    n * 9,
+                    "temporals.bin size (sparse={sparse} compressed={compressed})"
+                );
+                assert_eq!(
+                    got_num, want_num,
+                    "streamed numerics != dense (sparse={sparse} compressed={compressed})"
+                );
+                assert_eq!(
+                    got_temp, want_temp,
+                    "streamed temporals != dense (sparse={sparse} compressed={compressed})"
+                );
 
                 // And the caches still resolve after a re-open (mmap path).
                 let g2 = Graph::open(&dir).unwrap();
                 // 42 is an xsd:integer, inline-encoded into its id (never in numerics.bin); the
                 // decimals 1.5/2.5 are the cache entries that must round-trip.
-                let nums: Vec<f64> = g2.dict.iter().filter_map(|(id, _)| g2.numeric_value(id)).collect();
-                assert!(nums.contains(&1.5) && nums.contains(&2.5), "numerics survive: {nums:?}");
-                let temporal_count = g2.dict.iter().filter(|(id, _)| g2.temporal_value(*id).is_some()).count();
-                assert_eq!(temporal_count, 2, "both temporal literals survive (sparse={sparse} compressed={compressed})");
+                let nums: Vec<f64> = g2
+                    .dict
+                    .iter()
+                    .filter_map(|(id, _)| g2.numeric_value(id))
+                    .collect();
+                assert!(
+                    nums.contains(&1.5) && nums.contains(&2.5),
+                    "numerics survive: {nums:?}"
+                );
+                let temporal_count = g2
+                    .dict
+                    .iter()
+                    .filter(|(id, _)| g2.temporal_value(*id).is_some())
+                    .count();
+                assert_eq!(
+                    temporal_count, 2,
+                    "both temporal literals survive (sparse={sparse} compressed={compressed})"
+                );
                 std::fs::remove_dir_all(&dir).ok();
             }
         }
@@ -10654,7 +12231,9 @@ mod tests {
         let dict = &g.dict;
         let n = dict.len();
         // Owned-path reference: the old `numerics_of` logic byte-for-byte.
-        let owned: Vec<f64> = (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect();
+        let owned: Vec<f64> = (0..n)
+            .map(|i| numeric_of(&dict.term(i as Id + 1)))
+            .collect();
         // Borrowed-path: current `numerics_of`.
         let borrowed = numerics_of(dict);
         assert_eq!(owned.len(), borrowed.len(), "length mismatch");
@@ -10662,9 +12241,12 @@ mod tests {
             let id = idx as Id + 1;
             // Compare as bits: NaN == NaN in the cache (we want byte-identical, not IEEE equality).
             assert_eq!(
-                a.to_bits(), b.to_bits(),
+                a.to_bits(),
+                b.to_bits(),
                 "id {}: owned bits {:016x} != borrowed bits {:016x}",
-                id, a.to_bits(), b.to_bits()
+                id,
+                a.to_bits(),
+                b.to_bits()
             );
         }
     }
@@ -10675,16 +12257,31 @@ mod tests {
     /// callers trim). Kept in lock-step with the substrate re-export's own test.
     #[test]
     fn parse_xsd_f64_shared_acceptance_set() {
-        assert_eq!(parse_xsd_f64("NaN").map(f64::to_bits), Some(f64::NAN.to_bits()));
+        assert_eq!(
+            parse_xsd_f64("NaN").map(f64::to_bits),
+            Some(f64::NAN.to_bits())
+        );
         assert_eq!(parse_xsd_f64("INF"), Some(f64::INFINITY));
         assert_eq!(parse_xsd_f64("+INF"), Some(f64::INFINITY));
         assert_eq!(parse_xsd_f64("-INF"), Some(f64::NEG_INFINITY));
         assert_eq!(parse_xsd_f64("6"), Some(6.0));
         assert_eq!(parse_xsd_f64("+1"), Some(1.0));
         assert_eq!(parse_xsd_f64("1.5E2"), Some(150.0));
-        assert_eq!(parse_xsd_f64("-0.0").map(f64::to_bits), Some((-0.0f64).to_bits()));
+        assert_eq!(
+            parse_xsd_f64("-0.0").map(f64::to_bits),
+            Some((-0.0f64).to_bits())
+        );
         // Rust-`FromStr`-only spellings the XSD lexical space forbids: rejected.
-        for bad in ["inf", "+inf", "-inf", "infinity", "-infinity", "Infinity", "nan", "NAN"] {
+        for bad in [
+            "inf",
+            "+inf",
+            "-inf",
+            "infinity",
+            "-infinity",
+            "Infinity",
+            "nan",
+            "NAN",
+        ] {
             // Positional arg (not inline `{bad}`) to dodge the CodeQL false positive. [FABLE-5]
             assert_eq!(parse_xsd_f64(bad), None, "must reject {:?}", bad);
         }
@@ -10715,20 +12312,26 @@ mod tests {
         assert_eq!(numeric_cache_value("5.5", xi), None); // fraction on an integer
         assert_eq!(numeric_cache_value(".5", xi), None); // no integer part, scale 1
         assert_eq!(numeric_cache_value("1E2", xi), None); // exponent on an integer
-        assert_eq!(numeric_cache_value("9999999999999999999999999999999999999999", xi), None); // >i128
-        // decimals: any scale, no exponent, i128-fit.
+        assert_eq!(
+            numeric_cache_value("9999999999999999999999999999999999999999", xi),
+            None
+        ); // >i128
+           // decimals: any scale, no exponent, i128-fit.
         assert_eq!(numeric_cache_value("1.5", xd), Some(1.5));
         assert_eq!(numeric_cache_value(".5", xd), Some(0.5));
         assert_eq!(numeric_cache_value("007.50", xd), Some(7.5));
         assert_eq!(numeric_cache_value("1E2", xd), None); // exponent on a decimal
-        assert_eq!(numeric_cache_value("9999999999999999999999999999999999999999.5", xd), None);
+        assert_eq!(
+            numeric_cache_value("9999999999999999999999999999999999999999.5", xd),
+            None
+        );
         // float/double: XSD doubleRep spellings; genuine NaN reads back as a cache MISS.
         assert_eq!(numeric_cache_value("1.5E2", xdbl), Some(150.0));
         assert_eq!(numeric_cache_value("INF", xdbl), Some(f64::INFINITY));
         assert_eq!(numeric_cache_value("3.0", xf), Some(3.0));
         assert_eq!(numeric_cache_value("inf", xdbl), None); // Rust-only spelling
         assert_eq!(numeric_cache_value("NaN", xdbl), None); // genuine NaN -> sentinel miss
-        // non-numeric datatype: always None.
+                                                            // non-numeric datatype: always None.
         assert_eq!(numeric_cache_value("5", xsd::STRING.as_str()), None);
     }
 
@@ -10765,14 +12368,14 @@ mod tests {
             ("abc", "xsd:integer"),     // not a number -> REJECTED
             ("", "xsd:integer"),        // empty -> REJECTED
             ("1.000000000000000001", "xsd:decimal"), // high-precision decimal
-            ("9007199254740993", "xsd:integer"),     // 2^53 + 1
-            ("9007199254740991", "xsd:integer"),     // 2^53 - 1
+            ("9007199254740993", "xsd:integer"), // 2^53 + 1
+            ("9007199254740991", "xsd:integer"), // 2^53 - 1
             ("3.0", "xsd:float"),       // ordinary float
             ("007.50", "xsd:decimal"),  // leading zeros
             // sq-6b1lj: datatype-ill-formed lexicals -> cache MISS (of_literal type-errors).
-            ("1.5", "xsd:integer"),     // fraction on an integer -> REJECTED
-            ("1E2", "xsd:decimal"),     // exponent on a decimal -> REJECTED
-            ("1E2", "xsd:integer"),     // exponent on an integer -> REJECTED
+            ("1.5", "xsd:integer"), // fraction on an integer -> REJECTED
+            ("1E2", "xsd:decimal"), // exponent on a decimal -> REJECTED
+            ("1E2", "xsd:integer"), // exponent on an integer -> REJECTED
         ];
         let mut ttl = String::from(
             "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix ex: <http://ex/> .\n",
@@ -10796,7 +12399,14 @@ mod tests {
         let g = Graph::load_str(&ttl, "turtle").unwrap();
         // For each object literal, compare the cache decision to the evaluator model.
         for (id, tp) in g.dict.iter() {
-            let dict::TermParts::Lit { value, datatype, lang: None } = tp else { continue };
+            let dict::TermParts::Lit {
+                value,
+                datatype,
+                lang: None,
+            } = tp
+            else {
+                continue;
+            };
             if !is_numeric_datatype_str(datatype) {
                 continue;
             }
@@ -10839,18 +12449,39 @@ mod tests {
             ex:good ex:v \"INF\"^^xsd:double .";
         let g = Graph::load_str(ttl, "turtle").unwrap();
         let by_val = |needle: &str| -> Option<f64> {
-            g.dict.iter().find_map(|(id, tp)| match tp {
-                dict::TermParts::Lit { value, .. } if value == needle => Some(g.numeric_value(id)),
-                _ => None,
-            }).flatten()
+            g.dict
+                .iter()
+                .find_map(|(id, tp)| match tp {
+                    dict::TermParts::Lit { value, .. } if value == needle => {
+                        Some(g.numeric_value(id))
+                    }
+                    _ => None,
+                })
+                .flatten()
         };
         // (a) previously a raw-parse MISS, now a value-7.0 HIT (trim-then-parse).
-        assert_eq!(by_val(" 7 "), Some(7.0), "padded decimal must now hit the cache");
+        assert_eq!(
+            by_val(" 7 "),
+            Some(7.0),
+            "padded decimal must now hit the cache"
+        );
         // (b) previously a raw-parse HIT storing inf/NaN, now a MISS (XSD rejects the spelling).
-        assert_eq!(by_val("inf"), None, "'inf'^^xsd:double must NOT hit the cache");
-        assert_eq!(by_val("nan"), None, "'nan'^^xsd:double must NOT hit the cache");
+        assert_eq!(
+            by_val("inf"),
+            None,
+            "'inf'^^xsd:double must NOT hit the cache"
+        );
+        assert_eq!(
+            by_val("nan"),
+            None,
+            "'nan'^^xsd:double must NOT hit the cache"
+        );
         // The genuine XSD spelling still hits with the infinity value.
-        assert_eq!(by_val("INF"), Some(f64::INFINITY), "'INF'^^xsd:double still hits");
+        assert_eq!(
+            by_val("INF"),
+            Some(f64::INFINITY),
+            "'INF'^^xsd:double still hits"
+        );
     }
 
     // [SONNET-4.6] Exercise the outlined storage dispatch directly so the coverage
@@ -10919,8 +12550,14 @@ mod tests {
         g0.save(&dir).unwrap();
 
         // The marked secrets are on disk to begin with (dictionary blob holds the literal values).
-        assert!(on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "deleted-literal seed must be on disk first");
-        assert!(on_disk_contains(&dir, b"NAMED-GRAPH-DROP-MARKER"), "dropped-graph seed must be on disk first");
+        assert!(
+            on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"),
+            "deleted-literal seed must be on disk first"
+        );
+        assert!(
+            on_disk_contains(&dir, b"NAMED-GRAPH-DROP-MARKER"),
+            "dropped-graph seed must be on disk first"
+        );
 
         {
             let mut g = Graph::open(&dir).unwrap();
@@ -10938,7 +12575,10 @@ mod tests {
 
             // Logically hidden — but the WAL/dict bytes still hold the secrets pre-vacuum.
             assert_eq!(dump_terms(&g).len(), 1, "only the KEEP triple remains live");
-            assert!(on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "pre-vacuum: still on disk (logical only)");
+            assert!(
+                on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"),
+                "pre-vacuum: still on disk (logical only)"
+            );
 
             // VACUUM: physically rewrite the store + purge the dictionary.
             g.vacuum().unwrap();
@@ -10951,9 +12591,18 @@ mod tests {
         }
 
         // The KEEP marker survives; the erased data's bytes are PHYSICALLY GONE from disk.
-        assert!(on_disk_contains(&dir, b"KEEP-ME-LIVE-MARKER"), "live data must survive the vacuum");
-        assert!(!on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"), "DELETED literal value bytes must be physically erased");
-        assert!(!on_disk_contains(&dir, b"NAMED-GRAPH-DROP-MARKER"), "DROPped-graph data bytes must be physically erased");
+        assert!(
+            on_disk_contains(&dir, b"KEEP-ME-LIVE-MARKER"),
+            "live data must survive the vacuum"
+        );
+        assert!(
+            !on_disk_contains(&dir, b"SECRET-SSN-555-00-1234"),
+            "DELETED literal value bytes must be physically erased"
+        );
+        assert!(
+            !on_disk_contains(&dir, b"NAMED-GRAPH-DROP-MARKER"),
+            "DROPped-graph data bytes must be physically erased"
+        );
 
         // Durability: a fresh open sees exactly the live triple and nothing resurrects.
         let g2 = Graph::open(&dir).unwrap();
@@ -10968,14 +12617,23 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn vacuum_preserves_live_dataset_exactly() {
-        let dir = std::env::temp_dir().join(format!("sparq_vacuum_roundtrip_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sparq_vacuum_roundtrip_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let mut nq = String::new();
         for i in 0..40u32 {
-            nq.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
-            nq.push_str(&format!("<http://ex/s{i}> <http://ex/q> <http://ex/o{i}> <http://ex/g{}> .\n", i % 3));
+            nq.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"
+            ));
+            nq.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/q> <http://ex/o{i}> <http://ex/g{}> .\n",
+                i % 3
+            ));
         }
-        Graph::load_dataset(&nq, "nquads").unwrap().save(&dir).unwrap();
+        Graph::load_dataset(&nq, "nquads")
+            .unwrap()
+            .save(&dir)
+            .unwrap();
 
         let mut g = Graph::open(&dir).unwrap();
         // Mutate (insert + delete + drop a graph) so the overlay is non-trivial before vacuum.
@@ -10997,10 +12655,16 @@ mod tests {
         let before = dump_quads(&g);
         g.vacuum().unwrap();
         let after = dump_quads(&g);
-        assert_eq!(before, after, "vacuum must preserve the live dataset exactly (default + named)");
+        assert_eq!(
+            before, after,
+            "vacuum must preserve the live dataset exactly (default + named)"
+        );
 
         let reopened = dump_quads(&Graph::open(&dir).unwrap());
-        assert_eq!(before, reopened, "the vacuumed dataset must survive a reopen unchanged");
+        assert_eq!(
+            before, reopened,
+            "the vacuumed dataset must survive a reopen unchanged"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -11011,14 +12675,18 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn vacuum_swap_crash_recovery() {
-        let base = std::env::temp_dir().join(format!("sparq_vacuum_recover_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("sparq_vacuum_recover_{}", std::process::id()));
         let dir = base.join("g");
         let build = |d: &std::path::Path, tag: &str| {
             std::fs::remove_dir_all(d).ok();
-            Graph::load_str(&format!("<http://ex/{tag}> <http://ex/p> <http://ex/o> ."), "ntriples")
-                .unwrap()
-                .save(d)
-                .unwrap();
+            Graph::load_str(
+                &format!("<http://ex/{tag}> <http://ex/p> <http://ex/o> ."),
+                "ntriples",
+            )
+            .unwrap()
+            .save(d)
+            .unwrap();
         };
         // (a) Crash BETWEEN the two renames (dir missing, both siblings present): the open must
         //     COMPLETE the swap by promoting the fully-synced new base.
@@ -11026,14 +12694,23 @@ mod tests {
         build(&dir.with_extension("compact-new"), "new");
         assert!(!dir.exists());
         let g = Graph::open(&dir).unwrap();
-        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/new")), "must promote the new base");
-        assert!(!dir.with_extension("compact-new").exists() && !dir.with_extension("compact-old").exists());
+        assert!(
+            dump_terms(&g).iter().any(|(s, _, _)| s.contains("/new")),
+            "must promote the new base"
+        );
+        assert!(
+            !dir.with_extension("compact-new").exists()
+                && !dir.with_extension("compact-old").exists()
+        );
         // (b) Crash BEFORE the new base was ready (dir missing, only old present): roll back.
         std::fs::remove_dir_all(&dir).ok();
         build(&dir.with_extension("compact-old"), "old");
         assert!(!dir.exists());
         let g = Graph::open(&dir).unwrap();
-        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")), "must roll back to the old base");
+        assert!(
+            dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")),
+            "must roll back to the old base"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -11077,7 +12754,11 @@ mod tests {
         let pat = g
             .pattern(Some(&Term::NamedNode(s.clone())), Some(&p), Some(&o))
             .expect("all three terms interned");
-        assert_eq!(g.store.scan(&pat).rows.len(), 1, "the inserted triple must be queryable");
+        assert_eq!(
+            g.store.scan(&pat).rows.len(),
+            1,
+            "the inserted triple must be queryable"
+        );
         // Set semantics: re-inserting the identical triple does not grow the graph.
         g.insert_triple(s, p, o).unwrap();
         assert_eq!(g.len(), 1, "re-inserting an existing triple is a no-op");
@@ -11096,10 +12777,17 @@ mod tests {
         assert_eq!(g.len(), 1);
         // Removing an absent triple is a no-op (the object term is not even in the dict).
         g.remove_triple(s.clone(), p.clone(), other).unwrap();
-        assert_eq!(g.len(), 1, "removing an absent triple must not change the graph");
+        assert_eq!(
+            g.len(),
+            1,
+            "removing an absent triple must not change the graph"
+        );
         // Removing the present triple retracts it.
         g.remove_triple(s, p, o).unwrap();
-        assert!(g.is_empty(), "removing the present triple must empty the graph");
+        assert!(
+            g.is_empty(),
+            "removing the present triple must empty the graph"
+        );
     }
 
     /// gh-1122: the load-bearing invariant — a graph built with `Graph::new()` +
@@ -11171,7 +12859,10 @@ mod dir_roundtrip_test {
         assert!(g.id_of(&lit("keep")).is_some() && g.id_of(&lit("new")).is_some());
         let named = |g: &crate::Graph, name: &str| {
             let name = Term::NamedNode(NamedNode::new_unchecked(name));
-            g.named.iter().find(|(n, _)| *n == name).map(|(_, sub)| sub.len())
+            g.named
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, sub)| sub.len())
         };
         assert_eq!(named(&g, "http://ex/g1"), Some(1)); // g1-drop out, g1-new in
         assert_eq!(named(&g, "http://ex/g2"), Some(1)); // auto-created
@@ -11180,7 +12871,9 @@ mod dir_roundtrip_test {
 
     #[test]
     fn dir_literal_roundtrip() {
-        let g = crate::Graph::load_str("@prefix : <http://ex/> . :a :p \"abc\"@en--ltr .", "turtle").unwrap();
+        let g =
+            crate::Graph::load_str("@prefix : <http://ex/> . :a :p \"abc\"@en--ltr .", "turtle")
+                .unwrap();
         let scan = g.store.scan(&[None, None, None]);
         let t = scan.to_spo(&scan.rows.as_ref()[0]);
         assert_eq!(g.dict.term(t[2]).to_string(), "\"abc\"@en--ltr");
@@ -11199,12 +12892,27 @@ mod dir_roundtrip_test {
             let t = scan.to_spo(&scan.rows.as_ref()[0]);
             g.dict.term(t[2]).to_string()
         };
-        let nt = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "ntriples").unwrap();
-        let ttl = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "turtle").unwrap();
-        let nq = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "nquads").unwrap();
-        assert_eq!(only_obj(&nt), "\"hi\"@en-us", "N-Triples must lowercase the language tag");
-        assert_eq!(only_obj(&ttl), "\"hi\"@en-us", "Turtle must lowercase the language tag");
-        assert_eq!(only_obj(&nq), "\"hi\"@en-us", "N-Quads must lowercase the language tag");
+        let nt = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "ntriples")
+            .unwrap();
+        let ttl = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "turtle")
+            .unwrap();
+        let nq = crate::Graph::load_str("<http://ex/s> <http://ex/p> \"hi\"@en-US .\n", "nquads")
+            .unwrap();
+        assert_eq!(
+            only_obj(&nt),
+            "\"hi\"@en-us",
+            "N-Triples must lowercase the language tag"
+        );
+        assert_eq!(
+            only_obj(&ttl),
+            "\"hi\"@en-us",
+            "Turtle must lowercase the language tag"
+        );
+        assert_eq!(
+            only_obj(&nq),
+            "\"hi\"@en-us",
+            "N-Quads must lowercase the language tag"
+        );
         // The three load paths agree (the format-dependent split is gone).
         assert_eq!(only_obj(&nt), only_obj(&ttl));
         assert_eq!(only_obj(&nt), only_obj(&nq));
@@ -11220,15 +12928,16 @@ mod dir_roundtrip_test {
         use crate::{Graph, NumData, TempData};
         use oxrdf::vocab::xsd;
         use oxrdf::{Literal, NamedNode, Term};
-        let g = Graph::load_str(
-            "@prefix : <http://ex/> . :a :age 30 . :b :p :c .",
-            "turtle",
-        )
-        .unwrap();
+        let g =
+            Graph::load_str("@prefix : <http://ex/> . :a :age 30 . :b :p :c .", "turtle").unwrap();
         let mut f = g.fork();
         let lit = |v: &str| Term::Literal(Literal::new_typed_literal(v, xsd::DECIMAL));
         let iri = |s: &str| Term::NamedNode(NamedNode::new_unchecked(s));
-        f.apply_delta(&[[iri("http://ex/n"), iri("http://ex/age"), lit("4.5")]], &[]).unwrap();
+        f.apply_delta(
+            &[[iri("http://ex/n"), iri("http://ex/age"), lit("4.5")]],
+            &[],
+        )
+        .unwrap();
         f.compact().unwrap();
         assert_eq!(f.pending_delta_len(), 0);
         // Caches stay in the shareable Forked shape with an EMPTY side map…
@@ -11251,7 +12960,10 @@ mod dir_roundtrip_test {
             }
             _ => false,
         };
-        assert!(same_base, "fork after compact must share the folded cache base");
+        assert!(
+            same_base,
+            "fork after compact must share the folded cache base"
+        );
         assert_eq!(f2.numeric_value(id), Some(4.5));
     }
 }

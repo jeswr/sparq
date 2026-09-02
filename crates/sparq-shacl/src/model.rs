@@ -131,7 +131,10 @@ pub enum Component {
     /// `sh:ReifierShapeConstraintComponent`. Only meaningful for a single-predicate
     /// path (the reified triple needs a predicate); a non-predicate path yields no
     /// reifiers and (unless required) conforms vacuously.
-    ReifierShape { shape: usize, required: bool },
+    ReifierShape {
+        shape: usize,
+        required: bool,
+    },
     Qualified {
         shape: usize,
         min: Option<u64>,
@@ -719,7 +722,10 @@ impl ShapesModel {
             self.record_ill_formed(
                 node,
                 pred,
-                format!("the value of sh:{} must be an xsd:integer-typed literal", pred),
+                format!(
+                    "the value of sh:{} must be an xsd:integer-typed literal",
+                    pred
+                ),
             );
         }
     }
@@ -791,7 +797,11 @@ impl ShapesModel {
         // The lenient skip is unchanged.
         let mut parsed: Vec<(usize, crate::rules::NodeExpr, bool)> = Vec::new();
         for (sid, expr, is_nbe) in pending {
-            let pred = if is_nbe { "nodeByExpression" } else { "expression" };
+            let pred = if is_nbe {
+                "nodeByExpression"
+            } else {
+                "expression"
+            };
             match crate::rules::parse_node_expr(&g, self, &expr) {
                 Some(ne) => parsed.push((sid, ne, is_nbe)),
                 None => {
@@ -821,7 +831,9 @@ impl ShapesModel {
             // (no-override) meta for each — expression constraints carry no
             // reified-annotation override. (`validate_shape` is also padded
             // defensively, so a drift here can never silently drop a component.)
-            self.shapes[sid].component_meta.push(ComponentMeta::default());
+            self.shapes[sid]
+                .component_meta
+                .push(ComponentMeta::default());
             self.shapes[sid]
                 .qualified_min_meta
                 .push(ComponentMeta::default());
@@ -984,9 +996,7 @@ impl ShapesModel {
             // A SINGLE-element datatype/nodeKind set is the single-IRI spelling
             // `sh:datatype <iri>` (the SHACL-1.2 disjunctive LIST form is several
             // triples — its operand is an RDF list — so it is not annotated here).
-            Component::Datatype(dts) if dts.len() == 1 => {
-                Some((sh("datatype"), iri(&dts[0])))
-            }
+            Component::Datatype(dts) if dts.len() == 1 => Some((sh("datatype"), iri(&dts[0]))),
             Component::NodeKind(kinds) if kinds.len() == 1 => {
                 Some((sh("nodeKind"), iri(&kinds[0])))
             }
@@ -1962,7 +1972,8 @@ fn reified_meta(g: &GraphView, node: &Term, predicate: &str, object: &Term) -> C
     let reifiers = g.subjects(RDF_REIFIES, &triple_term);
     let mut meta = ComponentMeta::default();
     for r in &reifiers {
-        if matches!(g.object(r, &sh("deactivated")), Some(Term::Literal(l)) if l.value() == "true") {
+        if matches!(g.object(r, &sh("deactivated")), Some(Term::Literal(l)) if l.value() == "true")
+        {
             meta.deactivated = true;
         }
         for m in g.objects(r, &sh("message")) {
@@ -2110,10 +2121,7 @@ fn collect_properties(
 /// the shapes graph and compile their parameters + validators. A component is
 /// kept only if it has at least one parameter and at least one usable validator
 /// (a generic / node / property validator with a parsable `sh:ask`/`sh:select`).
-fn discover_components(
-    g: &GraphView,
-    failures: &mut Vec<PreBindingFailure>,
-) -> Vec<ComponentDef> {
+fn discover_components(g: &GraphView, failures: &mut Vec<PreBindingFailure>) -> Vec<ComponentDef> {
     let mut out = Vec::new();
     // SHACL §6.2: a component node is a SHACL instance of sh:ConstraintComponent —
     // i.e. typed sh:ConstraintComponent OR any rdfs:subClassOf-descendant of it

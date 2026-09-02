@@ -179,7 +179,11 @@ impl std::fmt::Display for DualLeafError {
                 write!(f, "not the expected value-lane datatype: {}", t)
             }
             DualLeafError::NonCanonicalValue(t) => {
-                write!(f, "non-canonical value-lane literal (fail-closed co-binding): {}", t)
+                write!(
+                    f,
+                    "non-canonical value-lane literal (fail-closed co-binding): {}",
+                    t
+                )
             }
         }
     }
@@ -675,7 +679,12 @@ fn commit_canonical_dual(
         leaves.push(leaf);
     }
     let commitment = poseidon2::hash(&leaves);
-    Ok(DualGraphCommitment { canonical, leaves, commitment, salt })
+    Ok(DualGraphCommitment {
+        canonical,
+        leaves,
+        commitment,
+        salt,
+    })
 }
 
 #[cfg(test)]
@@ -741,7 +750,10 @@ mod tests {
             "1.5",
             NamedNode::new("http://www.w3.org/2001/XMLSchema#double").unwrap(),
         );
-        assert!(matches!(encode_literal(&dbl), Err(DualLeafError::NotValueLane(_))));
+        assert!(matches!(
+            encode_literal(&dbl),
+            Err(DualLeafError::NotValueLane(_))
+        ));
     }
 
     #[test]
@@ -826,8 +838,11 @@ mod tests {
         assert_eq!(canonical_f64_bits(0x8000_0000_0000_0000), 0); // -0.0 -> +0.0
         assert_eq!(canonical_f64_bits(0x7ff0_0000_0000_0001), F64_CANONICAL_NAN); // sNaN
         assert_eq!(canonical_f64_bits(0x7ff8_0000_0000_0000), F64_CANONICAL_NAN); // qNaN
-        // +inf and a finite value are unchanged.
-        assert_eq!(canonical_f64_bits(0x7ff0_0000_0000_0000), 0x7ff0_0000_0000_0000);
+                                                                                  // +inf and a finite value are unchanged.
+        assert_eq!(
+            canonical_f64_bits(0x7ff0_0000_0000_0000),
+            0x7ff0_0000_0000_0000
+        );
         assert_eq!(canonical_f64_bits(2.5f64.to_bits()), 2.5f64.to_bits());
     }
 
@@ -848,8 +863,19 @@ mod tests {
         // [GPT-5.6] Audit regression: Rust's permissive `f64` parser accepts all
         // of these, but none is in the canonical xsd:double lexical space.
         for lexical in [
-            "inf", "Infinity", "+INF", "1.", "+.5", "01.5", "1e3", "1.0E+3",
-            "1.0E03", "0.5E0", "1.00E0", "1.0E9999", "1.0E-9999",
+            "inf",
+            "Infinity",
+            "+INF",
+            "1.",
+            "+.5",
+            "01.5",
+            "1e3",
+            "1.0E+3",
+            "1.0E03",
+            "0.5E0",
+            "1.00E0",
+            "1.0E9999",
+            "1.0E-9999",
         ] {
             assert!(
                 matches!(
@@ -944,7 +970,10 @@ mod tests {
             Err(DualLeafError::NonCanonicalValue(_))
         ));
         // Lone "0.0" is canonical (non-negative zero).
-        assert_eq!(encode_decimal(&dec_lit("0.0")).unwrap().value_hook, Fr::from(0u64));
+        assert_eq!(
+            encode_decimal(&dec_lit("0.0")).unwrap().value_hook,
+            Fr::from(0u64)
+        );
     }
 
     // ---- sq-vvfte: the DualLeafV1 whole-graph host commitment builder ----
@@ -1026,7 +1055,11 @@ mod tests {
         );
         assert_eq!(
             encode_term_dual(&Term::NamedNode(iri), &salt).unwrap(),
-            Some(poseidon2::hash(&[Fr::from(NO_VALUE), hs, Fr::from(TYPE_CODE_IRI)])),
+            Some(poseidon2::hash(&[
+                Fr::from(NO_VALUE),
+                hs,
+                Fr::from(TYPE_CODE_IRI)
+            ])),
         );
 
         let b = BlankNode::new("c14n0").unwrap();
@@ -1037,7 +1070,11 @@ mod tests {
         );
         assert_eq!(
             encode_term_dual(&Term::BlankNode(b), &salt).unwrap(),
-            Some(poseidon2::hash(&[Fr::from(NO_VALUE), hs, Fr::from(TYPE_CODE_BLANK_NODE)])),
+            Some(poseidon2::hash(&[
+                Fr::from(NO_VALUE),
+                hs,
+                Fr::from(TYPE_CODE_BLANK_NODE)
+            ])),
         );
 
         // Both literal lanes: the degenerate string lane AND a hookable lane.
@@ -1055,7 +1092,11 @@ mod tests {
             };
             assert_eq!(
                 encode_term_dual(&Term::Literal(lit.clone()), &salt).unwrap(),
-                Some(poseidon2::hash(&[value_component, hs, Fr::from(TYPE_CODE_LITERAL)])),
+                Some(poseidon2::hash(&[
+                    value_component,
+                    hs,
+                    Fr::from(TYPE_CODE_LITERAL)
+                ])),
                 "dual lexical slot drifted for {lit}"
             );
         }
@@ -1195,7 +1236,10 @@ mod tests {
             let lit = Literal::new_typed_literal(lexical, NamedNode::new(boolean_iri).unwrap());
             let real = crate::dual_leaf_boolean::encode_boolean(&lit).unwrap();
             assert_eq!(real.datatype_const, datatype_const(boolean_iri));
-            assert_ne!(real.value_component(), degenerate_value_component(boolean_iri, None));
+            assert_ne!(
+                real.value_component(),
+                degenerate_value_component(boolean_iri, None)
+            );
         }
         for (iri, real_const) in [
             (
@@ -1208,7 +1252,11 @@ mod tests {
             ),
         ] {
             assert!(!is_hookable_datatype(iri));
-            assert_ne!(real_const, datatype_const(iri), "{iri} const must be scale-folded");
+            assert_ne!(
+                real_const,
+                datatype_const(iri),
+                "{iri} const must be scale-folded"
+            );
         }
     }
 
@@ -1233,15 +1281,24 @@ mod tests {
         assert_eq!(
             encode_triple_dual(&inner, &salt).unwrap(),
             Some(poseidon2::hash(&[
-                encode_term_dual(&Term::NamedNode(NamedNode::new("http://ex/s").unwrap()), &salt)
-                    .unwrap()
-                    .unwrap(),
-                encode_term_dual(&Term::NamedNode(NamedNode::new("http://ex/p").unwrap()), &salt)
-                    .unwrap()
-                    .unwrap(),
-                encode_term_dual(&Term::NamedNode(NamedNode::new("http://ex/o").unwrap()), &salt)
-                    .unwrap()
-                    .unwrap(),
+                encode_term_dual(
+                    &Term::NamedNode(NamedNode::new("http://ex/s").unwrap()),
+                    &salt
+                )
+                .unwrap()
+                .unwrap(),
+                encode_term_dual(
+                    &Term::NamedNode(NamedNode::new("http://ex/p").unwrap()),
+                    &salt
+                )
+                .unwrap()
+                .unwrap(),
+                encode_term_dual(
+                    &Term::NamedNode(NamedNode::new("http://ex/o").unwrap()),
+                    &salt
+                )
+                .unwrap()
+                .unwrap(),
             ])),
         );
     }
@@ -1282,7 +1339,10 @@ mod tests {
         )];
         let err = commit_triples_dual(&triples, salt).unwrap_err();
         assert!(
-            matches!(err, DualCommitError::Leaf(DualLeafError::NonCanonicalValue(_))),
+            matches!(
+                err,
+                DualCommitError::Leaf(DualLeafError::NonCanonicalValue(_))
+            ),
             "expected a fail-closed value-lane rejection, got {err}"
         );
         // And the downgrade the rule forbids is genuinely a DIFFERENT leaf — the
@@ -1325,7 +1385,10 @@ mod tests {
             .iter()
             .map(|t| encode_triple_dual(t, &salt).unwrap().unwrap())
             .collect();
-        assert_eq!(dual.leaves, recomputed, "leaves must be encode_triple_dual in canonical order");
+        assert_eq!(
+            dual.leaves, recomputed,
+            "leaves must be encode_triple_dual in canonical order"
+        );
         assert_eq!(dual.commitment, poseidon2::hash(&recomputed));
 
         // The two methods are genuinely different commitments over the same graph
@@ -1339,9 +1402,14 @@ mod tests {
         // separates graphs exactly as in the string-canonical pipeline.
         let mut reversed = g.clone();
         reversed.reverse();
-        assert_eq!(commit_triples_dual(&reversed, salt).unwrap().commitment, dual.commitment);
+        assert_eq!(
+            commit_triples_dual(&reversed, salt).unwrap().commitment,
+            dual.commitment
+        );
         assert_ne!(
-            commit_triples_dual(&g, salt_from_bytes(&[8u8; 32])).unwrap().commitment,
+            commit_triples_dual(&g, salt_from_bytes(&[8u8; 32]))
+                .unwrap()
+                .commitment,
             dual.commitment
         );
     }

@@ -213,7 +213,10 @@ pub(crate) fn build_join_tree(rel_vars: &[Vec<u32>]) -> Vec<TreeNode> {
 
     // Number of shared variables between two relations' (small, sorted-or-not) var sets.
     let overlap = |a: usize, b: usize| -> usize {
-        rel_vars[a].iter().filter(|v| rel_vars[b].contains(v)).count()
+        rel_vars[a]
+            .iter()
+            .filter(|v| rel_vars[b].contains(v))
+            .count()
     };
 
     while placed.iter().any(|p| !p) {
@@ -221,14 +224,17 @@ pub(crate) fn build_join_tree(rel_vars: &[Vec<u32>]) -> Vec<TreeNode> {
         let seed = (0..n).find(|&i| !placed[i]).unwrap();
         placed[seed] = true;
         let root_node = nodes.len();
-        nodes.push(TreeNode { rel: seed, parent: usize::MAX });
+        nodes.push(TreeNode {
+            rel: seed,
+            parent: usize::MAX,
+        });
 
         // Grow the component: repeatedly attach the unplaced relation that shares the most
         // variables with SOME already-placed node of this component, as that node's child.
         loop {
             let mut best: Option<(usize, usize, usize)> = None; // (overlap, child_rel, parent_node)
-            // The component's already-placed nodes are `nodes[root_node..]`; this snapshot is
-            // stable for the inner search (nodes only grows AFTER a child is chosen, below).
+                                                                // The component's already-placed nodes are `nodes[root_node..]`; this snapshot is
+                                                                // stable for the inner search (nodes only grows AFTER a child is chosen, below).
             let placed_end = nodes.len();
             for (node_idx, node) in nodes.iter().enumerate().take(placed_end).skip(root_node) {
                 let prel = node.rel;
@@ -255,7 +261,10 @@ pub(crate) fn build_join_tree(rel_vars: &[Vec<u32>]) -> Vec<TreeNode> {
             match best {
                 Some((_, cand, parent_node)) => {
                     placed[cand] = true;
-                    nodes.push(TreeNode { rel: cand, parent: parent_node });
+                    nodes.push(TreeNode {
+                        rel: cand,
+                        parent: parent_node,
+                    });
                 }
                 None => break, // component exhausted
             }
@@ -303,7 +312,10 @@ mod tests {
         // ~512 MiB, so the sparse fallback must kick in.
         let keys = [1u32, 1 << 20, 1 << 28, (1u32 << 31) + 5, u32::MAX - 1];
         let f = KeyFilter::build(keys.iter().copied()).unwrap();
-        assert!(!f.is_bitmap(), "a sparse+huge span must use the set fallback");
+        assert!(
+            !f.is_bitmap(),
+            "a sparse+huge span must use the set fallback"
+        );
         for &k in &keys {
             assert!(f.contains(k), "present key {} must be a member", k);
         }
@@ -348,7 +360,11 @@ mod tests {
     /// earlier (already-placed) node — the pre-order invariant the sweep relies on.
     #[cfg(feature = "yannakakis")]
     fn assert_tree_well_formed(rel_vars: &[Vec<u32>], nodes: &[TreeNode]) {
-        assert_eq!(nodes.len(), rel_vars.len(), "every relation is a node exactly once");
+        assert_eq!(
+            nodes.len(),
+            rel_vars.len(),
+            "every relation is a node exactly once"
+        );
         let mut seen = vec![false; rel_vars.len()];
         let mut roots = 0;
         for (i, nd) in nodes.iter().enumerate() {
@@ -357,7 +373,12 @@ mod tests {
             if nd.is_root() {
                 roots += 1;
             } else {
-                assert!(nd.parent < i, "parent {} must precede child node {}", nd.parent, i);
+                assert!(
+                    nd.parent < i,
+                    "parent {} must precede child node {}",
+                    nd.parent,
+                    i
+                );
             }
         }
         assert!(seen.iter().all(|&s| s), "all relations placed");
@@ -394,7 +415,11 @@ mod tests {
         let rel_vars = vec![vec![0u32, 1], vec![1, 2], vec![10, 11]];
         let nodes = build_join_tree(&rel_vars);
         assert_tree_well_formed(&rel_vars, &nodes);
-        assert_eq!(nodes.iter().filter(|n| n.is_root()).count(), 2, "two components => two roots");
+        assert_eq!(
+            nodes.iter().filter(|n| n.is_root()).count(),
+            2,
+            "two components => two roots"
+        );
     }
 
     #[cfg(feature = "yannakakis")]

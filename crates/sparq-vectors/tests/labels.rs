@@ -35,8 +35,8 @@ fn term(iri: &str) -> Term {
 #[test]
 fn embed_labels_covers_labeled_entities_only() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
-    let path = std::env::temp_dir()
-        .join(format!("sparq-vectors-labels-{}.spqv", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("sparq-vectors-labels-{}.spqv", std::process::id()));
     let embedder = HashEmbedder::new(32);
     let mut store = VectorStore::create(&path, 32).unwrap();
     let n = embed_labels(&g, &mut store, &embedder).unwrap();
@@ -47,9 +47,18 @@ fn embed_labels_covers_labeled_entities_only() {
     assert!(store.get(id("http://example.org/bolt")).is_some());
     assert!(store.get(id("http://example.org/coubertin")).is_some());
     assert!(store.get(id("http://example.org/both")).is_some());
-    assert!(store.get(id("http://example.org/weird")).is_none(), "IRI-object label skipped");
-    assert!(store.get(id("http://example.org/silent")).is_none(), "unlabeled entity skipped");
-    assert!(store.get(id("http://example.org/blank")).is_none(), "whitespace label skipped");
+    assert!(
+        store.get(id("http://example.org/weird")).is_none(),
+        "IRI-object label skipped"
+    );
+    assert!(
+        store.get(id("http://example.org/silent")).is_none(),
+        "unlabeled entity skipped"
+    );
+    assert!(
+        store.get(id("http://example.org/blank")).is_none(),
+        "whitespace label skipped"
+    );
 
     // Priority: ex:both must be embedded from its rdfs:label, not its skos:prefLabel.
     let both = store.get(id("http://example.org/both")).unwrap();
@@ -79,8 +88,8 @@ fn embed_labels_covers_labeled_entities_only() {
 #[test]
 fn custom_predicates_and_dim_mismatch() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
-    let path = std::env::temp_dir()
-        .join(format!("sparq-vectors-labels2-{}.spqv", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("sparq-vectors-labels2-{}.spqv", std::process::id()));
 
     // skos-only config: only coubertin and both have skos:prefLabel.
     let cfg = LabelConfig {

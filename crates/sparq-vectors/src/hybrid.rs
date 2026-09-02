@@ -202,13 +202,22 @@ pub fn parse_provenance(s: &str) -> Result<Vec<(String, usize)>, String> {
             ));
         };
         if name.is_empty() {
-            return Err(format!("hybrid: provenance entry {:?} has an empty name", entry));
+            return Err(format!(
+                "hybrid: provenance entry {:?} has an empty name",
+                entry
+            ));
         }
-        let rank: usize = rank
-            .parse()
-            .map_err(|_| format!("hybrid: provenance entry {:?} has a non-integer rank", entry))?;
+        let rank: usize = rank.parse().map_err(|_| {
+            format!(
+                "hybrid: provenance entry {:?} has a non-integer rank",
+                entry
+            )
+        })?;
         if rank == 0 {
-            return Err(format!("hybrid: provenance ranks are 1-based, got {:?}", entry));
+            return Err(format!(
+                "hybrid: provenance ranks are 1-based, got {:?}",
+                entry
+            ));
         }
         out.push((name.to_string(), rank));
     }
@@ -277,7 +286,10 @@ pub fn validate_arms(arms: &[ArmRanking]) -> Result<(), String> {
 pub fn fuse_arms(arms: &[ArmRanking], rrf_k: f64, top_k: usize) -> Result<Vec<FusedHit>, String> {
     validate_arms(arms)?;
     if !rrf_k.is_finite() || rrf_k <= 0.0 {
-        return Err(format!("hybrid: the RRF k must be finite and positive, got {}", rrf_k));
+        return Err(format!(
+            "hybrid: the RRF k must be finite and positive, got {}",
+            rrf_k
+        ));
     }
     let mut acc: FxHashMap<Id, Accumulated> = FxHashMap::default();
     let mut order = 0usize;
@@ -350,8 +362,11 @@ pub struct Rescored {
 /// result that no arm retrieved.
 pub trait Reranker {
     /// Rescore `candidates` (the fused first stage, best first) for `query`.
-    fn rerank(&self, query: &ArmQuery<'_>, candidates: &[FusedHit])
-        -> Result<Vec<Rescored>, String>;
+    fn rerank(
+        &self,
+        query: &ArmQuery<'_>,
+        candidates: &[FusedHit],
+    ) -> Result<Vec<Rescored>, String>;
 }
 
 /// What to do when the second stage fails (an `Err`, or a malformed response).
@@ -765,8 +780,8 @@ impl<'a> HybridConfig<'a> {
             .arms
             .get(i)
             .ok_or_else(|| format!("hybrid: no arm at index {}", i))?;
-        let ranked =
-            f(query, candidates).map_err(|e| format!("hybrid: the {:?} arm failed: {}", name, e))?;
+        let ranked = f(query, candidates)
+            .map_err(|e| format!("hybrid: the {:?} arm failed: {}", name, e))?;
         Ok(ArmRanking::new(name.clone(), *weight, ranked))
     }
 
@@ -852,7 +867,9 @@ mod tests {
 
     #[test]
     fn fuse_arms_rejects_bad_rrf_k() {
-        assert!(fuse_arms(&arms(), 0.0, 5).unwrap_err().contains("finite and positive"));
+        assert!(fuse_arms(&arms(), 0.0, 5)
+            .unwrap_err()
+            .contains("finite and positive"));
         assert!(fuse_arms(&arms(), f64::NAN, 5).is_err());
     }
 
@@ -862,7 +879,9 @@ mod tests {
             ArmRanking::new("text", 1.0, vec![]),
             ArmRanking::new("text", 1.0, vec![]),
         ];
-        assert!(validate_arms(&dup_name).unwrap_err().contains("duplicate arm name"));
+        assert!(validate_arms(&dup_name)
+            .unwrap_err()
+            .contains("duplicate arm name"));
 
         let dup_id = vec![ArmRanking::new("text", 1.0, vec![(4, 1.0), (4, 0.5)])];
         assert!(validate_arms(&dup_id).unwrap_err().contains("twice"));
@@ -877,7 +896,9 @@ mod tests {
         assert!(validate_arms(&empty).is_err());
 
         let negative = vec![ArmRanking::new("text", -1.0, vec![])];
-        assert!(validate_arms(&negative).unwrap_err().contains("non-negative"));
+        assert!(validate_arms(&negative)
+            .unwrap_err()
+            .contains("non-negative"));
 
         assert!(validate_arms(&arms()).is_ok());
     }
@@ -903,7 +924,9 @@ mod tests {
         assert!(parse_provenance("vector").is_err());
         assert!(parse_provenance("=2").is_err());
         assert!(parse_provenance("vector=x").is_err());
-        assert!(parse_provenance("vector=0").unwrap_err().contains("1-based"));
+        assert!(parse_provenance("vector=0")
+            .unwrap_err()
+            .contains("1-based"));
     }
 
     /// A reranker driven by a fixed script, so the policy paths are exercised deterministically.
@@ -1138,9 +1161,8 @@ mod tests {
         let err = cfg.embed_query("machine learning", "en").unwrap_err();
         assert!(err.contains("needs a query embedder"), "got: {}", err);
 
-        let cfg = HybridConfig::new().query_embedder(Box::new(|t: &str, _l: &str| {
-            Ok(vec![t.len() as f32, 1.0])
-        }));
+        let cfg = HybridConfig::new()
+            .query_embedder(Box::new(|t: &str, _l: &str| Ok(vec![t.len() as f32, 1.0])));
         assert_eq!(cfg.embed_query("ab", "en").unwrap(), vec![2.0, 1.0]);
     }
 

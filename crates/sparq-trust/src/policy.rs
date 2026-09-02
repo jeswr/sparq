@@ -239,10 +239,12 @@ pub fn resolve_rule_keys(
         // Prefer trust:issuerDid (the resolver-bound, D′-narrowing path).
         if let Some(did_term) = object_of(node, vocab::ISSUER_DID, policy) {
             let did_str = term_lexical(&did_term);
-            return resolver.resolve_str(&did_str).map_err(|e| PolicyError::BadIssuerDid {
-                did: did_str,
-                reason: e.to_string(),
-            });
+            return resolver
+                .resolve_str(&did_str)
+                .map_err(|e| PolicyError::BadIssuerDid {
+                    did: did_str,
+                    reason: e.to_string(),
+                });
         }
         // Fall back to the operator-asserted hex key.
         if object_of(node, vocab::ISSUER_KEY, policy).is_some() {
@@ -706,16 +708,52 @@ mod tests {
         assert_eq!(parse_xsd_duration_secs("garbage"), None);
         assert_eq!(parse_xsd_duration_secs(""), None);
         assert_eq!(parse_xsd_duration_secs("P"), None, "empty duration");
-        assert_eq!(parse_xsd_duration_secs("PT"), None, "dangling T, no time part");
-        assert_eq!(parse_xsd_duration_secs("P1DT"), None, "dangling T after a date");
-        assert_eq!(parse_xsd_duration_secs("P30"), None, "digits, no designator");
-        assert_eq!(parse_xsd_duration_secs("PD"), None, "designator, no numeral");
+        assert_eq!(
+            parse_xsd_duration_secs("PT"),
+            None,
+            "dangling T, no time part"
+        );
+        assert_eq!(
+            parse_xsd_duration_secs("P1DT"),
+            None,
+            "dangling T after a date"
+        );
+        assert_eq!(
+            parse_xsd_duration_secs("P30"),
+            None,
+            "digits, no designator"
+        );
+        assert_eq!(
+            parse_xsd_duration_secs("PD"),
+            None,
+            "designator, no numeral"
+        );
         assert_eq!(parse_xsd_duration_secs("PT1M1H"), None, "out of order");
-        assert_eq!(parse_xsd_duration_secs("P1D1D"), None, "repeated designator");
-        assert_eq!(parse_xsd_duration_secs("PT1H1H"), None, "repeated designator");
-        assert_eq!(parse_xsd_duration_secs("P1H"), None, "time unit in date part");
-        assert_eq!(parse_xsd_duration_secs("PT1D"), None, "date unit in time part");
-        assert_eq!(parse_xsd_duration_secs("PT0.5S"), None, "fractional seconds");
+        assert_eq!(
+            parse_xsd_duration_secs("P1D1D"),
+            None,
+            "repeated designator"
+        );
+        assert_eq!(
+            parse_xsd_duration_secs("PT1H1H"),
+            None,
+            "repeated designator"
+        );
+        assert_eq!(
+            parse_xsd_duration_secs("P1H"),
+            None,
+            "time unit in date part"
+        );
+        assert_eq!(
+            parse_xsd_duration_secs("PT1D"),
+            None,
+            "date unit in time part"
+        );
+        assert_eq!(
+            parse_xsd_duration_secs("PT0.5S"),
+            None,
+            "fractional seconds"
+        );
         assert_eq!(parse_xsd_duration_secs("1D"), None, "missing leading P");
     }
 

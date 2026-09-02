@@ -75,14 +75,22 @@ impl std::fmt::Display for ExtractError {
                 write!(f, "construct outside the ALCH fragment: {}", d)
             }
             ExtractError::DataConstruct(d) => {
-                write!(f, "datatype / data-property construct (no concrete domain in L1): {}", d)
+                write!(
+                    f,
+                    "datatype / data-property construct (no concrete domain in L1): {}",
+                    d
+                )
             }
             ExtractError::MalformedList(d) => write!(f, "malformed RDF list: {}", d),
             ExtractError::MalformedClassExpression(d) => {
                 write!(f, "malformed class expression: {}", d)
             }
             ExtractError::Unclassifiable(d) => {
-                write!(f, "triple not soundly classifiable in the ALCH fragment: {}", d)
+                write!(
+                    f,
+                    "triple not soundly classifiable in the ALCH fragment: {}",
+                    d
+                )
             }
         }
     }
@@ -200,9 +208,8 @@ fn emit_named_composite_equiv(
     let mut named_composite_ids: BTreeSet<Id> = BTreeSet::new();
 
     // Only IRI nodes. `is_named_iri` = not inline, TermParts::Iri.
-    let is_named_iri = |id: Id| -> bool {
-        !is_inline(id) && matches!(dict.term_parts(id), TermParts::Iri { .. })
-    };
+    let is_named_iri =
+        |id: Id| -> bool { !is_inline(id) && matches!(dict.term_parts(id), TermParts::Iri { .. }) };
 
     for &id in idx.intersection_of.keys() {
         if is_named_iri(id) {
@@ -349,9 +356,8 @@ fn validate_no_orphan_structural_nodes(
     // not a triple term, not a named IRI). Named IRIs are excluded from the orphan check
     // because `emit_named_composite_equiv` will synthesise axioms for them; only anonymous
     // blank structural nodes can be genuinely unconsumed.
-    let is_anonymous_blank = |id: Id| -> bool {
-        !is_inline(id) && matches!(dict.term_parts(id), TermParts::Blank(_))
-    };
+    let is_anonymous_blank =
+        |id: Id| -> bool { !is_inline(id) && matches!(dict.term_parts(id), TermParts::Blank(_)) };
 
     // Seed: structural nodes that are considered "already consumed":
     //
@@ -417,11 +423,11 @@ fn validate_no_orphan_structural_nodes(
             };
         }
         follow_value!(idx.intersection_of); // intersection head → list head
-        follow_value!(idx.union_of);        // union head → list head
-        follow_value!(idx.complement_of);   // complement node → operand
+        follow_value!(idx.union_of); // union head → list head
+        follow_value!(idx.complement_of); // complement node → operand
         follow_value!(idx.some_values_from); // restriction → filler
-        follow_value!(idx.all_values_from);  // restriction → filler
-        // List cell traversal (the chain of rdf:first/rdf:rest cells).
+        follow_value!(idx.all_values_from); // restriction → filler
+                                            // List cell traversal (the chain of rdf:first/rdf:rest cells).
         if let Some(&first_val) = idx.first.get(&node) {
             if idx.structural_nodes.contains(&first_val) && reachable.insert(first_val) {
                 worklist.push(first_val);
@@ -543,13 +549,15 @@ fn classify_triple(
     if p == v.domain {
         let property = decode_object_property(dict, idx, s)?;
         let domain = decode_class(dict, v, idx, o)?;
-        onto.axioms.push(Axiom::ObjectPropertyDomain { property, domain });
+        onto.axioms
+            .push(Axiom::ObjectPropertyDomain { property, domain });
         return Ok(());
     }
     if p == v.range {
         let property = decode_object_property(dict, idx, s)?;
         let range = decode_class(dict, v, idx, o)?;
-        onto.axioms.push(Axiom::ObjectPropertyRange { property, range });
+        onto.axioms
+            .push(Axiom::ObjectPropertyRange { property, range });
         return Ok(());
     }
 
@@ -640,7 +648,8 @@ fn classify_type(
     #[cfg(feature = "dl_transitive")]
     if o == v.owl_transitive_property {
         let property = decode_object_property(dict, idx, s)?;
-        onto.axioms.push(Axiom::TransitiveObjectProperty { property });
+        onto.axioms
+            .push(Axiom::TransitiveObjectProperty { property });
         return Ok(());
     }
     // Property characteristics and n-ary collection meta-classes are logical but out of
@@ -808,8 +817,10 @@ fn decode_class_inner(
     let is_restr = idx.is_restriction.contains(&id)
         || idx.some_values_from.contains_key(&id)
         || idx.all_values_from.contains_key(&id);
-    let shape_count =
-        usize::from(is_inter) + usize::from(is_union) + usize::from(is_compl) + usize::from(is_restr);
+    let shape_count = usize::from(is_inter)
+        + usize::from(is_union)
+        + usize::from(is_compl)
+        + usize::from(is_restr);
     if shape_count > 1 {
         return Err(ExtractError::MalformedClassExpression(format!(
             "class node combines multiple class-expression shapes: {}",
@@ -897,11 +908,17 @@ fn decode_restriction(
         ))),
         (Some(filler), None) => {
             let inner = decode_class_inner(dict, v, idx, filler, visiting, depth + 1)?;
-            Ok(ClassExpression::ObjectSomeValuesFrom(property, Box::new(inner)))
+            Ok(ClassExpression::ObjectSomeValuesFrom(
+                property,
+                Box::new(inner),
+            ))
         }
         (None, Some(filler)) => {
             let inner = decode_class_inner(dict, v, idx, filler, visiting, depth + 1)?;
-            Ok(ClassExpression::ObjectAllValuesFrom(property, Box::new(inner)))
+            Ok(ClassExpression::ObjectAllValuesFrom(
+                property,
+                Box::new(inner),
+            ))
         }
         (None, None) => Err(ExtractError::MalformedClassExpression(format!(
             "restriction {} missing its someValuesFrom/allValuesFrom filler",
@@ -1417,8 +1434,7 @@ impl Index {
                 if let Some(prev) = idx.intersection_of.insert(s, o) {
                     if prev != o {
                         return Err(ExtractError::MalformedClassExpression(
-                            "class node has two conflicting owl:intersectionOf values"
-                                .to_string(),
+                            "class node has two conflicting owl:intersectionOf values".to_string(),
                         ));
                     }
                 }
@@ -1712,7 +1728,10 @@ mod tests {
         )
         .expect("parse");
         assert!(
-            matches!(extract(&dict, &triples), Err(ExtractError::DataConstruct(_))),
+            matches!(
+                extract(&dict, &triples),
+                Err(ExtractError::DataConstruct(_))
+            ),
             "a datatype range object must refuse extraction (DataConstruct)"
         );
         // A datatype as a subClassOf super-CE refuses just the same (position-uniform).

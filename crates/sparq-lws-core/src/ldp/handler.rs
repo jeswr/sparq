@@ -5268,7 +5268,8 @@ mod tests {
         // sq-10ty4: an honoured JSON-LD `profile` changes which bytes are served, so it changes
         // the validator too — exactly when the bytes differ.
         let stored = "\"5-abc123\"";
-        const EXPANDED: &str = "application/ld+json;profile=\"http://www.w3.org/ns/json-ld#expanded\"";
+        const EXPANDED: &str =
+            "application/ld+json;profile=\"http://www.w3.org/ns/json-ld#expanded\"";
         const COMPACTED: &str =
             "application/ld+json;profile=\"http://www.w3.org/ns/json-ld#compacted\"";
         // Compacted output differs from the default JSON-LD serialisation ⇒ its own variant tag.
@@ -5321,10 +5322,7 @@ mod tests {
         let resp = get_with(&state, owner_token(), "/alice/doc", accept.clone()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         // The honoured profile is echoed back in the Content-Type (JSON-LD 1.1 IANA registration).
-        assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap(),
-            COMPACTED
-        );
+        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), COMPACTED);
         let compacted_tag = etag_of(&resp);
         assert_ne!(
             compacted_tag, plain_tag,
@@ -5418,10 +5416,7 @@ mod tests {
         accept.insert(header::ACCEPT, HeaderValue::from_static(COMPACTED));
         let resp = get_with(&state, owner_token(), "/alice/c/", accept).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap(),
-            COMPACTED
-        );
+        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), COMPACTED);
         assert_ne!(etag_of(&resp), plain_tag);
         // The single-subject container listing compacts to the bare node object; its containment
         // triple compacts to a single node reference.

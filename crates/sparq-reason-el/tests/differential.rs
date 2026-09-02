@@ -312,11 +312,7 @@ fn thing_subclass_of_nothing_is_reported() {
         h.report().thing_unsatisfiable,
         "the global top clash must be surfaced"
     );
-    assert_eq!(
-        h.report().skipped_axioms,
-        0,
-        "the EL axiom must be applied"
-    );
+    assert_eq!(h.report().skipped_axioms, 0, "the EL axiom must be applied");
 }
 
 #[test]

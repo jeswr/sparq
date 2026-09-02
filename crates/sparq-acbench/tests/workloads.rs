@@ -35,13 +35,19 @@ fn agent_allow(agent: &str, resource: &str) -> IntentRow {
 }
 
 fn agent_deny(agent: &str, resource: &str) -> IntentRow {
-    IntentRow { effect: Effect::Deny, ..agent_allow(agent, resource) }
+    IntentRow {
+        effect: Effect::Deny,
+        ..agent_allow(agent, resource)
+    }
 }
 
 /// An Allow intent for `agent` on `resource` carrying a temporal ODRL condition.
 fn agent_allow_temporal(agent: &str, resource: &str, start: &str, end: &str) -> IntentRow {
     IntentRow {
-        condition: Condition::Temporal { start: start.to_string(), end: end.to_string() },
+        condition: Condition::Temporal {
+            start: start.to_string(),
+            end: end.to_string(),
+        },
         ..agent_allow(agent, resource)
     }
 }
@@ -72,15 +78,29 @@ const WINDOW_EXPIRED_END: &str = "2021-01-01T00:00:00Z";
 /// oracle for `model` agrees with `want`, and a *failure* proves it disagrees. This is the
 /// lever that makes the ODRL oracle arm actually get DISPATCHED (Finding 1): W1's `model`
 /// field routes `oracle::evaluate` through the arm under test.
-fn w1_single(model: AcModel, intents: Vec<IntentRow>, request: Request, want: Decision) -> RunOutcome {
-    W1DecisionBatch { requests: vec![request], expected: vec![want], model, intents }.run_oracle()
+fn w1_single(
+    model: AcModel,
+    intents: Vec<IntentRow>,
+    request: Request,
+    want: Decision,
+) -> RunOutcome {
+    W1DecisionBatch {
+        requests: vec![request],
+        expected: vec![want],
+        model,
+        intents,
+    }
+    .run_oracle()
 }
 
 // ── RunOutcome helpers (retained from scaffold) ───────────────────────────────────────
 
 #[test]
 fn run_outcome_passed_is_pass() {
-    let outcome = RunOutcome::Passed { decisions: 10, wall_us_indicative: 0 };
+    let outcome = RunOutcome::Passed {
+        decisions: 10,
+        wall_us_indicative: 0,
+    };
     assert!(outcome.is_pass());
     assert!(!outcome.is_failure());
     assert!(!outcome.is_skipped());
@@ -88,7 +108,9 @@ fn run_outcome_passed_is_pass() {
 
 #[test]
 fn run_outcome_failed_is_failure() {
-    let outcome = RunOutcome::Failed { mismatch: "deliberate test failure".to_string() };
+    let outcome = RunOutcome::Failed {
+        mismatch: "deliberate test failure".to_string(),
+    };
     assert!(!outcome.is_pass());
     assert!(outcome.is_failure());
     assert_eq!(outcome.mismatch(), Some("deliberate test failure"));
@@ -96,7 +118,9 @@ fn run_outcome_failed_is_failure() {
 
 #[test]
 fn run_outcome_skipped_is_neither() {
-    let outcome = RunOutcome::Skipped { reason: "blocked".to_string() };
+    let outcome = RunOutcome::Skipped {
+        reason: "blocked".to_string(),
+    };
     assert!(!outcome.is_pass());
     assert!(!outcome.is_failure());
     assert!(outcome.is_skipped());
@@ -115,7 +139,10 @@ fn w1_passes_when_expected_matches_oracle() {
         intents,
     };
     let outcome = batch.run_oracle();
-    assert!(outcome.is_pass(), "W1 must pass when expected matches the oracle: {outcome:?}");
+    assert!(
+        outcome.is_pass(),
+        "W1 must pass when expected matches the oracle: {outcome:?}"
+    );
     if let RunOutcome::Passed { decisions, .. } = outcome {
         assert_eq!(decisions, 2);
     }
@@ -129,7 +156,10 @@ fn w1_wiring_bug_length_mismatch_fails() {
         model: AcModel::Wac,
         intents: vec![agent_allow(ALICE, RES)],
     };
-    assert!(batch.run_oracle().is_failure(), "length mismatch must fail-closed");
+    assert!(
+        batch.run_oracle().is_failure(),
+        "length mismatch must fail-closed"
+    );
 }
 
 /// ANTI-VACUITY (the oracle's oracle): a deliberately WRONG expected set — claiming Bob
@@ -154,7 +184,11 @@ fn anti_vacuity_wrong_expected_fails_harness() {
     // …and it must propagate to a non-zero harness exit code with NO timing recorded.
     let mut report = HarnessReport::new();
     report.record("W1/anti-vacuity/WAC", outcome);
-    assert_eq!(report.exit_code(), 1, "harness must exit non-zero on a failed lane");
+    assert_eq!(
+        report.exit_code(),
+        1,
+        "harness must exit non-zero on a failed lane"
+    );
     assert_eq!(report.failed_count(), 1);
     // No `Passed { wall_us_indicative }` may exist for the failed lane.
     assert!(
@@ -173,7 +207,10 @@ fn anti_vacuity_wrong_deny_fails_harness() {
         model: AcModel::Wac,
         intents,
     };
-    assert!(batch.run_oracle().is_failure(), "wrong Deny expectation must fail");
+    assert!(
+        batch.run_oracle().is_failure(),
+        "wrong Deny expectation must fail"
+    );
 }
 
 /// A deliberately MISCOMPILED policy (a Deny intent that a buggy compiler renders as if it
@@ -181,7 +218,10 @@ fn anti_vacuity_wrong_deny_fails_harness() {
 /// stays Deny and any "expected Allow" fails. Proves the compiler cannot fool the oracle.
 #[test]
 fn anti_vacuity_miscompiled_deny_intent_cannot_grant() {
-    let deny = IntentRow { effect: Effect::Deny, ..agent_allow(ALICE, RES) };
+    let deny = IntentRow {
+        effect: Effect::Deny,
+        ..agent_allow(ALICE, RES)
+    };
     let batch = W1DecisionBatch {
         requests: vec![req(ALICE, RES)],
         // A miscompiled harness might "expect" the deny to have granted. It must not.
@@ -217,17 +257,35 @@ fn w1_allow_and_deny_same_target_differs_by_model() {
 
     // WAC: Deny row is unsupported/skipped → the Allow stands.
     assert!(
-        w1_single(AcModel::Wac, intents.clone(), req(ALICE, RES), Decision::Allow).is_pass(),
+        w1_single(
+            AcModel::Wac,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Allow
+        )
+        .is_pass(),
         "WAC has no deny: a matching Allow with a co-located Deny must still Allow"
     );
     // ACP: deny-wins.
     assert!(
-        w1_single(AcModel::Acp, intents.clone(), req(ALICE, RES), Decision::Deny).is_pass(),
+        w1_single(
+            AcModel::Acp,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Deny
+        )
+        .is_pass(),
         "ACP is deny-wins: a matching Deny must override the Allow"
     );
     // ODRL: permission-overrides-prohibition.
     assert!(
-        w1_single(AcModel::Odrl, intents.clone(), req(ALICE, RES), Decision::Allow).is_pass(),
+        w1_single(
+            AcModel::Odrl,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Allow
+        )
+        .is_pass(),
         "ODRL: a matching Permission overrides a co-located Prohibition → Allow"
     );
 
@@ -235,7 +293,13 @@ fn w1_allow_and_deny_same_target_differs_by_model() {
     // model that returns the *other* model's decision must FAIL. This is what the arm-swap
     // mutation trips on.
     assert!(
-        w1_single(AcModel::Acp, intents.clone(), req(ALICE, RES), Decision::Allow).is_failure(),
+        w1_single(
+            AcModel::Acp,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Allow
+        )
+        .is_failure(),
         "ACP must NOT return the ODRL answer (Allow) — arm-swap tripwire"
     );
     assert!(
@@ -254,18 +318,41 @@ fn w1_allow_and_deny_same_target_differs_by_model() {
 /// and this fixture additionally exercises the real temporal condition evaluation (Finding 2).
 #[test]
 fn w1_temporal_allow_differs_by_model_valid_window() {
-    let intents = vec![agent_allow_temporal(ALICE, RES, WINDOW_VALID_START, WINDOW_VALID_END)];
+    let intents = vec![agent_allow_temporal(
+        ALICE,
+        RES,
+        WINDOW_VALID_START,
+        WINDOW_VALID_END,
+    )];
 
     assert!(
-        w1_single(AcModel::Wac, intents.clone(), req(ALICE, RES), Decision::Deny).is_pass(),
+        w1_single(
+            AcModel::Wac,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Deny
+        )
+        .is_pass(),
         "WAC cannot express a temporal condition → the conditioned Allow is skipped → Deny"
     );
     assert!(
-        w1_single(AcModel::Acp, intents.clone(), req(ALICE, RES), Decision::Deny).is_pass(),
+        w1_single(
+            AcModel::Acp,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Deny
+        )
+        .is_pass(),
         "ACP cannot express a temporal condition → the conditioned Allow is skipped → Deny"
     );
     assert!(
-        w1_single(AcModel::Odrl, intents.clone(), req(ALICE, RES), Decision::Allow).is_pass(),
+        w1_single(
+            AcModel::Odrl,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Allow
+        )
+        .is_pass(),
         "ODRL evaluates the temporal window; it contains the pinned instant → Allow"
     );
 
@@ -287,9 +374,20 @@ fn w1_temporal_allow_differs_by_model_valid_window() {
 /// a Deny under ODRL — otherwise an expired retention/embargo grant would wrongly Allow.
 #[test]
 fn w1_temporal_expired_window_is_deny_odrl() {
-    let intents = vec![agent_allow_temporal(ALICE, RES, WINDOW_EXPIRED_START, WINDOW_EXPIRED_END)];
+    let intents = vec![agent_allow_temporal(
+        ALICE,
+        RES,
+        WINDOW_EXPIRED_START,
+        WINDOW_EXPIRED_END,
+    )];
     assert!(
-        w1_single(AcModel::Odrl, intents.clone(), req(ALICE, RES), Decision::Deny).is_pass(),
+        w1_single(
+            AcModel::Odrl,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Deny
+        )
+        .is_pass(),
         "an expired temporal window must Deny under ODRL (clock-free ground truth)"
     );
     // Anti-vacuity: claiming the expired grant still Allows must FAIL — proves the oracle
@@ -303,9 +401,20 @@ fn w1_temporal_expired_window_is_deny_odrl() {
 /// A permission whose temporal window CONTAINS the pinned instant must Allow under ODRL.
 #[test]
 fn w1_temporal_valid_window_is_allow_odrl() {
-    let intents = vec![agent_allow_temporal(ALICE, RES, WINDOW_VALID_START, WINDOW_VALID_END)];
+    let intents = vec![agent_allow_temporal(
+        ALICE,
+        RES,
+        WINDOW_VALID_START,
+        WINDOW_VALID_END,
+    )];
     assert!(
-        w1_single(AcModel::Odrl, intents.clone(), req(ALICE, RES), Decision::Allow).is_pass(),
+        w1_single(
+            AcModel::Odrl,
+            intents.clone(),
+            req(ALICE, RES),
+            Decision::Allow
+        )
+        .is_pass(),
         "a currently-valid temporal window must Allow under ODRL"
     );
     // And the mirror anti-vacuity: claiming a valid window Denies must fail.
@@ -329,9 +438,17 @@ fn w3_temporal_embargo_flip_produces_allow_delta() {
         writes: vec![AclWrite::Revoke(future), AclWrite::Grant(opened)],
         probes: vec![
             // Before any write: the window is in the future → Deny.
-            ChurnProbe { request: req(ALICE, RES), after_step: 0, expected: Decision::Deny },
+            ChurnProbe {
+                request: req(ALICE, RES),
+                after_step: 0,
+                expected: Decision::Deny,
+            },
             // After the flip: the window contains the pinned instant → Allow.
-            ChurnProbe { request: req(ALICE, RES), after_step: 2, expected: Decision::Allow },
+            ChurnProbe {
+                request: req(ALICE, RES),
+                after_step: 2,
+                expected: Decision::Allow,
+            },
         ],
         model: AcModel::Odrl,
     };
@@ -356,7 +473,9 @@ fn w2_authorized_intersection_passes() {
         produced_rows: vec!["<r1> <p> <o1> .".to_string()],
     };
     assert_eq!(check.expected_rows(), vec!["<r1> <p> <o1> .".to_string()]);
-    let lane = W2QueryLane { checks: vec![check] };
+    let lane = W2QueryLane {
+        checks: vec![check],
+    };
     assert!(lane.run_oracle().is_pass());
 }
 
@@ -370,7 +489,9 @@ fn w2_over_share_fails() {
         authorized_rows: vec!["<r1> <p> <o1> .".to_string()],
         produced_rows: vec!["<r1> <p> <o1> .".to_string(), "<r2> <p> <o2> .".to_string()],
     };
-    let lane = W2QueryLane { checks: vec![check] };
+    let lane = W2QueryLane {
+        checks: vec![check],
+    };
     let outcome = lane.run_oracle();
     assert!(outcome.is_failure(), "over-share must fail: {outcome:?}");
     assert!(outcome.mismatch().unwrap().contains("over-shared"));
@@ -386,7 +507,9 @@ fn w2_under_share_fails() {
         authorized_rows: vec!["<r1> <p> <o1> .".to_string(), "<r2> <p> <o2> .".to_string()],
         produced_rows: vec!["<r1> <p> <o1> .".to_string()], // dropped r2
     };
-    let lane = W2QueryLane { checks: vec![check] };
+    let lane = W2QueryLane {
+        checks: vec![check],
+    };
     let outcome = lane.run_oracle();
     assert!(outcome.is_failure());
     assert!(outcome.mismatch().unwrap().contains("missing"));
@@ -402,8 +525,16 @@ fn w3_revoke_produces_deny_after_step() {
         initial_intents: vec![grant.clone()],
         writes: vec![AclWrite::Revoke(grant.clone())],
         probes: vec![
-            ChurnProbe { request: req(ALICE, RES), after_step: 0, expected: Decision::Allow },
-            ChurnProbe { request: req(ALICE, RES), after_step: 1, expected: Decision::Deny },
+            ChurnProbe {
+                request: req(ALICE, RES),
+                after_step: 0,
+                expected: Decision::Allow,
+            },
+            ChurnProbe {
+                request: req(ALICE, RES),
+                after_step: 1,
+                expected: Decision::Deny,
+            },
         ],
         model: AcModel::Wac,
     };
@@ -418,8 +549,16 @@ fn w3_grant_then_probe_allows() {
         initial_intents: vec![],
         writes: vec![AclWrite::Grant(grant)],
         probes: vec![
-            ChurnProbe { request: req(BOB, RES), after_step: 0, expected: Decision::Deny },
-            ChurnProbe { request: req(BOB, RES), after_step: 1, expected: Decision::Allow },
+            ChurnProbe {
+                request: req(BOB, RES),
+                after_step: 0,
+                expected: Decision::Deny,
+            },
+            ChurnProbe {
+                request: req(BOB, RES),
+                after_step: 1,
+                expected: Decision::Allow,
+            },
         ],
         model: AcModel::Acp,
     };
@@ -443,7 +582,10 @@ fn w3_stale_grant_after_revoke_fails() {
         model: AcModel::Wac,
     };
     let outcome = script.run_oracle();
-    assert!(outcome.is_failure(), "a surviving stale grant MUST fail the churn lane");
+    assert!(
+        outcome.is_failure(),
+        "a surviving stale grant MUST fail the churn lane"
+    );
     assert!(outcome.mismatch().unwrap().contains("stale"));
 }
 
@@ -473,7 +615,12 @@ fn w4_decision_lane_concurrent_passes() {
         model: AcModel::Wac,
         intents,
     };
-    let cfg = W4Config { n_threads: 4, batches_per_thread: 8, model: AcModel::Wac, sf: 1 };
+    let cfg = W4Config {
+        n_threads: 4,
+        batches_per_thread: 8,
+        model: AcModel::Wac,
+        sf: 1,
+    };
     let outcome = cfg.run(&batch);
     assert!(
         outcome.decision_lane.is_pass(),
@@ -482,7 +629,11 @@ fn w4_decision_lane_concurrent_passes() {
     );
     // Concurrent readers must agree with the single-threaded oracle (determinism).
     if let RunOutcome::Passed { decisions, .. } = outcome.decision_lane {
-        assert_eq!(decisions, 4 * 8 * 2, "every thread×batch×request must be checked");
+        assert_eq!(
+            decisions,
+            4 * 8 * 2,
+            "every thread×batch×request must be checked"
+        );
     }
 }
 
@@ -495,7 +646,12 @@ fn w4_decision_lane_propagates_a_mismatch() {
         model: AcModel::Wac,
         intents,
     };
-    let cfg = W4Config { n_threads: 3, batches_per_thread: 2, model: AcModel::Wac, sf: 1 };
+    let cfg = W4Config {
+        n_threads: 3,
+        batches_per_thread: 2,
+        model: AcModel::Wac,
+        sf: 1,
+    };
     let outcome = cfg.run(&batch);
     assert!(
         outcome.decision_lane.is_failure(),
@@ -507,7 +663,12 @@ fn w4_decision_lane_propagates_a_mismatch() {
 /// (#1569 / PR #1612 has MERGED — the skip is architectural, not a false "unmerged dep").
 #[test]
 fn w4_query_sublane_skipped_with_accurate_reason() {
-    let cfg = W4Config { n_threads: 2, batches_per_thread: 1, model: AcModel::Wac, sf: 1 };
+    let cfg = W4Config {
+        n_threads: 2,
+        batches_per_thread: 1,
+        model: AcModel::Wac,
+        sf: 1,
+    };
     let batch = W1DecisionBatch {
         requests: vec![],
         expected: vec![],
@@ -537,10 +698,18 @@ fn w4_query_sublane_skipped_with_accurate_reason() {
 #[test]
 fn w4_run_params_query_sublane_skipped() {
     use sparq_acbench::GenParams;
-    let cfg = W4Config { n_threads: 2, batches_per_thread: 1, model: AcModel::Wac, sf: 1 };
+    let cfg = W4Config {
+        n_threads: 2,
+        batches_per_thread: 1,
+        model: AcModel::Wac,
+        sf: 1,
+    };
     let outcome = cfg.run_params(&GenParams::smoke());
     assert!(matches!(outcome.query_lane, RunOutcome::Skipped { .. }));
-    assert!(outcome.decision_lane.is_pass(), "empty batch trivially passes");
+    assert!(
+        outcome.decision_lane.is_pass(),
+        "empty batch trivially passes"
+    );
 }
 
 // ── Harness aggregator: fail-closed exit code ─────────────────────────────────────────
@@ -548,10 +717,18 @@ fn w4_run_params_query_sublane_skipped() {
 #[test]
 fn harness_all_pass_exits_zero() {
     let mut report = HarnessReport::new();
-    report.record("W1/x/WAC", RunOutcome::Passed { decisions: 1, wall_us_indicative: 0 });
+    report.record(
+        "W1/x/WAC",
+        RunOutcome::Passed {
+            decisions: 1,
+            wall_us_indicative: 0,
+        },
+    );
     report.record(
         "W4-query/x/WAC",
-        RunOutcome::Skipped { reason: W4_QUERY_SKIP_REASON.to_string() },
+        RunOutcome::Skipped {
+            reason: W4_QUERY_SKIP_REASON.to_string(),
+        },
     );
     assert_eq!(report.exit_code(), 0, "all-pass (+ skips) exits zero");
     assert_eq!(report.skipped_count(), 1);
@@ -561,8 +738,19 @@ fn harness_all_pass_exits_zero() {
 #[test]
 fn harness_any_fail_exits_nonzero() {
     let mut report = HarnessReport::new();
-    report.record("W1/x/WAC", RunOutcome::Passed { decisions: 1, wall_us_indicative: 0 });
-    report.record("W3/x/WAC", RunOutcome::Failed { mismatch: "stale grant".to_string() });
+    report.record(
+        "W1/x/WAC",
+        RunOutcome::Passed {
+            decisions: 1,
+            wall_us_indicative: 0,
+        },
+    );
+    report.record(
+        "W3/x/WAC",
+        RunOutcome::Failed {
+            mismatch: "stale grant".to_string(),
+        },
+    );
     assert_eq!(report.exit_code(), 1, "any failed lane exits non-zero");
     assert_eq!(report.failed_count(), 1);
 }

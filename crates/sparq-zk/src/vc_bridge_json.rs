@@ -315,8 +315,9 @@ fn expand_to_triples(
 
     let mut triples = Vec::new();
     for quad in parser {
-        let quad = quad
-            .map_err(|e| VcBridgeError::JsonLdExpansion(format!("expanding the {}: {}", what, e)))?;
+        let quad = quad.map_err(|e| {
+            VcBridgeError::JsonLdExpansion(format!("expanding the {}: {}", what, e))
+        })?;
         // Flattening a named graph into the default graph would change the very
         // N-Quads the DI hash covers, so refuse instead.
         if quad.graph_name != GraphName::DefaultGraph {
@@ -330,10 +331,10 @@ fn expand_to_triples(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encode::salt_from_bytes;
     use crate::vc_bridge::{
         hash_data_from_triples, hash_data_from_triples_sha384, ingest_verified_vc, VcCryptosuite,
     };
-    use crate::encode::salt_from_bytes;
     use oxrdf::NamedNode;
 
     /// A self-contained JSON-LD `@context` for the fixtures below.
@@ -499,7 +500,11 @@ mod tests {
 
         let sk = SigningKey::from_slice(&[13u8; 48]).unwrap();
         let sig: Signature = sk.sign(&hd);
-        let pk = sk.verifying_key().to_encoded_point(true).as_bytes().to_vec();
+        let pk = sk
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec();
         let vc = vc_json(CONTEXT, "ecdsa-rdfc-2019", &multibase_z(&sig.to_bytes()));
 
         let verified = verify_vc_json(&vc, &[], &pk).expect("P-384 VC envelope must verify");

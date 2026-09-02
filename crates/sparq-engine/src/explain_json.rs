@@ -38,8 +38,8 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 
-use sparq_core::Graph;
 use spargebra::{Query, SparqlParser};
+use sparq_core::Graph;
 
 use crate::exec;
 use crate::QueryBudget;
@@ -189,7 +189,9 @@ fn write_json_opt_f64(s: &mut String, v: Option<f64>) {
 /// Supports SELECT / ASK / CONSTRUCT / DESCRIBE (every query form, like the text
 /// `explain`). Returns `Err` for a malformed query.
 pub fn explain_plan(graph: &Graph, sparql: &str) -> Result<PlanNode, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let q = SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
@@ -207,8 +209,14 @@ pub fn explain_plan_analyze(graph: &Graph, sparql: &str) -> Result<PlanNode, Str
 }
 
 /// [`explain_plan_analyze`] under a cooperative [`QueryBudget`] (deadline / max rows).
-pub fn explain_plan_analyze_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<PlanNode, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+pub fn explain_plan_analyze_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<PlanNode, String> {
+    let q = SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
@@ -274,10 +282,16 @@ fn plan_from_pattern(graph: &Graph, p: &spargebra::algebra::GraphPattern) -> Pla
         | G::OrderBy { inner, .. }
         | G::Group { inner, .. } => vec![plan_from_pattern(graph, inner)],
         G::Join { left, right } | G::Union { left, right } | G::Minus { left, right } => {
-            vec![plan_from_pattern(graph, left), plan_from_pattern(graph, right)]
+            vec![
+                plan_from_pattern(graph, left),
+                plan_from_pattern(graph, right),
+            ]
         }
         G::LeftJoin { left, right, .. } => {
-            vec![plan_from_pattern(graph, left), plan_from_pattern(graph, right)]
+            vec![
+                plan_from_pattern(graph, left),
+                plan_from_pattern(graph, right),
+            ]
         }
         _ => Vec::new(),
     };
@@ -446,7 +460,11 @@ impl SlowQueryRing {
             }
             s.push_str("{\"sparql\":");
             write_json_string(&mut s, &q.sparql);
-            let _ = write!(s, ",\"totalNanos\":{},\"totalRows\":{},\"plan\":", q.total_nanos, q.total_rows);
+            let _ = write!(
+                s,
+                ",\"totalNanos\":{},\"totalRows\":{},\"plan\":",
+                q.total_nanos, q.total_rows
+            );
             q.plan.write_json(&mut s);
             s.push('}');
         }
@@ -489,7 +507,10 @@ mod tests {
         let est = bgp.estimated.expect("BGP node carries an estimate");
         assert!(est > 0.0, "estimate should be positive: {est}");
         // Planning-only: no actuals, no q-error anywhere.
-        assert!(bgp.actual.is_none() && bgp.q_error.is_none(), "no execution => no actual/q-error");
+        assert!(
+            bgp.actual.is_none() && bgp.q_error.is_none(),
+            "no execution => no actual/q-error"
+        );
         assert!(plan.max_q_error().is_none(), "no q-error in a dry-run plan");
     }
 
@@ -504,11 +525,18 @@ mod tests {
         let bgp = find(&plan, |n| n.operator.contains("BGP")).expect("a BGP node");
         assert_eq!(bgp.actual, Some(2), "the query yields 2 rows");
         assert!(bgp.nanos.is_some(), "ANALYZE records wall time");
-        let est = bgp.estimated.expect("BGP node carries the planner estimate");
-        let q = bgp.q_error.expect("BGP node with non-zero est+actual has a q-error");
+        let est = bgp
+            .estimated
+            .expect("BGP node carries the planner estimate");
+        let q = bgp
+            .q_error
+            .expect("BGP node with non-zero est+actual has a q-error");
         // q-error is exactly max(est/actual, actual/est) for this node.
         let expected = (est / 2.0).max(2.0 / est);
-        assert!((q - expected).abs() < 1e-9, "q={q} expected={expected} est={est}");
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "q={q} expected={expected} est={est}"
+        );
         assert!(q >= 1.0, "q-error is always >= 1.0: {q}");
         // The whole-plan worst q-error is at least this node's.
         assert!(plan.max_q_error().unwrap() >= q - 1e-9);
@@ -518,10 +546,14 @@ mod tests {
     fn q_error_none_on_empty_result() {
         // An unsatisfiable BGP (absent constant) → 0 actual rows AND 0 estimate;
         // q-error is undefined (None), not a divide-by-zero.
-        let plan = explain_plan_analyze(&g(), "SELECT ?s WHERE { ?s <http://ex/nope> ?o }").unwrap();
+        let plan =
+            explain_plan_analyze(&g(), "SELECT ?s WHERE { ?s <http://ex/nope> ?o }").unwrap();
         let bgp = find(&plan, |n| n.operator.contains("BGP")).expect("a BGP node");
         assert_eq!(bgp.actual, Some(0));
-        assert!(bgp.q_error.is_none(), "0/0 q-error must be None, not NaN/Inf");
+        assert!(
+            bgp.q_error.is_none(),
+            "0/0 q-error must be None, not NaN/Inf"
+        );
     }
 
     #[test]
@@ -580,7 +612,10 @@ mod tests {
     fn slow_query_ring_records_real_query() {
         let mut ring = SlowQueryRing::new(4);
         let q = ring
-            .record(&g(), "PREFIX ex: <http://ex/> SELECT ?a ?b WHERE { ?a ex:knows ?b }")
+            .record(
+                &g(),
+                "PREFIX ex: <http://ex/> SELECT ?a ?b WHERE { ?a ex:knows ?b }",
+            )
             .unwrap();
         assert_eq!(q.total_rows, 2);
         assert_eq!(ring.len(), 1);
@@ -591,7 +626,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&ring.to_json()).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 1);
         // CONSTRUCT is not analyzable → an honest Err, ring unchanged.
-        assert!(ring.record(&g(), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }").is_err());
+        assert!(ring
+            .record(&g(), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+            .is_err());
         assert_eq!(ring.len(), 1);
     }
 
@@ -613,14 +650,30 @@ mod tests {
     /// Reconstructs a `PlanNode` from a parsed serde_json value (test-only — proves
     /// the hand-written JSON carries every field needed to rebuild the tree).
     fn from_json_value(v: &serde_json::Value) -> PlanNode {
-        let opt_f64 = |k: &str| v.get(k).and_then(|x| if x.is_null() { None } else { x.as_f64() });
+        let opt_f64 = |k: &str| {
+            v.get(k)
+                .and_then(|x| if x.is_null() { None } else { x.as_f64() })
+        };
         PlanNode {
             operator: v["operator"].as_str().unwrap().to_string(),
             estimated: opt_f64("estimated"),
-            actual: v.get("actual").and_then(|x| if x.is_null() { None } else { x.as_u64().map(|n| n as usize) }),
-            nanos: v.get("nanos").and_then(|x| if x.is_null() { None } else { x.as_u64() }),
+            actual: v.get("actual").and_then(|x| {
+                if x.is_null() {
+                    None
+                } else {
+                    x.as_u64().map(|n| n as usize)
+                }
+            }),
+            nanos: v
+                .get("nanos")
+                .and_then(|x| if x.is_null() { None } else { x.as_u64() }),
             q_error: opt_f64("qError"),
-            children: v["children"].as_array().unwrap().iter().map(from_json_value).collect(),
+            children: v["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(from_json_value)
+                .collect(),
         }
     }
 }

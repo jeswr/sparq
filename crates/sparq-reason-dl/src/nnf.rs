@@ -54,9 +54,7 @@ use rustc_hash::FxHashSet;
 #[must_use]
 pub fn nnf(ce: &ClassExpression) -> ClassExpression {
     match ce {
-        ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => {
-            ce.clone()
-        }
+        ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => ce.clone(),
         ClassExpression::ObjectIntersectionOf(members) => {
             ClassExpression::ObjectIntersectionOf(members.iter().map(nnf).collect())
         }
@@ -243,12 +241,18 @@ mod tests {
     fn is_nnf_accepts_nnf_and_rejects_buried_negation() {
         assert!(is_nnf(&a()));
         assert!(is_nnf(&not(a())));
-        assert!(is_nnf(&CE::only(10, CE::ObjectUnionOf(vec![not(a()), b()]))));
+        assert!(is_nnf(&CE::only(
+            10,
+            CE::ObjectUnionOf(vec![not(a()), b()])
+        )));
         // Negation over anything but a named class is NOT NNF.
         assert!(!is_nnf(&not(CE::Thing)));
         assert!(!is_nnf(&not(not(a()))));
         assert!(!is_nnf(&not(CE::ObjectIntersectionOf(vec![a(), b()]))));
-        assert!(!is_nnf(&CE::some(10, not(CE::ObjectUnionOf(vec![a(), b()])))));
+        assert!(!is_nnf(&CE::some(
+            10,
+            not(CE::ObjectUnionOf(vec![a(), b()]))
+        )));
     }
 
     #[test]

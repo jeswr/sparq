@@ -279,10 +279,14 @@ fn scan_k1_n16_r8_full_prove_verify_round_trip() {
     assert_eq!(id, CircuitId::Scan { k: 1, n: 16, r: 8 });
     let prover = CircuitProver::from_crate_root();
     let out = scratch("scan_k1_r8_full");
-    let art = prover.prove_in(&id, &toml, &out, "scan_k1_r8_full").expect("prove succeeds");
+    let art = prover
+        .prove_in(&id, &toml, &out, "scan_k1_r8_full")
+        .expect("prove succeeds");
     assert!(!art.proof.is_empty());
     assert!(
-        prover.verify(&art, &out.join("verify")).expect("verify runs"),
+        prover
+            .verify(&art, &out.join("verify"))
+            .expect("verify runs"),
         "valid scan_k1_n16_r8 proof must verify"
     );
     // Tamper: flip a proof byte -> bb must reject.
@@ -290,7 +294,9 @@ fn scan_k1_n16_r8_full_prove_verify_round_trip() {
     let mid = bad.proof.len() / 2;
     bad.proof[mid] ^= 0xff;
     assert!(
-        !prover.verify(&bad, &out.join("verify_bad")).expect("verify runs"),
+        !prover
+            .verify(&bad, &out.join("verify_bad"))
+            .expect("verify runs"),
         "tampered scan_k1_n16_r8 proof must be rejected"
     );
 }
@@ -361,8 +367,16 @@ fn join_eq_na64_nb64_witness_satisfiable() {
     }
     let built =
         build_join(&big_graph_a(), 2, &big_graph_b(), 0, blinding()).expect("big join builds");
-    let (id, toml) =
-        prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness), None).unwrap();
+    let (id, toml) = prover_toml_for(
+        &built.inputs,
+        &challenge(),
+        &[],
+        &[],
+        &[],
+        Some(&built.witness),
+        None,
+    )
+    .unwrap();
     assert_eq!(id, CircuitId::JoinEq { n_a: 64, n_b: 64 });
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("join_eq_na64_nb64 compiles");
@@ -399,13 +413,25 @@ fn join_eq_na64_nb64_full_prove_verify_round_trip() {
     }
     let built =
         build_join(&big_graph_a(), 2, &big_graph_b(), 0, blinding()).expect("big join builds");
-    let (id, toml) =
-        prover_toml_for(&built.inputs, &challenge(), &[], &[], &[], Some(&built.witness), None).unwrap();
+    let (id, toml) = prover_toml_for(
+        &built.inputs,
+        &challenge(),
+        &[],
+        &[],
+        &[],
+        Some(&built.witness),
+        None,
+    )
+    .unwrap();
     assert_eq!(id, CircuitId::JoinEq { n_a: 64, n_b: 64 });
     let prover = CircuitProver::from_crate_root();
     let out = scratch("join_n64_full");
-    let art = prover.prove_in(&id, &toml, &out, "join_n64_full").expect("prove succeeds");
-    let vk = prover.canonical_vk(&id, &out.join("cvk")).expect("canonical vk");
+    let art = prover
+        .prove_in(&id, &toml, &out, "join_n64_full")
+        .expect("prove succeeds");
+    let vk = prover
+        .canonical_vk(&id, &out.join("cvk"))
+        .expect("canonical vk");
     assert!(
         prover
             .verify_with(&art.proof, &art.public_inputs, &vk, &out.join("verify"))

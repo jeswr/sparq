@@ -331,8 +331,8 @@ impl TrainedModel {
                         - h_im * r_im * t_re;
                     // Imaginary part of h·r·conj(t): Im((A + iB)(t_re − i·t_im)) = B·t_re − A·t_im
                     // with A = Re(h·r), B = Im(h·r).
-                    v[half + i] = (h_re * r_im + h_im * r_re) * t_re
-                        - (h_re * r_re - h_im * r_im) * t_im;
+                    v[half + i] =
+                        (h_re * r_im + h_im * r_re) * t_re - (h_re * r_re - h_im * r_im) * t_im;
                 }
                 v
             }

@@ -557,8 +557,9 @@ fn parse_multihash(bytes: &[u8]) -> Result<(u64, usize), ConceptError> {
     let (code, n1) = read_uvarint(bytes)?;
     let (len, n2) = read_uvarint(&bytes[n1..])?;
     let offset = n1 + n2;
-    let declared = usize::try_from(len)
-        .map_err(|_| ConceptError::Multihash(format!("declared digest length {} is absurd", len)))?;
+    let declared = usize::try_from(len).map_err(|_| {
+        ConceptError::Multihash(format!("declared digest length {} is absurd", len))
+    })?;
     let actual = bytes.len() - offset;
     if actual != declared {
         return Err(ConceptError::Multihash(format!(
@@ -998,7 +999,11 @@ mod tests {
 
     #[test]
     fn concept_hash_codes_lengths_and_lookup_agree() {
-        for h in [ConceptHash::Sha256, ConceptHash::Sha512, ConceptHash::Sha384] {
+        for h in [
+            ConceptHash::Sha256,
+            ConceptHash::Sha512,
+            ConceptHash::Sha384,
+        ] {
             assert_eq!(ConceptHash::from_code(h.code()), Some(h));
             assert_eq!(h.digest_record(&record()).unwrap().len(), h.digest_len());
         }
@@ -1047,7 +1052,10 @@ mod tests {
         let upper_body = format!("{}{}", URN_PREFIX, urn[URN_PREFIX.len()..].to_uppercase());
         let upper = ConceptUrn::parse(&upper_body).unwrap();
         assert_eq!(upper.multibase(), Multibase::Base16Upper);
-        assert_eq!(upper.multihash(), ConceptUrn::parse(&urn).unwrap().multihash());
+        assert_eq!(
+            upper.multihash(),
+            ConceptUrn::parse(&urn).unwrap().multihash()
+        );
         // Where the alphabet is case-significant, the same edit is a rejection.
         let b58 = concept_urn(&record(), ConceptHash::Sha256, Multibase::Base58Btc).unwrap();
         let b58_upper = format!("{}{}", URN_PREFIX, b58[URN_PREFIX.len()..].to_uppercase());
@@ -1128,7 +1136,11 @@ mod tests {
             Multibase::Base58Btc,
             Multibase::Base64Url,
         ] {
-            for h in [ConceptHash::Sha256, ConceptHash::Sha384, ConceptHash::Sha512] {
+            for h in [
+                ConceptHash::Sha256,
+                ConceptHash::Sha384,
+                ConceptHash::Sha512,
+            ] {
                 let urn = concept_urn(&record(), h, base).unwrap();
                 verify_concept_urn(&urn, &record()).unwrap();
                 let parsed = ConceptUrn::parse(&urn).unwrap();

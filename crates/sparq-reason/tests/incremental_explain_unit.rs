@@ -41,7 +41,11 @@ fn rdfs_ids(dict: &mut Dict) -> (Id, Id, Id, Id, Id) {
 }
 
 fn render(dict: &Dict, t: [Id; 3]) -> [String; 3] {
-    [dict.term(t[0]).to_string(), dict.term(t[1]).to_string(), dict.term(t[2]).to_string()]
+    [
+        dict.term(t[0]).to_string(),
+        dict.term(t[1]).to_string(),
+        dict.term(t[2]).to_string(),
+    ]
 }
 
 /// Lightweight structural invariants every well-formed [`ProofTree`] must satisfy,
@@ -50,18 +54,28 @@ fn render(dict: &Dict, t: [Id; 3]) -> [String; 3] {
 fn assert_structurally_sound(tree: &ProofTree, expect_conclusion: &[String; 3]) {
     let nodes = tree.nodes();
     assert!(!nodes.is_empty(), "empty proof");
-    assert_eq!(tree.root() as usize, nodes.len() - 1, "root must be the last node");
+    assert_eq!(
+        tree.root() as usize,
+        nodes.len() - 1,
+        "root must be the last node"
+    );
     assert_eq!(tree.conclusion(), expect_conclusion, "wrong conclusion");
     for (i, n) in nodes.iter().enumerate() {
         for &p in &n.premises {
-            assert!((p as usize) < i, "node {i}: premise {p} not strictly before it");
+            assert!(
+                (p as usize) < i,
+                "node {i}: premise {p} not strictly before it"
+            );
         }
         assert!(!n.rule.is_empty(), "node {i}: empty rule label");
         for term in &n.conclusion {
             assert!(!term.is_empty(), "node {i}: empty term in conclusion");
         }
         if n.rule == "asserted" {
-            assert!(n.premises.is_empty(), "node {i}: asserted leaf with premises");
+            assert!(
+                n.premises.is_empty(),
+                "node {i}: asserted leaf with premises"
+            );
         }
     }
 }
@@ -96,11 +110,20 @@ fn rdfs_insert_then_explain_new_derivation() {
     let mut g = MaterializedGraph::new(&mut dict, &[[dog, sc, mammal], [mammal, sc, animal]]);
     // Before the insert the typing is not in the closure and has no proof.
     assert!(!g.contains(&[rex, ty, animal]));
-    assert!(g.why(&dict, [rex, ty, animal]).is_none(), "no proof before the fact exists");
+    assert!(
+        g.why(&dict, [rex, ty, animal]).is_none(),
+        "no proof before the fact exists"
+    );
 
     let added = g.insert(&[[rex, ty, dog]]);
-    assert!(added > 0, "insert must add the asserted fact + its consequences");
-    assert!(g.contains(&[rex, ty, animal]), "incremental closure types rex up");
+    assert!(
+        added > 0,
+        "insert must add the asserted fact + its consequences"
+    );
+    assert!(
+        g.contains(&[rex, ty, animal]),
+        "incremental closure types rex up"
+    );
 
     let t = [rex, ty, animal];
     let tree = g.why(&dict, t).expect("newly-derived triple must explain");
@@ -113,7 +136,10 @@ fn rdfs_insert_then_explain_new_derivation() {
     // Every asserted leaf is CURRENTLY in the base (the consistency model).
     let base: FxHashSet<[String; 3]> = g.base_triples().map(|b| render(&dict, b)).collect();
     for leaf in asserted_leaves(&tree) {
-        assert!(base.contains(&leaf), "proof leaf {leaf:?} not in the current base");
+        assert!(
+            base.contains(&leaf),
+            "proof leaf {leaf:?} not in the current base"
+        );
     }
     // The just-inserted fact is one of those leaves.
     assert!(asserted_leaves(&tree).contains(&render(&dict, [rex, ty, dog])));
@@ -133,10 +159,7 @@ fn rdfs_retract_updates_explanation_to_alternative_support() {
         ex(&mut dict, "a"),
         ex(&mut dict, "b"),
     );
-    let mut g = MaterializedGraph::new(
-        &mut dict,
-        &[[p, sp, q], [q, dom, c], [a, p, b], [a, q, b]],
-    );
+    let mut g = MaterializedGraph::new(&mut dict, &[[p, sp, q], [q, dom, c], [a, p, b], [a, q, b]]);
     let t = [a, ty, c];
     assert!(g.contains(&t));
     let tree0 = g.why(&dict, t).expect("initial proof");
@@ -160,12 +183,17 @@ fn rdfs_retract_updates_explanation_to_alternative_support() {
     // Retract the second support: triple leaves the closure, no proof.
     g.delete(&[[a, q, b]]);
     assert!(!g.contains(&t));
-    assert!(g.why(&dict, t).is_none(), "no proof for a triple that left the closure");
+    assert!(
+        g.why(&dict, t).is_none(),
+        "no proof for a triple that left the closure"
+    );
 
     // Re-insert: support and proof return.
     g.insert(&[[a, q, b]]);
     assert!(g.contains(&t));
-    let tree2 = g.why(&dict, t).expect("re-inserted support restores the proof");
+    let tree2 = g
+        .why(&dict, t)
+        .expect("re-inserted support restores the proof");
     assert_structurally_sound(&tree2, &render(&dict, t));
 }
 
@@ -184,14 +212,36 @@ fn rdfs_why_respects_node_cap() {
     assert!(g.contains(&top));
 
     // Default caps: a proof exists.
-    let full = g.why(&dict, top).expect("default caps prove the deep chain");
-    assert!(full.nodes().len() > 2, "deep chain should need several nodes");
+    let full = g
+        .why(&dict, top)
+        .expect("default caps prove the deep chain");
+    assert!(
+        full.nodes().len() > 2,
+        "deep chain should need several nodes"
+    );
     // Tight node cap: aborts to None.
-    let capped = g.why_with(&dict, top, ExplainOpts { max_depth: 128, max_nodes: 2 });
+    let capped = g.why_with(
+        &dict,
+        top,
+        ExplainOpts {
+            max_depth: 128,
+            max_nodes: 2,
+        },
+    );
     assert!(capped.is_none(), "max_nodes=2 must abort the deep proof");
     // Tight depth cap: also aborts.
-    let depth_capped = g.why_with(&dict, top, ExplainOpts { max_depth: 1, max_nodes: 65_536 });
-    assert!(depth_capped.is_none(), "max_depth=1 must abort the deep proof");
+    let depth_capped = g.why_with(
+        &dict,
+        top,
+        ExplainOpts {
+            max_depth: 1,
+            max_nodes: 65_536,
+        },
+    );
+    assert!(
+        depth_capped.is_none(),
+        "max_depth=1 must abort the deep proof"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════
@@ -215,8 +265,15 @@ fn owl_mono_insert_then_explain_inverse() {
     );
     let inv = owl_iri(&mut dict, "inverseOf");
     let mut g = MaterializedOwlGraph::new(&mut dict, &[[parent, inv, child]]);
-    assert_eq!(g.mode(), OwlMode::CountingMono, "no transitive prop => mono mode");
-    assert!(!g.contains(&[b, child, a]), "nothing derived before the edge exists");
+    assert_eq!(
+        g.mode(),
+        OwlMode::CountingMono,
+        "no transitive prop => mono mode"
+    );
+    assert!(
+        !g.contains(&[b, child, a]),
+        "nothing derived before the edge exists"
+    );
 
     g.insert(&mut dict, &[[a, parent, b]]);
     let t = [b, child, a];
@@ -244,18 +301,21 @@ fn owl_fixpoint_transitive_insert_retract_explanation() {
         ex(&mut dict, "c"),
     );
     let trans = owl_iri(&mut dict, "TransitiveProperty");
-    let mut g = MaterializedOwlGraph::new(
-        &mut dict,
-        &[[anc, ty, trans], [a, anc, b]],
+    let mut g = MaterializedOwlGraph::new(&mut dict, &[[anc, ty, trans], [a, anc, b]]);
+    assert_eq!(
+        g.mode(),
+        OwlMode::CountingFixpoint,
+        "transitive prop => fixpoint mode"
     );
-    assert_eq!(g.mode(), OwlMode::CountingFixpoint, "transitive prop => fixpoint mode");
     let derived = [a, anc, c];
     assert!(!g.contains(&derived), "no bridge yet");
 
     // Insert the bridge (b ancestorOf c): prp-trp now derives (a ancestorOf c).
     g.insert(&mut dict, &[[b, anc, c]]);
     assert!(g.contains(&derived), "prp-trp derives the transitive edge");
-    let tree = g.why(&dict, derived).expect("transitive consequence must explain");
+    let tree = g
+        .why(&dict, derived)
+        .expect("transitive consequence must explain");
     assert_structurally_sound(&tree, &render(&dict, derived));
     let base: FxHashSet<[String; 3]> = g.base_triples().map(|x| render(&dict, x)).collect();
     for leaf in asserted_leaves(&tree) {
@@ -264,8 +324,14 @@ fn owl_fixpoint_transitive_insert_retract_explanation() {
 
     // Retract the bridge: the transitive edge and its explanation disappear.
     g.delete(&mut dict, &[[b, anc, c]]);
-    assert!(!g.contains(&derived), "retracting the bridge removes the transitive edge");
-    assert!(g.why(&dict, derived).is_none(), "no proof once the bridge is gone");
+    assert!(
+        !g.contains(&derived),
+        "retracting the bridge removes the transitive edge"
+    );
+    assert!(
+        g.why(&dict, derived).is_none(),
+        "no proof once the bridge is gone"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════
@@ -301,13 +367,15 @@ fn n3_insert_then_explain_transitive_chain() {
     assert!(!g.contains(&target), "no chain to c yet");
 
     g.insert(&[[n3_ex("b"), n3_ex("parent"), n3_ex("c")]]);
-    assert!(g.contains(&target), "the transitive ancestor edge is derived after the insert");
+    assert!(
+        g.contains(&target),
+        "the transitive ancestor edge is derived after the insert"
+    );
     let tree = g.why(&target).expect("derived N3 fact must explain");
     assert_structurally_sound(&tree, &n3_render(&target));
     // `MaterializedN3Graph` exposes no base iterator, but every asserted leaf is necessarily
     // also in the closure; check that, and that the just-inserted bridge is one of them.
-    let closure_set: FxHashSet<[String; 3]> =
-        g.closure().iter().map(n3_render).collect();
+    let closure_set: FxHashSet<[String; 3]> = g.closure().iter().map(n3_render).collect();
     for leaf in asserted_leaves(&tree) {
         assert!(closure_set.contains(&leaf), "stale N3 leaf {leaf:?}");
     }
@@ -317,7 +385,9 @@ fn n3_insert_then_explain_transitive_chain() {
     );
     // The root rule is one of the document's forward rules.
     assert!(
-        tree.nodes()[tree.root() as usize].rule.starts_with("n3-rule-"),
+        tree.nodes()[tree.root() as usize]
+            .rule
+            .starts_with("n3-rule-"),
         "derived N3 fact's top step names a rule"
     );
 }
@@ -334,11 +404,20 @@ fn n3_retract_drops_explanation() {
     let to_c = [n3_ex("a"), n3_ex("ancestor"), n3_ex("c")];
     let to_b = [n3_ex("a"), n3_ex("ancestor"), n3_ex("b")];
     assert!(g.contains(&to_c));
-    assert!(g.why(&to_c).is_some(), "chain to c explains before the retraction");
+    assert!(
+        g.why(&to_c).is_some(),
+        "chain to c explains before the retraction"
+    );
 
     g.delete(&[[n3_ex("b"), n3_ex("parent"), n3_ex("c")]]);
-    assert!(!g.contains(&to_c), "no path to c after retracting the bridge");
-    assert!(g.why(&to_c).is_none(), "no explanation for a fact that left the closure");
+    assert!(
+        !g.contains(&to_c),
+        "no path to c after retracting the bridge"
+    );
+    assert!(
+        g.why(&to_c).is_none(),
+        "no explanation for a fact that left the closure"
+    );
     // The independent (a ancestor b) survives and still explains.
     assert!(g.contains(&to_b));
     let tree = g.why(&to_b).expect("surviving fact still explains");

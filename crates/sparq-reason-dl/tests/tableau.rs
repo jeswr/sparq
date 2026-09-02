@@ -19,8 +19,8 @@
 
 use sparq_core::dict::Id;
 use sparq_core::Graph;
-use sparq_reason_dl::model::{Axiom, ClassExpression as CE};
 use sparq_reason_dl::model::ObjectPropertyExpression as OPE;
+use sparq_reason_dl::model::{Axiom, ClassExpression as CE};
 use sparq_reason_dl::tableau::{
     class_satisfiability, consistency, consistency_from_extraction, Budget, ExhaustedBudget,
     UnknownReason, Verdict,
@@ -382,7 +382,10 @@ fn or_branching_sat_unsat_pair() {
         is_a(IA, not(named(B))),
         is_a(IA, not(named(C))),
     ]);
-    assert_eq!(consistency(&unsat, Budget::default()), Verdict::Unsatisfiable);
+    assert_eq!(
+        consistency(&unsat, Budget::default()),
+        Verdict::Unsatisfiable
+    );
 
     let sat = onto(vec![tbox, is_a(IA, named(A)), is_a(IA, not(named(B)))]);
     assert_eq!(consistency(&sat, Budget::default()), Verdict::Satisfiable);
@@ -406,7 +409,10 @@ fn or_branch_backtracks_past_first_clash() {
         subclass(named(C), CE::Nothing),
         is_a(IA, named(A)),
     ]);
-    assert_eq!(consistency(&unsat, Budget::default()), Verdict::Unsatisfiable);
+    assert_eq!(
+        consistency(&unsat, Budget::default()),
+        Verdict::Unsatisfiable
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -461,7 +467,10 @@ fn forall_on_super_role_constrains_generated_sub_role_edge_pair() {
     let concept = and(vec![CE::some(S, named(A)), CE::only(R, not(named(A)))]);
 
     let unsat = onto(vec![subrole(S, R), is_a(IA, concept.clone())]);
-    assert_eq!(consistency(&unsat, Budget::default()), Verdict::Unsatisfiable);
+    assert_eq!(
+        consistency(&unsat, Budget::default()),
+        Verdict::Unsatisfiable
+    );
 
     let sat = onto(vec![is_a(IA, concept)]);
     assert_eq!(consistency(&sat, Budget::default()), Verdict::Satisfiable);
@@ -479,7 +488,10 @@ fn exists_forall_interaction_pair() {
         IA,
         and(vec![CE::some(R, named(A)), CE::only(R, not(named(A)))]),
     )]);
-    assert_eq!(consistency(&unsat, Budget::default()), Verdict::Unsatisfiable);
+    assert_eq!(
+        consistency(&unsat, Budget::default()),
+        Verdict::Unsatisfiable
+    );
 
     let sat = onto(vec![is_a(
         IA,
@@ -496,7 +508,10 @@ fn disjointness_pair() {
         is_a(IA, named(A)),
         is_a(IA, named(B)),
     ]);
-    assert_eq!(consistency(&unsat, Budget::default()), Verdict::Unsatisfiable);
+    assert_eq!(
+        consistency(&unsat, Budget::default()),
+        Verdict::Unsatisfiable
+    );
 
     let sat = onto(vec![
         Axiom::DisjointClasses(named(A), named(B)),
@@ -515,7 +530,10 @@ fn equivalence_desugars_to_both_gcis() {
         is_a(IA, named(A)),
         is_a(IA, not(named(B))),
     ]);
-    assert_eq!(consistency(&forward, Budget::default()), Verdict::Unsatisfiable);
+    assert_eq!(
+        consistency(&forward, Budget::default()),
+        Verdict::Unsatisfiable
+    );
     // Backward (B ⊓ C ⊑ A): a : B ⊓ C ⊓ ¬A is unsat.
     let backward = onto(vec![
         equiv.clone(),
@@ -523,7 +541,10 @@ fn equivalence_desugars_to_both_gcis() {
         is_a(IA, named(C)),
         is_a(IA, not(named(A))),
     ]);
-    assert_eq!(consistency(&backward, Budget::default()), Verdict::Unsatisfiable);
+    assert_eq!(
+        consistency(&backward, Budget::default()),
+        Verdict::Unsatisfiable
+    );
     // Consistent use.
     let sat = onto(vec![equiv, is_a(IA, named(A))]);
     assert_eq!(consistency(&sat, Budget::default()), Verdict::Satisfiable);
@@ -567,7 +588,10 @@ fn domain_and_range_pairs() {
 #[test]
 fn tbox_only_ontology_checked_over_nonempty_domain() {
     let unsat = onto(vec![subclass(CE::Thing, CE::Nothing)]);
-    assert_eq!(consistency(&unsat, Budget::default()), Verdict::Unsatisfiable);
+    assert_eq!(
+        consistency(&unsat, Budget::default()),
+        Verdict::Unsatisfiable
+    );
 
     let sat = onto(vec![subclass(named(A), CE::Nothing)]);
     assert_eq!(consistency(&sat, Budget::default()), Verdict::Satisfiable);

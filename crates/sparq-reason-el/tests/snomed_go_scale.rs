@@ -59,7 +59,9 @@ fn build_slice(d: &mut Dict, scale: usize) -> (Vec<[Id; 3]>, usize) {
     let part_of = iri(d, "partOf");
     let has_location = iri(d, "hasLocation");
     let has_exact_location = iri(d, "hasExactLocation");
-    let branches: Vec<Id> = (0..BRANCHES).map(|b| iri(d, &format!("Branch{b}"))).collect();
+    let branches: Vec<Id> = (0..BRANCHES)
+        .map(|b| iri(d, &format!("Branch{b}")))
+        .collect();
 
     let mut t: Vec<[Id; 3]> = Vec::new();
     let mut bnode = 0usize;
@@ -145,10 +147,19 @@ fn run_and_assert(scale: usize) -> usize {
     let closure = Classifier::classify(&dict, &triples);
     let direct = DirectHierarchy::from_closure(&closure);
 
-    let look = |s: &str| dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(format!("{EX}{s}"))));
+    let look = |s: &str| {
+        dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(format!(
+            "{EX}{s}"
+        ))))
+    };
 
     // 1. total closure edges over the named concept set.
-    let mut named: Vec<Id> = vec![look("Root"), look("LocatedFinding"), look("DeepPart"), look("StructC")];
+    let mut named: Vec<Id> = vec![
+        look("Root"),
+        look("LocatedFinding"),
+        look("DeepPart"),
+        look("StructC"),
+    ];
     for b in 0..BRANCHES {
         named.push(look(&format!("Branch{b}")));
     }
@@ -168,7 +179,10 @@ fn run_and_assert(scale: usize) -> usize {
     let located = (0..scale)
         .filter(|&i| closure.is_subclass_of(look(&format!("Finding{i}")), located_finding))
         .count();
-    assert_eq!(located, scale, "scale {scale}: not every Finding derived LocatedFinding");
+    assert_eq!(
+        located, scale,
+        "scale {scale}: not every Finding derived LocatedFinding"
+    );
 
     // 3. every StructA_i / StructB_i ⊑ DeepPart (CR4 through CR11 transitive composition).
     let deep_part = look("DeepPart");
@@ -176,7 +190,11 @@ fn run_and_assert(scale: usize) -> usize {
         .flat_map(|i| [format!("StructA{i}"), format!("StructB{i}")])
         .filter(|n| closure.is_subclass_of(look(n), deep_part))
         .count();
-    assert_eq!(deep, 2 * scale, "scale {scale}: not every Struct derived DeepPart");
+    assert_eq!(
+        deep,
+        2 * scale,
+        "scale {scale}: not every Struct derived DeepPart"
+    );
 
     closure_edges + direct.direct_edge_count()
 }

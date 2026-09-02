@@ -298,7 +298,9 @@ fn holder_set_proof_serde_round_trip() {
 /// `CircuitId::HolderSet { depth }` round-trips and names the on-disk package.
 #[test]
 fn holder_set_circuit_id_round_trips() {
-    let id = CircuitId::HolderSet { depth: HOLDER_SET_DEPTH };
+    let id = CircuitId::HolderSet {
+        depth: HOLDER_SET_DEPTH,
+    };
     assert_eq!(id.package(), "holder_set_d4");
     let json = serde_json::to_string(&id).expect("serializes");
     let back: CircuitId = serde_json::from_str(&json).expect("deserializes");
@@ -348,7 +350,10 @@ fn holder_set_depth_mismatch_rejected() {
     // Policy depth 4 != declared 2.
     let registry = registry_with_set(4);
     match run(&m, &registry, "set_depth_mismatch") {
-        Err(CheckError::HolderSetDepthMismatch { declared: 2, policy: 4 }) => {}
+        Err(CheckError::HolderSetDepthMismatch {
+            declared: 2,
+            policy: 4,
+        }) => {}
         other => panic!("expected HolderSetDepthMismatch {{2,4}}, got {other:?}"),
     }
 }
@@ -413,7 +418,9 @@ fn holder_set_malformed_blob_on_unreferenced_still_rejects() {
     let registry = registry_with_set(HOLDER_SET_DEPTH);
     match run(&m, &registry, "set_malformed_unref") {
         Err(CheckError::HolderSetUnreferencedCommitment { .. }) => {}
-        other => panic!("expected HolderSetUnreferencedCommitment (fires before blob decode), got {other:?}"),
+        other => panic!(
+            "expected HolderSetUnreferencedCommitment (fires before blob decode), got {other:?}"
+        ),
     }
 }
 
@@ -489,7 +496,11 @@ fn registry_root_matches_host_root() {
         .expect("the in-set holder is a member");
     let sibs = holder_set_membership_witness(&holder_set_keys(), depth, idx as u64)
         .expect("the in-set holder has a membership path");
-    assert_eq!(sibs.len(), depth as usize, "the path has one sibling per level");
+    assert_eq!(
+        sibs.len(),
+        depth as usize,
+        "the path has one sibling per level"
+    );
 }
 
 // =========================================================================
@@ -518,7 +529,9 @@ fn prove_scan(prover: &CircuitProver, tag: &str) -> (ProofInputs, String) {
     )
     .unwrap();
     let out = scratch(&format!("{tag}_scan"));
-    let art = prover.prove_in(&id, &toml, &out, tag).expect("scan prove succeeds");
+    let art = prover
+        .prove_in(&id, &toml, &out, tag)
+        .expect("scan prove succeeds");
     (scan.inputs, encode_artifacts(&art))
 }
 
@@ -537,7 +550,11 @@ fn prove_holder_set(
     let pok = holder_pok_witness(&hsk).expect("non-identity holder has a witness");
     let siblings = holder_set_membership_witness(holders, depth, index)
         .expect("the holder has a membership path");
-    let witness = HolderSetWitness { pok, index, siblings };
+    let witness = HolderSetWitness {
+        pok,
+        index,
+        siblings,
+    };
     let challenge = FieldHex(CHALLENGE_HEX.into()).to_field().unwrap();
     let toml = holder_set_prover_toml(&challenge, root, &witness);
     let out = scratch(&format!("{tag}_set"));
@@ -568,7 +585,10 @@ fn manifest_with_scan_and_set(
     m.commitment_attestations = vec![attest_bearer(commit_fr, fixture_salt(), &issuer)];
     m.revocation = Some(fixture_revocation());
     m.status_snapshots = vec![fixture_snapshot()];
-    m.sub_proofs = vec![SubProof { inputs: scan_inputs, proof_hex: scan_hex }];
+    m.sub_proofs = vec![SubProof {
+        inputs: scan_inputs,
+        proof_hex: scan_hex,
+    }];
     m
 }
 
@@ -599,7 +619,13 @@ fn hidden_holder_set_in_set_verifies_end_to_end() {
     };
     let commitment = commitments[0].clone();
     let set_hex = prove_holder_set(
-        &prover, IN_SET_HOLDER_SEED, &root, &holders, depth, index, "in_set",
+        &prover,
+        IN_SET_HOLDER_SEED,
+        &root,
+        &holders,
+        depth,
+        index,
+        "in_set",
     );
     let set_proof = HolderSetProof {
         commitment,
@@ -649,7 +675,13 @@ fn hidden_holder_set_forged_set_root_rejected_end_to_end() {
     };
     let commitment = commitments[0].clone();
     let set_hex = prove_holder_set(
-        &prover, IN_SET_HOLDER_SEED, &prover_root, &prover_holders, depth, index, "forged_root",
+        &prover,
+        IN_SET_HOLDER_SEED,
+        &prover_root,
+        &prover_holders,
+        depth,
+        index,
+        "forged_root",
     );
     let set_proof = HolderSetProof {
         commitment,
@@ -707,7 +739,11 @@ fn hidden_holder_set_out_of_set_holder_is_unprovable_end_to_end() {
     let hsk = SecretKey::from_seed(OUT_OF_SET_HOLDER_SEED);
     let pok = holder_pok_witness(&hsk).expect("non-identity holder has a witness");
     let siblings = holder_set_membership_witness(&holders, depth, 0).unwrap();
-    let witness = HolderSetWitness { pok, index: 0, siblings };
+    let witness = HolderSetWitness {
+        pok,
+        index: 0,
+        siblings,
+    };
     let challenge = FieldHex(CHALLENGE_HEX.into()).to_field().unwrap();
     let toml = holder_set_prover_toml(&challenge, &root, &witness);
     let out = scratch("out_of_set_unprovable");

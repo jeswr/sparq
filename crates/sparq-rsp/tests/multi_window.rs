@@ -50,16 +50,30 @@ fn multi_window_join_across_two_streams() {
 
     // --- window [0,10) ---
     // meta: s1 is in the kitchen, s2 is in the hall.
-    q.push(&meta, t("s1", "in", iri("kitchen")), 1, |r| results.push(r)).unwrap();
-    q.push(&meta, t("s2", "in", iri("hall")), 2, |r| results.push(r)).unwrap();
+    q.push(&meta, t("s1", "in", iri("kitchen")), 1, |r| results.push(r))
+        .unwrap();
+    q.push(&meta, t("s2", "in", iri("hall")), 2, |r| results.push(r))
+        .unwrap();
     // temp: s1 reads 21 and 23; s2 reads 30.
-    q.push(&temp, t("s1", "value", Literal::from(21).into()), 3, |r| results.push(r)).unwrap();
-    q.push(&temp, t("s1", "value", Literal::from(23).into()), 4, |r| results.push(r)).unwrap();
-    q.push(&temp, t("s2", "value", Literal::from(30).into()), 5, |r| results.push(r)).unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(21).into()), 3, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(23).into()), 4, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&temp, t("s2", "value", Literal::from(30).into()), 5, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     // A temp reading at ts 12 advances the SHARED clock to 12, closing [0,10) on
     // BOTH windows even though no meta arrived after ts 2.
-    q.push(&temp, t("s1", "value", Literal::from(99).into()), 12, |r| results.push(r)).unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(99).into()), 12, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     assert_eq!(results.len(), 1, "one synchronized tick closed [0,10)");
     let mut got: Vec<_> = results[0].rows.clone();
@@ -71,7 +85,11 @@ fn multi_window_join_across_two_streams() {
         "each reading joins with its sensor's room ACROSS the two windows"
     );
     assert_eq!(
-        results[0].vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        results[0]
+            .vars
+            .iter()
+            .map(|v| v.as_str())
+            .collect::<Vec<_>>(),
         ["room", "v"]
     );
 
@@ -94,8 +112,12 @@ fn multi_window_join_only_matches_shared_subject() {
     let mut results: Vec<WindowResult> = Vec::new();
 
     // s1 has a room but no reading; s2 has a reading but no room.
-    q.push(&meta, t("s1", "in", iri("kitchen")), 1, |r| results.push(r)).unwrap();
-    q.push(&temp, t("s2", "value", Literal::from(30).into()), 2, |r| results.push(r)).unwrap();
+    q.push(&meta, t("s1", "in", iri("kitchen")), 1, |r| results.push(r))
+        .unwrap();
+    q.push(&temp, t("s2", "value", Literal::from(30).into()), 2, |r| {
+        results.push(r)
+    })
+    .unwrap();
     q.flush(|r| results.push(r)).unwrap();
 
     let total_rows: usize = results.iter().map(|r| r.rows.len()).sum();
@@ -122,12 +144,22 @@ FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 20 STEP 20";
     let mut results: Vec<WindowResult> = Vec::new();
 
     // meta: s1 in kitchen at ts 1 (lands in w2's [0,20)).
-    q.push(&meta, t("s1", "in", iri("kitchen")), 1, |r| results.push(r)).unwrap();
+    q.push(&meta, t("s1", "in", iri("kitchen")), 1, |r| results.push(r))
+        .unwrap();
     // temp: s1 reads 21 at ts 2 (w1's [0,10)) and 23 at ts 13 (w1's [10,20)).
-    q.push(&temp, t("s1", "value", Literal::from(21).into()), 2, |r| results.push(r)).unwrap();
-    q.push(&temp, t("s1", "value", Literal::from(23).into()), 13, |r| results.push(r)).unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(21).into()), 2, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(23).into()), 13, |r| {
+        results.push(r)
+    })
+    .unwrap();
     // Advance the shared clock to 22: closes w1's [0,10) AND [10,20), and w2's [0,20).
-    q.push(&temp, t("s1", "value", Literal::from(99).into()), 22, |r| results.push(r)).unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(99).into()), 22, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     // Collect all emitted rows tagged with their tick end.
     let mut by_tick: Vec<(u64, Vec<Vec<Option<Term>>>)> =
@@ -138,12 +170,26 @@ FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 20 STEP 20";
     // has NO closed content → empty named graph → no join rows.
     // Tick at end=20: w1 has reading 23 ([10,20)); w2's [0,20) closed with the
     // kitchen fact → join: (kitchen, 23).
-    let tick20 = by_tick.iter().find(|(e, _)| *e == 20).map(|(_, r)| r.clone());
-    assert_eq!(tick20, Some(vec![row("kitchen", 23)]), "w2 content joins w1's [10,20)");
+    let tick20 = by_tick
+        .iter()
+        .find(|(e, _)| *e == 20)
+        .map(|(_, r)| r.clone());
+    assert_eq!(
+        tick20,
+        Some(vec![row("kitchen", 23)]),
+        "w2 content joins w1's [10,20)"
+    );
 
     // The end=10 tick must NOT have a join row (w2 had no closed content yet).
-    let tick10 = by_tick.iter().find(|(e, _)| *e == 10).map(|(_, r)| r.clone());
-    assert_eq!(tick10, Some(vec![]), "slow window not closed at boundary 10 → empty join");
+    let tick10 = by_tick
+        .iter()
+        .find(|(e, _)| *e == 10)
+        .map(|(_, r)| r.clone());
+    assert_eq!(
+        tick10,
+        Some(vec![]),
+        "slow window not closed at boundary 10 → empty join"
+    );
 }
 
 // ==================== [SONNET-4.6] sq-2n1q3.3: new tests below ====================
@@ -165,7 +211,11 @@ FROM NAMED WINDOW <http://ex/w3> ON <http://ex/meta2> RANGE 10 STEP 10";
 
 /// A `(type, loc, v)` join row as the 3-window query emits it.
 fn row3(typ: &str, loc: &str, v: i32) -> Vec<Option<Term>> {
-    vec![Some(iri(typ)), Some(iri(loc)), Some(Literal::from(v).into())]
+    vec![
+        Some(iri(typ)),
+        Some(iri(loc)),
+        Some(Literal::from(v).into()),
+    ]
 }
 
 /// [SONNET-4.6] sq-2n1q3.3 — EXPLICIT non-vacuous property test.
@@ -186,18 +236,27 @@ fn no_output_until_all_windows_populated_is_enforced() {
     let mut q = ContinuousMultiQuery::register(Q_THREE).unwrap();
     assert_eq!(q.window_iris().len(), 3, "three windows registered");
 
-    let obs   = nn("obs");
+    let obs = nn("obs");
     let meta1 = nn("meta1");
     // meta2 is deliberately never pushed to.
     let mut results: Vec<WindowResult> = Vec::new();
 
     // Push s1's VALUE into obs (w1) and its TYPE into meta1 (w2).
-    q.push(&obs,   t("s1", "value", Literal::from(42).into()), 1, |r| results.push(r)).unwrap();
-    q.push(&meta1, t("s1", "type",  iri("sensorA")),            2, |r| results.push(r)).unwrap();
+    q.push(&obs, t("s1", "value", Literal::from(42).into()), 1, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&meta1, t("s1", "type", iri("sensorA")), 2, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     // Advance the shared clock past [0,10) — meta2 (w3) receives NO push, so
     // its w3 window has no content even when [0,10) closes on all streams.
-    q.push(&obs, t("s1", "value", Literal::from(0).into()), 12, |r| results.push(r)).unwrap();
+    q.push(&obs, t("s1", "value", Literal::from(0).into()), 12, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     // Exactly one synchronized tick fires, but it must produce 0 rows because
     // w3 is empty — its GRAPH pattern matches nothing, collapsing the join.
@@ -219,7 +278,7 @@ fn no_output_until_all_windows_populated_is_enforced() {
 fn three_window_join_correctness() {
     let mut q = ContinuousMultiQuery::register(Q_THREE).unwrap();
 
-    let obs   = nn("obs");
+    let obs = nn("obs");
     let meta1 = nn("meta1");
     let meta2 = nn("meta2");
     let mut results: Vec<WindowResult> = Vec::new();
@@ -227,22 +286,44 @@ fn three_window_join_correctness() {
     // Window [0,10): two sensors in all three windows.
     // s1: value 42, type sensorA, location "london"
     // s2: value 99, type sensorB, location "paris"
-    q.push(&obs,   t("s1", "value", Literal::from(42).into()), 1, |r| results.push(r)).unwrap();
-    q.push(&obs,   t("s2", "value", Literal::from(99).into()), 2, |r| results.push(r)).unwrap();
-    q.push(&meta1, t("s1", "type",  iri("sensorA")),            3, |r| results.push(r)).unwrap();
-    q.push(&meta1, t("s2", "type",  iri("sensorB")),            4, |r| results.push(r)).unwrap();
-    q.push(&meta2, t("s1", "loc",   iri("london")),             5, |r| results.push(r)).unwrap();
-    q.push(&meta2, t("s2", "loc",   iri("paris")),              6, |r| results.push(r)).unwrap();
+    q.push(&obs, t("s1", "value", Literal::from(42).into()), 1, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&obs, t("s2", "value", Literal::from(99).into()), 2, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&meta1, t("s1", "type", iri("sensorA")), 3, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&meta1, t("s2", "type", iri("sensorB")), 4, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&meta2, t("s1", "loc", iri("london")), 5, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&meta2, t("s2", "loc", iri("paris")), 6, |r| results.push(r))
+        .unwrap();
 
     // Advance the clock to close [0,10) on all streams.
-    q.push(&obs, t("s1", "value", Literal::from(0).into()), 12, |r| results.push(r)).unwrap();
+    q.push(&obs, t("s1", "value", Literal::from(0).into()), 12, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     assert_eq!(results.len(), 1, "one synchronized tick for window [0,10)");
     let mut got = results[0].rows.clone();
     got.sort_by_key(|r| format!("{r:?}"));
     let mut want = vec![row3("sensorA", "london", 42), row3("sensorB", "paris", 99)];
     want.sort_by_key(|r| format!("{r:?}"));
-    assert_eq!(got, want, "both sensors join correctly across all three windows");
+    assert_eq!(
+        got, want,
+        "both sensors join correctly across all three windows"
+    );
     assert_eq!(q.window_iris().len(), 3);
 
     // Flush: w1 has the ts-12 heartbeat, w2 and w3 have nothing in [10,20).
@@ -250,7 +331,10 @@ fn three_window_join_correctness() {
     results.clear();
     q.flush(|r| results.push(r)).unwrap();
     let total: usize = results.iter().map(|r| r.rows.len()).sum();
-    assert_eq!(total, 0, "missing w2/w3 content in [10,20) → empty 3-window join");
+    assert_eq!(
+        total, 0,
+        "missing w2/w3 content in [10,20) → empty 3-window join"
+    );
 }
 
 /// [SONNET-4.6] sq-2n1q3.3 — ISTREAM over a multi-window join.
@@ -271,38 +355,70 @@ FROM NAMED WINDOW <http://ex/w1> ON <http://ex/temp> RANGE 10 STEP 10
 FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 10 STEP 10";
 
     let mut q = ContinuousMultiQuery::register(q_istream).unwrap();
-    assert!(matches!(q.r2s(), sparq_rsp::R2S::IStream), "parsed ISTREAM header");
+    assert!(
+        matches!(q.r2s(), sparq_rsp::R2S::IStream),
+        "parsed ISTREAM header"
+    );
 
     let temp = nn("temp");
     let meta = nn("meta");
     let mut results: Vec<WindowResult> = Vec::new();
 
     // Window [0,10): s1 in kitchen with value 10.
-    q.push(&meta, t("s1", "in",    iri("kitchen")),             1, |r| results.push(r)).unwrap();
-    q.push(&temp, t("s1", "value", Literal::from(10).into()),   2, |r| results.push(r)).unwrap();
+    q.push(&meta, t("s1", "in", iri("kitchen")), 1, |r| results.push(r))
+        .unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(10).into()), 2, |r| {
+        results.push(r)
+    })
+    .unwrap();
     // Advance clock to 12: closes [0,10) on both windows.
-    q.push(&temp, t("s1", "value", Literal::from(20).into()),   12, |r| results.push(r)).unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(20).into()), 12, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     // Window [10,20): s1 still in kitchen (re-announced in [10,20) meta),
     // value 20 (already pushed at ts 12) and 30 (pushed below).
-    q.push(&meta, t("s1", "in", iri("kitchen")),                13, |r| results.push(r)).unwrap();
-    q.push(&temp, t("s1", "value", Literal::from(30).into()),   14, |r| results.push(r)).unwrap();
+    q.push(&meta, t("s1", "in", iri("kitchen")), 13, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(30).into()), 14, |r| {
+        results.push(r)
+    })
+    .unwrap();
     // Advance clock to 22: closes [10,20).
-    q.push(&temp, t("s1", "value", Literal::from(0).into()),    22, |r| results.push(r)).unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(0).into()), 22, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
-    assert_eq!(results.len(), 2, "two ticks fired (one per tumbling window)");
+    assert_eq!(
+        results.len(),
+        2,
+        "two ticks fired (one per tumbling window)"
+    );
 
     // RSTREAM for [0,10) would be: [(kitchen, 10)].
     // ISTREAM tick 0: prev = {}, cur = {(kitchen,10)} → emit {(kitchen,10)}.
     let tick0_rows = results[0].rows.len();
-    assert_eq!(tick0_rows, 1, "ISTREAM tick 0: (kitchen,10) is new vs empty prev");
-    assert_eq!(results[0].rows[0], vec![Some(iri("kitchen")), Some(Literal::from(10).into())]);
+    assert_eq!(
+        tick0_rows, 1,
+        "ISTREAM tick 0: (kitchen,10) is new vs empty prev"
+    );
+    assert_eq!(
+        results[0].rows[0],
+        vec![Some(iri("kitchen")), Some(Literal::from(10).into())]
+    );
 
     // RSTREAM for [10,20) would be: [(kitchen,20), (kitchen,30)].
     // ISTREAM tick 1: prev={(kitchen,10)}, cur={(kitchen,20),(kitchen,30)}.
     // cur ∖ prev = {(kitchen,20),(kitchen,30)} (values differ, so both are "new").
     let tick1_rows = results[1].rows.len();
-    assert_eq!(tick1_rows, 2, "ISTREAM tick 1: both new rows vs (kitchen,10) prev");
+    assert_eq!(
+        tick1_rows, 2,
+        "ISTREAM tick 1: both new rows vs (kitchen,10) prev"
+    );
 }
 
 /// [SONNET-4.6] sq-2n1q3.3 — DSTREAM over a multi-window join.
@@ -322,34 +438,52 @@ FROM NAMED WINDOW <http://ex/w1> ON <http://ex/temp> RANGE 10 STEP 10
 FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 10 STEP 10";
 
     let mut q = ContinuousMultiQuery::register(q_dstream).unwrap();
-    assert!(matches!(q.r2s(), sparq_rsp::R2S::DStream), "parsed DSTREAM header");
+    assert!(
+        matches!(q.r2s(), sparq_rsp::R2S::DStream),
+        "parsed DSTREAM header"
+    );
 
     let temp = nn("temp");
     let meta = nn("meta");
     let mut results: Vec<WindowResult> = Vec::new();
 
     // Window [0,10): s1 in kitchen with values 10 and 20.
-    q.push(&meta, t("s1", "in",    iri("kitchen")),             1, |r| results.push(r)).unwrap();
-    q.push(&temp, t("s1", "value", Literal::from(10).into()),   2, |r| results.push(r)).unwrap();
-    q.push(&temp, t("s1", "value", Literal::from(20).into()),   3, |r| results.push(r)).unwrap();
+    q.push(&meta, t("s1", "in", iri("kitchen")), 1, |r| results.push(r))
+        .unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(10).into()), 2, |r| {
+        results.push(r)
+    })
+    .unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(20).into()), 3, |r| {
+        results.push(r)
+    })
+    .unwrap();
     // Advance clock to 12: closes [0,10).
-    q.push(&temp, t("s1", "value", Literal::from(0).into()),    12, |r| results.push(r)).unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(0).into()), 12, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     // Window [10,20): no meta for s1, so the join is empty.
-    q.push(&temp, t("s1", "value", Literal::from(99).into()),   22, |r| results.push(r)).unwrap();
+    q.push(&temp, t("s1", "value", Literal::from(99).into()), 22, |r| {
+        results.push(r)
+    })
+    .unwrap();
 
     assert_eq!(results.len(), 2, "two ticks fired");
 
     // DSTREAM tick 0: prev = {} (empty), so nothing disappears.
     assert_eq!(
-        results[0].rows.len(), 0,
+        results[0].rows.len(),
+        0,
         "DSTREAM tick 0: first tick never emits anything (prev was empty)"
     );
 
     // DSTREAM tick 1: prev={(kitchen,10),(kitchen,20)}, cur={} (no meta in [10,20)).
     // prev ∖ cur = both rows from tick 0.
     assert_eq!(
-        results[1].rows.len(), 2,
+        results[1].rows.len(),
+        2,
         "DSTREAM tick 1: both rows from tick 0 disappeared (no meta in [10,20))"
     );
 }

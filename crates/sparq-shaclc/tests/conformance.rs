@@ -45,8 +45,8 @@ fn extended_fixtures_match_the_oracle_and_strict_rejects_them_all() {
     for name in fixture_names("extended") {
         let doc = read_fixture("extended", &name, "shaclc");
         let expected = ttl_oracle("extended", &name);
-        let (got, _) = parse_extended(&doc, DEFAULT_BASE)
-            .unwrap_or_else(|e| panic!("extended/{name}: {e}"));
+        let (got, _) =
+            parse_extended(&doc, DEFAULT_BASE).unwrap_or_else(|e| panic!("extended/{name}: {e}"));
         assert!(
             is_isomorphic(&got, &expected),
             "extended/{name} differs from the .ttl oracle\n--- got ---\n{}\n--- expected ---\n{}",
@@ -55,9 +55,13 @@ fn extended_fixtures_match_the_oracle_and_strict_rejects_them_all() {
         );
         // The enforcement-leak fix: the strict parser's tables simply do not
         // contain the extension alternatives.
-        let err = parse_strict(&doc, DEFAULT_BASE)
-            .expect_err(&format!("extended/{name}: STRICT accepted an extended fixture"));
-        assert!(err.code.is_some(), "extended/{name}: stable reject code expected");
+        let err = parse_strict(&doc, DEFAULT_BASE).expect_err(&format!(
+            "extended/{name}: STRICT accepted an extended fixture"
+        ));
+        assert!(
+            err.code.is_some(),
+            "extended/{name}: stable reject code expected"
+        );
     }
 }
 
@@ -95,7 +99,8 @@ fn raw_push_parser_agrees_with_one_shot_on_the_whole_corpus() {
                     while j < doc.len() && !doc.is_char_boundary(j) {
                         j += 1;
                     }
-                    p.push(&doc[i..j]).unwrap_or_else(|e| panic!("{sub}/{name}: push: {e}"));
+                    p.push(&doc[i..j])
+                        .unwrap_or_else(|e| panic!("{sub}/{name}: push: {e}"));
                     i = j;
                 }
                 p.end().unwrap_or_else(|e| panic!("{sub}/{name}: end: {e}"));
@@ -105,7 +110,11 @@ fn raw_push_parser_agrees_with_one_shot_on_the_whole_corpus() {
                 ls.sort();
                 ls.join("\n")
             };
-            assert_eq!(fmt(&one), fmt(&pushed), "{sub}/{name}: push/one-shot divergence");
+            assert_eq!(
+                fmt(&one),
+                fmt(&pushed),
+                "{sub}/{name}: push/one-shot divergence"
+            );
         }
     }
 }

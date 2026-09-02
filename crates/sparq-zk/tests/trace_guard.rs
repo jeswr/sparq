@@ -173,7 +173,10 @@ fn verifier_independently_requires_obligation_prover_handshake() {
     let err = verify::recheck(q, &attributions, &[]).unwrap_err();
     assert!(matches!(err, verify::VerifyError::MissingObligation(_)));
     // …and one declaring it is accepted.
-    let edge = verify::JoinEdge { variable: "org".into(), patterns: (0, 1) };
+    let edge = verify::JoinEdge {
+        variable: "org".into(),
+        patterns: (0, 1),
+    };
     let required = verify::recheck(q, &attributions, std::slice::from_ref(&edge)).unwrap();
     assert_eq!(required, vec![edge]);
 }

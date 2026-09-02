@@ -453,7 +453,11 @@ impl SparqlEngine for HttpSparqlEngine {
                 .limit(self.config.max_body_bytes)
                 .read_to_string()
                 .map_err(|e| {
-                    self.failure(sparql, FailureKind::Transport, format!("reading response: {e}"))
+                    self.failure(
+                        sparql,
+                        FailureKind::Transport,
+                        format!("reading response: {e}"),
+                    )
                 })?,
             Err(ureq::Error::StatusCode(code)) => {
                 return Err(self.failure(
@@ -479,19 +483,26 @@ mod tests {
     fn form_urlencode_covers_unreserved_space_and_utf8() {
         assert_eq!(form_urlencode("abc-XYZ_0.9~"), "abc-XYZ_0.9~");
         assert_eq!(form_urlencode("a b"), "a+b");
-        assert_eq!(form_urlencode("?v < 5 && ?w = \"é\""), "%3Fv+%3C+5+%26%26+%3Fw+%3D+%22%C3%A9%22");
+        assert_eq!(
+            form_urlencode("?v < 5 && ?w = \"é\""),
+            "%3Fv+%3C+5+%26%26+%3Fw+%3D+%22%C3%A9%22"
+        );
     }
 
     #[test]
     fn build_request_parts_post_form_encodes_query_and_extras() {
         let mut config = EndpointConfig::generic("g", "http://localhost:1234/sparql");
-        config
-            .extra_params
-            .push(("format".to_string(), "application/sparql-results+json".to_string()));
+        config.extra_params.push((
+            "format".to_string(),
+            "application/sparql-results+json".to_string(),
+        ));
         let parts = build_request_parts(&config, "SELECT * WHERE { ?s ?p ?o }");
         assert_eq!(parts.http_method, "POST");
         assert_eq!(parts.url, "http://localhost:1234/sparql");
-        assert_eq!(parts.content_type, Some("application/x-www-form-urlencoded"));
+        assert_eq!(
+            parts.content_type,
+            Some("application/x-www-form-urlencoded")
+        );
         let body = parts.body.unwrap();
         assert!(body.starts_with("query=SELECT"));
         assert!(body.contains("&format=application%2Fsparql-results%2Bjson"));
@@ -513,7 +524,9 @@ mod tests {
         config.method = QueryMethod::Get;
         let parts = build_request_parts(&config, "ASK { }");
         assert_eq!(parts.http_method, "GET");
-        assert!(parts.url.starts_with("http://localhost:1234/sparql?query=ASK"));
+        assert!(parts
+            .url
+            .starts_with("http://localhost:1234/sparql?query=ASK"));
         assert_eq!(parts.body, None);
         assert_eq!(parts.content_type, None);
     }
@@ -523,22 +536,32 @@ mod tests {
     #[test]
     fn build_request_parts_no_double_question_mark_on_pre_existing_query_string() {
         // PostSparqlQuery arm: extra_params appended to a URL that already has '?'
-        let mut config = EndpointConfig::generic("g", "http://localhost:1234/sparql?default-graph-uri=urn:x");
+        let mut config =
+            EndpointConfig::generic("g", "http://localhost:1234/sparql?default-graph-uri=urn:x");
         config.method = QueryMethod::PostSparqlQuery;
-        config.extra_params.push(("format".to_string(), "json".to_string()));
+        config
+            .extra_params
+            .push(("format".to_string(), "json".to_string()));
         let parts = build_request_parts(&config, "ASK { }");
         let url = &parts.url;
         assert!(!url.contains("??"), "double '?' in URL: {url}");
-        assert!(url.contains("default-graph-uri=urn%3Ax&format=json") || url.contains("default-graph-uri=urn:x&format=json"),
-            "expected '&' separator, got: {url}");
+        assert!(
+            url.contains("default-graph-uri=urn%3Ax&format=json")
+                || url.contains("default-graph-uri=urn:x&format=json"),
+            "expected '&' separator, got: {url}"
+        );
 
         // Get arm: query string appended to a URL that already has '?'
-        let mut config2 = EndpointConfig::generic("g", "http://localhost:1234/sparql?service=default");
+        let mut config2 =
+            EndpointConfig::generic("g", "http://localhost:1234/sparql?service=default");
         config2.method = QueryMethod::Get;
         let parts2 = build_request_parts(&config2, "ASK { }");
         let url2 = &parts2.url;
         assert!(!url2.contains("??"), "double '?' in URL: {url2}");
-        assert!(url2.contains("service=default&query="), "expected '&' separator, got: {url2}");
+        assert!(
+            url2.contains("service=default&query="),
+            "expected '&' separator, got: {url2}"
+        );
     }
 
     #[test]
@@ -552,9 +575,10 @@ mod tests {
 
         let virtuoso = EndpointConfig::virtuoso("http://localhost:8890");
         assert_eq!(virtuoso.query_url, "http://localhost:8890/sparql");
-        assert!(virtuoso
-            .extra_params
-            .contains(&("format".to_string(), "application/sparql-results+json".to_string())));
+        assert!(virtuoso.extra_params.contains(&(
+            "format".to_string(),
+            "application/sparql-results+json".to_string()
+        )));
     }
 
     /// Blazegraph's namespace-scoped path — `{base}/namespace/{ns}/sparql`, NOT
@@ -576,7 +600,10 @@ mod tests {
             parts.url,
             "http://localhost:9999/blazegraph/namespace/kb/sparql"
         );
-        assert_eq!(parts.content_type, Some("application/x-www-form-urlencoded"));
+        assert_eq!(
+            parts.content_type,
+            Some("application/x-www-form-urlencoded")
+        );
         assert_eq!(parts.body.as_deref(), Some("query=ASK+%7B+%7D"));
     }
 
@@ -586,7 +613,10 @@ mod tests {
     #[test]
     fn graphdb_preset_targets_the_repository_url_and_disables_inference() {
         let config = EndpointConfig::graphdb("http://localhost:7200", "campaign");
-        assert_eq!(config.query_url, "http://localhost:7200/repositories/campaign");
+        assert_eq!(
+            config.query_url,
+            "http://localhost:7200/repositories/campaign"
+        );
         assert_eq!(config.method, QueryMethod::PostForm);
 
         let parts = build_request_parts(&config, "SELECT * WHERE { ?s ?p ?o }");
@@ -738,7 +768,8 @@ mod tests {
             )
             .into_boxed_str(),
         );
-        let engine = HttpSparqlEngine::new(EndpointConfig::generic("loopback", &serve_once(response)));
+        let engine =
+            HttpSparqlEngine::new(EndpointConfig::generic("loopback", &serve_once(response)));
         assert_eq!(engine.name(), "loopback");
         match engine.select("SELECT * WHERE { ?s ?p ?o }").unwrap() {
             QueryResults::Solutions { solutions, .. } => assert_eq!(solutions.len(), 1),
@@ -748,18 +779,29 @@ mod tests {
 
     #[test]
     fn http_engine_maps_a_500_to_http_status_failure() {
-        let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        let engine = HttpSparqlEngine::new(EndpointConfig::generic("loopback", &serve_once(response)));
+        let response =
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let engine =
+            HttpSparqlEngine::new(EndpointConfig::generic("loopback", &serve_once(response)));
         let err = engine.select("ASK { }").unwrap_err();
-        assert_eq!(err.kind, FailureKind::HttpStatus(500), "fail-closed: {err:?}");
+        assert_eq!(
+            err.kind,
+            FailureKind::HttpStatus(500),
+            "fail-closed: {err:?}"
+        );
     }
 
     #[test]
     fn http_engine_maps_garbage_body_to_invalid_results() {
         let response =
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot json!";
-        let engine = HttpSparqlEngine::new(EndpointConfig::generic("loopback", &serve_once(response)));
+        let engine =
+            HttpSparqlEngine::new(EndpointConfig::generic("loopback", &serve_once(response)));
         let err = engine.select("ASK { }").unwrap_err();
-        assert_eq!(err.kind, FailureKind::InvalidResults, "fail-closed: {err:?}");
+        assert_eq!(
+            err.kind,
+            FailureKind::InvalidResults,
+            "fail-closed: {err:?}"
+        );
     }
 }

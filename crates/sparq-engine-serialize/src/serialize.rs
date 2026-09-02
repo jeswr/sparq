@@ -464,7 +464,11 @@ fn accumulate_pred_object(group: &mut PredObjects, t: &Triple, prefixes: &Prefix
     if !group.objects.contains_key(&pkey) {
         group.order.push(pkey.clone());
     }
-    group.objects.entry(pkey).or_default().push(t.object.clone());
+    group
+        .objects
+        .entry(pkey)
+        .or_default()
+        .push(t.object.clone());
 }
 
 /// Streams the Turtle statement body (no header) for `triples` into `w` at the given indent,
@@ -915,7 +919,9 @@ fn group_sorted(triples: &[Triple]) -> Vec<PrettySubject> {
             .1
             .entry(pkey)
             .or_insert_with(|| (t.predicate.clone(), BTreeMap::new()));
-        pred.1.entry(nt_key(&t.object)).or_insert_with(|| t.object.clone());
+        pred.1
+            .entry(nt_key(&t.object))
+            .or_insert_with(|| t.object.clone());
     }
 
     by_subject
@@ -982,7 +988,12 @@ fn pretty_graph_body(
 
 /// Renders a subject for the pretty writer. With `abbreviate`, an IRI is prefix-compacted;
 /// without it, IRIs stay full `<…>`. Blank nodes are `_:label` either way.
-fn write_subject_pretty(subj: &NamedOrBlankNode, abbreviate: bool, prefixes: &Prefixes, out: &mut String) {
+fn write_subject_pretty(
+    subj: &NamedOrBlankNode,
+    abbreviate: bool,
+    prefixes: &Prefixes,
+    out: &mut String,
+) {
     match subj {
         NamedOrBlankNode::NamedNode(n) if abbreviate => write_iri(n.as_str(), prefixes, out),
         NamedOrBlankNode::NamedNode(n) => escape_iri(n.as_str(), out),
@@ -1051,7 +1062,11 @@ fn write_term_full(term: &Term, out: &mut String) {
 /// The output is round-trip-correct: re-parsing it yields the same triple set as the
 /// input (the same property [`write_turtle`] holds, reusing the same term/escaping
 /// helpers).
-pub fn write_turtle_pretty(triples: &[Triple], prefixes: &Prefixes, opts: &PrettyOptions) -> String {
+pub fn write_turtle_pretty(
+    triples: &[Triple],
+    prefixes: &Prefixes,
+    opts: &PrettyOptions,
+) -> String {
     let body = pretty_graph_body(triples, "", opts, prefixes);
     let mut sections: Vec<String> = Vec::new();
     if opts.abbreviate {
@@ -1352,9 +1367,9 @@ fn detect_lists(triples: &[Triple]) -> ListInfo {
     // A blank node is a *well-formed cell* iff it has exactly one first + one rest, is
     // referenced as an object exactly once, and is untainted.
     let is_cell = |b: &oxrdf::BlankNode| -> bool {
-        facts.get(b).is_some_and(|c| {
-            !c.tainted && c.obj_refs == 1 && c.first.is_some() && c.rest.is_some()
-        })
+        facts
+            .get(b)
+            .is_some_and(|c| !c.tainted && c.obj_refs == 1 && c.first.is_some() && c.rest.is_some())
     };
 
     // Pass 2 — for every triple that points at a candidate head (a cell reached by a
@@ -2320,7 +2335,11 @@ mod tests {
     /// Round-trip: PRETTY Turtle re-parses to the same triple SET.
     fn assert_pretty_iso(original_ttl: &str) {
         let g0 = Graph::load_str(original_ttl, "turtle").unwrap();
-        let ttl = write_turtle_pretty(&graph_triples(&g0), &ex_prefixes(), &PrettyOptions::default());
+        let ttl = write_turtle_pretty(
+            &graph_triples(&g0),
+            &ex_prefixes(),
+            &PrettyOptions::default(),
+        );
         let g1 = Graph::load_str(&ttl, "turtle").unwrap();
         assert_eq!(
             nt_sorted(&g0),
@@ -2341,7 +2360,11 @@ mod tests {
             "turtle",
         )
         .unwrap();
-        let ttl = write_turtle_pretty(&graph_triples(&g), &ex_prefixes(), &PrettyOptions::default());
+        let ttl = write_turtle_pretty(
+            &graph_triples(&g),
+            &ex_prefixes(),
+            &PrettyOptions::default(),
+        );
         let expected = "\
 @prefix ex: <http://ex/> .
 
@@ -2375,10 +2398,16 @@ ex:bob
         let opts = PrettyOptions::default();
         let pa = write_turtle_pretty(&graph_triples(&a), &ex_prefixes(), &opts);
         let pb = write_turtle_pretty(&graph_triples(&b), &ex_prefixes(), &opts);
-        assert_eq!(pa, pb, "pretty output must be emission-order-independent\n{pa}\n---\n{pb}");
+        assert_eq!(
+            pa, pb,
+            "pretty output must be emission-order-independent\n{pa}\n---\n{pb}"
+        );
         // `a` sorts first within the block.
         assert!(pa.starts_with("@prefix"), "{pa}");
-        assert!(pa.contains("ex:s\n  a ex:T ;"), "rdf:type 'a' sorts first:\n{pa}");
+        assert!(
+            pa.contains("ex:s\n  a ex:T ;"),
+            "rdf:type 'a' sorts first:\n{pa}"
+        );
     }
 
     #[test]
@@ -2413,7 +2442,10 @@ ex:bob
             ..PrettyOptions::default()
         };
         let ttl = write_turtle_pretty(&graph_triples(&g), &ex_prefixes(), &opts);
-        assert!(!ttl.contains("@prefix"), "no header when abbreviate=false:\n{ttl}");
+        assert!(
+            !ttl.contains("@prefix"),
+            "no header when abbreviate=false:\n{ttl}"
+        );
         assert!(ttl.contains("<http://ex/s>"), "IRIs stay full:\n{ttl}");
         // `a` shorthand for rdf:type is still used even without prefix compaction.
         assert!(ttl.contains("\n  a <http://ex/T>"), "'a' kept:\n{ttl}");
@@ -2446,7 +2478,10 @@ ex:bob
             GRAPH ex:g2 { ex:m ex:n ex:o . }"#;
         let g0 = Graph::load_dataset(data, "trig").unwrap();
         let owned = dataset_graphs(&g0);
-        let view: Vec<NamedGraph<'_>> = owned.iter().map(|(n, ts)| (n.as_ref(), ts.as_slice())).collect();
+        let view: Vec<NamedGraph<'_>> = owned
+            .iter()
+            .map(|(n, ts)| (n.as_ref(), ts.as_slice()))
+            .collect();
         let tg = write_trig_pretty(&view, &ex_prefixes(), &PrettyOptions::default());
         // Shape: shared header, GRAPH blocks, indented bodies.
         assert!(tg.contains("@prefix ex:"), "shared header:\n{tg}");
@@ -2814,7 +2849,11 @@ ex:bob
 
     /// Total triple count across the default graph and every named graph.
     fn triple_count(g: &Graph) -> usize {
-        g.iter_ids().count() + g.named.iter().map(|(_, ng)| ng.iter_ids().count()).sum::<usize>()
+        g.iter_ids().count()
+            + g.named
+                .iter()
+                .map(|(_, ng)| ng.iter_ids().count())
+                .sum::<usize>()
     }
 
     /// Blank-node-blind round-trip check for graphs that exercise `@list` collapsing.
@@ -3075,8 +3114,14 @@ ex:bob
         )
         .unwrap();
         let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
-        assert!(!doc.contains("\"@list\""), "empty list must not collapse:\n{doc}");
-        assert!(doc.contains("rdf-syntax-ns#nil"), "expected rdf:nil reference:\n{doc}");
+        assert!(
+            !doc.contains("\"@list\""),
+            "empty list must not collapse:\n{doc}"
+        );
+        assert!(
+            doc.contains("rdf-syntax-ns#nil"),
+            "expected rdf:nil reference:\n{doc}"
+        );
         assert_jsonld_iso(&g);
     }
 
@@ -3091,7 +3136,11 @@ ex:bob
         )
         .unwrap();
         let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
-        assert_eq!(doc.matches("\"@list\"").count(), 2, "two nested @lists:\n{doc}");
+        assert_eq!(
+            doc.matches("\"@list\"").count(),
+            2,
+            "two nested @lists:\n{doc}"
+        );
         assert!(
             !doc.contains("rdf-syntax-ns#first") && !doc.contains("rdf-syntax-ns#rest"),
             "nested list cells leaked:\n{doc}"
@@ -3156,7 +3205,10 @@ ex:bob
         )
         .unwrap();
         let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
-        assert!(!doc.contains("\"@list\""), "cycle must NOT collapse:\n{doc}");
+        assert!(
+            !doc.contains("\"@list\""),
+            "cycle must NOT collapse:\n{doc}"
+        );
         assert_jsonld_iso(&g);
     }
 
@@ -3173,7 +3225,10 @@ ex:bob
         )
         .unwrap();
         let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
-        assert!(!doc.contains("\"@list\""), "non-nil tail must NOT collapse:\n{doc}");
+        assert!(
+            !doc.contains("\"@list\""),
+            "non-nil tail must NOT collapse:\n{doc}"
+        );
         assert_jsonld_iso(&g);
     }
 
@@ -3193,7 +3248,11 @@ ex:bob
         .unwrap();
         // Default graph list collapses; named-graph list collapses in its own scope.
         let doc = graph_to_jsonld(&g, JsonLdForm::Expanded);
-        assert_eq!(doc.matches("\"@list\"").count(), 2, "both lists collapse:\n{doc}");
+        assert_eq!(
+            doc.matches("\"@list\"").count(),
+            2,
+            "both lists collapse:\n{doc}"
+        );
         assert_jsonld_list_iso(&g);
     }
 
@@ -3347,7 +3406,10 @@ ex:bob
             graph_to_jsonld(&g, JsonLdForm::Expanded)
         );
         assert!(pretty.contains('\t'), "tab indent should appear:\n{pretty}");
-        assert!(!pretty.contains("  "), "no two-space runs with a tab indent:\n{pretty}");
+        assert!(
+            !pretty.contains("  "),
+            "no two-space runs with a tab indent:\n{pretty}"
+        );
     }
 
     #[test]
@@ -3519,7 +3581,10 @@ ex:bob
         let ttl = graph_to_turtle_pretty_with(&g, &prefixes, &opts);
         // `http://example.org/x` -> `ex:x` (subject), `http://example.org/p` -> `ex:p`.
         assert!(ttl.contains("ex:x"), "subject abbreviated to ex:x:\n{ttl}");
-        assert!(ttl.contains("ex:p"), "predicate abbreviated to ex:p:\n{ttl}");
+        assert!(
+            ttl.contains("ex:p"),
+            "predicate abbreviated to ex:p:\n{ttl}"
+        );
         // `https://schema.org/Thing` -> `schema:Thing` (the HTTPS site namespace), and
         // `https://schema.org/y` -> `schema:y`.
         assert!(ttl.contains("schema:Thing"), "https schema type:\n{ttl}");
@@ -3535,14 +3600,21 @@ ex:bob
         );
         // Same custom policy reaches the JSON-LD compacted `@context`.
         let jc = graph_to_jsonld_with(&g, JsonLdForm::Compacted, &prefixes);
-        assert!(jc.contains("\"ex\":\"http://example.org/\""), "@context ex:\n{jc}");
+        assert!(
+            jc.contains("\"ex\":\"http://example.org/\""),
+            "@context ex:\n{jc}"
+        );
         assert!(
             jc.contains("\"schema\":\"https://schema.org/\""),
             "@context https schema:\n{jc}",
         );
         // And round-trips (re-parses to the same triple set).
         let g2 = Graph::load_str(&ttl, "turtle").unwrap();
-        assert_eq!(nt_sorted(&g), nt_sorted(&g2), "custom-prefix Turtle round-trip:\n{ttl}");
+        assert_eq!(
+            nt_sorted(&g),
+            nt_sorted(&g2),
+            "custom-prefix Turtle round-trip:\n{ttl}"
+        );
     }
 
     // =======================================================================
@@ -3597,7 +3669,11 @@ ex:bob
             );
             // And the streamed bytes still re-parse to the same triple set.
             let g2 = Graph::load_str(&streamed, "turtle").unwrap();
-            assert_eq!(nt_sorted(&g), nt_sorted(&g2), "streamed Turtle round-trip:\n{streamed}");
+            assert_eq!(
+                nt_sorted(&g),
+                nt_sorted(&g2),
+                "streamed Turtle round-trip:\n{streamed}"
+            );
         }
 
         #[test]
@@ -3606,7 +3682,11 @@ ex:bob
             // exercises subject grouping (emit-on-change) and predicate-object lists.
             let ex = "http://ex/";
             let triples = vec![
-                Triple::new(nn(&format!("{ex}alice")), nn(RDF_TYPE), nn(&format!("{ex}Person"))),
+                Triple::new(
+                    nn(&format!("{ex}alice")),
+                    nn(RDF_TYPE),
+                    nn(&format!("{ex}Person")),
+                ),
                 Triple::new(
                     nn(&format!("{ex}alice")),
                     nn(&format!("{ex}knows")),
@@ -3633,9 +3713,18 @@ ex:bob
             // Sanity: the streamed output actually used the prefix, the `a` shorthand and
             // grouped the two `ex:knows` objects on one predicate-object list.
             let out = turtle_streamed(&triples, &prefixes);
-            assert!(out.contains("@prefix ex: <http://ex/> ."), "prefix header:\n{out}");
-            assert!(out.contains("ex:alice a ex:Person"), "rdf:type as `a`:\n{out}");
-            assert!(out.contains("ex:knows ex:bob, ex:carol"), "object list:\n{out}");
+            assert!(
+                out.contains("@prefix ex: <http://ex/> ."),
+                "prefix header:\n{out}"
+            );
+            assert!(
+                out.contains("ex:alice a ex:Person"),
+                "rdf:type as `a`:\n{out}"
+            );
+            assert!(
+                out.contains("ex:knows ex:bob, ex:carol"),
+                "object list:\n{out}"
+            );
         }
 
         #[test]
@@ -3703,14 +3792,28 @@ ex:bob
             // accumulating subject 2 (the emit-on-change path).
             let ex = "http://ex/";
             let triples = vec![
-                Triple::new(nn(&format!("{ex}s1")), nn(&format!("{ex}p")), nn(&format!("{ex}o1"))),
-                Triple::new(nn(&format!("{ex}s2")), nn(&format!("{ex}p")), nn(&format!("{ex}o2"))),
+                Triple::new(
+                    nn(&format!("{ex}s1")),
+                    nn(&format!("{ex}p")),
+                    nn(&format!("{ex}o1")),
+                ),
+                Triple::new(
+                    nn(&format!("{ex}s2")),
+                    nn(&format!("{ex}p")),
+                    nn(&format!("{ex}o2")),
+                ),
             ];
             let prefixes = prefixes_from_pairs([("ex", ex)]);
             assert_streamed_eq_buffered(&triples, &prefixes);
             let out = turtle_streamed(&triples, &prefixes);
-            assert!(out.contains("ex:s1 ex:p ex:o1 .\n"), "subject 1 block:\n{out}");
-            assert!(out.contains("ex:s2 ex:p ex:o2 .\n"), "subject 2 block:\n{out}");
+            assert!(
+                out.contains("ex:s1 ex:p ex:o1 .\n"),
+                "subject 1 block:\n{out}"
+            );
+            assert!(
+                out.contains("ex:s2 ex:p ex:o2 .\n"),
+                "subject 2 block:\n{out}"
+            );
         }
 
         #[test]
@@ -3725,7 +3828,10 @@ ex:bob
             let prefixes = Prefixes::new();
             assert_streamed_eq_buffered(&triples, &prefixes);
             let out = turtle_streamed(&triples, &prefixes);
-            assert!(out.contains("<http://no.prefix/s>"), "full IRI fallback:\n{out}");
+            assert!(
+                out.contains("<http://no.prefix/s>"),
+                "full IRI fallback:\n{out}"
+            );
         }
 
         #[test]
@@ -3772,7 +3878,10 @@ ex:bob
             let g = Graph::default();
             let mut buf: Vec<u8> = Vec::new();
             graph_to_trig_streaming(&g, &default_prefixes(), &mut buf).unwrap();
-            assert_eq!(graph_to_trig_with(&g, &default_prefixes()), String::from_utf8(buf).unwrap());
+            assert_eq!(
+                graph_to_trig_with(&g, &default_prefixes()),
+                String::from_utf8(buf).unwrap()
+            );
         }
 
         #[test]
@@ -3921,11 +4030,15 @@ ex:bob
                         } else {
                             d.iri = term.clone();
                         }
-                        d.type_mapping =
-                            o.get("@type").and_then(Value::as_str).map(str::to_string);
-                        d.language = o.get("@language").and_then(Value::as_str).map(str::to_string);
-                        d.container =
-                            o.get("@container").and_then(Value::as_str).map(str::to_string);
+                        d.type_mapping = o.get("@type").and_then(Value::as_str).map(str::to_string);
+                        d.language = o
+                            .get("@language")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        d.container = o
+                            .get("@container")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
                     }
                     _ => {}
                 }
@@ -3986,7 +4099,9 @@ ex:bob
             if let Value::Object(o) = v {
                 // Resolve aliased keyword members (`id`→@id, `value`→@value, etc.).
                 let kw_get = |name: &str| -> Option<&Value> {
-                    o.iter().find(|(k, _)| ctx.keyword(k) == name).map(|(_, v)| v)
+                    o.iter()
+                        .find(|(k, _)| ctx.keyword(k) == name)
+                        .map(|(_, v)| v)
                 };
                 if let Some(Value::Array(items)) = kw_get("@list") {
                     return list_to_nt(items, def, ctx, graph, counter, out);
@@ -4006,7 +4121,11 @@ ex:bob
                 }
                 if let Some(id) = kw_get("@id").and_then(Value::as_str) {
                     let id = ctx.expand(id, false);
-                    return if id.starts_with("<<(") { id } else { id_term(&id) };
+                    return if id.starts_with("<<(") {
+                        id
+                    } else {
+                        id_term(&id)
+                    };
                 }
             }
             // A bare scalar (string/number/bool) compacted from a value object — its
@@ -4234,7 +4353,8 @@ ex:bob
                         for iv in idx.values() {
                             for o in as_array(iv) {
                                 let mut aux = String::new();
-                                let obj = object_to_nt(o, def.as_ref(), ctx, graph, counter, &mut aux);
+                                let obj =
+                                    object_to_nt(o, def.as_ref(), ctx, graph, counter, &mut aux);
                                 let _ = writeln!(out, "{subj} <{pred}> {obj} {graph}.");
                                 out.push_str(&aux);
                             }
@@ -4386,9 +4506,15 @@ ex:bob
                       "knows":{"@id":"http://ex/knows","@type":"@id"}}"#;
         let doc = compact_doc(&g, ctx);
         // @vocab-relative bare terms (name/age) — not full IRIs, not CURIEs.
-        assert!(doc.contains("\"name\":\"Alice\""), "vocab-relative name:\n{doc}");
+        assert!(
+            doc.contains("\"name\":\"Alice\""),
+            "vocab-relative name:\n{doc}"
+        );
         // @type keyword aliased to "type", value @vocab-compacted to the bare term "Person".
-        assert!(doc.contains("\"type\":\"Person\""), "aliased @type → bare:\n{doc}");
+        assert!(
+            doc.contains("\"type\":\"Person\""),
+            "aliased @type → bare:\n{doc}"
+        );
         // @id aliased to "id".
         assert!(doc.contains("\"id\":"), "aliased @id:\n{doc}");
         // @type:@id coercion collapses the node ref `{"@id":…}` to a bare IRI string. Node
@@ -4414,7 +4540,10 @@ ex:bob
         let doc = compact_doc(&g, ctx);
         // IRIs compact to ex:local CURIEs against the declared prefix.
         assert!(doc.contains("\"ex:p\":"), "predicate CURIE:\n{doc}");
-        assert!(doc.contains("\"ex:o\"") || doc.contains("ex:o"), "object CURIE:\n{doc}");
+        assert!(
+            doc.contains("\"ex:o\"") || doc.contains("ex:o"),
+            "object CURIE:\n{doc}"
+        );
         assert_compact_iso(&g, ctx);
     }
 
@@ -4431,7 +4560,10 @@ ex:bob
         let ctx = r#"{"@vocab":"http://ex/","xsd":"http://www.w3.org/2001/XMLSchema#",
                       "born":{"@id":"http://ex/born","@type":"xsd:date"}}"#;
         let doc = compact_doc(&g, ctx);
-        assert!(doc.contains("\"born\":\"1990-01-01\""), "coerced datatype → bare:\n{doc}");
+        assert!(
+            doc.contains("\"born\":\"1990-01-01\""),
+            "coerced datatype → bare:\n{doc}"
+        );
         assert!(!doc.contains("@value"), "no @value object remains:\n{doc}");
         assert_compact_iso(&g, ctx);
     }
@@ -4447,10 +4579,14 @@ ex:bob
         // Default @language fr → a matching language-tagged value drops to a bare string.
         let ctx = r#"{"@vocab":"http://ex/","@language":"fr"}"#;
         let doc = compact_doc(&g, ctx);
-        assert!(doc.contains("\"label\":\"Bonjour\""), "default-lang drop:\n{doc}");
+        assert!(
+            doc.contains("\"label\":\"Bonjour\""),
+            "default-lang drop:\n{doc}"
+        );
         // No @language value object survives on the node (the term in @context is fine).
         assert!(
-            !doc.contains("\"@graph\":[{") || !doc[doc.find("@graph").unwrap()..].contains("@language"),
+            !doc.contains("\"@graph\":[{")
+                || !doc[doc.find("@graph").unwrap()..].contains("@language"),
             "no @language value object remains in @graph:\n{doc}"
         );
         assert_compact_iso(&g, ctx);
@@ -4474,7 +4610,10 @@ ex:bob
             "plain string kept as value object under default @language:\n{doc}"
         );
         // The fr-tagged value compacts to a bare string (default matches).
-        assert!(doc.contains("\"tagged\":\"marqué\""), "fr value drops:\n{doc}");
+        assert!(
+            doc.contains("\"tagged\":\"marqué\""),
+            "fr value drops:\n{doc}"
+        );
         // And the whole thing round-trips losslessly (the plain string stays untagged).
         assert_compact_iso(&g, ctx);
     }
@@ -4490,7 +4629,10 @@ ex:bob
         // @container:@set keeps a single value as a one-element array (no compact-arrays).
         let ctx = r#"{"@vocab":"http://ex/","tag":{"@id":"http://ex/tag","@container":"@set"}}"#;
         let doc = compact_doc(&g, ctx);
-        assert!(doc.contains("\"tag\":[\"one\"]"), "@set forces array:\n{doc}");
+        assert!(
+            doc.contains("\"tag\":[\"one\"]"),
+            "@set forces array:\n{doc}"
+        );
         assert_compact_iso(&g, ctx);
     }
 
@@ -4503,7 +4645,8 @@ ex:bob
         )
         .unwrap();
         // @container:@list strips the {"@list": …} wrapper to a bare ordered array.
-        let ctx = r#"{"@vocab":"http://ex/","items":{"@id":"http://ex/items","@container":"@list"}}"#;
+        let ctx =
+            r#"{"@vocab":"http://ex/","items":{"@id":"http://ex/items","@container":"@list"}}"#;
         let doc = compact_doc(&g, ctx);
         assert!(
             doc.contains("\"items\":[\"a\",\"b\",\"c\"]"),
@@ -4511,7 +4654,10 @@ ex:bob
         );
         // No `@list` wrapper survives in the @graph body (the term decl in @context is fine).
         let body = &doc[doc.find("@graph").unwrap()..];
-        assert!(!body.contains("@list"), "no @list wrapper remains in @graph:\n{doc}");
+        assert!(
+            !body.contains("@list"),
+            "no @list wrapper remains in @graph:\n{doc}"
+        );
         // List-cell blank nodes are renamed on re-materialisation, so use the count-based check.
         assert_compact_count_iso(&g, ctx);
     }
@@ -4529,7 +4675,10 @@ ex:bob
             r#"{"@vocab":"http://ex/","label":{"@id":"http://ex/label","@container":"@language"}}"#;
         let doc = compact_doc(&g, ctx);
         assert!(doc.contains("\"en\":\"Hello\""), "language map en:\n{doc}");
-        assert!(doc.contains("\"fr\":\"Bonjour\""), "language map fr:\n{doc}");
+        assert!(
+            doc.contains("\"fr\":\"Bonjour\""),
+            "language map fr:\n{doc}"
+        );
         assert_compact_iso(&g, ctx);
     }
 
@@ -4545,7 +4694,10 @@ ex:bob
         let ctx = r#"{"@vocab":"http://ex/","id":"@id",
                       "children":{"@reverse":"http://ex/parent","@type":"@id"}}"#;
         let doc = compact_doc(&g, ctx);
-        assert!(doc.contains("@reverse") || doc.contains("\"children\""), "@reverse block:\n{doc}");
+        assert!(
+            doc.contains("@reverse") || doc.contains("\"children\""),
+            "@reverse block:\n{doc}"
+        );
         assert_compact_iso(&g, ctx);
     }
 
@@ -4583,7 +4735,10 @@ ex:bob
         let doc = compact_doc(&g, ctx);
         // Native scalar coercion is preserved through compaction.
         assert!(doc.contains("\"b\":true"), "native boolean:\n{doc}");
-        assert!(doc.contains("\"n\":42"), "native integer in named graph:\n{doc}");
+        assert!(
+            doc.contains("\"n\":42"),
+            "native integer in named graph:\n{doc}"
+        );
         assert_compact_iso(&g, ctx);
     }
 
@@ -4612,14 +4767,13 @@ ex:bob
 
     #[test]
     fn compact_empty_context_is_expanded_graph() {
-        let g = Graph::load_str(
-            r#"@prefix ex: <http://ex/> . ex:s ex:p "v" ."#,
-            "turtle",
-        )
-        .unwrap();
+        let g = Graph::load_str(r#"@prefix ex: <http://ex/> . ex:s ex:p "v" ."#, "turtle").unwrap();
         // An empty context yields full-IRI keys (no compaction), still a valid @graph doc.
         let doc = compact_doc(&g, "{}");
-        assert!(doc.contains("\"http://ex/p\""), "full IRI key with empty context:\n{doc}");
+        assert!(
+            doc.contains("\"http://ex/p\""),
+            "full IRI key with empty context:\n{doc}"
+        );
         assert_compact_iso(&g, "{}");
     }
 
@@ -4712,7 +4866,10 @@ ex:bob
         let ctx = r#"{"labels":{"@id":"http://ex/labels","@container":"@language"}}"#;
         let doc = compact_doc(&g, ctx);
         // The language-tagged string keeps its language-map slot.
-        assert!(doc.contains("\"en\":\"Hello\""), "language-map en slot:\n{doc}");
+        assert!(
+            doc.contains("\"en\":\"Hello\""),
+            "language-map en slot:\n{doc}"
+        );
         // The non-string integer is NOT placed in the language map (that would be invalid
         // JSON-LD); it goes under the separate non-language key (the full IRI here), keeping
         // its native form so the datatype survives.
@@ -4861,13 +5018,19 @@ ex:bob
         let ctx = r#"{"labels":{"@id":"http://ex/labels","@container":"@language"}}"#;
         let doc = compact_doc(&g, ctx);
         // The language map holds ONLY the string-valued, language-tagged entry.
-        assert!(doc.contains(r#""labels":{"en":"Hello"}"#), "lang map en-only:\n{doc}");
+        assert!(
+            doc.contains(r#""labels":{"en":"Hello"}"#),
+            "lang map en-only:\n{doc}"
+        );
         // The integer is under the separate full-IRI key as a native scalar (datatype kept).
         assert!(
             doc.contains(r#""http://ex/labels":42"#),
             "non-string under separate key:\n{doc}"
         );
-        assert!(!doc.contains(r#""@none":42"#), "no invalid @none scalar:\n{doc}");
+        assert!(
+            !doc.contains(r#""@none":42"#),
+            "no invalid @none scalar:\n{doc}"
+        );
         assert_compact_iso(&g, ctx);
     }
 
@@ -4890,7 +5053,10 @@ ex:bob
         let doc = compact_doc(&g, ctx);
         assert!(doc.contains(r#""en":"Hello""#), "lang slot:\n{doc}");
         // The plain string stays in the language map under `@none` (valid, pyld-faithful).
-        assert!(doc.contains(r#""@none":"plain""#), "plain string under @none:\n{doc}");
+        assert!(
+            doc.contains(r#""@none":"plain""#),
+            "plain string under @none:\n{doc}"
+        );
         assert_compact_iso(&g, ctx);
     }
 
@@ -4956,7 +5122,10 @@ ex:bob
             doc.contains(r#""en":["Hi","Hello"]"#),
             "multi-value en array:\n{doc}"
         );
-        assert!(doc.contains(r#""fr":"Salut""#), "single fr stays scalar:\n{doc}");
+        assert!(
+            doc.contains(r#""fr":"Salut""#),
+            "single fr stays scalar:\n{doc}"
+        );
         // Losslessness: all three triples survive the round-trip.
         assert_compact_iso(&g, ctx);
     }
@@ -5076,9 +5245,9 @@ ex:bob
     fn write_term_full_lang_and_typed_literal() {
         let mut out = String::new();
         // Lang-tagged literal: "hello"@en
-        let lang_lit = Term::Literal(
-            oxrdf::Literal::new_language_tagged_literal_unchecked("hello", "en"),
-        );
+        let lang_lit = Term::Literal(oxrdf::Literal::new_language_tagged_literal_unchecked(
+            "hello", "en",
+        ));
         write_term_full(&lang_lit, &mut out);
         assert_eq!(out, "\"hello\"@en", "lang literal round-trip: {}", out);
 
@@ -5198,9 +5367,13 @@ ex:bob
         let foaf_name = "http://xmlns.com/foaf/0.1/name";
         let g = Graph::load_dataset(
             &[
-                "<http://ex/s> <", foaf_name, "> \"Alice\" .",
+                "<http://ex/s> <",
+                foaf_name,
+                "> \"Alice\" .",
                 " GRAPH <http://ex/g1> {",
-                " <http://ex/a> <", foaf_name, "> \"Bob\" . }",
+                " <http://ex/a> <",
+                foaf_name,
+                "> \"Bob\" . }",
             ]
             .concat(),
             "trig",
@@ -5238,8 +5411,8 @@ ex:bob
     /// array exercises the comma branch.
     #[test]
     fn parse_context_json_number_and_array_values() {
-        let ctx = parse_context_json(r#"{"n":42,"arr":[1,"two",3]}"#)
-            .expect("number + array parse");
+        let ctx =
+            parse_context_json(r#"{"n":42,"arr":[1,"two",3]}"#).expect("number + array parse");
         let mut out = String::new();
         Jv::write(&ctx, &mut out);
         // Number preserved verbatim as a raw token.
@@ -5255,8 +5428,7 @@ ex:bob
     #[test]
     fn parse_context_json_string_escape_sequences() {
         // \" → a literal double-quote in the decoded string.
-        let ctx_q =
-            parse_context_json(r#"{"q":"say \"hi\""}"#).expect("escaped-quote parse");
+        let ctx_q = parse_context_json(r#"{"q":"say \"hi\""}"#).expect("escaped-quote parse");
         let mut out = String::new();
         Jv::write(&ctx_q, &mut out);
         // json_escape re-encodes the embedded quote as \".
@@ -5277,8 +5449,7 @@ ex:bob
         );
 
         // \uXXXX → decoded Unicode code-point.
-        let ctx_u =
-            parse_context_json(r#"{"uni":"ABC"}"#).expect("unicode-escape parse");
+        let ctx_u = parse_context_json(r#"{"uni":"ABC"}"#).expect("unicode-escape parse");
         let mut out_u = String::new();
         Jv::write(&ctx_u, &mut out_u);
         // U+0041 = 'A'; the result is "ABC".
@@ -5291,12 +5462,15 @@ ex:bob
         let mut out_ws = String::new();
         Jv::write(&ctx_ws, &mut out_ws);
         // json_escape re-encodes them; just confirm the object serialises without panic.
-        assert!(out_ws.contains("\"t\":"), "tab-escape key present: {}", out_ws);
+        assert!(
+            out_ws.contains("\"t\":"),
+            "tab-escape key present: {}",
+            out_ws
+        );
 
         // Multi-byte UTF-8 (é = U+00E9, 2 bytes) travels through the `_` arm that
         // advances past continuation bytes.
-        let ctx_mb =
-            parse_context_json(r#"{"k":"café"}"#).expect("multi-byte via \\uXXXX");
+        let ctx_mb = parse_context_json(r#"{"k":"café"}"#).expect("multi-byte via \\uXXXX");
         let mut out_mb = String::new();
         Jv::write(&ctx_mb, &mut out_mb);
         // U+00E9 = 'é'; json_escape keeps it verbatim (> 0x1F, non-special).

@@ -28,15 +28,15 @@
 //! with `sf`. The PRNG is seeded once from `params.seed` and advanced in a fixed order so
 //! the same [`GenParams`] always produces the same corpus.
 
+use rand::rngs::SmallRng;
 use rand::RngCore;
 use rand::SeedableRng;
-use rand::rngs::SmallRng;
 
 use crate::{
-    AcModel, AccessMode, Audience, CompiledPolicy, Condition, Decision, Effect,
-    ExpectedDecision, Expressibility, ExpressibilityEntry, GenParams, IntentRow,
-    QueryClass, QueryFixture, Request, Scope, compile_acp, compile_odrl, compile_wac,
-    oracle_acp, oracle_odrl, oracle_wac,
+    compile_acp, compile_odrl, compile_wac, oracle_acp, oracle_odrl, oracle_wac, AcModel,
+    AccessMode, Audience, CompiledPolicy, Condition, Decision, Effect, ExpectedDecision,
+    Expressibility, ExpressibilityEntry, GenParams, IntentRow, QueryClass, QueryFixture, Request,
+    Scope,
 };
 
 /// Output of the U2 commercial-project-management generator.
@@ -142,11 +142,21 @@ fn subcontractor_group_uri(oi: u32, oi2: u32) -> String {
 
 // ── Scale-factor mapping ─────────────────────────────────────────────────────────────────
 
-fn n_orgs(sf: u32) -> u32 { (2 * sf).max(1) }
-fn projects_per_org(sf: u32) -> u32 { (2 * sf).max(1) }
-fn sites_per_project(sf: u32) -> u32 { (2 * sf).max(1) }
-fn docs_per_site(sf: u32) -> u32 { (5 * sf).max(5) }
-fn members_per_role(params: &GenParams) -> u32 { params.members_per_group.clamp(1, 8) }
+fn n_orgs(sf: u32) -> u32 {
+    (2 * sf).max(1)
+}
+fn projects_per_org(sf: u32) -> u32 {
+    (2 * sf).max(1)
+}
+fn sites_per_project(sf: u32) -> u32 {
+    (2 * sf).max(1)
+}
+fn docs_per_site(sf: u32) -> u32 {
+    (5 * sf).max(5)
+}
+fn members_per_role(params: &GenParams) -> u32 {
+    params.members_per_group.clamp(1, 8)
+}
 
 // ── PRNG helpers ─────────────────────────────────────────────────────────────────────────
 
@@ -160,7 +170,9 @@ fn rand_bool(rng: &mut SmallRng, probability: f32) -> bool {
 }
 
 fn next_u32_bounded(rng: &mut SmallRng, bound: u32) -> u32 {
-    if bound == 0 { return 0; }
+    if bound == 0 {
+        return 0;
+    }
     rng.next_u32() % bound
 }
 
@@ -172,7 +184,9 @@ fn next_u32_bounded(rng: &mut SmallRng, bound: u32) -> u32 {
 /// must be expanded to per-member `acp:agent` matchers. This function recreates the
 /// member list from the IRI pattern without external state.
 fn resolve_group_members(row: &IntentRow, params: &GenParams) -> Vec<String> {
-    let Audience::Group(g) = &row.audience else { return vec![]; };
+    let Audience::Group(g) = &row.audience else {
+        return vec![];
+    };
     let nm = members_per_role(params);
     let no = n_orgs(params.sf);
 
@@ -183,8 +197,12 @@ fn resolve_group_members(row: &IntentRow, params: &GenParams) -> Vec<String> {
             if let (Ok(oi), Ok(oi2)) = (a.parse::<u32>(), b.parse::<u32>()) {
                 let mut members = Vec::new();
                 for mi in 0..2_u32 {
-                    if oi < no { members.push(agent_uri(oi, mi)); }
-                    if oi2 < no { members.push(agent_uri(oi2, mi)); }
+                    if oi < no {
+                        members.push(agent_uri(oi, mi));
+                    }
+                    if oi2 < no {
+                        members.push(agent_uri(oi2, mi));
+                    }
                 }
                 return members;
             }
@@ -308,7 +326,11 @@ pub fn generate(params: &GenParams) -> ProjectMgmtDataset {
         for pi in 0..np {
             let project = project_uri(oi, pi);
             data_nquads.push(triple(&project, RDF_TYPE, LDP_BASIC_CONTAINER));
-            data_nquads.push(triple(&project, RDF_TYPE, &format!("{PM_VOCAB}{PM_PROJECT_TYPE}")));
+            data_nquads.push(triple(
+                &project,
+                RDF_TYPE,
+                &format!("{PM_VOCAB}{PM_PROJECT_TYPE}"),
+            ));
             data_nquads.push(triple(&org_uri(oi), LDP_CONTAINS, &project));
 
             // Owner: full control on the project subtree.
@@ -461,7 +483,11 @@ pub fn generate(params: &GenParams) -> ProjectMgmtDataset {
             for si in 0..ns {
                 let site = site_uri(oi, pi, si);
                 data_nquads.push(triple(&site, RDF_TYPE, LDP_BASIC_CONTAINER));
-                data_nquads.push(triple(&site, RDF_TYPE, &format!("{PM_VOCAB}{PM_SITE_TYPE}")));
+                data_nquads.push(triple(
+                    &site,
+                    RDF_TYPE,
+                    &format!("{PM_VOCAB}{PM_SITE_TYPE}"),
+                ));
                 data_nquads.push(triple(&project, LDP_CONTAINS, &site));
 
                 for di in 0..nd {
@@ -502,9 +528,7 @@ pub fn generate(params: &GenParams) -> ProjectMgmtDataset {
                             shared_intent_idx,
                             ExpressibilityEntry {
                                 model: AcModel::Acp,
-                                expressibility: Expressibility::Expansion(
-                                    doc_member_list.len(),
-                                ),
+                                expressibility: Expressibility::Expansion(doc_member_list.len()),
                             },
                         ));
                     }
@@ -587,13 +611,7 @@ pub fn generate(params: &GenParams) -> ProjectMgmtDataset {
 /// Covers: org owners, org members (indices 0 and 1), subcontractors, an unknown external
 /// agent (expect deny — fail-closed), and per-document reads. Request count is bounded by
 /// `params.n_agents` to avoid blowing up at large SF.
-fn build_request_tuples(
-    params: &GenParams,
-    no: u32,
-    np: u32,
-    ns: u32,
-    nd: u32,
-) -> Vec<Request> {
+fn build_request_tuples(params: &GenParams, no: u32, np: u32, ns: u32, nd: u32) -> Vec<Request> {
     let mut tuples: Vec<Request> = Vec::new();
     let max_orgs = no.min(params.n_agents.max(1));
     let max_projects = np.min(2);
@@ -624,7 +642,11 @@ fn build_request_tuples(
             agent: agent_uri(oi, 1),
             client: None,
             resource: project0.clone(),
-            mode: AccessMode { read: false, write: true, control: false },
+            mode: AccessMode {
+                read: false,
+                write: true,
+                control: false,
+            },
         });
 
         // Unknown external agent reads project 0 (expect Deny — fail-closed)

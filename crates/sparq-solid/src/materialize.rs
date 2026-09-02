@@ -154,7 +154,13 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
     let rules = wac_rules()?;
     let mut dict = Dict::new();
     // WAC has no creator/owner vocabulary; provenance is ignored (the loader skips it).
-    let facts = assemble_input_ids(&mut dict, graph, System::Wac, &AccessProvenance::new(), &VerifiedCredentials::new())?;
+    let facts = assemble_input_ids(
+        &mut dict,
+        graph,
+        System::Wac,
+        &AccessProvenance::new(),
+        &VerifiedCredentials::new(),
+    )?;
     let closure = eval(&mut dict, &facts, rules);
     strip_reserved_graphs(graph);
     let mut stats = install_auth_view(graph, &dict, &closure);
@@ -297,7 +303,11 @@ fn elapsed_millis() -> f64 {
 /// Whether a closure triple belongs in the auth view: `auth:*` predicates, `rdf:type`
 /// with an `auth:` class, plus the accept-set facts of matchers referenced by
 /// `auth:exceptMatcher` (collected in a first pass).
-fn install_auth_view(graph: &mut Graph, dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> MaterializeStats {
+fn install_auth_view(
+    graph: &mut Graph,
+    dict: &Dict,
+    closure: &[[sparq_core::dict::Id; 3]],
+) -> MaterializeStats {
     // pass 1: matchers referenced by conditional grants
     let mut except_matchers: FxHashSet<sparq_core::dict::Id> = FxHashSet::default();
     for t in closure {
@@ -311,7 +321,9 @@ fn install_auth_view(graph: &mut Graph, dict: &Dict, closure: &[[sparq_core::dic
     let mut adict = Dict::new();
     let mut ids: Vec<[sparq_core::dict::Id; 3]> = Vec::new();
     for t in closure {
-        let Term::NamedNode(p) = dict.term(t[1]) else { continue };
+        let Term::NamedNode(p) = dict.term(t[1]) else {
+            continue;
+        };
         let keep = p.as_str().starts_with(AUTH_NS)
             || (p.as_str() == RDF_TYPE
                 && matches!(dict.term(t[2]), Term::NamedNode(o) if o.as_str().starts_with(AUTH_NS)))
@@ -323,9 +335,16 @@ fn install_auth_view(graph: &mut Graph, dict: &Dict, closure: &[[sparq_core::dic
         }
         let s = dict.term(t[0]);
         let o = dict.term(t[2]);
-        ids.push([adict.intern(&s), adict.intern(&Term::NamedNode(p)), adict.intern(&o)]);
+        ids.push([
+            adict.intern(&s),
+            adict.intern(&Term::NamedNode(p)),
+            adict.intern(&o),
+        ]);
     }
-    let stats = MaterializeStats { auth_triples: ids.len(), ..Default::default() };
+    let stats = MaterializeStats {
+        auth_triples: ids.len(),
+        ..Default::default()
+    };
     let auth = Graph::from_parts(adict, ids);
     let name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
     if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == name) {
@@ -354,7 +373,12 @@ mod tests {
     /// The WAC auth view as the TEXT engine derives it (the pre-sq-zgbso.4 pipeline).
     fn wac_text(graph: &mut Graph) -> Result<MaterializeStats, String> {
         strip_reserved_graphs(graph);
-        let input = assemble_input(graph, System::Wac, &AccessProvenance::new(), &VerifiedCredentials::new())?;
+        let input = assemble_input(
+            graph,
+            System::Wac,
+            &AccessProvenance::new(),
+            &VerifiedCredentials::new(),
+        )?;
         let src = format!("{}\n{}\n{}", input, COMMON_RULES, WAC_RULES);
         let mut dict = Dict::new();
         let closure = reason_n3(&mut dict, &src)?;
@@ -388,7 +412,11 @@ mod tests {
     }
 
     fn assert_same(text: &BTreeSet<String>, compiled: &BTreeSet<String>, what: &str) {
-        assert!(!text.is_empty(), "{}: the reference auth view is empty — vacuous test", what);
+        assert!(
+            !text.is_empty(),
+            "{}: the reference auth view is empty — vacuous test",
+            what
+        );
         let missing: Vec<_> = text.difference(compiled).take(5).collect();
         let extra: Vec<_> = compiled.difference(text).take(5).collect();
         assert!(
@@ -432,7 +460,11 @@ mod tests {
     fn acp_with_provenance_auth_view_is_identical_to_the_text_engine() {
         let src = crate::acp_fixture();
         let mut prov = AccessProvenance::new();
-        for (name, _) in Graph::load_dataset(&src, "nquads").expect("fixture loads").named.iter() {
+        for (name, _) in Graph::load_dataset(&src, "nquads")
+            .expect("fixture loads")
+            .named
+            .iter()
+        {
             if let Term::NamedNode(n) = name {
                 if !n.as_str().ends_with(".acr") {
                     prov.set_creator(n.as_str(), "https://carol.ex/card#me");
@@ -459,11 +491,24 @@ mod tests {
             let prov = AccessProvenance::new();
 
             let mut dict = Dict::new();
-            let ids = assemble_input_ids(&mut dict, &graph, system, &prov, &VerifiedCredentials::new())
-                .expect("id facts");
+            let ids = assemble_input_ids(
+                &mut dict,
+                &graph,
+                system,
+                &prov,
+                &VerifiedCredentials::new(),
+            )
+            .expect("id facts");
             let direct: BTreeSet<String> = ids
                 .iter()
-                .map(|t| format!("{} {} {}", dict.term(t[0]), dict.term(t[1]), dict.term(t[2])))
+                .map(|t| {
+                    format!(
+                        "{} {} {}",
+                        dict.term(t[0]),
+                        dict.term(t[1]),
+                        dict.term(t[2])
+                    )
+                })
                 .collect();
 
             let text = assemble_input(&graph, system, &prov, &VerifiedCredentials::new())
@@ -473,11 +518,22 @@ mod tests {
                 .expect("the text entry re-parses");
             let round_tripped: BTreeSet<String> = parsed
                 .iter()
-                .map(|t| format!("{} {} {}", tdict.term(t[0]), tdict.term(t[1]), tdict.term(t[2])))
+                .map(|t| {
+                    format!(
+                        "{} {} {}",
+                        tdict.term(t[0]),
+                        tdict.term(t[1]),
+                        tdict.term(t[2])
+                    )
+                })
                 .collect();
 
             assert!(!direct.is_empty(), "no facts assembled — vacuous test");
-            assert_eq!(direct, round_tripped, "fact entry diverges (system {:?})", system as u8);
+            assert_eq!(
+                direct, round_tripped,
+                "fact entry diverges (system {:?})",
+                system as u8
+            );
         }
     }
 
@@ -489,7 +545,9 @@ mod tests {
             "<{}#a> <{}> <urn:sparq:evil> <{}> .\n",
             control_doc, agent_predicate, control_doc
         );
-        Graph::load_dataset(&nq, "nquads").expect("poison graph loads").named
+        Graph::load_dataset(&nq, "nquads")
+            .expect("poison graph loads")
+            .named
     }
 
     /// The documented contract is that an `Err` leaves the dataset's previous auth view
@@ -499,29 +557,45 @@ mod tests {
     /// authorization view had silently vanished. Both materializers are checked.
     #[test]
     fn a_failed_rematerialization_leaves_the_previous_auth_view_in_place() {
-        let mut graph = Graph::load_dataset(&crate::wac_fixture(), "nquads").expect("fixture loads");
+        let mut graph =
+            Graph::load_dataset(&crate::wac_fixture(), "nquads").expect("fixture loads");
         materialize_wac(&mut graph).expect("first WAC materialization succeeds");
         let before = auth_view(&graph);
-        assert!(!before.is_empty(), "no auth view to preserve — vacuous test");
+        assert!(
+            !before.is_empty(),
+            "no auth view to preserve — vacuous test"
+        );
         graph.named.extend(poison_graph(
             "https://pod.ex/evil.acl",
             "http://www.w3.org/ns/auth/acl#agent",
         ));
         let err = materialize_wac(&mut graph).expect_err("a reserved agent IRI must fail");
         assert!(err.contains("urn:sparq:"), "unexpected WAC error: {}", err);
-        assert_eq!(auth_view(&graph), before, "WAC: the previous auth view must survive the error");
+        assert_eq!(
+            auth_view(&graph),
+            before,
+            "WAC: the previous auth view must survive the error"
+        );
 
-        let mut graph = Graph::load_dataset(&crate::acp_fixture(), "nquads").expect("fixture loads");
+        let mut graph =
+            Graph::load_dataset(&crate::acp_fixture(), "nquads").expect("fixture loads");
         materialize_acp(&mut graph).expect("first ACP materialization succeeds");
         let before = auth_view(&graph);
-        assert!(!before.is_empty(), "no auth view to preserve — vacuous test");
+        assert!(
+            !before.is_empty(),
+            "no auth view to preserve — vacuous test"
+        );
         graph.named.extend(poison_graph(
             "https://pod.ex/evil.acr",
             "http://www.w3.org/ns/solid/acp#agent",
         ));
         let err = materialize_acp(&mut graph).expect_err("a reserved agent IRI must fail");
         assert!(err.contains("urn:sparq:"), "unexpected ACP error: {}", err);
-        assert_eq!(auth_view(&graph), before, "ACP: the previous auth view must survive the error");
+        assert_eq!(
+            auth_view(&graph),
+            before,
+            "ACP: the previous auth view must survive the error"
+        );
     }
 
     /// A rule set outside the compiled subset must surface as a materialize `Err`, never
@@ -531,6 +605,9 @@ mod tests {
         wac_rules().expect("WAC rules are in the compiled subset");
         let acp = acp_rules().expect("ACP rules are in the compiled subset");
         assert_eq!(acp.len(), 3);
-        assert!(acp.iter().all(|s| s.n_rules() > 0), "every ACP stratum carries rules");
+        assert!(
+            acp.iter().all(|s| s.n_rules() > 0),
+            "every ACP stratum carries rules"
+        );
     }
 }

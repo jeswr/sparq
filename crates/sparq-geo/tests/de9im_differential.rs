@@ -40,7 +40,7 @@ use rand::rngs::StdRng;
 // [OPUS-4.8] sq-8xug: `random_range` moved from `Rng` to `RngExt` in rand 0.10.
 use rand::{RngExt, SeedableRng};
 use sparq_geo::geof;
-use sparq_geo::{GeoGeometry, Crs};
+use sparq_geo::{Crs, GeoGeometry};
 
 /// The differential must run over at least this many generated pairs, so the
 /// corpus can't silently shrink to nothing.
@@ -48,7 +48,10 @@ const MIN_CORPUS_PAIRS: usize = 400;
 
 /// Build a CRS84 [`GeoGeometry`] around an existing geo-types geometry.
 fn g(geometry: Geometry<f64>) -> GeoGeometry {
-    GeoGeometry { crs: Crs::Crs84, geometry }
+    GeoGeometry {
+        crs: Crs::Crs84,
+        geometry,
+    }
 }
 
 /// A small axis-aligned square of side `s` with lower-left corner `(x, y)`.
@@ -84,9 +87,18 @@ fn random_geometry(rng: &mut StdRng) -> Geometry<f64> {
         2 => {
             // A two-segment polyline.
             Geometry::LineString(LineString(vec![
-                Coord { x: coord(rng), y: coord(rng) },
-                Coord { x: coord(rng), y: coord(rng) },
-                Coord { x: coord(rng), y: coord(rng) },
+                Coord {
+                    x: coord(rng),
+                    y: coord(rng),
+                },
+                Coord {
+                    x: coord(rng),
+                    y: coord(rng),
+                },
+                Coord {
+                    x: coord(rng),
+                    y: coord(rng),
+                },
             ]))
         }
         _ => {
@@ -101,9 +113,7 @@ fn random_geometry(rng: &mut StdRng) -> Geometry<f64> {
 /// and `geo`'s predicates and `Relate` can legitimately differ on empties.
 fn is_degenerate(geom: &Geometry<f64>) -> bool {
     match geom {
-        Geometry::LineString(ls) => {
-            ls.0.windows(2).all(|w| w[0] == w[1])
-        }
+        Geometry::LineString(ls) => ls.0.windows(2).all(|w| w[0] == w[1]),
         Geometry::Polygon(p) => {
             use geo::Area;
             p.unsigned_area() == 0.0
@@ -327,8 +337,14 @@ fn de9im_relation_laws_hold_over_corpus() {
     for v in &violations {
         println!("  VIOLATION {v}");
     }
-    assert!(pairs >= MIN_CORPUS_PAIRS, "corpus too small: {pairs} < {MIN_CORPUS_PAIRS}");
-    assert!(region_pairs > 0, "no region-region pairs generated — partition laws untested");
+    assert!(
+        pairs >= MIN_CORPUS_PAIRS,
+        "corpus too small: {pairs} < {MIN_CORPUS_PAIRS}"
+    );
+    assert!(
+        region_pairs > 0,
+        "no region-region pairs generated — partition laws untested"
+    );
     assert!(
         violations.is_empty(),
         "{} DE-9IM relation-law violation(s):\n{}",

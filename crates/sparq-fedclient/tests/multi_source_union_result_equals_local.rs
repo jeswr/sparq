@@ -82,7 +82,11 @@ fn descriptor(id: &str, preds: &[&str]) -> SourceDescriptor {
 fn plan(
     bgp: &Bgp,
     sources: &[(&str, &[&str])],
-) -> (Vec<SourceDescriptor>, Vec<sparq_fedplan::PatternSources>, sparq_fedplan::JoinTree) {
+) -> (
+    Vec<SourceDescriptor>,
+    Vec<sparq_fedplan::PatternSources>,
+    sparq_fedplan::JoinTree,
+) {
     let descriptors: Vec<SourceDescriptor> = sources
         .iter()
         .enumerate()
@@ -96,11 +100,7 @@ fn plan(
 
 /// Assert the multi-source federated result (materialised AND streaming) equals local
 /// evaluation of `whole_query` over the union of every source graph. [OPUS-4.8] sq-7yf0.
-fn assert_multi_source_equals_union(
-    bgp: &Bgp,
-    sources: &[(&str, &[&str])],
-    whole_query: &str,
-) {
+fn assert_multi_source_equals_union(bgp: &Bgp, sources: &[(&str, &[&str])], whole_query: &str) {
     // Per-source engine graphs + endpoint adapters (index i == descriptor i == source i).
     let graphs: Vec<Arc<Graph>> = sources
         .iter()
@@ -121,7 +121,10 @@ fn assert_multi_source_equals_union(
     let (_descriptors, sel, tree) = plan(bgp, sources);
 
     // The borrowed adapter slice for the resolver (range-checked index → adapter).
-    let adapters: Vec<&dyn FederatedSource> = endpoints.iter().map(|e| e as &dyn FederatedSource).collect();
+    let adapters: Vec<&dyn FederatedSource> = endpoints
+        .iter()
+        .map(|e| e as &dyn FederatedSource)
+        .collect();
     let resolver = SourceResolver::new(bgp, &adapters);
 
     // Materialised multi-source fan-out.
@@ -161,9 +164,14 @@ fn assert_multi_source_equals_union(
             ep
         })
         .collect();
-    let stream =
-        stream_multi_source(&resolver, &sel, &arc_adapters, &tree, &StreamOptions::default())
-            .expect("streaming multi-source interpreter builds");
+    let stream = stream_multi_source(
+        &resolver,
+        &sel,
+        &arc_adapters,
+        &tree,
+        &StreamOptions::default(),
+    )
+    .expect("streaming multi-source interpreter builds");
     let got = stream.collect_solutions().unwrap();
     let got_rows: Vec<Vec<Option<oxrdf::Term>>> = got.iter().map(|s| s.cells.clone()).collect();
     let got_vars = got

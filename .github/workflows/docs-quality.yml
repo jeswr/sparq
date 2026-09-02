@@ -963,6 +963,17 @@ jobs:
         run: python3 scripts/tests/test_path_ownership.py
       - name: Selection wiring inspection (fail-closed guards + real crate needles — sq-fmx4u.3)
         run: python3 scripts/tests/test_ci_select_wiring.py
+      # [OPUS-5] sq-0lk: `cargo fmt --all --check` in ci.yml's `lint` job stopped being
+      # `continue-on-error: true` once the one-time workspace reformat landed. Every way
+      # of undoing that is SILENT — re-adding the swallow line, renaming the job back to
+      # a "non-blocking" spelling, declaring it in the advisory registry (which would
+      # drop the clippy `-D warnings` gate with it), or unpinning the `rustfmt`
+      # component (which puts the gate back on an ambient formatter — issue #2360).
+      # Those four, plus the step's mere presence and its freedom from an `if:`, are
+      # pinned structurally here.
+      # Needs PyYAML — installed once in the shared setup above.
+      - name: rustfmt gate posture (no continue-on-error + pinned formatter — sq-0lk)
+        run: python3 scripts/tests/test_fmt_gate_posture.py
       # [SONNET-4.6] sq-6vshe.15: the merge-queue cache/artifact posture is two
       # single-line YAML properties that are INVISIBLE when absent — a dropped
       # `save-if` just makes the queue slower and churns the shared 10 GB cache

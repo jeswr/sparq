@@ -302,9 +302,18 @@ fn expr_total(e: &Expression) -> bool {
     use Expression::*;
     match e {
         NamedNode(_) | Literal(_) | Variable(_) | Bound(_) => true,
-        And(a, b) | Or(a, b) | Equal(a, b) | SameTerm(a, b) | Greater(a, b)
-        | GreaterOrEqual(a, b) | Less(a, b) | LessOrEqual(a, b) | Add(a, b)
-        | Subtract(a, b) | Multiply(a, b) | Divide(a, b) => expr_total(a) && expr_total(b),
+        And(a, b)
+        | Or(a, b)
+        | Equal(a, b)
+        | SameTerm(a, b)
+        | Greater(a, b)
+        | GreaterOrEqual(a, b)
+        | Less(a, b)
+        | LessOrEqual(a, b)
+        | Add(a, b)
+        | Subtract(a, b)
+        | Multiply(a, b)
+        | Divide(a, b) => expr_total(a) && expr_total(b),
         UnaryPlus(a) | UnaryMinus(a) | Not(a) => expr_total(a),
         In(a, list) => expr_total(a) && list.iter().all(expr_total),
         If(c, t, f) => expr_total(c) && expr_total(t) && expr_total(f),
@@ -351,9 +360,18 @@ fn expr_vars(e: &Expression, out: &mut FxHashSet<Variable>) {
             out.insert(v.clone());
         }
         NamedNode(_) | Literal(_) => {}
-        And(a, b) | Or(a, b) | Equal(a, b) | SameTerm(a, b) | Greater(a, b)
-        | GreaterOrEqual(a, b) | Less(a, b) | LessOrEqual(a, b) | Add(a, b)
-        | Subtract(a, b) | Multiply(a, b) | Divide(a, b) => {
+        And(a, b)
+        | Or(a, b)
+        | Equal(a, b)
+        | SameTerm(a, b)
+        | Greater(a, b)
+        | GreaterOrEqual(a, b)
+        | Less(a, b)
+        | LessOrEqual(a, b)
+        | Add(a, b)
+        | Subtract(a, b)
+        | Multiply(a, b)
+        | Divide(a, b) => {
             expr_vars(a, out);
             expr_vars(b, out);
         }
@@ -436,7 +454,11 @@ fn key_of(graph: &Graph, id: Id) -> JKey {
     match graph.dict.term_parts(id) {
         dict::TermParts::Iri { .. } | dict::TermParts::Blank(_) => JKey::Term(id),
         dict::TermParts::Triple(_) => JKey::Hard,
-        dict::TermParts::Lit { value, datatype, lang } => {
+        dict::TermParts::Lit {
+            value,
+            datatype,
+            lang,
+        } => {
             if let Some(tag) = lang {
                 return JKey::LangLit(tag.to_ascii_lowercase(), value.to_string());
             }
@@ -529,9 +551,19 @@ fn value_join(
     // partition the product — keyed×keyed above, hard-left×all, keyed-left×hard-right
     // — so no pair is emitted twice.
     let scratch = Bindings::unsorted(vec![lv.clone(), rv.clone()], Vec::new());
-    let (ea, eb) = (Expression::Variable(lv.clone()), Expression::Variable(rv.clone()));
+    let (ea, eb) = (
+        Expression::Variable(lv.clone()),
+        Expression::Variable(rv.clone()),
+    );
     let pair_true = |ida: Id, idb: Id| -> Result<bool, String> {
-        Ok(effective_boolean(&equal_expr(graph, local, &scratch, &[ida, idb], &ea, &eb)?))
+        Ok(effective_boolean(&equal_expr(
+            graph,
+            local,
+            &scratch,
+            &[ida, idb],
+            &ea,
+            &eb,
+        )?))
     };
     for (li, lk) in lkeys.iter().enumerate() {
         if !matches!(lk, JKey::Hard) {
@@ -605,11 +637,19 @@ mod tests {
     fn assert_on_off_equal(g: &Graph, q: &str) -> Vec<Vec<String>> {
         let before = fired();
         let on = bag(g, q);
-        assert!(fired() > before, "value-join must fire for this shape: {}", q);
+        assert!(
+            fired() > before,
+            "value-join must fire for this shape: {}",
+            q
+        );
         set_disabled(true);
         let off = bag(g, q);
         set_disabled(false);
-        assert_eq!(on, off, "value-join result differs from the verbatim path: {}", q);
+        assert_eq!(
+            on, off,
+            "value-join result differs from the verbatim path: {}",
+            q
+        );
         on
     }
 
@@ -617,7 +657,12 @@ mod tests {
     fn assert_declines(g: &Graph, q: &str) -> Vec<Vec<String>> {
         let before = fired();
         let out = bag(g, q);
-        assert_eq!(fired(), before, "value-join must DECLINE for this shape: {}", q);
+        assert_eq!(
+            fired(),
+            before,
+            "value-join must DECLINE for this shape: {}",
+            q
+        );
         out
     }
 
@@ -650,11 +695,18 @@ mod tests {
         // Independent oracle: `!(?a != ?b)` has the same three-valued keep-set as
         // `?a = ?b` (error stays error, both eliminate) but is NOT a top-level
         // equality conjunct, so it takes the verbatim path.
-        let oracle = assert_declines(&g, &q.replace("FILTER(?name = ?name2)", "FILTER(!(?name != ?name2))"));
+        let oracle = assert_declines(
+            &g,
+            &q.replace("FILTER(?name = ?name2)", "FILTER(!(?name != ?name2))"),
+        );
         assert_eq!(on, oracle);
         // Exactly one intersecting author.
         assert_eq!(on.len(), 1);
-        assert!(on[0].iter().any(|c| c.contains("alice")), "row: {:?}", on[0]);
+        assert!(
+            on[0].iter().any(|c| c.contains("alice")),
+            "row: {:?}",
+            on[0]
+        );
     }
 
     // ---- SPARQL `=` is value equality with promotion: "01"^^integer = "1.0"^^decimal ----
@@ -672,7 +724,11 @@ mod tests {
         let on = assert_on_off_equal(&g, &q);
         // "01" pairs with BOTH "1.0"^^decimal and "1.0E0"^^double; "7" with neither.
         assert_eq!(on.len(), 2, "bag: {:?}", on);
-        assert!(on.iter().all(|row| row.iter().any(|c| c.contains("01"))), "bag: {:?}", on);
+        assert!(
+            on.iter().all(|row| row.iter().any(|c| c.contains("01"))),
+            "bag: {:?}",
+            on
+        );
     }
 
     // ---- incompatible types are a TYPE ERROR (row eliminated), IRI vs literal is false ----
@@ -693,7 +749,13 @@ mod tests {
         // Only the identical unknown-datatype term pairs (term identity decides);
         // integer-vs-string and dtA-vs-dtB are type errors, IRI-vs-literal is false.
         assert_eq!(on.len(), 1, "bag: {:?}", on);
-        assert!(on[0].iter().all(|c| c.contains("\"x\"") || c.starts_with("?x=") || c.starts_with("?y=")), "bag: {:?}", on);
+        assert!(
+            on[0]
+                .iter()
+                .all(|c| c.contains("\"x\"") || c.starts_with("?x=") || c.starts_with("?y=")),
+            "bag: {:?}",
+            on
+        );
     }
 
     // ---- the sq-lr2ii class: high-precision decimals sharing an f64 stay UNEQUAL ----
@@ -714,7 +776,11 @@ mod tests {
         // big integers to another — the verbatim FILTER recheck (cmp_decimal_str)
         // must keep ONLY the exact-value pair 1.00000000000000001 = 1.000000000000000010.
         assert_eq!(on.len(), 1, "bag: {:?}", on);
-        assert!(on[0].iter().any(|c| c.contains("1.000000000000000010")), "bag: {:?}", on);
+        assert!(
+            on[0].iter().any(|c| c.contains("1.000000000000000010")),
+            "bag: {:?}",
+            on
+        );
     }
 
     // ---- a numeric lexical the CACHE rejects but the evaluator's fallback accepts:
@@ -786,7 +852,11 @@ mod tests {
         // 12:00Z = 13:00+01:00 (same instant, different lexicals/ids); the tz-less
         // operand is indeterminate against both (type error), date is cross-family.
         assert_eq!(on.len(), 1, "bag: {:?}", on);
-        assert!(on[0].iter().any(|c| c.contains("13:00:00+01:00")), "bag: {:?}", on);
+        assert!(
+            on[0].iter().any(|c| c.contains("13:00:00+01:00")),
+            "bag: {:?}",
+            on
+        );
     }
 
     // ---- xsd:boolean compares by VALUE: "1" = "true" ----
@@ -814,12 +884,14 @@ mod tests {
             "<http://ex/b1> <http://ex/q> <http://ex/t1> .\n",
             "<http://ex/b2> <http://ex/q> <http://ex/t3> .\n",
         ));
-        let q = format!(
-            "{PFX} SELECT ?s ?t WHERE {{ ?s ex:p ?x . ?t ex:q ?y . FILTER(?x = ?y) }}"
-        );
+        let q = format!("{PFX} SELECT ?s ?t WHERE {{ ?s ex:p ?x . ?t ex:q ?y . FILTER(?x = ?y) }}");
         let on = assert_on_off_equal(&g, &q);
         assert_eq!(on.len(), 1, "bag: {:?}", on);
-        assert!(on[0].iter().any(|c| c.contains("a1")) && on[0].iter().any(|c| c.contains("b1")), "bag: {:?}", on);
+        assert!(
+            on[0].iter().any(|c| c.contains("a1")) && on[0].iter().any(|c| c.contains("b1")),
+            "bag: {:?}",
+            on
+        );
     }
 
     // ---- a conjunction of equalities: one is the key, the rest recheck residually ----
@@ -837,7 +909,11 @@ mod tests {
         );
         let on = assert_on_off_equal(&g, &q);
         assert_eq!(on.len(), 1, "bag: {:?}", on);
-        assert!(on[0].iter().any(|c| c.contains("a1")) && on[0].iter().any(|c| c.contains("b1")), "bag: {:?}", on);
+        assert!(
+            on[0].iter().any(|c| c.contains("a1")) && on[0].iter().any(|c| c.contains("b1")),
+            "bag: {:?}",
+            on
+        );
     }
 
     // ---- three components: two chained by equalities, one cross-products ----
@@ -880,9 +956,7 @@ mod tests {
     #[test]
     fn declines_same_component_equality() {
         let g = load("<http://ex/s> <http://ex/p> \"v\" .\n<http://ex/s> <http://ex/q> \"v\" .\n");
-        let q = format!(
-            "{PFX} SELECT ?a ?b WHERE {{ ?s ex:p ?a . ?s ex:q ?b . FILTER(?a = ?b) }}"
-        );
+        let q = format!("{PFX} SELECT ?a ?b WHERE {{ ?s ex:p ?a . ?s ex:q ?b . FILTER(?a = ?b) }}");
         let out = assert_declines(&g, &q);
         assert_eq!(out.len(), 1);
     }
@@ -895,7 +969,12 @@ mod tests {
              FILTER(?x = ?y || false) }}"
         );
         let out = assert_declines(&g, &q);
-        assert_eq!(out.len(), 1, "the disjunction still keeps the row: {:?}", out);
+        assert_eq!(
+            out.len(),
+            1,
+            "the disjunction still keeps the row: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -916,7 +995,15 @@ mod tests {
             "{PFX} SELECT ?x ?y WHERE {{ <http://ex/a> ex:p ?x . <http://ex/b> ex:q ?y . FILTER(?x = ?y) }}"
         );
         let before = fired();
-        let r = query_with_budget(&g, &q, &QueryBudget { max_rows: Some(1_000_000), ..Default::default() }).unwrap();
+        let r = query_with_budget(
+            &g,
+            &q,
+            &QueryBudget {
+                max_rows: Some(1_000_000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(fired(), before, "must decline under an armed budget");
         assert_eq!(r.rows.len(), 1);
     }
@@ -949,10 +1036,19 @@ mod tests {
         assert_eq!(key_of(&g, id_of("-0.0")), key_of(&g, dict::INLINE_BASE));
         // Strings key by value, language-tagged by (lowercased tag, value).
         assert_eq!(key_of(&g, id_of("\"str\"")), JKey::Str("str".to_string()));
-        assert_eq!(key_of(&g, id_of("\"tag\"")), JKey::LangLit("en".to_string(), "tag".to_string()));
+        assert_eq!(
+            key_of(&g, id_of("\"tag\"")),
+            JKey::LangLit("en".to_string(), "tag".to_string())
+        );
         // Well-formed booleans key by value: "true" and "1" agree.
         assert_eq!(key_of(&g, id_of("\"true\"")), JKey::Bool(true));
-        assert_eq!(key_of(&g, id_of("\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>")), JKey::Bool(true));
+        assert_eq!(
+            key_of(
+                &g,
+                id_of("\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>")
+            ),
+            JKey::Bool(true)
+        );
         // Value-comparable temporals are the Hard class.
         assert_eq!(key_of(&g, id_of("2020-01-01T00:00:00Z")), JKey::Hard);
         // [FABLE-5] (sq-9781x) A whitespace-padded numeric lexical now HITS the aligned
@@ -961,7 +1057,10 @@ mod tests {
         // `Hard` (the cache/evaluator acceptance sets are now aligned, so it no longer needs
         // the exact-evaluator backstop for the whitespace case).
         assert_eq!(key_of(&g, id_of("\" 7\"")), JKey::Num(7.0f64.to_bits()));
-        assert_eq!(key_of(&g, id_of("\" 7\"")), key_of(&g, dict::INLINE_BASE + 7));
+        assert_eq!(
+            key_of(&g, id_of("\" 7\"")),
+            key_of(&g, dict::INLINE_BASE + 7)
+        );
         // Unknown datatype: identity key. IRIs: identity key.
         let uid = id_of("unknownDt");
         assert_eq!(key_of(&g, uid), JKey::Term(uid));
@@ -982,18 +1081,22 @@ mod tests {
             Box::new(Expression::Bound(Variable::new("c").unwrap()))
         )));
         // Any function call is out (row-nondeterminism / evaluation errors).
-        assert!(!expr_total(&Expression::FunctionCall(spargebra::algebra::Function::Str, vec![v("a")])));
-        assert!(!expr_total(&Expression::Not(Box::new(Expression::FunctionCall(
-            spargebra::algebra::Function::Rand,
-            vec![]
-        )))));
+        assert!(!expr_total(&Expression::FunctionCall(
+            spargebra::algebra::Function::Str,
+            vec![v("a")]
+        )));
+        assert!(!expr_total(&Expression::Not(Box::new(
+            Expression::FunctionCall(spargebra::algebra::Function::Rand, vec![])
+        ))));
     }
 
     #[test]
     fn pattern_components_split_and_merge() {
         let parse = |q: &str| -> Vec<TriplePattern> {
             let query = spargebra::SparqlParser::new().parse_query(q).unwrap();
-            let spargebra::Query::Select { pattern, .. } = query else { unreachable!() };
+            let spargebra::Query::Select { pattern, .. } = query else {
+                unreachable!()
+            };
             let mut pats = Vec::new();
             let mut filters = Vec::new();
             flatten_conjunction(&pattern_inner(&pattern), &mut pats, &mut filters);
@@ -1030,7 +1133,10 @@ mod tests {
         assert!(as_var_eq(cs[2]).is_some());
         // Self-equality and non-variable operands are not join edges.
         assert!(as_var_eq(&eq("a", "a")).is_none());
-        let lit = Expression::Equal(Box::new(v("a")), Box::new(Expression::Literal(oxrdf::Literal::new_simple_literal("x"))));
+        let lit = Expression::Equal(
+            Box::new(v("a")),
+            Box::new(Expression::Literal(oxrdf::Literal::new_simple_literal("x"))),
+        );
         assert!(as_var_eq(&lit).is_none());
     }
 

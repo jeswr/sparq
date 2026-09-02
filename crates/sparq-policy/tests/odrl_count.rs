@@ -42,7 +42,9 @@ fn policy_at_most(operator: &str, bound: &str) -> sparq_policy::Policy {
 }
 
 fn alice_reads() -> Request {
-    Request::new(read()).on("urn:asset/x").by("https://alice.ex/me")
+    Request::new(read())
+        .on("urn:asset/x")
+        .by("https://alice.ex/me")
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +84,10 @@ fn lt_means_n_minus_one() {
     let req = alice_reads();
     assert!(evaluate_and_exercise(&p, &req, &store).allow);
     assert!(evaluate_and_exercise(&p, &req, &store).allow);
-    assert!(!evaluate_and_exercise(&p, &req, &store).allow, "3rd must deny under lt 3");
+    assert!(
+        !evaluate_and_exercise(&p, &req, &store).allow,
+        "3rd must deny under lt 3"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +110,9 @@ fn eq_means_at_most_n() {
 fn base_deny_consumes_nothing() {
     let p = policy_at_most("lteq", "2");
     let store = InMemoryCounterStore::new();
-    let mallory = Request::new(read()).on("urn:asset/x").by("https://mallory.ex/me");
+    let mallory = Request::new(read())
+        .on("urn:asset/x")
+        .by("https://mallory.ex/me");
     // Mallory is not the assignee → base evaluator denies → no consume.
     let d = evaluate_and_exercise(&p, &mallory, &store);
     assert!(!d.allow);
@@ -136,12 +143,21 @@ fn budget_isolated_per_party_and_target() {
     let p = parse_policy_str(&ttl, "turtle").unwrap();
     let store = InMemoryCounterStore::new();
 
-    let alice = Request::new(read()).on("urn:asset/x").by("https://alice.ex/me");
-    let bob = Request::new(read()).on("urn:asset/x").by("https://bob.ex/me");
-    let alice_other = Request::new(read()).on("urn:asset/y").by("https://alice.ex/me");
+    let alice = Request::new(read())
+        .on("urn:asset/x")
+        .by("https://alice.ex/me");
+    let bob = Request::new(read())
+        .on("urn:asset/x")
+        .by("https://bob.ex/me");
+    let alice_other = Request::new(read())
+        .on("urn:asset/y")
+        .by("https://alice.ex/me");
 
     assert!(evaluate_and_exercise(&p, &alice, &store).allow);
-    assert!(!evaluate_and_exercise(&p, &alice, &store).allow, "alice's budget on x is spent");
+    assert!(
+        !evaluate_and_exercise(&p, &alice, &store).allow,
+        "alice's budget on x is spent"
+    );
     // Bob has his own budget on x.
     assert!(evaluate_and_exercise(&p, &bob, &store).allow);
     // Alice has a separate budget on a different target.
@@ -208,18 +224,39 @@ fn count_status_does_not_consume() {
     let req = alice_reads();
 
     // Before any exercise: Satisfied(0/2). Querying it twice consumes nothing.
-    assert_eq!(count_status(rule, &req, &store), CountStatus::Satisfied { consumed: 0, limit: 2 });
-    assert_eq!(count_status(rule, &req, &store), CountStatus::Satisfied { consumed: 0, limit: 2 });
+    assert_eq!(
+        count_status(rule, &req, &store),
+        CountStatus::Satisfied {
+            consumed: 0,
+            limit: 2
+        }
+    );
+    assert_eq!(
+        count_status(rule, &req, &store),
+        CountStatus::Satisfied {
+            consumed: 0,
+            limit: 2
+        }
+    );
 
     // Exercise once → status reflects 1 consumed, still satisfied.
     assert!(evaluate_and_exercise(&p, &req, &store).allow);
-    assert_eq!(count_status(rule, &req, &store), CountStatus::Satisfied { consumed: 1, limit: 2 });
+    assert_eq!(
+        count_status(rule, &req, &store),
+        CountStatus::Satisfied {
+            consumed: 1,
+            limit: 2
+        }
+    );
 
     // Exhaust → DefinitelyUnsatisfied.
     assert!(evaluate_and_exercise(&p, &req, &store).allow);
     assert_eq!(
         count_status(rule, &req, &store),
-        CountStatus::DefinitelyUnsatisfied { consumed: 2, limit: 2 }
+        CountStatus::DefinitelyUnsatisfied {
+            consumed: 2,
+            limit: 2
+        }
     );
 }
 
@@ -238,11 +275,17 @@ fn no_count_constraint_unbounded() {
     );
     let p = parse_policy_str(&ttl, "turtle").unwrap();
     let store = InMemoryCounterStore::new();
-    assert_eq!(count_status(&p.permissions[0], &alice_reads(), &store), CountStatus::NotConstrained);
+    assert_eq!(
+        count_status(&p.permissions[0], &alice_reads(), &store),
+        CountStatus::NotConstrained
+    );
     for _ in 0..10 {
         let d = evaluate_and_exercise(&p, &alice_reads(), &store);
         assert!(d.allow);
-        assert_eq!(d.consumed, None, "an unconstrained grant touches no counter");
+        assert_eq!(
+            d.consumed, None,
+            "an unconstrained grant touches no counter"
+        );
     }
 }
 
@@ -282,7 +325,11 @@ fn two_counts_tightest_governs_and_consumes_one() {
     // First exercise consumes exactly ONE unit (not one-per-constraint → would be 2).
     let d = evaluate_and_exercise(&p, &req, &store);
     assert!(d.allow, "exercise 1 should grant: {d:?}");
-    assert_eq!(d.consumed, Some(1), "one exercise consumes exactly one unit");
+    assert_eq!(
+        d.consumed,
+        Some(1),
+        "one exercise consumes exactly one unit"
+    );
 
     // Second exercise: still within the tightest limit of 2.
     let d = evaluate_and_exercise(&p, &req, &store);
@@ -291,7 +338,10 @@ fn two_counts_tightest_governs_and_consumes_one() {
 
     // Third: the tightest limit (2) is reached → DENY, nothing consumed.
     let d = evaluate_and_exercise(&p, &req, &store);
-    assert!(!d.allow, "exercise 3 must deny under the tightest (2) limit");
+    assert!(
+        !d.allow,
+        "exercise 3 must deny under the tightest (2) limit"
+    );
     assert_eq!(d.consumed, None);
 
     // Exactly 2 consumed — the looser limit of 5 never granted a 3rd, and no exercise
@@ -363,14 +413,23 @@ fn two_counts_denies_when_tightest_exhausted() {
     let store = InMemoryCounterStore::new();
     let req = alice_reads();
 
-    assert!(evaluate_and_exercise(&p, &req, &store).allow, "first exercise grants");
+    assert!(
+        evaluate_and_exercise(&p, &req, &store).allow,
+        "first exercise grants"
+    );
     let d = evaluate_and_exercise(&p, &req, &store);
-    assert!(!d.allow, "second exercise denies under the tightest (1) limit");
+    assert!(
+        !d.allow,
+        "second exercise denies under the tightest (1) limit"
+    );
     assert_eq!(d.consumed, None);
     // count_status agrees the tightest limit is exhausted.
     assert_eq!(
         count_status(&p.permissions[0], &req, &store),
-        CountStatus::DefinitelyUnsatisfied { consumed: 1, limit: 1 }
+        CountStatus::DefinitelyUnsatisfied {
+            consumed: 1,
+            limit: 1
+        }
     );
 }
 
@@ -407,7 +466,11 @@ fn concurrent_exercises_never_overgrant() {
     }
     // EXACTLY the limit was granted — not one more (atomicity) and not fewer (no lost
     // grant), and the store's final consumed count agrees.
-    assert_eq!(granted.load(Ordering::Relaxed), LIMIT, "must grant exactly the limit");
+    assert_eq!(
+        granted.load(Ordering::Relaxed),
+        LIMIT,
+        "must grant exactly the limit"
+    );
     let key = CountKey {
         rule_id: p.permissions[0].id.clone(),
         party: "https://alice.ex/me".into(),

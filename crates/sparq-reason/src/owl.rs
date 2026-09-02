@@ -284,8 +284,16 @@ fn commit_serial(
             if all.insert(c) {
                 rdfs_idx.insert(c, v);
                 if need.contains(&c[1]) {
-                    out.entry(c[1]).or_default().entry(c[0]).or_default().push(c[2]);
-                    inc.entry(c[1]).or_default().entry(c[2]).or_default().push(c[0]);
+                    out.entry(c[1])
+                        .or_default()
+                        .entry(c[0])
+                        .or_default()
+                        .push(c[2]);
+                    inc.entry(c[1])
+                        .or_default()
+                        .entry(c[2])
+                        .or_default()
+                        .push(c[0]);
                 }
                 if let Some((gen, transitive)) = gen_mark.as_mut() {
                     if transitive.contains(&c[1]) {
@@ -336,12 +344,30 @@ fn commit_candidates(
         + trp_chunks.iter().map(Vec::len).sum::<usize>();
     if total < PAR_THRESHOLD {
         let mut merged = commit_serial(
-            cand, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta,
+            cand,
+            same_as,
+            v,
+            uf,
+            all,
+            rdfs_idx,
+            need,
+            out,
+            inc,
+            new_delta,
             Some((gen, transitive)),
         );
         for ch in chunks {
             merged |= commit_serial(
-                ch, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta,
+                ch,
+                same_as,
+                v,
+                uf,
+                all,
+                rdfs_idx,
+                need,
+                out,
+                inc,
+                new_delta,
                 Some((gen, transitive)),
             );
         }
@@ -358,8 +384,9 @@ fn commit_candidates(
     let prof = std::env::var("SPARQ_OWL_PROF").is_ok(); // TEMP PROFILING (removed before merge)
     let t0 = std::time::Instant::now();
     let main_parts: Vec<&Vec<[Id; 3]>> = std::iter::once(&cand).chain(chunks.iter()).collect();
-    let trp_parts: Vec<&Vec<[Id; 3]>> =
-        std::iter::once(&trp_cand).chain(trp_chunks.iter()).collect();
+    let trp_parts: Vec<&Vec<[Id; 3]>> = std::iter::once(&trp_cand)
+        .chain(trp_chunks.iter())
+        .collect();
     // 1. sameAs merges first (serial union-find; parallel extraction). prp-trp never derives
     //    sameAs but the scan is uniform (and cheap) over both candidate streams.
     let same: Vec<(Id, Id)> = main_parts
@@ -404,8 +431,16 @@ fn commit_candidates(
             if all.insert(c) {
                 rdfs_idx.insert(c, v);
                 if need.contains(&c[1]) {
-                    out.entry(c[1]).or_default().entry(c[0]).or_default().push(c[2]);
-                    inc.entry(c[1]).or_default().entry(c[2]).or_default().push(c[0]);
+                    out.entry(c[1])
+                        .or_default()
+                        .entry(c[0])
+                        .or_default()
+                        .push(c[2]);
+                    inc.entry(c[1])
+                        .or_default()
+                        .entry(c[2])
+                        .or_default()
+                        .push(c[0]);
                 }
                 if !is_trp && transitive.contains(&c[1]) {
                     gen.mark(c);
@@ -451,8 +486,8 @@ struct ClassFeatureIdx {
     type_subj: FxHashMap<Id, Vec<Id>>, // class -> subjects
     subj_types: FxHashMap<Id, Vec<Id>>, // subject -> classes
     lists_dirty: bool,
-    lists: FxHashMap<Id, Vec<Id>>, // decoded list head -> members
-    keys: FxHashMap<Id, Vec<Id>>,  // class -> hasKey property list
+    lists: FxHashMap<Id, Vec<Id>>,  // decoded list head -> members
+    keys: FxHashMap<Id, Vec<Id>>,   // class -> hasKey property list
     chains: FxHashMap<Id, Vec<Id>>, // property -> chain property list
     inters: FxHashMap<Id, Vec<Id>>, // class -> intersection members
     unions: FxHashMap<Id, Vec<Id>>, // class -> union members
@@ -461,7 +496,12 @@ struct ClassFeatureIdx {
 
 impl ClassFeatureIdx {
     fn insert(&mut self, [s, p, obj]: [Id; 3], v: &Vocab, o: &Owl, dict: &Dict) {
-        self.by_pred.entry(p).or_default().entry(s).or_default().push(obj);
+        self.by_pred
+            .entry(p)
+            .or_default()
+            .entry(s)
+            .or_default()
+            .push(obj);
         if p == v.ty {
             self.type_subj.entry(obj).or_default().push(s);
             self.subj_types.entry(s).or_default().push(obj);
@@ -593,9 +633,13 @@ fn rdfs_reachable_features(
     // The non-reflexive `reaches` means a directly-asserted feature predicate (which the direct
     // scan in the callers already handles) does NOT count here — only a feature predicate that is
     // a *proper* RDFS superproperty of an in-use predicate triggers the fixpoint fallback.
-    let pred_hit = preds_in_use.iter().any(|&start| reaches(start, &sub_prop, feature_preds));
+    let pred_hit = preds_in_use
+        .iter()
+        .any(|&start| reaches(start, &sub_prop, feature_preds));
     // Same for feature classes reached through subClassOf+.
-    let type_hit = types_in_use.iter().any(|&start| reaches(start, &sub_class, feature_types));
+    let type_hit = types_in_use
+        .iter()
+        .any(|&start| reaches(start, &sub_class, feature_types));
     (pred_hit, type_hit)
 }
 
@@ -644,8 +688,13 @@ fn owl_uses_features(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> bool {
     ]
     .into_iter()
     .collect();
-    let types: FxHashSet<Id> = [o.symmetric, o.transitive, o.functional, o.inv_functional].into_iter().collect();
-    if triples.iter().any(|&[_, p, ob]| preds.contains(&p) || (p == v.ty && types.contains(&ob))) {
+    let types: FxHashSet<Id> = [o.symmetric, o.transitive, o.functional, o.inv_functional]
+        .into_iter()
+        .collect();
+    if triples
+        .iter()
+        .any(|&[_, p, ob]| preds.contains(&p) || (p == v.ty && types.contains(&ob)))
+    {
         return true;
     }
     // [OPUS-4.8] Also fall back to the fixpoint when an OWL feature predicate/class is reachable
@@ -680,16 +729,18 @@ fn monotone_only(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> Option<crate::rdfs:
     ]
     .into_iter()
     .collect();
-    let recursive_types: FxHashSet<Id> =
-        [o.transitive, o.functional, o.inv_functional].into_iter().collect();
+    let recursive_types: FxHashSet<Id> = [o.transitive, o.functional, o.inv_functional]
+        .into_iter()
+        .collect();
 
     // [OPUS-4.8] An OWL feature can also be introduced by RDFS entailment (rdfs7/rdfs9), e.g.
     // `(:p rdfs:subPropertyOf owl:sameAs)` (recursive) or `(:C rdfs:subClassOf owl:SymmetricProperty)`
     // (monotone). The mono descriptor below is built from DIRECTLY-asserted feature axioms only, so
     // an RDFS-reachable feature — recursive OR monotone — would be silently dropped. Force the full
     // fixpoint whenever any OWL feature predicate/class is RDFS-reachable. See 1402.
-    let monotone_preds: FxHashSet<Id> =
-        [o.inverse_of, o.equiv_class, o.equiv_prop].into_iter().collect();
+    let monotone_preds: FxHashSet<Id> = [o.inverse_of, o.equiv_class, o.equiv_prop]
+        .into_iter()
+        .collect();
     let monotone_types: FxHashSet<Id> = [o.symmetric].into_iter().collect();
     let all_feature_preds: FxHashSet<Id> =
         recursive_preds.union(&monotone_preds).copied().collect();
@@ -907,10 +958,10 @@ fn post_equivalences(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     }
     let mut added = 0;
     let emit = |pairs: &FxHashSet<(Id, Id)>,
-                    eq: Id,
-                    set: &mut FxHashSet<[Id; 3]>,
-                    triples: &mut Vec<[Id; 3]>,
-                    added: &mut usize| {
+                eq: Id,
+                set: &mut FxHashSet<[Id; 3]>,
+                triples: &mut Vec<[Id; 3]>,
+                added: &mut usize| {
         for &(a, b) in pairs.iter() {
             if a != b && pairs.contains(&(b, a)) {
                 for t in [[a, eq, b], [b, eq, a]] {
@@ -1005,8 +1056,13 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     // delta edges are appended as they are derived — instead of rebuilt from `all` every round,
     // which was the dominant per-round cost on recursive (transitive-closure) workloads.
     let mut ax = Axioms::build(&all, &v, &o);
-    let mut need: FxHashSet<Id> =
-        ax.transitive.iter().chain(ax.functional.iter()).chain(ax.inv_functional.iter()).copied().collect();
+    let mut need: FxHashSet<Id> = ax
+        .transitive
+        .iter()
+        .chain(ax.functional.iter())
+        .chain(ax.inv_functional.iter())
+        .copied()
+        .collect();
     let mut out: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     let mut inc: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     build_adjacency(&all, &need, &mut out, &mut inc);
@@ -1106,7 +1162,11 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                 // (persistent build-side table, keyed on [p, s]); default: plain FxHashMap.
                 #[cfg(not(feature = "substrate-join"))]
                 if let Some(ys) = out.get(&p).and_then(|m| m.get(&s)) {
-                    cand.extend(ys.iter().filter(|&&y| y != obj).map(|&y| [obj, o.same_as, y]));
+                    cand.extend(
+                        ys.iter()
+                            .filter(|&&y| y != obj)
+                            .map(|&y| [obj, o.same_as, y]),
+                    );
                 }
                 #[cfg(feature = "substrate-join")]
                 adj.probe_out(p, s, |y| {
@@ -1595,8 +1655,13 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             // are bounded by the individual count, so this fallback cannot loop indefinitely.
             all = canonicalize(&all, &mut uf, o.same_as);
             ax = Axioms::build(&all, &v, &o);
-            need =
-                ax.transitive.iter().chain(ax.functional.iter()).chain(ax.inv_functional.iter()).copied().collect();
+            need = ax
+                .transitive
+                .iter()
+                .chain(ax.functional.iter())
+                .chain(ax.inv_functional.iter())
+                .copied()
+                .collect();
             build_adjacency(&all, &need, &mut out, &mut inc);
             // [SONNET-4.6] sq-qonbz.2 — rebuild DeltaAdj from the recanonicalised triple set
             // (mirrors the `build_adjacency` call above; union-find merge rewrites ids, so the
@@ -1758,9 +1823,17 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let (mut base, derived) = {
         use rayon::prelude::*;
         let mut derived: Vec<[Id; 3]> = if expanded.len() >= PAR_THRESHOLD {
-            expanded.par_iter().copied().filter(|t| !original.contains(t)).collect()
+            expanded
+                .par_iter()
+                .copied()
+                .filter(|t| !original.contains(t))
+                .collect()
         } else {
-            expanded.iter().copied().filter(|t| !original.contains(t)).collect()
+            expanded
+                .iter()
+                .copied()
+                .filter(|t| !original.contains(t))
+                .collect()
         };
         derived.par_sort_unstable();
         derived.dedup();
@@ -1898,7 +1971,9 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
                         if all.contains(&[y, *p, x]) {
                             out.push(format!(
                                 "asymmetric {} holds both ways between {} and {}",
-                                term(*p), term(x), term(y)
+                                term(*p),
+                                term(x),
+                                term(y)
                             ));
                         }
                     }
@@ -1915,7 +1990,8 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
                         if x == y {
                             out.push(format!(
                                 "irreflexive {} relates {} to itself",
-                                term(*p), term(x)
+                                term(*p),
+                                term(x)
                             ));
                         }
                     }
@@ -1945,7 +2021,10 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
                 if all.contains(&[x, q, y]) {
                     out.push(format!(
                         "disjoint properties {} and {} share the pair ({}, {})",
-                        term(p), term(q), term(x), term(y)
+                        term(p),
+                        term(q),
+                        term(x),
+                        term(y)
                     ));
                 }
             }
@@ -1981,7 +2060,9 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
                     if all.contains(&[x, p, y]) {
                         out.push(format!(
                             "negative property assertion violated: {} {} {}",
-                            term(x), term(p), term(y)
+                            term(x),
+                            term(p),
+                            term(y)
                         ));
                     }
                 }
@@ -2003,7 +2084,8 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
                                 if a == b || same.contains(&(a.min(b), a.max(b))) {
                                     out.push(format!(
                                         "AllDifferent members {} and {} are the same",
-                                        term(a), term(b)
+                                        term(a),
+                                        term(b)
                                     ));
                                 }
                             }
@@ -2018,7 +2100,9 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
     for &(a, b) in &same {
         if let (oxrdf::Term::Literal(la), oxrdf::Term::Literal(lb)) = (dict.term(a), dict.term(b)) {
             if literal_values_differ(&la, &lb) {
-                out.push(format!("distinct literal values {la} and {lb} forced sameAs"));
+                out.push(format!(
+                    "distinct literal values {la} and {lb} forced sameAs"
+                ));
             }
         }
     }
@@ -2076,8 +2160,7 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
             if let Some(pairs) = po.get(&p) {
                 for &(u, y) in pairs {
                     if subj_types.get(&u).is_some_and(|ts| ts.contains(&r))
-                        && (c == thing
-                            || subj_types.get(&y).is_some_and(|ts| ts.contains(&c)))
+                        && (c == thing || subj_types.get(&y).is_some_and(|ts| ts.contains(&c)))
                     {
                         out.push(format!(
                             "{} has a {} value{} but is maxQualifiedCardinality 0 on it",
@@ -2151,9 +2234,19 @@ fn literal_values_differ(a: &oxrdf::Literal, b: &oxrdf::Literal) -> bool {
         matches!(
             d.strip_prefix(XSD),
             Some(
-                "integer" | "decimal" | "long" | "int" | "short" | "byte"
-                    | "nonNegativeInteger" | "positiveInteger" | "nonPositiveInteger"
-                    | "negativeInteger" | "unsignedLong" | "unsignedInt" | "unsignedShort"
+                "integer"
+                    | "decimal"
+                    | "long"
+                    | "int"
+                    | "short"
+                    | "byte"
+                    | "nonNegativeInteger"
+                    | "positiveInteger"
+                    | "nonPositiveInteger"
+                    | "negativeInteger"
+                    | "unsignedLong"
+                    | "unsignedInt"
+                    | "unsignedShort"
                     | "unsignedByte"
             )
         )
@@ -2305,23 +2398,27 @@ mod tests {
         let ty = dict.intern_iri(rdf::TYPE.as_str());
         let inv_func = owl(&mut dict, "InverseFunctionalProperty");
         let p = ex(&mut dict, "p");
-        let mut triples =
-            vec![[ssn, ty, inv_func], [a, ssn, value], [b, ssn, value], [a, p, mark]];
+        let mut triples = vec![
+            [ssn, ty, inv_func],
+            [a, ssn, value],
+            [b, ssn, value],
+            [a, p, mark],
+        ];
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         let same_as = [OWL, "sameAs"].concat();
         assert!(
-            has(
-                &dict,
-                &set,
-                "http://ex/a",
-                &same_as,
-                "http://ex/b"
-            ),
+            has(&dict, &set, "http://ex/a", &same_as, "http://ex/b"),
             "prp-ifp ⊢ sameAs"
         );
         assert!(
-            has(&dict, &set, "http://ex/b", "http://ex/p", "http://ex/marker"),
+            has(
+                &dict,
+                &set,
+                "http://ex/b",
+                "http://ex/p",
+                "http://ex/marker"
+            ),
             "eq-rep substitution after prp-ifp"
         );
     }
@@ -2401,9 +2498,15 @@ mod tests {
         // No OWL-specific feature → the OWL-RL closure is RDFS + scm-dom/rng, computed by the
         // single-pass fast path. Validates the routing produces rdfs7/2/3/9 + scm-dom1/2/rng1.
         let mut dict = Dict::new();
-        let r = |d: &mut Dict, f: &str| d.intern_iri(&format!("http://www.w3.org/2000/01/rdf-schema#{f}"));
-        let (sc, sp, dom, rng) =
-            (r(&mut dict, "subClassOf"), r(&mut dict, "subPropertyOf"), r(&mut dict, "domain"), r(&mut dict, "range"));
+        let r = |d: &mut Dict, f: &str| {
+            d.intern_iri(&format!("http://www.w3.org/2000/01/rdf-schema#{f}"))
+        };
+        let (sc, sp, dom, rng) = (
+            r(&mut dict, "subClassOf"),
+            r(&mut dict, "subPropertyOf"),
+            r(&mut dict, "domain"),
+            r(&mut dict, "range"),
+        );
         let ty = rdf(&mut dict, "type");
         let (c0, c1, d0, d1, p, q, x, y) = (
             ex(&mut dict, "c0"),
@@ -2415,15 +2518,30 @@ mod tests {
             ex(&mut dict, "x"),
             ex(&mut dict, "y"),
         );
-        let mut triples =
-            vec![[c0, sc, c1], [d0, sc, d1], [p, dom, c0], [p, rng, d0], [q, sp, p], [x, q, y]];
+        let mut triples = vec![
+            [c0, sc, c1],
+            [d0, sc, d1],
+            [p, dom, c0],
+            [p, rng, d0],
+            [q, sp, p],
+            [x, q, y],
+        ];
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         assert!(set.contains(&[x, p, y]), "rdfs7 (q subPropertyOf p)");
-        assert!(set.contains(&[x, ty, c0]) && set.contains(&[x, ty, c1]), "rdfs2 domain + rdfs9 up subclass");
-        assert!(set.contains(&[y, ty, d0]) && set.contains(&[y, ty, d1]), "rdfs3 range + rdfs9 up subclass");
+        assert!(
+            set.contains(&[x, ty, c0]) && set.contains(&[x, ty, c1]),
+            "rdfs2 domain + rdfs9 up subclass"
+        );
+        assert!(
+            set.contains(&[y, ty, d0]) && set.contains(&[y, ty, d1]),
+            "rdfs3 range + rdfs9 up subclass"
+        );
         assert!(set.contains(&[p, dom, c1]), "scm-dom1 (domain up subclass)");
-        assert!(set.contains(&[q, dom, c0]), "scm-dom2 (domain down subproperty)");
+        assert!(
+            set.contains(&[q, dom, c0]),
+            "scm-dom2 (domain down subproperty)"
+        );
         assert!(set.contains(&[p, rng, d1]), "scm-rng1 (range up subclass)");
     }
 
@@ -2630,7 +2748,11 @@ mod tests {
             owl(&mut dict, "maxQualifiedCardinality"),
             owl(&mut dict, "onClass"),
         );
-        let zero = dict.intern_lit("0", "http://www.w3.org/2001/XMLSchema#nonNegativeInteger", None);
+        let zero = dict.intern_lit(
+            "0",
+            "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+            None,
+        );
         let mut triples = vec![
             [r, onp, p],
             [r, mqc, zero],
@@ -2640,11 +2762,19 @@ mod tests {
             [y, ty, c],
         ];
         materialize_owl_rl(&mut dict, &mut triples);
-        assert!(!inconsistencies(&dict, &triples).is_empty(), "cls-maxqc1 clash");
+        assert!(
+            !inconsistencies(&dict, &triples).is_empty(),
+            "cls-maxqc1 clash"
+        );
 
         // Consistent variant: the p-value is NOT a :C — no clash (the qualification matters).
         let mut d2 = Dict::new();
-        let (p, c, u, y) = (ex(&mut d2, "p"), ex(&mut d2, "C"), ex(&mut d2, "u"), ex(&mut d2, "y"));
+        let (p, c, u, y) = (
+            ex(&mut d2, "p"),
+            ex(&mut d2, "C"),
+            ex(&mut d2, "u"),
+            ex(&mut d2, "y"),
+        );
         let r = d2.intern_blank("_RQ0");
         let ty = rdf(&mut d2, "type");
         let (onp, mqc, onc) = (
@@ -2652,10 +2782,23 @@ mod tests {
             owl(&mut d2, "maxQualifiedCardinality"),
             owl(&mut d2, "onClass"),
         );
-        let zero = d2.intern_lit("0", "http://www.w3.org/2001/XMLSchema#nonNegativeInteger", None);
-        let mut t2 = vec![[r, onp, p], [r, mqc, zero], [r, onc, c], [u, ty, r], [u, p, y]];
+        let zero = d2.intern_lit(
+            "0",
+            "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+            None,
+        );
+        let mut t2 = vec![
+            [r, onp, p],
+            [r, mqc, zero],
+            [r, onc, c],
+            [u, ty, r],
+            [u, p, y],
+        ];
         materialize_owl_rl(&mut d2, &mut t2);
-        assert!(inconsistencies(&d2, &t2).is_empty(), "untyped filler: no cls-maxqc1 clash");
+        assert!(
+            inconsistencies(&d2, &t2).is_empty(),
+            "untyped filler: no cls-maxqc1 clash"
+        );
 
         // cls-maxqc2: onClass owl:Thing — ANY p-value clashes.
         let mut d3 = Dict::new();
@@ -2668,8 +2811,18 @@ mod tests {
             owl(&mut d3, "onClass"),
             owl(&mut d3, "Thing"),
         );
-        let zero = d3.intern_lit("0", "http://www.w3.org/2001/XMLSchema#nonNegativeInteger", None);
-        let mut t3 = vec![[r, onp, p], [r, mqc, zero], [r, onc, thing], [u, ty, r], [u, p, y]];
+        let zero = d3.intern_lit(
+            "0",
+            "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+            None,
+        );
+        let mut t3 = vec![
+            [r, onp, p],
+            [r, mqc, zero],
+            [r, onc, thing],
+            [u, ty, r],
+            [u, p, y],
+        ];
         materialize_owl_rl(&mut d3, &mut t3);
         assert!(!inconsistencies(&d3, &t3).is_empty(), "cls-maxqc2 clash");
     }
@@ -2689,7 +2842,10 @@ mod tests {
         let (r1, r2) = (dict.intern_blank("_R1"), dict.intern_blank("_R2"));
         let ty = rdf(&mut dict, "type");
         let sc = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
-        let (onp, svf) = (owl(&mut dict, "onProperty"), owl(&mut dict, "someValuesFrom"));
+        let (onp, svf) = (
+            owl(&mut dict, "onProperty"),
+            owl(&mut dict, "someValuesFrom"),
+        );
         let mut triples = vec![
             [dog, sc, animal],
             [r1, onp, haspet],
@@ -2701,7 +2857,10 @@ mod tests {
         let added = materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         assert!(set.contains(&[r1, sc, r2]), "scm-svf1");
-        assert!(set.contains(&[x, ty, r2]), "rdfs9 over the scm-svf1 edge (fixpoint feed)");
+        assert!(
+            set.contains(&[x, ty, r2]),
+            "rdfs9 over the scm-svf1 edge (fixpoint feed)"
+        );
         assert_eq!(added, 2, "exactly scm-svf1 + rdfs9");
     }
 
@@ -2773,7 +2932,10 @@ mod tests {
         );
         let sc = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
         let sp = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subPropertyOf");
-        let (onp, avf) = (owl(&mut dict, "onProperty"), owl(&mut dict, "allValuesFrom"));
+        let (onp, avf) = (
+            owl(&mut dict, "onProperty"),
+            owl(&mut dict, "allValuesFrom"),
+        );
         let mut triples = vec![
             // scm-avf1 instance
             [dog, sc, animal],
@@ -2792,8 +2954,14 @@ mod tests {
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         assert!(set.contains(&[r1, sc, r2]), "scm-avf1");
         assert!(!set.contains(&[r2, sc, r1]), "scm-avf1 is directional");
-        assert!(set.contains(&[a2, sc, a1]), "scm-avf2 (reversed conclusion)");
-        assert!(!set.contains(&[a1, sc, a2]), "scm-avf2 derives ONLY the reversed edge");
+        assert!(
+            set.contains(&[a2, sc, a1]),
+            "scm-avf2 (reversed conclusion)"
+        );
+        assert!(
+            !set.contains(&[a1, sc, a2]),
+            "scm-avf2 derives ONLY the reversed edge"
+        );
     }
 
     #[test]
@@ -3026,7 +3194,10 @@ mod tests {
         let mut triples = vec![[r, svf, c], [r, onp, p], [x, p, u], [u, ty, d], [d, sc, c]];
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-        assert!(set.contains(&[x, ty, r]), "cls-svf1 over a DERIVED filler type");
+        assert!(
+            set.contains(&[x, ty, r]),
+            "cls-svf1 over a DERIVED filler type"
+        );
     }
 
     #[test]
@@ -3051,7 +3222,10 @@ mod tests {
         let mut triples = vec![[p, ty, trans], [q, sp, p], [a, q, b], [b, q, c]];
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-        assert!(set.contains(&[a, p, c]), "spo1 ⊕ prp-trp (transitive super-property)");
+        assert!(
+            set.contains(&[a, p, c]),
+            "spo1 ⊕ prp-trp (transitive super-property)"
+        );
     }
 
     #[test]
@@ -3078,7 +3252,10 @@ mod tests {
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         assert!(set.contains(&[x, ty, cc]), "cls-int1 membership");
-        assert!(set.contains(&[x, ty, e]), "cax-eqc1 over the DERIVED int1 membership");
+        assert!(
+            set.contains(&[x, ty, e]),
+            "cax-eqc1 over the DERIVED int1 membership"
+        );
     }
 
     #[test]
@@ -3102,7 +3279,10 @@ mod tests {
         let mut triples = vec![[p1, eqp, p2], [p2, eqp, p3], [a, p1, b]];
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-        assert!(set.contains(&[a, p3, b]), "prp-eqp across a 2-link equivalence chain");
+        assert!(
+            set.contains(&[a, p3, b]),
+            "prp-eqp across a 2-link equivalence chain"
+        );
     }
 
     // [OPUS-4.8] sq-350ms — SOUNDNESS guard (the other half of "completeness
@@ -3315,7 +3495,10 @@ mod tests {
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         // rdfs7 fires regardless of path:
-        assert!(set.contains(&[a, same_as, b]), "rdfs7 should derive :a owl:sameAs :b");
+        assert!(
+            set.contains(&[a, same_as, b]),
+            "rdfs7 should derive :a owl:sameAs :b"
+        );
         // The equality MUST be acted on: :a inherits :b's outgoing :likes :c (eq-rep-s).
         assert!(
             has(&dict, &set, "http://ex/a", "http://ex/likes", "http://ex/c"),
@@ -3343,7 +3526,10 @@ mod tests {
         let mut triples = vec![[myprop, sc, symmetric], [knows, ty, myprop], [a, knows, b]];
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-        assert!(set.contains(&[knows, ty, symmetric]), "rdfs9 should type :knows symmetric");
+        assert!(
+            set.contains(&[knows, ty, symmetric]),
+            "rdfs9 should type :knows symmetric"
+        );
         assert!(
             set.contains(&[b, knows, a]),
             "subclass-derived owl:SymmetricProperty must drive prp-symp (1402)"
@@ -3367,7 +3553,10 @@ mod tests {
         let o = Owl::intern(&mut dict);
         let triples = vec![[parent, inv, child], [a, parent, b]];
         // inverseOf is a feature, so the fixpoint IS needed, but the monotone path must accept it.
-        assert!(owl_uses_features(&triples, &v, &o), "inverseOf is a feature");
+        assert!(
+            owl_uses_features(&triples, &v, &o),
+            "inverseOf is a feature"
+        );
         assert!(
             monotone_only(&triples, &v, &o).is_some(),
             "direct inverseOf must remain on the monotone fast path"
@@ -3479,7 +3668,11 @@ mod tests {
             owl(&mut dict, "AllDifferent"),
             owl(&mut dict, "members"),
         );
-        let (a, b, c) = (ex(&mut dict, "alice"), ex(&mut dict, "bob"), ex(&mut dict, "carol"));
+        let (a, b, c) = (
+            ex(&mut dict, "alice"),
+            ex(&mut dict, "bob"),
+            ex(&mut dict, "carol"),
+        );
         let mut triples = vec![[set, ty, all_diff]];
         let head = rdf_list(&mut dict, &mut triples, &[a, b, c]);
         triples.push([set, members, head]);
@@ -3503,7 +3696,11 @@ mod tests {
             owl(&mut dict, "AllDifferent"),
             owl(&mut dict, "members"),
         );
-        let (a, b, c) = (ex(&mut dict, "p1"), ex(&mut dict, "p2"), ex(&mut dict, "p3"));
+        let (a, b, c) = (
+            ex(&mut dict, "p1"),
+            ex(&mut dict, "p2"),
+            ex(&mut dict, "p3"),
+        );
         let mut triples = vec![[set, ty, all_diff]];
         let head = rdf_list(&mut dict, &mut triples, &[a, b, c]);
         triples.push([set, members, head]);
@@ -3529,7 +3726,11 @@ mod tests {
             owl(&mut dict, "distinctMembers"),
         );
         let same_as = owl(&mut dict, "sameAs");
-        let (a, b, c) = (ex(&mut dict, "q1"), ex(&mut dict, "q2"), ex(&mut dict, "q3"));
+        let (a, b, c) = (
+            ex(&mut dict, "q1"),
+            ex(&mut dict, "q2"),
+            ex(&mut dict, "q3"),
+        );
         let mut triples = vec![[set, ty, all_diff]];
         let head = rdf_list(&mut dict, &mut triples, &[a, b, c]);
         triples.push([set, distinct, head]);

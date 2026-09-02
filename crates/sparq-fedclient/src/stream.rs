@@ -235,7 +235,7 @@ mod tests {
     fn dropped_consumer_signals_producer_to_stop() {
         let (sink, stream) = SolutionStream::bounded(1);
         drop(stream); // consumer gone before any pull.
-        // The first emit may succeed (slack) or fail; a later one must report closed.
+                      // The first emit may succeed (slack) or fail; a later one must report closed.
         let _ = sink.emit(sol("http://ex/a"));
         // Once the slack is used, emit returns false (consumer gone) — the producer's stop
         // signal. (We loop to consume any slack deterministically.)
@@ -246,7 +246,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_closed, "a dropped consumer must eventually signal closed");
+        assert!(
+            saw_closed,
+            "a dropped consumer must eventually signal closed"
+        );
     }
 
     #[test]
@@ -293,11 +296,17 @@ mod tests {
         // closes and `next()` terminates (same discipline as `error_item_short_circuits_collect`);
         // otherwise the live sender keeps the receiver blocking after the last item. [OPUS-4.8] sq-qcnn.22
         let (sink, stream) = SolutionStream::bounded(0);
-        assert!(sink.emit(sol("http://ex/a")), "promoted-to-1 slack accepts one item without blocking");
+        assert!(
+            sink.emit(sol("http://ex/a")),
+            "promoted-to-1 slack accepts one item without blocking"
+        );
         drop(sink);
         let items: Vec<_> = stream.collect();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].as_ref().unwrap().get("s"), Some(&nn("http://ex/a")));
+        assert_eq!(
+            items[0].as_ref().unwrap().get("s"),
+            Some(&nn("http://ex/a"))
+        );
     }
 
     #[test]
@@ -309,10 +318,8 @@ mod tests {
 
     #[test]
     fn from_rows_single_row() {
-        let stream = SolutionStream::from_rows(
-            vec!["x".into()],
-            vec![vec![Some(nn("http://ex/obj"))]],
-        );
+        let stream =
+            SolutionStream::from_rows(vec!["x".into()], vec![vec![Some(nn("http://ex/obj"))]]);
         let got = stream.collect_solutions().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].get("x"), Some(&nn("http://ex/obj")));

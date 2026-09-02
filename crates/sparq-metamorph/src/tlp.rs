@@ -243,7 +243,10 @@ mod tests {
     #[test]
     fn tlp_queries_builds_the_three_branch_filters() {
         let queries = tlp_queries("?s <http://example.org/v> ?v", "?v < 5");
-        assert_eq!(queries.base, "SELECT * WHERE { ?s <http://example.org/v> ?v }");
+        assert_eq!(
+            queries.base,
+            "SELECT * WHERE { ?s <http://example.org/v> ?v }"
+        );
         assert!(queries.branch_true.contains("FILTER( ?v < 5 )"));
         assert!(queries.branch_false.contains("FILTER( !( ?v < 5 ) )"));
         assert!(queries

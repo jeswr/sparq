@@ -132,7 +132,10 @@ pub fn filter_value_dl_prover_toml(
     s.push_str(&format!("datatype_const = \"{}\"\n", datatype_const.0));
     s.push_str(&format!("expected = {}\n", expected));
     s.push_str(&format!("value_hook = \"{}\"\n", value_hook.0));
-    s.push_str(&format!("lexical_component = \"{}\"\n", lexical_component.0));
+    s.push_str(&format!(
+        "lexical_component = \"{}\"\n",
+        lexical_component.0
+    ));
     s
 }
 
@@ -202,7 +205,10 @@ pub fn filter_value_dl_f64_prover_toml(
     s.push_str(&format!("datatype_const = \"{}\"\n", datatype_const.0));
     s.push_str(&format!("expected = {}\n", expected));
     s.push_str(&format!("value_hook = \"{}\"\n", value_hook.0));
-    s.push_str(&format!("lexical_component = \"{}\"\n", lexical_component.0));
+    s.push_str(&format!(
+        "lexical_component = \"{}\"\n",
+        lexical_component.0
+    ));
     s
 }
 
@@ -237,8 +243,14 @@ pub fn filter_value_dl_decimal_prover_toml(
     s.push_str(&format!("datatype_const = \"{}\"\n", datatype_const.0));
     s.push_str(&format!("expected = {}\n", expected));
     s.push_str(&format!("value_neg = {}\n", value_neg));
-    s.push_str(&format!("value_hook_scaled = \"{}\"\n", value_hook_scaled.0));
-    s.push_str(&format!("lexical_component = \"{}\"\n", lexical_component.0));
+    s.push_str(&format!(
+        "value_hook_scaled = \"{}\"\n",
+        value_hook_scaled.0
+    ));
+    s.push_str(&format!(
+        "lexical_component = \"{}\"\n",
+        lexical_component.0
+    ));
     s
 }
 
@@ -274,12 +286,21 @@ pub fn filter_value_dl_datetime_prover_toml(
     s.push_str(&format!("operand_enc = \"{}\"\n", operand_enc.0));
     s.push_str(&format!("op = \"{}\"\n", op));
     s.push_str(&format!("bound_neg = {}\n", bound_neg));
-    s.push_str(&format!("bound_scaled_epoch = \"{}\"\n", bound_scaled_epoch));
+    s.push_str(&format!(
+        "bound_scaled_epoch = \"{}\"\n",
+        bound_scaled_epoch
+    ));
     s.push_str(&format!("datatype_const = \"{}\"\n", datatype_const.0));
     s.push_str(&format!("expected = {}\n", expected));
     s.push_str(&format!("value_neg = {}\n", value_neg));
-    s.push_str(&format!("value_hook_scaled = \"{}\"\n", value_hook_scaled.0));
-    s.push_str(&format!("lexical_component = \"{}\"\n", lexical_component.0));
+    s.push_str(&format!(
+        "value_hook_scaled = \"{}\"\n",
+        value_hook_scaled.0
+    ));
+    s.push_str(&format!(
+        "lexical_component = \"{}\"\n",
+        lexical_component.0
+    ));
     s
 }
 
@@ -597,10 +618,7 @@ fn rows_array(rows: &[[FieldHex; 3]]) -> String {
     format!(
         "[{}]",
         rows.iter()
-            .map(|r| format!(
-                "[\"{}\", \"{}\", \"{}\"]",
-                r[0].0, r[1].0, r[2].0
-            ))
+            .map(|r| format!("[\"{}\", \"{}\", \"{}\"]", r[0].0, r[1].0, r[2].0))
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -888,7 +906,10 @@ mod toml_glue_tests {
         let f = Fr::from(0x1a2bu64);
         let hex = FieldHex::from_field(&f);
         // The canonical rendering is 0x-prefixed 64-nibble hex.
-        assert!(hex.0.starts_with("0x") && hex.0.len() == 66, "canonical 0x + 64 nibbles");
+        assert!(
+            hex.0.starts_with("0x") && hex.0.len() == 66,
+            "canonical 0x + 64 nibbles"
+        );
         // Parse back to the same field element.
         assert_eq!(hex.to_field(), Some(f), "to_field inverts from_field");
         // Re-rendering the parsed field is byte-identical (idempotent canonical form).
@@ -904,7 +925,11 @@ mod toml_glue_tests {
     fn field_hex_rejects_malformed_input() {
         assert_eq!(fh("0xzz").to_field(), None, "non-hex digits rejected");
         assert_eq!(fh("").to_field(), None, "empty rejected");
-        assert_eq!(fh(&format!("0x{}", "f".repeat(65))).to_field(), None, "over-long rejected");
+        assert_eq!(
+            fh(&format!("0x{}", "f".repeat(65))).to_field(),
+            None,
+            "over-long rejected"
+        );
     }
 
     // --- scalar vs array rendering shape ---------------------------------
@@ -915,36 +940,55 @@ mod toml_glue_tests {
     #[test]
     fn filter_int_toml_scalar_and_array_shape_and_order() {
         let toml = filter_int_prover_toml(
-            &fh("0x1"),       // challenge
-            &fh("0xabc"),     // operand_enc
+            &fh("0x1"),   // challenge
+            &fh("0xabc"), // operand_enc
             FilterOp::Gt.code(),
-            42,               // bound
-            true,             // expected
+            42,   // bound
+            true, // expected
             b"123",
         );
         // Scalars: quoted Field literals (nargo's toml reader accepts 0x-prefixed).
         assert!(toml.contains("challenge = \"0x1\"\n"));
         assert!(toml.contains("operand_enc = \"0xabc\"\n"));
-        assert!(toml.contains("op = \"2\"\n"), "FilterOp::Gt.code() == 2, rendered as a string");
-        assert!(toml.contains("bound = \"42\"\n"), "u64 bound is a quoted Field");
+        assert!(
+            toml.contains("op = \"2\"\n"),
+            "FilterOp::Gt.code() == 2, rendered as a string"
+        );
+        assert!(
+            toml.contains("bound = \"42\"\n"),
+            "u64 bound is a quoted Field"
+        );
         // expected is a BARE bool (not quoted) — the circuit's `pub bool`.
         assert!(toml.contains("expected = true\n"));
         // digits: an inline array of quoted ASCII codepoints, one per decimal digit.
-        assert!(toml.contains("digits = [\"49\", \"50\", \"51\"]\n"), "b'1'=49, b'2'=50, b'3'=51");
+        assert!(
+            toml.contains("digits = [\"49\", \"50\", \"51\"]\n"),
+            "b'1'=49, b'2'=50, b'3'=51"
+        );
         // Declaration order: challenge < operand_enc < op < bound < expected < digits.
-        let order: Vec<&str> = ["challenge", "operand_enc", "op", "bound", "expected", "digits"]
-            .iter()
-            .map(|k| {
-                let pat = format!("{} =", k);
-                assert!(toml.contains(&pat), "field `{}` present", k);
-                *k
-            })
-            .collect();
+        let order: Vec<&str> = [
+            "challenge",
+            "operand_enc",
+            "op",
+            "bound",
+            "expected",
+            "digits",
+        ]
+        .iter()
+        .map(|k| {
+            let pat = format!("{} =", k);
+            assert!(toml.contains(&pat), "field `{}` present", k);
+            *k
+        })
+        .collect();
         let positions: Vec<usize> = order
             .iter()
             .map(|k| toml.find(&format!("{} =", k)).unwrap())
             .collect();
-        assert!(positions.windows(2).all(|w| w[0] < w[1]), "fields in declaration order");
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "fields in declaration order"
+        );
     }
 
     /// `scan_prover_toml` renders the nested `enc` as `[[[..];3];N];K]` and emits
@@ -958,7 +1002,10 @@ mod toml_glue_tests {
         let rows = [[fh("0x1"), fh("0x2"), fh("0x3")]];
         let attribution = [true, false];
         let counts = [2u32, 1u32];
-        let g0 = vec![[fh("0xa"), fh("0xb"), fh("0xc")], [fh("0xd"), fh("0xe"), fh("0xf")]];
+        let g0 = vec![
+            [fh("0xa"), fh("0xb"), fh("0xc")],
+            [fh("0xd"), fh("0xe"), fh("0xf")],
+        ];
         let g1 = vec![[fh("0x4"), fh("0x5"), fh("0x6")]];
         let enc = [g0, g1];
         let toml = scan_prover_toml(
@@ -1002,25 +1049,34 @@ mod toml_glue_tests {
             &fh("0x1"),
             &fh("0xop"),
             FilterOp::Lt.code(),
-            true,     // bound_neg
-            7,        // bound magnitude
-            false,    // expected
-            true,     // neg (operand)
+            true,  // bound_neg
+            7,     // bound magnitude
+            false, // expected
+            true,  // neg (operand)
             b"42",
         );
-        assert!(signed.contains("bound_neg = true\n"), "bound sign is a bare bool");
+        assert!(
+            signed.contains("bound_neg = true\n"),
+            "bound sign is a bare bool"
+        );
         assert!(signed.contains("bound = \"7\"\n"));
-        assert!(signed.contains("neg = true\n"), "operand sign is a bare bool");
-        assert!(signed.contains("mag_digits = [\"52\", \"50\"]\n"), "b'4'=52, b'2'=50");
+        assert!(
+            signed.contains("neg = true\n"),
+            "operand sign is a bare bool"
+        );
+        assert!(
+            signed.contains("mag_digits = [\"52\", \"50\"]\n"),
+            "b'4'=52, b'2'=50"
+        );
 
         let decimal = filter_decimal_prover_toml(
             &fh("0x1"),
             &fh("0xop"),
             FilterOp::Ge.code(),
-            false,    // bound_neg
-            12345,    // bound_scaled
-            true,     // expected
-            false,    // neg
+            false, // bound_neg
+            12345, // bound_scaled
+            true,  // expected
+            false, // neg
             b"123",
             b"45",
         );
@@ -1038,14 +1094,25 @@ mod toml_glue_tests {
         let padded = pad_hex(vec![fh("0x1")], 3);
         assert_eq!(padded.len(), 3);
         assert_eq!(padded[0], fh("0x1"));
-        assert_eq!(padded[1], FieldHex("0x0".to_string()), "pad slot is the zero field element");
+        assert_eq!(
+            padded[1],
+            FieldHex("0x0".to_string()),
+            "pad slot is the zero field element"
+        );
         // Already-long input is left intact (no truncation).
         let same = pad_hex(vec![fh("0xa"), fh("0xb")], 1);
         assert_eq!(same.len(), 2, "pad_hex never shortens");
 
         let rows = pad_rows(vec![[fh("0x1"), fh("0x2"), fh("0x3")]], 2);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1], [FieldHex("0x0".into()), FieldHex("0x0".into()), FieldHex("0x0".into())]);
+        assert_eq!(
+            rows[1],
+            [
+                FieldHex("0x0".into()),
+                FieldHex("0x0".into()),
+                FieldHex("0x0".into())
+            ]
+        );
     }
 
     /// `canonical_digits` is the ASCII-decimal byte witness the digit arrays carry.
@@ -1070,12 +1137,21 @@ mod toml_glue_tests {
             bound: 50,
             expected: true,
         };
-        let (id, toml) =
-            prover_toml_for(&inputs, &fh("0x1"), &[], &[], b"50", None, None)
-                .expect("filter_int needs no extra witness");
+        let (id, toml) = prover_toml_for(&inputs, &fh("0x1"), &[], &[], b"50", None, None)
+            .expect("filter_int needs no extra witness");
         assert_eq!(id, CircuitId::FilterInt { d: 2 });
-        let direct = filter_int_prover_toml(&fh("0x1"), &fh("0xab"), FilterOp::Eq.code(), 50, true, b"50");
-        assert_eq!(toml, direct, "dispatcher output matches the member renderer");
+        let direct = filter_int_prover_toml(
+            &fh("0x1"),
+            &fh("0xab"),
+            FilterOp::Eq.code(),
+            50,
+            true,
+            b"50",
+        );
+        assert_eq!(
+            toml, direct,
+            "dispatcher output matches the member renderer"
+        );
     }
 
     /// A `JoinEq` input WITHOUT its private `JoinWitness` returns the recoverable
@@ -1095,7 +1171,10 @@ mod toml_glue_tests {
             .expect_err("join_eq without its witness must be an Err, never a panic");
         assert_eq!(err, ProverTomlError::JoinEqMissingWitness);
         // And the message points the caller at build_join / the join_witness arg.
-        assert!(err.to_string().contains("build_join"), "the error message is actionable");
+        assert!(
+            err.to_string().contains("build_join"),
+            "the error message is actionable"
+        );
     }
 
     /// A `FilterSignedInt` / `FilterDecimal` input WITHOUT its `FilterSignedWitness`
@@ -1116,7 +1195,11 @@ mod toml_glue_tests {
         assert_eq!(err, ProverTomlError::FilterSignedMissingWitness);
 
         // Supplying the witness renders successfully and carries the operand sign.
-        let w = FilterSignedWitness { neg: true, int_digits: vec![b'4', b'2'], frac_digits: vec![] };
+        let w = FilterSignedWitness {
+            neg: true,
+            int_digits: vec![b'4', b'2'],
+            frac_digits: vec![],
+        };
         let (id, toml) = prover_toml_for(&inputs, &fh("0x1"), &[], &[], &[], None, Some(&w))
             .expect("with witness it renders");
         assert_eq!(id, CircuitId::FilterSignedInt { md: 2 });
@@ -1144,14 +1227,14 @@ mod toml_glue_tests {
     #[test]
     fn filter_value_dl_f64_toml_shape_and_order() {
         let toml = filter_value_dl_f64_prover_toml(
-            &fh("0x01"), // challenge
-            &fh("0x02"), // operand_enc
-            3,           // op (ge)
+            &fh("0x01"),        // challenge
+            &fh("0x02"),        // operand_enc
+            3,                  // op (ge)
             0x4008000000000000, // b_bits (3.0)
-            &fh("0x03"), // datatype_const
-            true,        // expected
-            &fh("0x04"), // value_hook (IEEE bits)
-            &fh("0x05"), // lexical_component
+            &fh("0x03"),        // datatype_const
+            true,               // expected
+            &fh("0x04"),        // value_hook (IEEE bits)
+            &fh("0x05"),        // lexical_component
         );
         let lines: Vec<&str> = toml.lines().collect();
         // Declaration order: challenge, operand_enc, op, b_bits, datatype_const,
@@ -1204,16 +1287,16 @@ mod toml_glue_tests {
     #[test]
     fn filter_value_dl_datetime_toml_shape_and_order() {
         let toml = filter_value_dl_datetime_prover_toml(
-            &fh("0x01"),  // challenge
-            &fh("0x02"),  // operand_enc
-            0,            // op (lt)
-            false,        // bound_neg
-            86_400_000,   // bound_scaled_epoch (1970-01-02T00:00:00Z)
-            &fh("0x03"),  // datatype_const (the LANE constant)
-            true,         // expected
-            true,         // value_neg (a pre-epoch instant)
-            &fh("0x04"),  // value_hook_scaled
-            &fh("0x05"),  // lexical_component
+            &fh("0x01"), // challenge
+            &fh("0x02"), // operand_enc
+            0,           // op (lt)
+            false,       // bound_neg
+            86_400_000,  // bound_scaled_epoch (1970-01-02T00:00:00Z)
+            &fh("0x03"), // datatype_const (the LANE constant)
+            true,        // expected
+            true,        // value_neg (a pre-epoch instant)
+            &fh("0x04"), // value_hook_scaled
+            &fh("0x05"), // lexical_component
         );
         let lines: Vec<&str> = toml.lines().collect();
         assert!(lines[0].starts_with("challenge = "));
@@ -1276,17 +1359,17 @@ mod toml_glue_tests {
     #[test]
     fn path_reach_toml_shape_and_order() {
         let toml = path_reach_prover_toml(
-            &fh("0x01"),                     // challenge
-            &[fh("0x0a"), fh("0x0b")],       // commitments (k=2)
-            &fh("0x11"),                     // pred_enc
-            &fh("0x22"),                     // src_enc
-            &fh("0x33"),                     // dst_enc
-            true,                            // allow_zero
-            4,                               // depth_bound
-            &[true, false],                  // attribution (k=2)
-            2,                               // path_len
-            &[fh("0x44"), fh("0x55"), fh("0x55"), fh("0x55")], // nodes (padded to d=4)
-            &[2, 0],                         // counts (k=2)
+            &fh("0x01"),                                        // challenge
+            &[fh("0x0a"), fh("0x0b")],                          // commitments (k=2)
+            &fh("0x11"),                                        // pred_enc
+            &fh("0x22"),                                        // src_enc
+            &fh("0x33"),                                        // dst_enc
+            true,                                               // allow_zero
+            4,                                                  // depth_bound
+            &[true, false],                                     // attribution (k=2)
+            2,                                                  // path_len
+            &[fh("0x44"), fh("0x55"), fh("0x55"), fh("0x55")],  // nodes (padded to d=4)
+            &[2, 0],                                            // counts (k=2)
             &[vec![[fh("0x1"), fh("0x2"), fh("0x3")]], vec![]], // enc[k][*][3]
         );
         let lines: Vec<&str> = toml.lines().collect();
@@ -1321,6 +1404,9 @@ mod toml_glue_tests {
         };
         let r = prover_toml_for(&inputs, &fh("0x01"), &[], &[], &[], None, None);
         assert_eq!(r, Err(ProverTomlError::PathReachUseDedicatedFn));
-        assert!(r.unwrap_err().to_string().contains("path_reach_prover_toml"));
+        assert!(r
+            .unwrap_err()
+            .to_string()
+            .contains("path_reach_prover_toml"));
     }
 }

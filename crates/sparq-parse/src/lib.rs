@@ -971,12 +971,10 @@ mod tests {
                 zstd::bulk::Compressor::with_prepared_dictionary(&prepared.encoder).unwrap();
             c.compress(b"hello dict").unwrap()
         };
-        let mut d =
-            zstd::bulk::Decompressor::with_prepared_dictionary(prepared.decoder()).unwrap();
+        let mut d = zstd::bulk::Decompressor::with_prepared_dictionary(prepared.decoder()).unwrap();
         let plain = d.decompress(&frame, 64).unwrap();
         assert_eq!(
-            plain,
-            b"hello dict",
+            plain, b"hello dict",
             "decoder() must be the real prepared decoder"
         );
     }
@@ -1079,12 +1077,7 @@ mod tests {
         // Gzip multi-member: each member decompresses to its chunk.
         for mode in [Mode::Serial, Mode::Parallel] {
             let members = run_sink(&chunks, Codec::Gzip { level: 6 }, mode);
-            assert_eq!(
-                members.len(),
-                chunks.len(),
-                "member count ({:?})",
-                mode
-            );
+            assert_eq!(members.len(), chunks.len(), "member count ({:?})", mode);
             for (i, (member, chunk)) in members.iter().zip(&chunks).enumerate() {
                 let decoded = decode_gzip_concat(member).unwrap();
                 assert_eq!(
@@ -1097,12 +1090,7 @@ mod tests {
         // Zstd multi-frame: each frame decompresses to its chunk.
         for mode in [Mode::Serial, Mode::Parallel] {
             let members = run_sink(&chunks, Codec::Zstd { level: 3 }, mode);
-            assert_eq!(
-                members.len(),
-                chunks.len(),
-                "frame count ({:?})",
-                mode
-            );
+            assert_eq!(members.len(), chunks.len(), "frame count ({:?})", mode);
             for (i, (frame, chunk)) in members.iter().zip(&chunks).enumerate() {
                 let decoded = decode_zstd_concat(frame).unwrap();
                 assert_eq!(

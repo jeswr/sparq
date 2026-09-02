@@ -185,7 +185,11 @@ fn arity_capped_cls_int1_misses_three_plus_conjunct_intersections() {
         "on arity-1/2 lists the recursive walk must derive exactly what the explicit decode \
          did — otherwise the encodings' pinned LUBM closure count would move"
     );
-    assert_eq!(capped, short(&capped), "the capped shape derives nothing else");
+    assert_eq!(
+        capped,
+        short(&capped),
+        "the capped shape derives nothing else"
+    );
 }
 
 #[test]
@@ -193,8 +197,16 @@ fn shipped_encodings_use_the_generic_list_walk() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/reason-encodings");
     // (file, the recursive step rule's marker, the superseded arity-capped decode's marker)
     let cases = [
-        ("nemo/owl-rl.rls", "intAll(?r, ?x)", ["int1def(", "int2def("]),
-        ("vlog/owl-rl.dlog", "IntAll(R,X)", ["Int1(C,A)", "Int2(C,A,B)"]),
+        (
+            "nemo/owl-rl.rls",
+            "intAll(?r, ?x)",
+            ["int1def(", "int2def("],
+        ),
+        (
+            "vlog/owl-rl.dlog",
+            "IntAll(R,X)",
+            ["Int1(C,A)", "Int2(C,A,B)"],
+        ),
     ];
     for (rel, recursive_step, capped) in cases {
         let path = root.join(rel);

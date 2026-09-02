@@ -211,14 +211,23 @@ impl fmt::Display for ExpressionError {
         match self {
             Self::EmptyNonce => write!(f, "empty nonce (challenge-response binding is mandatory)"),
             Self::NoEntropy => {
-                write!(f, "no OS entropy source available to draw a fresh challenge nonce")
+                write!(
+                    f,
+                    "no OS entropy source available to draw a fresh challenge nonce"
+                )
             }
             Self::EmptyQuery => write!(f, "empty query"),
             Self::NoRequirements => {
-                write!(f, "no trustx:TrustRequirements node in the requirements graph")
+                write!(
+                    f,
+                    "no trustx:TrustRequirements node in the requirements graph"
+                )
             }
             Self::MultipleRequirements => {
-                write!(f, "more than one trustx:TrustRequirements node (v1 carries exactly one)")
+                write!(
+                    f,
+                    "more than one trustx:TrustRequirements node (v1 carries exactly one)"
+                )
             }
             Self::MissingQuestion => write!(f, "missing or non-IRI trustx:question value"),
             Self::MissingValidStatusAt => {
@@ -553,7 +562,9 @@ pub fn parse_request(
     let mut trusted_frameworks = Vec::new();
     for o in objects_of(TRUSTX_TRUSTS_FRAMEWORK) {
         let Term::NamedNode(n) = o else {
-            return Err(ExpressionError::BadTerm(TRUSTX_TRUSTS_FRAMEWORK.to_string()));
+            return Err(ExpressionError::BadTerm(
+                TRUSTX_TRUSTS_FRAMEWORK.to_string(),
+            ));
         };
         trusted_frameworks.push(n.clone());
     }
@@ -685,16 +696,27 @@ fn parse_shape(query: &str) -> Result<Shape, ExpressionError> {
         .parse_query(query)
         .map_err(|e| ExpressionError::QueryParse(e.to_string()))?;
     match q {
-        Query::Ask { dataset: None, pattern, .. } => {
+        Query::Ask {
+            dataset: None,
+            pattern,
+            ..
+        } => {
             // The parser wraps ASK's group pattern in a Project of its
             // in-scope variables; unwrap it (nothing is projected by ASK).
             let inner = match &pattern {
                 GraphPattern::Project { inner, .. } => inner.as_ref(),
                 other => other,
             };
-            Ok(Shape { form: Form::Ask, patterns: bgp_patterns(inner)? })
+            Ok(Shape {
+                form: Form::Ask,
+                patterns: bgp_patterns(inner)?,
+            })
         }
-        Query::Select { dataset: None, pattern, .. } => {
+        Query::Select {
+            dataset: None,
+            pattern,
+            ..
+        } => {
             let (distinct, inner) = match &pattern {
                 GraphPattern::Distinct { inner } => (true, inner.as_ref()),
                 other => (false, other),
@@ -708,7 +730,10 @@ fn parse_shape(query: &str) -> Result<Shape, ExpressionError> {
                 check_reserved(v)?;
             }
             Ok(Shape {
-                form: Form::Select { distinct, vars: variables.clone() },
+                form: Form::Select {
+                    distinct,
+                    vars: variables.clone(),
+                },
                 patterns: bgp_patterns(inner)?,
             })
         }
@@ -721,7 +746,11 @@ fn parse_shape(query: &str) -> Result<Shape, ExpressionError> {
 
 /// Injection guard for IRIs interpolated into `<…>` in the generated query.
 fn safe_iri(iri: &str) -> Result<&str, ExpressionError> {
-    if iri.is_empty() || iri.chars().any(|c| c == '>' || c == '<' || c.is_whitespace()) {
+    if iri.is_empty()
+        || iri
+            .chars()
+            .any(|c| c == '>' || c == '<' || c.is_whitespace())
+    {
         return Err(ExpressionError::UnsafeIri(iri.to_string()));
     }
     Ok(iri)
@@ -825,7 +854,10 @@ fn admissibility_body(
         };
         match (mode1, mode2) {
             (Some(v), Some(c)) => {
-                b.push_str(&format!("  {{\n    {}\n  }}\n  UNION\n  {{\n{}  }}\n", v, c));
+                b.push_str(&format!(
+                    "  {{\n    {}\n  }}\n  UNION\n  {{\n{}  }}\n",
+                    v, c
+                ));
             }
             (Some(v), None) => b.push_str(&format!("  {}\n", v)),
             (None, Some(c)) => b.push_str(&c),
@@ -840,7 +872,11 @@ fn build_rewrite(req: &TrustRequirements, shape: &Shape) -> Result<String, Expre
     Ok(match &shape.form {
         Form::Ask => format!("ASK {{\n{}}}", body),
         Form::Select { distinct, vars } => {
-            let head = vars.iter().map(Variable::to_string).collect::<Vec<_>>().join(" ");
+            let head = vars
+                .iter()
+                .map(Variable::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
             format!(
                 "SELECT {}{} WHERE {{\n{}}}",
                 if *distinct { "DISTINCT " } else { "" },
@@ -934,7 +970,9 @@ fn resolve_term(
         TermPattern::Variable(v) => col
             .get(v.as_str())
             .and_then(|i| row.get(*i).cloned().flatten())
-            .ok_or_else(|| ExpressionError::Engine(format!("unbound pattern variable ?{}", v.as_str()))),
+            .ok_or_else(|| {
+                ExpressionError::Engine(format!("unbound pattern variable ?{}", v.as_str()))
+            }),
         _ => Err(unsupported("non-fragment pattern term")),
     }
 }
@@ -949,7 +987,9 @@ fn resolve_predicate(
         NamedNodePattern::Variable(v) => col
             .get(v.as_str())
             .and_then(|i| row.get(*i).cloned().flatten())
-            .ok_or_else(|| ExpressionError::Engine(format!("unbound pattern variable ?{}", v.as_str()))),
+            .ok_or_else(|| {
+                ExpressionError::Engine(format!("unbound pattern variable ?{}", v.as_str()))
+            }),
     }
 }
 
@@ -1020,7 +1060,8 @@ fn assemble_response(
     for row in &r.rows {
         for (i, p) in shape.patterns.iter().enumerate() {
             let bound = |name: String| {
-                col.get(&name).and_then(|ix| row.get(*ix).cloned().flatten())
+                col.get(&name)
+                    .and_then(|ix| row.get(*ix).cloned().flatten())
             };
             let Some(g) = bound(format!("__tx_g{}", i)) else {
                 continue;
@@ -1028,10 +1069,11 @@ fn assemble_response(
             let s = resolve_term(&p.subject, row, &col)?;
             let pr = resolve_predicate(&p.predicate, row, &col)?;
             let o = resolve_term(&p.object, row, &col)?;
-            bundles
-                .entry(g.to_string())
-                .or_default()
-                .insert((s.to_string(), pr.to_string(), o.to_string()));
+            bundles.entry(g.to_string()).or_default().insert((
+                s.to_string(),
+                pr.to_string(),
+                o.to_string(),
+            ));
             seeds.insert(g.to_string());
             for handle in ["__tx_st", "__tx_iss", "__tx_cert", "__tx_cst"] {
                 if let Some(t) = bound(format!("{}{}", handle, i)) {
@@ -1105,7 +1147,11 @@ fn assemble_response(
     })
 }
 
-fn answer_over(shape: &Shape, q_prime: &str, graph: &Graph) -> Result<ContractAnswer, ExpressionError> {
+fn answer_over(
+    shape: &Shape,
+    q_prime: &str,
+    graph: &Graph,
+) -> Result<ContractAnswer, ExpressionError> {
     match &shape.form {
         Form::Ask => Ok(ContractAnswer::Boolean(
             sparq_engine::ask(graph, q_prime).map_err(ExpressionError::Engine)?,
@@ -1153,9 +1199,13 @@ pub fn evaluate_contract(
                 supplied: pc.policy.to_string(),
             });
         }
-        let verdict =
-            crate::admissibility::admissible(pc.method, pc.constraint_iris, pc.policy_n3, pc.annotations)
-                .map_err(ExpressionError::Admissibility)?;
+        let verdict = crate::admissibility::admissible(
+            pc.method,
+            pc.constraint_iris,
+            pc.policy_n3,
+            pc.annotations,
+        )
+        .map_err(ExpressionError::Admissibility)?;
         if !verdict.admissible {
             return Err(ExpressionError::MethodNotAdmissible(verdict.unsatisfied));
         }
@@ -1164,7 +1214,11 @@ pub fn evaluate_contract(
     let q_prime = build_rewrite(&request.requirements, &shape)?;
     let answer = answer_over(&shape, &q_prime, holder)?;
     let response = assemble_response(request, &shape, holder)?;
-    Ok(ContractOutcome { answer, rewritten_query: q_prime, response })
+    Ok(ContractOutcome {
+        answer,
+        rewritten_query: q_prime,
+        response,
+    })
 }
 
 /// The INDEPENDENT verifier re-check (the bead's second invariant): given only
@@ -1181,8 +1235,8 @@ pub fn verify_response(
     }
     let shape = parse_shape(&request.query)?;
     let q_prime = build_rewrite(&request.requirements, &shape)?;
-    let r = Graph::load_dataset(&response.dataset_form, "trig")
-        .map_err(ExpressionError::Response)?;
+    let r =
+        Graph::load_dataset(&response.dataset_form, "trig").map_err(ExpressionError::Response)?;
     answer_over(&shape, &q_prime, &r)
 }
 
@@ -1319,10 +1373,7 @@ fn unix_to_datetime_lexical(secs: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let mo = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(mo <= 2);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, mo, d, h, min, s
-    )
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, min, s)
 }
 
 #[cfg(test)]
@@ -1379,7 +1430,10 @@ mod tests {
     /// `issuer`, optionally covered by a status attestation over [from, until].
     fn holder_mode1(issuer: &str, from: &str, until: &str, with_status: bool) -> Graph {
         let mut d = String::new();
-        d.push_str(&format!("<urn:b1> <{}> <{}> .\n", PROV_WAS_ATTRIBUTED_TO, issuer));
+        d.push_str(&format!(
+            "<urn:b1> <{}> <{}> .\n",
+            PROV_WAS_ATTRIBUTED_TO, issuer
+        ));
         if with_status {
             d.push_str(&status_lines("urn:b1", "urn:st1", from, until));
         }
@@ -1394,16 +1448,50 @@ mod tests {
     /// carries a `trustx:Certification` under eIDAS2 with the given `scope`
     /// object and window; the certification is itself status-covered when
     /// `with_cert_status`.
-    fn holder_mode2(scope: &str, cert_from: &str, cert_until: &str, with_cert_status: bool) -> Graph {
+    fn holder_mode2(
+        scope: &str,
+        cert_from: &str,
+        cert_until: &str,
+        with_cert_status: bool,
+    ) -> Graph {
         let mut d = String::new();
-        d.push_str(&format!("<urn:b1> <{}> <{}> .\n", PROV_WAS_ATTRIBUTED_TO, ISS_CERT));
-        d.push_str(&status_lines("urn:b1", "urn:st1", "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z"));
-        d.push_str(&format!("<urn:cert1> <{}> <{}> .\n", rdf_type(), TRUSTX_CERTIFICATION));
-        d.push_str(&format!("<urn:cert1> <{}> <{}> .\n", TRUSTX_CERTIFIES, ISS_CERT));
-        d.push_str(&format!("<urn:cert1> <{}> <{}> .\n", TRUSTX_UNDER_FRAMEWORK, TRUSTX_EIDAS2));
-        d.push_str(&format!("<urn:cert1> <{}> {} .\n", TRUSTX_VALID_FROM, dtlit(cert_from)));
-        d.push_str(&format!("<urn:cert1> <{}> {} .\n", TRUSTX_VALID_UNTIL, dtlit(cert_until)));
-        d.push_str(&format!("<urn:cert1> <{}> <{}> .\n", TRUSTX_CERTIFICATION_SCOPE, scope));
+        d.push_str(&format!(
+            "<urn:b1> <{}> <{}> .\n",
+            PROV_WAS_ATTRIBUTED_TO, ISS_CERT
+        ));
+        d.push_str(&status_lines(
+            "urn:b1",
+            "urn:st1",
+            "2026-07-01T00:00:00Z",
+            "2026-07-10T00:00:00Z",
+        ));
+        d.push_str(&format!(
+            "<urn:cert1> <{}> <{}> .\n",
+            rdf_type(),
+            TRUSTX_CERTIFICATION
+        ));
+        d.push_str(&format!(
+            "<urn:cert1> <{}> <{}> .\n",
+            TRUSTX_CERTIFIES, ISS_CERT
+        ));
+        d.push_str(&format!(
+            "<urn:cert1> <{}> <{}> .\n",
+            TRUSTX_UNDER_FRAMEWORK, TRUSTX_EIDAS2
+        ));
+        d.push_str(&format!(
+            "<urn:cert1> <{}> {} .\n",
+            TRUSTX_VALID_FROM,
+            dtlit(cert_from)
+        ));
+        d.push_str(&format!(
+            "<urn:cert1> <{}> {} .\n",
+            TRUSTX_VALID_UNTIL,
+            dtlit(cert_until)
+        ));
+        d.push_str(&format!(
+            "<urn:cert1> <{}> <{}> .\n",
+            TRUSTX_CERTIFICATION_SCOPE, scope
+        ));
         if with_cert_status {
             d.push_str(&status_lines(
                 "urn:cert1",
@@ -1469,7 +1557,11 @@ mod tests {
             ));
         }
         if let Some(p) = method_policy {
-            v.push(Triple::new(node, nn(TRUSTX_METHOD_POLICY), Term::NamedNode(nn(p))));
+            v.push(Triple::new(
+                node,
+                nn(TRUSTX_METHOD_POLICY),
+                Term::NamedNode(nn(p)),
+            ));
         }
         v
     }
@@ -1482,8 +1574,12 @@ mod tests {
     }
 
     fn request(query: &str, issuers: &[&str], frameworks: &[&str]) -> ContractRequest {
-        parse_request(query, &tr_triples(issuers, frameworks, None, None), &nonce("nonce-1"))
-            .expect("fixture request parses")
+        parse_request(
+            query,
+            &tr_triples(issuers, frameworks, None, None),
+            &nonce("nonce-1"),
+        )
+        .expect("fixture request parses")
     }
 
     // ── parse_request ───────────────────────────────────────────────────
@@ -1509,7 +1605,10 @@ mod tests {
     #[test]
     fn parse_request_rejects_empty_query() {
         let tr = tr_triples(&[ISS_X], &[], None, None);
-        assert_eq!(parse_request(" ", &tr, &nonce("n")), Err(ExpressionError::EmptyQuery));
+        assert_eq!(
+            parse_request(" ", &tr, &nonce("n")),
+            Err(ExpressionError::EmptyQuery)
+        );
     }
 
     // ── ChallengeNonce (issue #4621) ─────────────────────────────────────
@@ -1519,9 +1618,18 @@ mod tests {
         // The mandatory challenge-response binding: the refusal parse_request
         // used to make now lives at the one constructor an outside value can
         // enter through.
-        assert_eq!(ChallengeNonce::from_wire(""), Err(ExpressionError::EmptyNonce));
-        assert_eq!(ChallengeNonce::from_wire("  "), Err(ExpressionError::EmptyNonce));
-        assert_eq!(ChallengeNonce::from_wire("\t\n"), Err(ExpressionError::EmptyNonce));
+        assert_eq!(
+            ChallengeNonce::from_wire(""),
+            Err(ExpressionError::EmptyNonce)
+        );
+        assert_eq!(
+            ChallengeNonce::from_wire("  "),
+            Err(ExpressionError::EmptyNonce)
+        );
+        assert_eq!(
+            ChallengeNonce::from_wire("\t\n"),
+            Err(ExpressionError::EmptyNonce)
+        );
     }
 
     #[test]
@@ -1540,12 +1648,27 @@ mod tests {
         // this set to one element.
         const DRAWS: usize = 64;
         let drawn: BTreeSet<String> = (0..DRAWS)
-            .map(|_| ChallengeNonce::generate().expect("OS entropy").as_str().to_string())
+            .map(|_| {
+                ChallengeNonce::generate()
+                    .expect("OS entropy")
+                    .as_str()
+                    .to_string()
+            })
             .collect();
-        assert_eq!(drawn.len(), DRAWS, "generate() repeated a nonce across {} draws", DRAWS);
+        assert_eq!(
+            drawn.len(),
+            DRAWS,
+            "generate() repeated a nonce across {} draws",
+            DRAWS
+        );
         for n in &drawn {
             // 32 CSPRNG bytes, lowercase hex.
-            assert_eq!(n.len(), ChallengeNonce::ENTROPY_BYTES * 2, "unexpected width: {}", n);
+            assert_eq!(
+                n.len(),
+                ChallengeNonce::ENTROPY_BYTES * 2,
+                "unexpected width: {}",
+                n
+            );
             assert!(
                 n.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
                 "not lowercase hex: {}",
@@ -1555,7 +1678,10 @@ mod tests {
         // A generated nonce is a legal wire value (it round-trips through the
         // holder's echo without the emptiness refusal firing).
         let fresh = ChallengeNonce::generate().expect("OS entropy");
-        assert_eq!(ChallengeNonce::from_wire(fresh.as_str()).expect("round-trips"), fresh);
+        assert_eq!(
+            ChallengeNonce::from_wire(fresh.as_str()).expect("round-trips"),
+            fresh
+        );
     }
 
     #[test]
@@ -1563,18 +1689,24 @@ mod tests {
         // The verifier-side path end-to-end: the freshly generated challenge is
         // what parse_request carries and what the response has to echo back.
         let fresh = ChallengeNonce::generate().expect("OS entropy");
-        let req = parse_request(ASK_AGE, &tr_triples(&[ISS_X], &[], None, None), &fresh)
-            .expect("parses");
+        let req =
+            parse_request(ASK_AGE, &tr_triples(&[ISS_X], &[], None, None), &fresh).expect("parses");
         assert_eq!(req.nonce, fresh);
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
         let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.response.nonce, fresh);
-        assert_eq!(verify_response(&req, &out.response), Ok(ContractAnswer::Boolean(true)));
+        assert_eq!(
+            verify_response(&req, &out.response),
+            Ok(ContractAnswer::Boolean(true))
+        );
     }
 
     #[test]
     fn parse_request_rejects_missing_or_duplicated_requirements_node() {
-        assert_eq!(parse_request(ASK_AGE, &[], &nonce("n")), Err(ExpressionError::NoRequirements));
+        assert_eq!(
+            parse_request(ASK_AGE, &[], &nonce("n")),
+            Err(ExpressionError::NoRequirements)
+        );
         let mut two = tr_triples(&[ISS_X], &[], None, None);
         two.push(Triple::new(
             nn("urn:tr2"),
@@ -1593,7 +1725,10 @@ mod tests {
             .into_iter()
             .filter(|t| t.predicate.as_str() != TRUSTX_QUESTION)
             .collect();
-        assert_eq!(parse_request(ASK_AGE, &no_q, &nonce("n")), Err(ExpressionError::MissingQuestion));
+        assert_eq!(
+            parse_request(ASK_AGE, &no_q, &nonce("n")),
+            Err(ExpressionError::MissingQuestion)
+        );
         let no_t: Vec<Triple> = tr_triples(&[ISS_X], &[], None, None)
             .into_iter()
             .filter(|t| t.predicate.as_str() != TRUSTX_REQUIRES_VALID_STATUS_AT)
@@ -1620,8 +1755,16 @@ mod tests {
         assert_eq!(req.requirements.question.as_str(), "urn:q1");
 
         let mut d = String::new();
-        d.push_str(&format!("<urn:b1> <{}> <{}> .\n", PROV_WAS_ATTRIBUTED_TO, ISS_X));
-        d.push_str(&status_lines("urn:b1", "urn:st1", "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z"));
+        d.push_str(&format!(
+            "<urn:b1> <{}> <{}> .\n",
+            PROV_WAS_ATTRIBUTED_TO, ISS_X
+        ));
+        d.push_str(&status_lines(
+            "urn:b1",
+            "urn:st1",
+            "2026-07-01T00:00:00Z",
+            "2026-07-10T00:00:00Z",
+        ));
         d.push_str(&format!(
             "GRAPH <urn:b1> {{ <urn:jesse> <{}> \"Jesse\" . }}\n",
             FOAF_NAME
@@ -1651,7 +1794,9 @@ mod tests {
         ));
         assert_eq!(
             parse_request(ASK_AGE, &tr, &nonce("n")),
-            Err(ExpressionError::BadDateTime("2026-07-05T00:00:00+02:00".to_string()))
+            Err(ExpressionError::BadDateTime(
+                "2026-07-05T00:00:00+02:00".to_string()
+            ))
         );
     }
 
@@ -1668,7 +1813,11 @@ mod tests {
     fn parse_request_validates_did_issuers_and_accepts_plain_iris() {
         // Uppercase DID method is invalid DID syntax → fail-closed via Did::parse.
         assert_eq!(
-            parse_request(ASK_AGE, &tr_triples(&["did:WEB:x.example"], &[], None, None), &nonce("n")),
+            parse_request(
+                ASK_AGE,
+                &tr_triples(&["did:WEB:x.example"], &[], None, None),
+                &nonce("n")
+            ),
             Err(ExpressionError::BadIssuer("did:WEB:x.example".to_string()))
         );
         // A non-did IRI identity is accepted opaquely.
@@ -1678,7 +1827,10 @@ mod tests {
             &nonce("n"),
         )
         .expect("plain IRI issuer accepted");
-        assert_eq!(req.requirements.trusted_issuers, vec![nn("https://issuers.example/x")]);
+        assert_eq!(
+            req.requirements.trusted_issuers,
+            vec![nn("https://issuers.example/x")]
+        );
     }
 
     #[test]
@@ -1699,27 +1851,50 @@ mod tests {
         let q = rewrite_query(&request(ASK_AGE, &[ISS_X], &[])).expect("rewrites");
         assert!(q.starts_with("ASK {"), "ASK form preserved: {}", q);
         assert!(q.contains("GRAPH ?__tx_g0"), "bundle GRAPH wrap: {}", q);
-        assert!(q.contains(TRUSTX_COVERED_BY), "status coverage pattern: {}", q);
-        assert!(q.contains(TRUSTX_STATUS_ATTESTATION), "positive attestation type: {}", q);
         assert!(
-            q.contains(&format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime>", T)),
+            q.contains(TRUSTX_COVERED_BY),
+            "status coverage pattern: {}",
+            q
+        );
+        assert!(
+            q.contains(TRUSTX_STATUS_ATTESTATION),
+            "positive attestation type: {}",
+            q
+        );
+        assert!(
+            q.contains(&format!(
+                "\"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime>",
+                T
+            )),
             "instant t embedded: {}",
             q
         );
-        assert!(q.contains(PROV_WAS_ATTRIBUTED_TO), "attribution pattern: {}", q);
+        assert!(
+            q.contains(PROV_WAS_ATTRIBUTED_TO),
+            "attribution pattern: {}",
+            q
+        );
         assert!(
             q.contains(&format!("VALUES ?__tx_iss0 {{ <{}> }}", ISS_X)),
             "issuer membership VALUES: {}",
             q
         );
         // Mode 1 only: no certification machinery.
-        assert!(!q.contains(TRUSTX_CERTIFICATION), "no cert block in mode 1: {}", q);
+        assert!(
+            !q.contains(TRUSTX_CERTIFICATION),
+            "no cert block in mode 1: {}",
+            q
+        );
     }
 
     #[test]
     fn rewrite_mode2_conjoins_certification_window_status_and_scope() {
         let q = rewrite_query(&request(ASK_AGE, &[], &[TRUSTX_EIDAS2])).expect("rewrites");
-        assert!(q.contains(TRUSTX_CERTIFICATION), "certification pattern: {}", q);
+        assert!(
+            q.contains(TRUSTX_CERTIFICATION),
+            "certification pattern: {}",
+            q
+        );
         assert!(q.contains(TRUSTX_CERTIFIES), "certifies binding: {}", q);
         assert!(
             q.contains(&format!("VALUES ?__tx_fw0 {{ <{}> }}", TRUSTX_EIDAS2)),
@@ -1729,7 +1904,11 @@ mod tests {
         // Certifications are status-checked like credentials (design §6 case 7).
         assert!(q.contains("?__tx_cst0"), "cert status coverage: {}", q);
         // Scope conformance: AnyServiceScope OR the statement's own predicate.
-        assert!(q.contains(TRUSTX_ANY_SERVICE_SCOPE), "service-level scope arm: {}", q);
+        assert!(
+            q.contains(TRUSTX_ANY_SERVICE_SCOPE),
+            "service-level scope arm: {}",
+            q
+        );
         assert!(
             q.contains(&format!("<{}> <{}>", TRUSTX_CERTIFICATION_SCOPE, FOAF_AGE)),
             "predicate-scope arm: {}",
@@ -1742,7 +1921,11 @@ mod tests {
         let q = rewrite_query(&request(ASK_AGE, &[ISS_X], &[TRUSTX_EIDAS2])).expect("rewrites");
         assert!(q.contains("UNION"), "modes compose by OR: {}", q);
         assert!(q.contains("VALUES ?__tx_iss0"), "mode 1 arm present: {}", q);
-        assert!(q.contains(TRUSTX_CERTIFICATION), "mode 2 arm present: {}", q);
+        assert!(
+            q.contains(TRUSTX_CERTIFICATION),
+            "mode 2 arm present: {}",
+            q
+        );
     }
 
     #[test]
@@ -1754,7 +1937,11 @@ mod tests {
         )
         .expect("parses");
         let q = rewrite_query(&req).expect("rewrites");
-        assert!(!q.contains(TRUSTX_ANY_SERVICE_SCOPE), "scope arm omitted: {}", q);
+        assert!(
+            !q.contains(TRUSTX_ANY_SERVICE_SCOPE),
+            "scope arm omitted: {}",
+            q
+        );
         // Certification validity + status coverage still required (fail-closed core).
         assert!(q.contains(TRUSTX_CERTIFICATION) && q.contains("?__tx_cst0"));
     }
@@ -1762,14 +1949,22 @@ mod tests {
     #[test]
     fn rewrite_preserves_select_projection_and_distinct() {
         let q = rewrite_query(&request(SELECT_AGE, &[ISS_X], &[])).expect("rewrites");
-        assert!(q.starts_with("SELECT ?age WHERE {"), "projection preserved: {}", q);
+        assert!(
+            q.starts_with("SELECT ?age WHERE {"),
+            "projection preserved: {}",
+            q
+        );
         let qd = rewrite_query(&request(
             "SELECT DISTINCT ?age WHERE { <urn:jesse> <http://xmlns.com/foaf/0.1/age> ?age }",
             &[ISS_X],
             &[],
         ))
         .expect("rewrites");
-        assert!(qd.starts_with("SELECT DISTINCT ?age WHERE {"), "DISTINCT preserved: {}", qd);
+        assert!(
+            qd.starts_with("SELECT DISTINCT ?age WHERE {"),
+            "DISTINCT preserved: {}",
+            qd
+        );
     }
 
     #[test]
@@ -1792,9 +1987,15 @@ mod tests {
         ];
         for c in cases {
             let req = request(ASK_AGE, &[ISS_X], &[]);
-            let req = ContractRequest { query: (*c).to_string(), ..req };
+            let req = ContractRequest {
+                query: (*c).to_string(),
+                ..req
+            };
             assert!(
-                matches!(rewrite_query(&req), Err(ExpressionError::UnsupportedQuery(_))),
+                matches!(
+                    rewrite_query(&req),
+                    Err(ExpressionError::UnsupportedQuery(_))
+                ),
                 "expected UnsupportedQuery for: {}",
                 c
             );
@@ -1812,8 +2013,14 @@ mod tests {
             rewrite_query(&reserved),
             Err(ExpressionError::ReservedVariable(_))
         ));
-        let garbage = ContractRequest { query: "NOT SPARQL".to_string(), ..req };
-        assert!(matches!(rewrite_query(&garbage), Err(ExpressionError::QueryParse(_))));
+        let garbage = ContractRequest {
+            query: "NOT SPARQL".to_string(),
+            ..req
+        };
+        assert!(matches!(
+            rewrite_query(&garbage),
+            Err(ExpressionError::QueryParse(_))
+        ));
     }
 
     #[test]
@@ -1826,7 +2033,10 @@ mod tests {
         assert_eq!(rewrite_query(&no_mode), Err(ExpressionError::NoTrustMode));
         let mut bad_t = req;
         bad_t.requirements.valid_status_at = "garbage\") . } #injection".to_string();
-        assert!(matches!(rewrite_query(&bad_t), Err(ExpressionError::BadDateTime(_))));
+        assert!(matches!(
+            rewrite_query(&bad_t),
+            Err(ExpressionError::BadDateTime(_))
+        ));
     }
 
     // ── evaluate_contract + verify_response: mode 1 ──────────────────────
@@ -1841,7 +2051,10 @@ mod tests {
         // The (b) form carries the bundle AND its provenance.
         assert!(out.response.dataset_form.contains("GRAPH <urn:b1>"));
         assert!(out.response.dataset_form.contains(PROV_WAS_ATTRIBUTED_TO));
-        assert!(out.response.dataset_form.contains(TRUSTX_STATUS_ATTESTATION));
+        assert!(out
+            .response
+            .dataset_form
+            .contains(TRUSTX_STATUS_ATTESTATION));
         // The (a) normative form reifies the statement as an RDF 1.2 triple term.
         assert!(out.response.reifier_form.contains(RDF_REIFIES));
         assert!(out.response.reifier_form.contains("<<("));
@@ -1855,7 +2068,12 @@ mod tests {
     #[test]
     fn mode1_untrusted_issuer_fails_closed() {
         let req = request(ASK_AGE, &[ISS_X], &[]);
-        let holder = holder_mode1(ISS_EVIL, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
+        let holder = holder_mode1(
+            ISS_EVIL,
+            "2026-07-01T00:00:00Z",
+            "2026-07-10T00:00:00Z",
+            true,
+        );
         let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         // No admissible derivation ⇒ no binding AND an empty response.
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
@@ -1901,15 +2119,26 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let bound = rows[0][0].as_ref().expect("age bound").to_string();
         assert!(bound.contains("25"), "age binding: {}", bound);
-        assert_eq!(verify_response(&req, &out.response).expect("re-checks"), out.answer);
+        assert_eq!(
+            verify_response(&req, &out.response).expect("re-checks"),
+            out.answer
+        );
     }
 
     #[test]
     fn multi_pattern_query_requires_admissibility_per_statement() {
         // Two patterns over one bundle: both contribute, both provenance-checked.
         let mut d = String::new();
-        d.push_str(&format!("<urn:b1> <{}> <{}> .\n", PROV_WAS_ATTRIBUTED_TO, ISS_X));
-        d.push_str(&status_lines("urn:b1", "urn:st1", "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z"));
+        d.push_str(&format!(
+            "<urn:b1> <{}> <{}> .\n",
+            PROV_WAS_ATTRIBUTED_TO, ISS_X
+        ));
+        d.push_str(&status_lines(
+            "urn:b1",
+            "urn:st1",
+            "2026-07-01T00:00:00Z",
+            "2026-07-10T00:00:00Z",
+        ));
         d.push_str(&format!(
             "GRAPH <urn:b1> {{ <urn:jesse> <{}> {} . <urn:jesse> <{}> \"Jesse\" . }}\n",
             FOAF_AGE, AGE_25, FOAF_NAME
@@ -1934,7 +2163,12 @@ mod tests {
     #[test]
     fn mode2_scope_conformant_certification_binds() {
         let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
-        let holder = holder_mode2(FOAF_AGE, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
+        let holder = holder_mode2(
+            FOAF_AGE,
+            "2026-07-01T00:00:00Z",
+            "2026-07-10T00:00:00Z",
+            true,
+        );
         let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(true));
         // The response provenance includes the certification + BOTH attestations,
@@ -1966,7 +2200,12 @@ mod tests {
         // OUTSIDE the certified scope (design §6 case 6: the "only issued what
         // they are certified to issue" reject).
         let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
-        let holder = holder_mode2(FOAF_NAME, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
+        let holder = holder_mode2(
+            FOAF_NAME,
+            "2026-07-01T00:00:00Z",
+            "2026-07-10T00:00:00Z",
+            true,
+        );
         let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
         assert_eq!(out.response.contributing_statements, 0);
@@ -1975,7 +2214,12 @@ mod tests {
     #[test]
     fn mode2_expired_certification_fails_closed() {
         let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
-        let holder = holder_mode2(FOAF_AGE, "2026-06-01T00:00:00Z", "2026-07-04T00:00:00Z", true);
+        let holder = holder_mode2(
+            FOAF_AGE,
+            "2026-06-01T00:00:00Z",
+            "2026-07-04T00:00:00Z",
+            true,
+        );
         let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
     }
@@ -1985,7 +2229,12 @@ mod tests {
         // Certifications are status-checked exactly like credentials (design §6
         // case 7): no covering attestation on the certification ⇒ no binding.
         let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
-        let holder = holder_mode2(FOAF_AGE, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", false);
+        let holder = holder_mode2(
+            FOAF_AGE,
+            "2026-07-01T00:00:00Z",
+            "2026-07-10T00:00:00Z",
+            false,
+        );
         let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
     }
@@ -2033,7 +2282,9 @@ mod tests {
         // m1 holds PerPresentation; the policy requires gteq CrossPresentation.
         assert_eq!(
             evaluate_contract(&req, &holder, Some(&pc)),
-            Err(ExpressionError::MethodNotAdmissible(vec![CONSTRAINT_CROSS.to_string()]))
+            Err(ExpressionError::MethodNotAdmissible(vec![
+                CONSTRAINT_CROSS.to_string()
+            ]))
         );
     }
 
@@ -2094,7 +2345,10 @@ mod tests {
         let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         let mut replayed = out.response;
         replayed.nonce = nonce("some-other-session");
-        assert_eq!(verify_response(&req, &replayed), Err(ExpressionError::NonceMismatch));
+        assert_eq!(
+            verify_response(&req, &replayed),
+            Err(ExpressionError::NonceMismatch)
+        );
     }
 
     #[test]
@@ -2150,7 +2404,8 @@ mod tests {
             text
         );
         assert!(
-            text.iter().any(|t| t.contains(TRUSTX_COVERED_BY) && t.contains("urn:st1")),
+            text.iter()
+                .any(|t| t.contains(TRUSTX_COVERED_BY) && t.contains("urn:st1")),
             "coveredBy link: {:?}",
             text
         );
@@ -2158,11 +2413,14 @@ mod tests {
 
     #[test]
     fn mint_status_attestation_epoch_window() {
-        let triples =
-            mint_status_attestation(&nn("urn:b"), &nn("urn:st"), LiveStatus::Live, 0, 0)
-                .expect("mints");
+        let triples = mint_status_attestation(&nn("urn:b"), &nn("urn:st"), LiveStatus::Live, 0, 0)
+            .expect("mints");
         let text = triples[1].to_string();
-        assert!(text.contains("1970-01-01T00:00:00Z"), "epoch lexical: {}", text);
+        assert!(
+            text.contains("1970-01-01T00:00:00Z"),
+            "epoch lexical: {}",
+            text
+        );
     }
 
     #[test]
@@ -2191,7 +2449,10 @@ mod tests {
         // consumes — a holder graph whose only status attestation was minted
         // from a Live check binds; nothing else changed.
         let mut d = String::new();
-        d.push_str(&format!("<urn:b1> <{}> <{}> .\n", PROV_WAS_ATTRIBUTED_TO, ISS_X));
+        d.push_str(&format!(
+            "<urn:b1> <{}> <{}> .\n",
+            PROV_WAS_ATTRIBUTED_TO, ISS_X
+        ));
         for t in mint_status_attestation(
             &nn("urn:b1"),
             &nn("urn:st1"),
@@ -2217,8 +2478,14 @@ mod tests {
 
     #[test]
     fn public_encoding_iris_are_stable() {
-        assert_eq!(PROV_WAS_ATTRIBUTED_TO, "http://www.w3.org/ns/prov#wasAttributedTo");
-        assert_eq!(RDF_REIFIES, "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
+        assert_eq!(
+            PROV_WAS_ATTRIBUTED_TO,
+            "http://www.w3.org/ns/prov#wasAttributedTo"
+        );
+        assert_eq!(
+            RDF_REIFIES,
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies"
+        );
     }
 
     #[test]
@@ -2259,6 +2526,9 @@ mod tests {
         assert_eq!(unix_to_datetime_lexical(0), "1970-01-01T00:00:00Z");
         assert_eq!(unix_to_datetime_lexical(86_399), "1970-01-01T23:59:59Z");
         assert_eq!(unix_to_datetime_lexical(1_783_209_600), T);
-        assert_eq!(unix_to_datetime_lexical(1_782_000_000), "2026-06-21T00:00:00Z");
+        assert_eq!(
+            unix_to_datetime_lexical(1_782_000_000),
+            "2026-06-21T00:00:00Z"
+        );
     }
 }

@@ -439,7 +439,12 @@ mod tests {
     #[test]
     fn sd_and_rdfc_token_spaces_are_disjoint() {
         for t in ["bbs-2023", "ecdsa-sd-2023"] {
-            assert_eq!(VcCryptosuite::from_token(t), None, "{} must stay delegated", t);
+            assert_eq!(
+                VcCryptosuite::from_token(t),
+                None,
+                "{} must stay delegated",
+                t
+            );
         }
         for t in ["eddsa-rdfc-2022", "ecdsa-rdfc-2019"] {
             assert_eq!(
@@ -489,7 +494,13 @@ mod tests {
         let cred = disclosed();
         let cfg = proof_config(SdCryptosuite::EcdsaSd2023);
         let v = StubVerifier::new(&[SdCryptosuite::Bbs2023], true);
-        let p = presentation(SdCryptosuite::EcdsaSd2023, &cred, &cfg, &[3u8; 8], &[4u8; 8]);
+        let p = presentation(
+            SdCryptosuite::EcdsaSd2023,
+            &cred,
+            &cfg,
+            &[3u8; 8],
+            &[4u8; 8],
+        );
         assert!(matches!(
             ingest_disclosed_vc(
                 NamedNode::new("https://dmv.example/vc/lic-7").unwrap(),
@@ -499,7 +510,11 @@ mod tests {
             ),
             Err(VcBridgeError::SelectiveDisclosureUnavailable(t)) if t == "ecdsa-sd-2023"
         ));
-        assert_eq!(v.calls(), 0, "an unsupported suite must not reach the verifier");
+        assert_eq!(
+            v.calls(),
+            0,
+            "an unsupported suite must not reach the verifier"
+        );
     }
 
     /// A rejecting verifier produces NO commitment, and its verbatim reason is

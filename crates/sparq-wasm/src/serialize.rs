@@ -69,8 +69,8 @@ use sparq_engine::serialize::{
     graph_to_trig_with, graph_to_turtle_pretty_with, graph_to_turtle_with, parse_context_json,
     prefixes_from_pairs, JsonLdForm, JsonLdPrettyOptions, Prefixes, PrettyOptions,
 };
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::Store;
 
@@ -104,10 +104,16 @@ fn resolve_prefixes(prefixes: Option<js_sys::Array>) -> Result<Prefixes, JsError
             ))
         })?;
         let prefix = pair.get(0).as_string().ok_or_else(|| {
-            JsError::new(&format!("prefixes[{}][0] (the prefix label) must be a string", i))
+            JsError::new(&format!(
+                "prefixes[{}][0] (the prefix label) must be a string",
+                i
+            ))
         })?;
         let iri = pair.get(1).as_string().ok_or_else(|| {
-            JsError::new(&format!("prefixes[{}][1] (the namespace IRI) must be a string", i))
+            JsError::new(&format!(
+                "prefixes[{}][1] (the namespace IRI) must be a string",
+                i
+            ))
         })?;
         pairs.push((prefix, iri));
     }
@@ -420,7 +426,10 @@ mod tests {
         let got = store.serialize("turtle", false, None, true, None).unwrap();
         let g = Graph::load_str(DATA, "turtle").unwrap();
         let want = graph_to_turtle_with(&g, &default_prefixes());
-        assert_eq!(got, want, "wasm compact Turtle must equal the engine output");
+        assert_eq!(
+            got, want,
+            "wasm compact Turtle must equal the engine output"
+        );
     }
 
     // ---- [OPUS-4.8] sq-l5kr: the optional caller-supplied prefix map ----
@@ -461,7 +470,9 @@ mod tests {
             "compact TriG None arm == default_prefixes (now honoured via graph_to_trig_with)",
         );
         assert_eq!(
-            store.serialize("jsonld-compacted", false, None, true, None).unwrap(),
+            store
+                .serialize("jsonld-compacted", false, None, true, None)
+                .unwrap(),
             graph_to_jsonld_with(&g, JsonLdForm::Compacted, &dp),
             "JSON-LD compacted None arm == default_prefixes",
         );
@@ -523,7 +534,10 @@ mod tests {
                 indent: "  ".to_string(),
             };
             let want = graph_to_jsonld_pretty_with(&g, form, &default_prefixes(), &opts);
-            assert_eq!(got, want, "wasm pretty JSON-LD ({fmt}) must equal the engine output");
+            assert_eq!(
+                got, want,
+                "wasm pretty JSON-LD ({fmt}) must equal the engine output"
+            );
             // The pretty document is multi-line JSON (the indenter inserted newlines).
             assert!(got.contains('\n'), "pretty JSON-LD is indented: {got}");
         }
@@ -537,16 +551,31 @@ mod tests {
     fn serialize_jsonld_minified_matches_engine_and_ignores_abbreviate() {
         let store = Store::load(DATA, "turtle").unwrap();
         let g = Graph::load_str(DATA, "turtle").unwrap();
-        let got = store.serialize("jsonld-compacted", false, None, true, None).unwrap();
+        let got = store
+            .serialize("jsonld-compacted", false, None, true, None)
+            .unwrap();
         let want = graph_to_jsonld_with(&g, JsonLdForm::Compacted, &default_prefixes());
-        assert_eq!(got, want, "wasm minified JSON-LD must equal the engine output");
+        assert_eq!(
+            got, want,
+            "wasm minified JSON-LD must equal the engine output"
+        );
         // `abbreviate` is a no-op for JSON-LD: true vs false produces identical bytes.
-        let with_abbrev_off = store.serialize("jsonld-compacted", false, None, false, None).unwrap();
+        let with_abbrev_off = store
+            .serialize("jsonld-compacted", false, None, false, None)
+            .unwrap();
         assert_eq!(got, with_abbrev_off, "abbreviate is ignored for JSON-LD");
         // Compacted carries a prefix `@context`; expanded does not.
-        assert!(got.contains("@context"), "compacted form has @context: {got}");
-        let expanded = store.serialize("jsonld-expanded", false, None, true, None).unwrap();
-        assert!(!expanded.contains("@context"), "expanded form has no @context: {expanded}");
+        assert!(
+            got.contains("@context"),
+            "compacted form has @context: {got}"
+        );
+        let expanded = store
+            .serialize("jsonld-expanded", false, None, true, None)
+            .unwrap();
+        assert!(
+            !expanded.contains("@context"),
+            "expanded form has no @context: {expanded}"
+        );
     }
 
     /// A custom indent flows through to the JSON-LD pretty writer (a four-space indent
@@ -560,7 +589,13 @@ mod tests {
             .serialize("jsonld-expanded", true, Some("  ".to_string()), true, None)
             .unwrap();
         let four = store
-            .serialize("jsonld-expanded", true, Some("    ".to_string()), true, None)
+            .serialize(
+                "jsonld-expanded",
+                true,
+                Some("    ".to_string()),
+                true,
+                None,
+            )
             .unwrap();
         assert_ne!(two, four, "indent option must affect the JSON-LD output");
         let opts = JsonLdPrettyOptions {
@@ -571,8 +606,13 @@ mod tests {
             graph_to_jsonld_pretty_with(&g, JsonLdForm::Expanded, &default_prefixes(), &opts),
             "custom-indent JSON-LD must equal the engine output with the same opts"
         );
-        let dflt = store.serialize("jsonld-expanded", true, None, true, None).unwrap();
-        assert_eq!(dflt, two, "None indent uses the two-space default for JSON-LD");
+        let dflt = store
+            .serialize("jsonld-expanded", true, None, true, None)
+            .unwrap();
+        assert_eq!(
+            dflt, two,
+            "None indent uses the two-space default for JSON-LD"
+        );
     }
 
     /// JSON-LD round-trips: a serialised document re-parses to the same triple set. Guarded
@@ -622,12 +662,23 @@ mod tests {
         assert_eq!(got, want, "serializeCompact must equal the engine writer");
         // The `@vocab` term-compaction the prefix-only form CANNOT do: bare `name`/`knows`
         // predicate keys (not `schema:name`), proving the full algorithm ran.
-        assert!(got.contains("\"@vocab\":\"http://schema.org/\""), "context echoed: {got}");
-        assert!(got.contains("\"name\":"), "predicate is @vocab-relative bare term: {got}");
+        assert!(
+            got.contains("\"@vocab\":\"http://schema.org/\""),
+            "context echoed: {got}"
+        );
+        assert!(
+            got.contains("\"name\":"),
+            "predicate is @vocab-relative bare term: {got}"
+        );
         // Contrast: the prefix-only `jsonld-compacted` form keeps a `schema:` CURIE, never a
         // bare `name` key — so the new method genuinely exposes a richer surface.
-        let prefix_only = store.serialize("jsonld-compacted", false, None, true, None).unwrap();
-        assert!(!prefix_only.contains("\"name\":"), "prefix-only form is not @vocab: {prefix_only}");
+        let prefix_only = store
+            .serialize("jsonld-compacted", false, None, true, None)
+            .unwrap();
+        assert!(
+            !prefix_only.contains("\"name\":"),
+            "prefix-only form is not @vocab: {prefix_only}"
+        );
     }
 
     /// The pretty arm equals `graph_to_jsonld_compact_pretty` and re-indents the minified
@@ -639,12 +690,18 @@ mod tests {
         let g = Graph::load_str(data, "turtle").unwrap();
         let ctx_text = r#"{"@vocab":"http://ex/"}"#;
         let ctx = parse_context_json(ctx_text).unwrap();
-        let two = store.serialize_compact(ctx_text, true, Some("  ".to_string())).unwrap();
-        let opts = JsonLdPrettyOptions { indent: "  ".to_string() };
+        let two = store
+            .serialize_compact(ctx_text, true, Some("  ".to_string()))
+            .unwrap();
+        let opts = JsonLdPrettyOptions {
+            indent: "  ".to_string(),
+        };
         assert_eq!(two, graph_to_jsonld_compact_pretty(&g, &ctx, &opts));
         assert!(two.contains('\n'), "pretty compaction is multi-line: {two}");
         // A four-space indent differs; `None` defaults to two spaces.
-        let four = store.serialize_compact(ctx_text, true, Some("    ".to_string())).unwrap();
+        let four = store
+            .serialize_compact(ctx_text, true, Some("    ".to_string()))
+            .unwrap();
         assert_ne!(two, four, "indent option must affect the output");
         let dflt = store.serialize_compact(ctx_text, true, None).unwrap();
         assert_eq!(dflt, two, "None indent uses the two-space default");
@@ -661,8 +718,15 @@ mod tests {
         let g = Graph::load_str(data, "turtle").unwrap();
         let got = store.serialize_compact("{}", false, None).unwrap();
         let ctx = parse_context_json("{}").unwrap();
-        assert_eq!(got, graph_to_jsonld_compact(&g, &ctx), "empty @context matches the engine");
+        assert_eq!(
+            got,
+            graph_to_jsonld_compact(&g, &ctx),
+            "empty @context matches the engine"
+        );
         // No abbreviation with an empty context: the predicate stays a full IRI.
-        assert!(got.contains("http://ex/p"), "full-IRI predicate with empty @context: {got}");
+        assert!(
+            got.contains("http://ex/p"),
+            "full-IRI predicate with empty @context: {got}"
+        );
     }
 }

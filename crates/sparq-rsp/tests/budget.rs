@@ -30,7 +30,10 @@ fn value_triple(n: i32) -> [Term; 3] {
 }
 
 fn row_cap(max_rows: usize) -> QueryBudget {
-    QueryBudget { max_rows: Some(max_rows), ..QueryBudget::unlimited() }
+    QueryBudget {
+        max_rows: Some(max_rows),
+        ..QueryBudget::unlimited()
+    }
 }
 
 #[test]
@@ -43,12 +46,21 @@ fn select_budget_max_rows_trips_on_window_close() {
     .with_budget(row_cap(1));
     // Three rows buffered into [0,10) — under the cap nothing evaluates yet.
     for n in 0..3 {
-        q.push(value_triple(n), n as u64, |_| panic!("no window closed yet")).unwrap();
+        q.push(value_triple(n), n as u64, |_| {
+            panic!("no window closed yet")
+        })
+        .unwrap();
     }
     // Closing the window evaluates 3 rows against max_rows=1: the budget trips
     // and the error is the push's evaluation error.
-    let err = q.push(value_triple(9), 12, |_| panic!("budget must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (max-rows)"), "got: {}", err);
+    let err = q
+        .push(value_triple(9), 12, |_| panic!("budget must trip"))
+        .unwrap_err();
+    assert!(
+        err.contains("query budget exceeded (max-rows)"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
@@ -81,7 +93,11 @@ fn select_window_timeout_bounds_each_evaluation() {
         q.push(value_triple(n), n as u64, |_| {}).unwrap();
     }
     let err = q.flush(|_| panic!("timeout must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (timeout)"), "got: {}", err);
+    assert!(
+        err.contains("query budget exceeded (timeout)"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
@@ -127,8 +143,14 @@ fn select_expired_absolute_deadline_not_extended_by_window_timeout() {
     for n in 0..3 {
         q.push(value_triple(n), n as u64, |_| {}).unwrap();
     }
-    let err = q.flush(|_| panic!("absolute deadline must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (timeout)"), "got: {}", err);
+    let err = q
+        .flush(|_| panic!("absolute deadline must trip"))
+        .unwrap_err();
+    assert!(
+        err.contains("query budget exceeded (timeout)"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
@@ -150,7 +172,11 @@ fn select_zero_window_timeout_trips_despite_generous_absolute_deadline() {
         q.push(value_triple(n), n as u64, |_| {}).unwrap();
     }
     let err = q.flush(|_| panic!("window timeout must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (timeout)"), "got: {}", err);
+    assert!(
+        err.contains("query budget exceeded (timeout)"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
@@ -165,7 +191,11 @@ fn construct_budget_max_rows_trips() {
         q.push(value_triple(n), n as u64, |_| {}).unwrap();
     }
     let err = q.flush(|_| panic!("budget must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (max-rows)"), "got: {}", err);
+    assert!(
+        err.contains("query budget exceeded (max-rows)"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
@@ -178,15 +208,18 @@ fn construct_window_timeout_trips() {
     .with_window_timeout(Duration::ZERO);
     q.push(value_triple(0), 0, |_| {}).unwrap();
     let err = q.flush(|_| panic!("timeout must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (timeout)"), "got: {}", err);
+    assert!(
+        err.contains("query budget exceeded (timeout)"),
+        "got: {}",
+        err
+    );
 }
 
 // A single-pattern ASK is answered straight from the index count, and tiny
 // conjunctive shapes can complete their LIMIT-1 streaming scan before the
 // first coarse poll — there is nothing to bound there. The ASK tests use a
 // UNION shape, which enters the evaluator and polls at operator entry.
-const ASK_UNION: &str =
-    "ASK { { ?s <http://ex/value> ?v } UNION { ?s <http://ex/other> ?v } }";
+const ASK_UNION: &str = "ASK { { ?s <http://ex/value> ?v } UNION { ?s <http://ex/other> ?v } }";
 
 #[test]
 fn ask_budget_cancel_flag_aborts() {
@@ -198,7 +231,11 @@ fn ask_budget_cancel_flag_aborts() {
         .with_budget(QueryBudget::cancelled_by(flag));
     q.push(value_triple(0), 0, |_| {}).unwrap();
     let err = q.flush(|_| panic!("cancel must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (cancelled)"), "got: {}", err);
+    assert!(
+        err.contains("query budget exceeded (cancelled)"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
@@ -208,7 +245,11 @@ fn ask_window_timeout_trips() {
         .with_window_timeout(Duration::ZERO);
     q.push(value_triple(0), 0, |_| {}).unwrap();
     let err = q.flush(|_| panic!("timeout must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (timeout)"), "got: {}", err);
+    assert!(
+        err.contains("query budget exceeded (timeout)"),
+        "got: {}",
+        err
+    );
 }
 
 const MULTI_RSPQL: &str = "\
@@ -222,7 +263,9 @@ FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 10 STEP 10";
 
 #[test]
 fn multi_budget_max_rows_trips_on_tick() {
-    let mut q = ContinuousMultiQuery::register(MULTI_RSPQL).unwrap().with_budget(row_cap(1));
+    let mut q = ContinuousMultiQuery::register(MULTI_RSPQL)
+        .unwrap()
+        .with_budget(row_cap(1));
     let temp = NamedNode::new_unchecked("http://ex/temp");
     let meta = NamedNode::new_unchecked("http://ex/meta");
     let in_room = |s: &str| -> [Term; 3] {
@@ -245,13 +288,18 @@ fn multi_budget_max_rows_trips_on_tick() {
     q.push(&temp, reading("s1", 21), 3, |_| {}).unwrap();
     q.push(&temp, reading("s2", 22), 4, |_| {}).unwrap();
     let err = q.flush(|_| panic!("budget must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (max-rows)"), "got: {}", err);
+    assert!(
+        err.contains("query budget exceeded (max-rows)"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
 fn multi_window_timeout_trips_on_tick() {
-    let mut q =
-        ContinuousMultiQuery::register(MULTI_RSPQL).unwrap().with_window_timeout(Duration::ZERO);
+    let mut q = ContinuousMultiQuery::register(MULTI_RSPQL)
+        .unwrap()
+        .with_window_timeout(Duration::ZERO);
     let meta = NamedNode::new_unchecked("http://ex/meta");
     let triple: [Term; 3] = [
         NamedNode::new_unchecked("http://ex/s1").into(),
@@ -260,5 +308,9 @@ fn multi_window_timeout_trips_on_tick() {
     ];
     q.push(&meta, triple, 1, |_| {}).unwrap();
     let err = q.flush(|_| panic!("timeout must trip")).unwrap_err();
-    assert!(err.contains("query budget exceeded (timeout)"), "got: {}", err);
+    assert!(
+        err.contains("query budget exceeded (timeout)"),
+        "got: {}",
+        err
+    );
 }

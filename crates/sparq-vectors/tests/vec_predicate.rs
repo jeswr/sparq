@@ -340,8 +340,8 @@ fn boundary_score_tie_membership_is_by_ntriples_codepoint_order() {
     store.put(id("http://ex/z-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
     store.put(num("10"), &[0.6, -0.8]).unwrap(); // cos 0.6
     store.put(num("2"), &[3.0, 4.0]).unwrap(); // cos 0.6 (scaled twin)
-    // k=2: one slot above the boundary (`top`), one slot for the three-way 0.6 tie — the
-    // smallest N-Triples key `"10"^^xsd:integer` must be the admitted member.
+                                               // k=2: one slot above the boundary (`top`), one slot for the three-way 0.6 tie — the
+                                               // smallest N-Triples key `"10"^^xsd:integer` must be the admitted member.
     let r = query_vec(
         &g,
         "PREFIX vec: <http://sparq.dev/vec#>
@@ -392,7 +392,7 @@ fn blank_node_candidate_at_the_boundary_is_a_hard_query_error() {
     store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0
     store.put(id("http://ex/a-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
     store.put(bnode, &[0.6, -0.8]).unwrap(); // cos 0.6 — tied blank node
-    // k=2: one slot for the two-way 0.6 boundary tie the blank node sits in → hard error.
+                                             // k=2: one slot for the two-way 0.6 boundary tie the blank node sits in → hard error.
     let err = query_vec(
         &g,
         "PREFIX vec: <http://sparq.dev/vec#>
@@ -400,7 +400,10 @@ fn blank_node_candidate_at_the_boundary_is_a_hard_query_error() {
         &store,
     )
     .unwrap_err();
-    assert!(err.contains("blank node"), "expected the fail-closed domain error, got: {err}");
+    assert!(
+        err.contains("blank node"),
+        "expected the fail-closed domain error, got: {err}"
+    );
     // k=1: the unique winner is an IRI; the blank node stays strictly below the boundary and
     // is rejected by score alone — the query succeeds.
     let r = query_vec(
@@ -512,7 +515,9 @@ mod filtered_boundary_tiebreak {
         store.put(id("http://ex/z-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6, admitted
         store.put(num("10"), &[0.6, -0.8]).unwrap(); // cos 0.6, admitted
         store.put(num("2"), &[3.0, 4.0]).unwrap(); // cos 0.6 (scaled twin), admitted
-        store.put(id("http://ex/near-but-out"), &[0.9, 0.1]).unwrap(); // cos ~0.99, NOT admitted
+        store
+            .put(id("http://ex/near-but-out"), &[0.9, 0.1])
+            .unwrap(); // cos ~0.99, NOT admitted
         (g, store)
     }
 
@@ -593,11 +598,7 @@ mod declared_metric {
 
     #[test]
     fn non_cosine_declared_metric_is_rejected() {
-        let g = Graph::load_str(
-            "<http://ex/a> <http://ex/label> \"alpha\" .",
-            "ntriples",
-        )
-        .unwrap();
+        let g = Graph::load_str("<http://ex/a> <http://ex/label> \"alpha\" .", "ntriples").unwrap();
         let id = g
             .id_of(&Term::NamedNode(NamedNode::new("http://ex/a").unwrap()))
             .unwrap();

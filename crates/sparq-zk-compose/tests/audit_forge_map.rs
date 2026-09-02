@@ -57,18 +57,17 @@ use sparq_zk::commit::commit_triples;
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
-use sparq_zk_compose::build::{
-    build_filter_int, build_scan, encode_int_literal, Pattern, Slot,
-};
+use sparq_zk_compose::build::{build_filter_int, build_scan, encode_int_literal, Pattern, Slot};
 use sparq_zk_compose::driver::{CircuitProver, ProofArtifacts};
 use sparq_zk_compose::manifest::{
-    AttestedStatusRef, BindingEdge, BindingMode, CircuitId, CommitmentAttestation, EntailmentRegime,
-    FieldHex, FilterOp, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
+    AttestedStatusRef, BindingEdge, BindingMode, CircuitId, CommitmentAttestation,
+    EntailmentRegime, FieldHex, FilterOp, ProofInputs, ProofManifest, RevocationStatus,
+    StatusListSnapshot, SubProof,
 };
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
-    encode_artifacts, verify_manifest, CheckError, EntailmentPolicy, HolderBindingPolicy, HolderRegistry,
-    InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
+    encode_artifacts, verify_manifest, CheckError, EntailmentPolicy, HolderBindingPolicy,
+    HolderRegistry, InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
 };
 
 // === shared fixtures (kept local so this map is a single self-contained file) ==
@@ -95,7 +94,11 @@ fn credential_graph() -> Vec<Triple> {
     let alice = NamedOrBlankNode::NamedNode(iri("http://ex/alice"));
     vec![
         Triple::new(alice.clone(), iri("http://ex/age"), int_lit(25)),
-        Triple::new(alice, iri("http://ex/role"), Term::NamedNode(iri("http://ex/admin"))),
+        Triple::new(
+            alice,
+            iri("http://ex/role"),
+            Term::NamedNode(iri("http://ex/admin")),
+        ),
     ]
 }
 
@@ -110,8 +113,16 @@ fn nonce_for(hex: &str) -> VerifierNonce {
 }
 
 fn fixture_snapshot(revoked: bool) -> StatusListSnapshot {
-    let bits = if revoked { vec![1u8 << STATUS_INDEX] } else { vec![0u8] };
-    StatusListSnapshot { status_list: STATUS_LIST.to_string(), version: STATUS_VERSION, bits }
+    let bits = if revoked {
+        vec![1u8 << STATUS_INDEX]
+    } else {
+        vec![0u8]
+    };
+    StatusListSnapshot {
+        status_list: STATUS_LIST.to_string(),
+        version: STATUS_VERSION,
+        bits,
+    }
 }
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
@@ -138,7 +149,9 @@ fn attest_full(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestatio
         commitment: FieldHex::from_field(&commitment),
         issuer_public_key: public_key_to_hex(&sk.public_key()),
         signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
-        cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        cryptosuite: SignatureScheme::Poseidon2SchnorrV1
+            .cryptosuite_iri()
+            .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
             ref_commitment: None,
@@ -198,16 +211,21 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
-        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        sub_proofs: vec![SubProof {
+            inputs: scan.inputs,
+            proof_hex: String::new(),
+        }],
         binding_edges: vec![],
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     };
     (m, commitment, salt)
 }
@@ -346,7 +364,9 @@ fn finding_04_nonce_replay_rejected() {
     }
     match run("f04_replay_2") {
         Err(CheckError::NonceReplay) => {}
-        other => panic!("#4: re-presentation under a burnt nonce must be NonceReplay, got {other:?}"),
+        other => {
+            panic!("#4: re-presentation under a burnt nonce must be NonceReplay, got {other:?}")
+        }
     }
 }
 
@@ -406,19 +426,27 @@ fn scan_plus_filter_manifest(
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![
-            SubProof { inputs: scan_inputs, proof_hex: String::new() },
-            SubProof { inputs: filter, proof_hex: String::new() },
+            SubProof {
+                inputs: scan_inputs,
+                proof_hex: String::new(),
+            },
+            SubProof {
+                inputs: filter,
+                proof_hex: String::new(),
+            },
         ],
         binding_edges: edge.into_iter().collect(),
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     }
 }
 
@@ -438,7 +466,12 @@ fn finding_05_filter_bound_substitution_rejected() {
     // forged bound is 17 (not the query's 18). 25 >= 17 = true, but bound != 18.
     let filter = filter_int_inputs(25, FilterOp::Ge, 17, true);
     // Edge points at the age object slot (slot 2) of scan row 0 → filter.
-    let edge = BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 };
+    let edge = BindingEdge {
+        from_proof: 0,
+        from_row: 0,
+        from_slot: 2,
+        to_proof: 1,
+    };
     let m = scan_plus_filter_manifest(query, filter, Some(edge));
     match verify_full(&m, "f05_bound_sub") {
         Err(CheckError::UnboundFilter { variable }) => {
@@ -514,7 +547,12 @@ fn finding_07_operand_substitution_host_rejected() {
     // The filter declares operand_enc for value 99 — NOT the scanned age (25).
     let filter = filter_int_inputs(99, FilterOp::Ge, 18, true);
     // Edge claims the scanned age column (slot 2) feeds this filter.
-    let edge = BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 };
+    let edge = BindingEdge {
+        from_proof: 0,
+        from_row: 0,
+        from_slot: 2,
+        to_proof: 1,
+    };
     let m = scan_plus_filter_manifest(query, filter, Some(edge));
     match verify_full(&m, "f07_operand_sub") {
         Err(CheckError::BindingInconsistent { edge: 0 }) => {}
@@ -544,7 +582,11 @@ fn finding_08_attribution_omitted_rejected() {
         unreachable!("sub-proof 0 is a scan");
     }
     match verify_full(&m, "f08_attr_omit") {
-        Err(CheckError::AttributionMalformed { proof: 0, expected: 1, got: 0 }) => {}
+        Err(CheckError::AttributionMalformed {
+            proof: 0,
+            expected: 1,
+            got: 0,
+        }) => {}
         other => panic!("#8: omitted attribution must be AttributionMalformed, got {other:?}"),
     }
 }
@@ -590,16 +632,21 @@ fn finding_08_attribution_collapse_rejected() {
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
-        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        sub_proofs: vec![SubProof {
+            inputs: scan.inputs,
+            proof_hex: String::new(),
+        }],
         binding_edges: vec![],
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     };
     match verify_full(&m, "f08_attr_collapse") {
         Err(CheckError::AttributionUnderDeclared { pattern: 0, .. }) => {}
@@ -635,7 +682,10 @@ fn finding_09_salt_reused_rejected() {
     let reused = salt_from_bytes(&[42u8; 32]);
     let c0 = commit_triples(&g0, reused).unwrap();
     let c1 = commit_triples(&g1, reused).unwrap();
-    assert_ne!(c0.commitment, c1.commitment, "distinct graphs => distinct commitments");
+    assert_ne!(
+        c0.commitment, c1.commitment,
+        "distinct graphs => distinct commitments"
+    );
     let pattern = Pattern {
         s: Slot::Var,
         p: Slot::Const(Term::NamedNode(iri("http://ex/p"))),
@@ -657,20 +707,27 @@ fn finding_09_salt_reused_rejected() {
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
-        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        sub_proofs: vec![SubProof {
+            inputs: scan.inputs,
+            proof_hex: String::new(),
+        }],
         binding_edges: vec![],
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     };
     match verify_full(&m, "f09_salt_reuse") {
         Err(CheckError::SaltReused { .. }) => {}
-        other => panic!("#9: a salt reused across two scan-referenced graphs must be SaltReused, got {other:?}"),
+        other => panic!(
+            "#9: a salt reused across two scan-referenced graphs must be SaltReused, got {other:?}"
+        ),
     }
 }
 
@@ -746,8 +803,16 @@ fn finding_11_circuit_id_r_relabel_rejected() {
         unreachable!("sub-proof 0 is a scan");
     }
     match verify_full(&m, "f11_r_relabel") {
-        Err(CheckError::CircuitIdMismatch { proof: 0, declared, derived }) => {
-            assert_eq!(declared, CircuitId::Scan { k: 1, n: 16, r: 8 }, "declared the forged r=8");
+        Err(CheckError::CircuitIdMismatch {
+            proof: 0,
+            declared,
+            derived,
+        }) => {
+            assert_eq!(
+                declared,
+                CircuitId::Scan { k: 1, n: 16, r: 8 },
+                "declared the forged r=8"
+            );
             assert_eq!(
                 derived,
                 Some(CircuitId::Scan { k: 1, n: 16, r: 4 }),
@@ -786,7 +851,10 @@ fn finding_12_revoked_bit_rejected() {
         &nonce_for(CHALLENGE_HEX),
         &InMemorySeenNonces::new(),
     ) {
-        Err(CheckError::CredentialRevoked { index: STATUS_INDEX, .. }) => {}
+        Err(CheckError::CredentialRevoked {
+            index: STATUS_INDEX,
+            ..
+        }) => {}
         other => panic!("#12a: a revoked credential must be CredentialRevoked, got {other:?}"),
     }
 }
@@ -815,7 +883,10 @@ fn finding_12_stale_version_rejected() {
         &nonce_for(CHALLENGE_HEX),
         &InMemorySeenNonces::new(),
     ) {
-        Err(CheckError::StatusListStale { version: STATUS_VERSION, .. }) => {}
+        Err(CheckError::StatusListStale {
+            version: STATUS_VERSION,
+            ..
+        }) => {}
         other => panic!("#12b: a stale version must be StatusListStale, got {other:?}"),
     }
 }
@@ -842,13 +913,19 @@ fn honest_filter_d1(
     let (filter, digits) = build_filter_int(operand_enc, value, op, bound, expected).unwrap();
     let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits, None, None).unwrap();
     let out = scratch(tag);
-    let art = prover.prove_in(&id, &toml, &out, tag).expect("filter proves");
+    let art = prover
+        .prove_in(&id, &toml, &out, tag)
+        .expect("filter proves");
     (filter, art)
 }
 
 /// Prove a real scan over `{ ?s <ex/age> ?o }`; returns the honest scan
 /// ProofInputs + its encoded artifact hex.
-fn honest_age_scan(challenge: &FieldHex, prover: &CircuitProver, tag: &str) -> (ProofInputs, String) {
+fn honest_age_scan(
+    challenge: &FieldHex,
+    prover: &CircuitProver,
+    tag: &str,
+) -> (ProofInputs, String) {
     let salt = fixture_salt();
     let commit = commit_triples(&credential_graph(), salt).unwrap();
     let pattern = Pattern {
@@ -857,8 +934,16 @@ fn honest_age_scan(challenge: &FieldHex, prover: &CircuitProver, tag: &str) -> (
         o: Slot::Var,
     };
     let scan = build_scan(std::slice::from_ref(&commit), &pattern).expect("scan builds");
-    let (id, toml) =
-        prover_toml_for(&scan.inputs, challenge, &scan.witness.counts, &scan.witness.enc, &[], None, None).unwrap();
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+        None,
+        None,
+    )
+    .unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("scan proves");
     (scan.inputs, encode_artifacts(&art))
@@ -888,19 +973,27 @@ fn composed_manifest(
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![
-            SubProof { inputs: scan_inputs, proof_hex: scan_hex },
-            SubProof { inputs: filter_inputs, proof_hex: filter_hex },
+            SubProof {
+                inputs: scan_inputs,
+                proof_hex: scan_hex,
+            },
+            SubProof {
+                inputs: filter_inputs,
+                proof_hex: filter_hex,
+            },
         ],
         binding_edges: vec![],
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     }
 }
 
@@ -992,7 +1085,9 @@ fn finding_07_operand_substitution_bb_rejected() {
     let m = composed_manifest(scan_inputs, scan_hex, filter, encode_artifacts(&art));
     match verify_full(&m, "f07bb_verify") {
         Err(CheckError::PublicInputMismatch { proof: 1 }) => {}
-        other => panic!("#7 (bb): a substituted operand must be PublicInputMismatch, got {other:?}"),
+        other => {
+            panic!("#7 (bb): a substituted operand must be PublicInputMismatch, got {other:?}")
+        }
     }
 }
 
@@ -1024,11 +1119,19 @@ fn finding_11_n_relabel_bb_rejected() {
     let mut g0 = Vec::new();
     for i in 0..5u64 {
         // 5 matching <ex/p0> triples with distinct objects.
-        g0.push(Triple::new(subj0.clone(), iri("http://ex/p0"), int_lit(100 + i)));
+        g0.push(Triple::new(
+            subj0.clone(),
+            iri("http://ex/p0"),
+            int_lit(100 + i),
+        ));
     }
     for i in 0..15u64 {
         // 15 non-matching filler triples → 20 total (forces n=64).
-        g0.push(Triple::new(subj0.clone(), iri(&format!("http://ex/q{i}")), int_lit(i)));
+        g0.push(Triple::new(
+            subj0.clone(),
+            iri(&format!("http://ex/q{i}")),
+            int_lit(i),
+        ));
     }
     let g1 = vec![Triple::new(
         NamedOrBlankNode::NamedNode(iri("http://ex/other")),
@@ -1052,10 +1155,20 @@ fn finding_11_n_relabel_bb_rejected() {
         &CircuitId::Scan { k: 2, n: 64, r: 8 },
         "#11 bb: the >16-slot graph must derive the scan_k2_n64_r8 member"
     );
-    let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[], None, None).unwrap();
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+        None,
+        None,
+    )
+    .unwrap();
     let out = scratch("f11bb");
-    let art = prover.prove_in(&id, &toml, &out, "f11bb").expect("scan_k2_n64_r8 proves");
+    let art = prover
+        .prove_in(&id, &toml, &out, "f11bb")
+        .expect("scan_k2_n64_r8 proves");
 
     // FORGE: relabel the declared id to the n=16 member (scan_k2_n16_r8).
     let mut forged = scan.inputs.clone();
@@ -1077,16 +1190,21 @@ fn finding_11_n_relabel_bb_rejected() {
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         derivation_steps: vec![],
-        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        binding: BindingMode::Challenge {
+            challenge: FieldHex(CHALLENGE_HEX.into()),
+        },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
-        sub_proofs: vec![SubProof { inputs: forged, proof_hex: encode_artifacts(&art) }],
+        sub_proofs: vec![SubProof {
+            inputs: forged,
+            proof_hex: encode_artifacts(&art),
+        }],
         binding_edges: vec![],
         join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
-            holder_pok_proofs: vec![],
-            holder_set_proofs: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
     };
     // The n-relabel is closed by the canonical-vk recompute (bb verify rejects
     // the n=64 proof against the n=16 vk) and/or the public-input length mismatch.

@@ -198,9 +198,15 @@ mod tests {
         // simple literal ≡ xsd:string.
         assert!(term_equal_rdf(&lit("abc", ""), &lit("abc", XSD_STRING)));
         // language tags compare case-insensitively.
-        assert!(term_equal_rdf(&langlit("chat", "en"), &langlit("chat", "EN")));
+        assert!(term_equal_rdf(
+            &langlit("chat", "en"),
+            &langlit("chat", "EN")
+        ));
         // lang literal is NOT equal to a plain string of the same lexical.
-        assert!(!term_equal_rdf(&langlit("chat", "en"), &lit("chat", XSD_STRING)));
+        assert!(!term_equal_rdf(
+            &langlit("chat", "en"),
+            &lit("chat", XSD_STRING)
+        ));
         // strict: no numeric canonicalisation for data-sourced terms.
         assert!(!term_equal_rdf(&lit("01", XSD_INT), &lit("1", XSD_INT)));
         // IRIs, blanks, triples, and cross-kind.
@@ -208,7 +214,10 @@ mod tests {
             &Term::Iri("http://a".into()),
             &Term::Iri("http://a".into())
         ));
-        assert!(term_equal_rdf(&Term::Blank("b0".into()), &Term::Blank("b0".into())));
+        assert!(term_equal_rdf(
+            &Term::Blank("b0".into()),
+            &Term::Blank("b0".into())
+        ));
         let t1 = Term::Triple(Box::new([
             Term::Iri("http://s".into()),
             Term::Iri("http://p".into()),
@@ -220,28 +229,52 @@ mod tests {
             lit("1", XSD_INT),
         ]));
         assert!(term_equal_rdf(&t1, &t2));
-        assert!(!term_equal_rdf(&Term::Iri("http://a".into()), &Term::Blank("a".into())));
+        assert!(!term_equal_rdf(
+            &Term::Iri("http://a".into()),
+            &Term::Blank("a".into())
+        ));
     }
 
     #[test]
     fn canonical_key_collapses_value_variants() {
         // numeric lexical variance collapses under the value regime (unlike strict equality).
-        assert_eq!(canonical_key(&lit("01", XSD_INT)), canonical_key(&lit("1", XSD_INT)));
+        assert_eq!(
+            canonical_key(&lit("01", XSD_INT)),
+            canonical_key(&lit("1", XSD_INT))
+        );
         // simple literal ≡ xsd:string, keyed identically.
-        assert_eq!(canonical_key(&lit("abc", "")), canonical_key(&lit("abc", XSD_STRING)));
+        assert_eq!(
+            canonical_key(&lit("abc", "")),
+            canonical_key(&lit("abc", XSD_STRING))
+        );
         // language tag lowercased in the key.
-        assert_eq!(canonical_key(&langlit("chat", "EN")), canonical_key(&langlit("chat", "en")));
+        assert_eq!(
+            canonical_key(&langlit("chat", "EN")),
+            canonical_key(&langlit("chat", "en"))
+        );
         // boolean 1 ≡ true.
-        assert_eq!(canonical_key(&lit("1", XSD_BOOLEAN)), canonical_key(&lit("true", XSD_BOOLEAN)));
+        assert_eq!(
+            canonical_key(&lit("1", XSD_BOOLEAN)),
+            canonical_key(&lit("true", XSD_BOOLEAN))
+        );
         // same instant, different lexical -> same key.
         assert_eq!(
             canonical_key(&lit("2020-01-01T13:00:00Z", XSD_DT)),
             canonical_key(&lit("2020-01-01T14:00:00+01:00", XSD_DT))
         );
         // different value / different datatype / different kind -> different key.
-        assert_ne!(canonical_key(&lit("1", XSD_INT)), canonical_key(&lit("2", XSD_INT)));
-        assert_ne!(canonical_key(&lit("1", XSD_INT)), canonical_key(&lit("1", XSD_STRING)));
-        assert_ne!(canonical_key(&Term::Iri("x".into())), canonical_key(&Term::Blank("x".into())));
+        assert_ne!(
+            canonical_key(&lit("1", XSD_INT)),
+            canonical_key(&lit("2", XSD_INT))
+        );
+        assert_ne!(
+            canonical_key(&lit("1", XSD_INT)),
+            canonical_key(&lit("1", XSD_STRING))
+        );
+        assert_ne!(
+            canonical_key(&Term::Iri("x".into())),
+            canonical_key(&Term::Blank("x".into()))
+        );
         // unknown datatype keeps exact lexical.
         assert_ne!(
             canonical_key(&lit("01", "http://example.org/weird")),
@@ -252,7 +285,10 @@ mod tests {
     #[test]
     fn canonical_lexical_collapses_value_variants_only_where_the_value_space_is_known() {
         // numeric / boolean / temporal: value-canonical.
-        assert_eq!(canonical_lexical("01", XSD_INT), canonical_lexical("1", XSD_INT));
+        assert_eq!(
+            canonical_lexical("01", XSD_INT),
+            canonical_lexical("1", XSD_INT)
+        );
         assert_eq!(canonical_lexical("1", XSD_BOOLEAN), "true");
         assert_eq!(canonical_lexical("0", XSD_BOOLEAN), "false");
         assert_eq!(
@@ -265,7 +301,10 @@ mod tests {
         assert_eq!(canonical_lexical("01", "http://example.org/weird"), "01");
         assert_eq!(canonical_lexical("maybe", XSD_BOOLEAN), "maybe");
         // a genuinely different value still separates.
-        assert_ne!(canonical_lexical("1", XSD_INT), canonical_lexical("2", XSD_INT));
+        assert_ne!(
+            canonical_lexical("1", XSD_INT),
+            canonical_lexical("2", XSD_INT)
+        );
     }
 
     #[test]

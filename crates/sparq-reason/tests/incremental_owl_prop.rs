@@ -88,19 +88,21 @@ fn build(dict: &mut Dict, rng: &mut Rng, with_transitive: bool) -> (Onto, Vec<[I
     // 4 class chains of depth 5, with one equivalentClass bridge between chains.
     let mut classes = Vec::new();
     for i in 0..4 {
-        let chain: Vec<Id> =
-            (0..5).map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..5)
+            .map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], v.sc, w[1]]);
         }
         classes.extend(chain);
     }
     base.push([classes[2], v.eqc, classes[7]]); // C0_2 ≡ C1_2
-    // 3 subproperty chains of depth 3, each property with random domain/range.
+                                                // 3 subproperty chains of depth 3, each property with random domain/range.
     let mut props = Vec::new();
     for i in 0..3 {
-        let chain: Vec<Id> =
-            (0..3).map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..3)
+            .map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], v.sp, w[1]]);
         }
@@ -140,8 +142,9 @@ fn build(dict: &mut Dict, rng: &mut Rng, with_transitive: bool) -> (Onto, Vec<[I
         props.push(connected);
     }
     // 150 individuals with random types and property assertions (+ some differentFrom).
-    let individuals: Vec<Id> =
-        (0..150).map(|i| dict.intern_iri(&format!("http://ex/ind{i}"))).collect();
+    let individuals: Vec<Id> = (0..150)
+        .map(|i| dict.intern_iri(&format!("http://ex/ind{i}")))
+        .collect();
     for &s in &individuals {
         base.push([s, v.ty, classes[rng.below(classes.len())]]);
         for _ in 0..2 {
@@ -155,7 +158,15 @@ fn build(dict: &mut Dict, rng: &mut Rng, with_transitive: bool) -> (Onto, Vec<[I
         let b = individuals[rng.below(individuals.len())];
         base.push([a, v.diff, b]);
     }
-    (Onto { v, classes, props, individuals }, base)
+    (
+        Onto {
+            v,
+            classes,
+            props,
+            individuals,
+        },
+        base,
+    )
 }
 
 /// A random ABox triple: type assertion, property assertion, or differentFrom.
@@ -185,8 +196,11 @@ fn run_schedule(seed: u64, with_transitive: bool, batches: usize) {
     let mut g = MaterializedOwlGraph::new(&mut dict, &base);
     let mut mirror: FxHashSet<[Id; 3]> = base.into_iter().collect();
 
-    let expected_mode =
-        if with_transitive { OwlMode::CountingFixpoint } else { OwlMode::CountingMono };
+    let expected_mode = if with_transitive {
+        OwlMode::CountingFixpoint
+    } else {
+        OwlMode::CountingMono
+    };
     assert_eq!(g.mode(), expected_mode, "profile detection");
 
     assert_eq!(
@@ -226,8 +240,11 @@ fn run_schedule(seed: u64, with_transitive: bool, batches: usize) {
             mirror.extend(delta);
         } else {
             // ABox delete batch: mostly currently-asserted ABox triples + some randoms.
-            let current: Vec<[Id; 3]> =
-                mirror.iter().copied().filter(|t| !onto.is_tbox(t)).collect();
+            let current: Vec<[Id; 3]> = mirror
+                .iter()
+                .copied()
+                .filter(|t| !onto.is_tbox(t))
+                .collect();
             let n = 1 + rng.below(8);
             let delta: Vec<[Id; 3]> = (0..n)
                 .map(|_| {
@@ -256,10 +273,17 @@ fn run_schedule(seed: u64, with_transitive: bool, batches: usize) {
                 full.len()
             );
         }
-        assert_eq!(g.len(), inc.len(), "len() inconsistent with closure() at batch {batch}");
+        assert_eq!(
+            g.len(),
+            inc.len(),
+            "len() inconsistent with closure() at batch {batch}"
+        );
         assert_eq!(g.base_len(), mirror.len(), "base drifted at batch {batch}");
     }
-    assert!(tbox_batches > 0, "schedule should have exercised the TBox fallback");
+    assert!(
+        tbox_batches > 0,
+        "schedule should have exercised the TBox fallback"
+    );
 }
 
 #[test]
@@ -287,9 +311,16 @@ fn fallback_profile_stays_correct_and_counts_rebuilds() {
     base.push([restriction, svf, onto.classes[0]]);
 
     let mut g = MaterializedOwlGraph::new(&mut dict, &base);
-    assert_eq!(g.mode(), OwlMode::Fallback, "restriction must force fallback mode");
+    assert_eq!(
+        g.mode(),
+        OwlMode::Fallback,
+        "restriction must force fallback mode"
+    );
     let mut mirror: FxHashSet<[Id; 3]> = base.into_iter().collect();
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), oracle(&mut dict, &mirror));
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        oracle(&mut dict, &mirror)
+    );
 
     for batch in 0..12 {
         let n = 1 + rng.below(5);
@@ -337,19 +368,36 @@ fn mode_flips_when_fallback_feature_added_and_removed() {
     g.insert(&mut dict, &[t]);
     mirror.insert(t);
     assert_eq!(g.mode(), OwlMode::Fallback, "sameAs must flip to fallback");
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), oracle(&mut dict, &mirror));
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        oracle(&mut dict, &mirror)
+    );
 
     // Removing it flips back to counting.
     g.delete(&mut dict, &[t]);
     mirror.remove(&t);
-    assert_eq!(g.mode(), OwlMode::CountingFixpoint, "fallback must lift when sameAs goes");
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), oracle(&mut dict, &mirror));
+    assert_eq!(
+        g.mode(),
+        OwlMode::CountingFixpoint,
+        "fallback must lift when sameAs goes"
+    );
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        oracle(&mut dict, &mirror)
+    );
 
     // And ABox updates are incremental again.
     let rebuilds = g.full_rebuilds();
     let d = random_abox(&onto, &mut rng);
     g.insert(&mut dict, &[d]);
     mirror.insert(d);
-    assert_eq!(g.full_rebuilds(), rebuilds, "counting mode must not rebuild on ABox insert");
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), oracle(&mut dict, &mirror));
+    assert_eq!(
+        g.full_rebuilds(),
+        rebuilds,
+        "counting mode must not rebuild on ABox insert"
+    );
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        oracle(&mut dict, &mirror)
+    );
 }

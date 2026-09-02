@@ -342,14 +342,17 @@ mod tests {
         // q = worksFor(?x, ?y) with ?y existential ⇒ tree witness folds to Employee(?x).
         let t = tbox_employee_worksfor();
         let q = cq(
-            vec![role("worksFor", Term::Var("x".into()), Term::Var("y".into()))],
+            vec![role(
+                "worksFor",
+                Term::Var("x".into()),
+                Term::Var("y".into()),
+            )],
             &["x"],
         );
         let ucq = tree_witness_ucq(q.clone(), &t);
         // Input plus the Employee(?x) folding.
         assert!(
-            ucq.iter()
-                .any(|c| c.atoms == vec![class("Employee", "x")]),
+            ucq.iter().any(|c| c.atoms == vec![class("Employee", "x")]),
             "expected an Employee(?x) folding; got {ucq:?}"
         );
     }
@@ -359,11 +362,19 @@ mod tests {
         // ?y projected ⇒ NOT existential ⇒ no fold (would drop the ?y join — unsound).
         let t = tbox_employee_worksfor();
         let q = cq(
-            vec![role("worksFor", Term::Var("x".into()), Term::Var("y".into()))],
+            vec![role(
+                "worksFor",
+                Term::Var("x".into()),
+                Term::Var("y".into()),
+            )],
             &["x", "y"],
         );
         let ucq = tree_witness_ucq(q.clone(), &t);
-        assert_eq!(ucq.len(), 1, "no fold when the filler is a bound answer var");
+        assert_eq!(
+            ucq.len(),
+            1,
+            "no fold when the filler is a bound answer var"
+        );
         assert_eq!(ucq[0], q);
     }
 
@@ -381,8 +392,7 @@ mod tests {
         let ucq = tree_witness_ucq(q.clone(), &t);
         // ?y is shared so neither worksFor atom is a tree witness on its own.
         assert!(
-            ucq.iter().all(|c| c.atoms.len() >= 2)
-                || ucq.iter().any(|c| c == &q),
+            ucq.iter().all(|c| c.atoms.len() >= 2) || ucq.iter().any(|c| c == &q),
             "shared filler must not be folded directly; got {ucq:?}"
         );
     }
@@ -393,10 +403,8 @@ mod tests {
         // worksFor(?x,_) witness emits knows(?x, _fresh). The fresh filler must be UNIQUE (not
         // collide with the existing `_`), else a spurious join could lose answers.
         let mut t = TBox::default();
-        t.exists_super.push((
-            Basic::Exists(Role::named("knows")),
-            Role::named("worksFor"),
-        ));
+        t.exists_super
+            .push((Basic::Exists(Role::named("knows")), Role::named("worksFor")));
         let q = cq(
             vec![role("worksFor", Term::Var("x".into()), Term::Unbound(0))],
             &["x"],
@@ -409,7 +417,10 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Atom::Role { role, .. } if role.iri == "knows"))
         });
-        assert!(folded.is_some(), "expected a knows(?x,_) folding; got {ucq:?}");
+        assert!(
+            folded.is_some(),
+            "expected a knows(?x,_) folding; got {ucq:?}"
+        );
         let c = folded.unwrap();
         let mut ids: Vec<u32> = c
             .atoms
@@ -426,7 +437,11 @@ mod tests {
         let len = ids.len();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), len, "every `_` filler id in the folded disjunct must be unique");
+        assert_eq!(
+            ids.len(),
+            len,
+            "every `_` filler id in the folded disjunct must be unique"
+        );
     }
 
     #[test]

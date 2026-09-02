@@ -513,7 +513,8 @@ fn edit_disposition_is_incremental_reports_only_the_fold() {
 
 #[test]
 fn triples_returns_the_live_graph() {
-    let ttl = format!("{PRE} :A rdfs:subClassOf :B . :B rdfs:subClassOf :C . :C rdfs:subClassOf :D .");
+    let ttl =
+        format!("{PRE} :A rdfs:subClassOf :B . :B rdfs:subClassOf :C . :C rdfs:subClassOf :D .");
     let (dict, all) = parse(&ttl);
     let sub = sub_class_of(&dict);
     let c_sub_d = [iri(&dict, "C"), sub, iri(&dict, "D")];
@@ -628,10 +629,7 @@ fn edit_units(dict: &Dict, triples: &[[Id; 3]]) -> Vec<Vec<[Id; 3]>> {
     // Anonymous (blank-node) structure is owned by the axiom that references it.
     let anon = |id: Id| {
         !sparq_core::dict::is_inline(id)
-            && matches!(
-                dict.term_parts(id),
-                sparq_core::dict::TermParts::Blank(_)
-            )
+            && matches!(dict.term_parts(id), sparq_core::dict::TermParts::Blank(_))
     };
     let mut units = Vec::new();
     for &t in triples {
@@ -682,8 +680,15 @@ fn randomized_addition_streams_match_full_reclassification() {
         }
         // The whole graph must have been rebuilt by the stream, and the stream must actually have
         // EXERCISED the fold (otherwise this test would silently only cover the fallback).
-        assert_eq!(inc.triples().len(), all.len(), "seed {seed}: every unit applied");
-        assert!(folds > 0, "seed {seed}: the incremental path was never taken");
+        assert_eq!(
+            inc.triples().len(),
+            all.len(),
+            "seed {seed}: every unit applied"
+        );
+        assert!(
+            folds > 0,
+            "seed {seed}: the incremental path was never taken"
+        );
     }
 }
 
@@ -762,6 +767,10 @@ fn randomized_triple_at_a_time_streams_match_full_reclassification() {
                 &format!("triple stream seed {seed} step {step}"),
             );
         }
-        assert_eq!(inc.triples().len(), all.len(), "seed {seed}: whole graph rebuilt");
+        assert_eq!(
+            inc.triples().len(),
+            all.len(),
+            "seed {seed}: whole graph rebuilt"
+        );
     }
 }

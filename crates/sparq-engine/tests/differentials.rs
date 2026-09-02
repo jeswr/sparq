@@ -6,12 +6,12 @@
 //! relative to a subdirectory, so explicit `#[path]` attributes are required.
 #[path = "differentials/semijoin_differential.rs"]
 mod semijoin_differential;
-#[path = "differentials/yannakakis_differential.rs"]
-mod yannakakis_differential;
 #[path = "differentials/vectorized_byte_identity.rs"]
 mod vectorized_byte_identity;
 #[path = "differentials/vectorized_exec_differential.rs"]
 mod vectorized_exec_differential;
+#[path = "differentials/yannakakis_differential.rs"]
+mod yannakakis_differential;
 // [SONNET-4.6] (sq-y5ew5) Hybrid tri-mask FILTER kernel acceptance tests (T1-T5).
 #[path = "differentials/chunk_select_tri_mask.rs"]
 mod chunk_select_tri_mask;

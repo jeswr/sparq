@@ -94,7 +94,9 @@ impl std::fmt::Display for IsoError {
                  RDFC-1.0 implementation used here"
             ),
             Self::NotRdf(what) => write!(f, "blank-node canonicalisation: not RDF ({})", what),
-            Self::Invalid(what) => write!(f, "blank-node canonicalisation: invalid term ({})", what),
+            Self::Invalid(what) => {
+                write!(f, "blank-node canonicalisation: invalid term ({})", what)
+            }
             Self::TooComplex(why) => write!(f, "blank-node canonicalisation declined: {}", why),
         }
     }
@@ -292,7 +294,10 @@ mod tests {
         }
     }
     fn sol(pairs: &[(&str, Term)]) -> Solution {
-        pairs.iter().map(|(k, t)| (k.to_string(), t.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, t)| (k.to_string(), t.clone()))
+            .collect()
     }
 
     #[test]
@@ -337,7 +342,11 @@ mod tests {
         let ca = canonical_graph(&a).unwrap();
         assert_eq!(ca, canonical_graph(&b).unwrap());
         // It really is the canonical labelling, not the input labels.
-        assert!(ca.contains("_:c14n"), "expected canonical labels, got:\n{}", ca);
+        assert!(
+            ca.contains("_:c14n"),
+            "expected canonical labels, got:\n{}",
+            ca
+        );
         assert!(!ca.contains("_:b0"));
         // N-Triples, not N-Quads: every line is exactly `s p o .` with no graph component.
         assert_eq!(ca.lines().count(), 2, "{}", ca);

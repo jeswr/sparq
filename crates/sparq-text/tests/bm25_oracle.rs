@@ -83,9 +83,26 @@ const B: f32 = 0.75;
 /// A small mixed vocabulary with shared prefixes (so `*` queries expand), repeats
 /// (so tf varies), and Unicode/CJK (so casefolding/segmentation is exercised).
 const VOCAB: &[&str] = &[
-    "auto", "automatic", "autonomous", "autobahn", // shared "auto" prefix
-    "brown", "fox", "quick", "lazy", "dog", "jumps", "over", "the", "data", "graph",
-    "café", "straße", "ΣΟΦΊΑ", "Большой", "東京", "北京市", // unicode + CJK
+    "auto",
+    "automatic",
+    "autonomous",
+    "autobahn", // shared "auto" prefix
+    "brown",
+    "fox",
+    "quick",
+    "lazy",
+    "dog",
+    "jumps",
+    "over",
+    "the",
+    "data",
+    "graph",
+    "café",
+    "straße",
+    "ΣΟΦΊΑ",
+    "Большой",
+    "東京",
+    "北京市", // unicode + CJK
 ];
 
 /// A random document: 0..=12 vocab tokens joined by varied separators (so the
@@ -191,7 +208,11 @@ impl RefScorer {
         for (id, m) in &self.tf {
             let mut summed = 0u32;
             for (tok, &f) in m {
-                let hit = if *prefix { tok.starts_with(qt.as_str()) } else { tok == qt };
+                let hit = if *prefix {
+                    tok.starts_with(qt.as_str())
+                } else {
+                    tok == qt
+                };
                 if hit {
                     summed += f;
                 }
@@ -275,10 +296,10 @@ const QUERIES: &[&str] = &[
     "the quick brown fox",
     "auto*",
     "auto* dog",
-    "AUTO*",            // casefold
+    "AUTO*", // casefold
     "café",
     "straße",
-    "σοφία",            // matches ΣΟΦΊΑ after casefold
+    "σοφία", // matches ΣΟΦΊΑ after casefold
     "большой",
     "東京",
     "北京市",
@@ -287,12 +308,12 @@ const QUERIES: &[&str] = &[
     "data graph",
     "auto* fox quick",
     "the over jumps",
-    "missing",          // absent token
-    "fox missing",      // AND with absent -> empty; OR -> fox's docs
+    "missing",     // absent token
+    "fox missing", // AND with absent -> empty; OR -> fox's docs
     "auto* missing",
-    "",                 // empty
-    " ,.;! ",           // punctuation only
-    "fox fox",          // duplicate token must not change the score
+    "",        // empty
+    " ,.;! ",  // punctuation only
+    "fox fox", // duplicate token must not change the score
 ];
 
 /// The index hits as `(id -> score)`, plus the ordered id list (for the ranking
@@ -464,7 +485,10 @@ fn bm25_hand_pinned_cross_check() {
     // Ranking sanity from the hand numbers: highest tf ("fox fox") first, the
     // longer single-tf doc ("fox tail") last among the three.
     assert!(s_c > s_a, "higher tf must outrank");
-    assert!(s_a > s_b, "shorter doc must outrank a longer one at equal tf");
+    assert!(
+        s_a > s_b,
+        "shorter doc must outrank a longer one at equal tf"
+    );
     let ranked: Vec<String> = hits
         .iter()
         .map(|h| match g.dict.term(h.id) {
@@ -472,5 +496,9 @@ fn bm25_hand_pinned_cross_check() {
             _ => unreachable!(),
         })
         .collect();
-    assert_eq!(ranked, vec!["fox fox", "fox", "fox tail"], "hand-pinned ranking");
+    assert_eq!(
+        ranked,
+        vec!["fox fox", "fox", "fox tail"],
+        "hand-pinned ranking"
+    );
 }

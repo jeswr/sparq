@@ -148,7 +148,10 @@ impl LocalServiceRows {
     /// The empty relation over `vars` — zero rows, which makes the surrounding join
     /// empty (NOT the join identity; see the `SILENT` note on the module docs).
     pub fn empty(vars: Vec<Variable>) -> Self {
-        Self { vars, rows: Vec::new() }
+        Self {
+            vars,
+            rows: Vec::new(),
+        }
     }
 
     /// Checks the header/arity contract — unique column names, every row exactly
@@ -160,7 +163,10 @@ impl LocalServiceRows {
     pub fn validate(&self) -> Result<(), String> {
         for (i, v) in self.vars.iter().enumerate() {
             if self.vars[..i].contains(v) {
-                return Err(format!("duplicate variable ?{} in the returned header", v.as_str()));
+                return Err(format!(
+                    "duplicate variable ?{} in the returned header",
+                    v.as_str()
+                ));
             }
         }
         let width = self.vars.len();
@@ -184,8 +190,9 @@ impl LocalServiceRows {
 /// hard query error, or — under `SERVICE SILENT` — swallowed, yielding the join
 /// identity so the surrounding solutions survive unchanged. The message only needs to
 /// be useful to a human debugging the handler.
-pub type LocalServiceFn =
-    std::sync::Arc<dyn Fn(&LocalServiceRequest<'_>) -> Result<LocalServiceRows, String> + Send + Sync>;
+pub type LocalServiceFn = std::sync::Arc<
+    dyn Fn(&LocalServiceRequest<'_>) -> Result<LocalServiceRows, String> + Send + Sync,
+>;
 
 /// A map from SERVICE IRIs to [`LocalServiceFn`] handlers, consulted by the executor
 /// for `SERVICE <iri> { … }` BEFORE any HTTP transport. Installed for a scope by
@@ -209,7 +216,10 @@ impl LocalServiceRegistry {
     pub fn register(
         &mut self,
         iri: impl Into<String>,
-        handler: impl Fn(&LocalServiceRequest<'_>) -> Result<LocalServiceRows, String> + Send + Sync + 'static,
+        handler: impl Fn(&LocalServiceRequest<'_>) -> Result<LocalServiceRows, String>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.map.insert(iri.into(), std::sync::Arc::new(handler));
     }
@@ -246,7 +256,9 @@ impl std::fmt::Debug for LocalServiceRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut iris: Vec<&str> = self.iris().collect();
         iris.sort_unstable();
-        f.debug_struct("LocalServiceRegistry").field("iris", &iris).finish()
+        f.debug_struct("LocalServiceRegistry")
+            .field("iris", &iris)
+            .finish()
     }
 }
 
@@ -262,7 +274,10 @@ mod tests {
     fn rows_ok() -> LocalServiceRows {
         LocalServiceRows::new(
             vec![var("a"), var("b")],
-            vec![vec![Some(Term::from(NamedNode::new("urn:x").unwrap())), None]],
+            vec![vec![
+                Some(Term::from(NamedNode::new("urn:x").unwrap())),
+                None,
+            ]],
         )
     }
 
@@ -274,14 +289,20 @@ mod tests {
         let e = LocalServiceRows::empty(vec![var("a")]);
         assert!(e.rows.is_empty());
         assert_eq!(e.vars, vec![var("a")]);
-        assert_eq!(LocalServiceRows::default(), LocalServiceRows::new(Vec::new(), Vec::new()));
+        assert_eq!(
+            LocalServiceRows::default(),
+            LocalServiceRows::new(Vec::new(), Vec::new())
+        );
     }
 
     #[test]
     fn validate_accepts_and_rejects() {
         assert!(rows_ok().validate().is_ok());
         let dup = LocalServiceRows::new(vec![var("a"), var("a")], Vec::new());
-        assert!(dup.validate().unwrap_err().contains("duplicate variable ?a"));
+        assert!(dup
+            .validate()
+            .unwrap_err()
+            .contains("duplicate variable ?a"));
         let ragged = LocalServiceRows::new(vec![var("a"), var("b")], vec![vec![None]]);
         let err = ragged.validate().unwrap_err();
         assert!(err.contains("row 0"), "{}", err);
@@ -313,7 +334,10 @@ mod tests {
             patterns: &pats,
         };
         assert_eq!(h(&req).unwrap_err(), "nope");
-        assert_eq!(format!("{:?}", reg), "LocalServiceRegistry { iris: [\"urn:h\"] }");
+        assert_eq!(
+            format!("{:?}", reg),
+            "LocalServiceRegistry { iris: [\"urn:h\"] }"
+        );
     }
 
     #[test]

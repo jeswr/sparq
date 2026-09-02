@@ -3,7 +3,7 @@
 //! end-to-end ContinuousQuery pipeline.
 
 use oxrdf::{Literal, NamedNode, Term};
-use sparq_rsp::{ContinuousQuery, R2S, TripleStream, WindowSpec, WindowedStream};
+use sparq_rsp::{ContinuousQuery, TripleStream, WindowSpec, WindowedStream, R2S};
 
 fn iri(s: &str) -> Term {
     NamedNode::new_unchecked(format!("http://ex/{s}")).into()
@@ -63,7 +63,10 @@ fn tumbling_windows_partition_without_double_counting() {
     assert_eq!(windows.len(), 4); // [0,10) [10,20) [20,30) [30,40)
     let total: usize = windows.iter().map(|w| w.triples.len()).sum();
     assert_eq!(total, 35);
-    assert_eq!(windows[2].triples.iter().map(|x| x.ts).collect::<Vec<_>>(), (20..30).collect::<Vec<_>>());
+    assert_eq!(
+        windows[2].triples.iter().map(|x| x.ts).collect::<Vec<_>>(),
+        (20..30).collect::<Vec<_>>()
+    );
 }
 
 /// Sliding windows overlap: RANGE 10 STEP 5 puts ts 7 in BOTH [0,10) and [5,15).
@@ -92,7 +95,10 @@ fn empty_windows_reported_between_data_but_not_before_first_triple() {
     ws.push(t("s", "p", "b"), 1_035);
     let windows = ws.flush();
     let bounds: Vec<(u64, u64)> = windows.iter().map(|w| (w.start, w.end)).collect();
-    assert_eq!(bounds, [(1000, 1010), (1010, 1020), (1020, 1030), (1030, 1040)]);
+    assert_eq!(
+        bounds,
+        [(1000, 1010), (1010, 1020), (1020, 1030), (1030, 1040)]
+    );
     assert!(windows[1].triples.is_empty() && windows[2].triples.is_empty());
 }
 
@@ -117,7 +123,10 @@ fn step_greater_than_range_gap_triples_belong_to_no_window() {
 fn gap_triples_advance_the_watermark_and_close_earlier_windows() {
     let mut ws = WindowedStream::empty(WindowSpec::time(5, 10)); // covers [0,5) [10,15) …
     ws.push(t("s", "p", "in"), 3);
-    assert!(ws.take_closed().is_empty(), "[0,5) still open at watermark 3");
+    assert!(
+        ws.take_closed().is_empty(),
+        "[0,5) still open at watermark 3"
+    );
     ws.push(t("s", "p", "gap"), 7); // no window, but watermark → 7 ≥ 5
     let closed = ws.take_closed();
     assert_eq!(closed.len(), 1, "gap arrival closed [0,5)");
@@ -134,7 +143,10 @@ fn gap_first_arrival_anchors_and_empty_window_is_still_emitted() {
     // [0,5) must stay open (3 < 5) even though nothing was ever buffered.
     let mut ws = WindowedStream::empty(WindowSpec::time(5, 10).with_max_delay(4));
     ws.push(t("s", "p", "gap"), 7);
-    assert!(ws.take_closed().is_empty(), "[0,5) still open at watermark 3");
+    assert!(
+        ws.take_closed().is_empty(),
+        "[0,5) still open at watermark 3"
+    );
     ws.push(t("s", "p", "in"), 13); // watermark 9 ≥ 5: closes [0,5), empty
     let closed = ws.take_closed();
     assert_eq!(closed.len(), 1);
@@ -166,7 +178,11 @@ fn out_of_order_within_max_delay_is_kept_beyond_is_dropped_and_counted() {
     ws.push(t("s", "p", "too-late"), 9); // [0,10) is gone
     assert_eq!(ws.late_dropped(), 1);
     let windows = ws.flush();
-    assert_eq!(objs(&windows[0]), ["b", "c"], "dropped triple never surfaces");
+    assert_eq!(
+        objs(&windows[0]),
+        ["b", "c"],
+        "dropped triple never surfaces"
+    );
 }
 
 /// The lateness contract holds across the FIRST push too: the starting window
@@ -212,7 +228,11 @@ fn rows_window_keeps_last_n_arrivals_and_reports_each_arrival() {
     assert_eq!(objs(&reports[0]), ["o1"]);
     assert_eq!(objs(&reports[2]), ["o1", "o2", "o3"]);
     assert_eq!(objs(&reports[4]), ["o3", "o4", "o5"], "oldest evicted");
-    assert_eq!((reports[4].start, reports[4].end), (30, 50), "inclusive content bounds");
+    assert_eq!(
+        (reports[4].start, reports[4].end),
+        (30, 50),
+        "inclusive content bounds"
+    );
     assert!(ws.flush().is_empty(), "flush is a no-op for count windows");
 }
 
@@ -238,7 +258,11 @@ fn rows_window_membership_is_arrival_order_not_timestamp_order() {
     ws.push(t("s", "p", "b"), 50); // older timestamp, newer arrival
     let reports = ws.take_closed();
     assert_eq!(objs(&reports[1]), ["a", "b"]);
-    assert_eq!((reports[1].start, reports[1].end), (100, 50), "bounds are content ts, not sorted");
+    assert_eq!(
+        (reports[1].start, reports[1].end),
+        (100, 50),
+        "bounds are content ts, not sorted"
+    );
 }
 
 /// A scripted TripleStream replays its history through WindowedStream::new.
@@ -276,9 +300,19 @@ fn continuous_avg_per_window() {
 
     // The engine returns integer averages as xsd:decimal (per SPARQL AVG typing).
     let avg = |x: &str| {
-        Some(Term::from(Literal::new_typed_literal(x, oxrdf::vocab::xsd::DECIMAL)))
+        Some(Term::from(Literal::new_typed_literal(
+            x,
+            oxrdf::vocab::xsd::DECIMAL,
+        )))
     };
-    assert_eq!(avgs, vec![(0, 10, avg("4.0")), (10, 20, avg("10.0")), (20, 30, avg("8.0"))]);
+    assert_eq!(
+        avgs,
+        vec![
+            (0, 10, avg("4.0")),
+            (10, 20, avg("10.0")),
+            (20, 30, avg("8.0"))
+        ]
+    );
 }
 
 /// RSTREAM emits the FULL result of every window, joins included.
@@ -298,10 +332,19 @@ fn continuous_rstream_full_result_with_join() {
 
     assert_eq!(results.len(), 1);
     let r = &results[0];
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["room", "v"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["room", "v"]
+    );
     assert_eq!(r.rows.len(), 2, "s1 joins with both of its readings");
-    assert_eq!(r.rows[0], vec![Some(iri("kitchen")), Some(Literal::from(21).into())]);
-    assert_eq!(r.rows[1], vec![Some(iri("kitchen")), Some(Literal::from(23).into())]);
+    assert_eq!(
+        r.rows[0],
+        vec![Some(iri("kitchen")), Some(Literal::from(21).into())]
+    );
+    assert_eq!(
+        r.rows[1],
+        vec![Some(iri("kitchen")), Some(Literal::from(23).into())]
+    );
 }
 
 /// Scripted ISTREAM: only rows ADDED relative to the previous window appear.
@@ -333,7 +376,12 @@ fn istream_emits_only_added_rows() {
     let expect = |w: u64, o: &str| (w, vec![Some(iri(o))]);
     assert_eq!(
         emitted,
-        vec![expect(0, "a"), expect(0, "b"), expect(10, "c"), expect(30, "a")],
+        vec![
+            expect(0, "a"),
+            expect(0, "b"),
+            expect(10, "c"),
+            expect(30, "a")
+        ],
         "b not re-emitted in [10,20); empty [20,30) adds nothing; a re-added in [30,40)"
     );
 }
@@ -382,8 +430,12 @@ fn dstream_emits_only_removed_rows_including_via_empty_window() {
 fn istream_dstream_diffs_are_multiset() {
     // ?v projected per reading: two sensors reading 7 → the row (7) twice.
     let sparql = "SELECT ?v WHERE { ?s <http://ex/value> ?v }";
-    let mut qi = ContinuousQuery::register(sparql, WindowSpec::time(10, 10)).unwrap().with_r2s(R2S::IStream);
-    let mut qd = ContinuousQuery::register(sparql, WindowSpec::time(10, 10)).unwrap().with_r2s(R2S::DStream);
+    let mut qi = ContinuousQuery::register(sparql, WindowSpec::time(10, 10))
+        .unwrap()
+        .with_r2s(R2S::IStream);
+    let mut qd = ContinuousQuery::register(sparql, WindowSpec::time(10, 10))
+        .unwrap()
+        .with_r2s(R2S::DStream);
     let mut got_i: Vec<usize> = Vec::new(); // emitted row count per window
     let mut got_d: Vec<usize> = Vec::new();
 
@@ -458,11 +510,8 @@ fn continuous_query_count_window_slide_diffs_consecutive_reports() {
 /// result; the counter is observable.
 #[test]
 fn continuous_query_counts_late_drops() {
-    let mut q = ContinuousQuery::register(
-        "SELECT ?o WHERE { ?s ?p ?o }",
-        WindowSpec::time(10, 10),
-    )
-    .unwrap();
+    let mut q = ContinuousQuery::register("SELECT ?o WHERE { ?s ?p ?o }", WindowSpec::time(10, 10))
+        .unwrap();
     let mut n_rows = 0usize;
     let mut sink = |r: sparq_rsp::WindowResult| n_rows += r.rows.len();
     q.push(t("s", "p", "a"), 5, &mut sink).unwrap();
@@ -560,7 +609,8 @@ fn eval_modes_produce_identical_results() {
         for ts in 0..40u64 {
             // Two sensors; duplicate the SAME triple at several timestamps so
             // set semantics and the delta diff are both exercised.
-            q.push(val(&format!("s{}", ts % 2), (ts % 7) as i32), ts, &mut sink).unwrap();
+            q.push(val(&format!("s{}", ts % 2), (ts % 7) as i32), ts, &mut sink)
+                .unwrap();
         }
         q.push(t("x", "p", "gap"), 60, &mut sink).unwrap(); // empty windows in between
         q.flush(&mut sink).unwrap();
@@ -571,9 +621,15 @@ fn eval_modes_produce_identical_results() {
     let delta = run(EvalMode::Delta);
     let snapshot = run(EvalMode::Snapshot);
     assert!(!rebuild.is_empty());
-    assert_eq!(rebuild, persistent, "PersistentDict diverged from the rebuild baseline");
+    assert_eq!(
+        rebuild, persistent,
+        "PersistentDict diverged from the rebuild baseline"
+    );
     assert_eq!(rebuild, delta, "Delta diverged from the rebuild baseline");
-    assert_eq!(rebuild, snapshot, "Snapshot diverged from the rebuild baseline");
+    assert_eq!(
+        rebuild, snapshot,
+        "Snapshot diverged from the rebuild baseline"
+    );
 }
 
 /// Delta mode stays correct across overlay compactions (churn > window) and
@@ -594,7 +650,8 @@ fn delta_mode_compaction_and_multi_timestamp_eviction() {
         for ts in 0..1500u64 {
             // Distinct triple per tick → enough churn to cross the compaction
             // threshold several times…
-            q.push(t("s", "p", &format!("o{ts}")), ts, &mut sink).unwrap();
+            q.push(t("s", "p", &format!("o{ts}")), ts, &mut sink)
+                .unwrap();
             // …plus one RECURRING triple every 30 ticks: present at several
             // timestamps per window, evicted only when ALL occurrences leave.
             if ts % 30 == 0 {
@@ -644,7 +701,9 @@ fn persistent_dict_compaction_bounds_growth_on_churning_vocabulary() {
     // --- Reference: Rebuild mode (fresh dict per window, never persists). ---
     let mut reference: Vec<WindowRows> = Vec::new();
     {
-        let mut q = ContinuousQuery::register(q_str, spec).unwrap().with_mode(EvalMode::Rebuild);
+        let mut q = ContinuousQuery::register(q_str, spec)
+            .unwrap()
+            .with_mode(EvalMode::Rebuild);
         assert_eq!(q.dict_len(), None, "Rebuild has no lifetime dictionary");
         let mut sink = |r: sparq_rsp::WindowResult| reference.push((r.start, r.end, r.rows));
         for ts in 0..TICKS {
@@ -658,8 +717,9 @@ fn persistent_dict_compaction_bounds_growth_on_churning_vocabulary() {
     let mut max_dict_len = 0usize;
     let mut samples: Vec<usize> = Vec::new();
     {
-        let mut q =
-            ContinuousQuery::register(q_str, spec).unwrap().with_mode(EvalMode::PersistentDict);
+        let mut q = ContinuousQuery::register(q_str, spec)
+            .unwrap()
+            .with_mode(EvalMode::PersistentDict);
         let mut sink = |r: sparq_rsp::WindowResult| got.push((r.start, r.end, r.rows));
         for ts in 0..TICKS {
             q.push(triple(ts), ts, &mut sink).unwrap();
@@ -674,7 +734,10 @@ fn persistent_dict_compaction_bounds_growth_on_churning_vocabulary() {
 
     // 1) Results are IDENTICAL to the uncompacted reference — the compaction
     //    remap preserved every still-referenced term and every window's rows.
-    assert_eq!(got, reference, "PersistentDict (compacting) diverged from the Rebuild reference");
+    assert_eq!(
+        got, reference,
+        "PersistentDict (compacting) diverged from the Rebuild reference"
+    );
     assert!(!reference.is_empty());
 
     // 2) The dictionary is BOUNDED: the all-time vocabulary is ~2·TICKS + 1
@@ -742,7 +805,10 @@ fn continuous_construct_emits_transformed_window_graphs() {
     assert_eq!(out.len(), 2);
     assert_eq!((out[0].start, out[0].end), (0, 10));
     assert_eq!(construct_objs(&out[0].triples), ["a"]);
-    assert!(out[0].triples.iter().all(|t| t.predicate.as_str() == "http://ex/seen"));
+    assert!(out[0]
+        .triples
+        .iter()
+        .all(|t| t.predicate.as_str() == "http://ex/seen"));
     assert_eq!(construct_objs(&out[1].triples), ["b"]);
 }
 
@@ -801,7 +867,9 @@ fn construct_and_ask_registration_validate_query_form() {
     let spec = WindowSpec::time(10, 10);
     assert!(ContinuousConstruct::register("SELECT * WHERE { ?s ?p ?o }", spec).is_err());
     assert!(ContinuousConstruct::register("ASK { ?s ?p ?o }", spec).is_err());
-    assert!(ContinuousConstruct::register("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", spec).is_ok());
+    assert!(
+        ContinuousConstruct::register("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", spec).is_ok()
+    );
     assert!(ContinuousAsk::register("SELECT * WHERE { ?s ?p ?o }", spec).is_err());
     assert!(ContinuousAsk::register("ASK { ?s ?p ?o }", spec).is_ok());
 }

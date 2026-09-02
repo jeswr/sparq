@@ -105,7 +105,10 @@ impl<'a> Session<'a> {
     /// assert_eq!(alice.at("2026-06-17T00:00:00Z").now, Some("2026-06-17T00:00:00Z"));
     /// ```
     pub fn at(self, now: &'a str) -> Session<'a> {
-        Session { now: Some(now), ..self }
+        Session {
+            now: Some(now),
+            ..self
+        }
     }
 }
 
@@ -180,7 +183,10 @@ impl Mode {
 /// assert_ne!(pair_principal("a&client=b", "c"), pair_principal("a", "b&client=c"));
 /// ```
 pub fn pair_principal(agent: &str, client: &str) -> String {
-    let (a, c) = (sparq_reason::n3::encode_for_uri(agent), sparq_reason::n3::encode_for_uri(client));
+    let (a, c) = (
+        sparq_reason::n3::encode_for_uri(agent),
+        sparq_reason::n3::encode_for_uri(client),
+    );
     format!("urn:sparq:pair?agent={a}&client={c}")
 }
 
@@ -318,10 +324,18 @@ impl AuthIndex {
             };
             if let Some((mode, is_allow)) = Mode::from_pred(p.as_str()) {
                 if let Term::NamedNode(g) = &t[2] {
-                    let map = if is_allow { &mut ix.allow } else { &mut ix.deny };
+                    let map = if is_allow {
+                        &mut ix.allow
+                    } else {
+                        &mut ix.deny
+                    };
                     // [OPUS-4.8] sq-b7k7u: bucket the grant under its graph's origin.
                     let origin = crate::loader::iri_origin(g.as_str()).to_owned();
-                    map.entry((subj, mode)).or_default().entry(origin).or_default().push(g.clone());
+                    map.entry((subj, mode))
+                        .or_default()
+                        .entry(origin)
+                        .or_default()
+                        .push(g.clone());
                 }
                 continue;
             }
@@ -330,12 +344,18 @@ impl AuthIndex {
                 match p.as_str() {
                     "https://sparq.dev/ns/solidx#acceptsAgentP" => {
                         if let Term::NamedNode(o) = &t[2] {
-                            ix.matcher_agents.entry(subj).or_default().insert(o.as_str().to_owned());
+                            ix.matcher_agents
+                                .entry(subj)
+                                .or_default()
+                                .insert(o.as_str().to_owned());
                         }
                     }
                     "https://sparq.dev/ns/solidx#acceptsClientP" => {
                         if let Term::NamedNode(o) = &t[2] {
-                            ix.matcher_clients.entry(subj).or_default().insert(o.as_str().to_owned());
+                            ix.matcher_clients
+                                .entry(subj)
+                                .or_default()
+                                .insert(o.as_str().to_owned());
                         }
                     }
                     // [OPUS-4.8] sq-3jtd.6: the issuer-dimension matcher accept-set fact.
@@ -351,7 +371,9 @@ impl AuthIndex {
             };
             let entry = cond.entry(subj).or_default();
             match (local, &t[2]) {
-                ("effect", Term::NamedNode(o)) => entry.allow = o.as_str() == format!("{AUTH_NS}Allow"),
+                ("effect", Term::NamedNode(o)) => {
+                    entry.allow = o.as_str() == format!("{AUTH_NS}Allow")
+                }
                 ("agent", Term::NamedNode(o)) => entry.agent = o.as_str().to_owned(),
                 ("client", Term::NamedNode(o)) => entry.client = o.as_str().to_owned(),
                 // [OPUS-4.8] sq-3jtd.6: the conditional grant's issuer head.
@@ -368,7 +390,11 @@ impl AuthIndex {
         // [OPUS-4.8] sq-b7k7u: bucket each conditional grant under its target graph's
         // origin (empty-origin key when it has no target graph — such a grant is inert).
         for g in cond.into_values() {
-            let origin = g.graph.as_ref().map(|n| crate::loader::iri_origin(n.as_str()).to_owned()).unwrap_or_default();
+            let origin = g
+                .graph
+                .as_ref()
+                .map(|n| crate::loader::iri_origin(n.as_str()).to_owned())
+                .unwrap_or_default();
             ix.cond.entry(origin).or_default().push(g);
         }
         ix
@@ -487,7 +513,12 @@ impl AuthIndex {
     /// (`accessible == ⋃ over origins of accessible_in_origin`), so it lets a per-request
     /// decision and a diff-based session-cache re-derivation pay only the affected origin's
     /// cost instead of the whole store's. Internal to the crate.
-    pub(crate) fn accessible_in_origin(&self, s: &Session, mode: Mode, origin: &str) -> Vec<NamedNode> {
+    pub(crate) fn accessible_in_origin(
+        &self,
+        s: &Session,
+        mode: Mode,
+        origin: &str,
+    ) -> Vec<NamedNode> {
         self.accessible_impl(s, mode, Some(origin))
     }
 
@@ -496,8 +527,14 @@ impl AuthIndex {
     /// diff-based invalidation to enumerate the union of old + new origins. [SONNET-4.6]
     /// sq-b7k7u fix.
     pub(crate) fn origin_keys(&self) -> impl Iterator<Item = &str> {
-        let a = self.allow.values().flat_map(|by_o| by_o.keys().map(String::as_str));
-        let d = self.deny.values().flat_map(|by_o| by_o.keys().map(String::as_str));
+        let a = self
+            .allow
+            .values()
+            .flat_map(|by_o| by_o.keys().map(String::as_str));
+        let d = self
+            .deny
+            .values()
+            .flat_map(|by_o| by_o.keys().map(String::as_str));
         let c = self.cond.keys().map(String::as_str);
         a.chain(d).chain(c)
     }
@@ -572,10 +609,20 @@ impl AuthIndex {
                 ex,
             )
         }
-        let self_conds: FxHashSet<CondKey> =
-            self.cond.get(origin).into_iter().flatten().map(cond_key).collect();
-        let other_conds: FxHashSet<CondKey> =
-            other.cond.get(origin).into_iter().flatten().map(cond_key).collect();
+        let self_conds: FxHashSet<CondKey> = self
+            .cond
+            .get(origin)
+            .into_iter()
+            .flatten()
+            .map(cond_key)
+            .collect();
+        let other_conds: FxHashSet<CondKey> = other
+            .cond
+            .get(origin)
+            .into_iter()
+            .flatten()
+            .map(cond_key)
+            .collect();
         self_conds == other_conds
     }
 
@@ -630,7 +677,10 @@ impl AuthIndex {
                 }
             }
         }
-        let mut out: Vec<NamedNode> = allowed.into_iter().filter(|g| !denied.contains(g)).collect();
+        let mut out: Vec<NamedNode> = allowed
+            .into_iter()
+            .filter(|g| !denied.contains(g))
+            .collect();
         out.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
         out
     }
@@ -644,7 +694,9 @@ fn extend_from_buckets(
     only: Option<&str>,
 ) {
     match only {
-        None => by_origin.values().for_each(|gs| sink.extend(gs.iter().cloned())),
+        None => by_origin
+            .values()
+            .for_each(|gs| sink.extend(gs.iter().cloned())),
         Some(o) => {
             if let Some(gs) = by_origin.get(o) {
                 sink.extend(gs.iter().cloned());
@@ -753,7 +805,10 @@ fn parse_utc_instant(s: &str) -> Option<UtcInstant> {
     let (year, month, dom) = parse_ymd(date)?;
     let epoch_day = days_from_civil(year, month, dom)?;
     let Some(rest) = rest else {
-        return Some(UtcInstant { day: epoch_day, nanos_in_day: 0 });
+        return Some(UtcInstant {
+            day: epoch_day,
+            nanos_in_day: 0,
+        });
     };
     let (time, offset_min) = split_offset(rest)?;
     let (hh, mm, ss, frac_nanos) = parse_hms(time)?;
@@ -893,30 +948,66 @@ mod window_tests {
 
     #[test]
     fn windowed_with_no_clock_fails_closed() {
-        assert!(!window_admits(None, Some(T2), None), "notAfter + no clock → deny");
-        assert!(!window_admits(Some(T0), None, None), "notBefore + no clock → deny");
-        assert!(!window_admits(Some(T0), Some(T2), None), "two-sided + no clock → deny");
+        assert!(
+            !window_admits(None, Some(T2), None),
+            "notAfter + no clock → deny"
+        );
+        assert!(
+            !window_admits(Some(T0), None, None),
+            "notBefore + no clock → deny"
+        );
+        assert!(
+            !window_admits(Some(T0), Some(T2), None),
+            "two-sided + no clock → deny"
+        );
     }
 
     #[test]
     fn not_after_is_inclusive_upper_bound() {
-        assert!(window_admits(None, Some(T2), Some(T1)), "before close → admit");
-        assert!(window_admits(None, Some(T2), Some(T2)), "exactly at close → admit (inclusive)");
-        assert!(!window_admits(None, Some(T0), Some(T1)), "after close → deny");
+        assert!(
+            window_admits(None, Some(T2), Some(T1)),
+            "before close → admit"
+        );
+        assert!(
+            window_admits(None, Some(T2), Some(T2)),
+            "exactly at close → admit (inclusive)"
+        );
+        assert!(
+            !window_admits(None, Some(T0), Some(T1)),
+            "after close → deny"
+        );
     }
 
     #[test]
     fn not_before_is_inclusive_lower_bound() {
-        assert!(window_admits(Some(T0), None, Some(T1)), "after open → admit");
-        assert!(window_admits(Some(T0), None, Some(T0)), "exactly at open → admit (inclusive)");
-        assert!(!window_admits(Some(T2), None, Some(T1)), "before open → deny");
+        assert!(
+            window_admits(Some(T0), None, Some(T1)),
+            "after open → admit"
+        );
+        assert!(
+            window_admits(Some(T0), None, Some(T0)),
+            "exactly at open → admit (inclusive)"
+        );
+        assert!(
+            !window_admits(Some(T2), None, Some(T1)),
+            "before open → deny"
+        );
     }
 
     #[test]
     fn two_sided_window_admits_only_inside() {
-        assert!(window_admits(Some(T0), Some(T2), Some(T1)), "inside → admit");
-        assert!(!window_admits(Some(T0), Some(T2), Some("2025-01-01T00:00:00Z")), "before → deny");
-        assert!(!window_admits(Some(T0), Some(T2), Some("2027-01-01T00:00:00Z")), "after → deny");
+        assert!(
+            window_admits(Some(T0), Some(T2), Some(T1)),
+            "inside → admit"
+        );
+        assert!(
+            !window_admits(Some(T0), Some(T2), Some("2025-01-01T00:00:00Z")),
+            "before → deny"
+        );
+        assert!(
+            !window_admits(Some(T0), Some(T2), Some("2027-01-01T00:00:00Z")),
+            "after → deny"
+        );
     }
 
     // [OPUS-4.8] sq-0q7n — REGRESSION for the access-control fail-open the adversarial
@@ -957,7 +1048,10 @@ mod window_tests {
         // not a blanket deny): notAfter = 12:00Z; now = 09:00-02:00 (= 11:00Z, before close).
         let not_after = "2026-06-16T12:00:00Z";
         let now = "2026-06-16T09:00:00-02:00"; // real instant 11:00Z, inside
-        assert!(window_admits(None, Some(not_after), Some(now)), "instant inside → admit");
+        assert!(
+            window_admits(None, Some(not_after), Some(now)),
+            "instant inside → admit"
+        );
         // Two-sided, offset clock genuinely inside.
         assert!(
             window_admits(
@@ -971,9 +1065,18 @@ mod window_tests {
 
     #[test]
     fn unparseable_bound_or_clock_fails_closed() {
-        assert!(!window_admits(None, Some("not-a-date"), Some(T1)), "bad notAfter → deny");
-        assert!(!window_admits(Some("garbage"), None, Some(T1)), "bad notBefore → deny");
-        assert!(!window_admits(None, Some(T2), Some("???")), "bad clock → deny");
+        assert!(
+            !window_admits(None, Some("not-a-date"), Some(T1)),
+            "bad notAfter → deny"
+        );
+        assert!(
+            !window_admits(Some("garbage"), None, Some(T1)),
+            "bad notBefore → deny"
+        );
+        assert!(
+            !window_admits(None, Some(T2), Some("???")),
+            "bad clock → deny"
+        );
     }
 
     /// [OPUS-4.8] sq-0q7n — the feature-off fallback comparator MUST agree with the
@@ -1044,8 +1147,18 @@ mod origin_partition_tests {
     fn accessible_equals_union_over_origins() {
         let ix = two_pod_index();
         let sessions = [
-            Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None },
-            Session { agent: Some("https://bob.ex/card#me"), client: None, issuer: None, now: None },
+            Session {
+                agent: Some("https://alice.ex/card#me"),
+                client: None,
+                issuer: None,
+                now: None,
+            },
+            Session {
+                agent: Some("https://bob.ex/card#me"),
+                client: None,
+                issuer: None,
+                now: None,
+            },
             Session::default(), // anonymous
         ];
         let origins = all_origins(&ix);
@@ -1056,12 +1169,19 @@ mod origin_partition_tests {
                 for o in &origins {
                     union.extend(ix.accessible_in_origin(&s, mode, o));
                 }
-                assert_eq!(full, union, "accessible != ⋃ accessible_in_origin for {s:?}/{mode:?}");
+                assert_eq!(
+                    full, union,
+                    "accessible != ⋃ accessible_in_origin for {s:?}/{mode:?}"
+                );
                 // Each per-origin slice is exactly the full set restricted to that origin.
                 for o in &origins {
-                    let slice: FxHashSet<_> = ix.accessible_in_origin(&s, mode, o).into_iter().collect();
-                    let restricted: FxHashSet<_> =
-                        full.iter().filter(|g| crate::loader::iri_origin(g.as_str()) == o).cloned().collect();
+                    let slice: FxHashSet<_> =
+                        ix.accessible_in_origin(&s, mode, o).into_iter().collect();
+                    let restricted: FxHashSet<_> = full
+                        .iter()
+                        .filter(|g| crate::loader::iri_origin(g.as_str()) == o)
+                        .cloned()
+                        .collect();
                     assert_eq!(slice, restricted, "slice != full∩origin for {o}");
                 }
             }
@@ -1071,11 +1191,22 @@ mod origin_partition_tests {
     #[test]
     fn accessible_in_origin_of_absent_origin_is_empty() {
         let ix = two_pod_index();
-        let alice = Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None };
+        let alice = Session {
+            agent: Some("https://alice.ex/card#me"),
+            client: None,
+            issuer: None,
+            now: None,
+        };
         // alice reads pod a; she has nothing in pod b or a never-seen origin.
-        assert!(!ix.accessible_in_origin(&alice, Mode::Read, "https://a.ex").is_empty());
-        assert!(ix.accessible_in_origin(&alice, Mode::Read, "https://b.ex").is_empty());
-        assert!(ix.accessible_in_origin(&alice, Mode::Read, "https://never.ex").is_empty());
+        assert!(!ix
+            .accessible_in_origin(&alice, Mode::Read, "https://a.ex")
+            .is_empty());
+        assert!(ix
+            .accessible_in_origin(&alice, Mode::Read, "https://b.ex")
+            .is_empty());
+        assert!(ix
+            .accessible_in_origin(&alice, Mode::Read, "https://never.ex")
+            .is_empty());
     }
 }
 
@@ -1146,7 +1277,10 @@ mod bucket_eq_tests {
     fn identical_grants_compare_equal() {
         let a = index_with(vec![grant(&["urn:m:a", "urn:m:b"])]);
         let b = index_with(vec![grant(&["urn:m:a", "urn:m:b"])]);
-        assert!(a.bucket_eq(&b, ORIGIN), "identical conditional grants must compare equal");
+        assert!(
+            a.bucket_eq(&b, ORIGIN),
+            "identical conditional grants must compare equal"
+        );
     }
 
     /// Control: canonicalization properties the tuple key must PRESERVE from the old key —

@@ -200,7 +200,10 @@ impl N3Builtin {
     /// Whether this is a binary arithmetic gadget, whose slot 2 is an OUTPUT
     /// the gadget determines (and therefore BINDS) rather than an input.
     pub fn is_arithmetic(self) -> bool {
-        matches!(self, N3Builtin::Sum | N3Builtin::Difference | N3Builtin::Product)
+        matches!(
+            self,
+            N3Builtin::Sum | N3Builtin::Difference | N3Builtin::Product
+        )
     }
 
     /// Whether this is a comparison gadget: both operands are inputs and
@@ -282,14 +285,20 @@ impl N3Premise {
     /// An ordinary join atom, matched against the derivation DAG (and so,
     /// transitively, against the committed graphs).
     pub fn join(slots: [N3Slot; 3]) -> Self {
-        N3Premise { builtin: N3Builtin::None, slots }
+        N3Premise {
+            builtin: N3Builtin::None,
+            slots,
+        }
     }
 
     /// A builtin atom, classified through the fail-closed
     /// [`N3Builtin::classify`] gate. Prefer this over constructing the struct
     /// literally: it is what refuses an unwhitelisted builtin at the boundary.
     pub fn builtin(predicate_iri: &str, slots: [N3Slot; 3]) -> Result<Self, N3SubsetError> {
-        Ok(N3Premise { builtin: N3Builtin::classify(predicate_iri)?, slots })
+        Ok(N3Premise {
+            builtin: N3Builtin::classify(predicate_iri)?,
+            slots,
+        })
     }
 }
 
@@ -334,18 +343,38 @@ pub enum N3SubsetError {
     /// A builtin reads a variable no earlier premise atom bound — the rule is
     /// not evaluable "when ready" and the gadget would read an unconstrained
     /// witness.
-    BuiltinInputNotBound { rule: usize, atom: usize, variable: u32 },
+    BuiltinInputNotBound {
+        rule: usize,
+        atom: usize,
+        variable: u32,
+    },
     /// **The safety / range-restriction violation.** A conclusion variable is
     /// not bound by the premise, so the prover could CHOOSE its value and
     /// derive an arbitrary triple. This is the condition that makes the subset
     /// sound, not merely tidy.
-    UnboundConclusionVariable { rule: usize, atom: usize, variable: u32 },
+    UnboundConclusionVariable {
+        rule: usize,
+        atom: usize,
+        variable: u32,
+    },
     /// The rule has more premise atoms than the circuit member's `P` bucket.
-    PremiseBucketOverflow { rule: usize, atoms: usize, bucket: usize },
+    PremiseBucketOverflow {
+        rule: usize,
+        atoms: usize,
+        bucket: usize,
+    },
     /// The rule has more conclusion atoms than the circuit member's `C` bucket.
-    ConclusionBucketOverflow { rule: usize, atoms: usize, bucket: usize },
+    ConclusionBucketOverflow {
+        rule: usize,
+        atoms: usize,
+        bucket: usize,
+    },
     /// A constant slot's term encoding is not a well-formed field element.
-    MalformedTermEncoding { rule: usize, atom: usize, slot: usize },
+    MalformedTermEncoding {
+        rule: usize,
+        atom: usize,
+        slot: usize,
+    },
 }
 
 impl std::fmt::Display for N3SubsetError {
@@ -551,9 +580,11 @@ fn slot_fields(
         .kind()
         .ok_or(N3SubsetError::ExistentialInConclusion { rule, atom })?;
     let konst = match slot {
-        N3Slot::Const(hex) => hex
-            .to_field()
-            .ok_or(N3SubsetError::MalformedTermEncoding { rule, atom, slot: index })?,
+        N3Slot::Const(hex) => hex.to_field().ok_or(N3SubsetError::MalformedTermEncoding {
+            rule,
+            atom,
+            slot: index,
+        })?,
         _ => Fr::from(0u64),
     };
     Ok((kind, konst, slot.var().unwrap_or(0)))
@@ -728,7 +759,9 @@ mod tests {
         ] {
             assert_eq!(
                 N3Builtin::classify(iri),
-                Err(N3SubsetError::BuiltinNotWhitelisted { predicate: iri.to_string() }),
+                Err(N3SubsetError::BuiltinNotWhitelisted {
+                    predicate: iri.to_string()
+                }),
                 "{iri} must be refused, not approximated"
             );
         }
@@ -736,8 +769,12 @@ mod tests {
 
     #[test]
     fn admit_accepts_the_safe_rules() {
-        join_rule().admit(0).expect("a safe join rule is in the subset");
-        comparison_rule().admit(0).expect("a whitelisted comparison is in the subset");
+        join_rule()
+            .admit(0)
+            .expect("a safe join rule is in the subset");
+        comparison_rule()
+            .admit(0)
+            .expect("a whitelisted comparison is in the subset");
     }
 
     // An arithmetic builtin BINDS its output, so a conclusion may legitimately
@@ -767,7 +804,11 @@ mod tests {
         rule.premises.truncate(1); // drops the atom that bound ?r
         assert_eq!(
             rule.admit(3),
-            Err(N3SubsetError::UnboundConclusionVariable { rule: 3, atom: 0, variable: 2 })
+            Err(N3SubsetError::UnboundConclusionVariable {
+                rule: 3,
+                atom: 0,
+                variable: 2
+            })
         );
     }
 
@@ -789,18 +830,36 @@ mod tests {
         rule.premises.swap(0, 1); // the comparison now runs BEFORE ?s is bound
         assert_eq!(
             rule.admit(0),
-            Err(N3SubsetError::BuiltinInputNotBound { rule: 0, atom: 0, variable: 1 })
+            Err(N3SubsetError::BuiltinInputNotBound {
+                rule: 0,
+                atom: 0,
+                variable: 1
+            })
         );
     }
 
     #[test]
     fn admit_rejects_degenerate_rules() {
-        let empty_premise = N3Rule { premises: vec![], conclusions: vec![] };
-        assert_eq!(empty_premise.admit(0), Err(N3SubsetError::EmptyPremise { rule: 0 }));
-        let empty_conclusion =
-            N3Rule { premises: join_rule().premises, conclusions: vec![] };
-        assert_eq!(empty_conclusion.admit(2), Err(N3SubsetError::EmptyConclusion { rule: 2 }));
-        assert_eq!(N3RuleSet::default().admit(), Err(N3SubsetError::EmptyRuleSet));
+        let empty_premise = N3Rule {
+            premises: vec![],
+            conclusions: vec![],
+        };
+        assert_eq!(
+            empty_premise.admit(0),
+            Err(N3SubsetError::EmptyPremise { rule: 0 })
+        );
+        let empty_conclusion = N3Rule {
+            premises: join_rule().premises,
+            conclusions: vec![],
+        };
+        assert_eq!(
+            empty_conclusion.admit(2),
+            Err(N3SubsetError::EmptyConclusion { rule: 2 })
+        );
+        assert_eq!(
+            N3RuleSet::default().admit(),
+            Err(N3SubsetError::EmptyRuleSet)
+        );
     }
 
     // The structural fail-closed property this bead is about: an out-of-subset
@@ -809,18 +868,30 @@ mod tests {
     fn commit_refuses_a_rule_set_outside_the_subset() {
         let mut unsafe_rule = join_rule();
         unsafe_rule.premises.truncate(1);
-        let set = N3RuleSet { rules: vec![join_rule(), unsafe_rule] };
+        let set = N3RuleSet {
+            rules: vec![join_rule(), unsafe_rule],
+        };
         assert_eq!(
             set.commit(2, 1),
-            Err(N3SubsetError::UnboundConclusionVariable { rule: 1, atom: 0, variable: 2 })
+            Err(N3SubsetError::UnboundConclusionVariable {
+                rule: 1,
+                atom: 0,
+                variable: 2
+            })
         );
     }
 
     #[test]
     fn commit_is_deterministic_and_bucket_dependent() {
-        let set = N3RuleSet { rules: vec![join_rule(), comparison_rule()] };
+        let set = N3RuleSet {
+            rules: vec![join_rule(), comparison_rule()],
+        };
         let root = set.commit(2, 1).expect("the rules are in the subset");
-        assert_eq!(root, set.commit(2, 1).unwrap(), "the fold must be deterministic");
+        assert_eq!(
+            root,
+            set.commit(2, 1).unwrap(),
+            "the fold must be deterministic"
+        );
         // The root is only meaningful for ONE member's buckets, exactly like a
         // graph commitment and its (k, n) bucket.
         assert_ne!(root, set.commit(3, 1).unwrap(), "padding enters the fold");
@@ -830,7 +901,9 @@ mod tests {
     // editing ANY committed slot must move the root.
     #[test]
     fn commit_changes_when_any_slot_is_edited() {
-        let honest = N3RuleSet { rules: vec![join_rule(), comparison_rule()] };
+        let honest = N3RuleSet {
+            rules: vec![join_rule(), comparison_rule()],
+        };
         let root = honest.commit(2, 1).unwrap();
 
         // (a) a different conclusion predicate
@@ -849,7 +922,9 @@ mod tests {
         assert_ne!(root, tampered.commit(2, 1).unwrap());
 
         // (d) rule ORDER (the leaf order is part of the commitment)
-        let swapped = N3RuleSet { rules: vec![comparison_rule(), join_rule()] };
+        let swapped = N3RuleSet {
+            rules: vec![comparison_rule(), join_rule()],
+        };
         assert_ne!(root, swapped.commit(2, 1).unwrap());
     }
 
@@ -870,8 +945,20 @@ mod tests {
 
     #[test]
     fn var_count_reports_the_bucket_the_rules_need() {
-        assert_eq!(N3RuleSet { rules: vec![join_rule()] }.var_count(), 3);
-        assert_eq!(N3RuleSet { rules: vec![comparison_rule()] }.var_count(), 2);
+        assert_eq!(
+            N3RuleSet {
+                rules: vec![join_rule()]
+            }
+            .var_count(),
+            3
+        );
+        assert_eq!(
+            N3RuleSet {
+                rules: vec![comparison_rule()]
+            }
+            .var_count(),
+            2
+        );
         assert_eq!(N3RuleSet::default().var_count(), 0);
     }
 
@@ -880,11 +967,19 @@ mod tests {
         let rule = join_rule();
         assert_eq!(
             rule.leaf(0, 1, 1),
-            Err(N3SubsetError::PremiseBucketOverflow { rule: 0, atoms: 2, bucket: 1 })
+            Err(N3SubsetError::PremiseBucketOverflow {
+                rule: 0,
+                atoms: 2,
+                bucket: 1
+            })
         );
         assert_eq!(
             rule.leaf(0, 2, 0),
-            Err(N3SubsetError::ConclusionBucketOverflow { rule: 0, atoms: 1, bucket: 0 })
+            Err(N3SubsetError::ConclusionBucketOverflow {
+                rule: 0,
+                atoms: 1,
+                bucket: 0
+            })
         );
     }
 }

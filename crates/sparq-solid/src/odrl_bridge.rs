@@ -272,7 +272,10 @@ pub struct BridgeOutcome {
     /// [`crate::PodStore::materialize_odrl_permission_counted`]): the new consumed count
     /// (`1..=limit`) after this exercise atomically consumed one unit of budget. `None`
     /// for an uncounted permission, any non-counted bridge path, or a deny.
-    #[cfg_attr(not(feature = "count-enforcement"), allow(rustdoc::broken_intra_doc_links))]
+    #[cfg_attr(
+        not(feature = "count-enforcement"),
+        allow(rustdoc::broken_intra_doc_links)
+    )]
     pub consumed: Option<u64>,
     /// The exact auth-view triples this call materialized (allow grant, deny, and/or
     /// the conditional-grant head triples), for the bridge ledger to track so a later
@@ -283,13 +286,20 @@ pub struct BridgeOutcome {
 
 impl BridgeOutcome {
     fn denied(reasons: Vec<String>) -> BridgeOutcome {
-        BridgeOutcome { reasons, ..BridgeOutcome::default() }
+        BridgeOutcome {
+            reasons,
+            ..BridgeOutcome::default()
+        }
     }
 
     /// A loud, fail-closed **refusal**: the policy's `odrl:conflict` strategy is one the
     /// bridge cannot faithfully honour, so nothing is materialised. [OPUS-4.8] sq-ihqbl.
     fn refused(reason: String) -> BridgeOutcome {
-        BridgeOutcome { refused: true, reasons: vec![reason], ..BridgeOutcome::default() }
+        BridgeOutcome {
+            refused: true,
+            reasons: vec![reason],
+            ..BridgeOutcome::default()
+        }
     }
 }
 
@@ -898,7 +908,11 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
             _ => return AgentMapping::Unmappable,
         }
     }
-    AgentMapping::Faithful { agents, except, window }
+    AgentMapping::Faithful {
+        agents,
+        except,
+        window,
+    }
 }
 
 /// Split the compact `|`/space/comma right-operand set encoding into its members —
@@ -1059,12 +1073,20 @@ pub fn materialize_permission_conditional(
         }
         // Duties must be discharged at materialization (no ACP analogue → one-shot
         // semantics; an undischarged duty blocks this rule).
-        if rule.duties.iter().any(|d| !request.discharged_duties.contains(&d.action.0)) {
+        if rule
+            .duties
+            .iter()
+            .any(|d| !request.discharged_duties.contains(&d.action.0))
+        {
             fallback_reasons.push(format!("permission {} has an undischarged duty", rule.id));
             continue;
         }
         match map_constraints_to_agents(rule) {
-            AgentMapping::Faithful { agents: recipients, except, window } => {
+            AgentMapping::Faithful {
+                agents: recipients,
+                except,
+                window,
+            } => {
                 let agents = condition_agents(rule, &recipients);
                 if agents.is_empty() {
                     // every recipient was reserved-encoded → fail-closed, nothing.
@@ -1120,7 +1142,13 @@ pub fn materialize_permission_conditional(
                 }
                 let agents = expand_party_collection_heads(request, &agents);
                 let (first, emitted) = append_conditional_grants(
-                    graph, &agents, &excepts, &window, mode, target, GrantEffect::Allow,
+                    graph,
+                    &agents,
+                    &excepts,
+                    &window,
+                    mode,
+                    target,
+                    GrantEffect::Allow,
                 );
                 return BridgeOutcome {
                     granted: true,
@@ -1252,7 +1280,11 @@ pub fn materialize_prohibition_conditional(
             continue;
         }
         match map_constraints_to_agents(rule) {
-            AgentMapping::Faithful { agents: recipients, except, window } => {
+            AgentMapping::Faithful {
+                agents: recipients,
+                except,
+                window,
+            } => {
                 // [OPUS-4.8] sq-0q7n: a time-windowed DENY is fail-OPEN — outside the
                 // window the deny would lapse and the carved-out party would regain
                 // access. A live-clock window is safe only on an ALLOW (a lapsed allow
@@ -1300,7 +1332,13 @@ pub fn materialize_prohibition_conditional(
                     continue;
                 }
                 let (first, emitted) = append_conditional_grants(
-                    graph, &agents, &excepts, &TimeWindow::default(), mode, target, GrantEffect::Deny,
+                    graph,
+                    &agents,
+                    &excepts,
+                    &TimeWindow::default(),
+                    mode,
+                    target,
+                    GrantEffect::Deny,
                 );
                 return BridgeOutcome {
                     prohibited: true,
@@ -1467,7 +1505,9 @@ fn heads_name_party_collection(policy: &Policy, request: &Request, heads: &[Stri
 /// already understands; a concrete WebID passes through unchanged.
 fn normalise_recipient_principal(r: &str) -> String {
     match r {
-        "http://www.w3.org/ns/odrl/2/All" | "http://www.w3.org/ns/odrl/2/Group" => PUBLIC.to_owned(),
+        "http://www.w3.org/ns/odrl/2/All" | "http://www.w3.org/ns/odrl/2/Group" => {
+            PUBLIC.to_owned()
+        }
         "http://www.w3.org/ns/odrl/2/AllConnections" => AUTHENTICATED.to_owned(),
         _ => r.to_owned(),
     }
@@ -1485,7 +1525,6 @@ fn rule_action_target_match(rule: &Rule, request: &Request, _mode: Mode, target:
         None => true,
     }
 }
-
 
 /// The deontic force of a materialized `auth:ConditionalGrant` — selects the
 /// `auth:effect` object emitted by [`append_conditional_grants`]. [OPUS-4.8] sq-4r70.
@@ -1578,7 +1617,10 @@ fn append_conditional_grants(
     let except_matchers: Vec<(String, [Term; 3])> = excepts
         .iter()
         .map(|x| {
-            let m = format!("urn:sparq:odrl-except?agent={}", sparq_reason::n3::encode_for_uri(x));
+            let m = format!(
+                "urn:sparq:odrl-except?agent={}",
+                sparq_reason::n3::encode_for_uri(x)
+            );
             (
                 m,
                 [
@@ -1616,13 +1658,37 @@ fn append_conditional_grants(
         let g = Term::NamedNode(NamedNode::new_unchecked(&grant_iri));
         let agent_o = Term::NamedNode(NamedNode::new_unchecked(agent));
         let mut head = vec![
-            [g.clone(), Term::NamedNode(type_p.clone()), Term::NamedNode(cond_class.clone())],
-            [g.clone(), Term::NamedNode(effect_p.clone()), Term::NamedNode(effect_o.clone())],
+            [
+                g.clone(),
+                Term::NamedNode(type_p.clone()),
+                Term::NamedNode(cond_class.clone()),
+            ],
+            [
+                g.clone(),
+                Term::NamedNode(effect_p.clone()),
+                Term::NamedNode(effect_o.clone()),
+            ],
             [g.clone(), Term::NamedNode(agent_p.clone()), agent_o],
-            [g.clone(), Term::NamedNode(client_p.clone()), Term::NamedNode(any_client.clone())],
-            [g.clone(), Term::NamedNode(issuer_p.clone()), Term::NamedNode(any_issuer.clone())],
-            [g.clone(), Term::NamedNode(mode_p.clone()), Term::NamedNode(mode_o.clone())],
-            [g.clone(), Term::NamedNode(graph_p.clone()), Term::NamedNode(graph_o.clone())],
+            [
+                g.clone(),
+                Term::NamedNode(client_p.clone()),
+                Term::NamedNode(any_client.clone()),
+            ],
+            [
+                g.clone(),
+                Term::NamedNode(issuer_p.clone()),
+                Term::NamedNode(any_issuer.clone()),
+            ],
+            [
+                g.clone(),
+                Term::NamedNode(mode_p.clone()),
+                Term::NamedNode(mode_o.clone()),
+            ],
+            [
+                g.clone(),
+                Term::NamedNode(graph_p.clone()),
+                Term::NamedNode(graph_o.clone()),
+            ],
         ];
         // [OPUS-4.8] sq-0q7n: the live-clock window bounds (xsd:dateTime literals),
         // re-checked against `Session::now` by `crate::AuthIndex::cond_applies`.
@@ -1630,23 +1696,41 @@ fn append_conditional_grants(
             head.push([
                 g.clone(),
                 Term::NamedNode(not_before_p.clone()),
-                Term::Literal(Literal::new_typed_literal(nb.as_str(), xsd_datetime.clone())),
+                Term::Literal(Literal::new_typed_literal(
+                    nb.as_str(),
+                    xsd_datetime.clone(),
+                )),
             ]);
         }
         if let Some(na) = &window.not_after {
             head.push([
                 g.clone(),
                 Term::NamedNode(not_after_p.clone()),
-                Term::Literal(Literal::new_typed_literal(na.as_str(), xsd_datetime.clone())),
+                Term::Literal(Literal::new_typed_literal(
+                    na.as_str(),
+                    xsd_datetime.clone(),
+                )),
             ]);
         }
         // Wire each exception matcher onto the grant + materialize its accept-set facts.
         for (m, [agent_accept, client_accept, issuer_accept]) in &except_matchers {
             let m_node = Term::NamedNode(NamedNode::new_unchecked(m));
             head.push([g.clone(), Term::NamedNode(except_p.clone()), m_node.clone()]);
-            head.push([m_node.clone(), Term::NamedNode(accepts_agent_p.clone()), agent_accept.clone()]);
-            head.push([m_node.clone(), Term::NamedNode(accepts_client_p.clone()), client_accept.clone()]);
-            head.push([m_node, Term::NamedNode(accepts_issuer_p.clone()), issuer_accept.clone()]);
+            head.push([
+                m_node.clone(),
+                Term::NamedNode(accepts_agent_p.clone()),
+                agent_accept.clone(),
+            ]);
+            head.push([
+                m_node.clone(),
+                Term::NamedNode(accepts_client_p.clone()),
+                client_accept.clone(),
+            ]);
+            head.push([
+                m_node,
+                Term::NamedNode(accepts_issuer_p.clone()),
+                issuer_accept.clone(),
+            ]);
         }
         for t in head {
             if !emitted.contains(&t) {
@@ -1654,11 +1738,7 @@ fn append_conditional_grants(
             }
         }
         if first.is_none() {
-            first = Some((
-                agent.clone(),
-                format!("{AUTH_NS}effect"),
-                target.to_owned(),
-            ));
+            first = Some((agent.clone(), format!("{AUTH_NS}effect"), target.to_owned()));
         }
     }
 
@@ -1787,14 +1867,20 @@ impl BridgeLedger {
     /// per logical grant.
     pub fn record(&mut self, policy: &Policy, request: &Request, kind: BridgeKind) {
         let slot = (kind, request.target.clone(), request.party.clone());
-        if let Some(e) = self.entries.iter_mut().find(|e| {
-            (e.kind, e.request.target.clone(), e.request.party.clone()) == slot
-        }) {
+        if let Some(e) = self
+            .entries
+            .iter_mut()
+            .find(|e| (e.kind, e.request.target.clone(), e.request.party.clone()) == slot)
+        {
             e.policy = policy.clone();
             e.request = request.clone();
             return;
         }
-        self.entries.push(BridgeEntry { policy: policy.clone(), request: request.clone(), kind });
+        self.entries.push(BridgeEntry {
+            policy: policy.clone(),
+            request: request.clone(),
+            kind,
+        });
     }
 
     /// Replace the tracked `(policy, request)` for the grant slot matching
@@ -1805,9 +1891,11 @@ impl BridgeLedger {
     /// no bridged grant to refresh for that slot. [OPUS-4.8] sq-dpk4.
     pub fn update(&mut self, policy: &Policy, request: &Request, kind: BridgeKind) -> bool {
         let slot = (kind, request.target.clone(), request.party.clone());
-        match self.entries.iter_mut().find(|e| {
-            (e.kind, e.request.target.clone(), e.request.party.clone()) == slot
-        }) {
+        match self
+            .entries
+            .iter_mut()
+            .find(|e| (e.kind, e.request.target.clone(), e.request.party.clone()) == slot)
+        {
             Some(e) => {
                 e.policy = policy.clone();
                 e.request = request.clone();
@@ -1988,11 +2076,18 @@ fn refresh_prohibition_conditional(
 /// maps faithfully to agent conditions (so the conditional-deny path would emit a
 /// re-checked condition rather than fall back to one-shot). [OPUS-4.8] sq-4r70.
 fn prohibition_maps_faithfully(policy: &Policy, request: &Request) -> bool {
-    let Some(mode) = action_to_mode(&request.action) else { return false };
-    let Some(target) = request.target.as_deref() else { return false };
+    let Some(mode) = action_to_mode(&request.action) else {
+        return false;
+    };
+    let Some(target) = request.target.as_deref() else {
+        return false;
+    };
     policy.prohibitions.iter().any(|rule| {
         rule_action_target_match(rule, request, mode, target)
-            && matches!(map_constraints_to_agents(rule), AgentMapping::Faithful { .. })
+            && matches!(
+                map_constraints_to_agents(rule),
+                AgentMapping::Faithful { .. }
+            )
     })
 }
 
@@ -2109,7 +2204,9 @@ fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
 // ============================================================================
 #[cfg(feature = "count-enforcement")]
 pub(crate) mod count {
-    use super::{action_to_mode, append_grant, refuse_unimplementable_conflict, BridgeOutcome, AUTH_NS};
+    use super::{
+        action_to_mode, append_grant, refuse_unimplementable_conflict, BridgeOutcome, AUTH_NS,
+    };
     use sparq_core::Graph;
     use sparq_policy::{
         count_status, evaluate, evaluate_and_exercise, CountStatus, Policy, Request,
@@ -2269,12 +2366,12 @@ pub(crate) mod count {
                 reemit_grant(graph, request)
             }
             // Exhausted, or unprovable (store outage / malformed) → retract (fail-closed).
-            CountStatus::DefinitelyUnsatisfied { consumed, limit } => BridgeOutcome::denied(vec![
-                format!(
+            CountStatus::DefinitelyUnsatisfied { consumed, limit } => {
+                BridgeOutcome::denied(vec![format!(
                     "permission {} count budget exhausted ({consumed} >= {limit}); grant retracted",
                     rule.id
-                ),
-            ]),
+                )])
+            }
             CountStatus::Unprovable => BridgeOutcome::denied(vec![format!(
                 "permission {} count state unprovable on refresh; grant retracted (fail-closed)",
                 rule.id
@@ -2431,7 +2528,10 @@ pub fn materialize_odrl_n3(
     // 0. STRICT Turtle parse + ground-term re-serialization (injection guard), then
     //    the canonical-dateTime / prohibition-scope validation (fail-closed).
     let policy_graph = Graph::load_dataset(policy_ttl, "turtle").map_err(|e| {
-        format!("policy is not strict Turtle (N3/Turtle-extension constructs are rejected): {}", e)
+        format!(
+            "policy is not strict Turtle (N3/Turtle-extension constructs are rejected): {}",
+            e
+        )
     })?;
     let policy_triples = crate::loader::graph_triples(&policy_graph);
 
@@ -2491,13 +2591,19 @@ pub fn materialize_odrl_n3(
     let mut deny_triple: Option<(String, String, String)> = None;
 
     for t in &closure {
-        let Term::NamedNode(p) = dict.term(t[1]) else { continue };
+        let Term::NamedNode(p) = dict.term(t[1]) else {
+            continue;
+        };
         let p_str = p.as_str();
         if !p_str.starts_with(AUTH_NS) {
             continue;
         }
-        let Term::NamedNode(s) = dict.term(t[0]) else { continue };
-        let Term::NamedNode(o) = dict.term(t[2]) else { continue };
+        let Term::NamedNode(s) = dict.term(t[0]) else {
+            continue;
+        };
+        let Term::NamedNode(o) = dict.term(t[2]) else {
+            continue;
+        };
         let triple = [
             Term::NamedNode(NamedNode::new_unchecked(s.as_str())),
             Term::NamedNode(NamedNode::new_unchecked(p_str)),
@@ -2505,9 +2611,17 @@ pub fn materialize_odrl_n3(
         ];
         let local = p_str.strip_prefix(AUTH_NS).unwrap_or("");
         if local.starts_with("deny") {
-            deny_triple = Some((s.as_str().to_owned(), p_str.to_owned(), o.as_str().to_owned()));
+            deny_triple = Some((
+                s.as_str().to_owned(),
+                p_str.to_owned(),
+                o.as_str().to_owned(),
+            ));
         } else {
-            grant_triple = Some((s.as_str().to_owned(), p_str.to_owned(), o.as_str().to_owned()));
+            grant_triple = Some((
+                s.as_str().to_owned(),
+                p_str.to_owned(),
+                o.as_str().to_owned(),
+            ));
         }
         new_triples.push(triple);
     }
@@ -2573,7 +2687,10 @@ fn objects_of<'a>(
     subject: &'a Term,
     predicate: &'a str,
 ) -> impl Iterator<Item = &'a Term> + 'a {
-    triples.iter().filter(move |t| &t[0] == subject && is_named(&t[1], predicate)).map(|t| &t[2])
+    triples
+        .iter()
+        .filter(move |t| &t[0] == subject && is_named(&t[1], predicate))
+        .map(|t| &t[2])
 }
 
 /// Engine-owned IRI prefixes/terms a caller-supplied policy may never mention as
@@ -2744,8 +2861,9 @@ fn validate_policy_for_n3(triples: &[[Term; 3]]) -> Result<(), String> {
         for c in objects_of(triples, rule, &constraint) {
             let xone_subs: Vec<&Term> = objects_of(triples, c, &xone_p).collect();
             let has_xone = !xone_subs.is_empty();
-            let subs: Vec<&Term> =
-                objects_of(triples, c, &or_p).chain(objects_of(triples, c, &and_p)).collect();
+            let subs: Vec<&Term> = objects_of(triples, c, &or_p)
+                .chain(objects_of(triples, c, &and_p))
+                .collect();
             if has_xone || !subs.is_empty() {
                 lc_count += 1;
                 if lc_count > 1 {
@@ -2852,7 +2970,11 @@ fn unambiguous_operands(triples: &[[Term; 3]], c: &Term) -> Result<(), String> {
         // so what is ambiguous there is several distinct combinator PREDICATES, not
         // several objects of one.
         let ambiguous = if *label == "logical combinator" {
-            predicates.iter().filter(|p| objects_of(triples, c, p).next().is_some()).count() > 1
+            predicates
+                .iter()
+                .filter(|p| objects_of(triples, c, p).next().is_some())
+                .count()
+                > 1
         } else {
             distinct_objects(triples, c, predicates).len() > 1
         };
@@ -2889,8 +3011,10 @@ fn unambiguous_operands(triples: &[[Term; 3]], c: &Term) -> Result<(), String> {
 fn prohibition_atomic_supported(triples: &[[Term; 3]], c: &Term) -> Result<(), String> {
     let left_preds = [format!("{}leftOperand", ODRL_NS)];
     let op_preds = [format!("{}operator", ODRL_NS)];
-    let right_preds =
-        [format!("{}rightOperand", ODRL_NS), format!("{}rightOperandReference", ODRL_NS)];
+    let right_preds = [
+        format!("{}rightOperand", ODRL_NS),
+        format!("{}rightOperandReference", ODRL_NS),
+    ];
     let lefts = distinct_objects(triples, c, &left_preds);
     let ops = distinct_objects(triples, c, &op_preds);
     let rights = distinct_objects(triples, c, &right_preds);
@@ -2949,7 +3073,12 @@ fn serialize_request_n3(req: &Request) -> Result<String, String> {
     }
     let mut out = String::new();
     let _ = writeln!(out, "<urn:odrl-req> a <{}Request> ;", ODRL_NS);
-    let _ = writeln!(out, "    <{}action> {} ;", ODRL_NS, iri(&req.action, "action")?);
+    let _ = writeln!(
+        out,
+        "    <{}action> {} ;",
+        ODRL_NS,
+        iri(&req.action, "action")?
+    );
     if let Some(target) = &req.target {
         let _ = writeln!(out, "    <{}target> {} ;", ODRL_NS, iri(target, "target")?);
     }
@@ -2987,8 +3116,16 @@ mod set_tighter_tests {
         // instant is the offset form (11:00Z); lexically "12…Z" < "13…+02:00" so the OLD
         // code wrongly kept 12:00Z (later instant → wider window).
         let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
-        set_tighter(&mut slot, "2026-06-16T13:00:00+02:00", /*keep_earlier=*/ true);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T13:00:00+02:00"), "kept earlier instant");
+        set_tighter(
+            &mut slot,
+            "2026-06-16T13:00:00+02:00",
+            /*keep_earlier=*/ true,
+        );
+        assert_eq!(
+            slot.as_deref(),
+            Some("2026-06-16T13:00:00+02:00"),
+            "kept earlier instant"
+        );
     }
 
     #[test]
@@ -2996,17 +3133,37 @@ mod set_tighter_tests {
         // Two notBefore bounds: 12:00Z and 09:00-02:00 (= 11:00Z). The LATER instant is
         // 12:00Z; lexically "09…-02:00" < "12…Z" — verify the tighter (later) is kept.
         let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
-        set_tighter(&mut slot, "2026-06-16T09:00:00-02:00", /*keep_earlier=*/ false);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "kept later instant");
+        set_tighter(
+            &mut slot,
+            "2026-06-16T09:00:00-02:00",
+            /*keep_earlier=*/ false,
+        );
+        assert_eq!(
+            slot.as_deref(),
+            Some("2026-06-16T12:00:00Z"),
+            "kept later instant"
+        );
         // And a genuinely-later offset bound DOES replace.
-        set_tighter(&mut slot, "2026-06-16T16:00:00+02:00", /*keep_earlier=*/ false); // = 14:00Z
-        assert_eq!(slot.as_deref(), Some("2026-06-16T16:00:00+02:00"), "later instant wins");
+        set_tighter(
+            &mut slot,
+            "2026-06-16T16:00:00+02:00",
+            /*keep_earlier=*/ false,
+        ); // = 14:00Z
+        assert_eq!(
+            slot.as_deref(),
+            Some("2026-06-16T16:00:00+02:00"),
+            "later instant wins"
+        );
     }
 
     #[test]
     fn unparseable_candidate_never_widens() {
         let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
         set_tighter(&mut slot, "not-a-date", true);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "malformed never replaces");
+        assert_eq!(
+            slot.as_deref(),
+            Some("2026-06-16T12:00:00Z"),
+            "malformed never replaces"
+        );
     }
 }

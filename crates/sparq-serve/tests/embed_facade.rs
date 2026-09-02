@@ -15,8 +15,8 @@
 
 use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
-use sparq_serve::embed::{self, Metadata};
 use sparq_engine::QueryBudget;
+use sparq_serve::embed::{self, Metadata};
 
 /// A two-triple default-graph resource on one subject.
 fn seed() -> Graph {
@@ -55,8 +55,8 @@ fn query_json_returns_expected_rows() {
         json
     );
     // A COUNT(*) over the graph reads exactly 2 through the JSON facade.
-    let cj = embed::query_json(&g, "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }")
-        .expect("count json ok");
+    let cj =
+        embed::query_json(&g, "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }").expect("count json ok");
     assert_eq!(json_scalar(&cj), "2");
 }
 
@@ -89,8 +89,7 @@ fn query_json_with_budget_enforces_row_cap() {
 #[test]
 fn query_returns_structured_rows() {
     let g = seed();
-    let res = embed::query(&g, "SELECT ?p WHERE { <http://ex/alice> ?p ?o }")
-        .expect("query ok");
+    let res = embed::query(&g, "SELECT ?p WHERE { <http://ex/alice> ?p ?o }").expect("query ok");
     assert_eq!(res.vars.len(), 1, "one projected variable");
     assert_eq!(res.vars[0].as_str(), "p");
     assert_eq!(res.rows.len(), 2, "two predicate bindings");
@@ -135,8 +134,11 @@ fn update_in_place_mutates_graph() {
     .expect("delete ok");
     assert_eq!(g.len(), 2, "one triple deleted");
     assert!(
-        !embed::ask(&g, "ASK { <http://ex/alice> <http://xmlns.com/foaf/0.1/age> ?o }")
-            .expect("ask"),
+        !embed::ask(
+            &g,
+            "ASK { <http://ex/alice> <http://xmlns.com/foaf/0.1/age> ?o }"
+        )
+        .expect("ask"),
         "deleted triple gone"
     );
 }
@@ -148,7 +150,11 @@ fn update_in_place_atomic_is_all_or_nothing() {
     let before = g.len();
     let err = embed::update_in_place_atomic(&mut g, "INSERT DATA { this is not sparql }");
     assert!(err.is_err(), "malformed update is rejected");
-    assert_eq!(g.len(), before, "atomic failure left no partial prefix applied");
+    assert_eq!(
+        g.len(),
+        before,
+        "atomic failure left no partial prefix applied"
+    );
 
     // A well-formed atomic update commits.
     embed::update_in_place_atomic(
@@ -176,8 +182,11 @@ fn apply_delta_nquads_applies_adds_and_deletes() {
         "inserted default-graph triple present"
     );
     assert!(
-        !embed::ask(&g, "ASK { <http://ex/alice> <http://xmlns.com/foaf/0.1/age> ?o }")
-            .expect("ask age"),
+        !embed::ask(
+            &g,
+            "ASK { <http://ex/alice> <http://xmlns.com/foaf/0.1/age> ?o }"
+        )
+        .expect("ask age"),
         "deleted triple gone"
     );
     // The named-graph statement auto-created the named graph.
@@ -188,8 +197,7 @@ fn apply_delta_nquads_applies_adds_and_deletes() {
     );
 
     // Deleting from an absent named graph is a no-op (does not error).
-    let del_named =
-        "<http://ex/doc1> <http://ex/p> \"v\" <http://ex/graph1> .\n";
+    let del_named = "<http://ex/doc1> <http://ex/p> \"v\" <http://ex/graph1> .\n";
     embed::apply_delta_nquads(&mut g, "", del_named).expect("named-graph delete ok");
 }
 
@@ -223,7 +231,10 @@ fn named_graph_exists_reports_correct_presence() {
     );
     // A different IRI is still absent.
     let other = Term::NamedNode(NamedNode::new("http://ex/other").unwrap());
-    assert!(!embed::named_graph_exists(&g, &other), "unrelated IRI absent");
+    assert!(
+        !embed::named_graph_exists(&g, &other),
+        "unrelated IRI absent"
+    );
 }
 
 #[test]

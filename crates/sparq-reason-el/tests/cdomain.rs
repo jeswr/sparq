@@ -76,7 +76,11 @@ fn cr7_empty_integer_range_makes_the_class_unsatisfiable_via_cr5() {
     );
     let (dict, triples) = classify(&ttl);
     let h = Classifier::classify(&dict, &triples);
-    assert_eq!(h.report().skipped_axioms, 0, "both faceted ranges are supported");
+    assert_eq!(
+        h.report().skipped_axioms,
+        0,
+        "both faceted ranges are supported"
+    );
     let unsat = h.unsatisfiable_classes();
     assert!(
         unsat.contains(&iri(&dict, "Bad")),
@@ -86,7 +90,11 @@ fn cr7_empty_integer_range_makes_the_class_unsatisfiable_via_cr5() {
         !unsat.contains(&iri(&dict, "Ok")),
         "Ok's range [10, 18] has witness 12 — flipping this verdict is UNSOUND"
     );
-    assert_eq!(h.report().unsatisfiable_classes, 1, "exactly Bad is unsatisfiable");
+    assert_eq!(
+        h.report().unsatisfiable_classes,
+        1,
+        "exactly Bad is unsatisfiable"
+    );
 }
 
 #[test]
@@ -110,8 +118,14 @@ fn cr7_discrete_tightening_differs_from_dense_decimal() {
     let h = Classifier::classify(&dict, &triples);
     assert_eq!(h.report().skipped_axioms, 0);
     let unsat = h.unsatisfiable_classes();
-    assert!(unsat.contains(&iri(&dict, "IntGap")), "no integer lies in (5, 6)");
-    assert!(!unsat.contains(&iri(&dict, "DecGap")), "5.5 witnesses the decimal (5, 6)");
+    assert!(
+        unsat.contains(&iri(&dict, "IntGap")),
+        "no integer lies in (5, 6)"
+    );
+    assert!(
+        !unsat.contains(&iri(&dict, "DecGap")),
+        "5.5 witnesses the decimal (5, 6)"
+    );
 }
 
 #[test]
@@ -131,8 +145,14 @@ fn cr7_point_collapse_and_exclusive_point_is_empty() {
     let (dict, triples) = classify(&ttl);
     let h = Classifier::classify(&dict, &triples);
     let unsat = h.unsatisfiable_classes();
-    assert!(!unsat.contains(&iri(&dict, "Point")), "{{5.0}} is non-empty");
-    assert!(unsat.contains(&iri(&dict, "NoPoint")), "(5.0, 5.0] is empty");
+    assert!(
+        !unsat.contains(&iri(&dict, "Point")),
+        "{{5.0}} is non-empty"
+    );
+    assert!(
+        unsat.contains(&iri(&dict, "NoPoint")),
+        "(5.0, 5.0] is empty"
+    );
 }
 
 #[test]
@@ -153,8 +173,14 @@ fn cr7_derived_type_implicit_bounds_participate() {
     let (dict, triples) = classify(&ttl);
     let h = Classifier::classify(&dict, &triples);
     let unsat = h.unsatisfiable_classes();
-    assert!(unsat.contains(&iri(&dict, "BigByte")), "no byte reaches 1000");
-    assert!(unsat.contains(&iri(&dict, "NoNat")), "no nonNegativeInteger is < 0");
+    assert!(
+        unsat.contains(&iri(&dict, "BigByte")),
+        "no byte reaches 1000"
+    );
+    assert!(
+        unsat.contains(&iri(&dict, "NoNat")),
+        "no nonNegativeInteger is < 0"
+    );
     assert_eq!(h.report().unsatisfiable_classes, 2);
 }
 
@@ -185,7 +211,11 @@ fn cr8_containment_threads_through_the_data_existential() {
     );
     // NOTE: A also reaches Y (A's [5,10] filler IS the LHS of the Y axiom — same range,
     // deduped to one concept), and X reaches B likewise. The full expected closure:
-    assert_closure(&ttl, &["A", "B", "X", "Y"], &[("A", "B"), ("A", "Y"), ("X", "B")]);
+    assert_closure(
+        &ttl,
+        &["A", "B", "X", "Y"],
+        &[("A", "B"), ("A", "Y"), ("X", "B")],
+    );
 }
 
 #[test]
@@ -253,7 +283,11 @@ fn cr8_integer_range_inside_decimal_range_but_never_the_reverse() {
     );
     // Also entailed and derived: A ⊑ Y ([5,10]int ⊆ [0,100]int) and X ⊑ B
     // ([5.0,10.0]dec ⊆ [0.0,100.0]dec, same sort). NOT derived: X ⊑ Y (the honest gap).
-    assert_closure(&ttl, &["A", "B", "X", "Y"], &[("A", "B"), ("A", "Y"), ("X", "B")]);
+    assert_closure(
+        &ttl,
+        &["A", "B", "X", "Y"],
+        &[("A", "B"), ("A", "Y"), ("X", "B")],
+    );
 }
 
 #[test]
@@ -335,7 +369,10 @@ fn classify_graph_with_cdomain_is_idempotent_and_emits_no_range_concepts() {
     let (mut dict, mut triples) = classify(&ttl);
     let before = triples.len();
     let r1 = classify_graph(&mut dict, &mut triples);
-    assert_eq!(r1.emitted_subsumptions, 1, "exactly the derived A ⊑ B edge is new");
+    assert_eq!(
+        r1.emitted_subsumptions, 1,
+        "exactly the derived A ⊑ B edge is new"
+    );
     assert_eq!(triples.len(), before + 1);
     let r2 = classify_graph(&mut dict, &mut triples);
     assert_eq!(r2.emitted_subsumptions, 0, "second run is idempotent");
@@ -358,7 +395,11 @@ fn mixed_structure_nodes_are_refused_not_strengthened() {
     );
     let (dict, triples) = classify(&ttl);
     let h = Classifier::classify(&dict, &triples);
-    assert_eq!(h.report().skipped_axioms, 1, "the mixed node's axiom is refused");
+    assert_eq!(
+        h.report().skipped_axioms,
+        1,
+        "the mixed node's axiom is refused"
+    );
     assert_closure(&ttl, &["A", "C", "D"], &[]);
 }
 
@@ -386,7 +427,11 @@ fn union_marked_range_nodes_are_refused_not_strengthened() {
     );
     let (dict, triples) = classify(&ttl);
     let h = Classifier::classify(&dict, &triples);
-    assert_eq!(h.report().skipped_axioms, 1, "the union-marked node's axiom is refused");
+    assert_eq!(
+        h.report().skipped_axioms,
+        1,
+        "the union-marked node's axiom is refused"
+    );
     assert_closure(&ttl, &["A", "C", "D", "E"], &[]);
 }
 
@@ -406,7 +451,11 @@ fn all_values_marked_range_nodes_are_refused_not_strengthened() {
     );
     let (dict, triples) = classify(&ttl);
     let h = Classifier::classify(&dict, &triples);
-    assert_eq!(h.report().skipped_axioms, 1, "the allValuesFrom-marked node's axiom is refused");
+    assert_eq!(
+        h.report().skipped_axioms,
+        1,
+        "the allValuesFrom-marked node's axiom is refused"
+    );
     assert_closure(&ttl, &["A", "C", "E"], &[]);
 }
 
@@ -426,7 +475,11 @@ fn datatype_complement_marked_range_nodes_are_refused_not_strengthened() {
     );
     let (dict, triples) = classify(&ttl);
     let h = Classifier::classify(&dict, &triples);
-    assert_eq!(h.report().skipped_axioms, 1, "the complement-marked node's axiom is refused");
+    assert_eq!(
+        h.report().skipped_axioms,
+        1,
+        "the complement-marked node's axiom is refused"
+    );
     assert_closure(&ttl, &["A", "E"], &[]);
 }
 
@@ -455,7 +508,11 @@ fn union_marked_range_is_not_strengthened_through_an_existential() {
         !h.is_subclass_of(iri(&dict, "G"), iri(&dict, "H")),
         "G ⊑ H must NOT be derived (countermodel: C = D = ∅, E = ∅, p(g) = 5, g ∉ H)"
     );
-    assert_eq!(h.report().skipped_axioms, 1, "exactly the union+range axiom is refused");
+    assert_eq!(
+        h.report().skipped_axioms,
+        1,
+        "exactly the union+range axiom is refused"
+    );
     assert_closure(&ttl, &["C", "D", "E", "G", "H"], &[]);
 }
 

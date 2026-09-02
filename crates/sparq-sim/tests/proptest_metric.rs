@@ -38,7 +38,10 @@ fn unweighted(graph: &Graph, mode: SignatureMode) -> Sim<'_> {
     // Like `profile_fallback` above: fallback tiers append blocks scored on their own
     // scale, so they are disabled to pin the exactly-scored ranking properties.
     #[cfg(feature = "lexical")]
-    let cfg = SimConfig { lexical_fallback: false, ..cfg };
+    let cfg = SimConfig {
+        lexical_fallback: false,
+        ..cfg
+    };
     Sim::with_config(graph, cfg)
 }
 

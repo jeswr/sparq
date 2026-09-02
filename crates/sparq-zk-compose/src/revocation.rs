@@ -231,7 +231,9 @@ pub fn merkle_root(snapshot: &StatusListSnapshot, depth: u32) -> Option<Fr> {
     let defaults = SubtreeDefaults::new(depth);
     // The first leaf index that reads as SET (padding past the covered bits).
     let set_after = (snapshot.bits.len() as u64).saturating_mul(8);
-    Some(sparse_subtree_root(snapshot, &defaults, set_after, 0, depth))
+    Some(sparse_subtree_root(
+        snapshot, &defaults, set_after, 0, depth,
+    ))
 }
 
 /// [OPUS-4.8] sq-hwe: the ORIGINAL dense `O(2^depth)` Merkle-root builder, retained
@@ -250,10 +252,7 @@ fn dense_merkle_root(snapshot: &StatusListSnapshot, depth: u32) -> Option<Fr> {
     let mut level: Vec<Fr> = (0..n_leaves as u64).map(|i| leaf(snapshot, i)).collect();
     // Fold pairwise up to the root.
     for _ in 0..depth {
-        level = level
-            .chunks(2)
-            .map(|pair| h2(pair[0], pair[1]))
-            .collect();
+        level = level.chunks(2).map(|pair| h2(pair[0], pair[1])).collect();
     }
     debug_assert_eq!(level.len(), 1, "fold reduces to a single root");
     level.first().copied()
@@ -285,7 +284,11 @@ pub struct MerkleWitness {
 /// are uniform subtrees — and, crucially, NEVER materialises `2^depth` leaves. The
 /// path is byte-identical to the one the old dense builder produced (cross-checked
 /// in the unit tests by re-folding to the dense root).
-pub fn merkle_witness(snapshot: &StatusListSnapshot, depth: u32, index: u64) -> Option<MerkleWitness> {
+pub fn merkle_witness(
+    snapshot: &StatusListSnapshot,
+    depth: u32,
+    index: u64,
+) -> Option<MerkleWitness> {
     if depth > 31 {
         return None;
     }
@@ -305,7 +308,9 @@ pub fn merkle_witness(snapshot: &StatusListSnapshot, depth: u32, index: u64) -> 
     for k in 0..depth {
         let sib_node = pos ^ 1;
         let sib_lo = sib_node << k;
-        siblings.push(sparse_subtree_root(snapshot, &defaults, set_after, sib_lo, k));
+        siblings.push(sparse_subtree_root(
+            snapshot, &defaults, set_after, sib_lo, k,
+        ));
         pos >>= 1;
     }
     Some(MerkleWitness { bit, siblings })
@@ -332,7 +337,10 @@ pub fn revoke_prover_toml(
     let mut s = String::new();
     s.push_str(&format!("challenge = \"{}\"\n", field_to_hex(challenge)));
     s.push_str(&format!("root = \"{}\"\n", field_to_hex(root)));
-    s.push_str(&format!("index_commitment = \"{}\"\n", field_to_hex(index_commitment)));
+    s.push_str(&format!(
+        "index_commitment = \"{}\"\n",
+        field_to_hex(index_commitment)
+    ));
     s.push_str(&format!("index = \"{index}\"\n"));
     s.push_str(&format!("bit = \"{}\"\n", field_to_hex(&witness.bit)));
     s.push_str(&format!("blinding = \"{}\"\n", field_to_hex(blinding)));
@@ -572,20 +580,35 @@ pub fn revoke_hidden_ref_prover_toml(
     witness: &HiddenRefWitness,
 ) -> String {
     let list = |v: &[Fr]| {
-        let parts: Vec<String> = v.iter().map(|s| format!("\"{}\"", field_to_hex(s))).collect();
+        let parts: Vec<String> = v
+            .iter()
+            .map(|s| format!("\"{}\"", field_to_hex(s)))
+            .collect();
         format!("[{}]", parts.join(", "))
     };
     let mut s = String::new();
     // -- public, in main() declaration order --
     s.push_str(&format!("challenge = \"{}\"\n", field_to_hex(challenge)));
-    s.push_str(&format!("ref_commitment = \"{}\"\n", field_to_hex(ref_commitment)));
-    s.push_str(&format!("index_commitment = \"{}\"\n", field_to_hex(index_commitment)));
-    s.push_str(&format!("accepted_set_root = \"{}\"\n", field_to_hex(accepted_set_root)));
+    s.push_str(&format!(
+        "ref_commitment = \"{}\"\n",
+        field_to_hex(ref_commitment)
+    ));
+    s.push_str(&format!(
+        "index_commitment = \"{}\"\n",
+        field_to_hex(index_commitment)
+    ));
+    s.push_str(&format!(
+        "accepted_set_root = \"{}\"\n",
+        field_to_hex(accepted_set_root)
+    ));
     s.push_str(&format!("min_version = \"{min_version}\"\n"));
     // -- private --
     s.push_str(&format!("list_id = \"{}\"\n", field_to_hex(list_id)));
     s.push_str(&format!("version = \"{version}\"\n"));
-    s.push_str(&format!("ref_blinding = \"{}\"\n", field_to_hex(ref_blinding)));
+    s.push_str(&format!(
+        "ref_blinding = \"{}\"\n",
+        field_to_hex(ref_blinding)
+    ));
     s.push_str(&format!(
         "status_list_root = \"{}\"\n",
         field_to_hex(&witness.status_list_root)
@@ -593,7 +616,10 @@ pub fn revoke_hidden_ref_prover_toml(
     s.push_str(&format!("set_index = \"{}\"\n", witness.set_index));
     s.push_str(&format!("set_siblings = {}\n", list(&witness.set_siblings)));
     s.push_str(&format!("index = \"{index}\"\n"));
-    s.push_str(&format!("bit = \"{}\"\n", field_to_hex(&witness.merkle.bit)));
+    s.push_str(&format!(
+        "bit = \"{}\"\n",
+        field_to_hex(&witness.merkle.bit)
+    ));
     s.push_str(&format!("blinding = \"{}\"\n", field_to_hex(blinding)));
     s.push_str(&format!("siblings = {}\n", list(&witness.merkle.siblings)));
     s
@@ -604,7 +630,11 @@ mod tests {
     use super::*;
 
     fn snap(bits: Vec<u8>) -> StatusListSnapshot {
-        StatusListSnapshot { status_list: "http://ex/s".to_string(), version: 1, bits }
+        StatusListSnapshot {
+            status_list: "http://ex/s".to_string(),
+            version: 1,
+            bits,
+        }
     }
 
     // The Rust h2 mirrors the circuit's documented vector: h2(1,2) ==
@@ -624,7 +654,10 @@ mod tests {
     #[test]
     fn merkle_root_depth2_matches_hand_built() {
         let s = snap(vec![0b0000_0010]); // bit 1 set, rest unset
-        let expected = h2(h2(Fr::from(0u64), Fr::from(1u64)), h2(Fr::from(0u64), Fr::from(0u64)));
+        let expected = h2(
+            h2(Fr::from(0u64), Fr::from(1u64)),
+            h2(Fr::from(0u64), Fr::from(0u64)),
+        );
         assert_eq!(merkle_root(&s, 2), Some(expected));
     }
 
@@ -638,13 +671,13 @@ mod tests {
     fn sparse_root_equals_dense_root_for_every_shape() {
         let cases = vec![
             // (bits, depths to test)
-            (vec![0u8], vec![0u32, 1, 2, 3, 6]),                 // tiny + tail padding
-            (vec![0b0000_0010u8], vec![2, 3, 6]),                // one set bit
-            (vec![0xFFu8], vec![3, 6]),                          // a fully-revoked byte + padding
-            (vec![0u8, 0, 0, 0, 0, 0, 0, 0], vec![6]),          // 64 covered, all zero
-            (vec![0b1000_0001u8, 0, 0b0100_0000, 0], vec![5, 6]),// scattered set bits
-            (vec![], vec![0, 2, 4]),                             // EMPTY: every leaf is fail-closed 1
-            (vec![0u8; 3], vec![6]),                             // 24 covered (boundary mid-tree)
+            (vec![0u8], vec![0u32, 1, 2, 3, 6]), // tiny + tail padding
+            (vec![0b0000_0010u8], vec![2, 3, 6]), // one set bit
+            (vec![0xFFu8], vec![3, 6]),          // a fully-revoked byte + padding
+            (vec![0u8, 0, 0, 0, 0, 0, 0, 0], vec![6]), // 64 covered, all zero
+            (vec![0b1000_0001u8, 0, 0b0100_0000, 0], vec![5, 6]), // scattered set bits
+            (vec![], vec![0, 2, 4]),             // EMPTY: every leaf is fail-closed 1
+            (vec![0u8; 3], vec![6]),             // 24 covered (boundary mid-tree)
         ];
         for (bits, depths) in cases {
             let s = snap(bits.clone());
@@ -680,7 +713,11 @@ mod tests {
         let mut pos = 0u64;
         for sib in &w.siblings {
             let is_right = pos & 1 == 1;
-            node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+            node = if is_right {
+                h2(*sib, node)
+            } else {
+                h2(node, *sib)
+            };
             pos >>= 1;
         }
         assert_eq!(node, root, "sparse witness must re-fold to the sparse root");
@@ -705,10 +742,17 @@ mod tests {
         let mut pos = padding_index;
         for sib in &w.siblings {
             let is_right = pos & 1 == 1;
-            node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+            node = if is_right {
+                h2(*sib, node)
+            } else {
+                h2(node, *sib)
+            };
             pos >>= 1;
         }
-        assert_eq!(node, root, "padding-index witness must still re-fold to the root");
+        assert_eq!(
+            node, root,
+            "padding-index witness must still re-fold to the root"
+        );
     }
 
     // [OPUS-4.8] sq-hwe: any_bit_set scans byte ranges and short-circuits; verify
@@ -738,12 +782,21 @@ mod tests {
     #[test]
     fn any_bit_set_is_fail_closed_on_missing_bytes() {
         let s = snap(vec![0b0000_0000u8]); // one covered byte, all active
-        // Range entirely in the missing/padding region (bytes 1..) must read as set.
-        assert!(any_bit_set(&s, 8, 24), "padding region must be fail-closed (set)");
+                                           // Range entirely in the missing/padding region (bytes 1..) must read as set.
+        assert!(
+            any_bit_set(&s, 8, 24),
+            "padding region must be fail-closed (set)"
+        );
         // Range straddling covered (active) + missing also reports set via the tail.
-        assert!(any_bit_set(&s, 0, 16), "straddling range must be fail-closed (set)");
+        assert!(
+            any_bit_set(&s, 0, 16),
+            "straddling range must be fail-closed (set)"
+        );
         // Sanity: a fully-covered all-active range is correctly NOT set.
-        assert!(!any_bit_set(&s, 0, 8), "covered all-active range is not set");
+        assert!(
+            !any_bit_set(&s, 0, 8),
+            "covered all-active range is not set"
+        );
         // And the missing-byte reads agree with the per-index `bit()` oracle.
         for i in 8u64..24 {
             assert!(s.bit(i), "out-of-range bit {i} must be revoked");
@@ -765,7 +818,11 @@ mod tests {
             let mut pos = index;
             for sib in &w.siblings {
                 let is_right = pos & 1 == 1;
-                node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+                node = if is_right {
+                    h2(*sib, node)
+                } else {
+                    h2(node, *sib)
+                };
                 pos /= 2;
             }
             assert_eq!(node, root, "fold for index {index} must reach the root");
@@ -840,7 +897,11 @@ mod tests {
                 let mut node = accepted_set_leaf(e);
                 let mut pos = i as u64;
                 for sib in &sibs {
-                    node = if pos & 1 == 1 { h2(*sib, node) } else { h2(node, *sib) };
+                    node = if pos & 1 == 1 {
+                        h2(*sib, node)
+                    } else {
+                        h2(node, *sib)
+                    };
                     pos >>= 1;
                 }
                 assert_eq!(node, root, "fold for entry {i} at depth {set_depth}");
@@ -872,15 +933,27 @@ mod tests {
         // Each component alone binds.
         let mut other_list = entries();
         other_list[0].status_list = "http://ex/c".to_string();
-        assert_ne!(accepted_set_root(&other_list, depth), Some(base), "IRI binds");
+        assert_ne!(
+            accepted_set_root(&other_list, depth),
+            Some(base),
+            "IRI binds"
+        );
 
         let mut other_version = entries();
         other_version[0].version = 9;
-        assert_ne!(accepted_set_root(&other_version, depth), Some(base), "version binds");
+        assert_ne!(
+            accepted_set_root(&other_version, depth),
+            Some(base),
+            "version binds"
+        );
 
         let mut other_root = entries();
         other_root[0].status_list_root = Fr::from(0x9999u64);
-        assert_ne!(accepted_set_root(&other_root, depth), Some(base), "root binds");
+        assert_ne!(
+            accepted_set_root(&other_root, depth),
+            Some(base),
+            "root binds"
+        );
     }
 
     // [OPUS-5] sq-6qe: the canonical LEAF ORDER is load-bearing — the relying
@@ -904,9 +977,17 @@ mod tests {
         let es = entries(); // 3 entries
         assert_eq!(accepted_set_root(&es, 1), None, "3 entries do not fit 2^1");
         assert!(accepted_set_root(&es, 2).is_some(), "3 entries fit 2^2");
-        assert_eq!(accepted_set_root(&es, 32), None, "implausible depth refused");
+        assert_eq!(
+            accepted_set_root(&es, 32),
+            None,
+            "implausible depth refused"
+        );
         assert_eq!(accepted_set_witness(&es, 32, 0), None);
-        assert_eq!(accepted_set_witness(&es, 2, 4), None, "index 4 is out of a 2^2 tree");
+        assert_eq!(
+            accepted_set_witness(&es, 2, 4),
+            None,
+            "index 4 is out of a 2^2 tree"
+        );
     }
 
     // [OPUS-5] sq-6qe: an EMPTY accepted set still commits (to the all-padding

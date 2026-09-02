@@ -88,7 +88,10 @@ fn q05a_shape_identical_rows_to_unoptimized_oracle() {
     // The `!(?name != ?name2)` spelling is result-equivalent but shape-ineligible,
     // so it runs the verbatim cross-product-then-filter plan.
     let oracle = bag(&g, &q05a("FILTER(!(?name != ?name2))"));
-    assert_eq!(optimized, oracle, "value-join must not change the q05a result");
+    assert_eq!(
+        optimized, oracle,
+        "value-join must not change the q05a result"
+    );
     // And the literal expectation: exactly the one author name shared by both stars.
     assert_eq!(optimized.len(), 1, "bag: {:?}", optimized);
     assert_eq!(
@@ -111,7 +114,10 @@ fn q12a_ask_twin_agrees() {
         ask(&g, &q).unwrap()
     };
     assert!(run_ask("FILTER(?name = ?name2)"));
-    assert_eq!(run_ask("FILTER(?name = ?name2)"), run_ask("FILTER(!(?name != ?name2))"));
+    assert_eq!(
+        run_ask("FILTER(?name = ?name2)"),
+        run_ask("FILTER(!(?name != ?name2))")
+    );
     // A filter with no possible intersection stays false through both plans.
     assert!(!run_ask("FILTER(?name = ?name2 && ?name != \"erdoes\")"));
 }

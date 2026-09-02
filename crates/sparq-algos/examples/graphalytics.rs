@@ -149,7 +149,9 @@ fn parse_args() -> Result<Args, String> {
             "--export-edgelist" => export_edgelist = Some(PathBuf::from(value()?)),
             "--iters" => {
                 let v = value()?;
-                iters = v.parse().map_err(|_| format!("--iters: not a number: {v}"))?;
+                iters = v
+                    .parse()
+                    .map_err(|_| format!("--iters: not a number: {v}"))?;
             }
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -334,7 +336,10 @@ impl ScratchDir {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            let dir = base.join(format!("sparq-graphalytics-{}-{}-{:x}", pid, attempt, nonce));
+            let dir = base.join(format!(
+                "sparq-graphalytics-{}-{}-{:x}",
+                pid, attempt, nonce
+            ));
             match std::fs::create_dir(&dir) {
                 Ok(()) => {
                     restrict_to_owner(&dir)?;
@@ -527,8 +532,7 @@ fn materialize_nt(
         };
         // A literal object keeps the subject a node without adding an edge, so an ISOLATED
         // vertex still shows up in the projection with degree 0.
-        writeln!(w, "<{VERTEX_PREFIX}{id}> <{ID_PRED}> \"{id}\" .")
-            .map_err(|e| e.to_string())?;
+        writeln!(w, "<{VERTEX_PREFIX}{id}> <{ID_PRED}> \"{id}\" .").map_err(|e| e.to_string())?;
         n_vertices += 1;
     }
 
@@ -539,13 +543,19 @@ fn materialize_nt(
         let (Some(s), Some(o)) = (f.next(), f.next()) else {
             continue; // blank line; a trailing weight column is simply ignored
         };
-        writeln!(w, "<{VERTEX_PREFIX}{s}> <{EDGE_PRED}> <{VERTEX_PREFIX}{o}> .")
-            .map_err(|e| e.to_string())?;
+        writeln!(
+            w,
+            "<{VERTEX_PREFIX}{s}> <{EDGE_PRED}> <{VERTEX_PREFIX}{o}> ."
+        )
+        .map_err(|e| e.to_string())?;
         if !directed {
             // Graphalytics undirected edge files list each edge ONCE; the algorithms see it
             // in both directions.
-            writeln!(w, "<{VERTEX_PREFIX}{o}> <{EDGE_PRED}> <{VERTEX_PREFIX}{s}> .")
-                .map_err(|e| e.to_string())?;
+            writeln!(
+                w,
+                "<{VERTEX_PREFIX}{o}> <{EDGE_PRED}> <{VERTEX_PREFIX}{s}> ."
+            )
+            .map_err(|e| e.to_string())?;
         }
         n_edges += 1;
     }
@@ -622,7 +632,11 @@ mod tests {
         let roots: Vec<PathBuf> = dirs.iter().map(|d| d.dir.clone()).collect();
         drop(dirs);
         for root in &roots {
-            assert!(!root.exists(), "scratch directory {:?} outlived its run", root);
+            assert!(
+                !root.exists(),
+                "scratch directory {:?} outlived its run",
+                root
+            );
         }
     }
 
@@ -633,8 +647,16 @@ mod tests {
     fn scratch_dir_is_private_to_the_owner() {
         use std::os::unix::fs::PermissionsExt;
         let scratch = ScratchDir::new().expect("claim a scratch directory");
-        let mode = std::fs::metadata(&scratch.dir).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o700, "scratch dir mode {:o} is not rwx------", mode);
+        let mode = std::fs::metadata(&scratch.dir)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "scratch dir mode {:o} is not rwx------",
+            mode
+        );
     }
 
     /// The security half of the fix rests on `create_dir` being an EXCLUSIVE claim that does

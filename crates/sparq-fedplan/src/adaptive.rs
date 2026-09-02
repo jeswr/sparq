@@ -2092,14 +2092,19 @@ mod tests {
     #[test]
     fn ewma_smoothing_constants() {
         assert_eq!(
-            RuntimeStats::DEFAULT_LATENCY_ALPHA, 0.3,
+            RuntimeStats::DEFAULT_LATENCY_ALPHA,
+            0.3,
             "default latency EWMA α is the documented 0.3 heuristic"
         );
         let mut stats = RuntimeStats::new();
         assert_eq!(stats.latency_alpha(), 0.3);
         // First sample SEEDS the average (no history to decay).
         stats.record_source_latency(0, 100.0);
-        assert_eq!(stats.observed_latency_of(0), Some(100.0), "first sample seeds EWMA");
+        assert_eq!(
+            stats.observed_latency_of(0),
+            Some(100.0),
+            "first sample seeds EWMA"
+        );
         // Second sample: 0.3·1000 + 0.7·100 = 300 + 70 = 370.
         stats.record_source_latency(0, 1000.0);
         assert_eq!(
@@ -2118,7 +2123,11 @@ mod tests {
         let mut sharp = RuntimeStats::with_latency_alpha(1.0);
         sharp.record_source_latency(0, 100.0);
         sharp.record_source_latency(0, 1000.0);
-        assert_eq!(sharp.observed_latency_of(0), Some(1000.0), "α=1 ⇒ no smoothing");
+        assert_eq!(
+            sharp.observed_latency_of(0),
+            Some(1000.0),
+            "α=1 ⇒ no smoothing"
+        );
         // α is clamped into (0, 1]: a degenerate 0.0 / negative request never freezes the seed.
         assert!(RuntimeStats::with_latency_alpha(0.0).latency_alpha() > 0.0);
         assert_eq!(RuntimeStats::with_latency_alpha(5.0).latency_alpha(), 1.0);
@@ -2312,7 +2321,11 @@ mod tests {
     #[test]
     fn per_source_alpha_override_takes_precedence() {
         let mut stats = RuntimeStats::with_latency_alpha(0.3).with_source_alpha(1, 1.0);
-        assert_eq!(stats.effective_alpha(0), 0.3, "source 0 falls back to global α");
+        assert_eq!(
+            stats.effective_alpha(0),
+            0.3,
+            "source 0 falls back to global α"
+        );
         assert_eq!(stats.effective_alpha(1), 1.0, "source 1 uses its override");
         // Source 0 smooths (0.3·1000 + 0.7·100 = 370) …
         stats.record_source_latency(0, 100.0);
@@ -2321,11 +2334,20 @@ mod tests {
         // … source 1 does NOT (α = 1 ⇒ last sample wins).
         stats.record_source_latency(1, 100.0);
         stats.record_source_latency(1, 1000.0);
-        assert_eq!(stats.observed_latency_of(1), Some(1000.0), "override α=1 ⇒ no smoothing");
+        assert_eq!(
+            stats.observed_latency_of(1),
+            Some(1000.0),
+            "override α=1 ⇒ no smoothing"
+        );
         // Override is clamped into (0,1] like the global.
-        let clamped = RuntimeStats::new().with_source_alpha(2, 5.0).with_source_alpha(3, 0.0);
+        let clamped = RuntimeStats::new()
+            .with_source_alpha(2, 5.0)
+            .with_source_alpha(3, 0.0);
         assert_eq!(clamped.effective_alpha(2), 1.0, "α>1 clamps to 1");
-        assert!(clamped.effective_alpha(3) > 0.0, "α≤0 clamps to strictly positive");
+        assert!(
+            clamped.effective_alpha(3) > 0.0,
+            "α≤0 clamps to strictly positive"
+        );
     }
 
     // ---- (b) TIME-AWARE DECAY weights a LARGE-GAP sample more than a back-to-back one.
@@ -2353,12 +2375,20 @@ mod tests {
         // 0.65·1000 + 0.35·100 = 685.
         one_hl.record_source_latency_after(0, 1000.0, half_life);
         let one = one_hl.observed_latency_of(0).unwrap();
-        assert!((one - 685.0).abs() < 1e-9, "one half-life ⇒ α_eff 0.65 ⇒ 685, got {}", one);
+        assert!(
+            (one - 685.0).abs() < 1e-9,
+            "one half-life ⇒ α_eff 0.65 ⇒ 685, got {}",
+            one
+        );
         // Δt = 10 half-lives ⇒ decay weight 1 − 0.5^10 ≈ 0.999 ⇒ α_eff ≈ 1 ⇒ value ≈ the new
         // sample 1000 (the now-stale history is almost fully decayed away).
         big_gap.record_source_latency_after(0, 1000.0, 10.0 * half_life);
         let big = big_gap.observed_latency_of(0).unwrap();
-        assert!(big > 999.0, "a large-gap sample dominates (history decayed): got {}", big);
+        assert!(
+            big > 999.0,
+            "a large-gap sample dominates (history decayed): got {}",
+            big
+        );
         // The ordering is the load-bearing property: larger gap ⇒ the fresh sample weighs more.
         assert!(
             big > one && one > no_gap.observed_latency_of(0).unwrap(),
@@ -2391,13 +2421,30 @@ mod tests {
     // ---- (b) A non-positive / non-finite half-life DISABLES decay (back to the off default).
     #[test]
     fn non_positive_half_life_disables_decay() {
-        assert_eq!(RuntimeStats::new().with_decay_half_life(0.0).decay_half_life(), None);
-        assert_eq!(RuntimeStats::new().with_decay_half_life(-5.0).decay_half_life(), None);
         assert_eq!(
-            RuntimeStats::new().with_decay_half_life(f64::INFINITY).decay_half_life(),
+            RuntimeStats::new()
+                .with_decay_half_life(0.0)
+                .decay_half_life(),
             None
         );
-        assert_eq!(RuntimeStats::new().with_decay_half_life(50.0).decay_half_life(), Some(50.0));
+        assert_eq!(
+            RuntimeStats::new()
+                .with_decay_half_life(-5.0)
+                .decay_half_life(),
+            None
+        );
+        assert_eq!(
+            RuntimeStats::new()
+                .with_decay_half_life(f64::INFINITY)
+                .decay_half_life(),
+            None
+        );
+        assert_eq!(
+            RuntimeStats::new()
+                .with_decay_half_life(50.0)
+                .decay_half_life(),
+            Some(50.0)
+        );
     }
 
     // ---- (c) STALENESS EVICTION drops an over-age entry and keeps a fresh one. Deterministic:
@@ -2416,7 +2463,11 @@ mod tests {
         let evicted = stats.evict_stale(500.0);
         assert_eq!(evicted, 1, "exactly the one over-age source is evicted");
         assert_eq!(stats.observed_latency_of(0), None, "stale source 0 dropped");
-        assert_eq!(stats.observed_latency_of(1), Some(200.0), "fresh source 1 kept");
+        assert_eq!(
+            stats.observed_latency_of(1),
+            Some(200.0),
+            "fresh source 1 kept"
+        );
         assert_eq!(stats.source_age(0), None, "its age entry is gone too");
     }
 
@@ -2528,8 +2579,8 @@ mod tests {
         assert!(!diverges(100.0, 300.0, &policy)); // 3× up.
         assert!(!diverges(300.0, 100.0, &policy)); // 3× down.
         assert!(!diverges(100.0, 100.0, &policy)); // exact.
-        // Floors: a zero estimate/observation is treated as 1 (no divide-by-zero, no spurious
-        // infinite divergence). observed 0 vs estimate 1 ⇒ e(1) > 4·o(1)? no ⇒ stable.
+                                                   // Floors: a zero estimate/observation is treated as 1 (no divide-by-zero, no spurious
+                                                   // infinite divergence). observed 0 vs estimate 1 ⇒ e(1) > 4·o(1)? no ⇒ stable.
         assert!(!diverges(0.0, 0.0, &policy));
         // estimate 100 vs observed 0 ⇒ e(100) > 4·o.max(1)=4 ⇒ diverges (collapse to nothing).
         assert!(diverges(100.0, 0.0, &policy));
@@ -2580,7 +2631,11 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(ps.total_cardinality(), 0.0, "prior estimate total is exactly zero");
+        assert_eq!(
+            ps.total_cardinality(),
+            0.0,
+            "prior estimate total is exactly zero"
+        );
         let mut stats = RuntimeStats::new();
         stats.record_leaf_cardinality(0, 40.0);
         let corrected = corrected_selection(std::slice::from_ref(&ps), &stats);
@@ -2624,9 +2679,17 @@ mod tests {
     fn record_inputs_clamp_negatives() {
         let mut stats = RuntimeStats::new();
         stats.record_leaf_cardinality(0, -5.0);
-        assert_eq!(stats.observed_leaf(0), Some(0.0), "negative cardinality clamps to 0");
+        assert_eq!(
+            stats.observed_leaf(0),
+            Some(0.0),
+            "negative cardinality clamps to 0"
+        );
         stats.record_source_latency(1, -10.0);
-        assert_eq!(stats.observed_latency_of(1), Some(0.0), "negative latency clamps to 0");
+        assert_eq!(
+            stats.observed_latency_of(1),
+            Some(0.0),
+            "negative latency clamps to 0"
+        );
     }
 
     // ---- `clamp_alpha` maps NaN to the default α (a NaN would poison the EWMA), and clamps
@@ -2685,14 +2748,20 @@ mod tests {
             TriplePattern::new(v("c"), iri("http://ex/q"), v("d")),
         ]);
         let solutions: SolutionSets = vec![
-            vec![t(&[("a", "a1"), ("b", "b1")]), t(&[("a", "a2"), ("b", "b2")])],
+            vec![
+                t(&[("a", "a1"), ("b", "b1")]),
+                t(&[("a", "a2"), ("b", "b2")]),
+            ],
             vec![t(&[("c", "c1"), ("d", "d1")])],
         ];
         let forward = evaluate(&bgp, &solutions, &[0, 1]);
         let backward = evaluate(&bgp, &solutions, &[1, 0]);
         // 2 × 1 = 2 rows, each carrying all four variables.
         assert_eq!(forward.len(), 2);
-        assert!(multiset_eq(&forward, &backward), "Cartesian eval is order-independent");
+        assert!(
+            multiset_eq(&forward, &backward),
+            "Cartesian eval is order-independent"
+        );
         // Every row binds all four variables (full cross product merge).
         for row in &forward {
             assert_eq!(row.bindings().len(), 4);

@@ -70,7 +70,11 @@ impl GeoIndexProvider {
     pub fn new(index: GeoIndex) -> Self {
         let indexed = index.entries().map(|e| e.literal.clone()).collect();
         let indexed_ids = Arc::new(index.entries().map(|e| e.literal_id).collect());
-        Self { index, indexed, indexed_ids }
+        Self {
+            index,
+            indexed,
+            indexed_ids,
+        }
     }
 
     /// Borrow the wrapped index (e.g. for the non-pushdown query methods).
@@ -96,7 +100,12 @@ fn center_point(wkt: &str) -> Option<Point<f64>> {
 impl SpatialProvider for GeoIndexProvider {
     fn candidates(&self, query: &SpatialQuery) -> Option<Vec<Term>> {
         match query {
-            SpatialQuery::DistanceWithin { point_wkt, radius, unit_iri, inclusive: _ } => {
+            SpatialQuery::DistanceWithin {
+                point_wkt,
+                radius,
+                unit_iri,
+                inclusive: _,
+            } => {
                 // Only METRIC distance (metre/km/mile) shares the index's great-circle
                 // metric; degree/radian distance is euclidean coordinate distance — a
                 // different metric the metre-window index cannot bound — so decline it
@@ -134,7 +143,9 @@ impl SpatialProvider for GeoIndexProvider {
         // the per-row `is_indexed` fallback. The `Arc`'s CONTENT equals the ids of
         // the terms `is_indexed` reports, so the engine's id-level and per-row
         // checks return the SAME keep/drop verdict. [OPUS-4.8]
-        self.index.indexed_ids_for(dict_ptr).map(|_| Arc::clone(&self.indexed_ids))
+        self.index
+            .indexed_ids_for(dict_ptr)
+            .map(|_| Arc::clone(&self.indexed_ids))
     }
 
     /// [FABLE-5] (sq-lk3aw.4) EXACT certification for a constant-region containment
@@ -155,7 +166,8 @@ impl SpatialProvider for GeoIndexProvider {
                 // A non-geographic or empty region shares no window with the index's
                 // geographic entries: DECLINE rather than certify an empty set the
                 // exact `geof:` check might disagree with on edge cases.
-                if !g.crs.is_geographic() || geo::BoundingRect::bounding_rect(&g.geometry).is_none() {
+                if !g.crs.is_geographic() || geo::BoundingRect::bounding_rect(&g.geometry).is_none()
+                {
                     return None;
                 }
                 Some(self.index.within_region_literals(&g))
@@ -209,7 +221,10 @@ mod tests {
             unit_iri: DEG,
             inclusive: true,
         };
-        assert!(p.candidates(&q).is_none(), "angular-unit distance must decline");
+        assert!(
+            p.candidates(&q).is_none(),
+            "angular-unit distance must decline"
+        );
     }
 
     #[test]
@@ -224,7 +239,10 @@ mod tests {
             unit_iri: KM,
             inclusive: true,
         };
-        assert!(p.candidates(&q).is_none(), "non-geographic centre must decline");
+        assert!(
+            p.candidates(&q).is_none(),
+            "non-geographic centre must decline"
+        );
     }
 
     #[test]
@@ -262,9 +280,13 @@ mod tests {
         // decline (None) rather than wrongly drop same-CRS matches.
         let p = GeoIndexProvider::new(index());
         let q = SpatialQuery::BboxIntersects {
-            arg_wkt: "<http://www.opengis.net/def/crs/EPSG/0/3857> POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+            arg_wkt:
+                "<http://www.opengis.net/def/crs/EPSG/0/3857> POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
         };
-        assert!(p.candidates(&q).is_none(), "non-geographic bbox must decline");
+        assert!(
+            p.candidates(&q).is_none(),
+            "non-geographic bbox must decline"
+        );
     }
 
     #[test]
@@ -289,7 +311,10 @@ mod tests {
             .expect("one entry")
             .literal
             .clone();
-        assert!(p.is_indexed(&known), "the indexed literal is reported indexed");
+        assert!(
+            p.is_indexed(&known),
+            "the indexed literal is reported indexed"
+        );
 
         let other = Term::Literal(oxrdf::Literal::new_typed_literal(
             "POINT(99 99)",

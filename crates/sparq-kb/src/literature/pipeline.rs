@@ -404,7 +404,10 @@ fn prepare<E: Extractor>(connector_json: &str, extractor: &E) -> Result<Prepared
         match ground::verify(c, &abstracts, &source_dois) {
             Ok(()) => {
                 sidecar.grounded += 1;
-                grounded_by_doi.entry(c.source_doi.clone()).or_default().push(i);
+                grounded_by_doi
+                    .entry(c.source_doi.clone())
+                    .or_default()
+                    .push(i);
             }
             Err(failure) => sidecar.quarantined.push(quarantine(c, &failure)),
         }
@@ -412,7 +415,10 @@ fn prepare<E: Extractor>(connector_json: &str, extractor: &E) -> Result<Prepared
 
     // exploredStatus per source: Explored iff it produced >=1 grounded Finding, else DeadEnd.
     for stub in &stubs {
-        if grounded_by_doi.get(&stub.doi).is_some_and(|v| !v.is_empty()) {
+        if grounded_by_doi
+            .get(&stub.doi)
+            .is_some_and(|v| !v.is_empty())
+        {
             sidecar.sources_explored += 1;
         } else {
             sidecar.sources_dead_end += 1;
@@ -810,7 +816,11 @@ mod tests {
         assert_eq!(&t[10..11], "T");
         assert!(t.ends_with('Z'));
         let year: i64 = t[..4].parse().unwrap();
-        assert!((2026..2200).contains(&year), "sane wall-clock year, got {}", t);
+        assert!(
+            (2026..2200).contains(&year),
+            "sane wall-clock year, got {}",
+            t
+        );
     }
 
     fn run_fixture() -> PipelineOutput {
@@ -888,11 +898,19 @@ mod tests {
         // instant, enabling deterministic test fixtures.
         let extractor = RecordedExtractor::from_fixture().unwrap();
         let fixed_time = "2026-07-05T14:30:00Z";
-        let out = run_with_time(crate::literature::FIXTURE_OPENALEX_BATCH, &extractor, Some(fixed_time.to_string())).unwrap();
+        let out = run_with_time(
+            crate::literature::FIXTURE_OPENALEX_BATCH,
+            &extractor,
+            Some(fixed_time.to_string()),
+        )
+        .unwrap();
 
         // The injected timestamp must appear in the emitted Turtle.
         assert_eq!(out.generated_at_time, fixed_time);
-        assert!(out.turtle.contains(fixed_time), "injected timestamp must appear in emitted TTL");
+        assert!(
+            out.turtle.contains(fixed_time),
+            "injected timestamp must appear in emitted TTL"
+        );
         // Both Finding and Activity nodes must carry the timestamp.
         let timestamp_count = out.turtle.matches(fixed_time).count();
         assert!(
@@ -913,7 +931,10 @@ mod tests {
         assert_eq!(source_tier(Some("   ")), Tier::LicenseRestricted);
         assert_eq!(source_tier(Some("cc-by-nc")), Tier::LicenseRestricted);
         assert_eq!(source_tier(Some("cc-by-nd")), Tier::LicenseRestricted);
-        assert_eq!(source_tier(Some("all-rights-reserved")), Tier::LicenseRestricted);
+        assert_eq!(
+            source_tier(Some("all-rights-reserved")),
+            Tier::LicenseRestricted
+        );
         assert_eq!(source_tier(Some("cc-by")), Tier::Machine);
         assert_eq!(source_tier(Some("CC-BY")), Tier::Machine);
         assert_eq!(source_tier(Some("cc-by-sa")), Tier::Machine);
@@ -924,7 +945,10 @@ mod tests {
     #[test]
     fn tier_graph_iri_names_the_vocab_constant() {
         // Direct unit test for the public `Tier::graph_iri` (all three variants).
-        assert_eq!(Tier::HandAuthored.graph_iri(), crate::vocab::TIER_HAND_AUTHORED_GRAPH);
+        assert_eq!(
+            Tier::HandAuthored.graph_iri(),
+            crate::vocab::TIER_HAND_AUTHORED_GRAPH
+        );
         assert_eq!(Tier::Machine.graph_iri(), crate::vocab::TIER_MACHINE_GRAPH);
         assert_eq!(
             Tier::LicenseRestricted.graph_iri(),
@@ -972,7 +996,10 @@ mod tests {
         // Machine tier: no findings (all sources are restricted).
         assert!(!out.machine_tier.contains("a pkg:Finding"));
         // Restricted tier: all four grounded findings land here.
-        assert_eq!(out.license_restricted_tier.matches("a pkg:Finding").count(), 4);
+        assert_eq!(
+            out.license_restricted_tier.matches("a pkg:Finding").count(),
+            4
+        );
         // A Complete batch carries NO incompleteness marker.
         assert!(out.completeness.is_complete());
         assert!(!out.machine_tier.contains("INCOMPLETE"));

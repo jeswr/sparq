@@ -13,10 +13,7 @@ use sparq_geo::{
 
 #[test]
 fn parses_point_pos_default_crs() {
-    let g = parse_gml_literal(
-        r#"<gml:Point><gml:pos>-83.38 33.95</gml:pos></gml:Point>"#,
-    )
-    .unwrap();
+    let g = parse_gml_literal(r#"<gml:Point><gml:pos>-83.38 33.95</gml:pos></gml:Point>"#).unwrap();
     assert_eq!(g.crs, Crs::Crs84);
     assert_eq!(g.geometry, Geometry::Point(Point::new(-83.38, 33.95)));
 }
@@ -24,10 +21,9 @@ fn parses_point_pos_default_crs() {
 #[test]
 fn parses_point_gml2_coordinates() {
     // GML 2 legacy spelling: <gml:coordinates>x,y</gml:coordinates>.
-    let g = parse_gml_literal(
-        r#"<gml:Point><gml:coordinates>1.5,-2.25</gml:coordinates></gml:Point>"#,
-    )
-    .unwrap();
+    let g =
+        parse_gml_literal(r#"<gml:Point><gml:coordinates>1.5,-2.25</gml:coordinates></gml:Point>"#)
+            .unwrap();
     assert_eq!(g.geometry, Geometry::Point(Point::new(1.5, -2.25)));
 }
 
@@ -54,8 +50,7 @@ fn parses_linestring_repeated_pos() {
            </gml:LineString>"#,
     )
     .unwrap();
-    let expected =
-        LineString::new(vec![Coord { x: 0.0, y: 0.0 }, Coord { x: 1.0, y: 1.0 }]);
+    let expected = LineString::new(vec![Coord { x: 0.0, y: 0.0 }, Coord { x: 1.0, y: 1.0 }]);
     assert_eq!(g.geometry, Geometry::LineString(expected));
 }
 
@@ -78,7 +73,10 @@ fn parses_polygon_exterior_only() {
         Coord { x: 0.0, y: 4.0 },
         Coord { x: 0.0, y: 0.0 },
     ]);
-    assert_eq!(g.geometry, Geometry::Polygon(Polygon::new(exterior, vec![])));
+    assert_eq!(
+        g.geometry,
+        Geometry::Polygon(Polygon::new(exterior, vec![]))
+    );
 }
 
 #[test]
@@ -132,7 +130,10 @@ fn parses_polygon_gml2_boundary_spellings() {
         Coord { x: 0.0, y: 4.0 },
         Coord { x: 0.0, y: 0.0 },
     ]);
-    assert_eq!(g.geometry, Geometry::Polygon(Polygon::new(exterior, vec![])));
+    assert_eq!(
+        g.geometry,
+        Geometry::Polygon(Polygon::new(exterior, vec![]))
+    );
 }
 
 #[test]
@@ -199,7 +200,10 @@ fn parses_multisurface_of_polygons() {
         ]),
         vec![],
     );
-    assert_eq!(g.geometry, Geometry::MultiPolygon(MultiPolygon::new(vec![p1, p2])));
+    assert_eq!(
+        g.geometry,
+        Geometry::MultiPolygon(MultiPolygon::new(vec![p1, p2]))
+    );
 }
 
 #[test]
@@ -219,9 +223,10 @@ fn namespace_prefix_is_irrelevant() {
 
 #[test]
 fn srs_name_crs84_default_equivalent() {
-    let with = parse_gml_literal(
-        &format!(r#"<gml:Point srsName="{}"><gml:pos>-83.38 33.95</gml:pos></gml:Point>"#, vocab::CRS84),
-    )
+    let with = parse_gml_literal(&format!(
+        r#"<gml:Point srsName="{}"><gml:pos>-83.38 33.95</gml:pos></gml:Point>"#,
+        vocab::CRS84
+    ))
     .unwrap();
     assert_eq!(with.crs, Crs::Crs84);
     assert_eq!(with.geometry, Geometry::Point(Point::new(-83.38, 33.95)));
@@ -404,7 +409,11 @@ fn arc_string_densifies_to_linestring_within_tolerance() {
     // The endpoints are exact, and every vertex lies on the unit circle.
     assert!((coords.first().unwrap().x - 1.0).abs() < 1e-9);
     assert!((coords.last().unwrap().x + 1.0).abs() < 1e-9);
-    assert!(coords.len() > 10, "semicircle densified to {} pts", coords.len());
+    assert!(
+        coords.len() > 10,
+        "semicircle densified to {} pts",
+        coords.len()
+    );
     // Vertices sit on the circle to f64 precision; the polyline approximation is
     // the chords BETWEEN them, bounded by the 5-degree-per-chord step.
     assert!(max_radial_error(&coords, Coord { x: 0.0, y: 0.0 }, 1.0) < 1e-9);
@@ -418,7 +427,10 @@ fn arc_string_densifies_to_linestring_within_tolerance() {
             (a1 - a0).abs().to_degrees()
         })
         .fold(0.0, f64::max);
-    assert!(max_step_deg <= 5.0 + 1e-6, "max angular step {max_step_deg} deg");
+    assert!(
+        max_step_deg <= 5.0 + 1e-6,
+        "max angular step {max_step_deg} deg"
+    );
 }
 
 #[test]
@@ -537,7 +549,11 @@ fn surface_with_arc_ring_densifies_to_polygon() {
     let ring: Vec<Coord<f64>> = p.exterior().coords().cloned().collect();
     // Vertices lie on the unit circle; the ring is closed.
     assert!(max_radial_error(&ring, Coord { x: 0.0, y: 0.0 }, 1.0) < 1e-9);
-    assert_eq!(ring.first().unwrap(), ring.last().unwrap(), "ring must close");
+    assert_eq!(
+        ring.first().unwrap(),
+        ring.last().unwrap(),
+        "ring must close"
+    );
 }
 
 #[test]
@@ -572,10 +588,9 @@ fn three_d_linestring_drops_z() {
 #[test]
 fn three_d_srs_dimension_on_pos_element() {
     // srsDimension may sit on the gml:pos itself, not just the root.
-    let g = parse_gml_literal(
-        r#"<gml:Point><gml:pos srsDimension="3">7 8 9</gml:pos></gml:Point>"#,
-    )
-    .unwrap();
+    let g =
+        parse_gml_literal(r#"<gml:Point><gml:pos srsDimension="3">7 8 9</gml:pos></gml:Point>"#)
+            .unwrap();
     assert_eq!(g.geometry, Geometry::Point(Point::new(7.0, 8.0)));
 }
 
@@ -638,7 +653,9 @@ fn gml_equals_its_wkt_twin() {
 fn parse_geometry_literal_dispatches_by_datatype() {
     assert!(is_geometry_datatype(vocab::WKT_LITERAL));
     assert!(is_geometry_datatype(vocab::GML_LITERAL));
-    assert!(!is_geometry_datatype("http://www.w3.org/2001/XMLSchema#string"));
+    assert!(!is_geometry_datatype(
+        "http://www.w3.org/2001/XMLSchema#string"
+    ));
 
     let from_dispatch = parse_geometry_literal(
         r#"<gml:Point><gml:pos>1 2</gml:pos></gml:Point>"#,
@@ -738,7 +755,10 @@ mod sparql {
     }
 
     fn names(r: &sparq_engine::QueryResult, col: usize) -> Vec<String> {
-        r.rows.iter().map(|row| row[col].as_ref().unwrap().to_string()).collect()
+        r.rows
+            .iter()
+            .map(|row| row[col].as_ref().unwrap().to_string())
+            .collect()
     }
 
     #[test]

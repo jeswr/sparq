@@ -166,7 +166,15 @@ impl EliasFano {
                 zeros += 1;
             }
         }
-        Some(Self { hi, lo, sel1, sel0, l, n, hi_bits })
+        Some(Self {
+            hi,
+            lo,
+            sel1,
+            sel0,
+            l,
+            n,
+            hi_bits,
+        })
     }
 
     /// Number of encoded values.
@@ -223,7 +231,11 @@ impl EliasFano {
     fn zero_word(&self, w: usize) -> u64 {
         let x = !self.hi[w];
         let valid = self.hi_bits - w * 64;
-        if valid < 64 { x & (u64::MAX >> (64 - valid)) } else { x }
+        if valid < 64 {
+            x & (u64::MAX >> (64 - valid))
+        } else {
+            x
+        }
     }
 
     /// Bit position of the `j`-th zero in `hi`. `j` must be less than the zero count.
@@ -294,7 +306,12 @@ impl EliasFano {
     /// a `select1` per element, so it is the fair competitor to a varint block walk.
     #[must_use]
     pub fn iter(&self) -> EliasFanoIter<'_> {
-        EliasFanoIter { ef: self, i: 0, w: 0, word: self.hi.first().copied().unwrap_or(0) }
+        EliasFanoIter {
+            ef: self,
+            i: 0,
+            w: 0,
+            word: self.hi.first().copied().unwrap_or(0),
+        }
     }
 
     /// Decodes the whole sequence back to a `Vec`. Round-trips [`EliasFano::encode`] exactly.
@@ -422,7 +439,13 @@ impl PartitionedEliasFano {
             endpoints.push(end);
             base = end;
         }
-        Some(Self { part, upper: EliasFano::encode(&endpoints)?, parts, bases, n: values.len() })
+        Some(Self {
+            part,
+            upper: EliasFano::encode(&endpoints)?,
+            parts,
+            bases,
+            n: values.len(),
+        })
     }
 
     /// Number of encoded values.
@@ -465,7 +488,10 @@ impl PartitionedEliasFano {
 
     /// Sequential decode — the scan path, partition by partition.
     pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
-        self.parts.iter().zip(self.bases.iter()).flat_map(|(ef, &b)| ef.iter().map(move |v| v + b))
+        self.parts
+            .iter()
+            .zip(self.bases.iter())
+            .flat_map(|(ef, &b)| ef.iter().map(move |v| v + b))
     }
 
     /// Decodes the whole sequence back to a `Vec`.
@@ -609,7 +635,10 @@ mod tests {
             let pef = PartitionedEliasFano::encode_with_partition(&values, 64).unwrap();
             let max = *values.last().unwrap();
             // Probe every value, its neighbours, and past the end.
-            let mut probes: Vec<u64> = values.iter().flat_map(|&v| [v.saturating_sub(1), v, v + 1]).collect();
+            let mut probes: Vec<u64> = values
+                .iter()
+                .flat_map(|&v| [v.saturating_sub(1), v, v + 1])
+                .collect();
             probes.extend([0, max, max + 1, u64::MAX]);
             for t in probes {
                 let want = naive_next_geq(&values, t);
@@ -626,7 +655,12 @@ mod tests {
         let values: Vec<u64> = (0..256u64).map(|i| i * 1_000).collect();
         let pef = PartitionedEliasFano::encode_with_partition(&values, 16).unwrap();
         for t in [1u64, 15_001, 16_000, 16_001, 255_000, 255_001] {
-            assert_eq!(pef.next_geq(t), naive_next_geq(&values, t), "next_geq({})", t);
+            assert_eq!(
+                pef.next_geq(t),
+                naive_next_geq(&values, t),
+                "next_geq({})",
+                t
+            );
         }
     }
 
@@ -651,8 +685,18 @@ mod tests {
         let pef = PartitionedEliasFano::encode(&values).unwrap();
         // A codec that is not smaller than the raw `u64` array it replaces is not a codec.
         let raw = values.len() * size_of::<u64>();
-        assert!(ef.heap_bytes() > 0 && ef.heap_bytes() < raw, "ef {} vs raw {}", ef.heap_bytes(), raw);
-        assert!(pef.heap_bytes() > 0 && pef.heap_bytes() < raw, "pef {} vs raw {}", pef.heap_bytes(), raw);
+        assert!(
+            ef.heap_bytes() > 0 && ef.heap_bytes() < raw,
+            "ef {} vs raw {}",
+            ef.heap_bytes(),
+            raw
+        );
+        assert!(
+            pef.heap_bytes() > 0 && pef.heap_bytes() < raw,
+            "pef {} vs raw {}",
+            pef.heap_bytes(),
+            raw
+        );
     }
 
     proptest::proptest! {
@@ -716,13 +760,21 @@ mod tests {
                     bytes.push(d as u8);
                 }
             }
-            Self { bytes, dir, block, n: values.len() }
+            Self {
+                bytes,
+                dir,
+                block,
+                n: values.len(),
+            }
         }
 
         fn decode_block(&self, b: usize, out: &mut Vec<u64>) {
             out.clear();
             let start = self.dir[b].1 as usize;
-            let end = self.dir.get(b + 1).map_or(self.bytes.len(), |e| e.1 as usize);
+            let end = self
+                .dir
+                .get(b + 1)
+                .map_or(self.bytes.len(), |e| e.1 as usize);
             let count = (self.n - b * self.block).min(self.block);
             let mut pos = start;
             let mut acc = 0u64;
@@ -740,7 +792,11 @@ mod tests {
                 acc = if k == 0 { x } else { acc + x };
                 out.push(acc);
             }
-            debug_assert_eq!(pos, end, "block {} varint stream must be consumed exactly", b);
+            debug_assert_eq!(
+                pos, end,
+                "block {} varint stream must be consumed exactly",
+                b
+            );
         }
 
         /// Decode-then-search successor: the baseline `next_geq`.
@@ -748,7 +804,10 @@ mod tests {
             if self.dir.is_empty() {
                 return None;
             }
-            let b = self.dir.partition_point(|&(first, _)| first <= target).saturating_sub(1);
+            let b = self
+                .dir
+                .partition_point(|&(first, _)| first <= target)
+                .saturating_sub(1);
             for b in b..self.dir.len() {
                 self.decode_block(b, scratch);
                 let j = scratch.partition_point(|&v| v < target);
@@ -793,7 +852,9 @@ mod tests {
 
         const N: usize = 1_000_000;
         const SEEKS: usize = 200_000;
-        println!("\n===== sq-96hp1 Elias-Fano A/B (NON-canonical work-box; no number asserted) =====");
+        println!(
+            "\n===== sq-96hp1 Elias-Fano A/B (NON-canonical work-box; no number asserted) ====="
+        );
         println!(
             "  NOTE: PEF bits/value includes ~{} B/partition of per-partition struct metadata \
              (one Vec set per partition) — a layout artefact of this prototype, not of PEF.",
@@ -842,14 +903,24 @@ mod tests {
             let vb_scan = t.elapsed();
 
             let bits = |b: usize| b as f64 * 8.0 / values.len() as f64;
-            println!("--- shape={} n={} span={} raw={} B ---", name, values.len(), span, raw_bytes);
+            println!(
+                "--- shape={} n={} span={} raw={} B ---",
+                name,
+                values.len(),
+                span,
+                raw_bytes
+            );
             println!(
                 "  bits/value   EF={:>7.3}  PEF={:>7.3}  varint-blocks={:>7.3}",
-                bits(ef.heap_bytes()), bits(pef.heap_bytes()), bits(vb.heap_bytes())
+                bits(ef.heap_bytes()),
+                bits(pef.heap_bytes()),
+                bits(vb.heap_bytes())
             );
             println!(
                 "  heap bytes   EF={:>10}  PEF={:>10}  varint-blocks={:>10}",
-                ef.heap_bytes(), pef.heap_bytes(), vb.heap_bytes()
+                ef.heap_bytes(),
+                pef.heap_bytes(),
+                vb.heap_bytes()
             );
             println!(
                 "  seek {} probes  EF={:>10?}  PEF={:>10?}  varint-blocks={:>10?}",
@@ -873,7 +944,12 @@ mod tests {
         for (name, values) in shapes(700) {
             let vb = VarintBlocks::encode(&values, 64);
             let mut scratch = Vec::new();
-            assert_eq!(vb.scan_sum(&mut scratch), values.iter().copied().fold(0, u64::wrapping_add), "{}", name);
+            assert_eq!(
+                vb.scan_sum(&mut scratch),
+                values.iter().copied().fold(0, u64::wrapping_add),
+                "{}",
+                name
+            );
             assert!(vb.heap_bytes() > 0, "{}", name);
             let max = *values.last().unwrap();
             for t in [0, 1, values[values.len() / 2], max, max + 1] {

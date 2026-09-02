@@ -13,9 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sparq_core::Graph;
-use sparq_serve::{
-    ChangeLog, ChangeOp, GenerationRing, GraphApplier, PodId, Writer, WriterConfig,
-};
+use sparq_serve::{ChangeLog, ChangeOp, GenerationRing, GraphApplier, PodId, Writer, WriterConfig};
 
 fn scratch(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -68,7 +66,10 @@ fn hooked_writer_records_every_commit_durably_before_ack() {
         )
         .expect("commit 1");
     // Durable-before-ack: a SEPARATE reader handle already sees this commit's record.
-    let seen = ChangeLog::open(&tmp).expect("reader open").poll(0).expect("poll");
+    let seen = ChangeLog::open(&tmp)
+        .expect("reader open")
+        .poll(0)
+        .expect("poll");
     assert_eq!(seen.len(), 1, "record durably appended before the ack");
     assert_eq!(seen[0].generation, g1);
 
@@ -83,7 +84,10 @@ fn hooked_writer_records_every_commit_durably_before_ack() {
     drop(writer); // drain + join; the log handle lives on the writer thread and drops with it
 
     // Replay from disk: exactly one record per commit, gapless, quad-exact.
-    let replayed = ChangeLog::open(&tmp).expect("reopen").poll(0).expect("poll all");
+    let replayed = ChangeLog::open(&tmp)
+        .expect("reopen")
+        .poll(0)
+        .expect("poll all");
     assert_eq!(replayed.len(), 2);
     assert_eq!((replayed[0].seq, replayed[0].generation), (0, g1));
     assert_eq!((replayed[1].seq, replayed[1].generation), (1, g2));
@@ -134,13 +138,20 @@ fn into_commit_hook_reports_append_failure_to_on_error_and_keeps_going() {
 
     // Non-forward pair: the append is rejected fail-closed → dropped + reported.
     hook(g1.as_ref(), g0.as_ref());
-    assert_eq!(errors.lock().unwrap().len(), 1, "failure surfaced to on_error");
+    assert_eq!(
+        errors.lock().unwrap().len(),
+        1,
+        "failure surfaced to on_error"
+    );
 
     // A valid pair still records (the hook survives a dropped record).
     hook(g0.as_ref(), g1.as_ref());
     assert_eq!(errors.lock().unwrap().len(), 1, "no spurious extra error");
 
-    let recs = ChangeLog::open(&tmp).expect("reopen").poll(0).expect("poll");
+    let recs = ChangeLog::open(&tmp)
+        .expect("reopen")
+        .poll(0)
+        .expect("poll");
     assert_eq!(recs.len(), 1, "exactly the valid pair was recorded");
     assert_eq!(recs[0].generation, g1.number());
     assert_eq!(recs[0].insert_count(), 1);

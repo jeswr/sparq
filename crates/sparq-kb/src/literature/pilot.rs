@@ -179,7 +179,9 @@ impl CapLedger {
 
     /// Sub-agent invocations still available.
     pub fn remaining_invocations(&self) -> usize {
-        self.caps.max_subagent_invocations.saturating_sub(self.invocations)
+        self.caps
+            .max_subagent_invocations
+            .saturating_sub(self.invocations)
     }
 
     /// Charge `n` ingested records; fail-stop if the run's record cap would be exceeded.
@@ -279,8 +281,7 @@ impl DailyLedger {
         }
         let new_used = used + n;
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("daily ledger dir: {}", e))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("daily ledger dir: {}", e))?;
         }
         std::fs::write(
             &self.path,
@@ -408,7 +409,12 @@ impl SidecarFile {
 /// The stage-order rules (fail-closed). `adopt-topic` verdicts additionally require the
 /// LAST recorded audit to have passed the pre-registered bar.
 fn enforce_stage_order(existing: &[Value], stage: &str, record: &Value) -> Result<(), String> {
-    let stage_of = |v: &Value| v.get("stage").and_then(Value::as_str).unwrap_or("").to_string();
+    let stage_of = |v: &Value| {
+        v.get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     if existing.iter().any(|v| stage_of(v) == "verdict") {
         return Err("sidecar: the verdict is terminal — nothing appends after it".to_string());
     }
@@ -760,7 +766,10 @@ impl PilotRun {
                     .map_err(|e| format!("staging write {}: {}", name, e))
             };
             w("machine-tier.ttl", &tiered.machine_tier)?;
-            w("license-restricted-tier.ttl", &tiered.license_restricted_tier)?;
+            w(
+                "license-restricted-tier.ttl",
+                &tiered.license_restricted_tier,
+            )?;
             w(
                 "restricted-public-projection.ttl",
                 &tiered.restricted_public_projection,
@@ -823,7 +832,12 @@ impl PilotRun {
             quarantined_detail: sc
                 .quarantined
                 .iter()
-                .map(|q| (q.source_doi.clone(), categorize_reason(&q.reason).to_string()))
+                .map(|q| {
+                    (
+                        q.source_doi.clone(),
+                        categorize_reason(&q.reason).to_string(),
+                    )
+                })
                 .collect(),
             shacl_checked,
             shacl_conforms,
@@ -1136,7 +1150,8 @@ pub fn categorize_reason(reason: &str) -> &'static str {
 pub fn quarantine_reason_counts(sc: &pipeline::Sidecar) -> BTreeMap<String, usize> {
     let mut m = BTreeMap::new();
     for q in &sc.quarantined {
-        *m.entry(categorize_reason(&q.reason).to_string()).or_insert(0) += 1;
+        *m.entry(categorize_reason(&q.reason).to_string())
+            .or_insert(0) += 1;
     }
     m
 }
@@ -1306,18 +1321,20 @@ pub fn live_emit_allowed(sidecar_raw: &str) -> Result<(), String> {
         .get("min_precision")
         .and_then(Value::as_f64)
         .ok_or_else(|| "live-emit gate: bar has no min_precision".to_string())?;
-    let min_sample = bar
-        .get("min_sample")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "live-emit gate: bar has no min_sample".to_string())?
-        as usize;
+    let min_sample =
+        bar.get("min_sample")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "live-emit gate: bar has no min_sample".to_string())? as usize;
 
     let metrics = chain
         .iter()
         .find(|v| stage_of(v) == "metrics")
         .ok_or_else(|| "live-emit gate: no metrics record".to_string())?;
     if let Some(err) = metrics.get("error").and_then(Value::as_str) {
-        return Err(format!("live-emit gate: the run recorded an error: {}", err));
+        return Err(format!(
+            "live-emit gate: the run recorded an error: {}",
+            err
+        ));
     }
     if metrics.get("shacl_checked").and_then(Value::as_bool) != Some(true)
         || metrics.get("shacl_conforms").and_then(Value::as_bool) != Some(true)
@@ -1380,7 +1397,10 @@ pub fn live_emit(sidecar_raw: &str, tiered: &TieredOutput, out_dir: &Path) -> Re
             .map_err(|e| format!("live-emit write {}: {}", name, e))
     };
     w("machine-tier.ttl", &tiered.machine_tier)?;
-    w("license-restricted-tier.ttl", &tiered.license_restricted_tier)?;
+    w(
+        "license-restricted-tier.ttl",
+        &tiered.license_restricted_tier,
+    )?;
     w(
         "restricted-public-projection.ttl",
         &tiered.restricted_public_projection,
@@ -1403,13 +1423,7 @@ pub fn reconstruct_inverted_abstract(inv: &Value) -> Option<String> {
         }
     }
     words.sort();
-    Some(
-        words
-            .iter()
-            .map(|(_, w)| *w)
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    Some(words.iter().map(|(_, w)| *w).collect::<Vec<_>>().join(" "))
 }
 
 /// Normalise one page of a LIVE OpenAlex `/works` response into the connector's
@@ -1592,7 +1606,10 @@ mod tests {
         let (stubs, _) = parse_openalex_batch(FIXTURE_OPENALEX_BATCH).unwrap();
         let mut ledger = CapLedger::new(HardCaps::default());
         run.extract_batched(&ex, &stubs, 8, &mut ledger).unwrap();
-        assert!(called.get(), "the extractor ran (the assertion above fired)");
+        assert!(
+            called.get(),
+            "the extractor ran (the assertion above fired)"
+        );
     }
 
     #[test]
@@ -1627,19 +1644,35 @@ mod tests {
         let mut l = CapLedger::new(caps);
         // Records: 5 ok, then +1 refused.
         l.try_charge_records(5).unwrap();
-        assert!(l.try_charge_records(1).unwrap_err().contains("cap fail-stop"));
+        assert!(l
+            .try_charge_records(1)
+            .unwrap_err()
+            .contains("cap fail-stop"));
         assert_eq!(l.records_used(), 5, "a refused charge does not count");
         // API requests: 2 ok, third refused.
         l.try_charge_api_request().unwrap();
         l.try_charge_api_request().unwrap();
-        assert!(l.try_charge_api_request().unwrap_err().contains("cap fail-stop"));
+        assert!(l
+            .try_charge_api_request()
+            .unwrap_err()
+            .contains("cap fail-stop"));
         // Invocations: 1 ok, second refused.
         l.try_charge_invocation(50).unwrap();
-        assert!(l.try_charge_invocation(10).unwrap_err().contains("invocation cap"));
+        assert!(l
+            .try_charge_invocation(10)
+            .unwrap_err()
+            .contains("invocation cap"));
         // Per-invocation prompt ceiling.
         let mut l2 = CapLedger::new(caps);
-        assert!(l2.try_charge_invocation(101).unwrap_err().contains("per-invocation"));
-        assert_eq!(l2.invocations_used(), 0, "a refused invocation does not count");
+        assert!(l2
+            .try_charge_invocation(101)
+            .unwrap_err()
+            .contains("per-invocation"));
+        assert_eq!(
+            l2.invocations_used(),
+            0,
+            "a refused invocation does not count"
+        );
     }
 
     #[test]
@@ -1661,7 +1694,11 @@ mod tests {
         let err = run
             .extract_batched(&MustNotRun, &stubs, 1, &mut ledger)
             .unwrap_err();
-        assert!(err.contains("aborting BEFORE any invocation"), "got: {}", err);
+        assert!(
+            err.contains("aborting BEFORE any invocation"),
+            "got: {}",
+            err
+        );
         assert_eq!(ledger.invocations_used(), 0);
     }
 
@@ -1672,7 +1709,10 @@ mod tests {
         assert_eq!(ledger.used_today("2026-07-05").unwrap(), 0);
         assert_eq!(ledger.charge("2026-07-05", 8, 10).unwrap(), 8);
         // Over-cap refused, file unchanged.
-        assert!(ledger.charge("2026-07-05", 3, 10).unwrap_err().contains("cap fail-stop"));
+        assert!(ledger
+            .charge("2026-07-05", 3, 10)
+            .unwrap_err()
+            .contains("cap fail-stop"));
         assert_eq!(ledger.used_today("2026-07-05").unwrap(), 8);
         // Within cap still fine.
         assert_eq!(ledger.charge("2026-07-05", 2, 10).unwrap(), 10);
@@ -1700,9 +1740,7 @@ mod tests {
         let err = run.sidecar().chain().unwrap_err();
         assert!(err.contains("retro-edited"), "got: {}", err);
         // Further appends REFUSE on the broken chain.
-        let err = run
-            .record_verdict("iterate", "n", "c")
-            .unwrap_err();
+        let err = run.record_verdict("iterate", "n", "c").unwrap_err();
         assert!(err.contains("retro-edited"), "got: {}", err);
     }
 
@@ -1729,12 +1767,20 @@ mod tests {
         let err = s
             .append(json!({ "stage": "verdict", "verdict": "adopt-topic" }))
             .unwrap_err();
-        assert!(err.contains("PASSED the pre-registered bar"), "got: {}", err);
+        assert!(
+            err.contains("PASSED the pre-registered bar"),
+            "got: {}",
+            err
+        );
         // Unknown verdict refused.
         let err = s
             .append(json!({ "stage": "verdict", "verdict": "ship-it" }))
             .unwrap_err();
-        assert!(err.contains("adopt-topic | iterate | abandon"), "got: {}", err);
+        assert!(
+            err.contains("adopt-topic | iterate | abandon"),
+            "got: {}",
+            err
+        );
         // iterate verdict is fine, and is TERMINAL.
         s.append(json!({ "stage": "verdict", "verdict": "iterate" }))
             .unwrap();
@@ -1756,10 +1802,7 @@ mod tests {
         assert!(run.record_audit(20, 0.85, "test").unwrap());
         // All three audits recorded verbatim (append-only, no retro-editing).
         let chain = run.sidecar().chain().unwrap();
-        let audits: Vec<&Value> = chain
-            .iter()
-            .filter(|v| v["stage"] == "audit")
-            .collect();
+        let audits: Vec<&Value> = chain.iter().filter(|v| v["stage"] == "audit").collect();
         assert_eq!(audits.len(), 3);
         assert_eq!(audits[0]["audited_precision"], 1.0);
         assert_eq!(audits[1]["audited_precision"], 0.75);
@@ -1781,8 +1824,13 @@ mod tests {
         let mut ledger = CapLedger::new(HardCaps::default());
         // A SHACL stand-in gate for the pure test (the binary wires the real one).
         let gate = |_ttl: &str| Ok(true);
-        run.execute_dry(&fixture_inputs(Some(&staging)), &ex, &mut ledger, Some(&gate))
-            .unwrap();
+        run.execute_dry(
+            &fixture_inputs(Some(&staging)),
+            &ex,
+            &mut ledger,
+            Some(&gate),
+        )
+        .unwrap();
 
         let raw = || std::fs::read_to_string(run.sidecar().path()).unwrap();
         // NO audit recorded => refused.
@@ -1795,7 +1843,11 @@ mod tests {
         // Under-sized sample => refused even at precision 1.0.
         run.record_audit(4, 1.0, "test").unwrap();
         let err = live_emit_allowed(&raw()).unwrap_err();
-        assert!(err.contains("below the pre-registered minimum"), "got: {}", err);
+        assert!(
+            err.contains("below the pre-registered minimum"),
+            "got: {}",
+            err
+        );
         // Passing audit => allowed.
         run.record_audit(20, 0.9, "test").unwrap();
         live_emit_allowed(&raw()).unwrap();
@@ -1848,7 +1900,10 @@ mod tests {
         let raw = std::fs::read_to_string(run.sidecar().path()).unwrap();
         // No audit => live_emit refuses AND writes nothing (fail-closed).
         assert!(live_emit(&raw, &tiered, &out).is_err());
-        assert!(!out.exists(), "no KB-facing artifact may exist after a refusal");
+        assert!(
+            !out.exists(),
+            "no KB-facing artifact may exist after a refusal"
+        );
     }
 
     // ---- Fixture-driven end-to-end dry run (acceptance) -------------------------------
@@ -1869,7 +1924,10 @@ mod tests {
         assert_eq!(m.grounded, 4);
         assert_eq!(m.quarantined, 2);
         assert!((m.grounding_rate - 4.0 / 6.0).abs() < 1e-12);
-        assert_eq!(m.subagent_invocations, 1, "3 stubs at batch_size=8 = one batch");
+        assert_eq!(
+            m.subagent_invocations, 1,
+            "3 stubs at batch_size=8 = one batch"
+        );
         // Fail-closed licensing: the fixture has no licences, all findings restricted.
         assert_eq!(m.machine_tier_findings, 0);
         assert_eq!(m.license_restricted_findings, 4);
@@ -1919,8 +1977,14 @@ mod tests {
         // The committed-sidecar licensing invariant: NO abstract-derived text. Every
         // fixture justification lives in the abstracts; none may appear in the sidecar.
         let sidecar_raw = std::fs::read_to_string(run.sidecar().path()).unwrap();
-        assert!(!sidecar_raw.contains("chunk-parallel"), "no abstract text in sidecar");
-        assert!(!sidecar_raw.contains("zero-knowledge protocol"), "no abstract text");
+        assert!(
+            !sidecar_raw.contains("chunk-parallel"),
+            "no abstract text in sidecar"
+        );
+        assert!(
+            !sidecar_raw.contains("zero-knowledge protocol"),
+            "no abstract text"
+        );
     }
 
     #[test]
@@ -1929,8 +1993,7 @@ mod tests {
         // COUNTED (reason-tagged, no text) in the committed sidecar metrics record — the
         // grounding_rate=1.0/quarantined=0 blind spot the first pilot iteration found.
         let dir = tmpdir("boundary-rejects");
-        let run =
-            PilotRun::preregister(test_cfg("boundary-rejects"), dir.join("s.jsonl")).unwrap();
+        let run = PilotRun::preregister(test_cfg("boundary-rejects"), dir.join("s.jsonl")).unwrap();
         struct Rejecting(RecordedExtractor);
         impl Extractor for Rejecting {
             fn extract(&self, stubs: &[SourceStub]) -> Result<Vec<CandidateFinding>, String> {
@@ -1958,7 +2021,10 @@ mod tests {
         let m = run
             .execute_dry(&fixture_inputs(None), &ex, &mut ledger, None)
             .unwrap();
-        assert_eq!(m.boundary_rejects, 3, "boundary drops counted, never silent");
+        assert_eq!(
+            m.boundary_rejects, 3,
+            "boundary drops counted, never silent"
+        );
         assert_eq!(m.boundary_reject_reasons["justification-not-anchored"], 2);
         assert_eq!(m.boundary_reject_reasons["unknown-source"], 1);
         assert_eq!(m.boundary_rejects_detail.len(), 3);
@@ -1977,7 +2043,10 @@ mod tests {
         );
         // No abstract-derived text rides along (DOIs + categories only).
         let raw = std::fs::read_to_string(run.sidecar().path()).unwrap();
-        assert!(!raw.contains("chunk-parallel"), "no abstract text in sidecar");
+        assert!(
+            !raw.contains("chunk-parallel"),
+            "no abstract text in sidecar"
+        );
     }
 
     #[test]
@@ -2055,8 +2124,7 @@ mod tests {
         let raw = include_str!("../../ingest/literature-seeds.toml");
         let seeds = parse_seed_registry(raw).unwrap();
         assert!(seeds.len() >= 20, "the committed registry has its seeds");
-        let ids: std::collections::HashSet<&str> =
-            seeds.iter().map(|s| s.id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> = seeds.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids.len(), seeds.len(), "ids unique");
         let neuro = seeds
             .iter()
@@ -2118,7 +2186,10 @@ mod tests {
             categorize_reason("cited DOI does not resolve to an in-batch Source: 10.1/x"),
             "dangling-citation"
         );
-        assert_eq!(categorize_reason("source DOI not in batch"), "unknown-source");
+        assert_eq!(
+            categorize_reason("source DOI not in batch"),
+            "unknown-source"
+        );
         assert_eq!(categorize_reason("???"), "other");
     }
 

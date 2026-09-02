@@ -640,9 +640,18 @@ fn seed_and_trim(dir: &std::path::Path) -> u64 {
     let ring: GenerationRing<Graph> =
         GenerationRing::new(load("<http://ex/s0> <http://ex/p> <http://ex/o0> .\n"));
     let g0 = ring.current();
-    let g1 = ring.publish(load("<http://ex/s1> <http://ex/p> <http://ex/o1> .\n"), [pod.clone()]);
-    let g2 = ring.publish(load("<http://ex/s2> <http://ex/p> <http://ex/o2> .\n"), [pod.clone()]);
-    let g3 = ring.publish(load("<http://ex/s3> <http://ex/p> <http://ex/o3> .\n"), [pod]);
+    let g1 = ring.publish(
+        load("<http://ex/s1> <http://ex/p> <http://ex/o1> .\n"),
+        [pod.clone()],
+    );
+    let g2 = ring.publish(
+        load("<http://ex/s2> <http://ex/p> <http://ex/o2> .\n"),
+        [pod.clone()],
+    );
+    let g3 = ring.publish(
+        load("<http://ex/s3> <http://ex/p> <http://ex/o3> .\n"),
+        [pod],
+    );
     {
         let mut log = ChangeLog::open_with_config(
             dir,
@@ -686,7 +695,10 @@ async fn trim_horizon_replays_a_trimmed_log_and_a_dropped_offset_is_410() {
     let (status, body) = poll(&cl, &base, &[("iteratorType", "TRIM_HORIZON")]).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["totalRecords"], 3 - horizon, "{body}");
-    assert_eq!(body["records"][0]["eventId"]["commitNum"], horizon, "{body}");
+    assert_eq!(
+        body["records"][0]["eventId"]["commitNum"], horizon,
+        "{body}"
+    );
     assert_eq!(body["lastSequenceNumber"], 2, "{body}");
     assert_eq!(body["nextSequenceNumber"], 3, "{body}");
     assert_eq!(body["hasMoreRecords"], false, "{body}");
@@ -694,7 +706,10 @@ async fn trim_horizon_replays_a_trimmed_log_and_a_dropped_offset_is_410() {
     // No `iteratorType` at all defaults to TRIM_HORIZON — same answer, still not a 500.
     let (status, body) = poll(&cl, &base, &[]).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["records"][0]["eventId"]["commitNum"], horizon, "{body}");
+    assert_eq!(
+        body["records"][0]["eventId"]["commitNum"], horizon,
+        "{body}"
+    );
 
     // An anchor BELOW the horizon: 410 Gone naming the horizon to resume from.
     let (status, body) = poll(&cl, &base, &[("at", "0")]).await;
@@ -710,7 +725,10 @@ async fn trim_horizon_replays_a_trimmed_log_and_a_dropped_offset_is_410() {
     let anchor = (horizon - 1).to_string();
     let (status, body) = poll(&cl, &base, &[("after", anchor.as_str())]).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["records"][0]["eventId"]["commitNum"], horizon, "{body}");
+    assert_eq!(
+        body["records"][0]["eventId"]["commitNum"], horizon,
+        "{body}"
+    );
 
     // LATEST still tails the log rather than replaying the retained records.
     let (status, body) = poll(&cl, &base, &[("iteratorType", "LATEST")]).await;

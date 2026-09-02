@@ -108,7 +108,11 @@ impl<'a> IdTerm<'a> {
             return None;
         }
         match self.dict.term_parts(self.id) {
-            TermParts::Lit { value, datatype, lang: None } => num_of_parts(value, datatype),
+            TermParts::Lit {
+                value,
+                datatype,
+                lang: None,
+            } => num_of_parts(value, datatype),
             _ => None,
         }
     }
@@ -124,7 +128,11 @@ impl<'a> IdTerm<'a> {
             return Kind::Num(Some(Num::Int(i64::from(self.id - INLINE_BASE))));
         }
         match self.dict.term_parts(self.id) {
-            TermParts::Lit { value, datatype, lang } => {
+            TermParts::Lit {
+                value,
+                datatype,
+                lang,
+            } => {
                 if let Some(slot) = lang {
                     // The stored slot may carry an RDF 1.2 base direction (`en--ltr`);
                     // the engine compares by the BCP47 tag only (case-insensitively),
@@ -284,9 +292,11 @@ impl CompareTerm for IdTerm<'_> {
             // `" 1"^^xsd:integer` is value-1; a per-datatype-ill-formed `"1.5"^^xsd:integer`
             // is `None` (type error), mirroring the engine seam and the graph cache. The XSD
             // f64 spellings (INF/-INF/NaN, not inf/infinity) are enforced by `parse_xsd_f64`.
-            TermParts::Lit { value, datatype, lang: None }
-                if is_numeric_dt(datatype) && num_of_parts(value, datatype).is_some() =>
-            {
+            TermParts::Lit {
+                value,
+                datatype,
+                lang: None,
+            } if is_numeric_dt(datatype) && num_of_parts(value, datatype).is_some() => {
                 parse_xsd_f64(value.trim())
             }
             _ => None,
@@ -364,9 +374,11 @@ impl CompareTerm for IdTerm<'_> {
             // A dict triple term stores its component IDS — already this very term type,
             // so the generic recursion needs no reconstruction at all (the predicate id
             // resolves to an IRI, comparing by IRI string exactly like the engine).
-            TermParts::Triple([s, p, o]) => {
-                Some([IdTerm::new(self.dict, s), IdTerm::new(self.dict, p), IdTerm::new(self.dict, o)])
-            }
+            TermParts::Triple([s, p, o]) => Some([
+                IdTerm::new(self.dict, s),
+                IdTerm::new(self.dict, p),
+                IdTerm::new(self.dict, o),
+            ]),
             _ => None,
         }
     }
@@ -419,7 +431,11 @@ mod tests {
         let b = d.intern_blank("b0");
         let i = iri(&mut d, "http://ex/i");
         let l = lit(&mut d, "x", XSD_STRING);
-        let lang = d.intern_lit("chat", "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString", Some("fr"));
+        let lang = d.intern_lit(
+            "chat",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+            Some("fr"),
+        );
         let inline = lit(&mut d, "7", "http://www.w3.org/2001/XMLSchema#integer");
         assert!(is_inline(inline), "canonical small xsd:integer must inline");
         let tt = d.intern(&Term::Triple(Box::new(Triple::new(
@@ -499,9 +515,21 @@ mod tests {
         let ten = lit(&mut d, "10", int);
         let two = lit(&mut d, "2", int);
         let s11 = lit(&mut d, "11", XSD_STRING);
-        assert_eq!(compare_ids(&d, ten, s11), Ordering::Less, "Numeric < String by kind");
-        assert_eq!(compare_ids(&d, s11, two), Ordering::Greater, "String > Numeric (was lexical Less)");
-        assert_eq!(compare_ids(&d, ten, two), Ordering::Greater, "10 > 2 — consistent");
+        assert_eq!(
+            compare_ids(&d, ten, s11),
+            Ordering::Less,
+            "Numeric < String by kind"
+        );
+        assert_eq!(
+            compare_ids(&d, s11, two),
+            Ordering::Greater,
+            "String > Numeric (was lexical Less)"
+        );
+        assert_eq!(
+            compare_ids(&d, ten, two),
+            Ordering::Greater,
+            "10 > 2 — consistent"
+        );
         // Mixed exact/inexact at the collapse: double(2^53) equals int 2^53 exactly,
         // and sits strictly below int 2^53+1 (was a three-way Equal tie).
         let big = lit(&mut d, "9007199254740992", int);
@@ -521,7 +549,11 @@ mod tests {
         let a = lit(&mut d, "9007199254740992", int);
         let b = lit(&mut d, "9007199254740993", int);
         let (ta, tb) = (IdTerm::new(&d, a), IdTerm::new(&d, b));
-        assert_eq!(ta.as_f64(), tb.as_f64(), "the f64 keys must collapse for this pin");
+        assert_eq!(
+            ta.as_f64(),
+            tb.as_f64(),
+            "the f64 keys must collapse for this pin"
+        );
         assert_eq!(compare_ids(&d, a, b), Ordering::Less);
         assert_eq!(compare_ids(&d, b, a), Ordering::Greater);
         assert_eq!(compare_ids(&d, a, a), Ordering::Equal);
@@ -549,8 +581,16 @@ mod tests {
         assert_eq!(compare_ids(&d, f, t), Ordering::Less);
         assert_eq!(compare_ids(&d, one, t), Ordering::Equal);
         // Language strings: the tag matches case-insensitively, then values compare.
-        let en1 = d.intern_lit("apple", "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString", Some("en"));
-        let en2 = d.intern_lit("banana", "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString", Some("EN"));
+        let en1 = d.intern_lit(
+            "apple",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+            Some("en"),
+        );
+        let en2 = d.intern_lit(
+            "banana",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+            Some("EN"),
+        );
         assert_eq!(compare_ids(&d, en1, en2), Ordering::Less);
         // Same other-XSD datatype: lexical order.
         let y1 = lit(&mut d, "2020", "http://www.w3.org/2001/XMLSchema#gYear");
@@ -589,7 +629,10 @@ mod tests {
             d.intern(&Term::Triple(Box::new(Triple::new(
                 NamedNode::new_unchecked("http://ex/s"),
                 NamedNode::new_unchecked("http://ex/p"),
-                Term::Literal(Literal::new_typed_literal(o, NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"))),
+                Term::Literal(Literal::new_typed_literal(
+                    o,
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
+                )),
             ))))
         };
         let one = mk(&mut d, "1");
@@ -601,7 +644,10 @@ mod tests {
         let other_p = d.intern(&Term::Triple(Box::new(Triple::new(
             NamedNode::new_unchecked("http://ex/s"),
             NamedNode::new_unchecked("http://ex/q"),
-            Term::Literal(Literal::new_typed_literal("0", NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"))),
+            Term::Literal(Literal::new_typed_literal(
+                "0",
+                NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
+            )),
         ))));
         assert_eq!(compare_ids(&d, two, other_p), Ordering::Less); // p < q
     }
@@ -636,10 +682,13 @@ mod tests {
             ("9", "http://www.w3.org/2001/XMLSchema#integer"),
             ("-3", "http://www.w3.org/2001/XMLSchema#integer"),
             (" 12 ", "http://www.w3.org/2001/XMLSchema#integer"), // trimmed
-            ("99999999999999999999999999", "http://www.w3.org/2001/XMLSchema#integer"), // beyond i64
+            (
+                "99999999999999999999999999",
+                "http://www.w3.org/2001/XMLSchema#integer",
+            ), // beyond i64
             ("1.5", "http://www.w3.org/2001/XMLSchema#integer"),  // ill-formed integer
-            ("9.50", XSD_DECIMAL), // scale-preserving
-            ("abc", XSD_DECIMAL),  // ill-formed
+            ("9.50", XSD_DECIMAL),                                // scale-preserving
+            ("abc", XSD_DECIMAL),                                 // ill-formed
             ("1.5E0", XSD_DOUBLE),
             ("INF", XSD_DOUBLE),
             ("inf", XSD_DOUBLE), // rejected non-XSD spelling

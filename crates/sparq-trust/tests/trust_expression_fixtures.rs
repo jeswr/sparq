@@ -180,9 +180,8 @@ fn every_referenced_fixture_parses() {
         let data = read(&case.data);
         let mut named_graphs = 0usize;
         for result in TriGParser::new().for_reader(data.as_bytes()) {
-            let quad = result.unwrap_or_else(|e| {
-                panic!("{} must be valid TriG: {}", case.data.display(), e)
-            });
+            let quad = result
+                .unwrap_or_else(|e| panic!("{} must be valid TriG: {}", case.data.display(), e));
             if !matches!(quad.graph_name, oxrdf::GraphName::DefaultGraph) {
                 named_graphs += 1;
             }
@@ -268,13 +267,24 @@ fn every_trustx_iri_in_the_suite_is_a_real_vocabulary_term() {
             let text = read(path);
             let used = if path == &case.data {
                 trustx_iris(TriGParser::new().for_reader(text.as_bytes()).map(|r| {
-                    let q = r.unwrap_or_else(|e| panic!("{} must be valid TriG: {}", path.display(), e));
-                    (q.subject.to_string(), q.predicate.as_str().to_string(), q.object)
+                    let q = r
+                        .unwrap_or_else(|e| panic!("{} must be valid TriG: {}", path.display(), e));
+                    (
+                        q.subject.to_string(),
+                        q.predicate.as_str().to_string(),
+                        q.object,
+                    )
                 }))
             } else {
                 trustx_iris(TurtleParser::new().for_reader(text.as_bytes()).map(|r| {
-                    let t = r.unwrap_or_else(|e| panic!("{} must be valid Turtle: {}", path.display(), e));
-                    (t.subject.to_string(), t.predicate.as_str().to_string(), t.object)
+                    let t = r.unwrap_or_else(|e| {
+                        panic!("{} must be valid Turtle: {}", path.display(), e)
+                    });
+                    (
+                        t.subject.to_string(),
+                        t.predicate.as_str().to_string(),
+                        t.object,
+                    )
                 }))
             };
             assert!(

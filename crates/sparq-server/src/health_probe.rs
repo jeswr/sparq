@@ -235,6 +235,10 @@ mod tests {
         });
         let result = run_probe(&addr).await;
         // The 200 status line is in the first chunk, so the probe should succeed.
-        assert!(result.is_ok(), "healthy large response must succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "healthy large response must succeed: {:?}",
+            result
+        );
     }
 }

@@ -30,7 +30,10 @@ fn main() {
         branch,
         Epoch(7),
         TopicId::from_bytes([3u8; 32]),
-        Validity { not_before: 100, not_after: 200 },
+        Validity {
+            not_before: 100,
+            not_after: 200,
+        },
         vec!["wss://broker.example".to_string()],
     );
     grant.authority = vec![Authority::Read];
@@ -40,7 +43,12 @@ fn main() {
     println!("CAP_ID = {}", hex::encode(grant.cap_id().as_bytes()));
 
     // block envelope (fixed nonce + block id => deterministic ciphertext)
-    let ctx = BlockContext { repo, branch, epoch: Epoch(7), kind: ObjectKind::Operation };
+    let ctx = BlockContext {
+        repo,
+        branch,
+        epoch: Epoch(7),
+        kind: ObjectKind::Operation,
+    };
     let env = seal_block(
         &k,
         &ctx,
@@ -53,7 +61,10 @@ fn main() {
     )
     .unwrap();
     println!("BLOCK_ENVELOPE = {}", hex::encode(env.encode()));
-    println!("COMMIT_ID_OF_BLOCK = {}", hex::encode(env.commit_id().as_bytes()));
+    println!(
+        "COMMIT_ID_OF_BLOCK = {}",
+        hex::encode(env.commit_id().as_bytes())
+    );
 
     // commit plaintext (fixed author seed)
     let author = SecretSigningKey::from_seed([3u8; 32]);
@@ -101,12 +112,22 @@ fn main() {
 
     // secret-bearing capability
     let publisher = SecretSigningKey::from_seed([2u8; 32]);
-    let mut write =
-        Capability::new_write(base_grant(
-            repo, branch, Epoch(7), TopicId::from_bytes([3u8; 32]),
-            Validity { not_before: 100, not_after: 200 },
+    let mut write = Capability::new_write(
+        base_grant(
+            repo,
+            branch,
+            Epoch(7),
+            TopicId::from_bytes([3u8; 32]),
+            Validity {
+                not_before: 100,
+                not_after: 200,
+            },
             vec!["wss://broker.example".to_string()],
-        ), Secret32([9u8; 32]), &publisher).unwrap();
+        ),
+        Secret32([9u8; 32]),
+        &publisher,
+    )
+    .unwrap();
     write.grant.cap_nonce = [0x42; 32];
     write.grant.sign(&admin);
     println!("CAP_SECRET = {}", hex::encode(write.encode_secret()));

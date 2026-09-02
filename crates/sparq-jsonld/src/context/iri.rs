@@ -822,7 +822,9 @@ mod tests {
     fn unicode_iri_code_points_follow_ucschar() {
         // Positive: ucschar in the BMP, in the CJK compatibility range, and in plane 1.
         assert!(is_absolute_iri("http://example.com/na\u{ef}ve"));
-        assert!(is_absolute_iri("http://\u{4f8b}\u{3048}.jp/\u{30d1}\u{30b9}"));
+        assert!(is_absolute_iri(
+            "http://\u{4f8b}\u{3048}.jp/\u{30d1}\u{30b9}"
+        ));
         assert!(is_absolute_iri("http://example.com/\u{f900}"));
         assert!(is_absolute_iri("http://example.com/\u{10000}"));
 
@@ -898,7 +900,9 @@ mod tests {
         assert!(is_absolute_iri("http://"));
         assert!(is_absolute_iri("file:///etc/hosts"));
         // Authority-less schemes: ipath-rootless, ipath-absolute, ipath-empty.
-        assert!(is_absolute_iri("urn:uuid:6e8bc430-9c3a-11d9-9669-0800200c9a66"));
+        assert!(is_absolute_iri(
+            "urn:uuid:6e8bc430-9c3a-11d9-9669-0800200c9a66"
+        ));
         assert!(is_absolute_iri("did:example:123#key-1"));
         assert!(is_absolute_iri("mailto:a@example.org"));
         assert!(is_absolute_iri("tag:example.com,2026:a/b"));

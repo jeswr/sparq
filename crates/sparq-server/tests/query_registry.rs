@@ -332,12 +332,11 @@ async fn explain_registered_while_in_flight_via_state_accessor() {
     // Requests are strictly sequential, so the observable count is only ever 0 or 1.
     let mut peak_count = 0usize;
     for _attempt in 0..50 {
-        let mut req = std::pin::pin!(
-            http.get(format!(
+        let mut req = std::pin::pin!(http
+            .get(format!(
                 "{base}/sparql?query=SELECT+*+WHERE+%7B+%3Fs+%3Fp+%3Fo+%7D&explain=analyze"
             ))
-            .send()
-        );
+            .send());
         let explain_resp = loop {
             tokio::select! {
                 biased;
@@ -457,7 +456,11 @@ async fn remaining(base: &str) -> usize {
 #[tokio::test]
 async fn running_update_is_listed_and_killable() {
     let base = spawn_seeded().await;
-    assert_eq!(remaining(&base).await, SEEDS, "the seed data must be loaded");
+    assert_eq!(
+        remaining(&base).await,
+        SEEDS,
+        "the seed data must be loaded"
+    );
 
     // A DELETE whose WHERE is a three-way cross product: slow enough to catch in flight.
     let update = "DELETE { ?a <http://ex/p> ?x } WHERE { \
@@ -535,7 +538,9 @@ async fn writer_survives_a_killed_update() {
             .status()
     });
 
-    let row = await_update_row(&base).await.expect("the update must register");
+    let row = await_update_row(&base)
+        .await
+        .expect("the update must register");
     let id = row["id"].as_str().unwrap();
     client()
         .delete(format!("{base}/queries/{id}"))

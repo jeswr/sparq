@@ -144,7 +144,11 @@ pub struct JsonParseError {
 
 impl std::fmt::Display for JsonParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "JSON parse error at byte {}: {}", self.position, self.message)
+        write!(
+            f,
+            "JSON parse error at byte {}: {}",
+            self.position, self.message
+        )
     }
 }
 
@@ -510,7 +514,10 @@ mod tests {
         );
         let mut out = String::new();
         o.write(&mut out);
-        assert_eq!(out, "{\"s\":\"a\\\"b\\\\c\\n\\t\",\"n\":3.5,\"a\":[true,\"x\"]}");
+        assert_eq!(
+            out,
+            "{\"s\":\"a\\\"b\\\\c\\n\\t\",\"n\":3.5,\"a\":[true,\"x\"]}"
+        );
     }
 
     #[test]
@@ -566,7 +573,10 @@ mod tests {
     fn parse_decodes_string_escapes_including_unicode_and_surrogates() {
         // Two-char escapes: quote, backslash, newline, tab, and `\/`.
         let input = "\"a\\\"b\\\\c\\n\\t\\/A\"";
-        assert_eq!(Json::parse(input).unwrap(), Json::Str("a\"b\\c\n\t/A".into()));
+        assert_eq!(
+            Json::parse(input).unwrap(),
+            Json::Str("a\"b\\c\n\t/A".into())
+        );
         // A BMP `\u` escape (U+00E9 "é").
         assert_eq!(Json::parse("\"\\u00e9\"").unwrap(), Json::Str("é".into()));
         // A surrogate-pair escape `😀` encoding U+1F600 ("😀").
@@ -601,7 +611,10 @@ mod tests {
         // `&str`, and the run loop only breaks at ASCII bytes — never mid-UTF-8-sequence
         // — so the defensive invalid-UTF-8 arm is unreachable from the public API.)
         let e = Json::parse("\"abcd\u{01}\"").unwrap_err();
-        assert_eq!(e.position, 5, "error must point at the offending byte after the run");
+        assert_eq!(
+            e.position, 5,
+            "error must point at the offending byte after the run"
+        );
         // An unterminated long run still reports "unterminated string", not a panic/hang.
         assert!(Json::parse(&format!("\"{long}")).is_err());
     }
@@ -624,7 +637,7 @@ mod tests {
         assert!(Json::parse("\"a\u{01}b\"").is_err());
         assert!(Json::parse("\"tab\there\"").is_err()); // literal TAB
         assert!(Json::parse("\"nl\nhere\"").is_err()); // literal newline
-        // The escaped forms remain accepted.
+                                                       // The escaped forms remain accepted.
         assert_eq!(Json::parse("\"\\t\"").unwrap(), Json::Str("\t".into()));
     }
 

@@ -94,16 +94,21 @@ struct Public<'a> {
 
 fn unpack(inputs: &ProofInputs) -> Public<'_> {
     match inputs {
-        ProofInputs::FilterValueDl { id, operand_enc, op, bound, datatype_const, expected } => {
-            Public {
-                id,
-                operand_enc,
-                op: *op,
-                bound: *bound,
-                datatype_const,
-                expected: *expected,
-            }
-        }
+        ProofInputs::FilterValueDl {
+            id,
+            operand_enc,
+            op,
+            bound,
+            datatype_const,
+            expected,
+        } => Public {
+            id,
+            operand_enc,
+            op: *op,
+            bound: *bound,
+            datatype_const,
+            expected: *expected,
+        },
         other => panic!("boolean lane must build the shared FilterValueDl inputs, got {other:?}"),
     }
 }
@@ -210,11 +215,19 @@ fn an_integer_leaf_cannot_satisfy_a_boolean_member_call_and_vice_versa() {
     // Sanity that (a)/(b) are NOT vacuous: each witness set DOES rebind under its
     // OWN lane constant. If the recompute were broken these would fail too.
     assert_eq!(
-        member_rebinds_leaf(int_c.value_hook, int_c.datatype_const, int_c.lexical_component),
+        member_rebinds_leaf(
+            int_c.value_hook,
+            int_c.datatype_const,
+            int_c.lexical_component
+        ),
         int_c.leaf(),
     );
     assert_eq!(
-        member_rebinds_leaf(bool_c.value_hook, bool_c.datatype_const, bool_c.lexical_component),
+        member_rebinds_leaf(
+            bool_c.value_hook,
+            bool_c.datatype_const,
+            bool_c.lexical_component
+        ),
         bool_c.leaf(),
     );
 }
@@ -318,8 +331,7 @@ fn builder_discloses_the_honest_verdict_for_every_op() {
     for (value, op, bound, expected) in VERDICTS {
         let built = build_filter_value_dl_boolean(&bool_lit(value), op, bound).unwrap();
         let p = unpack(&built.inputs);
-        let (got_op, got_bound, dt, got_expected) =
-            (p.op, p.bound, p.datatype_const, p.expected);
+        let (got_op, got_bound, dt, got_expected) = (p.op, p.bound, p.datatype_const, p.expected);
         assert_eq!(got_op, op);
         assert_eq!(got_bound, u64::from(bound));
         assert_eq!(fr(dt), datatype_const(XSD_BOOLEAN));
@@ -359,7 +371,10 @@ fn non_canonical_and_non_boolean_literals_are_fail_closed_at_the_builder() {
 fn boolean_lane_inherits_the_value_lane_dispatch_legality() {
     let built = build_filter_value_dl_boolean(&bool_lit(true), FilterOp::Eq, true).unwrap();
     let id = unpack(&built.inputs).id.clone();
-    assert_eq!(resolve_circuit(CommitmentMethod::DualLeafV1, &id), Ok(id.clone()));
+    assert_eq!(
+        resolve_circuit(CommitmentMethod::DualLeafV1, &id),
+        Ok(id.clone())
+    );
     assert!(matches!(
         resolve_circuit(CommitmentMethod::StringCanonicalV1, &id),
         Err(DispatchError::IllegalPair { .. }),
@@ -519,8 +534,14 @@ fn in_circuit_boolean_lane_accepts_honest_and_rejects_lies() {
     // (a) honest.
     assert!(
         member_accepts(
-            "sq5xdlk_ok", operand_enc, op, bound, dt, expected,
-            &built.value_hook, &built.lexical_component,
+            "sq5xdlk_ok",
+            operand_enc,
+            op,
+            bound,
+            dt,
+            expected,
+            &built.value_hook,
+            &built.lexical_component,
         ),
         "the honest boolean witness must be provable on filter_value_dl_int"
     );
@@ -528,8 +549,14 @@ fn in_circuit_boolean_lane_accepts_honest_and_rejects_lies() {
     // (b) lying verdict — the ONLY change is `expected`.
     assert!(
         !member_accepts(
-            "sq5xdlk_lie", operand_enc, op, bound, dt, !expected,
-            &built.value_hook, &built.lexical_component,
+            "sq5xdlk_lie",
+            operand_enc,
+            op,
+            bound,
+            dt,
+            !expected,
+            &built.value_hook,
+            &built.lexical_component,
         ),
         "a flipped disclosed verdict must be unprovable"
     );
@@ -543,25 +570,41 @@ fn in_circuit_boolean_lane_accepts_honest_and_rejects_lies() {
     let int_lex = FieldHex(field_to_hex(&int_c.lexical_component));
     assert!(
         member_accepts(
-            "sq5xdlk_int_ok", &int_enc, op, bound,
-            &FieldHex(field_to_hex(&datatype_const(XSD_INTEGER))), expected,
-            &int_hook, &int_lex,
+            "sq5xdlk_int_ok",
+            &int_enc,
+            op,
+            bound,
+            &FieldHex(field_to_hex(&datatype_const(XSD_INTEGER))),
+            expected,
+            &int_hook,
+            &int_lex,
         ),
         "control: the integer leaf IS provable on its own lane"
     );
     assert!(
         !member_accepts(
-            "sq5xdlk_int_on_bool", &int_enc, op, bound, dt, expected,
-            &int_hook, &int_lex,
+            "sq5xdlk_int_on_bool",
+            &int_enc,
+            op,
+            bound,
+            dt,
+            expected,
+            &int_hook,
+            &int_lex,
         ),
         "an xsd:integer leaf must be unprovable under the boolean datatype_const"
     );
     // ...and symmetrically, the boolean leaf on the integer lane.
     assert!(
         !member_accepts(
-            "sq5xdlk_bool_on_int", operand_enc, op, bound,
-            &FieldHex(field_to_hex(&datatype_const(XSD_INTEGER))), expected,
-            &built.value_hook, &built.lexical_component,
+            "sq5xdlk_bool_on_int",
+            operand_enc,
+            op,
+            bound,
+            &FieldHex(field_to_hex(&datatype_const(XSD_INTEGER))),
+            expected,
+            &built.value_hook,
+            &built.lexical_component,
         ),
         "an xsd:boolean leaf must be unprovable under the integer datatype_const"
     );

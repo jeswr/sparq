@@ -42,7 +42,11 @@ fn ex(dict: &mut Dict, l: &str) -> Id {
 }
 
 fn render(dict: &Dict, t: [Id; 3]) -> [String; 3] {
-    [dict.term(t[0]).to_string(), dict.term(t[1]).to_string(), dict.term(t[2]).to_string()]
+    [
+        dict.term(t[0]).to_string(),
+        dict.term(t[1]).to_string(),
+        dict.term(t[2]).to_string(),
+    ]
 }
 
 fn rendered_base(dict: &Dict, g: &MaterializedGraph) -> FxHashSet<[String; 3]> {
@@ -51,7 +55,12 @@ fn rendered_base(dict: &Dict, g: &MaterializedGraph) -> FxHashSet<[String; 3]> {
 
 /// Strong validity oracle: materializing ONLY the proof's asserted leaves must re-derive
 /// the conclusion (the proof really is self-contained evidence).
-fn leaves_entail(dict: &mut Dict, g: &MaterializedGraph, tree: &sparq_reason::ProofTree, t: [Id; 3]) {
+fn leaves_entail(
+    dict: &mut Dict,
+    g: &MaterializedGraph,
+    tree: &sparq_reason::ProofTree,
+    t: [Id; 3],
+) {
     let rendered: FxHashMap<[String; 3], [Id; 3]> =
         g.base_triples().map(|b| (render(dict, b), b)).collect();
     let mut leaves: Vec<[Id; 3]> = proof_leaves(tree)
@@ -59,7 +68,10 @@ fn leaves_entail(dict: &mut Dict, g: &MaterializedGraph, tree: &sparq_reason::Pr
         .map(|l| *rendered.get(l).expect("leaf not in base"))
         .collect();
     materialize_rdfs(dict, &mut leaves);
-    assert!(leaves.contains(&t), "proof leaves do not re-entail the conclusion");
+    assert!(
+        leaves.contains(&t),
+        "proof leaves do not re-entail the conclusion"
+    );
 }
 
 #[test]
@@ -159,8 +171,9 @@ fn differential_every_derived_triple_has_a_valid_proof() {
     let mut base: Vec<[Id; 3]> = Vec::new();
     let mut classes = Vec::new();
     for i in 0..4 {
-        let chain: Vec<Id> =
-            (0..5).map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..5)
+            .map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], sc, w[1]]);
         }
@@ -168,8 +181,9 @@ fn differential_every_derived_triple_has_a_valid_proof() {
     }
     let mut props = Vec::new();
     for i in 0..3 {
-        let chain: Vec<Id> =
-            (0..3).map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..3)
+            .map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], sp, w[1]]);
         }
@@ -179,12 +193,17 @@ fn differential_every_derived_triple_has_a_valid_proof() {
         }
         props.extend(chain);
     }
-    let individuals: Vec<Id> =
-        (0..120).map(|i| dict.intern_iri(&format!("http://ex/ind{i}"))).collect();
+    let individuals: Vec<Id> = (0..120)
+        .map(|i| dict.intern_iri(&format!("http://ex/ind{i}")))
+        .collect();
     for &s in &individuals {
         base.push([s, ty, classes[rng.below(classes.len())]]);
         for _ in 0..2 {
-            base.push([s, props[rng.below(props.len())], individuals[rng.below(individuals.len())]]);
+            base.push([
+                s,
+                props[rng.below(props.len())],
+                individuals[rng.below(individuals.len())],
+            ]);
         }
     }
 
@@ -193,14 +212,19 @@ fn differential_every_derived_triple_has_a_valid_proof() {
     let base_set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
     let mut checked_derived = 0usize;
     for t in g.closure() {
-        let tree = g.why(&dict, t).unwrap_or_else(|| panic!("no proof for closure triple"));
+        let tree = g
+            .why(&dict, t)
+            .unwrap_or_else(|| panic!("no proof for closure triple"));
         check_proof(&tree, &rendered, Some(&render(&dict, t)));
         if !base_set.contains(&t) {
             leaves_entail(&mut dict, &g, &tree, t);
             checked_derived += 1;
         }
     }
-    assert!(checked_derived > 500, "differential sweep too small: {checked_derived}");
+    assert!(
+        checked_derived > 500,
+        "differential sweep too small: {checked_derived}"
+    );
     // Determinism: a second run yields byte-identical proofs.
     for t in g.closure().into_iter().take(50) {
         let a = g.why(&dict, t).unwrap().to_json();
@@ -222,10 +246,7 @@ fn retraction_invalidates_or_finds_alternative_support() {
         ex(&mut dict, "a"),
         ex(&mut dict, "b"),
     );
-    let mut g = MaterializedGraph::new(
-        &mut dict,
-        &[[p, sp, q], [q, dom, c], [a, p, b], [a, q, b]],
-    );
+    let mut g = MaterializedGraph::new(&mut dict, &[[p, sp, q], [q, dom, c], [a, p, b], [a, q, b]]);
     let t = [a, ty, c];
     assert!(g.contains(&t));
     let tree = g.why(&dict, t).unwrap();
@@ -250,7 +271,9 @@ fn retraction_invalidates_or_finds_alternative_support() {
     // Re-insert: support (and proof) come back.
     g.insert(&[[a, q, b]]);
     assert!(g.contains(&t));
-    let tree = g.why(&dict, t).expect("re-inserted support restores the proof");
+    let tree = g
+        .why(&dict, t)
+        .expect("re-inserted support restores the proof");
     check_proof(&tree, &rendered_base(&dict, &g), Some(&render(&dict, t)));
 }
 
@@ -279,7 +302,13 @@ fn retraction_differential_random_edits() {
         let dels: Vec<[Id; 3]> = (0..5).map(|_| abox[rng.below(abox.len())]).collect();
         g.delete(&dels);
         let ins: Vec<[Id; 3]> = (0..3)
-            .map(|_| [inds[rng.below(inds.len())], ty, classes[rng.below(classes.len())]])
+            .map(|_| {
+                [
+                    inds[rng.below(inds.len())],
+                    ty,
+                    classes[rng.below(classes.len())],
+                ]
+            })
             .collect();
         g.insert(&ins);
         let rendered = rendered_base(&dict, &g);
@@ -292,7 +321,10 @@ fn retraction_differential_random_edits() {
         // Deleted triples that left the closure must not explain.
         for d in &dels {
             if !g.contains(d) {
-                assert!(g.why(&dict, *d).is_none(), "round {round}: proof for absent triple");
+                assert!(
+                    g.why(&dict, *d).is_none(),
+                    "round {round}: proof for absent triple"
+                );
             }
         }
         g.insert(&dels); // restore for the next round

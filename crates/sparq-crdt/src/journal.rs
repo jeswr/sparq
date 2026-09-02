@@ -38,7 +38,6 @@
 //! checksummed record format plus a magic prefix, and is written atomically
 //! (temp file + rename + directory sync) by [`write_snapshot_file`].
 
-use crate::CrdtError;
 use crate::codec::{
     expect_array, expect_object, expect_str, parse_dec_u64, parse_summary, write_json_string,
     write_summary,
@@ -47,6 +46,7 @@ use crate::envelope::{Admission, DeltaEnvelope, Limits};
 use crate::id::{DatasetId, Dot, EnvelopeId};
 use crate::quad::CanonicalQuad;
 use crate::summary::CausalSummary;
+use crate::CrdtError;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -282,10 +282,16 @@ fn decode_journal_header(
         what: "journal header",
         reason: format!("not valid JSON: {e}"),
     })?;
-    let map = expect_object(&value, "journal header", &["dataset", "epoch", "format", "frontier"])?;
+    let map = expect_object(
+        &value,
+        "journal header",
+        &["dataset", "epoch", "format", "frontier"],
+    )?;
     let format = expect_str(map, "journal header", "format")?;
     if format != JOURNAL_FORMAT_V1 {
-        return Err(CrdtError::UnsupportedFormat { found: format.to_owned() });
+        return Err(CrdtError::UnsupportedFormat {
+            found: format.to_owned(),
+        });
     }
     let dataset = DatasetId::new(expect_str(map, "journal header", "dataset")?)?;
     let epoch = parse_dec_u64(expect_str(map, "journal header", "epoch")?)?;
@@ -372,7 +378,10 @@ impl Journal {
                 .write(true)
                 .create_new(true)
                 .open(path)?;
-            let header = frame(REC_HEADER, &encode_journal_header(&admission, &CausalSummary::new()));
+            let header = frame(
+                REC_HEADER,
+                &encode_journal_header(&admission, &CausalSummary::new()),
+            );
             file.write_all(&header)?;
             file.sync_data()?;
             sync_parent_dir(path)?;
@@ -744,11 +753,7 @@ impl Snapshot {
     /// Strictly decodes and validates a snapshot image for `admission` under
     /// `limits`: magic, frame checksum, byte bound, format version, dataset,
     /// epoch, store bounds, state invariants, and byte-level canonicality.
-    pub fn decode(
-        bytes: &[u8],
-        admission: &Admission,
-        limits: &Limits,
-    ) -> Result<Self, CrdtError> {
+    pub fn decode(bytes: &[u8], admission: &Admission, limits: &Limits) -> Result<Self, CrdtError> {
         if bytes.len() > limits.max_snapshot_bytes {
             return Err(CrdtError::Oversized {
                 what: "snapshot bytes",
@@ -777,11 +782,21 @@ impl Snapshot {
         let map = expect_object(
             &value,
             "snapshot",
-            &["context", "dataset", "epoch", "format", "frontier", "stability", "store"],
+            &[
+                "context",
+                "dataset",
+                "epoch",
+                "format",
+                "frontier",
+                "stability",
+                "store",
+            ],
         )?;
         let format = expect_str(map, "snapshot", "format")?;
         if format != SNAPSHOT_FORMAT_V1 {
-            return Err(CrdtError::UnsupportedFormat { found: format.to_owned() });
+            return Err(CrdtError::UnsupportedFormat {
+                found: format.to_owned(),
+            });
         }
         let dataset = DatasetId::new(expect_str(map, "snapshot", "dataset")?)?;
         let epoch = parse_dec_u64(expect_str(map, "snapshot", "epoch")?)?;
@@ -900,7 +915,10 @@ mod tests {
     }
 
     fn admission() -> Admission {
-        Admission::new(DatasetId::new("https://example.test/datasets/team").unwrap(), 3)
+        Admission::new(
+            DatasetId::new("https://example.test/datasets/team").unwrap(),
+            3,
+        )
     }
 
     fn envelope(sequence: u64) -> Vec<u8> {
@@ -1089,7 +1107,10 @@ mod tests {
             assert_eq!(journal.len(), 2, "cut at {cut}");
             assert!(journal.get(&dot(b"peer-a", 3)).unwrap().is_none());
             // The truncated log accepts the record again after recovery.
-            assert_eq!(journal.append(&envelope(3)).unwrap(), AppendOutcome::Appended);
+            assert_eq!(
+                journal.append(&envelope(3)).unwrap(),
+                AppendOutcome::Appended
+            );
         }
     }
 
@@ -1206,8 +1227,12 @@ mod tests {
             };
             match (buffered, streamed) {
                 (
-                    CrdtError::CorruptJournal { offset: buffered, .. },
-                    CrdtError::CorruptJournal { offset: streamed, .. },
+                    CrdtError::CorruptJournal {
+                        offset: buffered, ..
+                    },
+                    CrdtError::CorruptJournal {
+                        offset: streamed, ..
+                    },
                 ) => assert_eq!(buffered, streamed),
                 other => panic!("expected two corrupt-journal errors, got {:?}", other),
             }
@@ -1230,7 +1255,12 @@ mod tests {
         assert_eq!(scanned, records.len());
         // The reused buffer tracks the largest single record, not the log —
         // this is the property that removes the whole-log memory spike.
-        assert!(peak <= 2 * largest, "peak {} exceeded 2x largest record {}", peak, largest);
+        assert!(
+            peak <= 2 * largest,
+            "peak {} exceeded 2x largest record {}",
+            peak,
+            largest
+        );
         assert!(
             peak * 4 < bytes.len(),
             "peak {} is not far below the {}-byte log; the case is too small to be meaningful",
@@ -1257,7 +1287,10 @@ mod tests {
         assert_eq!(served, vec![envelope(2)]);
         // A remote that has everything needs nothing.
         let complete = journal.frontier().clone();
-        assert!(journal.serve_missing(&complete, usize::MAX).unwrap().is_empty());
+        assert!(journal
+            .serve_missing(&complete, usize::MAX)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1279,7 +1312,10 @@ mod tests {
         assert!(journal.get(&dot(b"peer-a", 1)).unwrap().is_none()); // not servable
         assert!(journal.get(&dot(b"peer-a", 3)).unwrap().is_some());
         // Re-delivery of a pruned identity is a harmless duplicate.
-        assert_eq!(journal.append(&envelope(1)).unwrap(), AppendOutcome::Duplicate);
+        assert_eq!(
+            journal.append(&envelope(1)).unwrap(),
+            AppendOutcome::Duplicate
+        );
         // Compacting with nothing new to cover is a no-op.
         assert_eq!(journal.compact(&covered).unwrap(), 0);
         // The compacted log survives reopen with the same frontier.
@@ -1310,7 +1346,10 @@ mod tests {
         .is_err());
         // An empty dot set is rejected.
         let mut store = BTreeMap::new();
-        store.insert(quad("<https://ex/s1> <https://ex/p> \"v\" ."), BTreeSet::new());
+        store.insert(
+            quad("<https://ex/s1> <https://ex/p> \"v\" ."),
+            BTreeSet::new(),
+        );
         assert!(Snapshot::new(
             admission().dataset,
             3,
@@ -1346,7 +1385,10 @@ mod tests {
     #[test]
     fn snapshot_accessors_expose_the_parts() {
         let snapshot = sample_snapshot();
-        assert_eq!(snapshot.dataset().as_str(), "https://example.test/datasets/team");
+        assert_eq!(
+            snapshot.dataset().as_str(),
+            "https://example.test/datasets/team"
+        );
         assert!(snapshot.context().contains(&dot(b"peer-a", 1)));
         assert_eq!(snapshot.store().len(), 1);
         assert!(snapshot.frontier().contains(&dot(b"peer-a", 2)));
@@ -1376,12 +1418,18 @@ mod tests {
             Snapshot::decode(&bytes, &stale, &Limits::default()),
             Err(CrdtError::WrongEpoch { .. })
         ));
-        let limits = Limits { max_snapshot_bytes: 8, ..Limits::default() };
+        let limits = Limits {
+            max_snapshot_bytes: 8,
+            ..Limits::default()
+        };
         assert!(matches!(
             Snapshot::decode(&bytes, &admission(), &limits),
             Err(CrdtError::Oversized { .. })
         ));
-        let limits = Limits { max_store_entries: 0, ..Limits::default() };
+        let limits = Limits {
+            max_store_entries: 0,
+            ..Limits::default()
+        };
         assert!(matches!(
             Snapshot::decode(&bytes, &admission(), &limits),
             Err(CrdtError::Oversized { .. })

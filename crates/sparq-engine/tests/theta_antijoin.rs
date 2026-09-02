@@ -51,7 +51,11 @@ fn multiset(g: &Graph, q: &str) -> Table {
     let mut rows: Vec<Vec<Option<String>>> = r
         .rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()))
+                .collect()
+        })
         .collect();
     rows.sort();
     rows
@@ -97,7 +101,10 @@ fn q06_dataset() -> Graph {
     for a in 0..5usize {
         ttl.push_str(&format!("ex:a{a} foaf:name \"Author {a}\" .\n"));
         // Years 2000 + offsets; author a has (a+2) documents.
-        for (i, yr) in (0..(a + 2)).map(|i| (i, 2000 + a * 3 + i)).collect::<Vec<_>>() {
+        for (i, yr) in (0..(a + 2))
+            .map(|i| (i, 2000 + a * 3 + i))
+            .collect::<Vec<_>>()
+        {
             let cls = if i % 2 == 0 { "ex:Article" } else { "ex:Book" };
             ttl.push_str(&format!(
                 "ex:d{a}_{i} rdf:type {cls} .\n\
@@ -113,11 +120,21 @@ fn q06_dataset() -> Graph {
 fn q06_shape_equivalence() {
     let g = q06_dataset();
     // The real q06 projection.
-    let (off, on) = on_off(&g, &format!("SELECT ?yr ?name ?document WHERE {{\n{Q06_BODY}\n}}"));
+    let (off, on) = on_off(
+        &g,
+        &format!("SELECT ?yr ?name ?document WHERE {{\n{Q06_BODY}\n}}"),
+    );
     assert_eq!(off, on, "q06 result differs with theta anti-join on vs off");
-    assert!(!on.is_empty(), "q06 fixture must return the earliest document per author");
+    assert!(
+        !on.is_empty(),
+        "q06 fixture must return the earliest document per author"
+    );
     // Exactly one earliest document per author (5 authors), each of whom has ≥2 docs.
-    assert_eq!(on.len(), 5, "expected one surviving (earliest) document per author");
+    assert_eq!(
+        on.len(),
+        5,
+        "expected one surviving (earliest) document per author"
+    );
 }
 
 #[test]
@@ -155,12 +172,22 @@ fn theta_type_error_survives() {
          ex:d0 rdf:type ex:Article . ex:d0 dcterms:issued \"2001\"^^xsd:integer . ex:d0 dc:creator ex:a0 .
          ex:d1 rdf:type ex:Article . ex:d1 dcterms:issued \"not-a-year\" . ex:d1 dc:creator ex:a0 .",
     );
-    let (off, on) = on_off(&g, &format!("SELECT ?document ?yr WHERE {{\n{Q06_BODY}\n}}"));
-    assert_eq!(off, on, "type-error residual eliminated a row (must survive)");
+    let (off, on) = on_off(
+        &g,
+        &format!("SELECT ?document ?yr WHERE {{\n{Q06_BODY}\n}}"),
+    );
+    assert_eq!(
+        off, on,
+        "type-error residual eliminated a row (must survive)"
+    );
     // d0 (year 2001) has no EARLIER same-author doc that compares numerically (d1's
     // year is non-numeric → error → no match) so d0 survives; d1 (non-numeric year)
     // also survives (its ?yr errors in every comparison). Both must be present.
-    assert_eq!(on.len(), 2, "both documents must survive the error-producing residual");
+    assert_eq!(
+        on.len(),
+        2,
+        "both documents must survive the error-producing residual"
+    );
 }
 
 #[test]
@@ -187,9 +214,16 @@ fn literal_correlation_value_correct() {
         } FILTER(!bound(?k2))
     }";
     let (off, on) = on_off(&g, q);
-    assert_eq!(off, on, "literal value-equality correlation differs on vs off");
+    assert_eq!(
+        off, on,
+        "literal value-equality correlation differs on vs off"
+    );
     // Only d1 survives (its rank is the minimum for key value 1).
-    assert_eq!(on.len(), 1, "exactly one document (d1) survives the value-correct anti-join");
+    assert_eq!(
+        on.len(),
+        1,
+        "exactly one document (d1) survives the value-correct anti-join"
+    );
     assert_eq!(on[0][0].as_deref(), Some("<http://example.org/d1>"));
 }
 
@@ -220,9 +254,15 @@ fn decline_nb_in_left() {
         } FILTER(!bound(?author2))
     }";
     let (off, on) = on_off(&g, q);
-    assert_eq!(off, on, "decline path (?nb bound on left) differs on vs off");
+    assert_eq!(
+        off, on,
+        "decline path (?nb bound on left) differs on vs off"
+    );
     // ?author2 is always bound (coauthor), so !bound is never satisfied → no rows.
-    assert!(on.is_empty(), "!bound(?author2) can never hold when ?author2 is left-bound");
+    assert!(
+        on.is_empty(),
+        "!bound(?author2) can never hold when ?author2 is left-bound"
+    );
 }
 
 #[test]
@@ -328,14 +368,21 @@ fn partially_bound_shared_var_fill_through() {
         "partially-bound shared var: fast path diverged from cold (fill-through bug)"
     );
     // The cold plan eliminates ex:d0 (fill-through makes BOUND(?s) true) ⇒ 0 rows.
-    assert!(off.is_empty(), "cold plan must eliminate ex:d0 (0 rows), got {:?}", off);
+    assert!(
+        off.is_empty(),
+        "cold plan must eliminate ex:d0 (0 rows), got {:?}",
+        off
+    );
     // And the fast path must have actually FIRED on this shape (otherwise the test is
     // vacuous — it would trivially match the cold path by falling back).
     theta_antijoin_testing::set_enabled(true);
     theta_antijoin_testing::reset_stats();
     let _ = query(&g, &format!("{PFX}{q}")).expect("query");
     let (fired, _rows, _bindings) = theta_antijoin_testing::stats();
-    assert!(fired, "theta anti-join did not fire on the partially-bound-shared-var shape");
+    assert!(
+        fired,
+        "theta anti-join did not fire on the partially-bound-shared-var shape"
+    );
 }
 
 #[test]
@@ -355,16 +402,30 @@ fn hash_path_large_cardinality_equivalence() {
         }
     }
     let g = load(&ttl);
-    let (off, on) = on_off(&g, &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"));
-    assert_eq!(off, on, "hash-path large-cardinality differs from cold path");
+    let (off, on) = on_off(
+        &g,
+        &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"),
+    );
+    assert_eq!(
+        off, on,
+        "hash-path large-cardinality differs from cold path"
+    );
     // One earliest document per author.
     assert_eq!(on.len(), 200, "one surviving earliest document per author");
     // Confirm the hash path actually fired (>64 distinct correlations).
     theta_antijoin_testing::set_enabled(true);
     theta_antijoin_testing::reset_stats();
-    let _ = query(&g, &format!("{PFX}SELECT ?document WHERE {{\n{Q06_BODY}\n}}")).unwrap();
+    let _ = query(
+        &g,
+        &format!("{PFX}SELECT ?document WHERE {{\n{Q06_BODY}\n}}"),
+    )
+    .unwrap();
     let (fired, _rows, bindings) = theta_antijoin_testing::stats();
-    assert!(fired && bindings > 64, "expected the hash strategy (>64 correlations): {}", bindings);
+    assert!(
+        fired && bindings > 64,
+        "expected the hash strategy (>64 correlations): {}",
+        bindings
+    );
 }
 
 #[test]
@@ -389,16 +450,31 @@ fn blank_node_correlation_equivalence() {
         ttl.push_str(&format!("_:auth{} foaf:name \"Author {}\" .\n", a, a));
     }
     let g = load(&ttl);
-    let (off, on) = on_off(&g, &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"));
+    let (off, on) = on_off(
+        &g,
+        &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"),
+    );
     assert_eq!(off, on, "blank-node correlation differs on vs off");
     // One earliest document per author (80 authors).
-    assert_eq!(on.len(), 80, "one surviving earliest document per blank-node author");
+    assert_eq!(
+        on.len(),
+        80,
+        "one surviving earliest document per blank-node author"
+    );
     // The hash path with blank-node keys fired.
     theta_antijoin_testing::set_enabled(true);
     theta_antijoin_testing::reset_stats();
-    let _ = query(&g, &format!("{PFX}SELECT ?document WHERE {{\n{Q06_BODY}\n}}")).unwrap();
+    let _ = query(
+        &g,
+        &format!("{PFX}SELECT ?document WHERE {{\n{Q06_BODY}\n}}"),
+    )
+    .unwrap();
     let (fired, _rows, bindings) = theta_antijoin_testing::stats();
-    assert!(fired && bindings > 64, "expected hash path on blank-node keys: {}", bindings);
+    assert!(
+        fired && bindings > 64,
+        "expected hash path on blank-node keys: {}",
+        bindings
+    );
 }
 
 // ── sq-3cmr4: sameTerm-correlated and IN-correlated OPTIONAL conditions ──────────
@@ -429,7 +505,11 @@ fn sameterm_correlation_equivalence_and_fires() {
     assert_eq!(off, on, "sameTerm-correlated q06 differs on vs off");
     assert_eq!(on.len(), 5, "one surviving earliest document per author");
     let (fired, bindings) = fired_stats(&g, &sel);
-    assert!(fired && bindings >= 1, "sameTerm correlation did not fire: {}", bindings);
+    assert!(
+        fired && bindings >= 1,
+        "sameTerm correlation did not fire: {}",
+        bindings
+    );
 }
 
 #[test]
@@ -464,8 +544,16 @@ fn sameterm_vs_eq_diverge_on_value_equal_literals() {
     // earlier same-TERM-key partner: BOTH survive. The divergence from `=` is the witness.
     let (st_off, st_on) = on_off(&g, &q_tmpl("sameTerm(?k, ?k2)"));
     assert_eq!(st_off, st_on, "sameTerm correlation differs on vs off");
-    assert_eq!(st_on.len(), 2, "under sameTerm BOTH docs survive (distinct key terms)");
-    assert_ne!(eq_on.len(), st_on.len(), "= and sameTerm MUST diverge on value-equal literals");
+    assert_eq!(
+        st_on.len(),
+        2,
+        "under sameTerm BOTH docs survive (distinct key terms)"
+    );
+    assert_ne!(
+        eq_on.len(),
+        st_on.len(),
+        "= and sameTerm MUST diverge on value-equal literals"
+    );
 }
 
 #[test]
@@ -496,7 +584,11 @@ fn sameterm_literal_hash_path_equivalence() {
     assert_eq!(off, on, "sameTerm literal hash-path differs from cold path");
     assert_eq!(on.len(), 90, "one surviving earliest doc per literal name");
     let (fired, bindings) = fired_stats(&g, &sel);
-    assert!(fired && bindings > 64, "expected hash path on literal sameTerm keys: {}", bindings);
+    assert!(
+        fired && bindings > 64,
+        "expected hash path on literal sameTerm keys: {}",
+        bindings
+    );
 }
 
 #[test]
@@ -510,7 +602,11 @@ fn in_single_var_correlation_equivalence_and_fires() {
     assert_eq!(off, on, "IN-correlated q06 differs on vs off");
     assert_eq!(on.len(), 5, "one surviving earliest document per author");
     let (fired, bindings) = fired_stats(&g, &sel);
-    assert!(fired && bindings >= 1, "single-var IN correlation did not fire: {}", bindings);
+    assert!(
+        fired && bindings >= 1,
+        "single-var IN correlation did not fire: {}",
+        bindings
+    );
 }
 
 #[test]
@@ -554,7 +650,11 @@ fn parallel_hash_path_result_identical() {
     // order preservation. (The 250k end-to-end measurement lives in `q06_measure_250k`.)
     let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
     for a in 0..120usize {
-        let author = if a % 2 == 0 { format!("ex:a{}", a) } else { format!("_:a{}", a) };
+        let author = if a % 2 == 0 {
+            format!("ex:a{}", a)
+        } else {
+            format!("_:a{}", a)
+        };
         ttl.push_str(&format!("{} foaf:name \"A{}\" .\n", author, a));
         for i in 0..3usize {
             let yr = 2000 + i;
@@ -565,7 +665,10 @@ fn parallel_hash_path_result_identical() {
         }
     }
     let g = load(&ttl);
-    let (off, on) = on_off(&g, &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"));
+    let (off, on) = on_off(
+        &g,
+        &format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}"),
+    );
     assert_eq!(off, on, "parallel/serial hash path differs from cold path");
     assert_eq!(on.len(), 120, "one surviving earliest document per author");
 }
@@ -593,7 +696,9 @@ fn parallel_hash_path_crosses_threshold() {
     let mut ttl = String::with_capacity(n * 48);
     // Minimal per-item shape: an item with a distinct key and a rank. Two triples/item.
     for i in 0..n {
-        ttl.push_str(&format!("ex:i{i} ex:key ex:k{i} . ex:i{i} ex:rank \"1\"^^xsd:integer .\n"));
+        ttl.push_str(&format!(
+            "ex:i{i} ex:key ex:k{i} . ex:i{i} ex:rank \"1\"^^xsd:integer .\n"
+        ));
     }
     let g = load(&ttl);
     // Anti-join: an item with NO OTHER item of the SAME key and a lower rank. Keys are
@@ -614,10 +719,19 @@ fn parallel_hash_path_crosses_threshold() {
     let on = query(&g, &q).expect("on query");
     let (fired, _rows, bindings) = theta_antijoin_testing::stats();
     // Closed-form expectation: every distinct-key item survives the anti-join.
-    assert_eq!(on.rows.len(), n, "each of the {} distinct-key items must survive", n);
+    assert_eq!(
+        on.rows.len(),
+        n,
+        "each of the {} distinct-key items must survive",
+        n
+    );
     // The parallel hash strategy fired (> 64 distinct correlations, > 50k anchor rows →
     // the `left_b.rows.len() >= PAR_THRESHOLD` rayon fan-out branch).
-    assert!(fired && bindings > 64, "parallel hash path did not fire: {}", bindings);
+    assert!(
+        fired && bindings > 64,
+        "parallel hash path did not fire: {}",
+        bindings
+    );
 }
 
 #[test]
@@ -630,7 +744,9 @@ fn randomised_differential() {
     // DIFFERENT code paths (recheck-expr kind, id-probe eligibility, seed vs scan).
     let mut state: u64 = 0x9E3779B97F4A7C15;
     let mut next = |m: u64| {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (state >> 33) % m
     };
     for trial in 0..48u64 {
@@ -650,7 +766,11 @@ fn randomised_differential() {
         // via `BOUND(?tag)` — the failing class the pre-fix generator could not produce
         // (left-unbound shared var read by the residual). [FABLE-5]
         let shared_var = trial % 4 == 0;
-        let n_auth = if big { 70 + next(30) as usize } else { 1 + next(4) as usize };
+        let n_auth = if big {
+            70 + next(30) as usize
+        } else {
+            1 + next(4) as usize
+        };
         let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
         let author = |a: usize| {
             if bnode_authors {
@@ -667,14 +787,19 @@ fn randomised_differential() {
             let a = next(n_auth as u64) as usize;
             ttl.push_str(&format!(
                 "ex:d{} rdf:type ex:Article . ex:d{} dc:creator {} .\n",
-                d, d, author(a)
+                d,
+                d,
+                author(a)
             ));
             // 1 in 6 documents gets a non-numeric year (error-producing residual).
             if next(6) == 0 {
                 ttl.push_str(&format!("ex:d{} dcterms:issued \"bad{}\" .\n", d, d));
             } else {
                 let yr = 1990 + next(20);
-                ttl.push_str(&format!("ex:d{} dcterms:issued \"{}\"^^xsd:integer .\n", d, yr));
+                ttl.push_str(&format!(
+                    "ex:d{} dcterms:issued \"{}\"^^xsd:integer .\n",
+                    d, yr
+                ));
             }
             // For the shared-var variant, bind `?tag` on ~2/3 of documents (an IRI). The
             // OPTIONAL in A leaves it UNBOUND on the rest, so the merged condition row
@@ -711,7 +836,11 @@ fn randomised_differential() {
         };
         let q = format!("SELECT ?document ?yr ?name ?tag WHERE {{\n{body}\n}}");
         let (off, on) = on_off(&g, &q);
-        assert_eq!(off, on, "randomised differential mismatch on trial {}", trial);
+        assert_eq!(
+            off, on,
+            "randomised differential mismatch on trial {}",
+            trial
+        );
     }
 }
 
@@ -758,11 +887,18 @@ fn q06_measure_250k() {
     let on = sparq_engine::query(&g, q06).expect("q06 on");
     let d_on = t.elapsed();
     let (fired, child_rows, bindings) = theta_antijoin_testing::stats();
-    eprintln!("theta stats: fired={} child_rows={} correlations={}", fired, child_rows, bindings);
+    eprintln!(
+        "theta stats: fired={} child_rows={} correlations={}",
+        fired, child_rows, bindings
+    );
     eprintln!("q06 rows: off={} on={}", off.rows.len(), on.rows.len());
     eprintln!("q06 OFF (cold left_outer_join): {:?}", d_off);
     eprintln!("q06 ON  (correlated theta anti-join): {:?}", d_on);
-    assert_eq!(off.rows.len(), on.rows.len(), "q06 row count must be identical on vs off");
+    assert_eq!(
+        off.rows.len(),
+        on.rows.len(),
+        "q06 row count must be identical on vs off"
+    );
 }
 
 // ── budget cooperativeness (sq-qk6ac) ─────────────────────────────────────────
@@ -795,7 +931,11 @@ fn budgeted_vs_unbudgeted(
     let mut budgeted: Table = r
         .rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()))
+                .collect()
+        })
         .collect();
     budgeted.sort();
     (plain, budgeted)
@@ -813,8 +953,15 @@ fn armed_but_unexhausted_budget_does_not_perturb_the_sip_strategy() {
     };
     let q = format!("SELECT ?yr ?name ?document WHERE {{\n{Q06_BODY}\n}}");
     let (plain, budgeted) = budgeted_vs_unbudgeted(&g, &q, &budget);
-    assert_eq!(plain, budgeted, "an armed budget changed the SIP-seed anti-join answer");
-    assert_eq!(budgeted.len(), 5, "one surviving (earliest) document per author");
+    assert_eq!(
+        plain, budgeted,
+        "an armed budget changed the SIP-seed anti-join answer"
+    );
+    assert_eq!(
+        budgeted.len(),
+        5,
+        "one surviving (earliest) document per author"
+    );
 }
 
 /// Same, on the HASH strategy (> 64 distinct correlations) — the branch whose verdict
@@ -839,11 +986,22 @@ fn armed_but_unexhausted_budget_does_not_perturb_the_hash_strategy() {
     };
     let q = format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}");
     let (plain, budgeted) = budgeted_vs_unbudgeted(&g, &q, &budget);
-    assert_eq!(plain, budgeted, "an armed budget changed the hash anti-join answer");
-    assert_eq!(budgeted.len(), 200, "one surviving earliest document per author");
+    assert_eq!(
+        plain, budgeted,
+        "an armed budget changed the hash anti-join answer"
+    );
+    assert_eq!(
+        budgeted.len(),
+        200,
+        "one surviving earliest document per author"
+    );
     // Anti-vacuity: the fixture really is on the HASH strategy (> 64 correlations).
     let (fired, bindings) = fired_stats(&g, &q);
-    assert!(fired && bindings > 64, "expected the hash strategy (>64 correlations): {}", bindings);
+    assert!(
+        fired && bindings > 64,
+        "expected the hash strategy (>64 correlations): {}",
+        bindings
+    );
 }
 
 /// A query cancelled BEFORE it starts must surface the CANONICAL reason, never a
@@ -943,8 +1101,10 @@ fn the_parallel_verdict_fan_out_abandons_probing_when_the_budget_trips() {
     );
     // The projected `?i` column as a sorted multiset (`?i` is certain in the left BGP).
     let sorted = |rows: &[Vec<Option<oxrdf::Term>>]| -> Vec<String> {
-        let mut v: Vec<String> =
-            rows.iter().map(|row| row[0].as_ref().expect("?i is bound").to_string()).collect();
+        let mut v: Vec<String> = rows
+            .iter()
+            .map(|row| row[0].as_ref().expect("?i is bound").to_string())
+            .collect();
         v.sort();
         v
     };
@@ -958,11 +1118,26 @@ fn the_parallel_verdict_fan_out_abandons_probing_when_the_budget_trips() {
     let plain = sparq_engine::query_with_functions(&g, &q, &fns).expect("unbudgeted query");
     let (fired, _rows, bindings) = theta_antijoin_testing::stats();
     let plain = sorted(&plain.rows);
-    assert_eq!(plain.len(), N, "each of the {} distinct-key items must survive", N);
-    assert!(fired && bindings > 64, "expected the hash strategy (>64 correlations): {}", bindings);
-    assert!(plain.len() >= 50_000, "fixture must cross PAR_THRESHOLD (50k left rows)");
+    assert_eq!(
+        plain.len(),
+        N,
+        "each of the {} distinct-key items must survive",
+        N
+    );
+    assert!(
+        fired && bindings > 64,
+        "expected the hash strategy (>64 correlations): {}",
+        bindings
+    );
+    assert!(
+        plain.len() >= 50_000,
+        "fixture must cross PAR_THRESHOLD (50k left rows)"
+    );
     let full_probes = probes.swap(0, Ordering::SeqCst);
-    assert_eq!(full_probes, N, "a full run must evaluate exactly one verdict per left row");
+    assert_eq!(
+        full_probes, N,
+        "a full run must evaluate exactly one verdict per left row"
+    );
 
     // (2) An ARMED but unexhausted budget must not perturb the answer — and must not
     //     skip a single verdict — on that same parallel branch.
@@ -973,7 +1148,11 @@ fn the_parallel_verdict_fan_out_abandons_probing_when_the_budget_trips() {
     };
     let budgeted = sparq_engine::query_with_functions_and_budget(&g, &q, &fns, &generous)
         .expect("an unexhausted budget must not trip the parallel verdict gate");
-    assert_eq!(plain, sorted(&budgeted.rows), "an armed budget changed the parallel answer");
+    assert_eq!(
+        plain,
+        sorted(&budgeted.rows),
+        "an armed budget changed the parallel answer"
+    );
     assert_eq!(
         probes.swap(0, Ordering::SeqCst),
         N,
@@ -1011,10 +1190,16 @@ fn public_toggle_and_stats() {
     // Direct unit coverage of the public `theta_antijoin_testing` surface (one direct
     // test per new public fn, for the coverage ratchet).
     let prev = theta_antijoin_testing::set_enabled(false);
-    assert!(!theta_antijoin_testing::set_enabled(true), "set_enabled returns the prior value");
+    assert!(
+        !theta_antijoin_testing::set_enabled(true),
+        "set_enabled returns the prior value"
+    );
     assert!(theta_antijoin_testing::set_enabled(prev));
 
     theta_antijoin_testing::reset_stats();
     let (fired, rows, bindings) = theta_antijoin_testing::stats();
-    assert!(!fired && rows == 0 && bindings == 0, "stats not cleared by reset");
+    assert!(
+        !fired && rows == 0 && bindings == 0,
+        "stats not cleared by reset"
+    );
 }

@@ -19,11 +19,13 @@
 //!   the pointwise minimum of the members' clocks and ignores cloud dots, so
 //!   it can under-approximate but never over-approximate stability.
 
-use crate::CrdtError;
-use crate::codec::{expect_object, expect_str, parse_dec_u64, parse_summary, write_json_string, write_summary};
+use crate::codec::{
+    expect_object, expect_str, parse_dec_u64, parse_summary, write_json_string, write_summary,
+};
 use crate::envelope::{Admission, Limits};
 use crate::id::{DatasetId, Dot, ReplicaId};
 use crate::summary::CausalSummary;
+use crate::CrdtError;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,7 +53,11 @@ pub struct SyncHello {
 impl SyncHello {
     /// Convenience constructor.
     pub fn new(dataset: DatasetId, epoch: u64, summary: CausalSummary) -> Self {
-        SyncHello { dataset, epoch, summary }
+        SyncHello {
+            dataset,
+            epoch,
+            summary,
+        }
     }
 
     /// Encodes the canonical byte form
@@ -75,11 +81,7 @@ impl SyncHello {
     /// rejection discipline as the envelope codec: oversized, unknown format
     /// version, wrong dataset, wrong membership epoch, unnormalised summary,
     /// or any non-canonical byte form.
-    pub fn decode(
-        bytes: &[u8],
-        admission: &Admission,
-        limits: &Limits,
-    ) -> Result<Self, CrdtError> {
+    pub fn decode(bytes: &[u8], admission: &Admission, limits: &Limits) -> Result<Self, CrdtError> {
         if bytes.len() > MAX_HELLO_BYTES {
             return Err(CrdtError::Oversized {
                 what: "hello bytes",
@@ -94,7 +96,9 @@ impl SyncHello {
         let map = expect_object(&value, "hello", &["dataset", "epoch", "format", "summary"])?;
         let format = expect_str(map, "hello", "format")?;
         if format != HELLO_FORMAT_V1 {
-            return Err(CrdtError::UnsupportedFormat { found: format.to_owned() });
+            return Err(CrdtError::UnsupportedFormat {
+                found: format.to_owned(),
+            });
         }
         let dataset = DatasetId::new(expect_str(map, "hello", "dataset")?)?;
         let epoch = parse_dec_u64(expect_str(map, "hello", "epoch")?)?;
@@ -133,10 +137,7 @@ pub struct SequenceInterval {
 ///
 /// Cost is proportional to the number of clock entries and cloud dots of the
 /// two summaries, never to counter magnitudes.
-pub fn missing_intervals(
-    have: &CausalSummary,
-    remote: &CausalSummary,
-) -> Vec<SequenceInterval> {
+pub fn missing_intervals(have: &CausalSummary, remote: &CausalSummary) -> Vec<SequenceInterval> {
     let mut out: Vec<SequenceInterval> = Vec::new();
     let mut push = |origin: &ReplicaId, first: u64, last: u64| {
         if let Some(prev) = out.last_mut() {
@@ -147,7 +148,11 @@ pub fn missing_intervals(
                 return;
             }
         }
-        out.push(SequenceInterval { origin: origin.clone(), first, last });
+        out.push(SequenceInterval {
+            origin: origin.clone(),
+            first,
+            last,
+        });
     };
     // Every origin either side of `have` mentions, in raw-byte order (clock
     // and cloud are both BTree-ordered, so a sorted merge falls out of
@@ -245,7 +250,10 @@ pub struct StabilityTracker {
 impl StabilityTracker {
     /// Starts tracking for one membership epoch with no acknowledgements.
     pub fn new(membership: Membership) -> Self {
-        StabilityTracker { membership, acks: BTreeMap::new() }
+        StabilityTracker {
+            membership,
+            acks: BTreeMap::new(),
+        }
     }
 
     /// The membership this tracker is scoped to.
@@ -368,8 +376,7 @@ mod tests {
     #[test]
     fn hello_decode_round_trips() {
         let hello = SyncHello::new(dataset(), 3, summary(&[(b"peer-a", 1), (b"peer-b", 5)]));
-        let decoded =
-            SyncHello::decode(&hello.encode(), &admission(), &Limits::default()).unwrap();
+        let decoded = SyncHello::decode(&hello.encode(), &admission(), &Limits::default()).unwrap();
         assert_eq!(decoded, hello);
     }
 
@@ -402,7 +409,11 @@ mod tests {
         let remote = summary(&[(b"a", 1)]);
         assert_eq!(
             missing_intervals(&have, &remote),
-            vec![SequenceInterval { origin: rid(b"a"), first: 2, last: 4 }]
+            vec![SequenceInterval {
+                origin: rid(b"a"),
+                first: 2,
+                last: 4
+            }]
         );
         // The remote missing nothing yields no intervals.
         assert!(missing_intervals(&have, &have).is_empty());
@@ -418,8 +429,16 @@ mod tests {
         assert_eq!(
             missing_intervals(&have, &remote),
             vec![
-                SequenceInterval { origin: rid(b"a"), first: 2, last: 2 },
-                SequenceInterval { origin: rid(b"a"), first: 4, last: 5 },
+                SequenceInterval {
+                    origin: rid(b"a"),
+                    first: 2,
+                    last: 2
+                },
+                SequenceInterval {
+                    origin: rid(b"a"),
+                    first: 4,
+                    last: 5
+                },
             ]
         );
     }
@@ -432,9 +451,21 @@ mod tests {
         assert_eq!(
             missing_intervals(&have, &remote),
             vec![
-                SequenceInterval { origin: rid(b"a"), first: 2, last: 2 },
-                SequenceInterval { origin: rid(b"a"), first: 5, last: 5 },
-                SequenceInterval { origin: rid(b"b"), first: 2, last: 2 },
+                SequenceInterval {
+                    origin: rid(b"a"),
+                    first: 2,
+                    last: 2
+                },
+                SequenceInterval {
+                    origin: rid(b"a"),
+                    first: 5,
+                    last: 5
+                },
+                SequenceInterval {
+                    origin: rid(b"b"),
+                    first: 2,
+                    last: 2
+                },
             ]
         );
         // Adjacent contiguous + sparse runs merge into one interval.
@@ -443,7 +474,11 @@ mod tests {
         remote_none.insert(dot(b"z", 1));
         assert_eq!(
             missing_intervals(&have, &remote_none),
-            vec![SequenceInterval { origin: rid(b"a"), first: 1, last: 3 }]
+            vec![SequenceInterval {
+                origin: rid(b"a"),
+                first: 1,
+                last: 3
+            }]
         );
     }
 
@@ -460,7 +495,11 @@ mod tests {
         let remote = CausalSummary::from_parts(remote_clock, Vec::new()).unwrap();
         assert_eq!(
             missing_intervals(&have, &remote),
-            vec![SequenceInterval { origin: rid(b"a"), first: u64::MAX, last: u64::MAX }]
+            vec![SequenceInterval {
+                origin: rid(b"a"),
+                first: u64::MAX,
+                last: u64::MAX
+            }]
         );
 
         // A remote cloud dot exactly at u64::MAX is the last sequence the
@@ -472,25 +511,31 @@ mod tests {
         // Remote: clock a:1 plus a sparse cloud dot a:u64::MAX.
         let mut remote_clock = BTreeMap::new();
         remote_clock.insert(rid(b"a"), 1);
-        let remote =
-            CausalSummary::from_parts(remote_clock, vec![dot(b"a", u64::MAX)]).unwrap();
+        let remote = CausalSummary::from_parts(remote_clock, vec![dot(b"a", u64::MAX)]).unwrap();
         assert_eq!(
             missing_intervals(&have, &remote),
-            vec![SequenceInterval { origin: rid(b"a"), first: 2, last: u64::MAX - 1 }]
+            vec![SequenceInterval {
+                origin: rid(b"a"),
+                first: 2,
+                last: u64::MAX - 1
+            }]
         );
 
         // A local cloud dot at u64::MAX the remote lacks is offered as a
         // single-sequence interval — the sparse path also stays overflow-free.
         let mut have_clock = BTreeMap::new();
         have_clock.insert(rid(b"a"), 1);
-        let have =
-            CausalSummary::from_parts(have_clock, vec![dot(b"a", u64::MAX)]).unwrap();
+        let have = CausalSummary::from_parts(have_clock, vec![dot(b"a", u64::MAX)]).unwrap();
         let mut remote_clock = BTreeMap::new();
         remote_clock.insert(rid(b"a"), 1);
         let remote = CausalSummary::from_parts(remote_clock, Vec::new()).unwrap();
         assert_eq!(
             missing_intervals(&have, &remote),
-            vec![SequenceInterval { origin: rid(b"a"), first: u64::MAX, last: u64::MAX }]
+            vec![SequenceInterval {
+                origin: rid(b"a"),
+                first: u64::MAX,
+                last: u64::MAX
+            }]
         );
     }
 
@@ -503,7 +548,10 @@ mod tests {
         // diagnostic successor must saturate rather than overflow.
         assert!(matches!(
             tracker.advance_epoch(Membership::new(u64::MAX, members).unwrap()),
-            Err(CrdtError::WrongEpoch { expected: u64::MAX, found: u64::MAX })
+            Err(CrdtError::WrongEpoch {
+                expected: u64::MAX,
+                found: u64::MAX
+            })
         ));
     }
 
@@ -536,7 +584,9 @@ mod tests {
             Err(CrdtError::WrongEpoch { .. })
         ));
         assert!(tracker.record_ack(&rid(b"z"), 3, summary(&[])).is_err());
-        assert!(tracker.record_ack(&rid(b"a"), 3, summary(&[(b"a", 1)])).is_ok());
+        assert!(tracker
+            .record_ack(&rid(b"a"), 3, summary(&[(b"a", 1)]))
+            .is_ok());
     }
 
     #[test]
@@ -547,7 +597,9 @@ mod tests {
             .unwrap();
         // Only one of two members acknowledged: nothing is stable yet.
         assert!(tracker.stable_frontier().is_empty());
-        tracker.record_ack(&rid(b"b"), 3, summary(&[(b"a", 1), (b"c", 4)])).unwrap();
+        tracker
+            .record_ack(&rid(b"b"), 3, summary(&[(b"a", 1), (b"c", 4)]))
+            .unwrap();
         let frontier = tracker.stable_frontier();
         assert_eq!(frontier.clock().get(&rid(b"a")), Some(&1)); // min(2, 1)
         assert_eq!(frontier.clock().get(&rid(b"b")), None); // min(1, 0) drops out
@@ -558,32 +610,48 @@ mod tests {
     #[test]
     fn record_ack_unions_so_replayed_acks_never_move_backwards() {
         let mut tracker = two_member_tracker();
-        tracker.record_ack(&rid(b"a"), 3, summary(&[(b"a", 1), (b"a", 2)])).unwrap();
-        tracker.record_ack(&rid(b"b"), 3, summary(&[(b"a", 1), (b"a", 2)])).unwrap();
+        tracker
+            .record_ack(&rid(b"a"), 3, summary(&[(b"a", 1), (b"a", 2)]))
+            .unwrap();
+        tracker
+            .record_ack(&rid(b"b"), 3, summary(&[(b"a", 1), (b"a", 2)]))
+            .unwrap();
         assert_eq!(tracker.stable_frontier().clock().get(&rid(b"a")), Some(&2));
         // A stale replayed ack must not regress the member's known summary.
-        tracker.record_ack(&rid(b"a"), 3, summary(&[(b"a", 1)])).unwrap();
+        tracker
+            .record_ack(&rid(b"a"), 3, summary(&[(b"a", 1)]))
+            .unwrap();
         assert_eq!(tracker.stable_frontier().clock().get(&rid(b"a")), Some(&2));
     }
 
     #[test]
     fn advance_epoch_requires_a_later_epoch_and_resets_acks() {
         let mut tracker = two_member_tracker();
-        tracker.record_ack(&rid(b"a"), 3, summary(&[(b"a", 1)])).unwrap();
-        tracker.record_ack(&rid(b"b"), 3, summary(&[(b"a", 1)])).unwrap();
+        tracker
+            .record_ack(&rid(b"a"), 3, summary(&[(b"a", 1)]))
+            .unwrap();
+        tracker
+            .record_ack(&rid(b"b"), 3, summary(&[(b"a", 1)]))
+            .unwrap();
         assert!(!tracker.stable_frontier().is_empty());
         // Same or earlier epoch is rejected.
         let members: BTreeSet<ReplicaId> = [rid(b"a")].into_iter().collect();
-        assert!(tracker.advance_epoch(Membership::new(3, members.clone()).unwrap()).is_err());
+        assert!(tracker
+            .advance_epoch(Membership::new(3, members.clone()).unwrap())
+            .is_err());
         // A later epoch resets stability: it must be re-earned.
-        tracker.advance_epoch(Membership::new(4, members).unwrap()).unwrap();
+        tracker
+            .advance_epoch(Membership::new(4, members).unwrap())
+            .unwrap();
         assert_eq!(tracker.membership().epoch(), 4);
         assert!(tracker.stable_frontier().is_empty());
         assert!(matches!(
             tracker.record_ack(&rid(b"a"), 3, summary(&[])),
             Err(CrdtError::WrongEpoch { .. })
         ));
-        tracker.record_ack(&rid(b"a"), 4, summary(&[(b"a", 1)])).unwrap();
+        tracker
+            .record_ack(&rid(b"a"), 4, summary(&[(b"a", 1)]))
+            .unwrap();
         assert_eq!(tracker.stable_frontier().clock().get(&rid(b"a")), Some(&1));
     }
 }

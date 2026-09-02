@@ -36,7 +36,11 @@ fn policy(rule_iri: &str, key_hex: &str, scope: &str, fresh: &str) -> Vec<TrustR
             iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
             Term::NamedNode(iri(&format!("{t}TrustRule"))),
         ),
-        Triple::new(s.clone(), iri(&format!("{t}source")), Term::NamedNode(iri(GOV))),
+        Triple::new(
+            s.clone(),
+            iri(&format!("{t}source")),
+            Term::NamedNode(iri(GOV)),
+        ),
         Triple::new(
             s.clone(),
             iri(&format!("{t}issuerKey")),
@@ -47,7 +51,11 @@ fn policy(rule_iri: &str, key_hex: &str, scope: &str, fresh: &str) -> Vec<TrustR
             iri(&format!("{t}forPredicate")),
             Term::NamedNode(iri(SCHEMA_AGE)),
         ),
-        Triple::new(s.clone(), iri(&format!("{t}scope")), Term::NamedNode(iri(scope))),
+        Triple::new(
+            s.clone(),
+            iri(&format!("{t}scope")),
+            Term::NamedNode(iri(scope)),
+        ),
         Triple::new(
             s,
             iri(&format!("{t}freshWithin")),
@@ -169,7 +177,10 @@ fn cache_key_invalidates_on_policy_change_but_reuses_when_unchanged() {
         ))
         .unwrap();
     assert_eq!(cache.verdict(epoch, &store, &cred, &session, &target), 1);
-    assert_eq!(cache.misses, 2, "a policy edit invalidates the cached verdict");
+    assert_eq!(
+        cache.misses, 2,
+        "a policy edit invalidates the cached verdict"
+    );
 }
 
 /// The narrowing composition is REAL: a per-`.acr` document tightening freshness to P1D

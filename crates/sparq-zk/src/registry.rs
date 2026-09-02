@@ -331,7 +331,8 @@ impl RegistryEntry {
         };
         let list_id = crate::sig::status_list_id_to_field(sl.as_str());
         let status_ref = crate::sig::status_ref_digest(&list_id, idx, ver);
-        let msg = crate::sig::commitment_message_with_status(&self.commitment, &self.salt, &status_ref);
+        let msg =
+            crate::sig::commitment_message_with_status(&self.commitment, &self.salt, &status_ref);
         // [OPUS-4.8] sq-1hsl: route through the pluggable OFF-circuit signature
         // seam. `verify_commitment_with_scheme` resolves the cryptosuite to its
         // `IssuerSignatureScheme` and fails closed on an unknown cryptosuite or
@@ -348,9 +349,11 @@ impl RegistryEntry {
     /// must ALSO check the key is a member of the disclosed key-set `K`.
     // [OPUS-4.8] audit #3.
     pub fn verify_commitment_signature(&self) -> bool {
-        let (Some(pk_hex), Some(sig_hex), Some(cs)) =
-            (&self.issuer_public_key, &self.commitment_signature, &self.cryptosuite)
-        else {
+        let (Some(pk_hex), Some(sig_hex), Some(cs)) = (
+            &self.issuer_public_key,
+            &self.commitment_signature,
+            &self.cryptosuite,
+        ) else {
             return false;
         };
         // [OPUS-4.8] audit #9: issuance via `issued` signs the SALT-BOUND
@@ -378,7 +381,11 @@ impl RegistryEntry {
                     field_dt.clone(),
                 )),
             ],
-            [s.clone(), pred(ZK_SCHEME), Term::NamedNode(self.scheme.clone())],
+            [
+                s.clone(),
+                pred(ZK_SCHEME),
+                Term::NamedNode(self.scheme.clone()),
+            ],
             [
                 s.clone(),
                 pred(ZK_RDFC10_SALT),
@@ -427,18 +434,26 @@ impl RegistryEntry {
             ]);
         }
         if let Some(g) = &self.signature_graph {
-            out.push([s.clone(), pred(ZK_SIGNATURE_GRAPH), Term::NamedNode(g.clone())]);
+            out.push([
+                s.clone(),
+                pred(ZK_SIGNATURE_GRAPH),
+                Term::NamedNode(g.clone()),
+            ]);
         }
         if let Some(sl) = &self.status_list {
             out.push([s.clone(), pred(ZK_STATUS_LIST), Term::NamedNode(sl.clone())]);
         }
         // [OPUS-4.8] audit #12: the issuer-bound status-list index + version.
-        let xsd_int = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#nonNegativeInteger");
+        let xsd_int =
+            NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#nonNegativeInteger");
         if let Some(idx) = self.status_list_index {
             out.push([
                 s.clone(),
                 pred(ZK_STATUS_LIST_INDEX),
-                Term::Literal(oxrdf::Literal::new_typed_literal(idx.to_string(), xsd_int.clone())),
+                Term::Literal(oxrdf::Literal::new_typed_literal(
+                    idx.to_string(),
+                    xsd_int.clone(),
+                )),
             ]);
         }
         if let Some(ver) = self.status_list_version {
@@ -473,7 +488,10 @@ impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RegistryError::ReservedDocumentIri(iri) => {
-                write!(f, "registry entry document IRI is in the reserved space: {iri}")
+                write!(
+                    f,
+                    "registry entry document IRI is in the reserved space: {iri}"
+                )
             }
         }
     }
@@ -486,10 +504,15 @@ impl std::error::Error for RegistryError {}
 /// dictionary, `Graph::from_parts`, and replacement of any existing slot —
 /// pre-existing registry content never survives (only the installer writes
 /// this graph).
-pub fn install_registry(graph: &mut Graph, entries: &[RegistryEntry]) -> Result<usize, RegistryError> {
+pub fn install_registry(
+    graph: &mut Graph,
+    entries: &[RegistryEntry],
+) -> Result<usize, RegistryError> {
     for e in entries {
         if e.document.as_str().starts_with(RESERVED_PREFIX) {
-            return Err(RegistryError::ReservedDocumentIri(e.document.as_str().to_string()));
+            return Err(RegistryError::ReservedDocumentIri(
+                e.document.as_str().to_string(),
+            ));
         }
     }
     let mut dict = Dict::new();
@@ -527,7 +550,9 @@ pub fn read_registry(graph: &Graph) -> Vec<RegistryEntry> {
         let s = reg.dict.term(t[0]);
         let p = reg.dict.term(t[1]);
         let o = reg.dict.term(t[2]);
-        let (Term::NamedNode(s), Term::NamedNode(p)) = (s, p) else { continue };
+        let (Term::NamedNode(s), Term::NamedNode(p)) = (s, p) else {
+            continue;
+        };
         if !by_subject.contains_key(s.as_str()) {
             order.push(s.clone());
         }
@@ -568,7 +593,9 @@ pub fn read_registry(graph: &Graph) -> Vec<RegistryEntry> {
         else {
             continue; // fail closed on malformed entries
         };
-        let Some(scheme) = iri_of(ZK_SCHEME) else { continue };
+        let Some(scheme) = iri_of(ZK_SCHEME) else {
+            continue;
+        };
         let status = match iri_of(ZK_STATUS) {
             Some(s) if s.as_str() == ZK_STATUS_REVOKED => Status::Revoked,
             Some(s) if s.as_str() == ZK_STATUS_ACTIVE => Status::Active,
@@ -625,7 +652,9 @@ mod tests {
             Fr::from(42u64),
             salt_from_bytes(&[9u8; 32]),
         );
-        e.cryptosuite = Some(NamedNode::new_unchecked("https://sparq.dev/ns/zk#poseidon2-schnorr-v1"));
+        e.cryptosuite = Some(NamedNode::new_unchecked(
+            "https://sparq.dev/ns/zk#poseidon2-schnorr-v1",
+        ));
         e.issuer_key = Some(NamedNode::new_unchecked("did:example:dmv#key-1"));
         e.signature_graph = Some(proof_graph_name(&e.document));
         e.status_list = Some(NamedNode::new_unchecked("https://dmv.example/status/3#94"));
@@ -649,10 +678,16 @@ mod tests {
         install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
         let back = read_registry(&g);
         assert_eq!(back, vec![e]);
-        assert_eq!(back[0].source_cryptosuite.as_deref(), Some("eddsa-rdfc-2022"));
+        assert_eq!(
+            back[0].source_cryptosuite.as_deref(),
+            Some("eddsa-rdfc-2022")
+        );
         // A plain entry has no source-cryptosuite (the slot is optional provenance).
-        let plain =
-            RegistryEntry::new(NamedNode::new("https://x/y").unwrap(), Fr::from(1u64), Fr::from(2u64));
+        let plain = RegistryEntry::new(
+            NamedNode::new("https://x/y").unwrap(),
+            Fr::from(1u64),
+            Fr::from(2u64),
+        );
         assert_eq!(plain.source_cryptosuite, None);
         let mut g2 = Graph::load_str("", "turtle").unwrap();
         install_registry(&mut g2, std::slice::from_ref(&plain)).unwrap();
@@ -672,13 +707,19 @@ mod tests {
             salt,
             &sk,
         );
-        assert!(e.verify_commitment_signature(), "fresh issued entry verifies");
+        assert!(
+            e.verify_commitment_signature(),
+            "fresh issued entry verifies"
+        );
         // Round-trips through the store unchanged (key + sig survive).
         let mut g = Graph::load_str("", "turtle").unwrap();
         install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
         let back = read_registry(&g);
         assert_eq!(back, vec![e]);
-        assert!(back[0].verify_commitment_signature(), "read-back entry verifies");
+        assert!(
+            back[0].verify_commitment_signature(),
+            "read-back entry verifies"
+        );
     }
 
     // [OPUS-4.8] audit #12: a status-bound issued entry verifies, round-trips
@@ -702,24 +743,39 @@ mod tests {
             Status::Active,
             &sk,
         );
-        assert!(e.verify_commitment_signature_with_status(), "fresh status-bound entry verifies");
+        assert!(
+            e.verify_commitment_signature_with_status(),
+            "fresh status-bound entry verifies"
+        );
         // Round-trips through the store.
         let mut g = Graph::load_str("", "turtle").unwrap();
         install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
         let back = read_registry(&g);
         assert_eq!(back, vec![e.clone()]);
-        assert!(back[0].verify_commitment_signature_with_status(), "read-back verifies");
+        assert!(
+            back[0].verify_commitment_signature_with_status(),
+            "read-back verifies"
+        );
 
         // Tamper the index/version/list => the recomputed digest diverges => fail.
         let mut tampered = e.clone();
         tampered.status_list_index = Some(95);
-        assert!(!tampered.verify_commitment_signature_with_status(), "wrong index must fail");
+        assert!(
+            !tampered.verify_commitment_signature_with_status(),
+            "wrong index must fail"
+        );
         let mut tampered = e.clone();
         tampered.status_list_version = Some(8);
-        assert!(!tampered.verify_commitment_signature_with_status(), "wrong version must fail");
+        assert!(
+            !tampered.verify_commitment_signature_with_status(),
+            "wrong version must fail"
+        );
         let mut tampered = e;
         tampered.status_list = Some(NamedNode::new("https://attacker.example/empty").unwrap());
-        assert!(!tampered.verify_commitment_signature_with_status(), "wrong list must fail");
+        assert!(
+            !tampered.verify_commitment_signature_with_status(),
+            "wrong list must fail"
+        );
     }
 
     #[test]
@@ -735,7 +791,10 @@ mod tests {
             &sk,
         );
         e.commitment = Fr::from(1001u64); // recommit over a different (truncated) graph
-        assert!(!e.verify_commitment_signature(), "tampered commitment must not verify");
+        assert!(
+            !e.verify_commitment_signature(),
+            "tampered commitment must not verify"
+        );
     }
 
     // [OPUS-4.8] codex 2216 MEDIUM: issuance is deterministic + nonce-safe. The
@@ -777,13 +836,19 @@ mod tests {
         // A plain (unsigned) entry has no commitment signature => unattested.
         let e = entry("https://dmv.example/vc/unsigned");
         // `entry` sets a cryptosuite IRI but no public key / signature.
-        assert!(!e.verify_commitment_signature(), "unsigned entry is unattested");
+        assert!(
+            !e.verify_commitment_signature(),
+            "unsigned entry is unattested"
+        );
     }
 
     #[test]
     fn round_trip_through_store() {
         let mut g = Graph::load_str("", "turtle").unwrap();
-        let entries = vec![entry("https://dmv.example/vc/lic-123"), entry("https://rail.example/vc/t-9")];
+        let entries = vec![
+            entry("https://dmv.example/vc/lic-123"),
+            entry("https://rail.example/vc/t-9"),
+        ];
         let n = install_registry(&mut g, &entries).unwrap();
         assert!(n >= entries.len() * 4);
         let back = read_registry(&g);
@@ -827,14 +892,18 @@ mod tests {
         let o = Term::NamedNode(NamedNode::new_unchecked(ZK_STATUS_ACTIVE));
         let ids = vec![[dict.intern(&s), dict.intern(&p), dict.intern(&o)]];
         let reg = Graph::from_parts(dict, ids);
-        g.named.push((Term::NamedNode(NamedNode::new_unchecked(ZK_GRAPH)), reg));
+        g.named
+            .push((Term::NamedNode(NamedNode::new_unchecked(ZK_GRAPH)), reg));
         assert!(read_registry(&g).is_empty());
     }
 
     #[test]
     fn proof_graph_convention() {
         let d = NamedNode::new("https://dmv.example/vc/lic-123").unwrap();
-        assert_eq!(proof_graph_name(&d).as_str(), "https://dmv.example/vc/lic-123?proof");
+        assert_eq!(
+            proof_graph_name(&d).as_str(),
+            "https://dmv.example/vc/lic-123?proof"
+        );
     }
 
     // [OPUS-4.8] sq-zzxt: commitment-method selection over the `zk:scheme` slot.

@@ -81,8 +81,8 @@ pub fn minimise_ucq(ucq: Vec<Cq>, answer: &[String]) -> Vec<Cq> {
             // mutually-contained pair: only drop j when i < j, OR (i > j and i is NOT contained
             // in j) — i.e. break ties by index so exactly one of an equivalent pair survives.
             if contains(&unique[i], &unique[j], answer) == Containment::Contained {
-                let keep_j_for_tie = j < i
-                    && contains(&unique[j], &unique[i], answer) == Containment::Contained;
+                let keep_j_for_tie =
+                    j < i && contains(&unique[j], &unique[i], answer) == Containment::Contained;
                 if !keep_j_for_tie {
                     dropped[j] = true;
                 }
@@ -111,7 +111,14 @@ pub fn contains(outer: &Cq, inner: &Cq, answer: &[String]) -> Containment {
         subst.insert(a.clone(), Term::Var(a.clone()));
     }
     let mut budget = HOM_BUDGET;
-    match search_hom(&outer.atoms, 0, &inner.atoms, &mut subst, &answer_set, &mut budget) {
+    match search_hom(
+        &outer.atoms,
+        0,
+        &inner.atoms,
+        &mut subst,
+        &answer_set,
+        &mut budget,
+    ) {
         Verdict::Found => Containment::Contained,
         Verdict::Exhausted => Containment::NotContained,
         Verdict::Budget => Containment::Unknown,
@@ -176,13 +183,20 @@ fn match_atom(
     answer_set: &FxHashSet<&str>,
 ) -> bool {
     match (src, tgt) {
+        (Atom::Class { class: c1, arg: a1 }, Atom::Class { class: c2, arg: a2 }) => {
+            c1 == c2 && bind(a1, a2, subst, answer_set)
+        }
         (
-            Atom::Class { class: c1, arg: a1 },
-            Atom::Class { class: c2, arg: a2 },
-        ) => c1 == c2 && bind(a1, a2, subst, answer_set),
-        (
-            Atom::Role { role: r1, s: s1, o: o1 },
-            Atom::Role { role: r2, s: s2, o: o2 },
+            Atom::Role {
+                role: r1,
+                s: s1,
+                o: o1,
+            },
+            Atom::Role {
+                role: r2,
+                s: s2,
+                o: o2,
+            },
         ) => r1 == r2 && bind(s1, s2, subst, answer_set) && bind(o1, o2, subst, answer_set),
         _ => false,
     }
@@ -283,7 +297,11 @@ mod tests {
         // because the hom q2 → q1 maps A(?x) onto the A(?x) atom of q1 (fixing ?x).
         let q1 = cq(vec![class("A", "x"), class("B", "x")], &["x"]);
         let q2 = cq(vec![class("A", "x")], &["x"]);
-        assert_eq!(contains(&q2, &q1, &["x".into()]), Containment::Contained, "q1 ⊆ q2");
+        assert_eq!(
+            contains(&q2, &q1, &["x".into()]),
+            Containment::Contained,
+            "q1 ⊆ q2"
+        );
         // The reverse does NOT hold (q2 has answers q1 lacks): no hom q1 → q2 (B(?x) unmatched).
         assert_eq!(contains(&q1, &q2, &["x".into()]), Containment::NotContained);
     }
@@ -302,7 +320,10 @@ mod tests {
         let q1 = cq(vec![class("A", "y")], &["y"]);
         let q2 = cq(vec![class("A", "x")], &["x"]);
         // Different answer signatures — there is no shared answer slice, but exercise the freeze:
-        assert_eq!(contains(&q2, &q1, &["x".into(), "y".into()]), Containment::NotContained);
+        assert_eq!(
+            contains(&q2, &q1, &["x".into(), "y".into()]),
+            Containment::NotContained
+        );
     }
 
     #[test]
@@ -365,7 +386,11 @@ mod tests {
             &["x", "y"],
         );
         let out = minimise_ucq(vec![q1, q2], &["x".into(), "y".into()]);
-        assert_eq!(out.len(), 1, "exactly one of an equivalent pair survives (never zero)");
+        assert_eq!(
+            out.len(),
+            1,
+            "exactly one of an equivalent pair survives (never zero)"
+        );
     }
 
     #[test]

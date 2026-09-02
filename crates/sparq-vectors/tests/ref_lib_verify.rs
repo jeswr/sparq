@@ -29,9 +29,9 @@
 //! perf figure (AGENTS.md). The fixture header's params are re-asserted against the
 //! consts below so a regenerated-with-different-params fixture FAILS CLOSED.
 
-use sparq_vectors::{nearest_exact, DiskAnnIndex, VamanaConfig, VectorStore};
 #[cfg(feature = "approx-ann")]
 use sparq_vectors::VectorIndex;
+use sparq_vectors::{nearest_exact, DiskAnnIndex, VamanaConfig, VectorStore};
 
 // --- fixture parameters: MUST match scripts/capture_hnswlib_ref.py ----------
 const SEED: u64 = 0xC0FFEE;
@@ -72,7 +72,10 @@ struct RefRow {
 /// above (fail-closed on a fixture regenerated with different settings), and returns the
 /// per-query rows keyed by qid.
 fn load_fixture() -> Vec<RefRow> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hnswlib_ref.tsv");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/hnswlib_ref.tsv"
+    );
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("cannot read reference fixture {}: {}", path, e));
 
@@ -90,12 +93,23 @@ fn load_fixture() -> Vec<RefRow> {
                     .find_map(|kv| kv.strip_prefix(key)?.parse::<u64>().ok())
             };
             assert_eq!(get("seed="), Some(SEED), "fixture seed drift");
-            assert_eq!(get("query_seed="), Some(QUERY_SEED), "fixture query_seed drift");
+            assert_eq!(
+                get("query_seed="),
+                Some(QUERY_SEED),
+                "fixture query_seed drift"
+            );
             assert_eq!(get("n="), Some(N as u64), "fixture n drift");
             assert_eq!(get("dim="), Some(DIM as u64), "fixture dim drift");
             assert_eq!(get("k="), Some(K as u64), "fixture k drift");
-            assert_eq!(get("queries="), Some(QUERIES as u64), "fixture queries drift");
-            assert!(rest.contains("space=cosine"), "fixture must be cosine-space");
+            assert_eq!(
+                get("queries="),
+                Some(QUERIES as u64),
+                "fixture queries drift"
+            );
+            assert!(
+                rest.contains("space=cosine"),
+                "fixture must be cosine-space"
+            );
             saw_params = true;
             continue;
         }
@@ -105,11 +119,18 @@ fn load_fixture() -> Vec<RefRow> {
         let mut cols = line.split('\t');
         let qid: usize = cols.next().unwrap().parse().unwrap();
         let parse_ids = |s: &str| -> Vec<u32> {
-            s.split(',').filter(|t| !t.is_empty()).map(|t| t.parse().unwrap()).collect()
+            s.split(',')
+                .filter(|t| !t.is_empty())
+                .map(|t| t.parse().unwrap())
+                .collect()
         };
         let hnsw = parse_ids(cols.next().expect("missing hnswlib column"));
         let exact = parse_ids(cols.next().expect("missing exact-knn column"));
-        assert!(cols.next().is_none(), "unexpected extra column on qid {}", qid);
+        assert!(
+            cols.next().is_none(),
+            "unexpected extra column on qid {}",
+            qid
+        );
         assert_eq!(hnsw.len(), K, "hnswlib row {} not k-wide", qid);
         assert_eq!(exact.len(), K, "exact row {} not k-wide", qid);
         rows[qid] = Some(RefRow { hnsw, exact });
@@ -124,8 +145,11 @@ fn load_fixture() -> Vec<RefRow> {
 /// Build the deterministic corpus store + the matching query set (shared by the exact,
 /// DiskANN and HNSW checks). Returns (store, store_path, queries).
 fn build_corpus(tag: &str) -> (VectorStore, std::path::PathBuf, Vec<Vec<f32>>) {
-    let store_path = std::env::temp_dir()
-        .join(format!("sparq-vectors-refverify-{}-{}.spqv", tag, std::process::id()));
+    let store_path = std::env::temp_dir().join(format!(
+        "sparq-vectors-refverify-{}-{}.spqv",
+        tag,
+        std::process::id()
+    ));
     let mut store = VectorStore::create(&store_path, DIM).unwrap();
     let mut state = SEED;
     for i in 0..N {
@@ -159,8 +183,10 @@ fn sparq_exact_reproduces_the_reference_exact_knn_oracle() {
 
     let mut total_overlap = 0usize;
     for (q, row) in queries.iter().zip(&fixture) {
-        let ours: Vec<u32> =
-            nearest_exact(&store, q, K).into_iter().map(|(id, _)| id).collect();
+        let ours: Vec<u32> = nearest_exact(&store, q, K)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         assert_eq!(ours.len(), K);
         let overlap = recall(&ours, &row.exact);
         total_overlap += (overlap * K as f64).round() as usize;
@@ -195,7 +221,10 @@ fn diskann_recall_is_at_least_hnswlib_on_the_reference_fixture() {
 
     // A generous search beam: this is the QUALITY check (is sparq's index AS GOOD as
     // hnswlib?), not a speed check, so we let DiskANN search hard.
-    let cfg = VamanaConfig { search_beam: 128, ..Default::default() };
+    let cfg = VamanaConfig {
+        search_beam: 128,
+        ..Default::default()
+    };
     let index = DiskAnnIndex::build_with(&store, &graph_path, cfg).unwrap();
     assert_eq!(index.len(), N);
 
@@ -274,8 +303,10 @@ fn hnsw_recall_is_at_least_hnswlib_on_the_reference_fixture() {
 #[test]
 #[ignore = "gather-only: needs python3 + numpy + hnswlib (heavy native deps)"]
 fn live_hnswlib_capture_matches_the_committed_fixture() {
-    let script =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/capture_hnswlib_ref.py");
+    let script = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/capture_hnswlib_ref.py"
+    );
     // Prefer an explicit interpreter (VECTOR_PY) so a gather box can point at its venv;
     // fall back to python3 on PATH.
     let py = std::env::var("VECTOR_PY").unwrap_or_else(|_| "python3".to_string());
@@ -298,8 +329,10 @@ fn live_hnswlib_capture_matches_the_committed_fixture() {
         return;
     }
     let produced = String::from_utf8(out.stdout).expect("harness output is utf-8");
-    let committed_path =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hnswlib_ref.tsv");
+    let committed_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/hnswlib_ref.tsv"
+    );
     let committed = std::fs::read_to_string(committed_path).unwrap();
     assert_eq!(
         produced.trim_end(),

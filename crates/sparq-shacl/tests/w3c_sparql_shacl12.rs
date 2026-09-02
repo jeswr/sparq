@@ -120,7 +120,10 @@ fn w3c_shacl12_sparql_suite() {
 
     let (mut pass, mut fail, mut skip) = (0usize, 0usize, 0usize);
     println!("\nW3C SHACL 1.2 SPARQL suite scoreboard");
-    println!("{:<14} {:>5} {:>5} {:>5}", "category", "pass", "fail", "skip");
+    println!(
+        "{:<14} {:>5} {:>5} {:>5}",
+        "category", "pass", "fail", "skip"
+    );
     for (group, c) in &score.by_group {
         println!("{group:<14} {:>5} {:>5} {:>5}", c.pass, c.fail, c.skip);
         pass += c.pass;

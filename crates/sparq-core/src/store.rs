@@ -33,12 +33,26 @@ pub enum Perm {
 // `compact-index` feature (for testing). Keyed on `target_arch` — NOT just a feature —
 // so the wasm choice does not leak to the native build via Cargo feature unification.
 #[cfg(not(any(target_arch = "wasm32", feature = "compact-index")))]
-pub const BUILT: &[Perm] = &[Perm::Spo, Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops];
+pub const BUILT: &[Perm] = &[
+    Perm::Spo,
+    Perm::Sop,
+    Perm::Pso,
+    Perm::Pos,
+    Perm::Osp,
+    Perm::Ops,
+];
 #[cfg(any(target_arch = "wasm32", feature = "compact-index"))]
 pub const BUILT: &[Perm] = &[Perm::Spo, Perm::Pos, Perm::Osp];
 
 impl Perm {
-    pub const ALL: [Perm; 6] = [Perm::Spo, Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops];
+    pub const ALL: [Perm; 6] = [
+        Perm::Spo,
+        Perm::Sop,
+        Perm::Pso,
+        Perm::Pos,
+        Perm::Osp,
+        Perm::Ops,
+    ];
 
     /// The column indices (into a canonical s,p,o triple) in this permutation's
     /// sort order. e.g. POS -> 1,2,0.
@@ -195,8 +209,11 @@ impl Overlay {
             return &self.added; // SPO: `added` is already the projection, already sorted
         }
         self.added_by_perm[perm as usize].get_or_init(|| {
-            let mut rows: Vec<[Id; 3]> =
-                self.added.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+            let mut rows: Vec<[Id; 3]> = self
+                .added
+                .iter()
+                .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
+                .collect();
             rows.sort_unstable();
             rows
         })
@@ -437,7 +454,11 @@ const DERIVE_PLAN: &[&[(Perm, Perm)]] = &[
     // Wave 1 — both straight off the deduped SPO run.
     &[(Perm::Spo, Perm::Pso), (Perm::Spo, Perm::Osp)],
     // Wave 2 — off wave 1.
-    &[(Perm::Pso, Perm::Ops), (Perm::Osp, Perm::Pos), (Perm::Osp, Perm::Sop)],
+    &[
+        (Perm::Pso, Perm::Ops),
+        (Perm::Osp, Perm::Pos),
+        (Perm::Osp, Perm::Sop),
+    ],
 ];
 /// The `compact-index` / wasm plan: only {SPO, POS, OSP} are [`BUILT`], and POS derives
 /// from OSP (deleting P from `[O,S,P]` leaves `[O,S]` = POS's trailing columns).
@@ -451,7 +472,11 @@ impl TripleStore {
     pub fn from_triples(triples: Vec<[Id; 3]>) -> Self {
         let perms = Self::build_raw_perms(triples);
         let pred_stats = Self::compute_pred_stats(&perms);
-        TripleStore { perms: std::sync::Arc::new(perms), pred_stats: std::sync::Arc::new(pred_stats), overlay: None }
+        TripleStore {
+            perms: std::sync::Arc::new(perms),
+            pred_stats: std::sync::Arc::new(pred_stats),
+            overlay: None,
+        }
     }
 
     /// Like [`from_triples`](Self::from_triples) but stores each permutation
@@ -472,11 +497,16 @@ impl TripleStore {
         for (i, pd) in raw.into_iter().enumerate() {
             if let PermData::Owned(v) = pd {
                 if !v.is_empty() {
-                    perms[i] = PermData::Compressed(crate::compress::CompressedPerm::encode_emit(&v));
+                    perms[i] =
+                        PermData::Compressed(crate::compress::CompressedPerm::encode_emit(&v));
                 }
             }
         }
-        TripleStore { perms: std::sync::Arc::new(perms), pred_stats: std::sync::Arc::new(pred_stats), overlay: None }
+        TripleStore {
+            perms: std::sync::Arc::new(perms),
+            pred_stats: std::sync::Arc::new(pred_stats),
+            overlay: None,
+        }
     }
 
     /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all six
@@ -557,7 +587,12 @@ impl TripleStore {
             // independent and derive concurrently.
             let built: Vec<(Perm, Vec<[Id; 3]>)> = wave
                 .par_iter()
-                .map(|&(src, dst)| (dst, Self::derive_perm(perms[src as usize].as_slice(), src, dst)))
+                .map(|&(src, dst)| {
+                    (
+                        dst,
+                        Self::derive_perm(perms[src as usize].as_slice(), src, dst),
+                    )
+                })
                 .collect();
             for (p, v) in built {
                 perms[p as usize] = PermData::Owned(v);
@@ -594,12 +629,17 @@ impl TripleStore {
             src
         );
         // Column j of a dst row is column `pick[j]` of a src row.
-        let pick: [usize; 3] =
-            std::array::from_fn(|j| so.iter().position(|&c| c == dor[j]).expect("a permutation covers every column"));
+        let pick: [usize; 3] = std::array::from_fn(|j| {
+            so.iter()
+                .position(|&c| c == dor[j])
+                .expect("a permutation covers every column")
+        });
         // Pre-sized exactly from the known row count (the mapped iterator is ExactSize, so
         // `collect` reserves `src_rows.len()` up front — no grow tail, no capacity slack).
-        let mut v: Vec<[Id; 3]> =
-            src_rows.iter().map(|r| [r[pick[0]], r[pick[1]], r[pick[2]]]).collect();
+        let mut v: Vec<[Id; 3]> = src_rows
+            .iter()
+            .map(|r| [r[pick[0]], r[pick[1]], r[pick[2]]])
+            .collect();
         radix_sort_rows_by_col0(&mut v);
         v
     }
@@ -630,7 +670,8 @@ impl TripleStore {
         let mut perms: [PermData; 6] = std::array::from_fn(|_| PermData::default());
         perms[Perm::Spo as usize] = PermData::Owned(triples);
         for &(src, dst) in DERIVE_PLAN.iter().copied().flatten() {
-            perms[dst as usize] = PermData::Owned(Self::derive_perm(perms[src as usize].as_slice(), src, dst));
+            perms[dst as usize] =
+                PermData::Owned(Self::derive_perm(perms[src as usize].as_slice(), src, dst));
         }
         perms
     }
@@ -666,9 +707,12 @@ impl TripleStore {
             // the persisted base always reflects the full current state (unbuilt perms
             // stay empty). The in-memory overlay is untouched (`save` takes `&self`).
             let rows: std::borrow::Cow<[[Id; 3]]> = match &self.overlay {
-                Some(ov) if BUILT.contains(&Perm::ALL[i]) => {
-                    std::borrow::Cow::Owned(ov.merge(&rows, Perm::ALL[i], [Id::MIN; 3], [Id::MAX; 3]))
-                }
+                Some(ov) if BUILT.contains(&Perm::ALL[i]) => std::borrow::Cow::Owned(ov.merge(
+                    &rows,
+                    Perm::ALL[i],
+                    [Id::MIN; 3],
+                    [Id::MAX; 3],
+                )),
                 _ => rows,
             };
             let path = dir.join(format!("perm{i}.bin"));
@@ -681,7 +725,12 @@ impl TripleStore {
                 std::io::Write::flush(&mut w)?;
             } else {
                 // SAFETY: reinterpret the contiguous [u32;3] rows as bytes for writing.
-                let bytes = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<u8>(), std::mem::size_of_val(rows.as_ref())) };
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        rows.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(rows.as_ref()),
+                    )
+                };
                 std::fs::write(path, bytes)?;
             }
         }
@@ -746,7 +795,14 @@ impl TripleStore {
             let count = rd8(&mut r)? as usize;
             let ndv_subj = rd8(&mut r)? as usize;
             let ndv_obj = rd8(&mut r)? as usize;
-            stats.insert(p, PredStat { count, ndv_subj, ndv_obj });
+            stats.insert(
+                p,
+                PredStat {
+                    count,
+                    ndv_subj,
+                    ndv_obj,
+                },
+            );
         }
         Some(stats)
     }
@@ -773,7 +829,8 @@ impl TripleStore {
             // magic and picks the V1/V2 decode reader — a V1 file decodes byte-identically
             // forever. Compressed perms are served lazily — block-wise decode off the mapped file.
             *slot = if map.len() >= 8
-                && (map[..8] == crate::compress::FILE_MAGIC || map[..8] == crate::compress::FILE_MAGIC_V2)
+                && (map[..8] == crate::compress::FILE_MAGIC
+                    || map[..8] == crate::compress::FILE_MAGIC_V2)
             {
                 PermData::Compressed(crate::compress::CompressedPerm::from_mmap(map)?)
             } else {
@@ -782,8 +839,13 @@ impl TripleStore {
         }
         // Use the persisted stats if present (no POS/PSO re-scan — keeps open fast and the
         // resident set small); else recompute (backward compatible with older saved dirs).
-        let pred_stats = Self::load_pred_stats(dir).unwrap_or_else(|| Self::compute_pred_stats(&perms));
-        Ok(TripleStore { perms: std::sync::Arc::new(perms), pred_stats: std::sync::Arc::new(pred_stats), overlay: None })
+        let pred_stats =
+            Self::load_pred_stats(dir).unwrap_or_else(|| Self::compute_pred_stats(&perms));
+        Ok(TripleStore {
+            perms: std::sync::Arc::new(perms),
+            pred_stats: std::sync::Arc::new(pred_stats),
+            overlay: None,
+        })
     }
 
     /// Per-predicate stats: count + distinct objects from POS (always built), and
@@ -809,7 +871,14 @@ impl TripleStore {
                 }
                 i += 1;
             }
-            stats.insert(p, PredStat { count, ndv_subj: count, ndv_obj: ndv_o });
+            stats.insert(
+                p,
+                PredStat {
+                    count,
+                    ndv_subj: count,
+                    ndv_obj: ndv_o,
+                },
+            );
         }
         // PSO (when built): exact distinct S per P.
         let mut i = 0;
@@ -952,7 +1021,9 @@ impl TripleStore {
     /// Number of pending overlay entries (insertions + deletions) — the input to a
     /// compaction threshold policy (a fork costs O(this); folding it costs O(n)).
     pub fn overlay_len(&self) -> usize {
-        self.overlay.as_ref().map_or(0, |ov| ov.added.len() + ov.deleted.len())
+        self.overlay
+            .as_ref()
+            .map_or(0, |ov| ov.added.len() + ov.deleted.len())
     }
 
     /// Heap footprint of the permutation indexes in bytes (for benchmarking). Memory-
@@ -1160,7 +1231,10 @@ mod tests {
             reference.sort_unstable();
             let mut radixed = rows.to_vec();
             radix_sort_rows(&mut radixed);
-            assert_eq!(radixed, reference, "radix diverged from sort_unstable for {rows:?}");
+            assert_eq!(
+                radixed, reference,
+                "radix diverged from sort_unstable for {rows:?}"
+            );
         }
 
         // Fixed degenerate + boundary shapes.
@@ -1249,7 +1323,11 @@ mod tests {
                     .collect();
                 want.sort_unstable();
                 let got = store.perms[perm as usize].as_slice();
-                assert_eq!(got, &want[..], "permutation {perm:?} differs from the comparison-sort reference");
+                assert_eq!(
+                    got,
+                    &want[..],
+                    "permutation {perm:?} differs from the comparison-sort reference"
+                );
             }
         }
     }
@@ -1262,8 +1340,10 @@ mod tests {
     fn build_raw_perms_radix_all(triples: &[[Id; 3]]) -> Vec<(Perm, Vec<[Id; 3]>)> {
         let build = |p: Perm| {
             let order = p.order();
-            let mut v: Vec<[Id; 3]> =
-                triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+            let mut v: Vec<[Id; 3]> = triples
+                .iter()
+                .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
+                .collect();
             radix_sort_rows(&mut v);
             v.dedup();
             v.shrink_to_fit();
@@ -1296,10 +1376,17 @@ mod tests {
         let mut have: Vec<Perm> = vec![Perm::Spo];
         for wave in DERIVE_PLAN {
             for &(src, dst) in wave.iter() {
-                assert!(have.contains(&src), "{src:?} is not materialised before it is used to derive {dst:?}");
+                assert!(
+                    have.contains(&src),
+                    "{src:?} is not materialised before it is used to derive {dst:?}"
+                );
                 let (so, dor) = (src.order(), dst.order());
                 let rest: Vec<usize> = so.iter().copied().filter(|&c| c != dor[0]).collect();
-                assert_eq!(rest, dor[1..], "{dst:?} is NOT derivable from {src:?} by a stable sort on its leading column");
+                assert_eq!(
+                    rest,
+                    dor[1..],
+                    "{dst:?} is NOT derivable from {src:?} by a stable sort on its leading column"
+                );
             }
             // Destinations only become available to the NEXT wave.
             for &(_, dst) in wave.iter() {
@@ -1310,7 +1397,10 @@ mod tests {
         have.sort_unstable_by_key(|p| *p as usize);
         let mut want: Vec<Perm> = BUILT.to_vec();
         want.sort_unstable_by_key(|p| *p as usize);
-        assert_eq!(have, want, "the derivation plan must produce exactly the BUILT set");
+        assert_eq!(
+            have, want,
+            "the derivation plan must produce exactly the BUILT set"
+        );
     }
 
     /// [SONNET-4.6 sq-dzfzq] RESULT-EQUIVALENCE of the derived build: every BUILT permutation of
@@ -1334,11 +1424,11 @@ mod tests {
         };
         // (subject span, predicate span, object span) — 1 means a CONSTANT column.
         let shapes: [(u32, u32, u32); 6] = [
-            (1, 1, 1),          // every column constant: no radix pass executes anywhere
-            (1, 7, 100_000),    // constant subject, wide multi-byte object
-            (300, 1, 300),      // constant predicate
-            (100_000, 5, 3),    // wide subject, tiny object -> heavy duplicates
-            (40, 40, 40),       // all sub-byte: exactly one pass per derivation
+            (1, 1, 1),                   // every column constant: no radix pass executes anywhere
+            (1, 7, 100_000),             // constant subject, wide multi-byte object
+            (300, 1, 300),               // constant predicate
+            (100_000, 5, 3),             // wide subject, tiny object -> heavy duplicates
+            (40, 40, 40),                // all sub-byte: exactly one pass per derivation
             (3_000_000, 900, 5_000_000), // all multi-byte
         ];
         for (si, pi, oi) in shapes {
@@ -1399,7 +1489,13 @@ mod tests {
                 st
             };
             let triples: Vec<[Id; 3]> = (0..n)
-                .map(|_| [1 + rng() % (n as u32 / 8).max(2), 1 + rng() % 60, 1 + rng() % (n as u32 / 2).max(2)])
+                .map(|_| {
+                    [
+                        1 + rng() % (n as u32 / 8).max(2),
+                        1 + rng() % 60,
+                        1 + rng() % (n as u32 / 2).max(2),
+                    ]
+                })
                 .collect();
 
             let (mut a, mut b) = (Duration::ZERO, Duration::ZERO);
@@ -1416,7 +1512,11 @@ mod tests {
                 // Keep both arms alive across the timing loop AND re-check equivalence here, so
                 // the measurement can never report a speedup for a wrong answer.
                 for (perm, want) in &ra {
-                    assert_eq!(got[*perm as usize].as_slice(), &want[..], "{perm:?} differs between the two arms");
+                    assert_eq!(
+                        got[*perm as usize].as_slice(),
+                        &want[..],
+                        "{perm:?} differs between the two arms"
+                    );
                 }
             }
             println!(
@@ -1434,12 +1534,7 @@ mod tests {
     /// when the permutation is not built or the bound positions are not a prefix.
     #[test]
     fn scan_perm_selects_named_permutation() {
-        let triples: Vec<[Id; 3]> = vec![
-            [10, 1, 100],
-            [10, 2, 100],
-            [11, 1, 100],
-            [12, 1, 101],
-        ];
+        let triples: Vec<[Id; 3]> = vec![[10, 1, 100], [10, 2, 100], [11, 1, 100], [12, 1, 101]];
         let store = TripleStore::from_triples(triples.clone());
 
         // Fully-unbound: a built predicate-first permutation must be selectable, and its rows
@@ -1449,12 +1544,17 @@ mod tests {
         // returns `None` because PSO is not built (the documented contract). [OPUS-4.8]
         #[cfg(not(any(target_arch = "wasm32", feature = "compact-index")))]
         {
-            let scan = store.scan_perm(&[None, None, None], Perm::Pso).expect("PSO is built");
+            let scan = store
+                .scan_perm(&[None, None, None], Perm::Pso)
+                .expect("PSO is built");
             assert_eq!(scan.perm, Perm::Pso);
             let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
             let mut want = triples.clone();
             want.sort_by_key(|t| (t[1], t[0], t[2])); // predicate, subject, object
-            assert_eq!(spo, want, "PSO scan not sorted by (predicate, subject, object)");
+            assert_eq!(
+                spo, want,
+                "PSO scan not sorted by (predicate, subject, object)"
+            );
         }
         #[cfg(any(target_arch = "wasm32", feature = "compact-index"))]
         {
@@ -1464,23 +1564,35 @@ mod tests {
                 "PSO is not built under compact-index; scan_perm must return None"
             );
             // POS IS built there and serves the fully-unbound pattern, sorted (predicate, object, subject).
-            let scan = store.scan_perm(&[None, None, None], Perm::Pos).expect("POS is built");
+            let scan = store
+                .scan_perm(&[None, None, None], Perm::Pos)
+                .expect("POS is built");
             assert_eq!(scan.perm, Perm::Pos);
             let spo: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
             let mut want = triples.clone();
             want.sort_by_key(|t| (t[1], t[2], t[0])); // predicate, object, subject
-            assert_eq!(spo, want, "POS scan not sorted by (predicate, object, subject)");
+            assert_eq!(
+                spo, want,
+                "POS scan not sorted by (predicate, object, subject)"
+            );
         }
 
         // Object bound: OSP places the object as the leading prefix → Some. (OSP is built in
         // both the default and the compact index set.)
-        let obj = store.scan_perm(&[None, None, Some(100)], Perm::Osp).expect("OSP built");
-        assert!(obj.rows.iter().all(|r| obj.to_spo(r)[2] == 100), "OSP range must be object=100");
+        let obj = store
+            .scan_perm(&[None, None, Some(100)], Perm::Osp)
+            .expect("OSP built");
+        assert!(
+            obj.rows.iter().all(|r| obj.to_spo(r)[2] == 100),
+            "OSP range must be object=100"
+        );
         assert_eq!(obj.rows.len(), 3);
 
         // Object bound but SPO does NOT put the bound object in the leading prefix → None.
         assert!(
-            store.scan_perm(&[None, None, Some(100)], Perm::Spo).is_none(),
+            store
+                .scan_perm(&[None, None, Some(100)], Perm::Spo)
+                .is_none(),
             "SPO cannot serve an object-only bound pattern as a prefix range"
         );
     }
@@ -1505,9 +1617,16 @@ mod tests {
         let store = TripleStore::from_triples(triples);
         for &perm in BUILT {
             let rows = store.perms[perm as usize].as_slice();
-            assert_eq!(rows.len(), distinct, "permutation {perm:?} still holds duplicate rows");
+            assert_eq!(
+                rows.len(),
+                distinct,
+                "permutation {perm:?} still holds duplicate rows"
+            );
             // Fully sorted in this perm's column order, and strictly increasing (no dup).
-            assert!(rows.windows(2).all(|w| w[0] < w[1]), "permutation {perm:?} not strictly sorted/deduped");
+            assert!(
+                rows.windows(2).all(|w| w[0] < w[1]),
+                "permutation {perm:?} not strictly sorted/deduped"
+            );
         }
     }
 
@@ -1549,13 +1668,21 @@ mod tests {
                     let cs = cmp.scan(&pat);
                     assert_eq!(dump(&rs), dump(&cs), "rows differ for pattern {pat:?}");
                     // estimate() must equal the true match count for both modes.
-                    assert_eq!(cmp.estimate(&pat), dump(&rs).len(), "estimate wrong for {pat:?}");
+                    assert_eq!(
+                        cmp.estimate(&pat),
+                        dump(&rs).len(),
+                        "estimate wrong for {pat:?}"
+                    );
                 }
             }
         }
         // Per-predicate stats must be identical (computed from raw before encoding).
         for p in 1..=13 {
-            assert_eq!(raw.pred_stat(p), cmp.pred_stat(p), "pred_stat differs for {p}");
+            assert_eq!(
+                raw.pred_stat(p),
+                cmp.pred_stat(p),
+                "pred_stat differs for {p}"
+            );
         }
     }
 
@@ -1591,13 +1718,26 @@ mod tests {
         }
         let raw = TripleStore::from_triples(triples.clone());
         let v1 = TripleStore::from_triples_compressed(triples.clone());
-        let v2 = with_emit_format(EmitFormat::V2, || TripleStore::from_triples_compressed(triples));
+        let v2 = with_emit_format(EmitFormat::V2, || {
+            TripleStore::from_triples_compressed(triples)
+        });
 
         let mut checked = 0;
         for i in 0..6 {
-            if let (PermData::Compressed(a), PermData::Compressed(b)) = (&v1.perms[i], &v2.perms[i]) {
-                assert_eq!(a.format(), crate::compress::Format::V1, "default in-RAM emit must stay V1 (perm {})", i);
-                assert_eq!(b.format(), crate::compress::Format::V2, "emit gate did not reach the in-RAM path (perm {})", i);
+            if let (PermData::Compressed(a), PermData::Compressed(b)) = (&v1.perms[i], &v2.perms[i])
+            {
+                assert_eq!(
+                    a.format(),
+                    crate::compress::Format::V1,
+                    "default in-RAM emit must stay V1 (perm {})",
+                    i
+                );
+                assert_eq!(
+                    b.format(),
+                    crate::compress::Format::V2,
+                    "emit gate did not reach the in-RAM path (perm {})",
+                    i
+                );
                 checked += 1;
             }
         }
@@ -1616,7 +1756,12 @@ mod tests {
                     let want = dump(&raw.scan(&pat));
                     assert_eq!(dump(&v1.scan(&pat)), want, "V1 rows differ for {:?}", pat);
                     assert_eq!(dump(&v2.scan(&pat)), want, "V2 rows differ for {:?}", pat);
-                    assert_eq!(v2.estimate(&pat), want.len(), "V2 estimate wrong for {:?}", pat);
+                    assert_eq!(
+                        v2.estimate(&pat),
+                        want.len(),
+                        "V2 estimate wrong for {:?}",
+                        pat
+                    );
                 }
             }
         }
@@ -1666,21 +1811,46 @@ mod tests {
             let f = format!("perm{}.bin", perm as usize);
             let r = std::fs::read(raw_dir.join(&f)).unwrap();
             let c = std::fs::read(cmp_dir.join(&f)).unwrap();
-            assert_ne!(&r[..8], &crate::compress::FILE_MAGIC, "raw {f} must not carry the magic");
-            assert_eq!(&c[..8], &crate::compress::FILE_MAGIC, "compressed {f} must carry the magic");
-            assert!(c.len() < r.len(), "{f}: compressed ({}) not smaller than raw ({})", c.len(), r.len());
+            assert_ne!(
+                &r[..8],
+                &crate::compress::FILE_MAGIC,
+                "raw {f} must not carry the magic"
+            );
+            assert_eq!(
+                &c[..8],
+                &crate::compress::FILE_MAGIC,
+                "compressed {f} must carry the magic"
+            );
+            assert!(
+                c.len() < r.len(),
+                "{f}: compressed ({}) not smaller than raw ({})",
+                c.len(),
+                r.len()
+            );
             raw_total += r.len() as u64;
             cmp_total += c.len() as u64;
         }
-        assert!(cmp_total * 2 < raw_total, "expected >2x overall perm compression, got {raw_total}/{cmp_total}");
+        assert!(
+            cmp_total * 2 < raw_total,
+            "expected >2x overall perm compression, got {raw_total}/{cmp_total}"
+        );
 
         let raw = TripleStore::open(&raw_dir).unwrap(); // old format: still opens (compat)
         let lazy = TripleStore::open(&cmp_dir).unwrap(); // auto-detected compressed
         let mut eager = TripleStore::open(&cmp_dir).unwrap();
         eager.decompress_to_ram(); // load-time decompression mode
-        assert!(matches!(lazy.perms[Perm::Spo as usize], PermData::Compressed(_)), "compressed file not auto-detected");
-        assert!(matches!(raw.perms[Perm::Spo as usize], PermData::Mapped(_)), "raw file must stay mmap'd");
-        assert!(matches!(eager.perms[Perm::Spo as usize], PermData::Owned(_)), "decompress_to_ram must own the rows");
+        assert!(
+            matches!(lazy.perms[Perm::Spo as usize], PermData::Compressed(_)),
+            "compressed file not auto-detected"
+        );
+        assert!(
+            matches!(raw.perms[Perm::Spo as usize], PermData::Mapped(_)),
+            "raw file must stay mmap'd"
+        );
+        assert!(
+            matches!(eager.perms[Perm::Spo as usize], PermData::Owned(_)),
+            "decompress_to_ram must own the rows"
+        );
         assert_eq!(raw.len(), lazy.len());
         assert_eq!(raw.len(), eager.len());
 
@@ -1694,18 +1864,36 @@ mod tests {
                 for &o in &ovals {
                     let pat: Pattern = [s, p, o];
                     for sort_col in [None, Some(0), Some(1), Some(2)] {
-                        fn scans<'a>(g: &'a TripleStore, pat: &Pattern, sort_col: Option<usize>) -> Scan<'a> {
+                        fn scans<'a>(
+                            g: &'a TripleStore,
+                            pat: &Pattern,
+                            sort_col: Option<usize>,
+                        ) -> Scan<'a> {
                             match sort_col {
                                 None => g.scan(pat),
                                 Some(c) => g.scan_sorted(pat, c),
                             }
                         }
-                        let (r, l, e) = (scans(&raw, &pat, sort_col), scans(&lazy, &pat, sort_col), scans(&eager, &pat, sort_col));
+                        let (r, l, e) = (
+                            scans(&raw, &pat, sort_col),
+                            scans(&lazy, &pat, sort_col),
+                            scans(&eager, &pat, sort_col),
+                        );
                         assert_eq!(r.perm, l.perm);
-                        assert_eq!(r.rows, l.rows, "lazy rows differ for {pat:?} sort {sort_col:?}");
-                        assert_eq!(r.rows, e.rows, "eager rows differ for {pat:?} sort {sort_col:?}");
+                        assert_eq!(
+                            r.rows, l.rows,
+                            "lazy rows differ for {pat:?} sort {sort_col:?}"
+                        );
+                        assert_eq!(
+                            r.rows, e.rows,
+                            "eager rows differ for {pat:?} sort {sort_col:?}"
+                        );
                     }
-                    assert_eq!(raw.estimate(&pat), lazy.estimate(&pat), "estimate differs for {pat:?}");
+                    assert_eq!(
+                        raw.estimate(&pat),
+                        lazy.estimate(&pat),
+                        "estimate differs for {pat:?}"
+                    );
                 }
             }
         }
@@ -1714,8 +1902,16 @@ mod tests {
         std::fs::remove_file(cmp_dir.join("predstats.bin")).unwrap();
         let refallback = TripleStore::open(&cmp_dir).unwrap();
         for p in 1..=18 {
-            assert_eq!(raw.pred_stat(p), lazy.pred_stat(p), "persisted pred_stat differs for {p}");
-            assert_eq!(raw.pred_stat(p), refallback.pred_stat(p), "recomputed pred_stat differs for {p}");
+            assert_eq!(
+                raw.pred_stat(p),
+                lazy.pred_stat(p),
+                "persisted pred_stat differs for {p}"
+            );
+            assert_eq!(
+                raw.pred_stat(p),
+                refallback.pred_stat(p),
+                "recomputed pred_stat differs for {p}"
+            );
         }
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1745,7 +1941,10 @@ mod tests {
         store.save(&dir).unwrap();
         let loaded = TripleStore::load_pred_stats(&dir)
             .expect("persisted predstats.bin must load, not fall back to a POS+PSO re-scan");
-        assert_eq!(loaded, *store.pred_stats, "loaded pred stats must equal the saved ones");
+        assert_eq!(
+            loaded, *store.pred_stats,
+            "loaded pred stats must equal the saved ones"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1773,8 +1972,15 @@ mod tests {
         // Inserts: fresh triples (plus a base duplicate — must be a no-op).
         triples.sort_unstable();
         triples.dedup();
-        let deletes: Vec<[Id; 3]> = triples.iter().step_by(7).copied().chain([[9999, 9999, 9999]]).collect();
-        let mut inserts: Vec<[Id; 3]> = (0..500).map(|_| [401 + rng() % 50, 10 + rng() % 3, 2001 + rng() % 100]).collect();
+        let deletes: Vec<[Id; 3]> = triples
+            .iter()
+            .step_by(7)
+            .copied()
+            .chain([[9999, 9999, 9999]])
+            .collect();
+        let mut inserts: Vec<[Id; 3]> = (0..500)
+            .map(|_| [401 + rng() % 50, 10 + rng() % 3, 2001 + rng() % 100])
+            .collect();
         inserts.push(triples[3]); // already in the base
         store.apply_delta(&inserts, &deletes);
         assert!(store.has_overlay());
@@ -1808,7 +2014,9 @@ mod tests {
                         for sort_col in [None, Some(0), Some(1), Some(2)] {
                             let (ov_scan, rb_scan) = match sort_col {
                                 None => (store.scan(&pat), rebuilt.scan(&pat)),
-                                Some(c) => (store.scan_sorted(&pat, c), rebuilt.scan_sorted(&pat, c)),
+                                Some(c) => {
+                                    (store.scan_sorted(&pat, c), rebuilt.scan_sorted(&pat, c))
+                                }
                             };
                             // Rows must be SORTED in the chosen permutation's order…
                             assert!(
@@ -1839,11 +2047,21 @@ mod tests {
         // pending insertion retracts it, the `added.remove` path), so a stale cache would
         // surface retracted rows and miss new ones. Re-running the identical sweep against a
         // fresh rebuild of the twice-updated set is what catches that.
-        let more_inserts: Vec<[Id; 3]> = (0..300).map(|_| [451 + rng() % 50, 13 + rng() % 3, 2101 + rng() % 100]).collect();
+        let more_inserts: Vec<[Id; 3]> = (0..300)
+            .map(|_| [451 + rng() % 50, 13 + rng() % 3, 2101 + rng() % 100])
+            .collect();
         // Retract a sample of the FIRST batch's pending insertions, and delete more base triples.
-        let pending: Vec<[Id; 3]> = inserts.iter().copied().filter(|t| triples.binary_search(t).is_err()).collect();
-        let more_deletes: Vec<[Id; 3]> =
-            pending.iter().step_by(3).copied().chain(triples.iter().skip(1).step_by(11).copied()).collect();
+        let pending: Vec<[Id; 3]> = inserts
+            .iter()
+            .copied()
+            .filter(|t| triples.binary_search(t).is_err())
+            .collect();
+        let more_deletes: Vec<[Id; 3]> = pending
+            .iter()
+            .step_by(3)
+            .copied()
+            .chain(triples.iter().skip(1).step_by(11).copied())
+            .collect();
         store.apply_delta(&more_inserts, &more_deletes);
 
         let mut reference2: Vec<[Id; 3]> = reference.clone();
@@ -1853,21 +2071,40 @@ mod tests {
         reference2.sort_unstable();
         reference2.dedup();
         let rebuilt2 = TripleStore::from_triples(reference2);
-        assert_eq!(store.len(), rebuilt2.len(), "len must reflect the second delta");
+        assert_eq!(
+            store.len(),
+            rebuilt2.len(),
+            "len must reflect the second delta"
+        );
         sweep(&store, &rebuilt2, "second delta");
 
         // Restore the single-delta state the revert check below expects.
-        let undo_ins: Vec<[Id; 3]> = more_deletes.iter().copied().filter(|t| reference.binary_search(t).is_ok()).collect();
+        let undo_ins: Vec<[Id; 3]> = more_deletes
+            .iter()
+            .copied()
+            .filter(|t| reference.binary_search(t).is_ok())
+            .collect();
         store.apply_delta(&undo_ins, &more_inserts);
         sweep(&store, &rebuilt, "reverted to first delta");
 
         // Reverting every EFFECTIVE change must drop the overlay entirely (no residual
         // overhead): re-insert the base triples that were deleted, delete the genuinely
         // new ones (the no-op delete/insert from above never entered the overlay).
-        let eff_del: Vec<[Id; 3]> = deletes.iter().copied().filter(|t| triples.binary_search(t).is_ok()).collect();
-        let eff_add: Vec<[Id; 3]> = inserts.iter().copied().filter(|t| triples.binary_search(t).is_err()).collect();
+        let eff_del: Vec<[Id; 3]> = deletes
+            .iter()
+            .copied()
+            .filter(|t| triples.binary_search(t).is_ok())
+            .collect();
+        let eff_add: Vec<[Id; 3]> = inserts
+            .iter()
+            .copied()
+            .filter(|t| triples.binary_search(t).is_err())
+            .collect();
         store.apply_delta(&eff_del, &eff_add);
-        assert!(!store.has_overlay(), "a fully reverted overlay must be dropped");
+        assert!(
+            !store.has_overlay(),
+            "a fully reverted overlay must be dropped"
+        );
         let full = store.scan(&[None, None, None]);
         let mut orig: Vec<[Id; 3]> = triples.clone();
         orig.sort_unstable();
@@ -1898,7 +2135,10 @@ mod tests {
         // A small overlay touching ONLY subject 50: insert (50,1,11), delete (50,1,1).
         let mut store = TripleStore::from_triples(triples.clone());
         store.apply_delta(&[[50, 1, 11]], &[[50, 1, 1]]);
-        assert!(store.has_overlay(), "the overlay must exist for a non-vacuous test");
+        assert!(
+            store.has_overlay(),
+            "the overlay must exist for a non-vacuous test"
+        );
 
         // A full rebuild of the corrected triple set (the general-path oracle).
         let mut reference: Vec<[Id; 3]> = triples.clone();
@@ -1912,25 +2152,56 @@ mod tests {
         for s in [1u32, 7, 49, 51, 100] {
             let pat: Pattern = [Some(s), None, None];
             let scan = store.scan(&pat);
-            assert!(matches!(scan.rows, Cow::Borrowed(_)), "untouched subject {} must be zero-copy borrowed", s);
-            assert_eq!(scan.rows, base_store.scan(&pat).rows, "fast-path rows must equal the base for subject {}", s);
+            assert!(
+                matches!(scan.rows, Cow::Borrowed(_)),
+                "untouched subject {} must be zero-copy borrowed",
+                s
+            );
+            assert_eq!(
+                scan.rows,
+                base_store.scan(&pat).rows,
+                "fast-path rows must equal the base for subject {}",
+                s
+            );
             // A clean range is untouched by the overlay, so the rebuild agrees too.
-            assert_eq!(scan.rows, rebuilt.scan(&pat).rows, "fast-path rows must equal the rebuild for subject {}", s);
+            assert_eq!(
+                scan.rows,
+                rebuilt.scan(&pat).rows,
+                "fast-path rows must equal the rebuild for subject {}",
+                s
+            );
         }
 
         // (ii) TOUCHED range (subject 50): general merge path — rows are OWNED, reflect the
         // correction (object 1 gone, 11 added), and match the rebuild in sort order.
         let touched: Pattern = [Some(50), None, None];
         let scan = store.scan(&touched);
-        assert!(matches!(scan.rows, Cow::Owned(_)), "a range the overlay touches must take the merge path");
-        assert_eq!(scan.rows, rebuilt.scan(&touched).rows, "merge-path rows must equal the rebuild");
-        assert!(scan.rows.windows(2).all(|w| w[0] <= w[1]), "merge-path rows must stay sorted");
+        assert!(
+            matches!(scan.rows, Cow::Owned(_)),
+            "a range the overlay touches must take the merge path"
+        );
+        assert_eq!(
+            scan.rows,
+            rebuilt.scan(&touched).rows,
+            "merge-path rows must equal the rebuild"
+        );
+        assert!(
+            scan.rows.windows(2).all(|w| w[0] <= w[1]),
+            "merge-path rows must stay sorted"
+        );
 
         // (iii) A full unbound scan intersects the overlay -> merge path, equals rebuild.
         let all: Pattern = [None, None, None];
         let scan = store.scan(&all);
-        assert!(matches!(scan.rows, Cow::Owned(_)), "an overlay-intersecting full scan takes the merge path");
-        assert_eq!(scan.rows, rebuilt.scan(&all).rows, "full merge-path scan must equal the rebuild");
+        assert!(
+            matches!(scan.rows, Cow::Owned(_)),
+            "an overlay-intersecting full scan takes the merge path"
+        );
+        assert_eq!(
+            scan.rows,
+            rebuilt.scan(&all).rows,
+            "full merge-path scan must equal the rebuild"
+        );
 
         // (iv) An overlay that touches a range only via a DELETE (no insert) must still take
         // the merge path there (count_correction = (0, 1) != (0, 0)) and drop the row.
@@ -1938,9 +2209,19 @@ mod tests {
         del_store.apply_delta(&[], &[[7, 1, 5]]);
         let pat: Pattern = [Some(7), None, None];
         let scan = del_store.scan(&pat);
-        assert!(matches!(scan.rows, Cow::Owned(_)), "a delete-only touched range must take the merge path");
-        assert!(!scan.rows.contains(&[7, 1, 5]), "the deleted row must be absent");
-        assert_eq!(scan.rows.len(), base_store.scan(&pat).rows.len() - 1, "exactly one row dropped");
+        assert!(
+            matches!(scan.rows, Cow::Owned(_)),
+            "a delete-only touched range must take the merge path"
+        );
+        assert!(
+            !scan.rows.contains(&[7, 1, 5]),
+            "the deleted row must be absent"
+        );
+        assert_eq!(
+            scan.rows.len(),
+            base_store.scan(&pat).rows.len() - 1,
+            "exactly one row dropped"
+        );
 
         // (v) sq-7d3dj.16 — CACHE INVALIDATION, witnessed by the `Cow` variant. The cached
         // perm-sorted projection of `added` must never outlive the `added` it came from, in
@@ -1955,13 +2236,20 @@ mod tests {
         let pat7: Pattern = [Some(7), None, None];
         let pat_p: Pattern = [None, Some(1), None];
         let pat_o: Pattern = [None, None, Some(11)];
-        assert!(matches!(store.scan(&pat7).rows, Cow::Borrowed(_)), "subject 7 starts clean (cache warmed)");
+        assert!(
+            matches!(store.scan(&pat7).rows, Cow::Borrowed(_)),
+            "subject 7 starts clean (cache warmed)"
+        );
         // Warm the non-SPO projections. Object 11 exists ONLY as the overlay's insertion,
         // so the O-bound scan is exactly one overlay row — a stale OSP cache is then visible
         // as a wrong row rather than as a needle in the base.
         let warm_p = store.scan(&pat_p).rows.len();
         // OSP rows are (o, s, p), so the single overlay insertion (50, 1, 11) reads (11, 50, 1).
-        assert_eq!(store.scan(&pat_o).rows.as_ref(), [[11, 50, 1]], "OSP warm-up sees only the inserted object 11");
+        assert_eq!(
+            store.scan(&pat_o).rows.as_ref(),
+            [[11, 50, 1]],
+            "OSP warm-up sees only the inserted object 11"
+        );
 
         // GROW: insert into the warmed ranges. Every projection must be rebuilt, so the scans
         // see the new row, subject 7 leaves the fast path, and all of it matches a rebuild.
@@ -1971,10 +2259,23 @@ mod tests {
         grown.extend([[50, 1, 11], [7, 1, 11]]);
         let grown_rebuild = TripleStore::from_triples(grown);
         let scan = store.scan(&pat7);
-        assert!(matches!(scan.rows, Cow::Owned(_)), "an insertion into the range must leave the fast path");
-        assert!(scan.rows.contains(&[7, 1, 11]), "the freshly inserted row must be visible (stale cache would hide it)");
-        assert_eq!(scan.rows, grown_rebuild.scan(&pat7).rows, "grown rows must equal the rebuild");
-        assert!(scan.rows.windows(2).all(|w| w[0] <= w[1]), "grown rows must stay sorted");
+        assert!(
+            matches!(scan.rows, Cow::Owned(_)),
+            "an insertion into the range must leave the fast path"
+        );
+        assert!(
+            scan.rows.contains(&[7, 1, 11]),
+            "the freshly inserted row must be visible (stale cache would hide it)"
+        );
+        assert_eq!(
+            scan.rows,
+            grown_rebuild.scan(&pat7).rows,
+            "grown rows must equal the rebuild"
+        );
+        assert!(
+            scan.rows.windows(2).all(|w| w[0] <= w[1]),
+            "grown rows must stay sorted"
+        );
         // The NON-SPO caches warmed above must have been invalidated too — these are the
         // assertions a missing `invalidate_added` fails, since SPO can never go stale.
         assert_eq!(
@@ -1982,28 +2283,57 @@ mod tests {
             [[11, 7, 1], [11, 50, 1]],
             "OSP must see BOTH object-11 rows (a stale cache keeps only the old one)"
         );
-        assert_eq!(store.scan(&pat_p).rows.len(), warm_p + 1, "POS must count the new predicate-1 row");
+        assert_eq!(
+            store.scan(&pat_p).rows.len(),
+            warm_p + 1,
+            "POS must count the new predicate-1 row"
+        );
         for pat in [pat_p, pat_o] {
             let scan = store.scan(&pat);
-            assert_eq!(scan.rows, grown_rebuild.scan(&pat).rows, "grown cross-perm rows differ for {pat:?}");
-            assert!(scan.rows.windows(2).all(|w| w[0] <= w[1]), "grown cross-perm rows must stay sorted");
+            assert_eq!(
+                scan.rows,
+                grown_rebuild.scan(&pat).rows,
+                "grown cross-perm rows differ for {pat:?}"
+            );
+            assert!(
+                scan.rows.windows(2).all(|w| w[0] <= w[1]),
+                "grown cross-perm rows must stay sorted"
+            );
         }
 
         // SHRINK: retract that pending insertion (the `added.remove` path). Every projection
         // must be rebuilt again, so the row disappears and subject 7 returns to zero-copy.
         store.apply_delta(&[], &[[7, 1, 11]]);
         let scan = store.scan(&pat7);
-        assert!(matches!(scan.rows, Cow::Borrowed(_)), "retracting the insertion must restore the fast path");
-        assert!(!scan.rows.contains(&[7, 1, 11]), "the retracted row must be gone (stale cache would keep it)");
-        assert_eq!(scan.rows, base_store.scan(&pat7).rows, "retracted rows must equal the untouched base");
+        assert!(
+            matches!(scan.rows, Cow::Borrowed(_)),
+            "retracting the insertion must restore the fast path"
+        );
+        assert!(
+            !scan.rows.contains(&[7, 1, 11]),
+            "the retracted row must be gone (stale cache would keep it)"
+        );
+        assert_eq!(
+            scan.rows,
+            base_store.scan(&pat7).rows,
+            "retracted rows must equal the untouched base"
+        );
         assert_eq!(
             store.scan(&pat_o).rows.as_ref(),
             [[11, 50, 1]],
             "OSP must drop the retracted row (a stale cache keeps it)"
         );
-        assert_eq!(store.scan(&pat_p).rows.len(), warm_p, "POS must be back to its pre-insert count");
+        assert_eq!(
+            store.scan(&pat_p).rows.len(),
+            warm_p,
+            "POS must be back to its pre-insert count"
+        );
         for pat in [pat7, pat_p, pat_o, [Some(50), None, None]] {
-            assert_eq!(store.scan(&pat).rows, rebuilt.scan(&pat).rows, "reverted cross-perm rows differ for {pat:?}");
+            assert_eq!(
+                store.scan(&pat).rows,
+                rebuilt.scan(&pat).rows,
+                "reverted cross-perm rows differ for {pat:?}"
+            );
         }
     }
 
@@ -2016,12 +2346,7 @@ mod tests {
     fn build_raw_perms_no_capacity_slack() {
         // Build a Vec with heavy duplicates to maximise pre/post-dedup slack.
         // 4 unique triples repeated 100x each → capacity starts at 400, len after dedup = 4.
-        let unique: Vec<[Id; 3]> = vec![
-            [1, 1, 1],
-            [2, 2, 2],
-            [3, 3, 3],
-            [4, 4, 4],
-        ];
+        let unique: Vec<[Id; 3]> = vec![[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]];
         let mut triples: Vec<[Id; 3]> = Vec::with_capacity(400);
         for _ in 0..100 {
             triples.extend_from_slice(&unique);

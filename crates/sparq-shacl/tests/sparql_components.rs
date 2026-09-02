@@ -65,7 +65,10 @@ fn ask_component_flags_and_conforms() {
     "#
     );
     // "abcdef" (6) > 3 -> violation; "ab" (2) <= 3 -> conforms.
-    let r = run("@prefix ex: <http://example.org/> . ex:x ex:y ex:z .", &shapes);
+    let r = run(
+        "@prefix ex: <http://example.org/> . ex:x ex:y ex:z .",
+        &shapes,
+    );
     assert!(!r.conforms, "{}", r.to_text());
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
     let res = &r.results[0];
@@ -91,8 +94,15 @@ fn ask_component_does_not_activate_without_parameter() {
           sh:property [ sh:path ex:name ; sh:minCount 0 ] .
     "#
     );
-    let r = run("@prefix ex: <http://example.org/> . ex:x ex:y ex:z .", &shapes);
-    assert!(r.conforms, "component must not fire when its parameter is unused: {}", r.to_text());
+    let r = run(
+        "@prefix ex: <http://example.org/> . ex:x ex:y ex:z .",
+        &shapes,
+    );
+    assert!(
+        r.conforms,
+        "component must not fire when its parameter is unused: {}",
+        r.to_text()
+    );
 }
 
 /// Multi-parameter binding: a two-parameter ASK component (the W3C
@@ -118,12 +128,21 @@ fn multi_parameter_component() {
     );
     // The targets are literals; "Hello World" = "Hello "+"World" conforms,
     // "Goodbye" does not.
-    let r = run("@prefix ex: <http://example.org/> . ex:x ex:y ex:z .", &shapes);
+    let r = run(
+        "@prefix ex: <http://example.org/> . ex:x ex:y ex:z .",
+        &shapes,
+    );
     assert!(!r.conforms, "{}", r.to_text());
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
     let v = r.results[0].value.as_ref().unwrap().to_string();
-    assert!(v.contains("Goodbye"), "the non-concat value should violate; got {v}");
-    assert_eq!(r.results[0].source_component, "http://example.org/ConcatComponent");
+    assert!(
+        v.contains("Goodbye"),
+        "the non-concat value should violate; got {v}"
+    );
+    assert_eq!(
+        r.results[0].source_component,
+        "http://example.org/ConcatComponent"
+    );
 }
 
 /// A SELECT validator: each returned solution is one violation, with the §5.2
@@ -158,7 +177,10 @@ fn select_validator_component() {
     assert!(!r.conforms, "{}", r.to_text());
     assert_eq!(r.results.len(), 2, "{}", r.to_text());
     for res in &r.results {
-        assert_eq!(res.source_component, "http://example.org/OverLimitComponent");
+        assert_eq!(
+            res.source_component,
+            "http://example.org/OverLimitComponent"
+        );
         let v = res.value.as_ref().unwrap().to_string();
         assert!(v.contains("12") || v.contains("20"), "value {v}");
         let msg = res.effective_messages()[0].to_string();
@@ -219,7 +241,10 @@ fn node_validator_preferred_for_node_shape() {
           ex:mustBeIri true .
     "#
     );
-    let r = run("@prefix ex: <http://example.org/> . ex:x ex:y ex:z .", &shapes);
+    let r = run(
+        "@prefix ex: <http://example.org/> . ex:x ex:y ex:z .",
+        &shapes,
+    );
     assert!(!r.conforms, "{}", r.to_text());
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
     let msg = r.results[0].effective_messages()[0].to_string();
@@ -298,7 +323,10 @@ fn property_validator_path_prebinding() {
     "#;
     let r2 = run(data2, &shapes2);
     assert_eq!(r2.results.len(), 1, "{}", r2.to_text());
-    assert_eq!(r2.results[0].value.as_ref().unwrap().to_string(), "\"Muenchen\"");
+    assert_eq!(
+        r2.results[0].value.as_ref().unwrap().to_string(),
+        "\"Muenchen\""
+    );
 }
 
 /// [OPUS-4.8] (sq-wys) The pre-bound parameter variable is the LOCAL NAME of the
@@ -321,11 +349,17 @@ fn parameter_variable_is_path_local_name_not_sh_name() {
           ex:lang "en" .
     "#
     );
-    let r = run("@prefix ex: <http://example.org/> . ex:x ex:y ex:z .", &shapes);
+    let r = run(
+        "@prefix ex: <http://example.org/> . ex:x ex:y ex:z .",
+        &shapes,
+    );
     assert!(!r.conforms, "{}", r.to_text());
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
     // "Munich" (no @en) violates; "Beijing"@en conforms.
-    assert_eq!(r.results[0].value.as_ref().unwrap().to_string(), "\"Munich\"");
+    assert_eq!(
+        r.results[0].value.as_ref().unwrap().to_string(),
+        "\"Munich\""
+    );
 }
 
 /// The report Turtle for a custom-component result is valid Turtle and carries
@@ -338,10 +372,15 @@ fn component_report_turtle_parses() {
         ex:S a sh:NodeShape ; sh:targetNode "abcdef" ; ex:maxLen 1 .
     "#
     );
-    let r = run("@prefix ex: <http://example.org/> . ex:x ex:y ex:z .", &shapes);
+    let r = run(
+        "@prefix ex: <http://example.org/> . ex:x ex:y ex:z .",
+        &shapes,
+    );
     assert!(!r.conforms);
     let ttl = r.to_turtle();
-    let parsed: Result<Vec<_>, _> = oxttl::TurtleParser::new().for_slice(ttl.as_bytes()).collect();
+    let parsed: Result<Vec<_>, _> = oxttl::TurtleParser::new()
+        .for_slice(ttl.as_bytes())
+        .collect();
     let triples = parsed.unwrap_or_else(|e| panic!("report Turtle does not parse: {e}\n{ttl}"));
     assert!(triples
         .iter()

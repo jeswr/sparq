@@ -538,7 +538,10 @@ mod tests {
     /// The rewrite expanded a topology triple: the `geof:` call and the
     /// `asWKT` resolution edge appear in the rewritten algebra.
     fn assert_expanded(s: &str) {
-        assert!(s.contains("function/geosparql/sfWithin"), "not expanded: {s}");
+        assert!(
+            s.contains("function/geosparql/sfWithin"),
+            "not expanded: {s}"
+        );
         assert!(s.contains("asWKT"), "no resolution path: {s}");
     }
 
@@ -649,9 +652,7 @@ mod tests {
         // is still handled — here a plain `Path` with a single NamedNode is
         // produced by an inverse path `^geo:sfContains`-style shape; we use a
         // sequence-free single hop expressed via a path to keep it a `Path`.)
-        let q = format!(
-            "{GEO_P} SELECT ?a ?b WHERE {{ ?a (geo:sfWithin) ?b }}"
-        );
+        let q = format!("{GEO_P} SELECT ?a ?b WHERE {{ ?a (geo:sfWithin) ?b }}");
         // Whether spargebra lowers `(geo:sfWithin)` to a Bgp or a Path, the
         // rewrite must still expand it.
         let s = rw(&q);
@@ -663,9 +664,7 @@ mod tests {
         // A standalone VALUES block has no nested pattern; the Values arm
         // returns it unchanged (no topology triple to expand). The query is a
         // structural no-op for the rewrite.
-        let q = format!(
-            "{GEO_P} SELECT ?a WHERE {{ VALUES ?a {{ ex:x ex:y }} }}"
-        );
+        let q = format!("{GEO_P} SELECT ?a WHERE {{ VALUES ?a {{ ex:x ex:y }} }}");
         let before = sparq_engine::PreparedQuery::parse(&q).unwrap().into_query();
         let after = rewrite_query(before.clone());
         assert_eq!(before.to_string(), after.to_string());
@@ -702,9 +701,7 @@ mod tests {
         ));
         assert_expanded(&describe);
 
-        let ask = rw(&format!(
-            "{GEO_P} ASK WHERE {{ ?a geo:sfWithin ?b }}"
-        ));
+        let ask = rw(&format!("{GEO_P} ASK WHERE {{ ?a geo:sfWithin ?b }}"));
         assert_expanded(&ask);
     }
 

@@ -60,7 +60,10 @@ fn main() {
     println!("# sq-0wo9e P0 ablation — INDICATIVE numbers on a NON-CANONICAL work-box");
     println!("# filtered link-prediction: MRR / Hits@1 / Hits@3 / Hits@10 (higher is better)");
     println!("# matrix: closure {{off,on}} x negatives {{uniform,type-constrained}}");
-    println!("# reported as MEAN +/- STD over {} seeds; read the ASYMMETRIC ComplEx run for any", seeds.len());
+    println!(
+        "# reported as MEAN +/- STD over {} seeds; read the ASYMMETRIC ComplEx run for any",
+        seeds.len()
+    );
     println!("# inter-cell delta (DistMult is near-random on these 100%-directional slices).");
     println!();
 
@@ -234,7 +237,9 @@ fn main() {
     // verdict may be ABANDON — a non-positive or non-significant delta means the axis did not help
     // on this slice, and nothing here claims otherwise.
     {
-        use sparq_vectors::eval::{run_pooling_ablation, run_weight_ablation, synthetic_provenance_ttl};
+        use sparq_vectors::eval::{
+            run_pooling_ablation, run_weight_ablation, synthetic_provenance_ttl,
+        };
 
         println!("== PHASE-4 provenance-weighting: paired deltas on the annotated slice ==");
         let w_seeds: Vec<u64> = (0..8u64).map(|i| seed0.wrapping_add(0xB00 + i)).collect();

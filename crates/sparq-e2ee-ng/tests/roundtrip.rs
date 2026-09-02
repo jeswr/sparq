@@ -32,7 +32,10 @@ fn sample_grant() -> PublicGrant {
         BranchId::from_bytes([2u8; 32]),
         Epoch(7),
         TopicId::from_bytes([3u8; 32]),
-        Validity { not_before: 100, not_after: 200 },
+        Validity {
+            not_before: 100,
+            not_after: 200,
+        },
         vec!["wss://broker.example".to_string()],
     )
 }
@@ -85,7 +88,10 @@ fn cbor_rejects_trailing_bytes() {
 #[test]
 fn cbor_enforces_limits() {
     // Declare a byte string of length 10 but with a tiny max_str_len.
-    let tight = Limits { max_str_len: 4, ..Limits::default() };
+    let tight = Limits {
+        max_str_len: 4,
+        ..Limits::default()
+    };
     let mut w = Writer::new();
     w.bytes(&[0u8; 10]);
     let bytes = w.into_bytes();
@@ -207,7 +213,10 @@ fn sign_verify_roundtrip_and_tamper() {
     let pk = sk.public();
     let sig = sk.sign(b"message");
     pk.verify(b"message", &sig).unwrap();
-    assert!(matches!(pk.verify(b"tampered", &sig), Err(Error::BadSignature)));
+    assert!(matches!(
+        pk.verify(b"tampered", &sig),
+        Err(Error::BadSignature)
+    ));
 }
 
 // ============================================================================
@@ -226,7 +235,10 @@ fn wrap_unwrap_roundtrip() {
 fn wrap_wrong_aad_fails_closed() {
     let recipient = RecipientSecretKey::from_bytes([6u8; 32]);
     let w = wrap(&recipient.public(), b"secret", b"aad-A").unwrap();
-    assert!(matches!(unwrap(&recipient, &w, b"aad-B"), Err(Error::Decrypt)));
+    assert!(matches!(
+        unwrap(&recipient, &w, b"aad-B"),
+        Err(Error::Decrypt)
+    ));
 }
 
 #[test]
@@ -243,9 +255,18 @@ fn wrap_rejects_low_order_recipient_key() {
     // the all-zero shared secret regardless of the ephemeral key, so sealing
     // must fail closed rather than derive a key from public context only.
     let low_order = RecipientPublicKey([0u8; 32]);
-    assert!(matches!(wrap(&low_order, b"secret", b"aad"), Err(Error::BadKey(_))));
     assert!(matches!(
-        wrap_with([11u8; 32], [12u8; AEAD_NONCE_LEN], &low_order, b"secret", b"aad"),
+        wrap(&low_order, b"secret", b"aad"),
+        Err(Error::BadKey(_))
+    ));
+    assert!(matches!(
+        wrap_with(
+            [11u8; 32],
+            [12u8; AEAD_NONCE_LEN],
+            &low_order,
+            b"secret",
+            b"aad"
+        ),
         Err(Error::BadKey(_))
     ));
 }
@@ -255,8 +276,14 @@ fn unwrap_rejects_low_order_ephemeral_key() {
     // An attacker-supplied low-order ephemeral key must fail closed on open.
     let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
     let good = wrap(&recipient.public(), b"secret", b"aad").unwrap();
-    let forged = WrappedSecret { ephemeral_pub: [0u8; 32], ..good };
-    assert!(matches!(unwrap(&recipient, &forged, b"aad"), Err(Error::Decrypt)));
+    let forged = WrappedSecret {
+        ephemeral_pub: [0u8; 32],
+        ..good
+    };
+    assert!(matches!(
+        unwrap(&recipient, &forged, b"aad"),
+        Err(Error::Decrypt)
+    ));
 }
 
 #[test]
@@ -289,8 +316,7 @@ fn read_write_admin_separation() {
     assert_eq!(read.grant.authority, vec![Authority::Read]);
     read.validate().unwrap();
 
-    let write =
-        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    let write = Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
     assert!(write.grant.authority.contains(&Authority::Publish));
     assert!(write.grant.publisher_pub.is_some());
     write.validate().unwrap();
@@ -324,14 +350,16 @@ fn publisher_secret_must_match_signed_publisher_pub() {
     assert!(matches!(cap.validate(), Err(Error::Separation(_))));
     // The mismatch is also caught on the decode path (decode_secret validates).
     let bytes = cap.encode_secret();
-    assert!(matches!(Capability::decode_secret(&bytes, lim()), Err(Error::Separation(_))));
+    assert!(matches!(
+        Capability::decode_secret(&bytes, lim()),
+        Err(Error::Separation(_))
+    ));
 }
 
 #[test]
 fn public_grant_excludes_secret_fields() {
     let publisher = SecretSigningKey::from_seed([2u8; 32]);
-    let write =
-        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    let write = Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
     let public = write.grant.encode();
     let secret = write.encode_secret();
     assert!(secret.len() > public.len(), "secret encoding carries more");
@@ -355,7 +383,10 @@ fn public_grant_admin_sign_verify() {
     // Tamper: flip epoch, signature must fail.
     let mut bad = grant.clone();
     bad.epoch = Epoch(999);
-    assert!(matches!(bad.verify(&admin.public()), Err(Error::BadSignature)));
+    assert!(matches!(
+        bad.verify(&admin.public()),
+        Err(Error::BadSignature)
+    ));
 }
 
 #[test]
@@ -370,8 +401,7 @@ fn cap_id_is_stable_and_nonce_sensitive() {
 #[test]
 fn capability_secret_roundtrip() {
     let publisher = SecretSigningKey::from_seed([2u8; 32]);
-    let mut write =
-        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    let mut write = Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
     let admin = SecretSigningKey::from_seed([1u8; 32]);
     write.grant.sign(&admin);
 
@@ -390,8 +420,7 @@ fn capability_secret_roundtrip() {
 fn wrap_capability_roundtrip_recovers_every_secret_field() {
     let publisher = SecretSigningKey::from_seed([2u8; 32]);
     let admin = SecretSigningKey::from_seed([1u8; 32]);
-    let mut write =
-        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    let mut write = Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
     write.grant.sign(&admin);
 
     let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
@@ -494,7 +523,10 @@ fn wrap_capability_rejects_a_structurally_invalid_public_grant() {
 
     // An inverted validity window.
     let mut cap = read_cap();
-    cap.grant.validity = Validity { not_before: 200, not_after: 100 };
+    cap.grant.validity = Validity {
+        not_before: 200,
+        not_after: 100,
+    };
     assert!(matches!(
         wrap_capability(&cap, &recipient.public()),
         Err(Error::Schema(_))
@@ -543,8 +575,7 @@ fn wrap_capability_rejects_low_order_recipient_key() {
 fn public_grant_decode_rejects_secret_field() {
     // A secret field (key 10) is not permitted in a standalone public grant.
     let publisher = SecretSigningKey::from_seed([2u8; 32]);
-    let write =
-        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    let write = Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
     let secret_bytes = write.encode_secret();
     assert!(matches!(
         PublicGrant::decode(&secret_bytes, lim()),
@@ -567,7 +598,10 @@ fn delegation_narrows_only() {
         Delegation {
             branches: None,
             authority: vec![Authority::Read],
-            validity: Validity { not_before: 120, not_after: 180 },
+            validity: Validity {
+                not_before: 120,
+                not_after: 180,
+            },
             max_epoch: Some(9),
         },
     )
@@ -599,7 +633,10 @@ fn delegation_narrows_only() {
             Delegation {
                 branches: None,
                 authority: vec![Authority::Read],
-                validity: Validity { not_before: 120, not_after: 180 },
+                validity: Validity {
+                    not_before: 120,
+                    not_after: 180
+                },
                 max_epoch: Some(5),
             }
         ),
@@ -614,7 +651,10 @@ fn delegation_narrows_only() {
             Delegation {
                 branches: None,
                 authority: vec![Authority::Read],
-                validity: Validity { not_before: 120, not_after: 180 },
+                validity: Validity {
+                    not_before: 120,
+                    not_after: 180
+                },
                 max_epoch: Some(10),
             }
         ),
@@ -627,7 +667,10 @@ fn delegation_narrows_only() {
         Delegation {
             branches: None,
             authority: vec![Authority::Read],
-            validity: Validity { not_before: 120, not_after: 180 },
+            validity: Validity {
+                not_before: 120,
+                not_after: 180,
+            },
             max_epoch: None,
         },
     )
@@ -642,7 +685,10 @@ fn delegation_narrows_only() {
             Delegation {
                 branches: None,
                 authority: vec![Authority::Read, Authority::Publish, Authority::Admin],
-                validity: Validity { not_before: 120, not_after: 180 },
+                validity: Validity {
+                    not_before: 120,
+                    not_after: 180
+                },
                 max_epoch: None,
             }
         ),
@@ -657,7 +703,10 @@ fn delegation_narrows_only() {
             Delegation {
                 branches: None,
                 authority: vec![Authority::Read],
-                validity: Validity { not_before: 0, not_after: 999 },
+                validity: Validity {
+                    not_before: 0,
+                    not_after: 999
+                },
                 max_epoch: None,
             }
         ),
@@ -679,7 +728,8 @@ fn sb(branch: u8, topic: u8) -> ScopedBranch {
 fn branch_set_grant() -> PublicGrant {
     let mut g = sample_grant();
     g.authority = vec![Authority::Admin];
-    g.set_branch_scope(vec![sb(0x30, 0xA3), sb(0x10, 0xA1), sb(0x20, 0xA2)]).unwrap();
+    g.set_branch_scope(vec![sb(0x30, 0xA3), sb(0x10, 0xA1), sb(0x20, 0xA2)])
+        .unwrap();
     g
 }
 
@@ -693,7 +743,10 @@ fn branch_scope_is_canonical_and_authenticated() {
     assert_eq!(g.branch, BranchId::from_bytes([0x10; 32]));
     assert_eq!(g.topic, TopicId::from_bytes([0xA1; 32]));
     assert_eq!(g.extra_branches, vec![sb(0x20, 0xA2), sb(0x30, 0xA3)]);
-    assert_eq!(g.branch_scope(), vec![sb(0x10, 0xA1), sb(0x20, 0xA2), sb(0x30, 0xA3)]);
+    assert_eq!(
+        g.branch_scope(),
+        vec![sb(0x10, 0xA1), sb(0x20, 0xA2), sb(0x30, 0xA3)]
+    );
 
     for b in [0x10u8, 0x20, 0x30] {
         assert!(g.covers_branch(&BranchId::from_bytes([b; 32])));
@@ -754,7 +807,10 @@ fn delegation_narrows_branch_set() {
                 BranchId::from_bytes([0x20; 32]),
             ]),
             authority: vec![Authority::Admin],
-            validity: Validity { not_before: 120, not_after: 180 },
+            validity: Validity {
+                not_before: 120,
+                not_after: 180,
+            },
             max_epoch: None,
         },
     )
@@ -774,7 +830,10 @@ fn delegation_narrows_branch_set() {
         Delegation {
             branches: None,
             authority: vec![Authority::Admin],
-            validity: Validity { not_before: 120, not_after: 180 },
+            validity: Validity {
+                not_before: 120,
+                not_after: 180,
+            },
             max_epoch: None,
         },
     )
@@ -789,14 +848,20 @@ fn delegation_narrows_branch_set() {
         Delegation {
             branches: Some(vec![BranchId::from_bytes([0x30; 32])]),
             authority: vec![Authority::Admin],
-            validity: Validity { not_before: 120, not_after: 180 },
+            validity: Validity {
+                not_before: 120,
+                not_after: 180,
+            },
             max_epoch: None,
         },
     )
     .unwrap();
     assert_eq!(single.branch_scope(), vec![sb(0x30, 0xA3)]);
     assert!(single.extra_branches.is_empty());
-    assert_eq!(PublicGrant::decode(&single.encode(), lim()).unwrap(), single);
+    assert_eq!(
+        PublicGrant::decode(&single.encode(), lim()).unwrap(),
+        single
+    );
 
     let narrow = |from: &PublicGrant, branches: Option<Vec<BranchId>>| {
         delegate(
@@ -805,7 +870,10 @@ fn delegation_narrows_branch_set() {
             Delegation {
                 branches,
                 authority: vec![Authority::Admin],
-                validity: Validity { not_before: 120, not_after: 180 },
+                validity: Validity {
+                    not_before: 120,
+                    not_after: 180,
+                },
                 max_epoch: None,
             },
         )
@@ -817,12 +885,18 @@ fn delegation_narrows_branch_set() {
         Err(Error::Delegation(_))
     ));
     // An empty set is not a narrow grant, it is an unusable one.
-    assert!(matches!(narrow(&parent, Some(vec![])), Err(Error::Delegation(_))));
+    assert!(matches!(
+        narrow(&parent, Some(vec![])),
+        Err(Error::Delegation(_))
+    ));
     // A repeated branch is rejected rather than silently collapsed.
     assert!(matches!(
         narrow(
             &parent,
-            Some(vec![BranchId::from_bytes([0x20; 32]), BranchId::from_bytes([0x20; 32])])
+            Some(vec![
+                BranchId::from_bytes([0x20; 32]),
+                BranchId::from_bytes([0x20; 32])
+            ])
         ),
         Err(Error::Delegation(_))
     ));
@@ -837,7 +911,10 @@ fn delegation_narrows_branch_set() {
         Err(Error::Delegation(_))
     ));
     // ...and inheriting from the child inherits only what the child still has.
-    assert_eq!(narrow(&child, None).unwrap().branch_scope(), child.branch_scope());
+    assert_eq!(
+        narrow(&child, None).unwrap().branch_scope(),
+        child.branch_scope()
+    );
 }
 
 /// Every `PublicGrant` field is public, so a parent can be hand-built (or
@@ -884,12 +961,18 @@ fn delegation_rejects_a_non_canonical_parent() {
                 Delegation {
                     branches,
                     authority: vec![Authority::Admin],
-                    validity: Validity { not_before: 120, not_after: 180 },
+                    validity: Validity {
+                        not_before: 120,
+                        not_after: 180,
+                    },
                     max_epoch: None,
                 },
             );
             // No child at all — never a signed one.
-            assert!(r.is_err(), "delegate minted a child from a non-canonical parent");
+            assert!(
+                r.is_err(),
+                "delegate minted a child from a non-canonical parent"
+            );
         }
     }
 
@@ -901,7 +984,10 @@ fn delegation_rejects_a_non_canonical_parent() {
         Delegation {
             branches: None,
             authority: vec![Authority::Admin],
-            validity: Validity { not_before: 120, not_after: 180 },
+            validity: Validity {
+                not_before: 120,
+                not_after: 180,
+            },
             max_epoch: None,
         },
     )
@@ -960,9 +1046,17 @@ fn block_tampered_ciphertext_fails_closed() {
     let k = Secret32([4u8; 32]);
     let ctx = sample_ctx();
     let object = ObjectId::from_bytes([5u8; 32]);
-    let mut env =
-        seal_block(&k, &ctx, &object, &sparq_e2ee_ng::ids::BlockId::from_bytes([6u8; 32]),
-                   0, 1, [7u8; AEAD_NONCE_LEN], b"payload").unwrap();
+    let mut env = seal_block(
+        &k,
+        &ctx,
+        &object,
+        &sparq_e2ee_ng::ids::BlockId::from_bytes([6u8; 32]),
+        0,
+        1,
+        [7u8; AEAD_NONCE_LEN],
+        b"payload",
+    )
+    .unwrap();
     env.ciphertext[0] ^= 0x01;
     assert!(matches!(open_block(&k, &ctx, &env), Err(Error::Decrypt)));
 }
@@ -1020,9 +1114,17 @@ fn commit_sign_verify_and_id_stable() {
         kind: ObjectKind::Commit,
     };
     let object = ObjectId::from_bytes([9u8; 32]);
-    let env = seal_block(&k, &ctx, &object,
-                         &sparq_e2ee_ng::ids::BlockId::from_bytes([10u8; 32]),
-                         0, 1, [11u8; AEAD_NONCE_LEN], &commit.encode()).unwrap();
+    let env = seal_block(
+        &k,
+        &ctx,
+        &object,
+        &sparq_e2ee_ng::ids::BlockId::from_bytes([10u8; 32]),
+        0,
+        1,
+        [11u8; AEAD_NONCE_LEN],
+        &commit.encode(),
+    )
+    .unwrap();
     assert_eq!(env.commit_id(), env.commit_id());
 
     // Decode the plaintext back and re-verify.

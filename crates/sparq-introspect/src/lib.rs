@@ -526,7 +526,11 @@ pub fn characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet> {
             predicate_triples: triples.into_boxed_slice(),
         })
         .collect();
-    sets.sort_unstable_by(|a, b| b.subjects.cmp(&a.subjects).then_with(|| a.predicates.cmp(&b.predicates)));
+    sets.sort_unstable_by(|a, b| {
+        b.subjects
+            .cmp(&a.subjects)
+            .then_with(|| a.predicates.cmp(&b.predicates))
+    });
     sets
 }
 
@@ -1601,10 +1605,7 @@ impl Introspection {
 
         // ---- Assemble: header, glossary, body, unmatched note.
         let mut w = BudgetWriter::new(budget_chars);
-        w.line(&format!(
-            "# Schema for {matched}/{} seeds",
-            seeds.len()
-        ));
+        w.line(&format!("# Schema for {matched}/{} seeds", seeds.len()));
         if !prefixes.assigned.is_empty() && !w.full() {
             w.line("## Prefixes");
             for (ns, pfx) in &prefixes.assigned {
@@ -2270,7 +2271,16 @@ mod tests {
                     .predicates
                     .iter()
                     .zip(s.predicate_triples.iter())
-                    .map(|(&p, &t)| (g.dict.term(p).to_string().trim_matches(['<', '>']).to_string(), t))
+                    .map(|(&p, &t)| {
+                        (
+                            g.dict
+                                .term(p)
+                                .to_string()
+                                .trim_matches(['<', '>'])
+                                .to_string(),
+                            t,
+                        )
+                    })
                     .collect();
                 preds.sort();
                 (
@@ -2285,15 +2295,29 @@ mod tests {
                 .iter()
                 .find(|(preds, ..)| *preds == set.predicates)
                 .unwrap_or_else(|| panic!("set {:?} missing from id table", set.predicates));
-            assert_eq!(found.1, set.subjects, "subject count for {:?}", set.predicates);
-            assert_eq!(found.2, set.predicate_triples, "triples for {:?}", set.predicates);
+            assert_eq!(
+                found.1, set.subjects,
+                "subject count for {:?}",
+                set.predicates
+            );
+            assert_eq!(
+                found.2, set.predicate_triples,
+                "triples for {:?}",
+                set.predicates
+            );
         }
         // Id-space invariants: ascending predicate ids, deterministic order.
-        assert!(ids.iter().all(|s| s.predicates.windows(2).all(|w| w[0] < w[1])));
+        assert!(ids
+            .iter()
+            .all(|s| s.predicates.windows(2).all(|w| w[0] < w[1])));
         assert!(ids.windows(2).all(|w| w[0].subjects >= w[1].subjects));
         // The two-subject set {rdf:type, :p, :q} leads.
         assert_eq!(ids[0].subjects, 2);
-        assert_eq!(ids[0].predicate_triples.iter().sum::<u64>(), 2 + 3 + 2, "type x2, p x3, q x2");
+        assert_eq!(
+            ids[0].predicate_triples.iter().sum::<u64>(),
+            2 + 3 + 2,
+            "type x2, p x3, q x2"
+        );
     }
 
     /// Cross-class join hints: `(C, p, D)` edge triple counts, exact on a fixture, and
@@ -2365,17 +2389,16 @@ mod tests {
         let nt = ix.to_void("http://ex.org/dataset");
 
         // Re-parse: the VoID document is valid N-Triples (hence valid Turtle).
-        let re: std::collections::HashMap<(String, String), String> =
-            oxttl::NTriplesParser::new()
-                .for_slice(nt.as_bytes())
-                .map(|t| {
-                    let t = t.expect("valid N-Triples");
-                    (
-                        (t.subject.to_string(), t.predicate.to_string()),
-                        t.object.to_string(),
-                    )
-                })
-                .collect();
+        let re: std::collections::HashMap<(String, String), String> = oxttl::NTriplesParser::new()
+            .for_slice(nt.as_bytes())
+            .map(|t| {
+                let t = t.expect("valid N-Triples");
+                (
+                    (t.subject.to_string(), t.predicate.to_string()),
+                    t.object.to_string(),
+                )
+            })
+            .collect();
 
         let ds = "<http://ex.org/dataset>".to_string();
         let v = |l: &str| format!("<{VOID_NS}{l}>");
@@ -2388,8 +2411,8 @@ mod tests {
         assert_eq!(re.get(&(ds.clone(), v("entities"))), Some(&lit(3))); // alice, bob, acme
         assert_eq!(re.get(&(ds.clone(), v("distinctSubjects"))), Some(&lit(3)));
         assert_eq!(re.get(&(ds.clone(), v("classes"))), Some(&lit(2))); // Person, Company
-        // 4 predicates: rdf:type, foaf:name, :worksAt (+ the partition properties are
-        // distinct predicates of the *original* graph, not the VoID doc).
+                                                                        // 4 predicates: rdf:type, foaf:name, :worksAt (+ the partition properties are
+                                                                        // distinct predicates of the *original* graph, not the VoID doc).
         assert_eq!(re.get(&(ds.clone(), v("properties"))), Some(&lit(3)));
         // A class partition for Person carries void:class + void:entities=2.
         let nt2 = ix.to_void("http://ex.org/dataset");
@@ -2559,9 +2582,7 @@ mod tests {
                 .collect();
             triples
                 .iter()
-                .filter(|t| {
-                    t.predicate.as_str() == sh(term) && t.object.to_string() == int1
-                })
+                .filter(|t| t.predicate.as_str() == sh(term) && t.object.to_string() == int1)
                 .filter_map(|t| path_of.get(&t.subject.to_string()).cloned())
                 .collect()
         };
@@ -2578,8 +2599,14 @@ mod tests {
         // sh:maxCount 1 ONLY for single-valued predicates: name (1 each) and label (1),
         // never worksAt (carol has 2 → avg multiplicity 2, unsound to bound).
         let max_paths = paths_with("maxCount");
-        assert!(max_paths.contains(&format!("<{name}>")), "name is single-valued");
-        assert!(max_paths.contains(&format!("<{label}>")), "label is single-valued");
+        assert!(
+            max_paths.contains(&format!("<{name}>")),
+            "name is single-valued"
+        );
+        assert!(
+            max_paths.contains(&format!("<{label}>")),
+            "label is single-valued"
+        );
         assert!(
             !max_paths.contains(&format!("<{works}>")),
             "worksAt is multi-valued — no sh:maxCount: {shacl}"
@@ -2891,7 +2918,7 @@ mod tests {
         // With cap=3 and 3 items already, the 4th push must be rejected (len NOT < cap).
         let mut t: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
         keep_min_sample(&mut t, 3, "aa".into()); // "aa" < last "c"
-        // Correct: replaces "c" → ["a","aa","b"].  Mutation `len <= cap` would push a 4th.
+                                                 // Correct: replaces "c" → ["a","aa","b"].  Mutation `len <= cap` would push a 4th.
         assert_eq!(t.len(), 3, "cap enforced: len must stay at 3");
         assert_eq!(t, vec!["a", "aa", "b"], "smaller value replaced the max");
     }
@@ -2937,11 +2964,23 @@ mod tests {
             "4 chars at max=3: truncated to 2+ellipsis"
         );
         // max=1: take(0) = "" + "…" (saturating_sub(1) of 1 is 0, not -1).
-        assert_eq!(truncate_chars("xy", 1), "\u{2026}", "max=1 yields bare ellipsis");
+        assert_eq!(
+            truncate_chars("xy", 1),
+            "\u{2026}",
+            "max=1 yields bare ellipsis"
+        );
         // max=0: saturating_sub(1) = 0, take(0) = "" + "…".
-        assert_eq!(truncate_chars("a", 0), "\u{2026}", "max=0 yields bare ellipsis");
+        assert_eq!(
+            truncate_chars("a", 0),
+            "\u{2026}",
+            "max=0 yields bare ellipsis"
+        );
         // Exactly 1 char at max=1: no truncation.
-        assert_eq!(truncate_chars("a", 1), "a", "1 char at max=1: no truncation");
+        assert_eq!(
+            truncate_chars("a", 1),
+            "a",
+            "1 char at max=1: no truncation"
+        );
         // Empty string: always returned unchanged regardless of max.
         assert_eq!(truncate_chars("", 0), "", "empty string is never truncated");
     }
@@ -2960,7 +2999,10 @@ mod tests {
             !w7.line("hello"),
             "limit=7, cost=6: 0+6+2=8 > 7 should reject (mutation +1 would accept)"
         );
-        assert!(w7.full(), "writer is in truncated state after first rejection");
+        assert!(
+            w7.full(),
+            "writer is in truncated state after first rejection"
+        );
 
         // limit=8: the line DOES fit because 0 + 6 + 2 = 8 > 8 is FALSE.
         let mut w8 = BudgetWriter::new(8);
@@ -2987,8 +3029,7 @@ mod tests {
         let out = w.finish();
         // used=6, limit=8: 6+2=8 <= 8 → marker appended.
         assert_eq!(
-            out,
-            "hello\n\u{2026}\n",
+            out, "hello\n\u{2026}\n",
             "elision marker must appear when used+2 exactly equals limit"
         );
 
@@ -3008,7 +3049,11 @@ mod tests {
         // [OPUS-4.8] sq-qcnn.21
         let mut w3 = BudgetWriter::new(1);
         assert!(!w3.line("x"), "no line fits when limit=1");
-        assert_eq!(w3.finish(), "", "no marker emitted when limit=1 (no room for the marker)");
+        assert_eq!(
+            w3.finish(),
+            "",
+            "no marker emitted when limit=1 (no room for the marker)"
+        );
     }
 
     /// [OPUS-4.8] sq-qcnn.21: `PrefixAssigner::compact` exact `i + 1` split point.
@@ -3023,7 +3068,10 @@ mod tests {
 
         // Standard IRI: last `/` is the delimiter; local part excludes the `/`.
         let r = pa.compact("http://ex.org/Foo");
-        assert_eq!(r, "ns1:Foo", "local part must start AFTER the slash, not include it");
+        assert_eq!(
+            r, "ns1:Foo",
+            "local part must start AFTER the slash, not include it"
+        );
 
         // Well-known namespace: gets its canonical prefix, not `ns2`.
         let r2 = pa.compact("http://xmlns.com/foaf/0.1/Person");
@@ -3069,7 +3117,11 @@ mod tests {
         // Inline integers encode as id = INLINE_BASE + value; render must decode back.
         let g = graph(":a :p 5 .");
         let ix = Introspection::build(&g);
-        let p = ix.predicates.iter().find(|p| p.predicate == ex("p")).unwrap();
+        let p = ix
+            .predicates
+            .iter()
+            .find(|p| p.predicate == ex("p"))
+            .unwrap();
         // render_object_sample for inline id (INLINE_BASE+5) → format!("\"{}\"", 5u64) = "\"5\"".
         assert_eq!(
             p.samples,
@@ -3080,7 +3132,11 @@ mod tests {
         // Two inline integers: lex-smallest kept first.
         let g2 = graph(":a :p 3 , 7 , 1 .");
         let ix2 = Introspection::build(&g2);
-        let p2 = ix2.predicates.iter().find(|p| p.predicate == ex("p")).unwrap();
+        let p2 = ix2
+            .predicates
+            .iter()
+            .find(|p| p.predicate == ex("p"))
+            .unwrap();
         // Lex order on rendered strings: "\"1\"" < "\"3\"" < "\"7\"".
         // Cap=3 (default), so all three fit.
         assert_eq!(
@@ -3121,10 +3177,7 @@ mod tests {
         let g3 = graph(":a :p :x , :y . :b :p :u , :v .");
         let ix3 = Introspection::build(&g3);
         let wcs3 = ix3.to_void_with_cs("http://ex.org/ds");
-        assert!(
-            wcs3.contains("2.0000"),
-            "avg multiplicity 2.0000: {wcs3}"
-        );
+        assert!(wcs3.contains("2.0000"), "avg multiplicity 2.0000: {wcs3}");
     }
 
     /// [OPUS-4.8] sq-qcnn.21: `to_void` exact class and property counts — ensures
@@ -3139,21 +3192,19 @@ mod tests {
         assert_eq!(ix.classes.len(), 2, "2 distinct rdf:type classes");
         assert_eq!(ix.predicates.len(), 3, "3 predicates: rdf:type, :p, :q");
         let nt = ix.to_void("http://ex.org/ds");
-        let re: std::collections::HashMap<(String, String), String> =
-            oxttl::NTriplesParser::new()
-                .for_slice(nt.as_bytes())
-                .map(|t| {
-                    let t = t.expect("valid N-Triples");
-                    (
-                        (t.subject.to_string(), t.predicate.to_string()),
-                        t.object.to_string(),
-                    )
-                })
-                .collect();
+        let re: std::collections::HashMap<(String, String), String> = oxttl::NTriplesParser::new()
+            .for_slice(nt.as_bytes())
+            .map(|t| {
+                let t = t.expect("valid N-Triples");
+                (
+                    (t.subject.to_string(), t.predicate.to_string()),
+                    t.object.to_string(),
+                )
+            })
+            .collect();
         let ds = "<http://ex.org/ds>".to_string();
         let lit = |n: u64| {
-            oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER)
-                .to_string()
+            oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER).to_string()
         };
         let vp = |l: &str| format!("<{VOID_NS}{l}>");
         // void:classes must be 2 (number of class profiles), not 3 (predicate count).
@@ -3200,8 +3251,7 @@ mod tests {
             .map(|t| t.expect("SHACL export is valid N-Triples"))
             .collect();
         let sh = |l: &str| format!("{SHACL_NS}{l}");
-        let int1 =
-            oxrdf::Literal::new_typed_literal("1", oxrdf::vocab::xsd::INTEGER).to_string();
+        let int1 = oxrdf::Literal::new_typed_literal("1", oxrdf::vocab::xsd::INTEGER).to_string();
         let path_of: std::collections::HashMap<String, String> = triples
             .iter()
             .filter(|t| t.predicate.as_str() == sh("path"))
@@ -3239,7 +3289,11 @@ mod tests {
         // Both in the same CS. predicate_triples[:p]=3 (2+1), predicate_triples[:q]=2 (1+1).
         let g = graph(":a :p :x , :y ; :q :z . :b :p :u ; :q :v .");
         let ids = characteristic_set_ids(&g);
-        assert_eq!(ids.len(), 1, "one characteristic set: both subjects share same predicate set");
+        assert_eq!(
+            ids.len(),
+            1,
+            "one characteristic set: both subjects share same predicate set"
+        );
         let set = &ids[0];
         assert_eq!(set.subjects, 2, "two subjects in the set");
         // Find predicate_triples for :p and :q.
@@ -3263,7 +3317,11 @@ mod tests {
         };
         // :p emitted 2 times by :a and 1 time by :b → total 3.
         // Mutation `k - j` → `k + j` would give a much larger number.
-        assert_eq!(triples_for("/p"), 3, ":p triples = 3 (2 from :a + 1 from :b)");
+        assert_eq!(
+            triples_for("/p"),
+            3,
+            ":p triples = 3 (2 from :a + 1 from :b)"
+        );
         // :q emitted 1 time by each → total 2.
         assert_eq!(triples_for("/q"), 2, ":q triples = 2 (1 from each subject)");
     }
@@ -3282,7 +3340,11 @@ mod tests {
         let ix = Introspection::build(&g);
         let t = ix.classes.iter().find(|c| c.class == ex("T")).unwrap();
         assert_eq!(t.instances, 3);
-        let cp = t.predicates.iter().find(|cp| cp.predicate == ex("p")).unwrap();
+        let cp = t
+            .predicates
+            .iter()
+            .find(|cp| cp.predicate == ex("p"))
+            .unwrap();
         // coverage = 2 subjects / 3 instances = 0.6666...
         // Mutation *: 2 * 3 = 6 (wrong). Mutation %: 2 % 3 = 2 (wrong).
         assert!(
@@ -3292,7 +3354,11 @@ mod tests {
             cp.coverage
         );
         // literal_fraction for :q: 3 literal objects / 3 triples = 1.0.
-        let pq = ix.predicates.iter().find(|p| p.predicate == ex("q")).unwrap();
+        let pq = ix
+            .predicates
+            .iter()
+            .find(|p| p.predicate == ex("q"))
+            .unwrap();
         // Mutation *: 3 * 3 = 9 (wrong). Mutation %: 3 % 3 = 0 (wrong).
         assert!(
             (pq.literal_fraction - 1.0).abs() < 1e-10,
@@ -3300,7 +3366,11 @@ mod tests {
             pq.literal_fraction
         );
         // :p has 0 literal objects / 2 triples = 0.0.
-        let pp = ix.predicates.iter().find(|p| p.predicate == ex("p")).unwrap();
+        let pp = ix
+            .predicates
+            .iter()
+            .find(|p| p.predicate == ex("p"))
+            .unwrap();
         assert!(
             pp.literal_fraction.abs() < 1e-10,
             "literal_fraction for IRI-only predicate must be 0.0"

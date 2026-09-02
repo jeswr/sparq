@@ -950,7 +950,10 @@ mod precheck {
         /// they are resolved from the bundled `secprop-methods.ttl` by the pre-check, and
         /// the policy N3 is synthesised from the STRUCTURED constraints (the `sq-nrwqs`
         /// hardening — the caller supplies no raw N3).
-        fn pref(method: &str, constraints: Vec<AdmissibilityConstraint>) -> AdmissibilityPreference {
+        fn pref(
+            method: &str,
+            constraints: Vec<AdmissibilityConstraint>,
+        ) -> AdmissibilityPreference {
             AdmissibilityPreference {
                 method_iri: NamedNode::new(method).unwrap(),
                 constraints,
@@ -1111,7 +1114,10 @@ mod precheck {
         #[test]
         fn unknown_method_with_no_constraints_denies() {
             let p = pref("https://sparq.dev/ns/zk#no-such-method", vec![]);
-            assert!(matches!(run(Some(&p)), PrecheckOutcome::UnknownMethod { .. }));
+            assert!(matches!(
+                run(Some(&p)),
+                PrecheckOutcome::UnknownMethod { .. }
+            ));
         }
 
         /// An EMPTY constraint set is vacuously satisfied for a KNOWN method (the
@@ -1138,8 +1144,17 @@ mod precheck {
             assert!(policy.contains(REQ_ASSUR) && policy.contains(REQ_SOUND));
             assert!(policy.contains("odrl:operator odrl:gteq"));
             // No `secx:` predicate is ever emitted by the policy synthesiser.
-            for pred in ["secx:hasProperty", "secx:level", "secx:property", "secx:satisfies"] {
-                assert!(!policy.contains(pred), "policy leaked a secx predicate: {}", pred);
+            for pred in [
+                "secx:hasProperty",
+                "secx:level",
+                "secx:property",
+                "secx:satisfies",
+            ] {
+                assert!(
+                    !policy.contains(pred),
+                    "policy leaked a secx predicate: {}",
+                    pred
+                );
             }
         }
 
@@ -1328,8 +1343,8 @@ mod precheck {
         /// an unknown method resolves to `None` (fail-closed).
         #[test]
         fn resolver_serialises_bundled_levels_and_derives_assurance() {
-            let n3 = super::resolve_bundled_annotations_n3(METHOD)
-                .expect("string-canonical is bundled");
+            let n3 =
+                super::resolve_bundled_annotations_n3(METHOD).expect("string-canonical is bundled");
             assert!(
                 n3.contains(crate::secprop::SECX_SOUNDNESS)
                     && n3.contains(crate::secprop::SECX_KNOWLEDGE_SOUND),

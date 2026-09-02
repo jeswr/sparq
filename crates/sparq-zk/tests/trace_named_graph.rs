@@ -70,9 +70,7 @@ fn cross_graph_join_attributes_each_pattern_to_its_graph() {
 fn single_graph_query_attributes_to_one_graph_only() {
     let ds = dataset();
     let exec = ds
-        .query_traced(
-            "SELECT ?t WHERE { <http://ex/alice> <http://ex/title> ?t }",
-        )
+        .query_traced("SELECT ?t WHERE { <http://ex/alice> <http://ex/title> ?t }")
         .unwrap();
     assert_eq!(exec.result.rows.len(), 1);
     let all: BTreeSet<usize> = exec
@@ -96,7 +94,10 @@ fn resolved_leaves_are_in_commitment_range() {
         .unwrap();
     for rp in &exec.patterns {
         for refs in &rp.leaves {
-            assert!(!refs.is_empty(), "every traced triple must attribute somewhere");
+            assert!(
+                !refs.is_empty(),
+                "every traced triple must attribute somewhere"
+            );
             for r in refs {
                 assert!(
                     r.leaf < ds.graphs[r.graph].commitment.leaves.len(),

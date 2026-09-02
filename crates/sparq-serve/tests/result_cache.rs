@@ -91,7 +91,9 @@ fn get_probe_hit_and_miss() {
     let cache = ResultCache::new();
     let epochs = PodEpochs::default();
     let scope = ScopeKey::unrestricted();
-    assert!(cache.get("ASK { ?s ?p ?o }", scope, FMT, &epochs, 0).is_none());
+    assert!(cache
+        .get("ASK { ?s ?p ?o }", scope, FMT, &epochs, 0)
+        .is_none());
 
     if let LeaseOutcome::Lead(g) = cache.lease(
         "ASK { ?s ?p ?o }",
@@ -125,17 +127,15 @@ fn scope_isolation_a_different_scope_misses() {
     // Scope A can see {private/, public/}; scope B can see only {public/}.
     let scope_a = ScopeKey::of_graphs(["urn:pod:alice/private", "urn:pod:public"]);
     let scope_b = ScopeKey::of_graphs(["urn:pod:public"]);
-    assert_ne!(scope_a, scope_b, "distinct accessible sets ⇒ distinct scope keys");
+    assert_ne!(
+        scope_a, scope_b,
+        "distinct accessible sets ⇒ distinct scope keys"
+    );
 
     // Cache a (potentially private-revealing) answer under scope A.
-    if let LeaseOutcome::Lead(g) = cache.lease(
-        q,
-        scope_a,
-        FMT,
-        ReadFootprint::Unbounded,
-        &epochs,
-        0,
-    ) {
+    if let LeaseOutcome::Lead(g) =
+        cache.lease(q, scope_a, FMT, ReadFootprint::Unbounded, &epochs, 0)
+    {
         g.fulfill(b("ALICE_PRIVATE_ROWS"), &epochs, 0);
     } else {
         panic!("expected Lead under scope A");
@@ -268,7 +268,11 @@ fn epoch_bump_invalidates_touched_pod_only() {
         cache.get(q, scope, FMT, &e_g1, 1).is_none(),
         "a write to the touched pod MUST invalidate"
     );
-    assert_eq!(cache.stats().stale, 1, "the stale entry was counted + evicted");
+    assert_eq!(
+        cache.stats().stale,
+        1,
+        "the stale entry was counted + evicted"
+    );
 }
 
 /// Unbounded-footprint entries pin the global generation: ANY write (generation
@@ -389,7 +393,10 @@ fn abandoned_lease_promotes_a_waiter() {
         }
         WaitOutcome::Bytes(_) => panic!("waiter should have been promoted after abandon"),
     }
-    assert_eq!(&*cache.get(q, scope, FMT, &epochs, 0).expect("now cached"), b"RECOVERED");
+    assert_eq!(
+        &*cache.get(q, scope, FMT, &epochs, 0).expect("now cached"),
+        b"RECOVERED"
+    );
 }
 
 /// Byte-budget LRU: with a tiny budget, inserting past it evicts the
@@ -421,9 +428,18 @@ fn lru_eviction_under_byte_budget() {
     // Insert Q3 → over budget (300 > 250) → evict the LRU, which is now Q2.
     insert("Q3");
 
-    assert!(cache.get("Q1", scope, FMT, &epochs, 0).is_some(), "Q1 (recently used) survives");
-    assert!(cache.get("Q3", scope, FMT, &epochs, 0).is_some(), "Q3 (just inserted) present");
-    assert!(cache.get("Q2", scope, FMT, &epochs, 0).is_none(), "Q2 (LRU) was evicted");
+    assert!(
+        cache.get("Q1", scope, FMT, &epochs, 0).is_some(),
+        "Q1 (recently used) survives"
+    );
+    assert!(
+        cache.get("Q3", scope, FMT, &epochs, 0).is_some(),
+        "Q3 (just inserted) present"
+    );
+    assert!(
+        cache.get("Q2", scope, FMT, &epochs, 0).is_none(),
+        "Q2 (LRU) was evicted"
+    );
     assert!(cache.stats().evictions >= 1);
     assert!(cache.bytes_used() <= 250, "never exceeds the byte budget");
 }
@@ -441,14 +457,7 @@ fn oversize_body_is_not_admitted() {
     let scope = ScopeKey::unrestricted();
     let big = b(&"y".repeat(1000)); // > 64
 
-    let returned = match cache.lease(
-        "BIG",
-        scope,
-        FMT,
-        ReadFootprint::Pods(vec![]),
-        &epochs,
-        0,
-    ) {
+    let returned = match cache.lease("BIG", scope, FMT, ReadFootprint::Pods(vec![]), &epochs, 0) {
         LeaseOutcome::Lead(g) => g.fulfill(big.clone(), &epochs, 0),
         other => panic!("expected Lead, got {}", outcome_name(&other)),
     };

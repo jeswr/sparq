@@ -150,13 +150,21 @@ fn histogram(freq: &BTreeMap<Id, u64>, limit: usize) -> Vec<HistogramBucket> {
         count += n;
         distinct += 1;
         if count >= target && out.len() + 1 < limit {
-            out.push(HistogramBucket { upper, count, distinct });
+            out.push(HistogramBucket {
+                upper,
+                count,
+                distinct,
+            });
             count = 0;
             distinct = 0;
         }
     }
     if distinct != 0 {
-        out.push(HistogramBucket { upper: *freq.last_key_value().unwrap().0, count, distinct });
+        out.push(HistogramBucket {
+            upper: *freq.last_key_value().unwrap().0,
+            count,
+            distinct,
+        });
     }
     out
 }
@@ -192,13 +200,18 @@ fn decode(bytes: &[u8]) -> io::Result<StatsCatalog> {
         let end = at
             .checked_add(n)
             .filter(|&end| end <= bytes.len())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated statistics catalog"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated statistics catalog")
+            })?;
         let slice = &bytes[*at..end];
         *at = end;
         Ok(slice)
     };
     if take(&mut at, MAGIC.len())? != MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported statistics catalog"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported statistics catalog",
+        ));
     }
     let read_u64 = |at: &mut usize| -> io::Result<u64> {
         Ok(u64::from_le_bytes(take(at, 8)?.try_into().unwrap()))
@@ -206,20 +219,34 @@ fn decode(bytes: &[u8]) -> io::Result<StatsCatalog> {
     let n = read_u64(&mut at)?;
     let min_record = std::mem::size_of::<Id>() + 24;
     if n > (bytes.len().saturating_sub(at) / min_record) as u64 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid statistics record count"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid statistics record count",
+        ));
     }
     let mut predicates = BTreeMap::new();
     for _ in 0..n {
-        let p = Id::from_le_bytes(take(&mut at, std::mem::size_of::<Id>())?.try_into().unwrap());
+        let p = Id::from_le_bytes(
+            take(&mut at, std::mem::size_of::<Id>())?
+                .try_into()
+                .unwrap(),
+        );
         let count = read_u64(&mut at)?;
         let mut read_hist = || -> io::Result<Vec<HistogramBucket>> {
             let n = read_u64(&mut at)?;
             if n > (bytes.len().saturating_sub(at) / (std::mem::size_of::<Id>() + 16)) as u64 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid histogram bucket count"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid histogram bucket count",
+                ));
             }
             let mut h = Vec::with_capacity(n as usize);
             for _ in 0..n {
-                let upper = Id::from_le_bytes(take(&mut at, std::mem::size_of::<Id>())?.try_into().unwrap());
+                let upper = Id::from_le_bytes(
+                    take(&mut at, std::mem::size_of::<Id>())?
+                        .try_into()
+                        .unwrap(),
+                );
                 h.push(HistogramBucket {
                     upper,
                     count: read_u64(&mut at)?,
@@ -230,10 +257,20 @@ fn decode(bytes: &[u8]) -> io::Result<StatsCatalog> {
         };
         let subjects = read_hist()?;
         let objects = read_hist()?;
-        predicates.insert(p, PredicateStats { count, subjects, objects });
+        predicates.insert(
+            p,
+            PredicateStats {
+                count,
+                subjects,
+                objects,
+            },
+        );
     }
     if at != bytes.len() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "trailing statistics catalog data"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "trailing statistics catalog data",
+        ));
     }
     Ok(StatsCatalog { predicates })
 }
@@ -311,9 +348,15 @@ mod tests {
         let fallback = crate::query(&graph, sparql).unwrap();
         let planned = with_stats_catalog(&catalog, || crate::query(&graph, sparql)).unwrap();
         assert_eq!(fallback.vars, planned.vars);
-        assert_eq!(fallback.rows, planned.rows, "catalog planning must preserve the solution bag");
+        assert_eq!(
+            fallback.rows, planned.rows,
+            "catalog planning must preserve the solution bag"
+        );
         let declined = crate::query(&graph, sparql).unwrap();
-        assert_eq!(fallback.rows, declined.rows, "guard must restore the prior planner path");
+        assert_eq!(
+            fallback.rows, declined.rows,
+            "guard must restore the prior planner path"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

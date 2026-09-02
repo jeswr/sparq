@@ -101,8 +101,14 @@ fn classify_emits_the_existential_subsumption() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("emitted_subclassof\t1"), "stdout: {stdout}");
     assert!(stdout.contains("skipped_axioms\t0"), "stdout: {stdout}");
-    assert!(stdout.contains("unsatisfiable_classes\t0"), "stdout: {stdout}");
-    assert!(stdout.contains("thing_unsatisfiable\tfalse"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("unsatisfiable_classes\t0"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("thing_unsatisfiable\tfalse"),
+        "stdout: {stdout}"
+    );
 
     let closure = std::fs::read_to_string(&out).expect("read closure");
     assert!(
@@ -149,11 +155,25 @@ fn el_derives_what_rl_cannot() {
     let q = format!(
         "SELECT ?sup WHERE {{ <http://ex/B> {SUB_CLASS_OF} ?sup FILTER(?sup = <http://ex/D>) }}"
     );
-    let ask = |profile: &str| run3(&["query", s(&ttl), "turtle", &q, "--reason", profile, "--format", "tsv"]);
+    let ask = |profile: &str| {
+        run3(&[
+            "query",
+            s(&ttl),
+            "turtle",
+            &q,
+            "--reason",
+            profile,
+            "--format",
+            "tsv",
+        ])
+    };
 
     let (code, el_out, err) = ask("el");
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(el_out.contains("<http://ex/D>"), "EL must derive B ⊑ D (CR2): {el_out}");
+    assert!(
+        el_out.contains("<http://ex/D>"),
+        "EL must derive B ⊑ D (CR2): {el_out}"
+    );
 
     let (code, rl_out, err) = ask("owl");
     assert_eq!(code, 0, "stderr: {err}");
@@ -174,7 +194,10 @@ fn reason_subcommand_accepts_el() {
 
     let (code, stdout, stderr) = run3(&["reason", s(&ttl), "turtle", "el", s(&out)]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("triples after el reasoning"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("triples after el reasoning"),
+        "stdout: {stdout}"
+    );
     assert!(stderr.contains("classified [OWL 2 EL]"), "stderr: {stderr}");
 
     let closure = std::fs::read_to_string(&out).expect("read closure");
@@ -202,8 +225,14 @@ fn rbox_role_lattice_is_enabled() {
 
     let (code, stdout, stderr) = run3(&["classify", s(&ttl), "turtle", s(&out)]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("emitted_subpropertyof\t1"), "stdout: {stdout}");
-    assert!(stdout.contains("rbox_non_regular\tfalse"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("emitted_subpropertyof\t1"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("rbox_non_regular\tfalse"),
+        "stdout: {stdout}"
+    );
 
     let closure = std::fs::read_to_string(&out).expect("read closure");
     assert!(

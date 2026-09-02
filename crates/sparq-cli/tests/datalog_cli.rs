@@ -83,17 +83,25 @@ fn reason_datalog_writes_the_stratified_closure() {
     let (code, stdout, stderr) = run3(&["reason", s(&data), "ntriples", &profile, s(&out)]);
     assert_eq!(code, 0, "stderr: {stderr}");
     // The stratification report: 3 rules across 3 strata (deg < Hub < Leaf).
-    assert!(stderr.contains("3 rule(s) in 3 stratum/strata"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("3 rule(s) in 3 stratum/strata"),
+        "stderr: {stderr}"
+    );
     assert!(stdout.contains("triples after"), "stdout: {stdout}");
 
     let closure = std::fs::read_to_string(&out).expect("read closure");
     // Aggregation: `a` has three edges.
     assert!(
-        closure.contains("<http://ex/a> <http://ex/deg> \"3\"^^<http://www.w3.org/2001/XMLSchema#integer> ."),
+        closure.contains(
+            "<http://ex/a> <http://ex/deg> \"3\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
+        ),
         "closure: {closure}"
     );
     // FILTER threshold over the aggregate.
-    assert!(closure.contains(&format!("<http://ex/a> {TYPE} <http://ex/Hub> .")), "closure: {closure}");
+    assert!(
+        closure.contains(&format!("<http://ex/a> {TYPE} <http://ex/Hub> .")),
+        "closure: {closure}"
+    );
     // Negation as failure against the completed lower stratum: everything that is NOT a Hub.
     for leaf in ["b", "c", "d"] {
         assert!(
@@ -101,9 +109,15 @@ fn reason_datalog_writes_the_stratified_closure() {
             "expected {leaf} to be a Leaf; closure: {closure}"
         );
     }
-    assert!(!closure.contains(&format!("<http://ex/a> {TYPE} <http://ex/Leaf> .")), "closure: {closure}");
+    assert!(
+        !closure.contains(&format!("<http://ex/a> {TYPE} <http://ex/Leaf> .")),
+        "closure: {closure}"
+    );
     // The input facts survive into the closure (it is a superset of the EDB).
-    assert!(closure.contains("<http://ex/a> <http://ex/edge> <http://ex/b> ."), "closure: {closure}");
+    assert!(
+        closure.contains("<http://ex/a> <http://ex/edge> <http://ex/b> ."),
+        "closure: {closure}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -128,9 +142,15 @@ fn query_reason_datalog_sees_derived_facts() {
     ]);
     assert_eq!(code, 0, "stderr: {stderr}");
     for leaf in ["b", "c", "d"] {
-        assert!(stdout.contains(&format!("<http://ex/{leaf}>")), "stdout: {stdout}");
+        assert!(
+            stdout.contains(&format!("<http://ex/{leaf}>")),
+            "stdout: {stdout}"
+        );
     }
-    assert!(!stdout.contains("<http://ex/a>"), "the Hub must not be a Leaf; stdout: {stdout}");
+    assert!(
+        !stdout.contains("<http://ex/a>"),
+        "the Hub must not be a Leaf; stdout: {stdout}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -151,9 +171,15 @@ fn unstratifiable_program_is_rejected() {
     let profile = format!("datalog:{}", s(&rules));
     let (code, _stdout, stderr) = run3(&["reason", s(&data), "ntriples", &profile]);
     assert_eq!(code, 1, "stderr: {stderr}");
-    assert!(stderr.contains("datalog stratification error"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("datalog stratification error"),
+        "stderr: {stderr}"
+    );
     // The checker names a predicate ON the cycle, so the message is actionable.
-    assert!(stderr.contains("http://ex/q") || stderr.contains("http://ex/p"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("http://ex/q") || stderr.contains("http://ex/p"),
+        "stderr: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -165,13 +191,23 @@ fn unstratifiable_program_is_rejected() {
 fn out_of_fragment_rules_exit_1() {
     let dir = scratch("out-of-fragment-rules");
     let data = write(&dir, "graph.nt", GRAPH);
-    let rules = write(&dir, "unsafe.dlog", "@prefix ex: <http://ex/> .\n[?x, ex:p, ?z] :- [?x, ex:edge, ?y] .\n");
+    let rules = write(
+        &dir,
+        "unsafe.dlog",
+        "@prefix ex: <http://ex/> .\n[?x, ex:p, ?z] :- [?x, ex:edge, ?y] .\n",
+    );
     let profile = format!("datalog:{}", s(&rules));
     let (code, _stdout, stderr) = run3(&["reason", s(&data), "ntriples", &profile]);
     assert_eq!(code, 1, "stderr: {stderr}");
     assert!(stderr.contains("datalog rule error in"), "stderr: {stderr}");
-    assert!(stderr.contains("unsafe.dlog"), "the rules FILE must be named; stderr: {stderr}");
-    assert!(stderr.contains("head variable `?z`"), "the CONSTRUCT must be named; stderr: {stderr}");
+    assert!(
+        stderr.contains("unsafe.dlog"),
+        "the rules FILE must be named; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("head variable `?z`"),
+        "the CONSTRUCT must be named; stderr: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -181,8 +217,16 @@ fn out_of_fragment_rules_exit_1() {
 fn missing_rules_file_exits_1() {
     let dir = scratch("missing-rules");
     let data = write(&dir, "graph.nt", GRAPH);
-    let (code, _stdout, stderr) = run3(&["reason", s(&data), "ntriples", "datalog:/no/such/rules.dlog"]);
+    let (code, _stdout, stderr) = run3(&[
+        "reason",
+        s(&data),
+        "ntriples",
+        "datalog:/no/such/rules.dlog",
+    ]);
     assert_eq!(code, 1, "stderr: {stderr}");
-    assert!(stderr.contains("error reading datalog rules /no/such/rules.dlog"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("error reading datalog rules /no/such/rules.dlog"),
+        "stderr: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

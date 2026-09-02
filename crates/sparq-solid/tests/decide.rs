@@ -18,7 +18,12 @@ const DAVE: &str = "https://dave.ex/card#me";
 const TEAM: &str = "https://pod.ex/groups/team#g";
 
 fn session(agent: Option<&str>) -> Session<'_> {
-    Session { agent, client: None, issuer: None, now: None }
+    Session {
+        agent,
+        client: None,
+        issuer: None,
+        now: None,
+    }
 }
 
 /// Build a materialized WAC store from an ACL corpus.
@@ -41,19 +46,29 @@ fn decide_allow_deny_per_mode() {
     // alice: Read+Write on her own doc; bob: nothing. The doc has its OWN .acl.
     let mut acl = AclBuilder::new();
     acl.document("https://pod.ex/d.ttl");
-    acl.access_to("https://pod.ex/d.ttl", |a| a.agent(ALICE).mode(Mode::Read).mode(Mode::Write));
+    acl.access_to("https://pod.ex/d.ttl", |a| {
+        a.agent(ALICE).mode(Mode::Read).mode(Mode::Write)
+    });
     let store = store(acl);
 
     let r = store.decide(&session(Some(ALICE)), "https://pod.ex/d.ttl", Mode::Read);
     assert!(r.allow, "alice has Read");
     assert_eq!(r.status, AclStatus::Resolved);
     assert_eq!(r.scope, Some(AclScope::AccessTo), "own .acl ⇒ accessTo");
-    assert_eq!(r.governing_acl, Some(NamedNode::new_unchecked("https://pod.ex/d.ttl.acl")));
+    assert_eq!(
+        r.governing_acl,
+        Some(NamedNode::new_unchecked("https://pod.ex/d.ttl.acl"))
+    );
     // granted_modes carries the full set in one decision.
     assert!(r.granted_modes.contains(&Mode::Read) && r.granted_modes.contains(&Mode::Write));
     assert!(!r.granted_modes.contains(&Mode::Append) && !r.granted_modes.contains(&Mode::Control));
 
-    assert!(allow(&store, Some(ALICE), "https://pod.ex/d.ttl", Mode::Write));
+    assert!(allow(
+        &store,
+        Some(ALICE),
+        "https://pod.ex/d.ttl",
+        Mode::Write
+    ));
     // alice was NOT granted Append/Control → authoritative deny (Resolved), not transient.
     let app = store.decide(&session(Some(ALICE)), "https://pod.ex/d.ttl", Mode::Append);
     assert!(!app.allow && app.status == AclStatus::Resolved);
@@ -79,11 +94,17 @@ fn decide_subject_kinds() {
     acl.document("https://pod.ex/pub/d.ttl");
     acl.access_to("https://pod.ex/pub/d.ttl", |a| a.public().mode(Mode::Read));
     acl.document("https://pod.ex/team/d.ttl");
-    acl.access_to("https://pod.ex/team/d.ttl", |a| a.agent_group(TEAM, &[CAROL, BOB]).mode(Mode::Read));
+    acl.access_to("https://pod.ex/team/d.ttl", |a| {
+        a.agent_group(TEAM, &[CAROL, BOB]).mode(Mode::Read)
+    });
     acl.document("https://pod.ex/auth/d.ttl");
-    acl.access_to("https://pod.ex/auth/d.ttl", |a| a.authenticated().mode(Mode::Read));
+    acl.access_to("https://pod.ex/auth/d.ttl", |a| {
+        a.authenticated().mode(Mode::Read)
+    });
     acl.document("https://pod.ex/priv/d.ttl");
-    acl.access_to("https://pod.ex/priv/d.ttl", |a| a.agent(ALICE).mode(Mode::Read));
+    acl.access_to("https://pod.ex/priv/d.ttl", |a| {
+        a.agent(ALICE).mode(Mode::Read)
+    });
     let store = store(acl);
 
     let r = Mode::Read;
@@ -112,23 +133,46 @@ fn decide_scope_access_to_vs_default() {
     acl.document("https://pod.ex/notes/n1.ttl");
     acl.document("https://pod.ex/notes/own.ttl");
     acl.default_for("https://pod.ex/", |a| a.agent(ALICE).mode(Mode::Read));
-    acl.access_to("https://pod.ex/notes/own.ttl", |a| a.agent(BOB).mode(Mode::Read));
+    acl.access_to("https://pod.ex/notes/own.ttl", |a| {
+        a.agent(BOB).mode(Mode::Read)
+    });
     let store = store(acl);
 
     // n1: inherited from the root .acl → Default scope.
-    let n1 = store.decide(&session(Some(ALICE)), "https://pod.ex/notes/n1.ttl", Mode::Read);
+    let n1 = store.decide(
+        &session(Some(ALICE)),
+        "https://pod.ex/notes/n1.ttl",
+        Mode::Read,
+    );
     assert!(n1.allow);
     assert_eq!(n1.scope, Some(AclScope::Default));
-    assert_eq!(n1.governing_acl, Some(NamedNode::new_unchecked("https://pod.ex/.acl")));
+    assert_eq!(
+        n1.governing_acl,
+        Some(NamedNode::new_unchecked("https://pod.ex/.acl"))
+    );
 
     // own.ttl: its OWN .acl governs → AccessTo scope, and only bob (alice's default does
     // NOT leak in — nearest-ACL semantics shadow the ancestor grant).
-    let eff = store.resolve_acl("https://pod.ex/notes/own.ttl").expect("own acl");
+    let eff = store
+        .resolve_acl("https://pod.ex/notes/own.ttl")
+        .expect("own acl");
     assert_eq!(eff.scope, AclScope::AccessTo);
     assert_eq!(eff.acl.as_str(), "https://pod.ex/notes/own.ttl.acl");
-    assert!(allow(&store, Some(BOB), "https://pod.ex/notes/own.ttl", Mode::Read));
-    let alice_on_own = store.decide(&session(Some(ALICE)), "https://pod.ex/notes/own.ttl", Mode::Read);
-    assert!(!alice_on_own.allow, "nearest-ACL shadows the root acl:default grant");
+    assert!(allow(
+        &store,
+        Some(BOB),
+        "https://pod.ex/notes/own.ttl",
+        Mode::Read
+    ));
+    let alice_on_own = store.decide(
+        &session(Some(ALICE)),
+        "https://pod.ex/notes/own.ttl",
+        Mode::Read,
+    );
+    assert!(
+        !alice_on_own.allow,
+        "nearest-ACL shadows the root acl:default grant"
+    );
     assert_eq!(alice_on_own.status, AclStatus::Resolved);
 
     // The /notes/ container is a MEMBER of / , so the root's acl:default <pod.ex/> DOES
@@ -139,8 +183,15 @@ fn decide_scope_access_to_vs_default() {
     assert!(notes.allow, "/notes/ is a member of / → inherited grant");
     assert_eq!(notes.scope, Some(AclScope::Default));
     let root = store.decide(&session(Some(ALICE)), "https://pod.ex/", Mode::Read);
-    assert!(!root.allow, "acl:default does not grant accessTo on the container it targets");
-    assert_eq!(root.scope, Some(AclScope::AccessTo), "root's own .acl governs it directly");
+    assert!(
+        !root.allow,
+        "acl:default does not grant accessTo on the container it targets"
+    );
+    assert_eq!(
+        root.scope,
+        Some(AclScope::AccessTo),
+        "root's own .acl governs it directly"
+    );
 }
 
 #[test]
@@ -150,7 +201,9 @@ fn resolve_acl_nearest_ancestor_one_call() {
     acl.document("https://pod.ex/a/b/doc.ttl");
     acl.default_for("https://pod.ex/a/", |a| a.public().mode(Mode::Read));
     let store = store(acl);
-    let eff = store.resolve_acl("https://pod.ex/a/b/doc.ttl").expect("inherited");
+    let eff = store
+        .resolve_acl("https://pod.ex/a/b/doc.ttl")
+        .expect("inherited");
     assert_eq!(eff.acl.as_str(), "https://pod.ex/a/.acl");
     assert_eq!(eff.scope, AclScope::Default);
 }
@@ -165,29 +218,49 @@ fn acl_link_header_surfaces_governing_acl_over_real_decide() {
     acl.document("https://pod.ex/notes/n1.ttl");
     acl.document("https://pod.ex/notes/own.ttl");
     acl.default_for("https://pod.ex/", |a| a.agent(ALICE).mode(Mode::Read));
-    acl.access_to("https://pod.ex/notes/own.ttl", |a| a.agent(BOB).mode(Mode::Read));
+    acl.access_to("https://pod.ex/notes/own.ttl", |a| {
+        a.agent(BOB).mode(Mode::Read)
+    });
     let store = store(acl);
 
     // Inherited (Default scope) → the ancestor .acl is advertised as the rel=acl Link.
-    let n1 = store.decide(&session(Some(ALICE)), "https://pod.ex/notes/n1.ttl", Mode::Read);
+    let n1 = store.decide(
+        &session(Some(ALICE)),
+        "https://pod.ex/notes/n1.ttl",
+        Mode::Read,
+    );
     assert_eq!(
         n1.acl_link_header().as_deref(),
         Some(r#"<https://pod.ex/.acl>; rel="acl""#)
     );
-    assert_eq!(n1.scope.map(AclScope::as_acl_predicate), Some("http://www.w3.org/ns/auth/acl#default"));
+    assert_eq!(
+        n1.scope.map(AclScope::as_acl_predicate),
+        Some("http://www.w3.org/ns/auth/acl#default")
+    );
 
     // Own ACL (AccessTo scope) → the resource's OWN .acl is advertised.
-    let own = store.decide(&session(Some(BOB)), "https://pod.ex/notes/own.ttl", Mode::Read);
+    let own = store.decide(
+        &session(Some(BOB)),
+        "https://pod.ex/notes/own.ttl",
+        Mode::Read,
+    );
     assert!(own.allow);
     assert_eq!(
         own.acl_link_header().as_deref(),
         Some(r#"<https://pod.ex/notes/own.ttl.acl>; rel="acl""#)
     );
-    assert_eq!(own.scope.map(AclScope::as_acl_predicate), Some("http://www.w3.org/ns/auth/acl#accessTo"));
+    assert_eq!(
+        own.scope.map(AclScope::as_acl_predicate),
+        Some("http://www.w3.org/ns/auth/acl#accessTo")
+    );
 
     // The Link surface is independent of the verdict — an authoritative DENY still tells the
     // client WHERE the governing ACL is (safe: it surfaces provenance, never the grant).
-    let denied = store.decide(&session(Some(BOB)), "https://pod.ex/notes/n1.ttl", Mode::Read);
+    let denied = store.decide(
+        &session(Some(BOB)),
+        "https://pod.ex/notes/n1.ttl",
+        Mode::Read,
+    );
     assert!(!denied.allow, "bob has no grant on n1");
     assert_eq!(denied.status, AclStatus::Resolved);
     assert_eq!(
@@ -206,7 +279,10 @@ fn acl_link_header_none_is_fail_closed_over_real_decide() {
 
     let no_acl = store.decide(&session(Some(ALICE)), "https://pod.ex/open.ttl", Mode::Read);
     assert_eq!(no_acl.status, AclStatus::NoAcl);
-    assert!(no_acl.acl_link_header().is_none(), "no ACL ⇒ nothing to advertise");
+    assert!(
+        no_acl.acl_link_header().is_none(),
+        "no ACL ⇒ nothing to advertise"
+    );
 
     let transient = store.decide(&session(Some(ALICE)), "not a valid iri", Mode::Read);
     assert_eq!(transient.status, AclStatus::Transient);
@@ -242,9 +318,15 @@ fn fail_closed_present_but_unloaded_is_denied_unloaded() {
     let d = store.decide(&session(Some(ALICE)), "https://pod.ex/d.ttl", Mode::Read);
     assert!(!d.allow, "present-but-UNLOADED ⇒ DENIED, never allowed");
     assert_eq!(d.status, AclStatus::Unloaded);
-    assert!(d.status.is_retryable(), "unloaded is a retryable 503, not a permission denial");
+    assert!(
+        d.status.is_retryable(),
+        "unloaded is a retryable 503, not a permission denial"
+    );
     // The governing ACL is still discovered (for the Link: rel=acl surface / a 503 body).
-    assert_eq!(d.governing_acl, Some(NamedNode::new_unchecked("https://pod.ex/d.ttl.acl")));
+    assert_eq!(
+        d.governing_acl,
+        Some(NamedNode::new_unchecked("https://pod.ex/d.ttl.acl"))
+    );
 }
 
 #[test]
@@ -277,7 +359,10 @@ fn fail_closed_reserved_encoding_session_value() {
         now: None,
     };
     let d = store.decide(&forged, "https://pod.ex/d.ttl", Mode::Read);
-    assert!(!d.allow, "reserved-encoding session value ⇒ fail-closed deny");
+    assert!(
+        !d.allow,
+        "reserved-encoding session value ⇒ fail-closed deny"
+    );
 }
 
 // ─── FR-1: decide_batch is a per-element independent, fail-closed decision ────────────
@@ -288,7 +373,9 @@ fn decide_batch_independent_decisions() {
     acl.document("https://pod.ex/pub.ttl");
     acl.access_to("https://pod.ex/pub.ttl", |a| a.public().mode(Mode::Read));
     acl.document("https://pod.ex/priv.ttl");
-    acl.access_to("https://pod.ex/priv.ttl", |a| a.agent(ALICE).mode(Mode::Read));
+    acl.access_to("https://pod.ex/priv.ttl", |a| {
+        a.agent(ALICE).mode(Mode::Read)
+    });
     let store = store(acl);
 
     let bob = session(Some(BOB));
@@ -307,7 +394,11 @@ fn decide_batch_independent_decisions() {
 
     // The batch result must equal calling decide() one-by-one (no cross-talk).
     for (i, (res, mode)) in reqs.iter().enumerate() {
-        assert_eq!(store.decide(&bob, res, *mode), out[i], "batch == singletons at {i}");
+        assert_eq!(
+            store.decide(&bob, res, *mode),
+            out[i],
+            "batch == singletons at {i}"
+        );
     }
 }
 
@@ -320,7 +411,9 @@ fn decide_verdict_matches_accessible_oracle() {
     // the oracle CAN see.
     let mut acl = AclBuilder::new();
     acl.document("https://pod.ex/notes/n1.ttl");
-    acl.default_for("https://pod.ex/", |a| a.agent(ALICE).mode(Mode::Read).mode(Mode::Write));
+    acl.default_for("https://pod.ex/", |a| {
+        a.agent(ALICE).mode(Mode::Read).mode(Mode::Write)
+    });
     let s = store(acl);
 
     let resource = "https://pod.ex/notes/n1.ttl";
@@ -330,7 +423,10 @@ fn decide_verdict_matches_accessible_oracle() {
             let sess = session(agent);
             let oracle = s.accessible(&sess, mode).contains(&res_node);
             let decided = s.decide(&sess, resource, mode).allow;
-            assert_eq!(decided, oracle, "decide != accessible for {agent:?}/{mode:?}");
+            assert_eq!(
+                decided, oracle,
+                "decide != accessible for {agent:?}/{mode:?}"
+            );
         }
     }
 }
@@ -364,8 +460,14 @@ fn decide_reflects_put_acl_without_manual_reindex() {
     let resource = "https://pod.ex/notes/n1.ttl";
 
     let before = store.decide(&alice, resource, Mode::Read);
-    assert!(!before.allow && before.status == AclStatus::NoAcl, "no ACL yet ⇒ NoAcl deny");
-    assert!(store.resolve_acl(resource).is_none(), "warm the index: no control document yet");
+    assert!(
+        !before.allow && before.status == AclStatus::NoAcl,
+        "no ACL yet ⇒ NoAcl deny"
+    );
+    assert!(
+        store.resolve_acl(resource).is_none(),
+        "warm the index: no control document yet"
+    );
 
     let acl = format!(
         "<https://pod.ex/.acl#o> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> .\n\
@@ -374,10 +476,15 @@ fn decide_reflects_put_acl_without_manual_reindex() {
          <https://pod.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> .\n",
         ALICE
     );
-    store.put_acl("https://pod.ex/.acl", &acl, "ntriples").expect("put_acl");
+    store
+        .put_acl("https://pod.ex/.acl", &acl, "ntriples")
+        .expect("put_acl");
 
     let after = store.decide(&alice, resource, Mode::Read);
-    assert!(after.allow, "put_acl grant visible to the next decide (index was invalidated)");
+    assert!(
+        after.allow,
+        "put_acl grant visible to the next decide (index was invalidated)"
+    );
     assert_eq!(after.status, AclStatus::Resolved);
     assert_eq!(after.scope, Some(AclScope::Default));
     assert_eq!(
@@ -401,15 +508,33 @@ fn decide_reflects_delete_acl_no_stale_grant() {
     let resource = "https://pod.ex/d.ttl";
 
     let before = store.decide(&alice, resource, Mode::Read);
-    assert!(before.allow && before.status == AclStatus::Resolved, "granted via own .acl");
-    assert!(store.resolve_acl(resource).is_some(), "warm the index: control document present");
+    assert!(
+        before.allow && before.status == AclStatus::Resolved,
+        "granted via own .acl"
+    );
+    assert!(
+        store.resolve_acl(resource).is_some(),
+        "warm the index: control document present"
+    );
 
-    store.delete_acl("https://pod.ex/d.ttl.acl").expect("delete_acl");
+    store
+        .delete_acl("https://pod.ex/d.ttl.acl")
+        .expect("delete_acl");
 
     let after = store.decide(&alice, resource, Mode::Read);
-    assert!(!after.allow, "deleted ACL must not keep granting (index was invalidated)");
-    assert_eq!(after.status, AclStatus::NoAcl, "no control document remains ⇒ NoAcl");
-    assert!(store.resolve_acl(resource).is_none(), "resolve_acl no longer finds the deleted ACL");
+    assert!(
+        !after.allow,
+        "deleted ACL must not keep granting (index was invalidated)"
+    );
+    assert_eq!(
+        after.status,
+        AclStatus::NoAcl,
+        "no control document remains ⇒ NoAcl"
+    );
+    assert!(
+        store.resolve_acl(resource).is_none(),
+        "resolve_acl no longer finds the deleted ACL"
+    );
 }
 
 #[test]
@@ -431,8 +556,14 @@ fn concurrent_decide_shares_one_persistent_index() {
         let s = std::sync::Arc::clone(&shared);
         handles.push(std::thread::spawn(move || {
             for _ in 0..200 {
-                assert!(s.decide(&session(Some(ALICE)), "https://pod.ex/d.ttl", Mode::Read).allow);
-                assert!(!s.decide(&session(Some(BOB)), "https://pod.ex/d.ttl", Mode::Read).allow);
+                assert!(
+                    s.decide(&session(Some(ALICE)), "https://pod.ex/d.ttl", Mode::Read)
+                        .allow
+                );
+                assert!(
+                    !s.decide(&session(Some(BOB)), "https://pod.ex/d.ttl", Mode::Read)
+                        .allow
+                );
                 assert!(s.resolve_acl("https://pod.ex/d.ttl").is_some());
             }
         }));

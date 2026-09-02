@@ -571,7 +571,10 @@ fn assert_error(input: &str, code: JsonLdErrorCode) {
 
 #[test]
 fn invalid_id_value() {
-    assert_error(r#"{"@id": 42, "http://ex/p": "v"}"#, JsonLdErrorCode::InvalidIdValue);
+    assert_error(
+        r#"{"@id": 42, "http://ex/p": "v"}"#,
+        JsonLdErrorCode::InvalidIdValue,
+    );
 }
 
 #[test]
@@ -737,7 +740,11 @@ fn included_value_must_be_a_node_object() {
     // DROPPED (null) result under the null active property — arrayifying that yields one
     // non-node element, so all three raise (W3C expand/in07, in08, in09). Collapsing the
     // drop to an empty array instead would vacuously accept them.
-    for included in [r#""string""#, r#"{"@value": "value"}"#, r#"{"@list": ["value"]}"#] {
+    for included in [
+        r#""string""#,
+        r#"{"@value": "value"}"#,
+        r#"{"@list": ["value"]}"#,
+    ] {
         assert_error(
             &format!(
                 r#"{{"@context": {{"@version": 1.1, "@vocab": "http://example.org/"}},
@@ -794,9 +801,7 @@ fn datatype_iri_with_a_malformed_percent_escape_is_rejected() {
         "http://example.com/%A",
     ] {
         assert_error(
-            &format!(
-                r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#
-            ),
+            &format!(r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#),
             JsonLdErrorCode::InvalidTypedValue,
         );
     }
@@ -810,19 +815,17 @@ fn datatype_iri_with_a_structurally_invalid_authority_is_rejected() {
     // the round-one code-point check accepted all of them; each is structurally malformed in
     // the authority (`ihost` / `port`).
     for datatype in [
-        "http://[",                       // unterminated IP-literal
-        "http://[::1",                    // ...likewise
-        "http://a[b]c/",                  // brackets outside an IP-literal
-        "http://example.com:bad-port",    // port = *DIGIT
-        "http://example.com:80a/",        // ...likewise
-        "http://[gggg::1]/",              // non-HEXDIG in an IPv6 group
-        "http://[1:2:3:4:5:6:7]/",        // seven groups, no `::` elision
-        "http://[::ffff:999.1.1.1]/",     // dec-octet out of range
+        "http://[",                    // unterminated IP-literal
+        "http://[::1",                 // ...likewise
+        "http://a[b]c/",               // brackets outside an IP-literal
+        "http://example.com:bad-port", // port = *DIGIT
+        "http://example.com:80a/",     // ...likewise
+        "http://[gggg::1]/",           // non-HEXDIG in an IPv6 group
+        "http://[1:2:3:4:5:6:7]/",     // seven groups, no `::` elision
+        "http://[::ffff:999.1.1.1]/",  // dec-octet out of range
     ] {
         assert_error(
-            &format!(
-                r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#
-            ),
+            &format!(r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#),
             JsonLdErrorCode::InvalidTypedValue,
         );
     }
@@ -844,9 +847,8 @@ fn structurally_valid_authorities_and_authority_less_schemes_are_accepted_dataty
         "did:example:123#key-1",
         "tag:example.com,2026:dt",
     ] {
-        let doc = format!(
-            r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#
-        );
+        let doc =
+            format!(r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#);
         let expected = format!(
             r#"[{{"http://example.com/bar": [{{"@value": "bar", "@type": "{datatype}"}}]}}]"#
         );

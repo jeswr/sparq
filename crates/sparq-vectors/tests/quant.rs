@@ -61,7 +61,9 @@ fn clustered_store(
         for _ in 0..per {
             let v: Vec<f32> = center
                 .iter()
-                .map(|x| x + ((splitmix64(state) >> 40) as f32 / (1u64 << 23) as f32 - 0.5) * spread)
+                .map(|x| {
+                    x + ((splitmix64(state) >> 40) as f32 / (1u64 << 23) as f32 - 0.5) * spread
+                })
                 .collect();
             // Guard against an all-zero draw (put rejects it); clustered noise never zeroes.
             store.put(id, &v).unwrap();
@@ -104,9 +106,15 @@ fn sq_round_trip_error_within_half_step() {
     // single bound is (2.0 / 255) / 2 ≈ 0.0039 — every component must be within it.
     let half_step = (2.0f32 / 255.0) / 2.0 + 1e-6;
     eprintln!("SQ worst per-component error = {worst_err:.6} (bound {half_step:.6}), min cosine of reconstruction = {min_cos:.5}");
-    assert!(worst_err <= half_step, "SQ component error {worst_err} exceeds half-step bound {half_step}");
+    assert!(
+        worst_err <= half_step,
+        "SQ component error {worst_err} exceeds half-step bound {half_step}"
+    );
     // Reconstruction stays a faithful direction (4× smaller): cosine well above 0.99.
-    assert!(min_cos > 0.99, "SQ reconstruction cosine too low: {min_cos}");
+    assert!(
+        min_cos > 0.99,
+        "SQ reconstruction cosine too low: {min_cos}"
+    );
 }
 
 #[test]
@@ -118,12 +126,15 @@ fn sq_encode_store_maps_slots_to_ids() {
     let enc = sq.encode_store(&store).unwrap();
     assert_eq!(enc.len(), store.len());
     assert_eq!(enc.stride(), 16); // SQ stride is dim
-    // Every slot's id+code reconstruct to ~the stored (normalized) vector.
+                                  // Every slot's id+code reconstruct to ~the stored (normalized) vector.
     for (slot, id, code) in enc.iter() {
         assert_eq!(id, enc.id(slot));
         let stored = normalize(store.get(id).unwrap());
         let rec = sq.reconstruct(code);
-        assert!(cosine(&stored, &rec) > 0.99, "slot {slot} reconstruction drifted");
+        assert!(
+            cosine(&stored, &rec) > 0.99,
+            "slot {slot} reconstruction drifted"
+        );
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -137,7 +148,12 @@ fn pq_encode_decode_and_self_nearest() {
     let path = tmp("pq-codec.spqv");
     let mut state = 0xDEF_u64;
     let store = clustered_store(&path, DIM, 8, 60, 0.08, &mut state);
-    let cfg = PqConfig { m: 8, k: 256, iters: 15, seed: 1 };
+    let cfg = PqConfig {
+        m: 8,
+        k: 256,
+        iters: 15,
+        seed: 1,
+    };
     let pq = ProductQuantizer::fit(DIM, store.iter().map(|(_, v)| v), cfg).unwrap();
     assert_eq!(pq.m(), 8);
     assert_eq!(pq.k(), 256);
@@ -149,7 +165,11 @@ fn pq_encode_decode_and_self_nearest() {
         let rec = pq.reconstruct(&code);
         assert_eq!(rec.len(), DIM);
         // Re-encoding the reconstruction yields the same code (each centroid is its own nearest).
-        assert_eq!(pq.encode(&rec), code, "PQ encode of reconstruction is not idempotent");
+        assert_eq!(
+            pq.encode(&rec),
+            code,
+            "PQ encode of reconstruction is not idempotent"
+        );
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -162,7 +182,17 @@ fn pq_adc_distance_matches_reconstructed_distance() {
     let path = tmp("pq-adc.spqv");
     let mut state = 0x111_u64;
     let store = clustered_store(&path, DIM, 5, 40, 0.1, &mut state);
-    let pq = ProductQuantizer::fit(DIM, store.iter().map(|(_, v)| v), PqConfig { m: 6, k: 64, iters: 12, seed: 9 }).unwrap();
+    let pq = ProductQuantizer::fit(
+        DIM,
+        store.iter().map(|(_, v)| v),
+        PqConfig {
+            m: 6,
+            k: 64,
+            iters: 12,
+            seed: 9,
+        },
+    )
+    .unwrap();
 
     let mut q_state = 0x222_u64;
     for _ in 0..50 {
@@ -173,8 +203,15 @@ fn pq_adc_distance_matches_reconstructed_distance() {
             let code = pq.encode(v);
             let adc = table.distance(&code);
             let rec = pq.reconstruct(&code);
-            let direct = nq.iter().zip(&rec).map(|(a, b)| (a - b) * (a - b)).sum::<f32>();
-            assert!((adc - direct).abs() < 1e-3, "ADC {adc} != reconstructed distance {direct}");
+            let direct = nq
+                .iter()
+                .zip(&rec)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>();
+            assert!(
+                (adc - direct).abs() < 1e-3,
+                "ADC {adc} != reconstructed distance {direct}"
+            );
             // cosine() helper agrees with 1 − d²/2.
             assert!((table.cosine(&code) - (1.0 - adc / 2.0)).abs() < 1e-5);
         }
@@ -219,19 +256,28 @@ fn pq_adc_ranking_preserves_recall_on_clustered_set() {
     let (mut pq_hits, mut rerank_hits) = (0usize, 0usize);
     for _ in 0..QUERIES {
         let q = rand_vec(&mut q_state, DIM);
-        let exact: Vec<u32> = nearest_exact(&store, &q, K).into_iter().map(|(id, _)| id).collect();
+        let exact: Vec<u32> = nearest_exact(&store, &q, K)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         assert_eq!(exact.len(), K);
         let table = DistanceTable::new(&pq, &q);
 
         // (a) PQ-alone.
-        let pq_only: Vec<u32> = enc.rank_pq(&table, K).into_iter().map(|(id, _)| id).collect();
+        let pq_only: Vec<u32> = enc
+            .rank_pq(&table, K)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         assert_eq!(pq_only.len(), K);
         pq_hits += pq_only.iter().filter(|id| exact.contains(id)).count();
 
         // (b) PQ candidate list → full-precision re-rank.
         let cand = enc.rank_pq(&table, REORDER);
-        let mut rescored: Vec<(u32, f32)> =
-            cand.into_iter().map(|(id, _)| (id, cosine(&q, store.get(id).unwrap()))).collect();
+        let mut rescored: Vec<(u32, f32)> = cand
+            .into_iter()
+            .map(|(id, _)| (id, cosine(&q, store.get(id).unwrap())))
+            .collect();
         rescored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         let reranked: Vec<u32> = rescored.into_iter().take(K).map(|(id, _)| id).collect();
         rerank_hits += reranked.iter().filter(|id| exact.contains(id)).count();
@@ -247,12 +293,18 @@ fn pq_adc_ranking_preserves_recall_on_clustered_set() {
     // Documented floors (measured ~0.62 PQ-alone, ~0.98 re-rank — see the recall-vs-compression
     // note in the report/README). The re-rank gate is the load-bearing one: it is the DiskANN
     // loop and proves PQ codes are a usable candidate filter at 8× with near-exact final recall.
-    assert!(pq_recall >= 0.55, "PQ-alone recall@{K} below floor: {pq_recall:.4} < 0.55");
+    assert!(
+        pq_recall >= 0.55,
+        "PQ-alone recall@{K} below floor: {pq_recall:.4} < 0.55"
+    );
     assert!(
         rerank_recall >= 0.95,
         "PQ + re-rank recall@{K} below gate: {rerank_recall:.4} < 0.95"
     );
-    assert!(rerank_recall >= pq_recall, "re-rank must not lose recall vs PQ-alone");
+    assert!(
+        rerank_recall >= pq_recall,
+        "re-rank must not lose recall vs PQ-alone"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -264,7 +316,17 @@ fn pq_uneven_subspaces_cover_every_dimension() {
     let path = tmp("pq-uneven.spqv");
     let mut state = 0x333_u64;
     let store = clustered_store(&path, DIM, 4, 50, 0.1, &mut state);
-    let pq = ProductQuantizer::fit(DIM, store.iter().map(|(_, v)| v), PqConfig { m: 7, k: 64, iters: 10, seed: 3 }).unwrap();
+    let pq = ProductQuantizer::fit(
+        DIM,
+        store.iter().map(|(_, v)| v),
+        PqConfig {
+            m: 7,
+            k: 64,
+            iters: 10,
+            seed: 3,
+        },
+    )
+    .unwrap();
     let (_, v) = store.iter().next().unwrap();
     let code = pq.encode(v);
     assert_eq!(code.len(), 7);
@@ -276,10 +338,42 @@ fn pq_uneven_subspaces_cover_every_dimension() {
 #[test]
 fn quant_validation_and_degenerate_cases() {
     // Config validation.
-    assert!(ProductQuantizer::fit(8, [[0.0f32; 8].as_slice()], PqConfig { m: 0, ..Default::default() }).is_err());
-    assert!(ProductQuantizer::fit(8, [[0.0f32; 8].as_slice()], PqConfig { m: 9, ..Default::default() }).is_err()); // m > dim
-    assert!(ProductQuantizer::fit(8, [[1.0f32; 8].as_slice()], PqConfig { k: 0, ..Default::default() }).is_err());
-    assert!(ProductQuantizer::fit(8, [[1.0f32; 8].as_slice()], PqConfig { k: 257, ..Default::default() }).is_err());
+    assert!(ProductQuantizer::fit(
+        8,
+        [[0.0f32; 8].as_slice()],
+        PqConfig {
+            m: 0,
+            ..Default::default()
+        }
+    )
+    .is_err());
+    assert!(ProductQuantizer::fit(
+        8,
+        [[0.0f32; 8].as_slice()],
+        PqConfig {
+            m: 9,
+            ..Default::default()
+        }
+    )
+    .is_err()); // m > dim
+    assert!(ProductQuantizer::fit(
+        8,
+        [[1.0f32; 8].as_slice()],
+        PqConfig {
+            k: 0,
+            ..Default::default()
+        }
+    )
+    .is_err());
+    assert!(ProductQuantizer::fit(
+        8,
+        [[1.0f32; 8].as_slice()],
+        PqConfig {
+            k: 257,
+            ..Default::default()
+        }
+    )
+    .is_err());
     // Empty training set for PQ is an error (k-means needs a point); SQ tolerates it (degenerate).
     let empty: [&[f32]; 0] = [];
     assert!(ProductQuantizer::fit(8, empty, PqConfig::default()).is_err());
@@ -288,7 +382,17 @@ fn quant_validation_and_degenerate_cases() {
 
     // K may exceed the training count (fewer points than centroids); fit succeeds.
     let one = [[1.0f32, 2.0, 3.0, 4.0].as_slice()];
-    let pq1 = ProductQuantizer::fit(4, one, PqConfig { m: 2, k: 256, iters: 5, seed: 1 }).unwrap();
+    let pq1 = ProductQuantizer::fit(
+        4,
+        one,
+        PqConfig {
+            m: 2,
+            k: 256,
+            iters: 5,
+            seed: 1,
+        },
+    )
+    .unwrap();
     let code = pq1.encode(&[1.0, 2.0, 3.0, 4.0]);
     assert_eq!(code.len(), 2);
 
@@ -296,15 +400,38 @@ fn quant_validation_and_degenerate_cases() {
     let path = tmp("pq-dim.spqv");
     let mut state = 0x444_u64;
     let store = clustered_store(&path, 12, 3, 30, 0.1, &mut state);
-    let pq_wrong = ProductQuantizer::fit(8, [[1.0f32; 8].as_slice()], PqConfig { m: 4, k: 16, iters: 5, seed: 1 }).unwrap();
-    assert!(pq_wrong.encode_store(&store).is_err(), "store dim 12 != quantizer dim 8 must error");
+    let pq_wrong = ProductQuantizer::fit(
+        8,
+        [[1.0f32; 8].as_slice()],
+        PqConfig {
+            m: 4,
+            k: 16,
+            iters: 5,
+            seed: 1,
+        },
+    )
+    .unwrap();
+    assert!(
+        pq_wrong.encode_store(&store).is_err(),
+        "store dim 12 != quantizer dim 8 must error"
+    );
     let _ = std::fs::remove_file(&path);
 
     // Empty store → empty EncodedStore (the candidate cache for an empty index).
     let epath = tmp("pq-emptystore.spqv");
     let mut estore = VectorStore::create(&epath, 8).unwrap();
     estore.finalize().unwrap();
-    let pq2 = ProductQuantizer::fit(8, [[1.0f32; 8].as_slice()], PqConfig { m: 4, k: 16, iters: 5, seed: 1 }).unwrap();
+    let pq2 = ProductQuantizer::fit(
+        8,
+        [[1.0f32; 8].as_slice()],
+        PqConfig {
+            m: 4,
+            k: 16,
+            iters: 5,
+            seed: 1,
+        },
+    )
+    .unwrap();
     let enc = pq2.encode_store(&estore).unwrap();
     assert!(enc.is_empty());
     let q = [0.1f32; 8];
@@ -324,10 +451,24 @@ fn pq_ties_break_on_ascending_id() {
     }
     store.put(100, &[0.0, 1.0, 0.0, 0.0]).unwrap();
     store.finalize().unwrap();
-    let pq = ProductQuantizer::fit(4, store.iter().map(|(_, v)| v), PqConfig { m: 2, k: 4, iters: 10, seed: 1 }).unwrap();
+    let pq = ProductQuantizer::fit(
+        4,
+        store.iter().map(|(_, v)| v),
+        PqConfig {
+            m: 2,
+            k: 4,
+            iters: 10,
+            seed: 1,
+        },
+    )
+    .unwrap();
     let enc = pq.encode_store(&store).unwrap();
     let table = DistanceTable::new(&pq, &[1.0, 0.0, 0.0, 0.0]);
-    let ranked: Vec<u32> = enc.rank_pq(&table, 3).into_iter().map(|(id, _)| id).collect();
+    let ranked: Vec<u32> = enc
+        .rank_pq(&table, 3)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
     // The three [1,0,0,0] vectors share a code → ascending id order 5,7,10.
     assert_eq!(ranked, vec![5, 7, 10]);
     let _ = std::fs::remove_file(&path);
@@ -357,9 +498,16 @@ fn pq_codebook_serialization_round_trips() {
     let t0 = DistanceTable::new(&pq, &q);
     let t1 = DistanceTable::new(&decoded, &q);
     for (_, v) in store.iter() {
-        assert_eq!(pq.encode(v), decoded.encode(v), "decoded codebook encodes differently");
+        assert_eq!(
+            pq.encode(v),
+            decoded.encode(v),
+            "decoded codebook encodes differently"
+        );
         let c = pq.encode(v);
-        assert!((t0.distance(&c) - t1.distance(&c)).abs() < 1e-6, "ADC distance differs");
+        assert!(
+            (t0.distance(&c) - t1.distance(&c)).abs() < 1e-6,
+            "ADC distance differs"
+        );
     }
 
     // A truncated / over-long / invalid block is rejected.
@@ -382,7 +530,12 @@ fn encoded_store_from_parts_round_trips_and_validates() {
     let pq = ProductQuantizer::fit(
         8,
         store.iter().map(|(_, v)| v),
-        PqConfig { m: 4, k: 16, iters: 10, seed: 3 },
+        PqConfig {
+            m: 4,
+            k: 16,
+            iters: 10,
+            seed: 3,
+        },
     )
     .unwrap();
     let enc = pq.encode_store(&store).unwrap();

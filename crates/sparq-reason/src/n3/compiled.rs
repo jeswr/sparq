@@ -869,7 +869,9 @@ fn intern_ground(dict: &mut Dict, t: &Term) -> Id {
         Term::Triple(_) => match super::n3_term_to_oxrdf(t) {
             Ok(ox) => dict.intern(&ox),
             Err(e) => {
-                unreachable!("compiled-rules symbol tables hold only representable ground terms: {e}")
+                unreachable!(
+                    "compiled-rules symbol tables hold only representable ground terms: {e}"
+                )
             }
         },
         // compile()/intern_facts() admit only ground symbols.
@@ -1631,13 +1633,19 @@ mod tests {
             "@prefix : <http://ex/> . << :a :p :b >> :says :alice . << :a :p :c >> :says :bob .",
             "@prefix : <http://ex/> . { << :a :p :b >> :says ?w } => { ?w :vouches :a . :meta :about << :a :p :b >> } .",
         );
-        assert!(has(&s, "http://ex/alice", "http://ex/vouches", "http://ex/a"));
+        assert!(has(
+            &s,
+            "http://ex/alice",
+            "http://ex/vouches",
+            "http://ex/a"
+        ));
         assert!(
             !has(&s, "http://ex/bob", "http://ex/vouches", "http://ex/a"),
             "the ground quotation must filter candidates: {s:?}"
         );
         assert!(
-            s.iter().any(|t| t.starts_with("<http://ex/meta> <http://ex/about> <<")),
+            s.iter()
+                .any(|t| t.starts_with("<http://ex/meta> <http://ex/about> <<")),
             "a ground quoted triple must be derivable as a conclusion constant: {s:?}"
         );
     }
@@ -1653,7 +1661,8 @@ mod tests {
         );
         assert!(s.contains("<http://ex/alice> <http://ex/nonMatching> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"));
         assert!(
-            !s.iter().any(|t| t.starts_with("<http://ex/bob> <http://ex/nonMatching>")),
+            !s.iter()
+                .any(|t| t.starts_with("<http://ex/bob> <http://ex/nonMatching>")),
             "the quoted-triple operand must compare equal to its own id: {s:?}"
         );
     }
@@ -1667,7 +1676,12 @@ mod tests {
             "@prefix : <http://ex/> . { << ?s :p ?o >> :says ?w } => { ?s :linked ?o . ?w :vouches ?s } .",
         );
         assert!(has(&s, "http://ex/a", "http://ex/linked", "http://ex/b"));
-        assert!(has(&s, "http://ex/alice", "http://ex/vouches", "http://ex/a"));
+        assert!(has(
+            &s,
+            "http://ex/alice",
+            "http://ex/vouches",
+            "http://ex/a"
+        ));
         // The `:q` quotation does not match the `:p` component constant, and the plain
         // `:a :p :b` triple is not a triple TERM, so neither fires the rule.
         assert!(
@@ -1687,7 +1701,12 @@ mod tests {
              << :a :p :b >> :assertedBy :alice .",
             "@prefix : <http://ex/> . { ?s :p ?o . << ?s :p ?o >> :assertedBy ?w . } => { ?o :sourced ?w } .",
         );
-        assert!(has(&s, "http://ex/b", "http://ex/sourced", "http://ex/alice"));
+        assert!(has(
+            &s,
+            "http://ex/b",
+            "http://ex/sourced",
+            "http://ex/alice"
+        ));
         assert!(
             !has(&s, "http://ex/c", "http://ex/sourced", "http://ex/alice"),
             "only the quoted-AND-asserted triple is sourced — the unpack must CHECK the \
@@ -1710,7 +1729,8 @@ mod tests {
             "http://ex/alice"
         ));
         assert!(
-            !s.iter().any(|t| t.contains("<http://ex/selfAsserted> <http://ex/bob>")),
+            !s.iter()
+                .any(|t| t.contains("<http://ex/selfAsserted> <http://ex/bob>")),
             "the repeated inner variable must filter: {s:?}"
         );
     }
@@ -1729,7 +1749,8 @@ mod tests {
         assert!(has(&s, "http://ex/m1", "http://ex/outer", "http://ex/a"));
         assert!(has(&s, "http://ex/m1", "http://ex/inner", "http://ex/b"));
         assert!(
-            !s.iter().any(|t| t.starts_with("<http://ex/m2> <http://ex/inner>")),
+            !s.iter()
+                .any(|t| t.starts_with("<http://ex/m2> <http://ex/inner>")),
             "the innermost object constant must filter the nested match: {s:?}"
         );
     }

@@ -60,8 +60,7 @@ fn a_to_b_to_a_serializes_identically_twice_and_keeps_literal_metadata() {
 
     // Metadata: the language tag and the datatype IRI both survive.
     assert!(first.contains(r#"{"@value":"Bee","@language":"en"}"#));
-    assert!(first
-        .contains(r#"{"@value":"42","@type":"http://www.w3.org/2001/XMLSchema#integer"}"#));
+    assert!(first.contains(r#"{"@value":"42","@type":"http://www.w3.org/2001/XMLSchema#integer"}"#));
 }
 
 #[test]
@@ -74,7 +73,12 @@ fn every_repeated_focus_policy_terminates_on_the_same_cycle() {
         let projection = JsonProjection::new().with_repeated_focus(policy);
         let projected = projection.project(&node);
 
-        assert_eq!(projected, projection.project(&node), "{:?} is unstable", policy);
+        assert_eq!(
+            projected,
+            projection.project(&node),
+            "{:?} is unstable",
+            policy
+        );
         assert!(
             projected.contains(r#"{"@ref":"http://example.org/a"}"#),
             "{:?} did not close the cycle with a reference: {}",

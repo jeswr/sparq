@@ -322,9 +322,7 @@ mod tests {
         // paths rather than referenced. Flipping the default to `OnRepeat`
         // turns the second `d` into `{"@ref":...}` and fails this.
         assert_eq!(
-            projected
-                .matches(r#""@id":"http://example.org/d""#)
-                .count(),
+            projected.matches(r#""@id":"http://example.org/d""#).count(),
             2
         );
         assert!(!projected.contains("@ref"));
@@ -340,9 +338,7 @@ mod tests {
             .project(&store.node(iri("a")));
 
         assert_eq!(
-            projected
-                .matches(r#""@id":"http://example.org/d""#)
-                .count(),
+            projected.matches(r#""@id":"http://example.org/d""#).count(),
             1
         );
         assert!(projected.contains(r#"{"@ref":"http://example.org/d"}"#));

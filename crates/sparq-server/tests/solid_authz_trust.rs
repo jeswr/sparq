@@ -403,7 +403,9 @@ async fn trust_block_invalid_agent_iri_is_403() {
     let base = spawn_trust_on().await;
     let resp = client()
         .post(format!("{}/authz/decide", base))
-        .json(&decide_body_trust_invalid_agent_iri("https://pod.ex/notes/n1"))
+        .json(&decide_body_trust_invalid_agent_iri(
+            "https://pod.ex/notes/n1",
+        ))
         .send()
         .await
         .unwrap();
@@ -452,7 +454,11 @@ async fn trust_flag_off_ignores_trust_block_falls_through_to_wac() {
         .await
         .unwrap();
     // Flag OFF => trust block ignored => normal WAC decision => alice (session.agent) has Read => 200.
-    assert_eq!(resp.status(), 200, "flag off => trust block ignored => WAC falls through");
+    assert_eq!(
+        resp.status(),
+        200,
+        "flag off => trust block ignored => WAC falls through"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
         body.get("allow").and_then(|v| v.as_bool()),
@@ -474,13 +480,19 @@ async fn trust_empty_credentials_falls_through_to_wac_deny() {
     let base = spawn_trust_on().await;
     let resp = client()
         .post(format!("{}/authz/decide", base))
-        .json(&decide_body_trust_empty_credentials("https://pod.ex/notes/n1"))
+        .json(&decide_body_trust_empty_credentials(
+            "https://pod.ex/notes/n1",
+        ))
         .send()
         .await
         .unwrap();
     // [SONNET-4.6] POSITIONAL format args (CodeQL guard).
     // Session has no agent (anonymous) + no admitted facts => WAC deny => 403.
-    assert_eq!(resp.status(), 403, "empty credentials + anon session => 403 WAC deny");
+    assert_eq!(
+        resp.status(),
+        403,
+        "empty credentials + anon session => 403 WAC deny"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
         body.get("allow").and_then(|v| v.as_bool()),
@@ -510,7 +522,11 @@ async fn no_trust_block_falls_through_to_wac_allow() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "no trust block => WAC fallthrough => alice allow");
+    assert_eq!(
+        resp.status(),
+        200,
+        "no trust block => WAC fallthrough => alice allow"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body.get("allow").and_then(|v| v.as_bool()), Some(true));
     assert!(body.get("trustDenied").is_none());
@@ -528,7 +544,11 @@ async fn no_trust_block_anon_session_is_wac_deny() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403, "no trust block + anon session => WAC deny 403");
+    assert_eq!(
+        resp.status(),
+        403,
+        "no trust block + anon session => WAC deny 403"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body.get("allow").and_then(|v| v.as_bool()), Some(false));
     assert!(body.get("trustDenied").is_none());
@@ -748,8 +768,7 @@ async fn happy_path_valid_credential_grants_access_with_trust_justification() {
         .and_then(|v| v.as_str())
         .expect("admittedSource must be present");
     assert_eq!(
-        admitted_source,
-        ISSUER_IRI,
+        admitted_source, ISSUER_IRI,
         "admittedSource must be the issuer IRI from the trust rule"
     );
 }
@@ -863,8 +882,20 @@ async fn partial_failure_batch_cred_a_admits_cred_b_fails_alice_gets_read() {
         RESOURCE,
         ALICE,
         &[
-            WireCred { nquads: &nquads_a, sig_hex: &good_sig, salt_hex: &salt_hex, issued_at: ISSUED_AT_SECS, revoked: false },
-            WireCred { nquads: &nquads_b, sig_hex: &bad_sig, salt_hex: &salt_hex, issued_at: ISSUED_AT_SECS, revoked: false },
+            WireCred {
+                nquads: &nquads_a,
+                sig_hex: &good_sig,
+                salt_hex: &salt_hex,
+                issued_at: ISSUED_AT_SECS,
+                revoked: false,
+            },
+            WireCred {
+                nquads: &nquads_b,
+                sig_hex: &bad_sig,
+                salt_hex: &salt_hex,
+                issued_at: ISSUED_AT_SECS,
+                revoked: false,
+            },
         ],
         &key_hex,
     );
@@ -1230,7 +1261,9 @@ async fn trust_block_is_refused_with_the_stateful_source() {
     let base = spawn_trust_on().await;
     let resp = client()
         .post(format!("{}/authz/decide", base))
-        .json(&server_source_decide_body_with_trust("https://pod.ex/notes/n1"))
+        .json(&server_source_decide_body_with_trust(
+            "https://pod.ex/notes/n1",
+        ))
         .send()
         .await
         .unwrap();

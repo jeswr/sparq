@@ -142,8 +142,7 @@ impl AlignedBytes {
         let mut ab = AlignedBytes { words, len };
         // SAFETY: `words` holds at least `len` bytes (rounded up to a word) and is u32-aligned
         // (≥ align(u8)); the destination region is exclusively owned here.
-        let dst =
-            unsafe { std::slice::from_raw_parts_mut(ab.words.as_mut_ptr() as *mut u8, len) };
+        let dst = unsafe { std::slice::from_raw_parts_mut(ab.words.as_mut_ptr() as *mut u8, len) };
         dst.copy_from_slice(&bytes);
         ab
     }
@@ -188,11 +187,13 @@ impl Bytes {
 pub(crate) fn open_backing(path: &Path) -> Result<Bytes, String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        let file =
+            std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         // SAFETY: read-only map of a regular file; we treat concurrent external
         // modification of the file as out of contract (same stance as sparq-core's
         // mmap'd dictionary/indexes).
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
+        let map =
+            unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
         Ok(Bytes::Map(map))
     }
     #[cfg(target_arch = "wasm32")]
@@ -215,7 +216,11 @@ impl std::ops::Deref for Bytes {
 
 enum Backing {
     /// Build phase: vectors accumulate in RAM; `finalize` writes the file.
-    Build { data: Vec<f32>, slots: FxHashMap<Id, u32>, ids: Vec<Id> },
+    Build {
+        data: Vec<f32>,
+        slots: FxHashMap<Id, u32>,
+        ids: Vec<Id>,
+    },
     /// Read phase: the whole file is memory-mapped or held as owned bytes.
     Map(Bytes),
 }
@@ -285,12 +290,18 @@ impl VectorStore {
             return Err(format!("invalid vector dimension {dim}"));
         }
         if cfg!(target_endian = "big") {
-            return Err(".spqv is a little-endian format; big-endian targets are unsupported".into());
+            return Err(
+                ".spqv is a little-endian format; big-endian targets are unsupported".into(),
+            );
         }
         Ok(VectorStore {
             dim,
             path: path.into(),
-            backing: Backing::Build { data: Vec::new(), slots: FxHashMap::default(), ids: Vec::new() },
+            backing: Backing::Build {
+                data: Vec::new(),
+                slots: FxHashMap::default(),
+                ids: Vec::new(),
+            },
             fingerprint: None,
             provenance: None,
             data_offset: HEADER_LEN,
@@ -368,7 +379,9 @@ impl VectorStore {
     /// [`open_from_bytes`](Self::open_from_bytes).
     fn open_validated(map: Bytes, path: PathBuf, origin: &str) -> Result<VectorStore, String> {
         if cfg!(target_endian = "big") {
-            return Err(".spqv is a little-endian format; big-endian targets are unsupported".into());
+            return Err(
+                ".spqv is a little-endian format; big-endian targets are unsupported".into(),
+            );
         }
         // The version-1 header is the smallest valid header; version 2 adds a fixed-size block.
         if map.len() < HEADER_LEN_V1 {
@@ -393,126 +406,125 @@ impl VectorStore {
         // all open; the header length and the offset where the vector data begins depend on the
         // version, so every downstream read keys off `data_offset` below. The v3 READ path is always
         // compiled (a v3 file opens even on a build without the `spqv-provenance` feature).
-        let (data_offset, fingerprint, provenance): (usize, Option<Fingerprint>, Option<EmbeddingProvenance>) =
-            match version {
-                1 => (HEADER_LEN_V1, None, None),
-                2 => {
-                    if map.len() < HEADER_LEN {
-                        return Err(format!(
-                            "{origin}: truncated version-2 header (fingerprint block)"
-                        ));
-                    }
-                    // [OPUS-4.8] (sq-32i5) An all-zero block (a v2 store finalized without
-                    // `with_fingerprint`) decodes to `None` ("unverifiable"), not a zero fingerprint
-                    // that would surface as a spurious "DIFFERENT graph" mismatch.
-                    let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
-                    (HEADER_LEN, fp, None)
+        let (data_offset, fingerprint, provenance): (
+            usize,
+            Option<Fingerprint>,
+            Option<EmbeddingProvenance>,
+        ) = match version {
+            1 => (HEADER_LEN_V1, None, None),
+            2 => {
+                if map.len() < HEADER_LEN {
+                    return Err(format!(
+                        "{origin}: truncated version-2 header (fingerprint block)"
+                    ));
                 }
-                3 => {
-                    // [FABLE-5] (sq-lhcot.1) v3 header = the v2 header (magic/version/dim/count/
-                    // reserved/fingerprint) + a `u32` provenance-block length at HEADER_LEN + that
-                    // many provenance bytes; the data section follows. Validate each step before
-                    // slicing so a corrupt header is a descriptive error, never an out-of-bounds read.
-                    if map.len() < HEADER_LEN + 4 {
-                        return Err(format!(
-                            "{origin}: truncated version-3 header (provenance length prefix)"
-                        ));
-                    }
-                    let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
-                    let prov_len =
-                        u32::from_le_bytes(map[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap())
-                            as usize;
-                    if prov_len > crate::spqv_provenance::MAX_PROVENANCE_BLOCK_LEN {
-                        return Err(format!(
-                            "{origin}: version-3 provenance block length {prov_len} exceeds the cap"
-                        ));
-                    }
-                    let prov_start = HEADER_LEN + 4;
-                    let prov_end = prov_start.checked_add(prov_len).ok_or_else(|| {
-                        format!("{origin}: version-3 provenance length {prov_len} overflows")
-                    })?;
-                    if map.len() < prov_end {
-                        return Err(format!(
-                            "{origin}: truncated version-3 provenance block (need {prov_len} bytes)"
-                        ));
-                    }
-                    let prov = EmbeddingProvenance::from_bytes(&map[prov_start..prov_end])
-                        .map_err(|e| format!("{origin}: {e}"))?;
-                    // [FABLE-5] The data section is zero-padded to the next 4-byte boundary after the
-                    // provenance block (see `build_header`) so the f32 casts stay aligned. Recompute
-                    // the same padded offset here; the pad bytes (if any) are not part of the block.
-                    let padded = prov_end.div_ceil(4) * 4;
-                    if map.len() < padded {
-                        return Err(format!(
-                            "{origin}: truncated version-3 header (provenance padding)"
-                        ));
-                    }
-                    (padded, fp, Some(prov))
+                // [OPUS-4.8] (sq-32i5) An all-zero block (a v2 store finalized without
+                // `with_fingerprint`) decodes to `None` ("unverifiable"), not a zero fingerprint
+                // that would surface as a spurious "DIFFERENT graph" mismatch.
+                let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
+                (HEADER_LEN, fp, None)
+            }
+            3 => {
+                // [FABLE-5] (sq-lhcot.1) v3 header = the v2 header (magic/version/dim/count/
+                // reserved/fingerprint) + a `u32` provenance-block length at HEADER_LEN + that
+                // many provenance bytes; the data section follows. Validate each step before
+                // slicing so a corrupt header is a descriptive error, never an out-of-bounds read.
+                if map.len() < HEADER_LEN + 4 {
+                    return Err(format!(
+                        "{origin}: truncated version-3 header (provenance length prefix)"
+                    ));
                 }
-                #[cfg(feature = "metadata-sidecar")]
-                4 => {
-                    if map.len() < HEADER_LEN + 4 {
-                        return Err(format!(
-                            "{origin}: truncated version-4 header (provenance length prefix)"
-                        ));
-                    }
-                    let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
-                    let prov_len =
-                        u32::from_le_bytes(map[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap())
-                            as usize;
-                    if prov_len > crate::spqv_provenance::MAX_PROVENANCE_BLOCK_LEN {
-                        return Err(format!(
-                            "{origin}: version-4 provenance block length {prov_len} exceeds the cap"
-                        ));
-                    }
-                    let prov_start = HEADER_LEN + 4;
-                    let prov_end = prov_start.checked_add(prov_len).ok_or_else(|| {
-                        format!("{origin}: version-4 provenance length {prov_len} overflows")
-                    })?;
-                    let meta_len_end = prov_end.checked_add(8).ok_or_else(|| {
-                        format!("{origin}: version-4 metadata length offset overflows")
-                    })?;
-                    if map.len() < meta_len_end {
-                        return Err(format!(
-                            "{origin}: truncated version-4 header (metadata length prefix)"
-                        ));
-                    }
-                    let provenance = if prov_len == 0 {
-                        None
-                    } else {
-                        Some(
-                            EmbeddingProvenance::from_bytes(&map[prov_start..prov_end])
-                                .map_err(|e| format!("{origin}: {e}"))?,
-                        )
-                    };
-                    let meta_len64 =
-                        u64::from_le_bytes(map[prov_end..meta_len_end].try_into().unwrap());
-                    let meta_len: usize = meta_len64.try_into().map_err(|_| {
-                        format!("{origin}: metadata block length exceeds the address space")
-                    })?;
-                    let meta_end = meta_len_end.checked_add(meta_len).ok_or_else(|| {
-                        format!("{origin}: version-4 metadata length {meta_len} overflows")
-                    })?;
-                    if map.len() < meta_end {
-                        return Err(format!(
-                            "{origin}: truncated version-4 metadata block (need {meta_len} bytes)"
-                        ));
-                    }
-                    metadata = crate::metadata::decode(
-                        &map[meta_len_end..meta_end],
-                        count,
-                        origin,
-                    )?;
-                    let padded = meta_end.div_ceil(4) * 4;
-                    if map.len() < padded {
-                        return Err(format!(
-                            "{origin}: truncated version-4 header (metadata padding)"
-                        ));
-                    }
-                    (padded, fp, provenance)
+                let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
+                let prov_len =
+                    u32::from_le_bytes(map[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap())
+                        as usize;
+                if prov_len > crate::spqv_provenance::MAX_PROVENANCE_BLOCK_LEN {
+                    return Err(format!(
+                        "{origin}: version-3 provenance block length {prov_len} exceeds the cap"
+                    ));
                 }
-                v => return Err(format!("{origin}: unsupported .spqv version {v}")),
-            };
+                let prov_start = HEADER_LEN + 4;
+                let prov_end = prov_start.checked_add(prov_len).ok_or_else(|| {
+                    format!("{origin}: version-3 provenance length {prov_len} overflows")
+                })?;
+                if map.len() < prov_end {
+                    return Err(format!(
+                        "{origin}: truncated version-3 provenance block (need {prov_len} bytes)"
+                    ));
+                }
+                let prov = EmbeddingProvenance::from_bytes(&map[prov_start..prov_end])
+                    .map_err(|e| format!("{origin}: {e}"))?;
+                // [FABLE-5] The data section is zero-padded to the next 4-byte boundary after the
+                // provenance block (see `build_header`) so the f32 casts stay aligned. Recompute
+                // the same padded offset here; the pad bytes (if any) are not part of the block.
+                let padded = prov_end.div_ceil(4) * 4;
+                if map.len() < padded {
+                    return Err(format!(
+                        "{origin}: truncated version-3 header (provenance padding)"
+                    ));
+                }
+                (padded, fp, Some(prov))
+            }
+            #[cfg(feature = "metadata-sidecar")]
+            4 => {
+                if map.len() < HEADER_LEN + 4 {
+                    return Err(format!(
+                        "{origin}: truncated version-4 header (provenance length prefix)"
+                    ));
+                }
+                let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
+                let prov_len =
+                    u32::from_le_bytes(map[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap())
+                        as usize;
+                if prov_len > crate::spqv_provenance::MAX_PROVENANCE_BLOCK_LEN {
+                    return Err(format!(
+                        "{origin}: version-4 provenance block length {prov_len} exceeds the cap"
+                    ));
+                }
+                let prov_start = HEADER_LEN + 4;
+                let prov_end = prov_start.checked_add(prov_len).ok_or_else(|| {
+                    format!("{origin}: version-4 provenance length {prov_len} overflows")
+                })?;
+                let meta_len_end = prov_end.checked_add(8).ok_or_else(|| {
+                    format!("{origin}: version-4 metadata length offset overflows")
+                })?;
+                if map.len() < meta_len_end {
+                    return Err(format!(
+                        "{origin}: truncated version-4 header (metadata length prefix)"
+                    ));
+                }
+                let provenance = if prov_len == 0 {
+                    None
+                } else {
+                    Some(
+                        EmbeddingProvenance::from_bytes(&map[prov_start..prov_end])
+                            .map_err(|e| format!("{origin}: {e}"))?,
+                    )
+                };
+                let meta_len64 =
+                    u64::from_le_bytes(map[prov_end..meta_len_end].try_into().unwrap());
+                let meta_len: usize = meta_len64.try_into().map_err(|_| {
+                    format!("{origin}: metadata block length exceeds the address space")
+                })?;
+                let meta_end = meta_len_end.checked_add(meta_len).ok_or_else(|| {
+                    format!("{origin}: version-4 metadata length {meta_len} overflows")
+                })?;
+                if map.len() < meta_end {
+                    return Err(format!(
+                        "{origin}: truncated version-4 metadata block (need {meta_len} bytes)"
+                    ));
+                }
+                metadata = crate::metadata::decode(&map[meta_len_end..meta_end], count, origin)?;
+                let padded = meta_end.div_ceil(4) * 4;
+                if map.len() < padded {
+                    return Err(format!(
+                        "{origin}: truncated version-4 header (metadata padding)"
+                    ));
+                }
+                (padded, fp, provenance)
+            }
+            v => return Err(format!("{origin}: unsupported .spqv version {v}")),
+        };
         // Checked size arithmetic: a malformed header must be rejected here, not wrap
         // around and pass the size check (or panic later in `get`/`iter`).
         let expect = count
@@ -611,7 +623,9 @@ impl VectorStore {
     #[cfg(feature = "metadata-sidecar")]
     pub fn put_with_meta(&mut self, id: Id, vector: &[f32], meta: &str) -> Result<(), String> {
         if meta.len() > u32::MAX as usize {
-            return Err(format!("metadata for id {id} exceeds the .spqv length limit"));
+            return Err(format!(
+                "metadata for id {id} exceeds the .spqv length limit"
+            ));
         }
         self.put(id, vector)?;
         self.metadata.insert(id, meta.to_owned());
@@ -752,9 +766,16 @@ impl VectorStore {
             //             + (appended ids). Tombstones and appends are disjoint by construction, so
             // a base id is double-counted with the appended set only via the `append` branch.
             let base = self.base_len();
-            let removed = delta.tombstones.iter().filter(|&&id| self.base_get(id).is_some()).count();
-            let shadowed =
-                delta.appended.keys().filter(|&&id| self.base_get(id).is_some()).count();
+            let removed = delta
+                .tombstones
+                .iter()
+                .filter(|&&id| self.base_get(id).is_some())
+                .count();
+            let shadowed = delta
+                .appended
+                .keys()
+                .filter(|&&id| self.base_get(id).is_some())
+                .count();
             return base - removed - shadowed + delta.appended.len();
         }
         self.base_len()
@@ -800,7 +821,12 @@ impl VectorStore {
         } else {
             self.path.display().to_string()
         };
-        fingerprint::check_against(self.fingerprint, graph, fingerprint::Artifact::Store, &origin)
+        fingerprint::check_against(
+            self.fingerprint,
+            graph,
+            fingerprint::Artifact::Store,
+            &origin,
+        )
     }
 
     /// [FABLE-5] (sq-lhcot.1) The embedding provenance this store was built with, or `None` for a
@@ -949,7 +975,8 @@ impl VectorStore {
     /// fingerprint (the generation the appended/tombstoned ids are keyed against).
     fn delta_mut(&mut self) -> &mut crate::delta::VectorDelta {
         let generation = self.fingerprint;
-        self.delta.get_or_insert_with(|| crate::delta::VectorDelta::new(generation))
+        self.delta
+            .get_or_insert_with(|| crate::delta::VectorDelta::new(generation))
     }
 
     /// [OPUS-4.8] (sq-pi44) **Add a NEW vector** for term `id` against an already-finalized store,
@@ -984,7 +1011,9 @@ impl VectorStore {
         let dim = self.dim;
         // Build phase: drop directly from the accumulating data (re-pack the dense slots).
         if let Backing::Build { data, slots, ids } = &mut self.backing {
-            let Some(slot) = slots.remove(&id) else { return false };
+            let Some(slot) = slots.remove(&id) else {
+                return false;
+            };
             let slot = slot as usize;
             // Remove the dense vector and the id at `slot`, then renumber the slots after it.
             data.drain(slot * dim..(slot + 1) * dim);
@@ -1017,7 +1046,9 @@ impl VectorStore {
         validate_vector(self.dim, id, vector)?;
         let dim = self.dim;
         if self.get(id).is_none() {
-            return Err(format!("id {id} has no vector to update; use `add` for a new id"));
+            return Err(format!(
+                "id {id} has no vector to update; use `add` for a new id"
+            ));
         }
         // Build phase: rewrite the dense slot in place.
         if let Backing::Build { data, slots, .. } = &mut self.backing {
@@ -1099,8 +1130,7 @@ impl VectorStore {
         // path): `iter()` yields the effective base+delta view in a deterministic order, and `put`
         // re-sorts the id→slot index on `finalize`, so the output is order-independent of the
         // collection order — i.e. byte-for-byte a from-scratch rebuild for the same id→vector map.
-        let pairs: Vec<(Id, Vec<f32>)> =
-            self.iter().map(|(id, v)| (id, v.to_vec())).collect();
+        let pairs: Vec<(Id, Vec<f32>)> = self.iter().map(|(id, v)| (id, v.to_vec())).collect();
         for (id, v) in &pairs {
             #[cfg(feature = "metadata-sidecar")]
             if let Some(meta) = self.meta(*id) {
@@ -1221,8 +1251,8 @@ impl VectorStore {
         if !delta_path.exists() {
             return Ok(store);
         }
-        let bytes = std::fs::read(delta_path)
-            .map_err(|e| format!("read {}: {e}", delta_path.display()))?;
+        let bytes =
+            std::fs::read(delta_path).map_err(|e| format!("read {}: {e}", delta_path.display()))?;
         let (delta, delta_dim) = crate::delta::VectorDelta::from_bytes(&bytes)
             .map_err(|e| format!("{}: {e}", delta_path.display()))?;
         if delta_dim != store.dim {
@@ -1283,7 +1313,11 @@ fn build_header(
         SPQV_VERSION
     };
     #[cfg(not(feature = "metadata-sidecar"))]
-    let version = if prov_bytes.is_some() { SPQV_VERSION_V3 } else { SPQV_VERSION };
+    let version = if prov_bytes.is_some() {
+        SPQV_VERSION_V3
+    } else {
+        SPQV_VERSION
+    };
     header[4..8].copy_from_slice(&version.to_le_bytes());
     header[8..12].copy_from_slice(&(dim as u32).to_le_bytes());
     header[12..20].copy_from_slice(&(count as u64).to_le_bytes());
@@ -1305,7 +1339,11 @@ fn build_header(
         header.extend_from_slice(&metadata_bytes);
         let pad = (4 - header.len() % 4) % 4;
         header.extend(std::iter::repeat_n(0u8, pad));
-        debug_assert_eq!(header.len() % 4, 0, "v4 data section must start 4-byte aligned");
+        debug_assert_eq!(
+            header.len() % 4,
+            0,
+            "v4 data section must start 4-byte aligned"
+        );
         return header;
     }
     if let Some(bytes) = prov_bytes {
@@ -1313,7 +1351,11 @@ fn build_header(
         header.extend_from_slice(&bytes);
         let pad = (4 - header.len() % 4) % 4;
         header.extend(std::iter::repeat_n(0u8, pad));
-        debug_assert_eq!(header.len() % 4, 0, "v3 data section must start 4-byte aligned");
+        debug_assert_eq!(
+            header.len() % 4,
+            0,
+            "v3 data section must start 4-byte aligned"
+        );
     }
     header
 }
@@ -1321,13 +1363,18 @@ fn build_header(
 /// Shared `put` validation: dimension, finiteness, non-zero direction.
 fn validate_vector(dim: usize, id: Id, vector: &[f32]) -> Result<(), String> {
     if vector.len() != dim {
-        return Err(format!("vector has dim {}, store has dim {dim}", vector.len()));
+        return Err(format!(
+            "vector has dim {}, store has dim {dim}",
+            vector.len()
+        ));
     }
     if vector.iter().any(|v| !v.is_finite()) {
         return Err(format!("vector for id {id} has a non-finite component"));
     }
     if vector.iter().all(|&v| v == 0.0) {
-        return Err(format!("vector for id {id} is all-zero (cosine is undefined on it)"));
+        return Err(format!(
+            "vector for id {id} is all-zero (cosine is undefined on it)"
+        ));
     }
     Ok(())
 }
@@ -1412,11 +1459,13 @@ impl StreamingWriter {
             return Err(format!("invalid vector dimension {dim}"));
         }
         if cfg!(target_endian = "big") {
-            return Err(".spqv is a little-endian format; big-endian targets are unsupported".into());
+            return Err(
+                ".spqv is a little-endian format; big-endian targets are unsupported".into(),
+            );
         }
         let path = path.into();
-        let mut file = std::fs::File::create(&path)
-            .map_err(|e| format!("create {}: {e}", path.display()))?;
+        let mut file =
+            std::fs::File::create(&path).map_err(|e| format!("create {}: {e}", path.display()))?;
         // [FABLE-5] Header with a zero count placeholder; finalize patches offset 12. The fingerprint
         // (offset 32..56) and — for v3 — the length-prefixed provenance block are known up front, so
         // they are written here (via the shared `build_header` seam), not patched. `build_header`
@@ -1429,7 +1478,8 @@ impl StreamingWriter {
             #[cfg(feature = "metadata-sidecar")]
             None,
         );
-        file.write_all(&header).map_err(|e| format!("write {}: {e}", path.display()))?;
+        file.write_all(&header)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
         let ids_path = {
             let mut p = path.clone().into_os_string();
             p.push(".ids-tmp");
@@ -1457,7 +1507,9 @@ impl StreamingWriter {
         // SAFETY: f32 has no invalid bit patterns and align(f32) ≥ align(u8).
         let bytes =
             unsafe { std::slice::from_raw_parts(vector.as_ptr() as *const u8, vector.len() * 4) };
-        self.data.write_all(bytes).map_err(|e| format!("write {}: {e}", self.path.display()))?;
+        self.data
+            .write_all(bytes)
+            .map_err(|e| format!("write {}: {e}", self.path.display()))?;
         self.ids
             .write_all(&id.to_le_bytes())
             .map_err(|e| format!("write {}: {e}", self.ids_path.display()))?;
@@ -1479,7 +1531,14 @@ impl StreamingWriter {
     /// fully validated — exactly as [`VectorStore::open`] would). On error the
     /// partial `.spqv` and sidecar are removed.
     pub fn finalize(self) -> Result<VectorStore, String> {
-        let StreamingWriter { dim: _, path, data, ids, ids_path, count } = self;
+        let StreamingWriter {
+            dim: _,
+            path,
+            data,
+            ids,
+            ids_path,
+            count,
+        } = self;
         let cleanup = |msg: String| -> String {
             std::fs::remove_file(&path).ok();
             std::fs::remove_file(&ids_path).ok();
@@ -1611,8 +1670,8 @@ mod kani_proofs {
         let mut bytes = vec![0u8; HEADER_LEN + 16];
         bytes[0..4].copy_from_slice(&SPQV_MAGIC);
         bytes[4..8].copy_from_slice(&2u32.to_le_bytes()); // version 2
-        // dim and count are symbolic so the checked-overflow + size-mismatch + index loop
-        // are all exercised; the fingerprint block and the trailing bytes stay symbolic too.
+                                                          // dim and count are symbolic so the checked-overflow + size-mismatch + index loop
+                                                          // are all exercised; the fingerprint block and the trailing bytes stay symbolic too.
         for b in bytes[8..].iter_mut() {
             *b = kani::any();
         }
@@ -1646,8 +1705,10 @@ mod kani_proofs {
     //   which part 1 proves in-domain — actually validates `Ok`, so the totality harnesses'
     //   domain genuinely contains an ACCEPTED store and their proof is not vacuously
     //   reject-only. [OPUS-4.8] sq-og8u8
-    const _DOMAIN_ADMITS_A_WELL_FORMED_STORE: () =
-        assert!(MAX_LEN >= HEADER_LEN, "the fuzzed domain must contain a minimal valid store");
+    const _DOMAIN_ADMITS_A_WELL_FORMED_STORE: () = assert!(
+        MAX_LEN >= HEADER_LEN,
+        "the fuzzed domain must contain a minimal valid store"
+    );
 
     // DOMAIN-COVERAGE SELF-CHECK for the v2-tail harness (sq-og8u8 anti-vacuity pattern): the
     // focused `open_validated_v2_tail_never_panics` harness fixes a 72-byte (HEADER_LEN + 16)
@@ -1731,16 +1792,24 @@ mod fingerprint_tests {
     #[test]
     fn domain_bounded_buffer_contains_an_accepted_store() {
         let mut bytes = vec![0u8; 56]; // HEADER_LEN — pinned numerically on purpose:
-        assert_eq!(bytes.len(), HEADER_LEN, "minimal v2 store is exactly the header");
+        assert_eq!(
+            bytes.len(),
+            HEADER_LEN,
+            "minimal v2 store is exactly the header"
+        );
         bytes[0..4].copy_from_slice(&SPQV_MAGIC);
         bytes[4..8].copy_from_slice(&SPQV_VERSION.to_le_bytes());
         bytes[8..12].copy_from_slice(&1u32.to_le_bytes()); // dim = 1 (dim == 0 is rejected)
-        // count = 0 (bytes 12..20 stay zero) ⇒ no data + no index; reserved + fingerprint
-        // stay all-zero (a valid v2 store finalized without `with_fingerprint`).
-        let store = VectorStore::open_from_bytes(bytes)
-            .expect("a minimal well-formed v2 store must validate — else the accept path is vacuous");
+                                                           // count = 0 (bytes 12..20 stay zero) ⇒ no data + no index; reserved + fingerprint
+                                                           // stay all-zero (a valid v2 store finalized without `with_fingerprint`).
+        let store = VectorStore::open_from_bytes(bytes).expect(
+            "a minimal well-formed v2 store must validate — else the accept path is vacuous",
+        );
         assert_eq!(store.dim(), 1);
-        assert!(store.fingerprint().is_none(), "all-zero fingerprint decodes to None");
+        assert!(
+            store.fingerprint().is_none(),
+            "all-zero fingerprint decodes to None"
+        );
     }
 
     /// DOMAIN-COVERAGE SELF-CHECK for the v2-tail harness (sq-og8u8 anti-vacuity pattern,
@@ -1768,8 +1837,8 @@ mod fingerprint_tests {
         bytes[4..8].copy_from_slice(&2u32.to_le_bytes()); // version 2
         bytes[8..12].copy_from_slice(&2u32.to_le_bytes()); // dim = 2
         bytes[12..20].copy_from_slice(&1u64.to_le_bytes()); // count = 1
-        // fingerprint block [32..56] stays all-zero (valid: no fingerprint).
-        // vector data [56..64]: f32 values [1.0, 0.0] in LE.
+                                                            // fingerprint block [32..56] stays all-zero (valid: no fingerprint).
+                                                            // vector data [56..64]: f32 values [1.0, 0.0] in LE.
         bytes[56..60].copy_from_slice(&1.0f32.to_le_bytes());
         bytes[60..64].copy_from_slice(&0.0f32.to_le_bytes());
         // index [64..72]: entry 0 — id = 1 (u32 LE), slot = 0 (u32 LE).
@@ -1780,7 +1849,10 @@ mod fingerprint_tests {
              in the focused harness domain",
         );
         assert_eq!(store.dim(), 2);
-        assert!(store.fingerprint().is_none(), "all-zero fingerprint block decodes to None");
+        assert!(
+            store.fingerprint().is_none(),
+            "all-zero fingerprint block decodes to None"
+        );
     }
 
     #[test]
@@ -1806,8 +1878,10 @@ mod fingerprint_tests {
         build_store(&ga, &path);
         let store = VectorStore::open(&path).unwrap();
         let gb = graph(B); // different dict ids AND triple count
-        // (2) Checked open/query against a DIFFERENT graph → descriptive Err, not silent wrong data.
-        let err = store.check_graph(&gb).expect_err("a mismatched graph must be rejected");
+                           // (2) Checked open/query against a DIFFERENT graph → descriptive Err, not silent wrong data.
+        let err = store
+            .check_graph(&gb)
+            .expect_err("a mismatched graph must be rejected");
         assert!(err.contains("fingerprint mismatch"), "err was: {err}");
         let qerr = nearest_term_exact_checked(&store, &gb, &iri("http://example.org/dave"), 1)
             .expect_err("a checked query against a mismatched graph must error");
@@ -1876,8 +1950,11 @@ mod fingerprint_tests {
             }
         }
         // index: (id, slot) sorted by id ascending → (3, slot1), (7, slot0)
-        let mut idx: Vec<(Id, u32)> =
-            vectors.iter().enumerate().map(|(slot, (id, _))| (*id, slot as u32)).collect();
+        let mut idx: Vec<(Id, u32)> = vectors
+            .iter()
+            .enumerate()
+            .map(|(slot, (id, _))| (*id, slot as u32))
+            .collect();
         idx.sort_unstable();
         for (id, slot) in idx {
             bytes.extend_from_slice(&id.to_le_bytes());
@@ -1886,13 +1963,21 @@ mod fingerprint_tests {
         std::fs::write(&path, &bytes).unwrap();
 
         let store = VectorStore::open(&path).expect("a legacy v1 file must still open");
-        assert!(store.fingerprint().is_none(), "v1 file carries no fingerprint");
+        assert!(
+            store.fingerprint().is_none(),
+            "v1 file carries no fingerprint"
+        );
         // Reads work against the v1 (offset-32) layout.
         assert_eq!(store.get(7), Some(&[1.0, 0.0, 0.0, 0.0][..]));
         assert_eq!(store.get(3), Some(&[0.0, 1.0, 0.0, 0.0][..]));
         // ...but it cannot be verified against a graph.
-        let err = store.check_graph(&graph(A)).expect_err("a v1 file must not certify a graph");
-        assert!(err.contains("predates graph-fingerprinting") || err.contains("legacy"), "err: {err}");
+        let err = store
+            .check_graph(&graph(A))
+            .expect_err("a v1 file must not certify a graph");
+        assert!(
+            err.contains("predates graph-fingerprinting") || err.contains("legacy"),
+            "err: {err}"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -1927,7 +2012,10 @@ mod provenance_read_tests {
 
     fn tmp(tag: &str) -> PathBuf {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("sparq_v3read_{tag}_{}_{n}.spqv", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "sparq_v3read_{tag}_{}_{n}.spqv",
+            std::process::id()
+        ))
     }
 
     fn prov() -> EmbeddingProvenance {
@@ -1939,7 +2027,12 @@ mod provenance_read_tests {
 
     /// Synthesize a real v3 `.spqv` file for `(dim, ids→vectors, provenance)` using ONLY the
     /// always-compiled `build_header` seam (no `with_provenance`, so this works with the feature off).
-    fn write_v3(path: &std::path::Path, dim: usize, rows: &[(Id, Vec<f32>)], p: &EmbeddingProvenance) {
+    fn write_v3(
+        path: &std::path::Path,
+        dim: usize,
+        rows: &[(Id, Vec<f32>)],
+        p: &EmbeddingProvenance,
+    ) {
         let count = rows.len();
         let header = build_header(
             dim,
@@ -1957,8 +2050,11 @@ mod provenance_read_tests {
             }
         }
         // id→slot index sorted by id.
-        let mut index: Vec<(Id, u32)> =
-            rows.iter().enumerate().map(|(slot, (id, _))| (*id, slot as u32)).collect();
+        let mut index: Vec<(Id, u32)> = rows
+            .iter()
+            .enumerate()
+            .map(|(slot, (id, _))| (*id, slot as u32))
+            .collect();
         index.sort_unstable();
         for (id, slot) in index {
             bytes.extend_from_slice(&id.to_le_bytes());
@@ -1970,10 +2066,18 @@ mod provenance_read_tests {
     #[test]
     fn v3_file_opens_and_exposes_provenance_in_both_feature_states() {
         let path = tmp("open");
-        let rows = vec![(1u32, vec![1.0, 0.0, 0.0, 0.0]), (2u32, vec![0.0, 1.0, 0.0, 0.0])];
+        let rows = vec![
+            (1u32, vec![1.0, 0.0, 0.0, 0.0]),
+            (2u32, vec![0.0, 1.0, 0.0, 0.0]),
+        ];
         write_v3(&path, 4, &rows, &prov());
-        let store = VectorStore::open(&path).expect("a v3 file must open regardless of the feature");
-        assert_eq!(store.provenance(), Some(&prov()), "provenance read from the v3 header");
+        let store =
+            VectorStore::open(&path).expect("a v3 file must open regardless of the feature");
+        assert_eq!(
+            store.provenance(),
+            Some(&prov()),
+            "provenance read from the v3 header"
+        );
         // Data reads correctly past the variable-length v3 header (data_offset from the header).
         assert_eq!(store.get(1), Some(&[1.0, 0.0, 0.0, 0.0][..]));
         assert_eq!(store.get(2), Some(&[0.0, 1.0, 0.0, 0.0][..]));
@@ -2025,7 +2129,10 @@ mod provenance_read_tests {
         let err = VectorStore::open(&path)
             .err()
             .expect("a corrupt v3 provenance block must be rejected");
-        assert!(err.contains("metric tag") || err.contains("provenance"), "err: {err}");
+        assert!(
+            err.contains("metric tag") || err.contains("provenance"),
+            "err: {err}"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -2035,7 +2142,10 @@ mod provenance_read_tests {
         let path = tmp("hdr");
         write_v3(&path, 4, &[(1u32, vec![1.0, 0.0, 0.0, 0.0])], &prov());
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), SPQV_VERSION_V3);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            SPQV_VERSION_V3
+        );
         let store = VectorStore::open(&path).unwrap();
         // data_offset is past the provenance block; the single vector still reads.
         assert_eq!(store.get(1), Some(&[1.0, 0.0, 0.0, 0.0][..]));

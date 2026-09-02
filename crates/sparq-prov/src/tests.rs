@@ -265,9 +265,7 @@ fn with_inputs_constructor_sets_used_and_defaults() {
     let e = d.entity().as_str();
     for input in &inputs {
         let iri = input.as_str();
-        assert!(lines.contains(&format!(
-            "<{a}> <http://www.w3.org/ns/prov#used> <{iri}> ."
-        )));
+        assert!(lines.contains(&format!("<{a}> <http://www.w3.org/ns/prov#used> <{iri}> .")));
         assert!(lines.contains(&format!(
             "<{e}> <http://www.w3.org/ns/prov#wasDerivedFrom> <{iri}> ."
         )));

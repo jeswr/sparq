@@ -253,9 +253,7 @@ impl<'a> RecordParser<'a> {
             } else {
                 // Unquoted field: up to the delimiter or a record terminator.
                 let start = self.pos;
-                while self.pos < bytes.len()
-                    && !matches!(bytes[self.pos], b',' | b'\n' | b'\r')
-                {
+                while self.pos < bytes.len() && !matches!(bytes[self.pos], b',' | b'\n' | b'\r') {
                     self.pos += 1;
                 }
                 fields.push(CsvField::Borrowed(&self.text[start..self.pos]));
@@ -411,7 +409,11 @@ pub fn from_csv_bytes(bytes: &[u8]) -> Result<QueryResult, ArrowError> {
 // string, while an empty `kind` marks an unbound row — which must not carry data in
 // any other field, so a malformed "unbound slot carrying data" fails closed instead of
 // being silently dropped. [FABLE-5]
-fn decode_cell(group: &[CsvField<'_>], column: &str, row: usize) -> Result<Option<Term>, ArrowError> {
+fn decode_cell(
+    group: &[CsvField<'_>],
+    column: &str,
+    row: usize,
+) -> Result<Option<Term>, ArrowError> {
     let kind = group[0].as_str();
     let value = group[1].as_str();
     let datatype = group[2].as_str();
@@ -419,7 +421,9 @@ fn decode_cell(group: &[CsvField<'_>], column: &str, row: usize) -> Result<Optio
     let direction = group[4].as_str();
 
     if kind.is_empty() {
-        if !value.is_empty() || !datatype.is_empty() || !language.is_empty()
+        if !value.is_empty()
+            || !datatype.is_empty()
+            || !language.is_empty()
             || !direction.is_empty()
         {
             return Err(cell_error(

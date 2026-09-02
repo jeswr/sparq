@@ -388,7 +388,10 @@ mod tests {
     // ----- [OPUS-4.8] sq-3c00: hidden-holder-SET host helpers -----
 
     fn holder_set(seeds: &[u64]) -> Vec<PublicKey> {
-        seeds.iter().map(|s| SecretKey::from_seed(*s).public_key()).collect()
+        seeds
+            .iter()
+            .map(|s| SecretKey::from_seed(*s).public_key())
+            .collect()
     }
 
     // The `holder_set_d{depth}` CircuitId maps to the on-disk package directory, so
@@ -424,10 +427,17 @@ mod tests {
             let mut pos = index;
             for sib in &sibs {
                 let is_right = pos & 1 == 1;
-                node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+                node = if is_right {
+                    h2(*sib, node)
+                } else {
+                    h2(node, *sib)
+                };
                 pos /= 2;
             }
-            assert_eq!(node, expected_root, "fold for index {index} reaches the root");
+            assert_eq!(
+                node, expected_root,
+                "fold for index {index} reaches the root"
+            );
         }
     }
 
@@ -461,7 +471,11 @@ mod tests {
         let expected = h2(n01, n23);
         assert_eq!(holder_set_root(&holders, depth), Some(expected));
         for leaf in &leaves {
-            assert_ne!(*leaf, padding_leaf(), "a holder leaf is never the padding leaf");
+            assert_ne!(
+                *leaf,
+                padding_leaf(),
+                "a holder leaf is never the padding leaf"
+            );
         }
     }
 
@@ -469,7 +483,7 @@ mod tests {
     fn out_of_range_index_and_overflow_are_none() {
         let holders = holder_set(&[100, 101, 102, 103]);
         assert_eq!(holder_set_membership_witness(&holders, 2, 4), None); // idx 4 OOB
-        // 5 holders do not fit a depth-2 (4-slot) tree.
+                                                                         // 5 holders do not fit a depth-2 (4-slot) tree.
         let big = holder_set(&[1, 2, 3, 4, 5]);
         assert_eq!(holder_set_root(&big, 2), None);
     }
@@ -492,10 +506,22 @@ mod tests {
         let leaf = holder_key_digest(&holders[holder_idx]).unwrap();
         assert_eq!(leaf, pok.holder_pk_digest, "witness digest is the set leaf");
 
-        let w = HolderSetWitness { pok, index: holder_idx as u64, siblings };
+        let w = HolderSetWitness {
+            pok,
+            index: holder_idx as u64,
+            siblings,
+        };
         let root = holder_set_root(&holders, depth).unwrap();
         let toml = holder_set_prover_toml(&Fr::from(0x2au64), &root, &w);
-        for field in ["challenge", "holder_set_root", "hsk", "hpk_x", "hpk_y", "index", "siblings"] {
+        for field in [
+            "challenge",
+            "holder_set_root",
+            "hsk",
+            "hpk_x",
+            "hpk_y",
+            "index",
+            "siblings",
+        ] {
             assert!(toml.contains(field), "toml must render {field}");
         }
         // The PUBLIC inputs come first (challenge, then holder_set_root), then private.

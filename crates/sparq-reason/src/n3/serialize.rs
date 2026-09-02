@@ -230,7 +230,13 @@ fn rule_term(t: &Term, vars: RuleVars) -> Term {
         ])),
         Term::Formula(ts) if vars == RuleVars::VarIris => Term::Formula(
             ts.iter()
-                .map(|r| [rule_term(&r[0], vars), rule_term(&r[1], vars), rule_term(&r[2], vars)])
+                .map(|r| {
+                    [
+                        rule_term(&r[0], vars),
+                        rule_term(&r[1], vars),
+                        rule_term(&r[2], vars),
+                    ]
+                })
                 .collect(),
         ),
         Term::Var(v) => match premise_blank_label(v) {
@@ -271,7 +277,10 @@ mod tests {
         assert_eq!(rendered(&Term::Iri("http://ex/a".into())), "<http://ex/a>");
         assert_eq!(rendered(&Term::Blank("b0".into())), "_:b0");
         assert_eq!(rendered(&Term::Var("x".into())), "?x");
-        assert_eq!(rendered(&Term::Lit("hi".into(), XSD_STRING.into(), None)), "\"hi\"");
+        assert_eq!(
+            rendered(&Term::Lit("hi".into(), XSD_STRING.into(), None)),
+            "\"hi\""
+        );
         assert_eq!(
             rendered(&Term::Lit("1".into(), "http://ex/d".into(), None)),
             "\"1\"^^<http://ex/d>"
@@ -311,7 +320,10 @@ mod tests {
         ]]);
         let ground = rendered(&rule_term(&inner, RuleVars::VarIris));
         assert!(!ground.contains('?'), "{ground}");
-        assert_eq!(ground, format!("{{ <{VAR_NS}y> <http://ex/p> <{VAR_NS}y> . }}"));
+        assert_eq!(
+            ground,
+            format!("{{ <{VAR_NS}y> <http://ex/p> <{VAR_NS}y> . }}")
+        );
         // `RuleVars::N3` leaves the formula exactly as parsed.
         assert_eq!(rendered(&rule_term(&inner, RuleVars::N3)), rendered(&inner));
         // A rewritten premise blank goes back to `_:x` in BOTH styles.

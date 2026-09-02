@@ -110,7 +110,10 @@ mod tests {
             NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
         ));
         let lang = Term::Literal(Literal::new_language_tagged_literal("1", "en").unwrap());
-        let e: Vec<_> = [&plain, &int, &lang].iter().map(|t| encode_term(t, &s).unwrap()).collect();
+        let e: Vec<_> = [&plain, &int, &lang]
+            .iter()
+            .map(|t| encode_term(t, &s).unwrap())
+            .collect();
         assert_ne!(e[0], e[1]);
         assert_ne!(e[0], e[2]);
         assert_ne!(e[1], e[2]);
@@ -130,10 +133,8 @@ mod tests {
         let salt = salt_from_bytes(&[7u8; 32]);
         let iri = Term::NamedNode(NamedNode::new("http://ex/a").unwrap());
         // Enc_t(IRI) = h_2(TYPE_CODE_IRI, blake3(iri-string, no <> delimiters)).
-        let expected = crate::poseidon2::hash(&[
-            Fr::from(TYPE_CODE_IRI),
-            blake3_field(b"http://ex/a"),
-        ]);
+        let expected =
+            crate::poseidon2::hash(&[Fr::from(TYPE_CODE_IRI), blake3_field(b"http://ex/a")]);
         let got = encode_term(&iri, &salt).unwrap();
         assert_eq!(got, expected);
         // Byte-stable: the same input yields the same 32-byte field word every call.
@@ -192,7 +193,10 @@ mod tests {
             o, // predicate slot now holds what was the object IRI
             Term::NamedNode(p),
         );
-        assert_ne!(encode_triple(&t, &salt).unwrap(), encode_triple(&swapped, &salt).unwrap());
+        assert_ne!(
+            encode_triple(&t, &salt).unwrap(),
+            encode_triple(&swapped, &salt).unwrap()
+        );
     }
 
     #[test]
@@ -214,7 +218,10 @@ mod tests {
     fn salt_from_bytes_pins_field_from_hash_bytes() {
         // salt_from_bytes is exactly field_from_hash_bytes over the entropy word.
         let bytes = [3u8; 32];
-        assert_eq!(salt_from_bytes(&bytes), crate::field::field_from_hash_bytes(&bytes));
+        assert_eq!(
+            salt_from_bytes(&bytes),
+            crate::field::field_from_hash_bytes(&bytes)
+        );
         // Deterministic + entropy-sensitive.
         assert_eq!(salt_from_bytes(&bytes), salt_from_bytes(&bytes));
         assert_ne!(salt_from_bytes(&[3u8; 32]), salt_from_bytes(&[4u8; 32]));

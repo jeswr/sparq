@@ -139,7 +139,11 @@ fn parse_reifier_form(text: &str) -> (BTreeSet<String>, BTreeSet<(String, String
             Some(at) => {
                 let reifier = line[..at].trim().to_string();
                 let inner = strip_trailing_dot(&line[at + marker.len()..]);
-                let inner = inner.strip_suffix(")>>").unwrap_or(&inner).trim().to_string();
+                let inner = inner
+                    .strip_suffix(")>>")
+                    .unwrap_or(&inner)
+                    .trim()
+                    .to_string();
                 reified.insert((reifier, inner));
             }
             None => {
@@ -214,7 +218,11 @@ fn every_manifest_case_matches_the_specification() {
 
         // The independent verifier re-check: `Q'` over the response ALONE.
         let replayed = verify_response(&request, &outcome.response).unwrap_or_else(|e| {
-            panic!("{}: the verifier re-check must not error: {}", case.label(), e)
+            panic!(
+                "{}: the verifier re-check must not error: {}",
+                case.label(),
+                e
+            )
         });
         assert_eq!(
             binds(&replayed),

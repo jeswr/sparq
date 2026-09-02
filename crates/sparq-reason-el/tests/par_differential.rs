@@ -443,7 +443,12 @@ fn par_phase_stats_work_counts_are_thread_count_invariant() {
     for t in THREAD_COUNTS {
         let (mut dict_par, mut triples_par) = (dict0.clone(), triples0.clone());
         let (_report, s) = classify_graph_par_stats(&mut dict_par, &mut triples_par, nz(t));
-        let counts = (s.rounds, s.frontier_items, s.derived_members, s.derived_links);
+        let counts = (
+            s.rounds,
+            s.frontier_items,
+            s.derived_members,
+            s.derived_links,
+        );
         match reference {
             None => reference = Some(counts),
             Some(r) => assert_eq!(

@@ -185,8 +185,9 @@ fn full_epsg_definition(epsg: u32) -> Option<crs_definitions::Def> {
     if needs_grids {
         return None;
     }
-    let has_datum_info =
-        ["+towgs84=", "+datum=", "+nadgrids="].iter().any(|k| def.proj4.contains(k));
+    let has_datum_info = ["+towgs84=", "+datum=", "+nadgrids="]
+        .iter()
+        .any(|k| def.proj4.contains(k));
     let wgs84_coincident = def.proj4.contains("+ellps=GRS80") || def.proj4.contains("+ellps=WGS84");
     if !has_datum_info && !wgs84_coincident {
         return None;
@@ -218,8 +219,10 @@ fn full_epsg_definition(epsg: u32) -> Option<crs_definitions::Def> {
 /// fail-closed: an unparseable axis matches no WKT and the entry is refused.
 #[cfg(feature = "epsg_full")]
 fn proj4_axis_directions(proj4: &str) -> Option<(&'static str, &'static str)> {
-    let axis =
-        proj4.split_ascii_whitespace().find_map(|t| t.strip_prefix("+axis=")).unwrap_or("enu");
+    let axis = proj4
+        .split_ascii_whitespace()
+        .find_map(|t| t.strip_prefix("+axis="))
+        .unwrap_or("enu");
     let direction = |b: u8| match b {
         b'e' => Some("EAST"),
         b'w' => Some("WEST"),
@@ -278,9 +281,10 @@ pub fn proj4_definition(epsg: u32) -> Option<String> {
             epsg - 25800
         )),
         // WGS84 / UTM north (326xx) and south (327xx) zones.
-        32601..=32660 => {
-            Some(format!("+proj=utm +zone={} +datum=WGS84 +units=m +no_defs", epsg - 32600))
-        }
+        32601..=32660 => Some(format!(
+            "+proj=utm +zone={} +datum=WGS84 +units=m +no_defs",
+            epsg - 32600
+        )),
         32701..=32760 => Some(format!(
             "+proj=utm +zone={} +south +datum=WGS84 +units=m +no_defs",
             epsg - 32700
@@ -319,7 +323,10 @@ pub fn epsg_code(crs: &Crs) -> Option<u32> {
 /// [`GeoError::Unsupported`].
 pub fn to_crs84(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     if g.crs.is_geographic() {
-        return Ok(GeoGeometry { crs: Crs::Crs84, geometry: g.geometry.clone() });
+        return Ok(GeoGeometry {
+            crs: Crs::Crs84,
+            geometry: g.geometry.clone(),
+        });
     }
     let epsg = epsg_code(&g.crs).ok_or_else(|| {
         GeoError::Unsupported(format!(
@@ -338,7 +345,9 @@ pub fn to_crs84(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
         let hint = "supported: 27700, 3857, 2154, 25832, 25833, 326xx/327xx UTM; geographic \
                     4258, 4269, 4283, 4171, 4490; the `epsg_full` feature adds the full \
                     EPSG registry";
-        GeoError::Unsupported(format!("no built-in proj4 definition for EPSG:{epsg} ({hint})"))
+        GeoError::Unsupported(format!(
+            "no built-in proj4 definition for EPSG:{epsg} ({hint})"
+        ))
     })?;
     let src = Proj::from_proj_string(&def)
         .map_err(|e| GeoError::Parse(format!("proj4 definition for EPSG:{epsg}: {e}")))?;
@@ -348,23 +357,31 @@ pub fn to_crs84(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
 
     // proj4rs transforms in place; failures (e.g. coordinates outside the
     // projection's domain) abort the whole geometry.
-    let geometry = g.geometry.try_map_coords(|c: Coord<f64>| -> Result<Coord<f64>, GeoError> {
-        // Normalise the input into proj's convention: geographic sources are
-        // written in the authority axis order in DEGREES but proj4rs consumes
-        // long/lat RADIANS; projected sources are metres, fed verbatim.
-        let (x, y) = match src_axis {
-            Some(AxisOrder::LatLong) => (c.y.to_radians(), c.x.to_radians()),
-            Some(AxisOrder::LongLat) => (c.x.to_radians(), c.y.to_radians()),
-            None => (c.x, c.y),
-        };
-        let mut p = (x, y, 0.0);
-        proj4rs::transform::transform(&src, &dst, &mut p).map_err(|e| {
-            GeoError::Unsupported(format!("EPSG:{epsg} -> CRS84 transform failed: {e}"))
+    let geometry = g
+        .geometry
+        .try_map_coords(|c: Coord<f64>| -> Result<Coord<f64>, GeoError> {
+            // Normalise the input into proj's convention: geographic sources are
+            // written in the authority axis order in DEGREES but proj4rs consumes
+            // long/lat RADIANS; projected sources are metres, fed verbatim.
+            let (x, y) = match src_axis {
+                Some(AxisOrder::LatLong) => (c.y.to_radians(), c.x.to_radians()),
+                Some(AxisOrder::LongLat) => (c.x.to_radians(), c.y.to_radians()),
+                None => (c.x, c.y),
+            };
+            let mut p = (x, y, 0.0);
+            proj4rs::transform::transform(&src, &dst, &mut p).map_err(|e| {
+                GeoError::Unsupported(format!("EPSG:{epsg} -> CRS84 transform failed: {e}"))
+            })?;
+            // Geographic outputs are radians in proj convention.
+            Ok(Coord {
+                x: p.0.to_degrees(),
+                y: p.1.to_degrees(),
+            })
         })?;
-        // Geographic outputs are radians in proj convention.
-        Ok(Coord { x: p.0.to_degrees(), y: p.1.to_degrees() })
-    })?;
-    Ok(GeoGeometry { crs: Crs::Crs84, geometry })
+    Ok(GeoGeometry {
+        crs: Crs::Crs84,
+        geometry,
+    })
 }
 
 /// Lexical-level mirror of [`to_crs84`]: a wktLiteral lexical form in, the

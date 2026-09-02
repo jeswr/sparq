@@ -990,7 +990,9 @@ mod tests {
         assert_ne!(&hd384[..64], &hd256[..], "profiles must not collide");
         // Same construction, wider digest: the proof-config half comes FIRST in
         // both, so a transposed SHA-384 concatenation would fail here.
-        let cfg_nquads = crate::canon::canonicalize_triples(&cfg).unwrap().to_nquads();
+        let cfg_nquads = crate::canon::canonicalize_triples(&cfg)
+            .unwrap()
+            .to_nquads();
         let cfg_hash = Sha384::digest(cfg_nquads.as_bytes());
         assert_eq!(&hd384[..48], &cfg_hash[..]);
     }

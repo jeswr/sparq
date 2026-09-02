@@ -28,7 +28,11 @@ fn rows_sorted(r: &QueryResult) -> Vec<Vec<String>> {
     let mut v: Vec<Vec<String>> = r
         .rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default())
+                .collect()
+        })
         .collect();
     v.sort();
     v
@@ -57,9 +61,21 @@ fn graph_query_survives_save_open_roundtrip() {
     let g2 = Graph::open(&dir).unwrap();
 
     // The SAME queries over the reopened (mmap) store must return the SAME rows.
-    assert_eq!(rows_sorted(&query(&g2, q_all).unwrap()), before_all, "GRAPH ?g rows changed after reopen");
-    assert_eq!(rows_sorted(&query(&g2, q_one).unwrap()), before_one, "graph-scoped rows changed after reopen");
-    assert_eq!(rows_sorted(&query(&g2, q_default).unwrap()), before_default, "default-graph rows changed after reopen");
+    assert_eq!(
+        rows_sorted(&query(&g2, q_all).unwrap()),
+        before_all,
+        "GRAPH ?g rows changed after reopen"
+    );
+    assert_eq!(
+        rows_sorted(&query(&g2, q_one).unwrap()),
+        before_one,
+        "graph-scoped rows changed after reopen"
+    );
+    assert_eq!(
+        rows_sorted(&query(&g2, q_default).unwrap()),
+        before_default,
+        "default-graph rows changed after reopen"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -116,7 +116,11 @@ const DEEP: Sig = Sig {
 
 fn gen_class(rng: &mut Rng, sig: &Sig, depth: u32) -> CE {
     // At depth 0 only leaves, so generation always terminates.
-    let k = if depth == 0 { rng.below(4) } else { rng.below(9) };
+    let k = if depth == 0 {
+        rng.below(4)
+    } else {
+        rng.below(9)
+    };
     match k {
         0 | 1 => CE::Class(sig.classes[rng.below(sig.classes.len())]),
         2 => CE::Thing,
@@ -251,10 +255,12 @@ impl Interp<'_> {
             CE::ObjectIntersectionOf(ms) => ms.iter().all(|m| self.holds(element, m)),
             CE::ObjectUnionOf(ms) => ms.iter().any(|m| self.holds(element, m)),
             CE::ObjectComplementOf(inner) => !self.holds(element, inner),
-            CE::ObjectSomeValuesFrom(p, filler) => (0..self.n)
-                .any(|t| self.has_edge(p.named(), element, t) && self.holds(t, filler)),
-            CE::ObjectAllValuesFrom(p, filler) => (0..self.n)
-                .all(|t| !self.has_edge(p.named(), element, t) || self.holds(t, filler)),
+            CE::ObjectSomeValuesFrom(p, filler) => {
+                (0..self.n).any(|t| self.has_edge(p.named(), element, t) && self.holds(t, filler))
+            }
+            CE::ObjectAllValuesFrom(p, filler) => {
+                (0..self.n).all(|t| !self.has_edge(p.named(), element, t) || self.holds(t, filler))
+            }
         }
     }
 
@@ -262,26 +268,18 @@ impl Interp<'_> {
     fn models_axiom(&self, axiom: &Axiom) -> bool {
         let all = |f: &dyn Fn(usize) -> bool| (0..self.n).all(f);
         match axiom {
-            Axiom::SubClassOf { sub, sup } => {
-                all(&|e| !self.holds(e, sub) || self.holds(e, sup))
-            }
-            Axiom::EquivalentClasses(l, r) => {
-                all(&|e| self.holds(e, l) == self.holds(e, r))
-            }
-            Axiom::DisjointClasses(l, r) => {
-                all(&|e| !(self.holds(e, l) && self.holds(e, r)))
-            }
+            Axiom::SubClassOf { sub, sup } => all(&|e| !self.holds(e, sub) || self.holds(e, sup)),
+            Axiom::EquivalentClasses(l, r) => all(&|e| self.holds(e, l) == self.holds(e, r)),
+            Axiom::DisjointClasses(l, r) => all(&|e| !(self.holds(e, l) && self.holds(e, r))),
             Axiom::SubObjectPropertyOf { sub, sup } => (0..self.n).all(|x| {
                 (0..self.n)
                     .all(|y| !self.has_edge(sub.named(), x, y) || self.has_edge(sup.named(), x, y))
             }),
             Axiom::ObjectPropertyDomain { property, domain } => (0..self.n).all(|x| {
-                (0..self.n)
-                    .all(|y| !self.has_edge(property.named(), x, y) || self.holds(x, domain))
+                (0..self.n).all(|y| !self.has_edge(property.named(), x, y) || self.holds(x, domain))
             }),
             Axiom::ObjectPropertyRange { property, range } => (0..self.n).all(|x| {
-                (0..self.n)
-                    .all(|y| !self.has_edge(property.named(), x, y) || self.holds(y, range))
+                (0..self.n).all(|y| !self.has_edge(property.named(), x, y) || self.holds(y, range))
             }),
             Axiom::ClassAssertion { class, individual } => {
                 self.holds(self.ind_elem(*individual), class)
@@ -413,15 +411,13 @@ fn desugar(axiom: &Axiom) -> Vec<Axiom> {
             CE::Nothing,
         )],
         // Domain(R, C)  ⟺  every subject of an R-edge is a C  ⟺  ∃R.⊤ ⊑ C.
-        Axiom::ObjectPropertyDomain { property, domain } => vec![gci(
-            CE::some(property.named(), CE::Thing),
-            domain.clone(),
-        )],
+        Axiom::ObjectPropertyDomain { property, domain } => {
+            vec![gci(CE::some(property.named(), CE::Thing), domain.clone())]
+        }
         // Range(R, C)  ⟺  every object of an R-edge is a C  ⟺  ⊤ ⊑ ∀R.C.
-        Axiom::ObjectPropertyRange { property, range } => vec![gci(
-            CE::Thing,
-            CE::only(property.named(), range.clone()),
-        )],
+        Axiom::ObjectPropertyRange { property, range } => {
+            vec![gci(CE::Thing, CE::only(property.named(), range.clone()))]
+        }
         // Already primitive for the tableau (GCI / RBox / ABox).
         other => vec![other.clone()],
     }
@@ -642,18 +638,10 @@ fn rename_class(ce: &CE, f: &dyn Fn(u32) -> u32) -> CE {
         CE::ObjectIntersectionOf(ms) => {
             CE::ObjectIntersectionOf(ms.iter().map(|m| rename_class(m, f)).collect())
         }
-        CE::ObjectUnionOf(ms) => {
-            CE::ObjectUnionOf(ms.iter().map(|m| rename_class(m, f)).collect())
-        }
-        CE::ObjectComplementOf(inner) => {
-            CE::ObjectComplementOf(Box::new(rename_class(inner, f)))
-        }
-        CE::ObjectSomeValuesFrom(p, filler) => {
-            CE::some(f(p.named()), rename_class(filler, f))
-        }
-        CE::ObjectAllValuesFrom(p, filler) => {
-            CE::only(f(p.named()), rename_class(filler, f))
-        }
+        CE::ObjectUnionOf(ms) => CE::ObjectUnionOf(ms.iter().map(|m| rename_class(m, f)).collect()),
+        CE::ObjectComplementOf(inner) => CE::ObjectComplementOf(Box::new(rename_class(inner, f))),
+        CE::ObjectSomeValuesFrom(p, filler) => CE::some(f(p.named()), rename_class(filler, f)),
+        CE::ObjectAllValuesFrom(p, filler) => CE::only(f(p.named()), rename_class(filler, f)),
     }
 }
 
@@ -808,5 +796,9 @@ fn logical_identities_hold_over_random_alch_ontologies() {
         decided
     );
     assert!(sat >= 30, "only {} Satisfiable verdicts observed", sat);
-    assert!(unsat >= 30, "only {} Unsatisfiable verdicts observed", unsat);
+    assert!(
+        unsat >= 30,
+        "only {} Unsatisfiable verdicts observed",
+        unsat
+    );
 }

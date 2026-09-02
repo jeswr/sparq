@@ -20,14 +20,14 @@
 //! # File ownership
 //! **Only bead `sq-i6du2.4` edits this file.**
 
-use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::Rng;
+use rand::SeedableRng;
 
 use crate::{
-    AcModel, AccessMode, Audience, CompiledPolicy, Condition, ConstraintComplexity, Decision,
-    Effect, ExpectedDecision, GenParams, IntentRow, QueryClass, QueryFixture, Request, Scope,
-    compile_acp, compile_odrl, compile_wac, oracle_acp, oracle_odrl, oracle_wac,
+    compile_acp, compile_odrl, compile_wac, oracle_acp, oracle_odrl, oracle_wac, AcModel,
+    AccessMode, Audience, CompiledPolicy, Condition, ConstraintComplexity, Decision, Effect,
+    ExpectedDecision, GenParams, IntentRow, QueryClass, QueryFixture, Request, Scope,
 };
 
 /// Output of the U3 financial-services generator.
@@ -134,16 +134,14 @@ fn emit_client_nquads(
         nquads.push(format!(
             "<{acct_iri}> <{schema}accountHolderName> <{client_iri}> ."
         ));
-        nquads.push(format!(
-            "<{client_iri}> <{schema}owns> <{acct_iri}> ."
-        ));
+        nquads.push(format!("<{client_iri}> <{schema}owns> <{acct_iri}> ."));
 
         for txn_id in 0..n_txns_per_account {
             let txn_iri = txn_uri(client_id, account_id, txn_id);
-            nquads.push(format!("<{txn_iri}> <{rdf_type}> <{schema}MoneyTransfer> ."));
             nquads.push(format!(
-                "<{txn_iri}> <{schema}accountId> <{acct_iri}> ."
+                "<{txn_iri}> <{rdf_type}> <{schema}MoneyTransfer> ."
             ));
+            nquads.push(format!("<{txn_iri}> <{schema}accountId> <{acct_iri}> ."));
             nquads.push(format!(
                 "<{txn_iri}> <{schema}amount> \"{txn_id}00\"^^<http://www.w3.org/2001/XMLSchema#decimal> ."
             ));
@@ -350,9 +348,7 @@ fn intents_for_advisory(
             let (start, end) = temporal_window(doc_id);
             Condition::Temporal { start, end }
         }
-        ConstraintComplexity::PurposeOrCount => {
-            Condition::Purpose(purpose_for(doc_id).to_owned())
-        }
+        ConstraintComplexity::PurposeOrCount => Condition::Purpose(purpose_for(doc_id).to_owned()),
         ConstraintComplexity::Compound => {
             let (start, end) = temporal_window(doc_id);
             Condition::And(
@@ -376,7 +372,11 @@ fn intents_for_advisory(
     intents.push(IntentRow {
         audience: Audience::Agent(advisor),
         scope: Scope::Resource,
-        mode: AccessMode { read: false, write: true, control: false },
+        mode: AccessMode {
+            read: false,
+            write: true,
+            control: false,
+        },
         condition: Condition::None,
         effect: Effect::Allow,
         resource_uri: doc,
@@ -384,6 +384,37 @@ fn intents_for_advisory(
 }
 
 // ── Request + oracle ground-truth generation ─────────────────────────────────────────
+
+/// Append the three per-model expected decisions for one read request.
+///
+/// Every row of the ground-truth table is built the same way — one read `Request` for
+/// `agent` against `resource`, evaluated by each of the three oracles in turn — so the
+/// construction lives here once rather than once per request shape.
+fn push_read_decisions(
+    decisions: &mut Vec<ExpectedDecision>,
+    agent: &str,
+    resource: &str,
+    intents: &[IntentRow],
+) {
+    for model in [AcModel::Wac, AcModel::Acp, AcModel::Odrl] {
+        let req = Request {
+            agent: agent.to_owned(),
+            client: None,
+            resource: resource.to_owned(),
+            mode: AccessMode::read_only(),
+        };
+        let decision = match model {
+            AcModel::Wac => oracle_wac(&req, intents),
+            AcModel::Acp => oracle_acp(&req, intents),
+            AcModel::Odrl => oracle_odrl(&req, intents),
+        };
+        decisions.push(ExpectedDecision {
+            request: req,
+            model,
+            decision,
+        });
+    }
+}
 
 /// Build the expected-decisions table from the intent table for all three models.
 ///
@@ -407,95 +438,30 @@ fn build_expected_decisions(
         let container = client_uri(client_id);
 
         // Client reads their own container root (subtree intent → Allow for all models).
-        for model in [AcModel::Wac, AcModel::Acp, AcModel::Odrl] {
-            let req = Request {
-                agent: agent.clone(),
-                client: None,
-                resource: container.clone(),
-                mode: AccessMode::read_only(),
-            };
-            let decision = match model {
-                AcModel::Wac => oracle_wac(&req, intents),
-                AcModel::Acp => oracle_acp(&req, intents),
-                AcModel::Odrl => oracle_odrl(&req, intents),
-            };
-            decisions.push(ExpectedDecision { request: req, model, decision });
-        }
+        push_read_decisions(&mut decisions, &agent, &container, intents);
 
         // Auditor reads the first account of each client.
         let acct0 = account_uri(client_id, 0);
         let auditor_agent = auditor_agent_uri(auditor_id);
-        for model in [AcModel::Wac, AcModel::Acp, AcModel::Odrl] {
-            let req = Request {
-                agent: auditor_agent.clone(),
-                client: None,
-                resource: acct0.clone(),
-                mode: AccessMode::read_only(),
-            };
-            let decision = match model {
-                AcModel::Wac => oracle_wac(&req, intents),
-                AcModel::Acp => oracle_acp(&req, intents),
-                AcModel::Odrl => oracle_odrl(&req, intents),
-            };
-            decisions.push(ExpectedDecision { request: req, model, decision });
-        }
+        push_read_decisions(&mut decisions, &auditor_agent, &acct0, intents);
 
         // Regulator reads the first transaction of the first account.
         let txn0 = txn_uri(client_id, 0, 0);
         let regulator_agent = regulator_agent_uri(regulator_id);
-        for model in [AcModel::Wac, AcModel::Acp, AcModel::Odrl] {
-            let req = Request {
-                agent: regulator_agent.clone(),
-                client: None,
-                resource: txn0.clone(),
-                mode: AccessMode::read_only(),
-            };
-            let decision = match model {
-                AcModel::Wac => oracle_wac(&req, intents),
-                AcModel::Acp => oracle_acp(&req, intents),
-                AcModel::Odrl => oracle_odrl(&req, intents),
-            };
-            decisions.push(ExpectedDecision { request: req, model, decision });
-        }
+        push_read_decisions(&mut decisions, &regulator_agent, &txn0, intents);
 
         // Cross-client: client_id tries to read client_id+1's container → Deny.
         let next_id = client_id + 1;
         if client_ids.contains(&next_id) {
             let cross_resource = client_uri(next_id);
-            for model in [AcModel::Wac, AcModel::Acp, AcModel::Odrl] {
-                let req = Request {
-                    agent: agent.clone(),
-                    client: None,
-                    resource: cross_resource.clone(),
-                    mode: AccessMode::read_only(),
-                };
-                let decision = match model {
-                    AcModel::Wac => oracle_wac(&req, intents),
-                    AcModel::Acp => oracle_acp(&req, intents),
-                    AcModel::Odrl => oracle_odrl(&req, intents),
-                };
-                decisions.push(ExpectedDecision { request: req, model, decision });
-            }
+            push_read_decisions(&mut decisions, &agent, &cross_resource, intents);
         }
     }
 
     // Unknown agent requests a resource → Deny for all models (fail-closed proof point).
     let unknown_agent = format!("{BASE}agent/unknown/9999");
     let first_resource = account_uri(client_ids[0], 0);
-    for model in [AcModel::Wac, AcModel::Acp, AcModel::Odrl] {
-        let req = Request {
-            agent: unknown_agent.clone(),
-            client: None,
-            resource: first_resource.clone(),
-            mode: AccessMode::read_only(),
-        };
-        let decision = match model {
-            AcModel::Wac => oracle_wac(&req, intents),
-            AcModel::Acp => oracle_acp(&req, intents),
-            AcModel::Odrl => oracle_odrl(&req, intents),
-        };
-        decisions.push(ExpectedDecision { request: req, model, decision });
-    }
+    push_read_decisions(&mut decisions, &unknown_agent, &first_resource, intents);
 
     decisions
 }
@@ -531,9 +497,7 @@ fn build_queries(
     // Q-point: client reads their first account's type and accountHolderName.
     let acct0 = account_uri(c0, 0);
     {
-        let sparql = format!(
-            "SELECT ?p ?o WHERE {{ GRAPH <{acct0}> {{ <{acct0}> ?p ?o }} }}"
-        );
+        let sparql = format!("SELECT ?p ?o WHERE {{ GRAPH <{acct0}> {{ <{acct0}> ?p ?o }} }}");
         let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         let client_cont = client_uri(c0);
         let expected_rows = vec![
@@ -552,9 +516,8 @@ fn build_queries(
     // Q-scan: list all accounts for client c0.
     {
         let container = client_uri(c0);
-        let sparql = format!(
-            "SELECT ?acct WHERE {{ ?acct <{schema}accountHolderName> <{container}> }}"
-        );
+        let sparql =
+            format!("SELECT ?acct WHERE {{ ?acct <{schema}accountHolderName> <{container}> }}");
         let expected_rows: Vec<String> = (0..n_accounts)
             .map(|a| format!("?acct=<{}>", account_uri(c0, a)))
             .collect();
@@ -662,7 +625,9 @@ fn build_queries(
 /// Panics if `params.validate()` fails.
 #[must_use]
 pub fn generate(params: &GenParams) -> FinancialDataset {
-    params.validate().expect("GenParams must be valid (U3 financial generator)");
+    params
+        .validate()
+        .expect("GenParams must be valid (U3 financial generator)");
 
     let mut rng = SmallRng::seed_from_u64(params.seed);
 
@@ -722,8 +687,7 @@ pub fn generate(params: &GenParams) -> FinancialDataset {
 
     // ── Per-model policy compilation ─────────────────────────────────────────────────
     let wac_policy: Vec<CompiledPolicy> = intents.iter().map(compile_wac).collect();
-    let acp_policy: Vec<CompiledPolicy> =
-        intents.iter().map(|r| compile_acp(r, &[])).collect();
+    let acp_policy: Vec<CompiledPolicy> = intents.iter().map(|r| compile_acp(r, &[])).collect();
     let odrl_policy: Vec<CompiledPolicy> = intents.iter().map(compile_odrl).collect();
 
     // ── Expected decisions ───────────────────────────────────────────────────────────
@@ -731,8 +695,12 @@ pub fn generate(params: &GenParams) -> FinancialDataset {
         build_expected_decisions(&intents, &client_ids, auditor_id, regulator_id);
 
     // ── W2 queries ───────────────────────────────────────────────────────────────────
-    let queries =
-        build_queries(&client_ids, &intents, n_accounts_per_client, n_txns_per_account);
+    let queries = build_queries(
+        &client_ids,
+        &intents,
+        n_accounts_per_client,
+        n_txns_per_account,
+    );
 
     FinancialDataset {
         data_nquads,

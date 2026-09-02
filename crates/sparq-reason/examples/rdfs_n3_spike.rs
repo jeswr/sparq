@@ -71,7 +71,14 @@ const ITERS: usize = 5;
 /// compared as sets even though each interns its own vocabulary into its own clone.
 fn as_strings(dict: &Dict, ids: &[[Id; 3]]) -> BTreeSet<String> {
     ids.iter()
-        .map(|t| format!("{} {} {}", dict.term(t[0]), dict.term(t[1]), dict.term(t[2])))
+        .map(|t| {
+            format!(
+                "{} {} {}",
+                dict.term(t[0]),
+                dict.term(t[1]),
+                dict.term(t[2])
+            )
+        })
         .collect()
 }
 
@@ -583,7 +590,10 @@ fn main() {
     // ---- §B scale: equivalence first, then the ratio -----------------------------
     println!("§B scale corpora (equivalence asserted BEFORE any timing):");
     let scales: Vec<(String, String)> = vec![
-        ("deep taxonomy (chain 120, 200 individuals)".into(), taxonomy_facts(120, 200)),
+        (
+            "deep taxonomy (chain 120, 200 individuals)".into(),
+            taxonomy_facts(120, 200),
+        ),
         (
             // 4 tops x 4 mids x 4 leaves = 64 leaf classes.
             "schema+ABox (64 leaf classes, 24 properties, 20k assertions)".into(),

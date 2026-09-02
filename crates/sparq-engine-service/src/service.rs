@@ -759,7 +759,10 @@ mod srj_stream {
         /// Identical cell handling to the old DOM path (absent variable ⇒ `None`).
         fn emit(&mut self, sol: &Value) -> Result<(), String> {
             let row = {
-                let vars = self.vars.as_ref().expect("emit is only called once vars are known");
+                let vars = self
+                    .vars
+                    .as_ref()
+                    .expect("emit is only called once vars are known");
                 let obj = sol.as_object().ok_or_else(|| {
                     "SERVICE: a solution binding is not a JSON object".to_string()
                 })?;
@@ -849,10 +852,7 @@ mod srj_stream {
                                     .filter_map(|s| s.as_str())
                                     .map(|s| {
                                         Variable::new(s).map_err(|e| {
-                                            format!(
-                                                "SERVICE: bad result variable {:?}: {}",
-                                                s, e
-                                            )
+                                            format!("SERVICE: bad result variable {:?}: {}", s, e)
                                         })
                                     })
                                     .collect::<Result<Vec<_>, _>>()
@@ -993,9 +993,8 @@ fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
                 // on `(lang, dir)`.
                 match get("its:dir").and_then(sparq_core::dict::parse_base_direction) {
                     Some(dir) => Ok(Term::Literal(
-                        Literal::new_directional_language_tagged_literal(value, lang, dir).map_err(
-                            |e| format!("SERVICE: bad language tag {lang:?}: {e}"),
-                        )?,
+                        Literal::new_directional_language_tagged_literal(value, lang, dir)
+                            .map_err(|e| format!("SERVICE: bad language tag {lang:?}: {e}"))?,
                     )),
                     None => Ok(Term::Literal(
                         Literal::new_language_tagged_literal(value, lang)
@@ -1003,7 +1002,8 @@ fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
                     )),
                 }
             } else if let Some(dt) = get("datatype") {
-                let dt = NamedNode::new(dt).map_err(|e| format!("SERVICE: bad datatype {dt:?}: {e}"))?;
+                let dt =
+                    NamedNode::new(dt).map_err(|e| format!("SERVICE: bad datatype {dt:?}: {e}"))?;
                 Ok(Term::Literal(Literal::new_typed_literal(value, dt)))
             } else {
                 Ok(Term::Literal(Literal::new_simple_literal(value)))
@@ -1014,7 +1014,10 @@ fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
                 .get("value")
                 .ok_or_else(|| "SERVICE: triple term without value".to_string())?;
             let part = |k: &str| -> Result<Term, String> {
-                srj_term(v.get(k).ok_or_else(|| format!("SERVICE: triple term without {k}"))?)
+                srj_term(
+                    v.get(k)
+                        .ok_or_else(|| format!("SERVICE: triple term without {k}"))?,
+                )
             };
             let subject = match part("subject")? {
                 Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
@@ -1088,9 +1091,11 @@ fn srx_term(
         "uri" => Ok(Term::NamedNode(
             NamedNode::new(&text).map_err(|e| format!("SERVICE: bad IRI {text:?}: {e}"))?,
         )),
-        "bnode" => Ok(Term::BlankNode(
-            BlankNode::new(&text).map_err(|e| format!("SERVICE: bad bnode {text:?}: {e}"))?,
-        )),
+        "bnode" => {
+            Ok(Term::BlankNode(BlankNode::new(&text).map_err(|e| {
+                format!("SERVICE: bad bnode {text:?}: {e}")
+            })?))
+        }
         // "literal" (and any other leaf, defensively).
         _ => {
             if let Some(lang) = lang {
@@ -1111,8 +1116,8 @@ fn srx_term(
                     )),
                 }
             } else if let Some(dt) = dt {
-                let dt =
-                    NamedNode::new(&dt).map_err(|e| format!("SERVICE: bad datatype {dt:?}: {e}"))?;
+                let dt = NamedNode::new(&dt)
+                    .map_err(|e| format!("SERVICE: bad datatype {dt:?}: {e}"))?;
                 Ok(Term::Literal(Literal::new_typed_literal(text, dt)))
             } else {
                 Ok(Term::Literal(Literal::new_simple_literal(text)))
@@ -1144,8 +1149,13 @@ pub(crate) fn parse_srx_into<F: RowSink>(
     let mut cur_var: Option<String> = None;
     // The open value element: (kind, xml:lang, its:dir, datatype, text).
     #[allow(clippy::type_complexity)]
-    let mut cur_val: Option<(String, Option<String>, Option<String>, Option<String>, String)> =
-        None;
+    let mut cur_val: Option<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    )> = None;
     // SPARQL 1.2 `<triple>` nesting: each frame is (active slot, [s, p, o]).
     let mut triple_stack: Vec<(usize, [Option<Term>; 3])> = Vec::new();
     let mut in_boolean = false;
@@ -1201,9 +1211,11 @@ pub(crate) fn parse_srx_into<F: RowSink>(
                 match name.as_str() {
                     "variable" => {
                         if let Some(v) = attr("name") {
-                            vars.push(Variable::new(&v).map_err(|e| {
-                                format!("SERVICE: bad result variable {v:?}: {e}")
-                            })?);
+                            vars.push(
+                                Variable::new(&v).map_err(|e| {
+                                    format!("SERVICE: bad result variable {v:?}: {e}")
+                                })?,
+                            );
                         }
                     }
                     "result" => cur_row.clear(),
@@ -1296,8 +1308,8 @@ pub(crate) fn parse_srx_into<F: RowSink>(
                                 ))
                             }
                         };
-                        let object = o
-                            .ok_or_else(|| "SERVICE: triple term without object".to_string())?;
+                        let object =
+                            o.ok_or_else(|| "SERVICE: triple term without object".to_string())?;
                         commit(
                             Term::Triple(Box::new(Triple {
                                 subject,
@@ -1330,9 +1342,7 @@ pub(crate) fn parse_srx_into<F: RowSink>(
     }
 
     if boolean.is_some() {
-        return Err(
-            "SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into(),
-        );
+        return Err("SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into());
     }
     Ok(vars)
 }
@@ -1375,8 +1385,13 @@ pub(crate) fn parse_srx_into_read<R: std::io::BufRead, F: RowSink>(
     let mut cur_row: rustc_hash::FxHashMap<String, Term> = rustc_hash::FxHashMap::default();
     let mut cur_var: Option<String> = None;
     #[allow(clippy::type_complexity)]
-    let mut cur_val: Option<(String, Option<String>, Option<String>, Option<String>, String)> =
-        None;
+    let mut cur_val: Option<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    )> = None;
     let mut triple_stack: Vec<(usize, [Option<Term>; 3])> = Vec::new();
     let mut in_boolean = false;
     let mut boolean: Option<bool> = None;
@@ -1430,9 +1445,11 @@ pub(crate) fn parse_srx_into_read<R: std::io::BufRead, F: RowSink>(
                 match name.as_str() {
                     "variable" => {
                         if let Some(v) = attr("name") {
-                            vars.push(Variable::new(&v).map_err(|e| {
-                                format!("SERVICE: bad result variable {v:?}: {e}")
-                            })?);
+                            vars.push(
+                                Variable::new(&v).map_err(|e| {
+                                    format!("SERVICE: bad result variable {v:?}: {e}")
+                                })?,
+                            );
                         }
                     }
                     "result" => cur_row.clear(),
@@ -1518,8 +1535,8 @@ pub(crate) fn parse_srx_into_read<R: std::io::BufRead, F: RowSink>(
                                 ))
                             }
                         };
-                        let object = o
-                            .ok_or_else(|| "SERVICE: triple term without object".to_string())?;
+                        let object =
+                            o.ok_or_else(|| "SERVICE: triple term without object".to_string())?;
                         commit_r(
                             Term::Triple(Box::new(Triple {
                                 subject,
@@ -1547,9 +1564,7 @@ pub(crate) fn parse_srx_into_read<R: std::io::BufRead, F: RowSink>(
     }
 
     if boolean.is_some() {
-        return Err(
-            "SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into(),
-        );
+        return Err("SERVICE: endpoint returned an ASK boolean, expected SELECT bindings".into());
     }
     Ok(vars)
 }
@@ -1612,7 +1627,8 @@ pub(crate) fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
                 // Defence-in-depth on ranges that are also internal but not
                 // covered above: broadcast, shared CGNAT (100.64/10), benchmarking.
                 || v4.is_broadcast()    // 255.255.255.255
-                || matches!(v4.octets(), [100, b, ..] if (64..=127).contains(&b)) // 100.64/10 CGNAT
+                || matches!(v4.octets(), [100, b, ..] if (64..=127).contains(&b))
+            // 100.64/10 CGNAT
         }
         IpAddr::V6(v6) => {
             // Unwrap IPv4-mapped (::ffff:a.b.c.d) and re-check as IPv4 so a
@@ -1737,9 +1753,7 @@ pub(crate) mod egress_policy {
         // Bracketed IPv6 authority: `[addr]` or `[addr]:port`.
         if let Some(rest) = entry.strip_prefix('[') {
             if let Some((inner, after)) = rest.split_once(']') {
-                let port = after
-                    .strip_prefix(':')
-                    .and_then(|p| p.parse::<u16>().ok());
+                let port = after.strip_prefix(':').and_then(|p| p.parse::<u16>().ok());
                 return (inner, port);
             }
             return (entry, None); // malformed (no closing bracket) — host pattern as-is
@@ -1788,12 +1802,7 @@ pub(crate) mod egress_policy {
     /// default-deny stays default-deny.
     pub(crate) fn is_allowed(host: &str, port: u16) -> bool {
         let h = host.to_ascii_lowercase();
-        POLICY.with(|p| {
-            p.borrow()
-                .allow
-                .iter()
-                .any(|e| entry_permits(e, &h, port))
-        })
+        POLICY.with(|p| p.borrow().allow.iter().any(|e| entry_permits(e, &h, port)))
     }
 
     /// True iff the single allowlist `entry` permits the lower-cased connect host `h` on
@@ -2028,12 +2037,12 @@ fn uri_host_port(uri: &ureq::http::Uri) -> Option<(String, String, u16)> {
     if host.is_empty() {
         return None;
     }
-    let port = authority.port_u16().unwrap_or_else(|| {
-        match uri.scheme_str() {
+    let port = authority
+        .port_u16()
+        .unwrap_or_else(|| match uri.scheme_str() {
             Some("https") => 443,
             _ => 80,
-        }
-    });
+        });
     // The authority host keeps IPv6 brackets (`[::1]`); strip them for the allowlist key and
     // for `to_socket_addrs` (which wants the bare host + a separate port).
     let bare = host.trim_start_matches('[').trim_end_matches(']');
@@ -2193,7 +2202,11 @@ impl ReaderTransport for HttpTransport {
                 // Return the body as a capped byte reader — no `read_to_string`, no
                 // String allocation for the whole body. The limit is the same cap as
                 // the `Transport` path so the body-byte bound is preserved.
-                let reader = r.into_body().into_with_config().limit(SERVICE_MAX_BODY_BYTES).reader();
+                let reader = r
+                    .into_body()
+                    .into_with_config()
+                    .limit(SERVICE_MAX_BODY_BYTES)
+                    .reader();
                 Ok(Box::new(reader))
             }
             Err(ureq::Error::StatusCode(code)) => {
@@ -2230,10 +2243,16 @@ mod tests {
     fn http_transport_timeout_tracks_budget() {
         use std::time::Duration;
         // No deadline -> the built-in default in full.
-        assert_eq!(HttpTransport::with_budget(None).timeout_for_test(), DEFAULT_SERVICE_TIMEOUT);
+        assert_eq!(
+            HttpTransport::with_budget(None).timeout_for_test(),
+            DEFAULT_SERVICE_TIMEOUT
+        );
         // A deadline tighter than the default caps the round-trip to the remaining time.
         let tight = Duration::from_secs(5);
-        assert_eq!(HttpTransport::with_budget(Some(tight)).timeout_for_test(), tight);
+        assert_eq!(
+            HttpTransport::with_budget(Some(tight)).timeout_for_test(),
+            tight
+        );
         // A deadline looser than the default never RAISES the timeout above the default.
         let loose = Duration::from_secs(120);
         assert_eq!(
@@ -2280,7 +2299,10 @@ mod tests {
             "results": { "bindings": [ { "a": {"type":"uri","value":"http://ex/x"} } ] }
         }"#;
         let rel = parse_srj(body).unwrap();
-        assert_eq!(rel.rows[0][0], Some(Term::NamedNode(NamedNode::new("http://ex/x").unwrap())));
+        assert_eq!(
+            rel.rows[0][0],
+            Some(Term::NamedNode(NamedNode::new("http://ex/x").unwrap()))
+        );
         assert_eq!(rel.rows[0][1], None);
     }
 
@@ -2326,7 +2348,11 @@ mod tests {
                     assert_eq!(l.value(), "مرحبا");
                     assert_eq!(l.language(), Some("ar"));
                     // The direction round-trips inbound (the bug: it was None).
-                    assert_eq!(l.direction(), Some(want), "its:dir={dir} must survive inbound");
+                    assert_eq!(
+                        l.direction(),
+                        Some(want),
+                        "its:dir={dir} must survive inbound"
+                    );
                 }
                 other => panic!("expected a directional literal, got {other:?}"),
             }
@@ -2531,8 +2557,7 @@ mod tests {
     #[test]
     fn srx_ask_boolean_is_rejected() {
         // SERVICE always wraps a SELECT, so an ASK boolean body is an error (mirrors SRJ).
-        let body =
-            format!(r#"<sparql xmlns="{SRX_NS}"><head/><boolean>true</boolean></sparql>"#);
+        let body = format!(r#"<sparql xmlns="{SRX_NS}"><head/><boolean>true</boolean></sparql>"#);
         assert!(parse_srx(&body).is_err());
     }
 
@@ -2560,7 +2585,9 @@ mod tests {
         assert!(parse_results("connection reset by peer").is_err());
         assert!(parse_results("").is_err());
         // Leading whitespace before the sniff byte is tolerated.
-        assert!(parse_results("   {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}").is_ok());
+        assert!(
+            parse_results("   {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}").is_ok()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2573,7 +2600,10 @@ mod tests {
         // [OPUS-4.8] sq-sjkj: direct coverage for the public accessor.
         // The default is DEFAULT_BIND_BLOCK (50) when no override is active.
         let s = bind_block_size();
-        assert_eq!(s, DEFAULT_BIND_BLOCK, "default bind-block size must be DEFAULT_BIND_BLOCK");
+        assert_eq!(
+            s, DEFAULT_BIND_BLOCK,
+            "default bind-block size must be DEFAULT_BIND_BLOCK"
+        );
     }
 
     /// `with_service_bound_join_block_size` scopes the override and restores it.
@@ -2582,10 +2612,18 @@ mod tests {
         // [OPUS-4.8] sq-sjkj: direct coverage for the scoped override entry point.
         let before = bind_block_size();
         with_service_bound_join_block_size(999, || {
-            assert_eq!(bind_block_size(), 999, "override must be active inside scope");
+            assert_eq!(
+                bind_block_size(),
+                999,
+                "override must be active inside scope"
+            );
         });
         // The previous value is restored after the scope.
-        assert_eq!(bind_block_size(), before, "override must be gone after scope");
+        assert_eq!(
+            bind_block_size(),
+            before,
+            "override must be gone after scope"
+        );
     }
 
     /// `with_service_bound_join_block_size(0, …)` is clamped to 1.
@@ -2608,7 +2646,10 @@ mod tests {
         // [OPUS-4.8] sq-b93pv: direct coverage for the public accessor.
         // The default is uncapped (None) when no override is active.
         let cap = remote_request_cap();
-        assert_eq!(cap, None, "default remote-request cap must be None (uncapped)");
+        assert_eq!(
+            cap, None,
+            "default remote-request cap must be None (uncapped)"
+        );
     }
 
     /// `with_service_remote_request_cap` scopes the cap and restores it.
@@ -2617,7 +2658,11 @@ mod tests {
         // [OPUS-4.8] sq-b93pv: direct coverage for the scoped cap entry point.
         assert_eq!(remote_request_cap(), None); // no prior override
         with_service_remote_request_cap(8, || {
-            assert_eq!(remote_request_cap(), Some(8), "cap must be active inside scope");
+            assert_eq!(
+                remote_request_cap(),
+                Some(8),
+                "cap must be active inside scope"
+            );
         });
         assert_eq!(remote_request_cap(), None, "cap must be gone after scope");
     }
@@ -2688,7 +2733,7 @@ mod tests {
     #[test]
     fn link_local_and_cloud_metadata_are_forbidden() {
         assert!(is_forbidden_ip(v4(169, 254, 0, 1))); // 169.254/16
-        // The cloud-metadata endpoint — the highest-value SSRF target.
+                                                      // The cloud-metadata endpoint — the highest-value SSRF target.
         assert!(is_forbidden_ip(v4(169, 254, 169, 254)));
         // IPv6 link-local fe80::/10.
         assert!(is_forbidden_ip(IpAddr::V6("fe80::1".parse().unwrap())));
@@ -2719,11 +2764,19 @@ mod tests {
     #[test]
     fn ipv4_mapped_v6_is_unwrapped_and_classified() {
         // ::ffff:127.0.0.1 must be refused as the embedded private v4.
-        assert!(is_forbidden_ip(IpAddr::V6("::ffff:127.0.0.1".parse().unwrap())));
-        assert!(is_forbidden_ip(IpAddr::V6("::ffff:10.0.0.1".parse().unwrap())));
-        assert!(is_forbidden_ip(IpAddr::V6("::ffff:169.254.169.254".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6(
+            "::ffff:127.0.0.1".parse().unwrap()
+        )));
+        assert!(is_forbidden_ip(IpAddr::V6(
+            "::ffff:10.0.0.1".parse().unwrap()
+        )));
+        assert!(is_forbidden_ip(IpAddr::V6(
+            "::ffff:169.254.169.254".parse().unwrap()
+        )));
         // A public v4 mapped into v6 is still allowed.
-        assert!(!is_forbidden_ip(IpAddr::V6("::ffff:8.8.8.8".parse().unwrap())));
+        assert!(!is_forbidden_ip(IpAddr::V6(
+            "::ffff:8.8.8.8".parse().unwrap()
+        )));
     }
 
     #[test]
@@ -2733,7 +2786,9 @@ mod tests {
         assert!(!is_forbidden_ip(v4(93, 184, 216, 34))); // example.com (historical)
         assert!(!is_forbidden_ip(v4(172, 15, 0, 1))); // just below 172.16/12 — public
         assert!(!is_forbidden_ip(v4(172, 32, 0, 1))); // just above 172.16/12 — public
-        assert!(!is_forbidden_ip(IpAddr::V6("2001:4860:4860::8888".parse().unwrap()))); // public v6
+        assert!(!is_forbidden_ip(IpAddr::V6(
+            "2001:4860:4860::8888".parse().unwrap()
+        ))); // public v6
     }
 
     #[test]
@@ -2831,7 +2886,10 @@ mod tests {
         assert_eq!(split_entry(".example.org"), (".example.org", None));
         // Port-scoped.
         assert_eq!(split_entry("127.0.0.1:8053"), ("127.0.0.1", Some(8053)));
-        assert_eq!(split_entry("sparql.internal:8443"), ("sparql.internal", Some(8443)));
+        assert_eq!(
+            split_entry("sparql.internal:8443"),
+            ("sparql.internal", Some(8443))
+        );
         assert_eq!(split_entry(".example.org:443"), (".example.org", Some(443)));
         // Bracketed IPv6 — brackets stripped from the host pattern.
         assert_eq!(split_entry("[::1]:8080"), ("::1", Some(8080)));
@@ -2859,15 +2917,15 @@ mod tests {
         assert!(permits(".example.org", "a.example.org", 443));
         assert!(permits(".example.org", "example.org", 80)); // apex included
         assert!(!permits(".example.org", "notexample.org", 80)); // boundary respected
-        // Port-scoped entry: exact port only.
+                                                                 // Port-scoped entry: exact port only.
         assert!(permits("127.0.0.1:8053", "127.0.0.1", 8053));
         assert!(!permits("127.0.0.1:8053", "127.0.0.1", 8054)); // other port rejected
         assert!(!permits("127.0.0.1:8053", "127.0.0.2", 8053)); // other host rejected
-        // Bracketed IPv6 + port; bare IPv6 host-level.
+                                                                // Bracketed IPv6 + port; bare IPv6 host-level.
         assert!(permits("[::1]:8080", "::1", 8080));
         assert!(!permits("[::1]:8080", "::1", 80));
         assert!(permits("2001:db8::1", "2001:db8::1", 443)); // bare IPv6 = all ports
-        // Malformed port → never-matching host pattern (fail-closed, never widened).
+                                                             // Malformed port → never-matching host pattern (fail-closed, never widened).
         assert!(!permits("127.0.0.1:99999", "127.0.0.1", 80));
         assert!(!permits("127.0.0.1:", "127.0.0.1", 80));
     }
@@ -3034,11 +3092,13 @@ mod tests {
         #[test]
         fn strict_empty_allowlist_denies_all() {
             for netloc in ["8.8.8.8:443", "1.1.1.1:80", "127.0.0.1:8080"] {
-                let err = with_service_egress_policy(true, std::iter::empty(), || {
-                    resolve_netloc(netloc)
-                })
-                .unwrap_err();
-                assert!(is_permission_denied(&err), "{netloc} must be refused, got {err:?}");
+                let err =
+                    with_service_egress_policy(true, std::iter::empty(), || resolve_netloc(netloc))
+                        .unwrap_err();
+                assert!(
+                    is_permission_denied(&err),
+                    "{netloc} must be refused, got {err:?}"
+                );
             }
         }
 
@@ -3088,7 +3148,10 @@ mod tests {
                 resolve_netloc("127.0.0.1:9999")
             })
             .unwrap_err();
-            assert!(is_permission_denied(&err), "other port must be refused, got {err:?}");
+            assert!(
+                is_permission_denied(&err),
+                "other port must be refused, got {err:?}"
+            );
         }
 
         #[test]
@@ -3215,7 +3278,11 @@ mod tests {
         fn assert_equiv(body: &str) {
             let got = parse_srj(body);
             let want = parse_srj_reference(body);
-            assert_eq!(got, want, "streaming vs DOM reference diverged on: {}", body);
+            assert_eq!(
+                got, want,
+                "streaming vs DOM reference diverged on: {}",
+                body
+            );
         }
 
         #[test]
@@ -3261,17 +3328,17 @@ mod tests {
         fn equivalence_on_malformed_documents() {
             for body in [
                 "not json at all",
-                "{",                                                   // truncated
-                r#"{"head":{}}"#,                                      // missing head.vars
-                r#"{"head":{"vars":5}}"#,                              // vars not an array
-                r#"{"head":{"vars":["x"]}}"#,                          // missing results
-                r#"{"head":{"vars":["x"]},"results":{}}"#,             // results without bindings
-                r#"{"head":{"vars":["x"]},"results":5}"#,              // results not an object
-                r#"{"head":{"vars":["x"]},"results":[1,2]}"#,          // results an array
-                r#"{"head":{"vars":["x"]},"results":{"bindings":5}}"#, // bindings not an array
-                r#"{"head":{"vars":["x"]},"results":{"bindings":{}}}"#, // bindings an object
+                "{",                                                     // truncated
+                r#"{"head":{}}"#,                                        // missing head.vars
+                r#"{"head":{"vars":5}}"#,                                // vars not an array
+                r#"{"head":{"vars":["x"]}}"#,                            // missing results
+                r#"{"head":{"vars":["x"]},"results":{}}"#,               // results without bindings
+                r#"{"head":{"vars":["x"]},"results":5}"#,                // results not an object
+                r#"{"head":{"vars":["x"]},"results":[1,2]}"#,            // results an array
+                r#"{"head":{"vars":["x"]},"results":{"bindings":5}}"#,   // bindings not an array
+                r#"{"head":{"vars":["x"]},"results":{"bindings":{}}}"#,  // bindings an object
                 r#"{"head":{"vars":["x"]},"results":{"bindings":[5]}}"#, // binding not an object
-                r#"{"boolean":true}"#,                                 // ASK body
+                r#"{"boolean":true}"#,                                   // ASK body
                 // ASK key trailing a full SELECT shape — still rejected.
                 r#"{"head":{"vars":["x"]},"results":{"bindings":[]},"boolean":false}"#,
                 r#"{"head":{"vars":["not a var"]},"results":{"bindings":[]}}"#, // bad var name
@@ -3312,7 +3379,10 @@ mod tests {
             let want = parse_srj_reference(&body).unwrap();
             assert_eq!(got.rows.len(), 10_000);
             assert_eq!(got.vars, want.vars);
-            assert_eq!(got.rows, want.rows, "row-for-row identical incl. duplicates");
+            assert_eq!(
+                got.rows, want.rows,
+                "row-for-row identical incl. duplicates"
+            );
         }
 
         #[test]
@@ -3332,7 +3402,10 @@ mod tests {
             })
             .unwrap_err();
             assert!(err.contains("invalid results JSON"), "got: {}", err);
-            assert_eq!(seen, 2, "rows are delivered as parsed, not after the document");
+            assert_eq!(
+                seen, 2,
+                "rows are delivered as parsed, not after the document"
+            );
             // The DOM reference, by contrast, delivers nothing from this document.
             assert!(parse_srj_reference(body).is_err());
         }
@@ -3355,7 +3428,10 @@ mod tests {
             })
             .unwrap_err();
             assert!(err.contains("SERVICE:"), "got: {}", err);
-            assert_eq!(seen, 2, "rows are delivered as parsed, not after the document");
+            assert_eq!(
+                seen, 2,
+                "rows are delivered as parsed, not after the document"
+            );
         }
 
         #[test]
@@ -3379,7 +3455,10 @@ mod tests {
                 }
             })
             .unwrap_err();
-            assert_eq!(err, "row cap exceeded (test sink)", "sink error is verbatim");
+            assert_eq!(
+                err, "row cap exceeded (test sink)",
+                "sink error is verbatim"
+            );
             assert_eq!(seen, 3, "no rows are delivered after the sink refuses");
         }
 
@@ -3405,7 +3484,10 @@ mod tests {
                 }
             })
             .unwrap_err();
-            assert_eq!(err, "row cap exceeded (test sink)", "sink error is verbatim");
+            assert_eq!(
+                err, "row cap exceeded (test sink)",
+                "sink error is verbatim"
+            );
             assert_eq!(seen, 3, "no rows are delivered after the sink refuses");
         }
 
@@ -3472,8 +3554,12 @@ mod tests {
             let transport = super::Canned(body);
             let tr = super::TransportAsReader(&transport);
             let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
-            let vars = eval_remote_into_read(&tr, "http://unused/", "SELECT * WHERE {}",
-                &mut |r| { rows.push(r); Ok(()) }).unwrap();
+            let vars =
+                eval_remote_into_read(&tr, "http://unused/", "SELECT * WHERE {}", &mut |r| {
+                    rows.push(r);
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(vars.len(), 2);
             assert_eq!(rows.len(), 2);
         }
@@ -3484,8 +3570,12 @@ mod tests {
             let body = r#"{"head":{"vars":["z"]},"results":{"bindings":[
                 {"z":{"type":"bnode","value":"b0"}}]}}"#;
             let mut n = 0usize;
-            let vars = parse_results_into_read(std::io::BufReader::new(body.as_bytes()),
-                &mut |_r| { n += 1; Ok(()) }).unwrap();
+            let vars =
+                parse_results_into_read(std::io::BufReader::new(body.as_bytes()), &mut |_r| {
+                    n += 1;
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(vars.len(), 1);
             assert_eq!(n, 1);
         }
@@ -3499,8 +3589,12 @@ mod tests {
                     <uri>http://ex/srx</uri>
                 </binding></result></results></sparql>"#;
             let mut n = 0usize;
-            let vars = parse_results_into_read(std::io::BufReader::new(body.as_bytes()),
-                &mut |_r| { n += 1; Ok(()) }).unwrap();
+            let vars =
+                parse_results_into_read(std::io::BufReader::new(body.as_bytes()), &mut |_r| {
+                    n += 1;
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(vars.len(), 1);
             assert_eq!(n, 1);
         }
@@ -3513,9 +3607,17 @@ mod tests {
                 {"s":{"type":"uri","value":"http://ex/s1"},"o":{"type":"literal","value":"v1"}},
                 {"s":{"type":"uri","value":"http://ex/s2"}}]}}"#;
             let mut from_str: Vec<Vec<Option<Term>>> = Vec::new();
-            let v1 = parse_srj_into(body, &mut |r| { from_str.push(r); Ok(()) }).unwrap();
+            let v1 = parse_srj_into(body, &mut |r| {
+                from_str.push(r);
+                Ok(())
+            })
+            .unwrap();
             let mut from_read: Vec<Vec<Option<Term>>> = Vec::new();
-            let v2 = parse_srj_into_read(body.as_bytes(), &mut |r| { from_read.push(r); Ok(()) }).unwrap();
+            let v2 = parse_srj_into_read(body.as_bytes(), &mut |r| {
+                from_read.push(r);
+                Ok(())
+            })
+            .unwrap();
             assert_eq!(v1, v2);
             assert_eq!(from_str, from_read);
         }
@@ -3534,10 +3636,17 @@ mod tests {
                     <result><binding name="s"><uri>http://ex/s2</uri></binding></result>
                 </results></sparql>"#;
             let mut from_str: Vec<Vec<Option<Term>>> = Vec::new();
-            let v1 = parse_srx_into(body, &mut |r| { from_str.push(r); Ok(()) }).unwrap();
+            let v1 = parse_srx_into(body, &mut |r| {
+                from_str.push(r);
+                Ok(())
+            })
+            .unwrap();
             let mut from_read: Vec<Vec<Option<Term>>> = Vec::new();
-            let v2 = parse_srx_into_read(std::io::BufReader::new(body.as_bytes()),
-                &mut |r| { from_read.push(r); Ok(()) }).unwrap();
+            let v2 = parse_srx_into_read(std::io::BufReader::new(body.as_bytes()), &mut |r| {
+                from_read.push(r);
+                Ok(())
+            })
+            .unwrap();
             assert_eq!(v1, v2);
             assert_eq!(from_str, from_read);
         }
@@ -3552,8 +3661,9 @@ mod tests {
         fn parse_results_into_read_empty_body_is_error() {
             // [OPUS-4.8] sq-my8wd.5 coverage: the `buf.is_empty()` early-return
             // branch in `parse_results_into_read` (the empty-response path).
-            let err = parse_results_into_read(std::io::BufReader::new(b"".as_ref()),
-                &mut |_r| Ok(())).unwrap_err();
+            let err =
+                parse_results_into_read(std::io::BufReader::new(b"".as_ref()), &mut |_r| Ok(()))
+                    .unwrap_err();
             assert!(
                 err.contains("neither SPARQL-Results-JSON nor -XML"),
                 "empty body must report the sniff error: {err}"
@@ -3566,15 +3676,19 @@ mod tests {
         fn parse_results_into_read_unknown_format_is_error() {
             // [OPUS-4.8] sq-my8wd.5 coverage: the `_ => Err(…)` sniff branch in
             // `parse_results_into_read` (the unrecognised-format path).
-            let err = parse_results_into_read(std::io::BufReader::new(b"plain text".as_ref()),
-                &mut |_r| Ok(())).unwrap_err();
+            let err = parse_results_into_read(
+                std::io::BufReader::new(b"plain text".as_ref()),
+                &mut |_r| Ok(()),
+            )
+            .unwrap_err();
             assert!(
                 err.contains("neither SPARQL-Results-JSON nor -XML"),
                 "unrecognised body must report the sniff error: {err}"
             );
             // Whitespace-only body hits the empty-buffer path after draining whitespace.
-            let err2 = parse_results_into_read(std::io::BufReader::new(b"   ".as_ref()),
-                &mut |_r| Ok(())).unwrap_err();
+            let err2 =
+                parse_results_into_read(std::io::BufReader::new(b"   ".as_ref()), &mut |_r| Ok(()))
+                    .unwrap_err();
             assert!(
                 err2.contains("neither SPARQL-Results-JSON nor -XML"),
                 "whitespace-only body must report the sniff error: {err2}"
@@ -3589,8 +3703,11 @@ mod tests {
             // branch in `parse_results_into_read`, then routing to SRJ.
             let body = b"   \n\t {\"head\":{\"vars\":[\"x\"]},\"results\":{\"bindings\":[]}}";
             let mut n = 0usize;
-            let vars = parse_results_into_read(std::io::BufReader::new(body.as_ref()),
-                &mut |_r| { n += 1; Ok(()) }).unwrap();
+            let vars = parse_results_into_read(std::io::BufReader::new(body.as_ref()), &mut |_r| {
+                n += 1;
+                Ok(())
+            })
+            .unwrap();
             assert_eq!(vars.len(), 1);
             assert_eq!(n, 0); // no rows
         }
@@ -3619,7 +3736,9 @@ mod tests {
     #[test]
     fn render_values_block_single_var_one_tuple() {
         let vars = vec![Variable::new("x").unwrap()];
-        let tuples = vec![vec![Term::NamedNode(NamedNode::new("http://ex/a").unwrap())]];
+        let tuples = vec![vec![Term::NamedNode(
+            NamedNode::new("http://ex/a").unwrap(),
+        )]];
         let got = render_values_block(&vars, &tuples);
         assert_eq!(got, "VALUES ?x { <http://ex/a> }");
     }
@@ -3669,7 +3788,11 @@ mod tests {
             Term::Literal(Literal::new_language_tagged_literal("hi", "en").unwrap()),
         ];
         let got = render_values_block(&vars, &[r1, r2]);
-        assert_eq!(got.matches("http://ex/s").count(), 2, "two subject IRIs: {got}");
+        assert_eq!(
+            got.matches("http://ex/s").count(),
+            2,
+            "two subject IRIs: {got}"
+        );
         assert!(got.contains("\"hi\"@en"), "lang-tagged literal: {got}");
     }
 
@@ -3724,8 +3847,8 @@ mod tests {
     #[test]
     fn parse_srj_into_read_error_propagates_from_reader() {
         let malformed = b"{ bad json !!! }";
-        let err = parse_srj_into_read(std::io::Cursor::new(malformed), &mut |_r| Ok(()))
-            .unwrap_err();
+        let err =
+            parse_srj_into_read(std::io::Cursor::new(malformed), &mut |_r| Ok(())).unwrap_err();
         assert!(
             err.contains("invalid results JSON"),
             "expected JSON error, got: {err}"
@@ -3991,9 +4114,8 @@ mod tests {
               <results></triple></results>
             </sparql>"#
         );
-        let err =
-            parse_srx_into_read(std::io::BufReader::new(body.as_bytes()), &mut |_r| Ok(()))
-                .unwrap_err();
+        let err = parse_srx_into_read(std::io::BufReader::new(body.as_bytes()), &mut |_r| Ok(()))
+            .unwrap_err();
         assert!(
             err.contains("invalid results XML"),
             "expected XML parse error, got: {err}"
@@ -4004,12 +4126,9 @@ mod tests {
     /// SERVICE always wraps a SELECT.
     #[test]
     fn parse_srx_into_read_boolean_body_is_error() {
-        let body = format!(
-            r#"<sparql xmlns="{SRX_NS}"><head/><boolean>true</boolean></sparql>"#
-        );
-        let err =
-            parse_srx_into_read(std::io::BufReader::new(body.as_bytes()), &mut |_r| Ok(()))
-                .unwrap_err();
+        let body = format!(r#"<sparql xmlns="{SRX_NS}"><head/><boolean>true</boolean></sparql>"#);
+        let err = parse_srx_into_read(std::io::BufReader::new(body.as_bytes()), &mut |_r| Ok(()))
+            .unwrap_err();
         assert!(
             err.contains("ASK boolean"),
             "expected ASK-boolean rejection, got: {err}"
@@ -4230,13 +4349,12 @@ mod tests {
             let srj = r#"{"head":{"vars":["x"]},"results":{"bindings":[
                 {"x":{"type":"uri","value":"http://ex/ht1"}}
             ]}}"#
-            .to_string();
+                .to_string();
             let port = serve_once(srj);
             let endpoint = format!("http://127.0.0.1:{port}/sparql");
-            let result = with_service_egress_allow(
-                [format!("127.0.0.1:{port}")],
-                || HttpTransport::with_budget(None).fetch(&endpoint, "SELECT * WHERE {}"),
-            );
+            let result = with_service_egress_allow([format!("127.0.0.1:{port}")], || {
+                HttpTransport::with_budget(None).fetch(&endpoint, "SELECT * WHERE {}")
+            });
             assert!(result.is_ok(), "fetch must succeed: {:?}", result);
             assert!(
                 result.unwrap().contains("http://ex/ht1"),
@@ -4251,7 +4369,7 @@ mod tests {
             let srj = r#"{"head":{"vars":["y"]},"results":{"bindings":[
                 {"y":{"type":"literal","value":"streamed"}}
             ]}}"#
-            .to_string();
+                .to_string();
             let port = serve_once(srj);
             let endpoint = format!("http://127.0.0.1:{port}/sparql");
             // `fetch_reader` returns a reader whose lifetime is tied to `transport`,
@@ -4261,8 +4379,7 @@ mod tests {
                 [format!("127.0.0.1:{port}")],
                 || -> Result<String, String> {
                     let transport = HttpTransport::with_budget(None);
-                    let mut reader =
-                        transport.fetch_reader(&endpoint, "SELECT * WHERE {}")?;
+                    let mut reader = transport.fetch_reader(&endpoint, "SELECT * WHERE {}")?;
                     let mut body = String::new();
                     std::io::Read::read_to_string(&mut reader, &mut body)
                         .map_err(|e| format!("read error: {e}"))?;
@@ -4270,7 +4387,10 @@ mod tests {
                 },
             )
             .unwrap_or_else(|e| panic!("fetch_reader must succeed: {e}"));
-            assert!(body.contains("streamed"), "body must contain the literal: {body}");
+            assert!(
+                body.contains("streamed"),
+                "body must contain the literal: {body}"
+            );
         }
     }
 }

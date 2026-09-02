@@ -95,7 +95,8 @@ fn typed_sub_vector_projects_only_requested_blocks() {
         &cfg,
         None,
         Some((&store, &header)),
-    ) else {
+    )
+    else {
         panic!("expected a typed-sub-vector grounding");
     };
     assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0], "numeric block only");
@@ -116,7 +117,8 @@ fn typed_sub_vector_projects_only_requested_blocks() {
         &all,
         None,
         Some((&store, &header)),
-    ) else {
+    )
+    else {
         panic!()
     };
     assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "all blocks");
@@ -216,15 +218,18 @@ ex:shaky  pkg:assurance secx:Conjectured ; pkg:confidence "0.3" ;
     let good: Vec<(&str, f64)> = vec![("from_good", 1.0)];
     let weak: Vec<(&str, f64)> = vec![("from_weak", 1.0)];
     let fused = fuse_rrf_weighted(
-        &[
-            (&good, weights[0] as f64),
-            (&weak, weights[1] as f64),
-        ],
+        &[(&good, weights[0] as f64), (&weak, weights[1] as f64)],
         sparq_vectors::RRF_K,
         10,
     );
-    assert_eq!(fused[0].0, "from_good", "higher-provenance modality ranks first");
-    assert!(fused[0].1 > fused[1].1, "and strictly outranks the lower-provenance one");
+    assert_eq!(
+        fused[0].0, "from_good",
+        "higher-provenance modality ranks first"
+    );
+    assert!(
+        fused[0].1 > fused[1].1,
+        "and strictly outranks the lower-provenance one"
+    );
 
     // Under the ablation-OFF arm every block is the fail-open 1.0 — grounding is unchanged.
     let off = pw
@@ -245,7 +250,11 @@ ex:shaky  pkg:assurance secx:Conjectured ; pkg:confidence "0.3" ;
     ) else {
         panic!()
     };
-    assert_eq!(weights, vec![1.0, 1.0], "ablation-off leaves every block unweighted");
+    assert_eq!(
+        weights,
+        vec![1.0, 1.0],
+        "ablation-off leaves every block unweighted"
+    );
 }
 
 /// [OPUS-5] sq-w2af4 — the PER-NODE half of point 3, END-TO-END: `ground_weighted` scales a node's
@@ -282,14 +291,20 @@ ex:silent ex:other ex:o3 .
     store.finalize().unwrap();
 
     // One block, fed by `ex:p`. The header carries the GRAPH-GLOBAL default for that predicate.
-    let plain = SchemaHeader::new(vec![Block::new(Encoder::Numeric, Metric::Euclidean, 0, 2)])
-        .unwrap();
+    let plain =
+        SchemaHeader::new(vec![Block::new(Encoder::Numeric, Metric::Euclidean, 0, 2)]).unwrap();
     let preds = [Some("http://ex/p")];
-    let header = pw.weight_header(&g, &plain, &preds, WeightMode::Provenance).unwrap();
+    let header = pw
+        .weight_header(&g, &plain, &preds, WeightMode::Provenance)
+        .unwrap();
     let global = header.blocks()[0].fusion_weight();
 
     let weight_of_node = |name: &str, mode: WeightMode| -> f32 {
-        let weighting = NodeWeighting { weights: &pw, block_predicates: &preds, mode };
+        let weighting = NodeWeighting {
+            weights: &pw,
+            block_predicates: &preds,
+            mode,
+        };
         let Some(Grounding::TypedSubVector { weights, .. }) = ground_weighted(
             &g,
             &iri(&format!("http://ex/{}", name)),
@@ -310,7 +325,12 @@ ex:silent ex:other ex:o3 .
     let silent = weight_of_node("silent", WeightMode::Provenance);
 
     // The load-bearing property: DISTINCT nodes, DISTINCT weights, each from its own edges only.
-    assert!(frail < strong, "the frail node's own edge weighs less ({} < {})", frail, strong);
+    assert!(
+        frail < strong,
+        "the frail node's own edge weighs less ({} < {})",
+        frail,
+        strong
+    );
     assert!(
         (strong - pw.weight_for_subject(ids[0])).abs() < 1e-6,
         "derived only from ex:strong's own incident edge: {}",
@@ -346,7 +366,11 @@ ex:silent ex:other ex:o3 .
         ) else {
             panic!()
         };
-        assert_eq!(weights, vec![global], "ground() keeps the persisted default");
+        assert_eq!(
+            weights,
+            vec![global],
+            "ground() keeps the persisted default"
+        );
     }
 }
 
@@ -379,7 +403,11 @@ ex:st rdf:reifies <<( ex:hub ex:cites ex:dubious )>> ; pkg:confidence "0.2" .
     let trusted = g.id_of(&iri("http://ex/trusted")).unwrap();
     let dubious = g.id_of(&iri("http://ex/dubious")).unwrap();
     let pw = ProvenanceWeights::mine(&g);
-    assert_eq!(pw.annotated_statements(), 1, "one reified statement carries provenance");
+    assert_eq!(
+        pw.annotated_statements(),
+        1,
+        "one reified statement carries provenance"
+    );
 
     let mut store = VectorStore::create(tmp("sketch"), 2).unwrap();
     store.put(trusted, &[1.0, 0.0]).unwrap();
@@ -388,19 +416,41 @@ ex:st rdf:reifies <<( ex:hub ex:cites ex:dubious )>> ; pkg:confidence "0.2" .
 
     let hub = iri("http://ex/hub");
     // OFF arm: the plain arithmetic mean of (1,0) and (0,1).
-    let mean = sketch_predicate(&g, &store, &hub, "http://ex/cites", &pw, WeightMode::Uniform)
-        .unwrap()
-        .expect("two neighbours have stored vectors");
-    assert!((mean[0] - 0.5).abs() < 1e-6 && (mean[1] - 0.5).abs() < 1e-6, "{:?}", mean);
+    let mean = sketch_predicate(
+        &g,
+        &store,
+        &hub,
+        "http://ex/cites",
+        &pw,
+        WeightMode::Uniform,
+    )
+    .unwrap()
+    .expect("two neighbours have stored vectors");
+    assert!(
+        (mean[0] - 0.5).abs() < 1e-6 && (mean[1] - 0.5).abs() < 1e-6,
+        "{:?}",
+        mean
+    );
 
     // ON arm: the undoubted statement's contribution dominates, in the exact w(t) proportion.
-    let pooled =
-        sketch_predicate(&g, &store, &hub, "http://ex/cites", &pw, WeightMode::Provenance)
-            .unwrap()
-            .unwrap();
+    let pooled = sketch_predicate(
+        &g,
+        &store,
+        &hub,
+        "http://ex/cites",
+        &pw,
+        WeightMode::Provenance,
+    )
+    .unwrap()
+    .unwrap();
     let wt = pw.weight_of([hub_id, cites, trusted], WeightMode::Provenance);
     let wd = pw.weight_of([hub_id, cites, dubious], WeightMode::Provenance);
-    assert!(wd < wt, "the reified statement is the doubted one ({} < {})", wd, wt);
+    assert!(
+        wd < wt,
+        "the reified statement is the doubted one ({} < {})",
+        wd,
+        wt
+    );
     assert!(
         pooled[0] > pooled[1],
         "the higher-provenance statement must dominate the sketch ({:?})",
@@ -417,8 +467,12 @@ ex:st rdf:reifies <<( ex:hub ex:cites ex:dubious )>> ; pkg:confidence "0.2" .
     .unwrap();
     let bare_pw = ProvenanceWeights::mine(&bare);
     let mut bare_store = VectorStore::create(tmp("sketch_bare"), 2).unwrap();
-    bare_store.put(bare.id_of(&iri("http://ex/trusted")).unwrap(), &[1.0, 0.0]).unwrap();
-    bare_store.put(bare.id_of(&iri("http://ex/dubious")).unwrap(), &[0.0, 1.0]).unwrap();
+    bare_store
+        .put(bare.id_of(&iri("http://ex/trusted")).unwrap(), &[1.0, 0.0])
+        .unwrap();
+    bare_store
+        .put(bare.id_of(&iri("http://ex/dubious")).unwrap(), &[0.0, 1.0])
+        .unwrap();
     bare_store.finalize().unwrap();
     let flat = sketch_predicate(
         &bare,
@@ -430,12 +484,23 @@ ex:st rdf:reifies <<( ex:hub ex:cites ex:dubious )>> ; pkg:confidence "0.2" .
     )
     .unwrap()
     .unwrap();
-    assert!((flat[0] - 0.5).abs() < 1e-6 && (flat[1] - 0.5).abs() < 1e-6, "{:?}", flat);
+    assert!(
+        (flat[0] - 0.5).abs() < 1e-6 && (flat[1] - 0.5).abs() < 1e-6,
+        "{:?}",
+        flat
+    );
 
     // An unknown predicate / a node with no vectorised neighbours pools to None, never an error.
-    assert!(sketch_predicate(&g, &store, &hub, "http://ex/absent", &pw, WeightMode::Provenance)
-        .unwrap()
-        .is_none());
+    assert!(sketch_predicate(
+        &g,
+        &store,
+        &hub,
+        "http://ex/absent",
+        &pw,
+        WeightMode::Provenance
+    )
+    .unwrap()
+    .is_none());
 }
 
 #[test]

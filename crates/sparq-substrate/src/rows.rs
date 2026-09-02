@@ -86,9 +86,15 @@ mod tests {
         // exercise the alias directly (the real type, not a mock) to lock the inline width.
         let mut r: Row = Row::new();
         r.extend_from_slice(&[1, 2, 3, 4]);
-        assert!(!r.spilled(), "a 4-column Row must stay inline (no heap allocation)");
+        assert!(
+            !r.spilled(),
+            "a 4-column Row must stay inline (no heap allocation)"
+        );
         r.push(5);
-        assert!(r.spilled(), "a 5-column Row spills, as the [Id; 4] inline width dictates");
+        assert!(
+            r.spilled(),
+            "a 5-column Row spills, as the [Id; 4] inline width dictates"
+        );
         assert_eq!(r.as_slice(), &[1, 2, 3, 4, 5]);
     }
 
@@ -98,7 +104,10 @@ mod tests {
         k.extend_from_slice(&[10, 20]);
         assert!(!k.spilled(), "a 2-column Key must stay inline");
         k.push(30);
-        assert!(k.spilled(), "a 3-column Key spills, as the [Id; 2] inline width dictates");
+        assert!(
+            k.spilled(),
+            "a 3-column Key spills, as the [Id; 2] inline width dictates"
+        );
     }
 
     #[test]
@@ -108,7 +117,10 @@ mod tests {
         p.push(1usize);
         assert!(!p.spilled(), "a 2-entry Posting must stay inline");
         p.push(2usize);
-        assert!(p.spilled(), "a 3-entry Posting spills, as the [usize; 2] inline width dictates");
+        assert!(
+            p.spilled(),
+            "a 3-entry Posting spills, as the [usize; 2] inline width dictates"
+        );
     }
 
     #[test]
@@ -116,7 +128,10 @@ mod tests {
         // The re-exported inline-int helpers are the SAME `sparq-core` functions, exercised
         // through the substrate name. A small in-range value inlines and is recognised.
         let id = inline_id_of_int(42).expect("42 is in the inline integer range");
-        assert!(is_inline(id), "an inline-int id must be recognised by is_inline");
+        assert!(
+            is_inline(id),
+            "an inline-int id must be recognised by is_inline"
+        );
         // A non-inline id (a plausible dictionary id) is not an inline integer.
         assert!(!is_inline(1));
         // A negative value has no inline id (the inline range is non-negative integers).

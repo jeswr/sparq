@@ -23,7 +23,11 @@ fn iri(local: &str) -> Term {
 }
 
 fn int(v: &str) -> Term {
-    Term::Lit(v.into(), "http://www.w3.org/2001/XMLSchema#integer".into(), None)
+    Term::Lit(
+        v.into(),
+        "http://www.w3.org/2001/XMLSchema#integer".into(),
+        None,
+    )
 }
 
 /// `[s p o]` as a row, for comparing against an answer set.
@@ -52,7 +56,11 @@ fn query_projects_over_the_closure_including_already_asserted_conclusions() {
         answers.contains(&row(iri("Socrates"), ty, iri("Mortal"))),
         "the entailed typing is an answer: {answers:?}"
     );
-    assert_eq!(answers.len(), 2, "the subClassOf axiom does not match the query: {answers:?}");
+    assert_eq!(
+        answers.len(),
+        2,
+        "the subClassOf axiom does not match the query: {answers:?}"
+    );
 }
 
 /// sq-xqchl.1 — a `math:` COMPARISON builtin in the query premise. Previously rejected
@@ -80,7 +88,11 @@ fn query_premise_evaluates_a_functional_builtin() {
 @prefix : <http://ex/>.
 { ?s :x ?a. ?s :y ?b. (?a ?b) math:sum ?t } => { ?s :total ?t }."#;
     let answers = reason_n3_query_terms(data, query).expect("functional builtin query");
-    assert_eq!(answers, vec![row(iri("a"), iri("total"), int("42"))], "{answers:?}");
+    assert_eq!(
+        answers,
+        vec![row(iri("a"), iri("total"), int("42"))],
+        "{answers:?}"
+    );
 }
 
 /// A first-class `( … )` LIST in the query premise: `list:member` iterates the list VALUE held
@@ -93,8 +105,14 @@ fn query_premise_matches_a_first_class_list() {
 { ?p :children ?l. ?l list:member ?c } => { ?c :parent ?p }."#;
     let answers = reason_n3_query_terms(data, query).expect("list query");
     assert_eq!(answers.len(), 2, "one answer per list member: {answers:?}");
-    assert!(answers.contains(&row(iri("bob"), iri("parent"), iri("alice"))), "{answers:?}");
-    assert!(answers.contains(&row(iri("carol"), iri("parent"), iri("alice"))), "{answers:?}");
+    assert!(
+        answers.contains(&row(iri("bob"), iri("parent"), iri("alice"))),
+        "{answers:?}"
+    );
+    assert!(
+        answers.contains(&row(iri("carol"), iri("parent"), iri("alice"))),
+        "{answers:?}"
+    );
 }
 
 /// A literal `( … )` list PATTERN in the query premise unifies STRUCTURALLY against the list
@@ -102,7 +120,8 @@ fn query_premise_matches_a_first_class_list() {
 #[test]
 fn query_premise_unifies_a_literal_list_pattern() {
     let data = "@prefix : <http://ex/>. :alice :children (:bob :carol) . :dan :children (:eve) .";
-    let query = "@prefix : <http://ex/>. { ?p :children (:bob ?second) } => { ?second :sibling :bob }.";
+    let query =
+        "@prefix : <http://ex/>. { ?p :children (:bob ?second) } => { ?second :sibling :bob }.";
     let answers = reason_n3_query_terms(data, query).expect("list-pattern query");
     assert_eq!(
         answers,
@@ -134,7 +153,11 @@ fn query_document_facts_are_not_data() {
     let data = "@prefix : <http://ex/>. :a :p :b .";
     let query = "@prefix : <http://ex/>. :c :p :d . { ?s :p ?o } => { ?s :q ?o }.";
     let answers = reason_n3_query_terms(data, query).expect("query");
-    assert_eq!(answers, vec![row(iri("a"), iri("q"), iri("b"))], "{answers:?}");
+    assert_eq!(
+        answers,
+        vec![row(iri("a"), iri("q"), iri("b"))],
+        "{answers:?}"
+    );
 }
 
 /// A BACKWARD (`<=`) rule of the data document is goal-directed — it never fires forward, so it
@@ -144,7 +167,11 @@ fn query_premise_resolves_a_backward_rule() {
     let data = "@prefix : <http://ex/>. :a :p :b . { ?s :q ?o } <= { ?s :p ?o }.";
     let query = "@prefix : <http://ex/>. { ?s :q ?o } => { ?s :answer ?o }.";
     let answers = reason_n3_query_terms(data, query).expect("backward query");
-    assert_eq!(answers, vec![row(iri("a"), iri("answer"), iri("b"))], "{answers:?}");
+    assert_eq!(
+        answers,
+        vec![row(iri("a"), iri("answer"), iri("b"))],
+        "{answers:?}"
+    );
 }
 
 /// Two query rules that project the same conclusion answer ONCE (answers are deduplicated).
@@ -155,15 +182,22 @@ fn answers_are_deduplicated_across_query_rules() {
 { ?s :p ?o } => { ?s :hit ?o }.
 { ?s :p ?o } => { ?s :hit ?o }."#;
     let answers = reason_n3_query_terms(data, query).expect("query");
-    assert_eq!(answers, vec![row(iri("a"), iri("hit"), iri("b"))], "{answers:?}");
+    assert_eq!(
+        answers,
+        vec![row(iri("a"), iri("hit"), iri("b"))],
+        "{answers:?}"
+    );
 }
 
 /// A query document with no forward rule fails LOUDLY rather than returning an empty answer
 /// that reads like "the query matched nothing".
 #[test]
 fn a_query_document_without_a_forward_rule_is_an_error() {
-    let err = reason_n3_query_terms("@prefix : <http://ex/>. :a :p :b .", "@prefix : <http://ex/>. :a :p :b .")
-        .unwrap_err();
+    let err = reason_n3_query_terms(
+        "@prefix : <http://ex/>. :a :p :b .",
+        "@prefix : <http://ex/>. :a :p :b .",
+    )
+    .unwrap_err();
     assert!(err.contains("no `{ … } => { … }` forward rule"), "{err}");
 }
 
@@ -177,7 +211,11 @@ fn interning_entry_point_expands_a_list_valued_answer() {
 @prefix : <http://ex/>.
 { ?s :p ?x } => { ?s :ps ?x }."#;
     let ids = reason_n3_query(&mut dict, data, query).expect("interned query");
-    assert_eq!(ids.len(), 2, "two answers, no list structure to expand: {ids:?}");
+    assert_eq!(
+        ids.len(),
+        2,
+        "two answers, no list structure to expand: {ids:?}"
+    );
 
     // Now a query whose conclusion IS a list value: the chain structure is part of the answer.
     let list_query = "@prefix : <http://ex/>. { ?s :p 1 } => { ?s :pair (1 2) }.";
@@ -213,13 +251,20 @@ fn generated_list_cells_never_merge_with_a_projected_blank() {
     let first = dict.intern_iri(FIRST);
     let rest = dict.intern_iri(REST);
 
-    let answer = ids.iter().find(|r| r[1] == pair).expect("the `:pair` answer row");
+    let answer = ids
+        .iter()
+        .find(|r| r[1] == pair)
+        .expect("the `:pair` answer row");
     assert_eq!(
         answer[0], projected,
         "the projected blank keeps its own identity — it IS `_:_l1` from the data: {ids:?}"
     );
     let cells: Vec<_> = ids.iter().filter(|r| r[1] == first).map(|r| r[0]).collect();
-    assert_eq!(cells.len(), 2, "a two-member list expands to two cells: {ids:?}");
+    assert_eq!(
+        cells.len(),
+        2,
+        "a two-member list expands to two cells: {ids:?}"
+    );
     assert!(
         !cells.contains(&projected),
         "a generated list cell MERGED with the projected `_:_l1` blank — two distinct RDF \
@@ -229,5 +274,9 @@ fn generated_list_cells_never_merge_with_a_projected_blank() {
         !ids.iter().any(|r| r[1] == rest && r[0] == projected),
         "the projected blank must not carry chain structure either: {ids:?}"
     );
-    assert_eq!(ids.len(), 5, "the `:pair` answer plus 2 triples per cell: {ids:?}");
+    assert_eq!(
+        ids.len(),
+        5,
+        "the `:pair` answer plus 2 triples per cell: {ids:?}"
+    );
 }

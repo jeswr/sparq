@@ -152,7 +152,10 @@ impl IriPrefixMemo {
     /// is still correct, just unaccelerated). [OPUS-4.8]
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
-        Self { prefixes: Vec::with_capacity(cap), cap }
+        Self {
+            prefixes: Vec::with_capacity(cap),
+            cap,
+        }
     }
 
     /// Number of memoized prefixes currently held (for tests/introspection). [OPUS-4.8]
@@ -190,7 +193,9 @@ impl IriPrefixMemo {
         if self.cap == 0 {
             return;
         }
-        let Some(plen) = scheme_authority_prefix_len(s) else { return };
+        let Some(plen) = scheme_authority_prefix_len(s) else {
+            return;
+        };
         let prefix = &s[..plen];
         if self.prefixes.iter().any(|p| p.as_ref() == prefix) {
             return;
@@ -246,12 +251,23 @@ mod tests {
     #[test]
     fn safe_suffix_byte_table_matches_predicate() {
         for b in 0u8..=255 {
-            assert_eq!(SUFFIX_SAFE[b as usize], is_safe_suffix_byte(b), "byte {}", b);
+            assert_eq!(
+                SUFFIX_SAFE[b as usize],
+                is_safe_suffix_byte(b),
+                "byte {}",
+                b
+            );
         }
         // Spot-check the boundary of what is / isn't safe.
-        assert!(is_safe_suffix_byte(b'a') && is_safe_suffix_byte(b'/') && is_safe_suffix_byte(b'?'));
-        assert!(is_safe_suffix_byte(b':') && is_safe_suffix_byte(b'@') && is_safe_suffix_byte(b'~'));
-        for &bad in &[b'#', b'%', b'[', b']', b' ', b'<', b'>', b'"', b'\\', 0u8, 0x7f] {
+        assert!(
+            is_safe_suffix_byte(b'a') && is_safe_suffix_byte(b'/') && is_safe_suffix_byte(b'?')
+        );
+        assert!(
+            is_safe_suffix_byte(b':') && is_safe_suffix_byte(b'@') && is_safe_suffix_byte(b'~')
+        );
+        for &bad in &[
+            b'#', b'%', b'[', b']', b' ', b'<', b'>', b'"', b'\\', 0u8, 0x7f,
+        ] {
             assert!(!is_safe_suffix_byte(bad), "byte {} must fall back", bad);
         }
         // No non-ASCII byte is ever "safe".
@@ -262,9 +278,18 @@ mod tests {
 
     #[test]
     fn prefix_extraction_covers_the_forms() {
-        assert_eq!(scheme_authority_prefix_len("http://ex/foo"), Some("http://ex/".len()));
-        assert_eq!(scheme_authority_prefix_len("https://a.b.c/x/y"), Some("https://a.b.c/".len()));
-        assert_eq!(scheme_authority_prefix_len("http://[::1]:80/p"), Some("http://[::1]:80/".len()));
+        assert_eq!(
+            scheme_authority_prefix_len("http://ex/foo"),
+            Some("http://ex/".len())
+        );
+        assert_eq!(
+            scheme_authority_prefix_len("https://a.b.c/x/y"),
+            Some("https://a.b.c/".len())
+        );
+        assert_eq!(
+            scheme_authority_prefix_len("http://[::1]:80/p"),
+            Some("http://[::1]:80/".len())
+        );
         // No '/'-terminated authority -> nothing to memo.
         assert_eq!(scheme_authority_prefix_len("http://ex"), None);
         assert_eq!(scheme_authority_prefix_len("http://ex?q=1"), None);
@@ -286,7 +311,10 @@ mod tests {
         assert!(memo.validate("http://example.org/b/c?d=e"));
         // A '#' in the suffix is not fast-provable, but validate still agrees with oxiri.
         assert!(!memo.fast_accept("http://example.org/a#frag"));
-        assert_eq!(memo.validate("http://example.org/a#frag"), oxiri_ok("http://example.org/a#frag"));
+        assert_eq!(
+            memo.validate("http://example.org/a#frag"),
+            oxiri_ok("http://example.org/a#frag")
+        );
     }
 
     #[test]
@@ -310,7 +338,14 @@ mod tests {
 
     #[test]
     fn is_valid_iri_matches_oxiri() {
-        for s in ["http://ex/a", "urn:x:y", "not an iri", "", "http://ex/a b", "mailto:a@b.c"] {
+        for s in [
+            "http://ex/a",
+            "urn:x:y",
+            "not an iri",
+            "",
+            "http://ex/a b",
+            "mailto:a@b.c",
+        ] {
             assert_eq!(is_valid_iri(s), oxiri_ok(s), "{:?}", s);
         }
     }
@@ -340,18 +375,18 @@ mod tests {
         // percent-encoding edges
         "http://ex/%20",
         "http://ex/%2F",
-        "http://ex/%GG",    // bad hex
-        "http://ex/%2",     // truncated
-        "http://ex/%",      // lone percent
+        "http://ex/%GG", // bad hex
+        "http://ex/%2",  // truncated
+        "http://ex/%",   // lone percent
         "http://ex/a%zzb",
         // non-ASCII / iunreserved / iprivate boundaries
-        "http://ex/\u{00e9}",       // é (ucschar) — valid in path
-        "http://ex/\u{00a0}",       // NBSP — NOT ucschar
-        "http://ex/\u{d7ff}",       // last BMP before surrogates (ucschar)
-        "http://ex/\u{e000}",       // private-use start — iprivate, invalid in PATH
-        "http://ex/?\u{e000}",      // iprivate is valid in QUERY
-        "http://ex/\u{10ffff}",     // max codepoint — not ucschar
-        "http://ex/\u{fdd0}",       // noncharacter
+        "http://ex/\u{00e9}",   // é (ucschar) — valid in path
+        "http://ex/\u{00a0}",   // NBSP — NOT ucschar
+        "http://ex/\u{d7ff}",   // last BMP before surrogates (ucschar)
+        "http://ex/\u{e000}",   // private-use start — iprivate, invalid in PATH
+        "http://ex/?\u{e000}",  // iprivate is valid in QUERY
+        "http://ex/\u{10ffff}", // max codepoint — not ucschar
+        "http://ex/\u{fdd0}",   // noncharacter
         // raw-illegal / control / whitespace
         "http://ex/a<b",
         "http://ex/a>b",
@@ -402,12 +437,44 @@ mod tests {
     /// structural delimiters, percent-encoding bytes, and non-ASCII boundary codepoints — so the
     /// generated IRIs straddle the accept/reject frontier where a fast-path bug would hide.
     const ALPHABET: &[char] = &[
-        'a', 'Z', '0', '9', '-', '.', '_', '~', // iunreserved
-        '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', // sub-delims
-        ':', '@', '/', '?', '#', // separators / ipchar extras
-        '%', '2', 'F', 'G', // percent-encoding (valid + invalid)
-        '[', ']', ' ', '<', '>', '\\', // illegal-ish / brackets
-        '\u{00e9}', '\u{00a0}', '\u{e000}', '\u{10ffff}', // ucschar / non-ucschar / iprivate / max
+        'a',
+        'Z',
+        '0',
+        '9',
+        '-',
+        '.',
+        '_',
+        '~', // iunreserved
+        '!',
+        '$',
+        '&',
+        '\'',
+        '(',
+        ')',
+        '*',
+        '+',
+        ',',
+        ';',
+        '=', // sub-delims
+        ':',
+        '@',
+        '/',
+        '?',
+        '#', // separators / ipchar extras
+        '%',
+        '2',
+        'F',
+        'G', // percent-encoding (valid + invalid)
+        '[',
+        ']',
+        ' ',
+        '<',
+        '>',
+        '\\', // illegal-ish / brackets
+        '\u{00e9}',
+        '\u{00a0}',
+        '\u{e000}',
+        '\u{10ffff}', // ucschar / non-ucschar / iprivate / max
     ];
 
     fn gen_iri(rng: &mut Rng, out: &mut String) {
@@ -415,7 +482,13 @@ mod tests {
         // Half the time, prefix with a realistic uniform `scheme://authority/` so the memo path
         // is exercised heavily; otherwise build a fully-random string.
         if rng.below(2) == 0 {
-            let prefixes = ["http://ex/", "https://a.b/", "http://[::1]:80/", "ftp://h.i.j/", "x://y/"];
+            let prefixes = [
+                "http://ex/",
+                "https://a.b/",
+                "http://[::1]:80/",
+                "ftp://h.i.j/",
+                "x://y/",
+            ];
             out.push_str(prefixes[rng.below(prefixes.len())]);
         } else {
             // Random scheme-ish head.
@@ -444,7 +517,12 @@ mod tests {
             let expected = oxiri_ok(s);
             // Fresh-memo equivalence.
             let mut fresh = IriPrefixMemo::new();
-            assert_eq!(fresh.validate(s), expected, "fresh validate != oxiri for {:?}", s);
+            assert_eq!(
+                fresh.validate(s),
+                expected,
+                "fresh validate != oxiri for {:?}",
+                s
+            );
             // Accept-shortcut soundness on a memo primed with a matching prefix: prime, then
             // assert a fast accept is never a wrong accept.
             if let Some(plen) = scheme_authority_prefix_len(s) {
@@ -453,11 +531,20 @@ mod tests {
                 let seed = format!("{}seed", &s[..plen]);
                 let _ = primed.validate(&seed);
                 if primed.fast_accept(s) {
-                    assert!(expected, "fast_accept wrongly accepted {:?} (oxiri rejects)", s);
+                    assert!(
+                        expected,
+                        "fast_accept wrongly accepted {:?} (oxiri rejects)",
+                        s
+                    );
                 }
             }
             // Shared-memo equivalence (state accumulates across the corpus).
-            assert_eq!(shared.validate(s), expected, "shared validate != oxiri for {:?}", s);
+            assert_eq!(
+                shared.validate(s),
+                expected,
+                "shared validate != oxiri for {:?}",
+                s
+            );
         }
 
         // 2) The deterministic IRI-structured generator: many randomized cases, each asserting
@@ -472,7 +559,11 @@ mod tests {
                 let expected = oxiri_ok(&s);
                 // Soundness: a standalone fast-accept must never over-accept.
                 if memo.fast_accept(&s) {
-                    assert!(expected, "fast_accept over-accepted {:?} (oxiri rejects)", s);
+                    assert!(
+                        expected,
+                        "fast_accept over-accepted {:?} (oxiri rejects)",
+                        s
+                    );
                 }
                 // Full equivalence of the wired validator against oxiri, memo state and all.
                 assert_eq!(memo.validate(&s), expected, "validate != oxiri for {:?}", s);

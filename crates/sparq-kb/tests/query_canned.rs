@@ -122,9 +122,9 @@ fn introspect_facade_terms_surfaces_the_schema_org_facade() {
     // skos:closeMatch enum bridge and the confidence alignment — three distinct bridge
     // predicates, so the query is not accidentally matching only one of them.
     for (pkg_term, facade_term) in [
-        ("task", "action"),                    // rdfs:subClassOf
-        ("open", "potentialactionstatus"),     // skos:closeMatch (status enum)
-        ("confidence", "rating"),              // skos:closeMatch (datatype property)
+        ("task", "action"),                // rdfs:subClassOf
+        ("open", "potentialactionstatus"), // skos:closeMatch (status enum)
+        ("confidence", "rating"),          // skos:closeMatch (datatype property)
     ] {
         assert!(
             pairs.contains(&(pkg_term.to_string(), facade_term.to_string())),
@@ -248,7 +248,10 @@ exq:meas a dqv:QualityMeasurement ;
             _ => String::new(),
         };
         if subject == "find" {
-            assert_eq!(metric, "confidencemeasurement", "metric must be the DQV metric");
+            assert_eq!(
+                metric, "confidencemeasurement",
+                "metric must be the DQV metric"
+            );
             assert_eq!(
                 value.parse::<f64>().unwrap_or(-1.0),
                 0.42,

@@ -119,16 +119,18 @@ pub fn numeric_equal(a: &NumericValue, b: &NumericValue) -> bool {
         // [OPUS-4.8] num-bigint 0.5: bigdecimal 0.4 no longer implements From<BigInt 0.5>
         // (two separate semver-major instances). Convert via the decimal string form, which is
         // lossless for integers and always parses successfully.
-        (Integer(x), Decimal(y)) => BigDecimal::from_str(&x.to_string())
-            .expect("BigInt::to_string yields a valid decimal literal")
-            .cmp(y)
-            == Ordering::Equal,
-        (Decimal(x), Integer(y)) => x
-            .cmp(
+        (Integer(x), Decimal(y)) => {
+            BigDecimal::from_str(&x.to_string())
+                .expect("BigInt::to_string yields a valid decimal literal")
+                .cmp(y)
+                == Ordering::Equal
+        }
+        (Decimal(x), Integer(y)) => {
+            x.cmp(
                 &BigDecimal::from_str(&y.to_string())
                     .expect("BigInt::to_string yields a valid decimal literal"),
-            )
-            == Ordering::Equal,
+            ) == Ordering::Equal
+        }
     }
 }
 
@@ -189,7 +191,10 @@ mod tests {
         let a = parse_numeric(big, XSD_INT).unwrap();
         let b = parse_numeric("1361129467683753853853498429727072845826", XSD_INT).unwrap();
         assert!(numeric_equal(&a, &parse_numeric(big, XSD_INT).unwrap()));
-        assert!(!numeric_equal(&a, &b), "consecutive huge integers must stay distinct");
+        assert!(
+            !numeric_equal(&a, &b),
+            "consecutive huge integers must stay distinct"
+        );
         // leading zeros / plus sign normalise in value space.
         assert!(numeric_equal(
             &parse_numeric("+007", XSD_INT).unwrap(),

@@ -51,7 +51,10 @@ fn block_on<F: Future>(future: F) -> F::Output {
         if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
             return output;
         }
-        assert!(signal.take_woken(), "future returned Pending without waking");
+        assert!(
+            signal.take_woken(),
+            "future returned Pending without waking"
+        );
     }
     panic!("future did not settle within the driver's poll budget");
 }
@@ -142,7 +145,9 @@ impl TermStream for FakeStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Term, AsyncStoreError>>> {
         let this = self.get_mut();
-        this.state.stream_polls.set(this.state.stream_polls.get() + 1);
+        this.state
+            .stream_polls
+            .set(this.state.stream_polls.get() + 1);
         // The first poll is what starts the request, exactly as the
         // `AsyncStoreBackend` laziness contract requires.
         if this.token.get() == Traversal::Idle {
@@ -257,7 +262,10 @@ impl AsyncStoreBackend for FakeStore {
     fn add(&self, subject: Term, predicate: NamedNode, object: Term) -> Self::Add {
         self.op(move |state| {
             if !state.contains(&subject, &predicate, &object) {
-                state.triples.borrow_mut().push((subject, predicate, object));
+                state
+                    .triples
+                    .borrow_mut()
+                    .push((subject, predicate, object));
             }
             Ok(())
         })
@@ -427,13 +435,33 @@ fn async_add_has_delete_round_trip() {
     let knows = iri("knows");
     let bob = term("bob");
 
-    assert!(!block_on(store.has(alice.clone(), knows.clone(), bob.clone()).unwrap()).unwrap());
+    assert!(!block_on(
+        store
+            .has(alice.clone(), knows.clone(), bob.clone())
+            .unwrap()
+    )
+    .unwrap());
 
-    block_on(store.add(alice.clone(), knows.clone(), bob.clone()).unwrap()).unwrap();
-    assert!(block_on(store.has(alice.clone(), knows.clone(), bob.clone()).unwrap()).unwrap());
+    block_on(
+        store
+            .add(alice.clone(), knows.clone(), bob.clone())
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(block_on(
+        store
+            .has(alice.clone(), knows.clone(), bob.clone())
+            .unwrap()
+    )
+    .unwrap());
     assert_eq!(state.triples.borrow().len(), 1);
 
-    block_on(store.delete(alice.clone(), knows.clone(), bob.clone()).unwrap()).unwrap();
+    block_on(
+        store
+            .delete(alice.clone(), knows.clone(), bob.clone())
+            .unwrap(),
+    )
+    .unwrap();
     assert!(!block_on(store.has(alice, knows, bob).unwrap()).unwrap());
     assert!(state.triples.borrow().is_empty());
 }
@@ -504,7 +532,10 @@ fn in_traversal_streams_subjects_and_into_values_unwraps() {
     // `into_values` drops the wrappers and returns the raw backend stream.
     let mut values = Box::pin(bob.r#in(&knows).into_values());
     let first = poll_once(|cx| values.as_mut().poll_next(cx));
-    assert_eq!(first.map(|item| item.unwrap().unwrap()), Poll::Ready(term("alice")));
+    assert_eq!(
+        first.map(|item| item.unwrap().unwrap()),
+        Poll::Ready(term("alice"))
+    );
 }
 
 #[test]
@@ -529,10 +560,7 @@ fn backend_read_errors_surface_through_the_wrapped_stream() {
     match poll_once(|cx| stream.poll_next(cx)) {
         Poll::Ready(Some(Err(error))) => {
             assert_eq!(error, AsyncStoreError::Backend("link down".to_owned()));
-            assert_eq!(
-                error.to_string(),
-                "async store operation failed: link down"
-            );
+            assert_eq!(error.to_string(), "async store operation failed: link down");
         }
         _ => panic!("expected the backend error to reach the caller unwrapped"),
     }

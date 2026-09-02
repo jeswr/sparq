@@ -23,9 +23,9 @@
 
 use oxrdf::{BlankNode, NamedOrBlankNode, Term, Triple, Variable};
 use rustc_hash::{FxHashMap, FxHashSet};
-use sparq_core::Graph;
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{Query, SparqlParser};
+use sparq_core::Graph;
 
 use crate::{PreparedQuery, QueryBudget, QueryResult};
 
@@ -36,7 +36,11 @@ pub fn construct(graph: &Graph, sparql: &str) -> Result<Vec<Triple>, String> {
 }
 
 /// [`construct`] under a cooperative [`QueryBudget`] (deadline / max WHERE-solution rows).
-pub fn construct_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<Triple>, String> {
+pub fn construct_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<Vec<Triple>, String> {
     construct_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
 }
 
@@ -56,7 +60,9 @@ pub fn construct_prepared_with_budget(
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
     match q {
-        Query::Construct { template, pattern, .. } => {
+        Query::Construct {
+            template, pattern, ..
+        } => {
             let _guard = crate::exec::budget::install(budget);
             let solutions = crate::exec::eval_select(graph, pattern)?;
             Ok(instantiate(template, &solutions))
@@ -72,7 +78,11 @@ pub fn describe(graph: &Graph, sparql: &str) -> Result<Vec<Triple>, String> {
 }
 
 /// [`describe`] under a cooperative [`QueryBudget`] (deadline / max rows).
-pub fn describe_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<Triple>, String> {
+pub fn describe_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<Vec<Triple>, String> {
     describe_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
 }
 
@@ -116,13 +126,17 @@ pub fn construct_or_describe_with_budget(
     sparql: &str,
     budget: &QueryBudget,
 ) -> Result<Vec<Triple>, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let q = SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
     let _guard = crate::exec::budget::install(budget);
     match q {
-        Query::Construct { template, pattern, .. } => {
+        Query::Construct {
+            template, pattern, ..
+        } => {
             let solutions = crate::exec::eval_select(graph, &pattern)?;
             Ok(instantiate(&template, &solutions))
         }
@@ -142,7 +156,11 @@ pub fn construct_ntriples(graph: &Graph, sparql: &str) -> Result<String, String>
 }
 
 /// [`construct_ntriples`] under a cooperative [`QueryBudget`].
-pub fn construct_ntriples_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
+pub fn construct_ntriples_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<String, String> {
     let triples = construct_or_describe_with_budget(graph, sparql, budget)?;
     Ok(triples_to_ntriples(&triples))
 }
@@ -166,8 +184,12 @@ pub fn triples_to_ntriples(triples: &[Triple]) -> String {
 /// or illegal slots, freshening template blank nodes per solution, and
 /// deduplicating the output (set semantics, first-production order).
 fn instantiate(template: &[TriplePattern], solutions: &QueryResult) -> Vec<Triple> {
-    let cols: FxHashMap<&Variable, usize> =
-        solutions.vars.iter().enumerate().map(|(i, v)| (v, i)).collect();
+    let cols: FxHashMap<&Variable, usize> = solutions
+        .vars
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v, i))
+        .collect();
     let mut out: Vec<Triple> = Vec::new();
     let mut seen: FxHashSet<Triple> = FxHashSet::default();
     for row in &solutions.rows {
@@ -178,10 +200,20 @@ fn instantiate(template: &[TriplePattern], solutions: &QueryResult) -> Vec<Tripl
         // collide with data blank nodes flowing in from the WHERE solutions.
         let mut row_bnodes: FxHashMap<&str, BlankNode> = FxHashMap::default();
         for tp in template {
-            let Some(s) = subject_term(&tp.subject, &get, &mut row_bnodes) else { continue };
-            let Some(p) = predicate_term(&tp.predicate, &get) else { continue };
-            let Some(o) = object_term(&tp.object, &get, &mut row_bnodes) else { continue };
-            let t = Triple { subject: s, predicate: p, object: o };
+            let Some(s) = subject_term(&tp.subject, &get, &mut row_bnodes) else {
+                continue;
+            };
+            let Some(p) = predicate_term(&tp.predicate, &get) else {
+                continue;
+            };
+            let Some(o) = object_term(&tp.object, &get, &mut row_bnodes) else {
+                continue;
+            };
+            let t = Triple {
+                subject: s,
+                predicate: p,
+                object: o,
+            };
             if seen.insert(t.clone()) {
                 out.push(t);
             }
@@ -199,7 +231,9 @@ fn subject_term<'a>(
 ) -> Option<NamedOrBlankNode> {
     match tp {
         TermPattern::NamedNode(n) => Some(NamedOrBlankNode::NamedNode(n.clone())),
-        TermPattern::BlankNode(b) => Some(NamedOrBlankNode::BlankNode(fresh(b.as_str(), row_bnodes))),
+        TermPattern::BlankNode(b) => {
+            Some(NamedOrBlankNode::BlankNode(fresh(b.as_str(), row_bnodes)))
+        }
         TermPattern::Variable(v) => match get(v)? {
             Term::NamedNode(n) => Some(NamedOrBlankNode::NamedNode(n)),
             Term::BlankNode(b) => Some(NamedOrBlankNode::BlankNode(b)),
@@ -210,7 +244,10 @@ fn subject_term<'a>(
 }
 
 /// Template predicate: an IRI. A variable bound to anything else is illegal.
-fn predicate_term(p: &NamedNodePattern, get: &dyn Fn(&Variable) -> Option<Term>) -> Option<oxrdf::NamedNode> {
+fn predicate_term(
+    p: &NamedNodePattern,
+    get: &dyn Fn(&Variable) -> Option<Term>,
+) -> Option<oxrdf::NamedNode> {
     match p {
         NamedNodePattern::NamedNode(n) => Some(n.clone()),
         NamedNodePattern::Variable(v) => match get(v)? {
@@ -237,7 +274,11 @@ fn object_term<'a>(
             let subject = subject_term(&t.subject, get, row_bnodes)?;
             let predicate = predicate_term(&t.predicate, get)?;
             let object = object_term(&t.object, get, row_bnodes)?;
-            Some(Term::Triple(Box::new(Triple { subject, predicate, object })))
+            Some(Term::Triple(Box::new(Triple {
+                subject,
+                predicate,
+                object,
+            })))
         }
     }
 }
@@ -260,10 +301,9 @@ fn cbd(graph: &Graph, solutions: &QueryResult) -> Result<Vec<Triple>, String> {
     for row in &solutions.rows {
         for cell in row.iter().flatten() {
             match cell {
-                Term::NamedNode(_) | Term::BlankNode(_)
-                    if visited.insert(cell.clone()) => {
-                        queue.push(cell.clone());
-                    }
+                Term::NamedNode(_) | Term::BlankNode(_) if visited.insert(cell.clone()) => {
+                    queue.push(cell.clone());
+                }
                 _ => {} // a literal has no description
             }
         }
@@ -276,7 +316,9 @@ fn cbd(graph: &Graph, solutions: &QueryResult) -> Result<Vec<Triple>, String> {
         let node = queue[i].clone();
         i += 1;
         crate::exec::budget::check(out.len())?;
-        let Some(id) = graph.id_of(&node) else { continue }; // resource absent from the data
+        let Some(id) = graph.id_of(&node) else {
+            continue;
+        }; // resource absent from the data
         let subject = match &node {
             Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n.clone()),
             Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b.clone()),
@@ -294,7 +336,11 @@ fn cbd(graph: &Graph, solutions: &QueryResult) -> Result<Vec<Triple>, String> {
             if matches!(object, Term::BlankNode(_)) && visited.insert(object.clone()) {
                 queue.push(object.clone());
             }
-            let t = Triple { subject: subject.clone(), predicate, object };
+            let t = Triple {
+                subject: subject.clone(),
+                predicate,
+                object,
+            };
             if seen.insert(t.clone()) {
                 out.push(t);
             }
@@ -319,7 +365,9 @@ mod tests {
     }
 
     fn nts(ts: &[Triple]) -> Vec<String> {
-        ts.iter().map(|t| format!("{} {} {} .", t.subject, t.predicate, t.object)).collect()
+        ts.iter()
+            .map(|t| format!("{} {} {} .", t.subject, t.predicate, t.object))
+            .collect()
     }
 
     #[test]
@@ -432,7 +480,8 @@ mod tests {
         let mut per_row_ok = 0;
         let mut bnodes = FxHashSet::default();
         for pair in ts.chunks(2) {
-            let (Term::BlankNode(b1), NamedOrBlankNode::BlankNode(b2)) = (&pair[0].object, &pair[1].subject)
+            let (Term::BlankNode(b1), NamedOrBlankNode::BlankNode(b2)) =
+                (&pair[0].object, &pair[1].subject)
             else {
                 panic!("expected bnode slot/holds pair")
             };
@@ -447,10 +496,18 @@ mod tests {
     #[test]
     fn construct_where_shorthand_and_empty_result() {
         // CONSTRUCT WHERE shorthand (template = pattern).
-        let ts = construct(&g(), "PREFIX ex: <http://ex/> CONSTRUCT WHERE { ?s ex:age ?a }").unwrap();
+        let ts = construct(
+            &g(),
+            "PREFIX ex: <http://ex/> CONSTRUCT WHERE { ?s ex:age ?a }",
+        )
+        .unwrap();
         assert_eq!(ts.len(), 3);
         // Unsatisfiable WHERE — empty graph.
-        let ts = construct(&g(), "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:x ?o } WHERE { ?s ex:nope ?o }").unwrap();
+        let ts = construct(
+            &g(),
+            "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:x ?o } WHERE { ?s ex:nope ?o }",
+        )
+        .unwrap();
         assert!(ts.is_empty());
         // Non-CONSTRUCT input is a clear error.
         assert!(construct(&g(), "SELECT * WHERE { ?s ?p ?o }").is_err());
@@ -475,7 +532,10 @@ mod tests {
 
     #[test]
     fn construct_budget_applies_to_where() {
-        let b = QueryBudget { max_rows: Some(1), ..QueryBudget::unlimited() };
+        let b = QueryBudget {
+            max_rows: Some(1),
+            ..QueryBudget::unlimited()
+        };
         let e = construct_with_budget(
             &g(),
             "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
@@ -497,14 +557,14 @@ mod tests {
     fn describe_multiple_and_var_form() {
         let ts = describe(&g(), "DESCRIBE <http://ex/alice> <http://ex/carol>").unwrap();
         assert_eq!(ts.len(), 5); // 3 + 2
-        // DESCRIBE ?x WHERE — describes every binding.
+                                 // DESCRIBE ?x WHERE — describes every binding.
         let ts = describe(
             &g(),
             "PREFIX ex: <http://ex/> DESCRIBE ?x WHERE { ?x ex:age ?a FILTER(?a > 28) }",
         )
         .unwrap();
         assert_eq!(ts.len(), 5); // alice(3) + carol(2)
-        // An IRI absent from the data describes to the empty graph.
+                                 // An IRI absent from the data describes to the empty graph.
         let ts = describe(&g(), "DESCRIBE <http://ex/nobody>").unwrap();
         assert!(ts.is_empty());
         // Non-DESCRIBE input is a clear error.

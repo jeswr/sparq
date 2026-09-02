@@ -162,10 +162,12 @@ fn slug(dict: &Dict, id: Id) -> String {
 /// construct that falls outside this arm's fragment.
 fn atom_node(atom: &Atom, ty: Option<Id>) -> Result<Node, String> {
     let Some(pred) = atom.pred else {
-        return Err("variable predicates are outside the Soufflé arm's fragment \
+        return Err(
+            "variable predicates are outside the Soufflé arm's fragment \
                     (they map to the conservative `Top` node, which has no \
                     per-relation counterpart)"
-            .to_string());
+                .to_string(),
+        );
     };
     if ty == Some(pred) {
         match atom.t[2] {
@@ -182,16 +184,20 @@ fn atom_node(atom: &Atom, ty: Option<Id>) -> Result<Node, String> {
 /// Reject the constructs this arm deliberately does not model, naming them.
 fn check_fragment(rule: &Rule) -> Result<(), String> {
     if !rule.aggregates.is_empty() {
-        return Err("AGGREGATE atoms are outside the Soufflé arm's fragment by design \
+        return Err(
+            "AGGREGATE atoms are outside the Soufflé arm's fragment by design \
                     — see the module docs (XSD-typed aggregation has no faithful \
                     untyped-symbol encoding); the in-tree oracle covers them"
-            .to_string());
+                .to_string(),
+        );
     }
     if !rule.filters.is_empty() {
-        return Err("FILTER conditions are outside the Soufflé arm's fragment by design \
+        return Err(
+            "FILTER conditions are outside the Soufflé arm's fragment by design \
                     — see the module docs (the shared substrate numeric tower has no \
                     faithful Soufflé encoding); the in-tree oracle covers them"
-            .to_string());
+                .to_string(),
+        );
     }
     Ok(())
 }

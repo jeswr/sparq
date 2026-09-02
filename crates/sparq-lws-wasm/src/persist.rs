@@ -191,10 +191,14 @@ impl std::fmt::Display for DecodeError {
                 write!(f, "unsupported journal version {}", v)
             }
             DecodeError::Truncated => f.write_str("journal ends mid-record"),
-            DecodeError::TooLarge => f.write_str("journal declares a length this target cannot address"),
+            DecodeError::TooLarge => {
+                f.write_str("journal declares a length this target cannot address")
+            }
             DecodeError::InvalidTag(tag) => write!(f, "unknown journal tag byte {}", tag),
             DecodeError::InvalidUtf8 => f.write_str("journal contains a non-UTF-8 string"),
-            DecodeError::TrailingBytes => f.write_str("journal has trailing bytes after its records"),
+            DecodeError::TrailingBytes => {
+                f.write_str("journal has trailing bytes after its records")
+            }
         }
     }
 }
@@ -347,7 +351,10 @@ struct Reader<'a> {
 impl<'a> Reader<'a> {
     fn take(&mut self, count: usize) -> Result<&'a [u8], DecodeError> {
         let end = self.pos.checked_add(count).ok_or(DecodeError::TooLarge)?;
-        let slice = self.bytes.get(self.pos..end).ok_or(DecodeError::Truncated)?;
+        let slice = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or(DecodeError::Truncated)?;
         self.pos = end;
         Ok(slice)
     }
@@ -516,7 +523,11 @@ mod wasm_store {
             self.inner.list_children(container).await
         }
 
-        async fn read_plan(&self, target: &str, acl_candidates: &[String]) -> ServerResult<ReadPlan> {
+        async fn read_plan(
+            &self,
+            target: &str,
+            acl_candidates: &[String],
+        ) -> ServerResult<ReadPlan> {
             self.inner.read_plan(target, acl_candidates).await
         }
 
@@ -626,7 +637,11 @@ mod tests {
     fn every_record_kind_survives_an_encode_decode_round_trip() {
         let records = vec![
             write("https://pod.example/card", "<a> <b> <c> ."),
-            create("https://pod.example/box/", "https://pod.example/box/1", "one"),
+            create(
+                "https://pod.example/box/",
+                "https://pod.example/box/1",
+                "one",
+            ),
             delete("https://pod.example/gone", Some("https://pod.example/box/")),
             delete("https://pod.example/loose", None),
         ];
@@ -659,7 +674,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_bytes_that_are_not_a_journal() {
-        assert_eq!(decode(b"not a journal at all"), Err(DecodeError::NotAJournal));
+        assert_eq!(
+            decode(b"not a journal at all"),
+            Err(DecodeError::NotAJournal)
+        );
         assert_eq!(decode(b""), Err(DecodeError::Truncated));
     }
 
@@ -667,7 +685,10 @@ mod tests {
     fn decode_rejects_a_future_format_version() {
         let mut bytes = Journal::new().encode();
         bytes[MAGIC.len()] = VERSION + 1;
-        assert_eq!(decode(&bytes), Err(DecodeError::UnsupportedVersion(VERSION + 1)));
+        assert_eq!(
+            decode(&bytes),
+            Err(DecodeError::UnsupportedVersion(VERSION + 1))
+        );
     }
 
     #[test]
@@ -739,8 +760,15 @@ mod tests {
     fn deleting_a_resource_removes_the_records_that_created_it() {
         let journal = journal_of([
             write("https://pod.example/card", "v1"),
-            create("https://pod.example/box/", "https://pod.example/box/1", "one"),
-            delete("https://pod.example/box/1", Some("https://pod.example/box/")),
+            create(
+                "https://pod.example/box/",
+                "https://pod.example/box/1",
+                "one",
+            ),
+            delete(
+                "https://pod.example/box/1",
+                Some("https://pod.example/box/"),
+            ),
         ]);
         assert_eq!(
             journal.records(),
@@ -755,7 +783,11 @@ mod tests {
     fn a_write_is_not_folded_away_while_a_record_still_needs_it_as_a_container() {
         let journal = journal_of([
             write("https://pod.example/box/", "container v1"),
-            create("https://pod.example/box/", "https://pod.example/box/1", "one"),
+            create(
+                "https://pod.example/box/",
+                "https://pod.example/box/1",
+                "one",
+            ),
             write("https://pod.example/box/", "container v2"),
         ]);
         assert_eq!(
@@ -763,21 +795,32 @@ mod tests {
             3,
             "dropping the first write would make the child's replay hit a missing container"
         );
-        assert_eq!(journal.records()[0], write("https://pod.example/box/", "container v1"));
+        assert_eq!(
+            journal.records()[0],
+            write("https://pod.example/box/", "container v1")
+        );
     }
 
     #[test]
     fn a_delete_is_kept_verbatim_while_a_record_still_needs_it_as_a_container() {
         let journal = journal_of([
             write("https://pod.example/box/", "container"),
-            create("https://pod.example/box/", "https://pod.example/box/1", "one"),
+            create(
+                "https://pod.example/box/",
+                "https://pod.example/box/1",
+                "one",
+            ),
             delete("https://pod.example/box/", None),
         ]);
         assert_eq!(
             journal.records(),
             vec![
                 write("https://pod.example/box/", "container"),
-                create("https://pod.example/box/", "https://pod.example/box/1", "one"),
+                create(
+                    "https://pod.example/box/",
+                    "https://pod.example/box/1",
+                    "one"
+                ),
                 delete("https://pod.example/box/", None),
             ],
             "the delete must replay as itself, in order, when its IRI is still referenced"
@@ -788,8 +831,15 @@ mod tests {
     fn deleting_the_last_child_lets_the_container_fold_away_too() {
         let journal = journal_of([
             write("https://pod.example/box/", "container"),
-            create("https://pod.example/box/", "https://pod.example/box/1", "one"),
-            delete("https://pod.example/box/1", Some("https://pod.example/box/")),
+            create(
+                "https://pod.example/box/",
+                "https://pod.example/box/1",
+                "one",
+            ),
+            delete(
+                "https://pod.example/box/1",
+                Some("https://pod.example/box/"),
+            ),
             delete("https://pod.example/box/", None),
         ]);
         assert!(
@@ -805,7 +855,11 @@ mod tests {
         journal.append(write("https://pod.example/card", "v1"));
         assert_eq!(journal.revision(), 1);
         journal.append(write("https://pod.example/card", "v2"));
-        assert_eq!(journal.revision(), 2, "a superseding write still moved the pod");
+        assert_eq!(
+            journal.revision(),
+            2,
+            "a superseding write still moved the pod"
+        );
         journal.append(delete("https://pod.example/card", None));
         assert_eq!(journal.revision(), 3, "so did the delete that emptied it");
         assert!(journal.is_empty());
@@ -815,15 +869,29 @@ mod tests {
     fn a_records_container_is_the_iri_its_replay_depends_on() {
         assert_eq!(write("https://pod.example/card", "v").container(), None);
         assert_eq!(
-            create("https://pod.example/box/", "https://pod.example/box/1", "one").container(),
+            create(
+                "https://pod.example/box/",
+                "https://pod.example/box/1",
+                "one"
+            )
+            .container(),
             Some("https://pod.example/box/")
         );
         assert_eq!(
-            delete("https://pod.example/box/1", Some("https://pod.example/box/")).container(),
+            delete(
+                "https://pod.example/box/1",
+                Some("https://pod.example/box/")
+            )
+            .container(),
             Some("https://pod.example/box/")
         );
         assert_eq!(
-            create("https://pod.example/box/", "https://pod.example/box/1", "one").target(),
+            create(
+                "https://pod.example/box/",
+                "https://pod.example/box/1",
+                "one"
+            )
+            .target(),
             "https://pod.example/box/1"
         );
     }

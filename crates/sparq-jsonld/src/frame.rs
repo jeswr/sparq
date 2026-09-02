@@ -75,8 +75,7 @@ pub struct FrameOptions {
 impl FrameOptions {
     /// The effective `omitGraph` value under `mode`.
     fn omit_graph(&self, mode: ProcessingMode) -> bool {
-        self.omit_graph
-            .unwrap_or(mode == ProcessingMode::JsonLd11)
+        self.omit_graph.unwrap_or(mode == ProcessingMode::JsonLd11)
     }
 
     /// The effective `pruneBlankNodeIdentifiers` value under `mode`.
@@ -196,7 +195,15 @@ pub fn frame_expanded(
         .map(|g| g.keys().cloned().collect())
         .unwrap_or_default();
     let mut framed = Json::Arr(Vec::new());
-    match_frame(&maps, &mut st, &subjects, &frame_arr, &mut framed, None, false)?;
+    match_frame(
+        &maps,
+        &mut st,
+        &subjects,
+        &frame_arr,
+        &mut framed,
+        None,
+        false,
+    )?;
 
     // `@embed: @last`: every occurrence embedded above; keep only the LAST embed of
     // each such id per top-level match (earlier ones demote to node references) —
@@ -595,9 +602,13 @@ fn match_frame(
                     .map(|g| {
                         g.iter()
                             .filter(|(_, node)| {
-                                node.get(reverse_prop).map(as_slice).unwrap_or_default().iter().any(
-                                    |v| v.get("@id").and_then(Json::as_str) == Some(id.as_str()),
-                                )
+                                node.get(reverse_prop)
+                                    .map(as_slice)
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .any(|v| {
+                                        v.get("@id").and_then(Json::as_str) == Some(id.as_str())
+                                    })
                             })
                             .map(|(sid, _)| sid.clone())
                             .collect()
@@ -1038,10 +1049,7 @@ fn add_reverse_output(output: &mut Json, reverse_prop: &str, item: Json) {
 /// Mutable access to an object member (companion to [`Json::get`]).
 fn output_member_mut<'a>(obj: &'a mut Json, key: &str) -> Option<&'a mut Json> {
     match obj {
-        Json::Obj(members) => members
-            .iter_mut()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v),
+        Json::Obj(members) => members.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v),
         _ => None,
     }
 }
@@ -1202,8 +1210,7 @@ fn cleanup_preserve(j: Json, compact_arrays: bool) -> Json {
                                 // an array that SHRANK to one element because a
                                 // preserved `@null` was dropped (the reference
                                 // processors' remove-preserve collapse).
-                                let shrank =
-                                    prior_len.map(|n| items.len() < n).unwrap_or(false);
+                                let shrank = prior_len.map(|n| items.len() < n).unwrap_or(false);
                                 if items.len() == 1 && (was_preserve_obj || shrank) {
                                     cleaned = items[0].clone();
                                 }
@@ -1406,9 +1413,16 @@ mod tests {
         let frame = parse(
             r#"[{"@explicit": [true], "http://ex/p": [{}], "http://ex/missing": [{"@default": [{"@value": "d"}]}]}]"#,
         );
-        let out = frame_expanded(&input, &frame, &JsonLdOptions::default(), &FrameOptions::default())
-            .expect("frame ok");
-        let Json::Arr(nodes) = &out else { panic!("array out") };
+        let out = frame_expanded(
+            &input,
+            &frame,
+            &JsonLdOptions::default(),
+            &FrameOptions::default(),
+        )
+        .expect("frame ok");
+        let Json::Arr(nodes) = &out else {
+            panic!("array out")
+        };
         assert_eq!(nodes.len(), 1);
         let node = &nodes[0];
         // @explicit keeps p, drops q.
@@ -1479,8 +1493,13 @@ mod tests {
         // output and its @id is pruned. (An all-matching `{}` frame would also emit the
         // blank node top-level — two output objects — and the label would be kept.)
         let frame = parse(r#"[{"@id": ["http://ex/a"]}]"#);
-        let out = frame_expanded(&input, &frame, &JsonLdOptions::default(), &FrameOptions::default())
-            .expect("frame ok");
+        let out = frame_expanded(
+            &input,
+            &frame,
+            &JsonLdOptions::default(),
+            &FrameOptions::default(),
+        )
+        .expect("frame ok");
         let text = {
             let mut s = String::new();
             out.write(&mut s);
@@ -1492,7 +1511,8 @@ mod tests {
             prune_blank_node_identifiers: Some(false),
             ..FrameOptions::default()
         };
-        let kept = frame_expanded(&input, &frame, &JsonLdOptions::default(), &fo).expect("frame ok");
+        let kept =
+            frame_expanded(&input, &frame, &JsonLdOptions::default(), &fo).expect("frame ok");
         let mut s = String::new();
         kept.write(&mut s);
         assert!(s.contains("_:b"), "bnode id kept without pruning: {s}");

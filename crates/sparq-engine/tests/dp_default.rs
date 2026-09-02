@@ -116,7 +116,10 @@ fn default_on_fires_for_multi_pattern_bgp() {
     let result = result_bag(&g, q);
     // class0 subClassOf class1; docs of type class1: doc1, doc6, ... ; only doc1 and
     // doc6 have references bags (indices 0-9 have bags).
-    assert!(!result.is_empty(), "default-on DPccp must return correct non-empty results");
+    assert!(
+        !result.is_empty(),
+        "default-on DPccp must return correct non-empty results"
+    );
 }
 
 /// Explicit opt-out: `without_dp_planner` restores greedy GOO.
@@ -133,8 +136,7 @@ fn without_dp_planner_gives_same_results() {
     let default_result = result_bag(&g, q);
     let greedy_result = sparq_engine::without_dp_planner(|| result_bag(&g, q));
     assert_eq!(
-        default_result,
-        greedy_result,
+        default_result, greedy_result,
         "opt-out (greedy GOO) must give same results as default DPccp"
     );
     assert!(!default_result.is_empty(), "non-vacuous result");
@@ -153,8 +155,7 @@ fn explicit_install_still_works() {
     let default_result = result_bag(&g, q);
     let explicit_result = sparq_engine::with_dp_planner(|| result_bag(&g, q));
     assert_eq!(
-        default_result,
-        explicit_result,
+        default_result, explicit_result,
         "explicit with_dp_planner must match default DPccp"
     );
 }
@@ -173,11 +174,17 @@ fn nested_opt_out_restores_outer_state() {
     sparq_engine::without_dp_planner(|| {
         let inner = result_bag(&g, q);
         // Result-equivalent even in greedy mode.
-        assert_eq!(before, inner, "opt-out result must match default for this query");
+        assert_eq!(
+            before, inner,
+            "opt-out result must match default for this query"
+        );
     });
     // After the guard drops, the prior state (default-on) is restored.
     let after = result_bag(&g, q);
-    assert_eq!(before, after, "default-on state must be restored after opt-out guard drops");
+    assert_eq!(
+        before, after,
+        "default-on state must be restored after opt-out guard drops"
+    );
 }
 
 /// `with_dp_planner_budget(0, …)` disables the DP (all-greedy); result is still correct.
@@ -192,5 +199,8 @@ fn budget_zero_behaves_like_greedy() {
     }";
     let default_result = result_bag(&g, q);
     let zero_budget = sparq_engine::with_dp_planner_budget(0, || result_bag(&g, q));
-    assert_eq!(default_result, zero_budget, "budget=0 must give same results as default");
+    assert_eq!(
+        default_result, zero_budget,
+        "budget=0 must give same results as default"
+    );
 }

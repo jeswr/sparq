@@ -101,7 +101,11 @@ impl Thresholds {
     /// exercised — not merely the pure `detect` shape test. Installed thread-locally by
     /// [`with_test_thresholds`]; only meaningful under `cfg(test)`/the doc-hidden hook.
     #[cfg(any(test, feature = "cluster-materialize"))]
-    const PERMISSIVE: Thresholds = Thresholds { member_min_est: 1, member_anchor_ratio: 1, anchor_max_est: usize::MAX };
+    const PERMISSIVE: Thresholds = Thresholds {
+        member_min_est: 1,
+        member_anchor_ratio: 1,
+        anchor_max_est: usize::MAX,
+    };
 }
 
 #[cfg(feature = "cluster-materialize")]
@@ -167,7 +171,9 @@ pub(crate) fn detect(
 
     // Exactly one unbound-predicate membership pattern. Zero → not this shape; two or
     // more → ambiguous, decline (keep the trigger tight to the profiled case).
-    let members: Vec<usize> = (0..prepared.len()).filter(|&i| is_membership(&prepared[i])).collect();
+    let members: Vec<usize> = (0..prepared.len())
+        .filter(|&i| is_membership(&prepared[i]))
+        .collect();
     let [m] = members[..] else { return None };
     if has_filter(m) || prepared[m].est < thr.member_min_est {
         return None;
@@ -195,7 +201,11 @@ pub(crate) fn detect(
         }
         let a_vars = pattern_vars(&prepared[a]);
         // Variables shared between anchor and membership.
-        let shared: Vec<&Variable> = a_vars.iter().copied().filter(|v| m_vars.contains(v)).collect();
+        let shared: Vec<&Variable> = a_vars
+            .iter()
+            .copied()
+            .filter(|v| m_vars.contains(v))
+            .collect();
         if shared.len() != 1 {
             continue;
         }
@@ -219,7 +229,8 @@ pub(crate) fn detect(
         // other than the shared one (else the cluster IS the whole join component).
         let m_connects_rest = m_vars.iter().any(|&v| {
             v != shared_var
-                && (0..prepared.len()).any(|j| j != m && j != a && pattern_vars(&prepared[j]).contains(&v))
+                && (0..prepared.len())
+                    .any(|j| j != m && j != a && pattern_vars(&prepared[j]).contains(&v))
         });
         if !m_connects_rest {
             continue;
@@ -230,7 +241,8 @@ pub(crate) fn detect(
         // cluster would drop that join edge — decline (keep it exact).
         let anchor_leaks = a_vars.iter().any(|&v| {
             v != shared_var
-                && (0..prepared.len()).any(|j| j != m && j != a && pattern_vars(&prepared[j]).contains(&v))
+                && (0..prepared.len())
+                    .any(|j| j != m && j != a && pattern_vars(&prepared[j]).contains(&v))
         });
         if anchor_leaks {
             continue;
@@ -246,8 +258,8 @@ pub(crate) fn detect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sparq_core::Graph;
     use spargebra::term::TriplePattern;
+    use sparq_core::Graph;
 
     fn g() -> Graph {
         // A tiny SP2Bench-shaped graph: a few Document subclasses, typed docs with
@@ -301,36 +313,54 @@ mod tests {
 
     // Test thresholds lowered so the small-graph estimates qualify — the SHAPE logic
     // is what the unit test must exercise; the est numbers are join-order-only.
-    const TEST_THR: Thresholds = Thresholds { member_min_est: 1, member_anchor_ratio: 1, anchor_max_est: 1_000_000 };
+    const TEST_THR: Thresholds = Thresholds {
+        member_min_est: 1,
+        member_anchor_ratio: 1,
+        anchor_max_est: 1_000_000,
+    };
 
     // The full q07 outer BGP → detects the {references, member} cluster and puts the
     // driver chain in `rest`.
     #[test]
     fn detects_q07_outer_cluster() {
-        let pats = tp(
-            "?class rdfs:subClassOf foaf:Document . \
+        let pats = tp("?class rdfs:subClassOf foaf:Document . \
              ?doc rdf:type ?class . \
              ?doc dc:title ?title . \
              ?bag2 ?member2 ?doc . \
-             ?doc2 dcterms:references ?bag2",
-        );
+             ?doc2 dcterms:references ?bag2");
         let prepared = crate::exec::prepare_bgp(&g(), &pats).unwrap();
         // The membership pattern is index 3 (`?bag2 ?member2 ?doc`), anchor index 4.
-        assert!(prepared[3].id_pat[1].is_none(), "membership pattern is unbound-predicate");
-        assert!(prepared[4].id_pat[1].is_some(), "anchor pattern is bound-predicate");
+        assert!(
+            prepared[3].id_pat[1].is_none(),
+            "membership pattern is unbound-predicate"
+        );
+        assert!(
+            prepared[4].id_pat[1].is_some(),
+            "anchor pattern is bound-predicate"
+        );
         let plan = detect(&prepared, TEST_THR, |_| false).expect("q07 cluster detected");
         let mut cluster = plan.cluster.clone();
         cluster.sort_unstable();
-        assert_eq!(cluster, vec![3, 4], "cluster is {{member, references-anchor}}");
+        assert_eq!(
+            cluster,
+            vec![3, 4],
+            "cluster is {{member, references-anchor}}"
+        );
         let mut rest = plan.rest.clone();
         rest.sort_unstable();
-        assert_eq!(rest, vec![0, 1, 2], "rest is the subClassOf/type/title chain");
+        assert_eq!(
+            rest,
+            vec![0, 1, 2],
+            "rest is the subClassOf/type/title chain"
+        );
     }
 
     // No unbound-predicate pattern → DECLINE.
     #[test]
     fn declines_when_no_membership_pattern() {
-        let pats = tp("?class rdfs:subClassOf foaf:Document . ?doc rdf:type ?class . ?doc dc:title ?title");
+        let pats = tp(
+            "?class rdfs:subClassOf foaf:Document . ?doc rdf:type ?class . ?doc dc:title ?title",
+        );
         let prepared = crate::exec::prepare_bgp(&g(), &pats).unwrap();
         assert_eq!(detect(&prepared, TEST_THR, |_| false), None);
     }
@@ -355,13 +385,11 @@ mod tests {
     // sub-BGP must not lose the filter).
     #[test]
     fn declines_when_cluster_pattern_has_filter() {
-        let pats = tp(
-            "?class rdfs:subClassOf foaf:Document . \
+        let pats = tp("?class rdfs:subClassOf foaf:Document . \
              ?doc rdf:type ?class . \
              ?doc dc:title ?title . \
              ?bag2 ?member2 ?doc . \
-             ?doc2 dcterms:references ?bag2",
-        );
+             ?doc2 dcterms:references ?bag2");
         let prepared = crate::exec::prepare_bgp(&g(), &pats).unwrap();
         // Pretend the anchor (index 4) carries a pushed filter.
         assert_eq!(detect(&prepared, TEST_THR, |i| i == 4), None);
@@ -371,13 +399,11 @@ mod tests {
     // cluster would drop that join edge). Here `?doc2` is reused by another pattern.
     #[test]
     fn declines_when_anchor_variable_leaks() {
-        let pats = tp(
-            "?doc rdf:type ?class . \
+        let pats = tp("?doc rdf:type ?class . \
              ?doc dc:title ?title . \
              ?bag2 ?member2 ?doc . \
              ?doc2 dcterms:references ?bag2 . \
-             ?doc2 dc:title ?title2",
-        );
+             ?doc2 dc:title ?title2");
         let prepared = crate::exec::prepare_bgp(&g(), &pats).unwrap();
         assert_eq!(detect(&prepared, TEST_THR, |_| false), None);
     }

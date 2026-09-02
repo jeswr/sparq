@@ -102,7 +102,10 @@ fn run_gen_clique(args: &[String]) -> ! {
         _ => usage(),
     };
     if !(2..=1000).contains(&n) {
-        eprintln!("canon_bench: gen-clique n must be in 2..=1000 (got {:?})", args);
+        eprintln!(
+            "canon_bench: gen-clique n must be in 2..=1000 (got {:?})",
+            args
+        );
         std::process::exit(1);
     }
     // Every ordered pair of distinct blank nodes, one predicate: maximal

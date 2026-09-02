@@ -6,11 +6,11 @@ use geo_types::{
     MultiPolygon, Point, Polygon, Rect, Triangle,
 }; // [OPUS-4.8]
 use sparq_core::Graph;
+use sparq_geo::vocab::WKT_LITERAL;
 use sparq_geo::{
     geof, is_geometry_datatype, metadata, parse_geometry_literal, parse_wkt_literal, Crs, GeoError,
     GeoGeometry, GeoIndex,
 };
-use sparq_geo::vocab::WKT_LITERAL;
 
 // ---- literal.rs: GeoGeometry::new, Crs::from_iri Other, parse_geometry_literal unsupported ---
 
@@ -36,7 +36,8 @@ fn crs_from_iri_other_branch() {
 /// parse_geometry_literal with an unsupported datatype returns GeoError::Unsupported. [OPUS-4.8]
 #[test]
 fn parse_geometry_literal_unsupported_datatype_errors() {
-    let result = parse_geometry_literal( // [OPUS-4.8]
+    let result = parse_geometry_literal(
+        // [OPUS-4.8]
         "POINT(1 2)",
         "http://example.org/not-a-geo-literal",
     );
@@ -50,7 +51,9 @@ fn parse_geometry_literal_unsupported_datatype_errors() {
 /// is_geometry_datatype distinguishes geo serializations from other datatypes. [OPUS-4.8]
 #[test]
 fn is_geometry_datatype_false_for_xsd_string() {
-    assert!(!is_geometry_datatype("http://www.w3.org/2001/XMLSchema#string")); // [OPUS-4.8]
+    assert!(!is_geometry_datatype(
+        "http://www.w3.org/2001/XMLSchema#string"
+    )); // [OPUS-4.8]
     assert!(is_geometry_datatype(WKT_LITERAL));
 }
 
@@ -63,7 +66,8 @@ fn euclidean_distance_all_first_arg_types() {
     let target = Geometry::Point(Point::new(0.0, 0.0)); // [OPUS-4.8]
 
     // MultiPolygon as a: closest vertex is (1,0) → distance = 1.
-    let mp_geom = Geometry::MultiPolygon(MultiPolygon(vec![Polygon::new( // [OPUS-4.8]
+    let mp_geom = Geometry::MultiPolygon(MultiPolygon(vec![Polygon::new(
+        // [OPUS-4.8]
         LineString(vec![
             Coord { x: 1.0, y: 0.0 },
             Coord { x: 2.0, y: 0.0 },
@@ -73,18 +77,28 @@ fn euclidean_distance_all_first_arg_types() {
         vec![],
     )]));
     let d_mp = geof::euclidean_distance(&mp_geom, &target);
-    assert!((d_mp - 1.0).abs() < 1e-6, "MultiPolygon distance was {}", d_mp);
+    assert!(
+        (d_mp - 1.0).abs() < 1e-6,
+        "MultiPolygon distance was {}",
+        d_mp
+    );
 
     // MultiPoint as a: closest is (1,0) → distance = 1.
-    let mpt_geom = Geometry::MultiPoint(MultiPoint(vec![ // [OPUS-4.8]
+    let mpt_geom = Geometry::MultiPoint(MultiPoint(vec![
+        // [OPUS-4.8]
         Point::new(3.0, 4.0),
         Point::new(1.0, 0.0),
     ]));
     let d_mpt = geof::euclidean_distance(&mpt_geom, &target);
-    assert!((d_mpt - 1.0).abs() < 1e-6, "MultiPoint distance was {}", d_mpt);
+    assert!(
+        (d_mpt - 1.0).abs() < 1e-6,
+        "MultiPoint distance was {}",
+        d_mpt
+    );
 
     // Rect as a: closest corner is (1,1) → distance = sqrt(2).
-    let rect_geom = Geometry::Rect(Rect::new( // [OPUS-4.8]
+    let rect_geom = Geometry::Rect(Rect::new(
+        // [OPUS-4.8]
         Coord { x: 1.0, y: 1.0 },
         Coord { x: 2.0, y: 2.0 },
     ));
@@ -98,21 +112,31 @@ fn euclidean_distance_all_first_arg_types() {
     );
 
     // Triangle as a: vertex (1,0) is closest → distance = 1.
-    let tri_geom = Geometry::Triangle(Triangle( // [OPUS-4.8]
+    let tri_geom = Geometry::Triangle(Triangle(
+        // [OPUS-4.8]
         Coord { x: 1.0, y: 0.0 },
         Coord { x: 2.0, y: 0.0 },
         Coord { x: 1.5, y: 1.0 },
     ));
     let d_tri = geof::euclidean_distance(&tri_geom, &target);
-    assert!((d_tri - 1.0).abs() < 1e-6, "Triangle distance was {}", d_tri);
+    assert!(
+        (d_tri - 1.0).abs() < 1e-6,
+        "Triangle distance was {}",
+        d_tri
+    );
 
     // GeometryCollection as a: closest member gives distance = 1.
-    let gc_geom = Geometry::GeometryCollection(GeometryCollection(vec![ // [OPUS-4.8]
+    let gc_geom = Geometry::GeometryCollection(GeometryCollection(vec![
+        // [OPUS-4.8]
         Geometry::Point(Point::new(5.0, 0.0)),
         Geometry::Point(Point::new(1.0, 0.0)),
     ]));
     let d_gc = geof::euclidean_distance(&gc_geom, &target);
-    assert!((d_gc - 1.0).abs() < 1e-6, "GeometryCollection distance was {}", d_gc);
+    assert!(
+        (d_gc - 1.0).abs() < 1e-6,
+        "GeometryCollection distance was {}",
+        d_gc
+    );
 }
 
 // ---- geof.rs: distance_meters empty-geometry error path -----------------------
@@ -122,8 +146,9 @@ fn euclidean_distance_all_first_arg_types() {
 #[test]
 fn distance_meters_empty_geometry_error() {
     let empty_mls = Geometry::MultiLineString(MultiLineString(vec![])); // [OPUS-4.8]
-    // A distant non-empty LineString so the two don't intersect.
-    let far_ls = Geometry::LineString(LineString(vec![ // [OPUS-4.8]
+                                                                        // A distant non-empty LineString so the two don't intersect.
+    let far_ls = Geometry::LineString(LineString(vec![
+        // [OPUS-4.8]
         Coord { x: 100.0, y: 0.0 },
         Coord { x: 101.0, y: 0.0 },
     ]));
@@ -156,14 +181,19 @@ fn point_to_geometry_meters_indeterminate_for_empty_gc() {
 /// boundary of a bare geo_types::Line gives MULTIPOINT of its two endpoints. [OPUS-4.8]
 #[test]
 fn boundary_of_bare_line() {
-    let g = GeoGeometry::new(Geometry::Line(GeoLine { // [OPUS-4.8]
+    let g = GeoGeometry::new(Geometry::Line(GeoLine {
+        // [OPUS-4.8]
         start: Coord { x: 0.0, y: 0.0 },
         end: Coord { x: 3.0, y: 4.0 },
     }));
     let b = geof::boundary(&g).unwrap();
     let wkt = b.to_wkt_literal();
     // The boundary of a bare Line is a MULTIPOINT of its two endpoints.
-    assert!(wkt.contains("MULTIPOINT"), "expected MULTIPOINT, got {}", wkt);
+    assert!(
+        wkt.contains("MULTIPOINT"),
+        "expected MULTIPOINT, got {}",
+        wkt
+    );
 }
 
 /// boundary of a MultiLineString applies the mod-2 endpoint rule. [OPUS-4.8]
@@ -173,13 +203,18 @@ fn boundary_of_multilinestring() {
     let g = parse_wkt_literal("MULTILINESTRING((0 0, 1 0),(2 0, 3 0))").unwrap(); // [OPUS-4.8]
     let b = geof::boundary(&g).unwrap();
     let wkt = b.to_wkt_literal();
-    assert!(wkt.contains("MULTIPOINT"), "expected MULTIPOINT, got {}", wkt);
+    assert!(
+        wkt.contains("MULTIPOINT"),
+        "expected MULTIPOINT, got {}",
+        wkt
+    );
 }
 
 /// boundary of a MultiPolygon gives a MULTILINESTRING of all rings. [OPUS-4.8]
 #[test]
 fn boundary_of_multipolygon() {
-    let g = parse_wkt_literal( // [OPUS-4.8]
+    let g = parse_wkt_literal(
+        // [OPUS-4.8]
         "MULTIPOLYGON(((0 0,1 0,1 1,0 1,0 0)),((2 2,3 2,3 3,2 3,2 2)))",
     )
     .unwrap();
@@ -195,7 +230,8 @@ fn boundary_of_multipolygon() {
 /// boundary of a Rect delegates to its polygon form (MULTILINESTRING ring). [OPUS-4.8]
 #[test]
 fn boundary_of_rect() {
-    let g = GeoGeometry::new(Geometry::Rect(Rect::new( // [OPUS-4.8]
+    let g = GeoGeometry::new(Geometry::Rect(Rect::new(
+        // [OPUS-4.8]
         Coord { x: 0.0, y: 0.0 },
         Coord { x: 1.0, y: 1.0 },
     )));
@@ -211,7 +247,8 @@ fn boundary_of_rect() {
 /// boundary of a Triangle delegates to its polygon form (MULTILINESTRING ring). [OPUS-4.8]
 #[test]
 fn boundary_of_triangle() {
-    let g = GeoGeometry::new(Geometry::Triangle(Triangle( // [OPUS-4.8]
+    let g = GeoGeometry::new(Geometry::Triangle(Triangle(
+        // [OPUS-4.8]
         Coord { x: 0.0, y: 0.0 },
         Coord { x: 1.0, y: 0.0 },
         Coord { x: 0.5, y: 1.0 },
@@ -230,11 +267,13 @@ fn boundary_of_triangle() {
 /// intersection of a Rect with a Triangle exercises polygonal() for both types. [OPUS-4.8]
 #[test]
 fn intersection_rect_with_triangle_covers_polygonal() {
-    let rect = GeoGeometry::new(Geometry::Rect(Rect::new( // [OPUS-4.8]
+    let rect = GeoGeometry::new(Geometry::Rect(Rect::new(
+        // [OPUS-4.8]
         Coord { x: 0.0, y: 0.0 },
         Coord { x: 2.0, y: 2.0 },
     )));
-    let tri = GeoGeometry::new(Geometry::Triangle(Triangle( // [OPUS-4.8]
+    let tri = GeoGeometry::new(Geometry::Triangle(Triangle(
+        // [OPUS-4.8]
         Coord { x: 0.0, y: 0.0 },
         Coord { x: 3.0, y: 0.0 },
         Coord { x: 1.5, y: 3.0 },
@@ -288,7 +327,8 @@ fn union_with_empty_right_returns_left() {
 #[test]
 fn union_mixed_dimension_is_geometry_collection() {
     let pt = GeoGeometry::new(Geometry::Point(Point::new(0.0, 0.0))); // [OPUS-4.8]
-    let ls = GeoGeometry::new(Geometry::LineString(LineString(vec![ // [OPUS-4.8]
+    let ls = GeoGeometry::new(Geometry::LineString(LineString(vec![
+        // [OPUS-4.8]
         Coord { x: 1.0, y: 0.0 },
         Coord { x: 2.0, y: 0.0 },
     ])));
@@ -326,7 +366,8 @@ fn buffer_at_pole_returns_unsupported() {
 #[test]
 fn intersection_with_empty_operand_returns_empty_multipoint() {
     let empty = GeoGeometry::new(Geometry::MultiPoint(MultiPoint(vec![]))); // [OPUS-4.8]
-    let ls = GeoGeometry::new(Geometry::LineString(LineString(vec![ // [OPUS-4.8]
+    let ls = GeoGeometry::new(Geometry::LineString(LineString(vec![
+        // [OPUS-4.8]
         Coord { x: 0.0, y: 0.0 },
         Coord { x: 1.0, y: 0.0 },
     ])));
@@ -343,7 +384,8 @@ fn intersection_with_empty_operand_returns_empty_multipoint() {
 /// empty MULTILINESTRING. [OPUS-4.8]
 #[test]
 fn difference_line_minus_itself_is_empty_multilinestring() {
-    let ls = GeoGeometry::new(Geometry::LineString(LineString(vec![ // [OPUS-4.8]
+    let ls = GeoGeometry::new(Geometry::LineString(LineString(vec![
+        // [OPUS-4.8]
         Coord { x: 0.0, y: 0.0 },
         Coord { x: 1.0, y: 0.0 },
     ])));
@@ -361,7 +403,8 @@ fn difference_line_minus_itself_is_empty_multilinestring() {
 
 /// Build a small GeoIndex: three points — two nearby, one far away. [OPUS-4.8]
 fn build_small_index() -> (Graph, GeoIndex) {
-    let nt = concat!( // [OPUS-4.8]
+    let nt = concat!(
+        // [OPUS-4.8]
         "<http://ex.org/e1> <http://www.opengis.net/ont/geosparql#asWKT> ",
         "\"POINT(0 0)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral> .\n",
         "<http://ex.org/e2> <http://www.opengis.net/ont/geosparql#asWKT> ",
@@ -378,10 +421,15 @@ fn build_small_index() -> (Graph, GeoIndex) {
 #[test]
 fn within_distance_literals_returns_nearby_literals() {
     let (_g, index) = build_small_index(); // [OPUS-4.8]
-    // Center at origin; 200 km radius captures e1 (0 km) and e2 (~111 km) but not e3.
+                                           // Center at origin; 200 km radius captures e1 (0 km) and e2 (~111 km) but not e3.
     let center = Point::new(0.0, 0.0);
     let literals = index.within_distance_literals(center, 200_000.0);
-    assert_eq!(literals.len(), 2, "expected 2 nearby literals, got {:?}", literals);
+    assert_eq!(
+        literals.len(),
+        2,
+        "expected 2 nearby literals, got {:?}",
+        literals
+    );
     // The candidate set is a superset of the exact within_distance result.
     let hits = index.within_distance(center, 200_000.0, None);
     assert!(
@@ -405,7 +453,7 @@ fn within_distance_literals_zero_radius() {
 #[test]
 fn bbox_candidate_literals_superset_of_intersects() {
     let (_g, index) = build_small_index(); // [OPUS-4.8]
-    // A polygon bbox covering (0,0) and (1,0) but not (50,50).
+                                           // A polygon bbox covering (0,0) and (1,0) but not (50,50).
     let query_geom = parse_wkt_literal("POLYGON((-1 -1, 2 -1, 2 1, -1 1, -1 -1))").unwrap();
     let candidates = index.bbox_candidate_literals(&query_geom);
     assert!(
@@ -429,7 +477,11 @@ fn bbox_candidate_literals_empty_for_non_geographic_crs() {
     let (_g, index) = build_small_index(); // [OPUS-4.8]
     let other_crs = parse_wkt_literal("<http://example.org/my-crs> POINT(0 0)").unwrap();
     let candidates = index.bbox_candidate_literals(&other_crs);
-    assert_eq!(candidates.len(), 0, "non-geographic CRS must yield no candidates");
+    assert_eq!(
+        candidates.len(),
+        0,
+        "non-geographic CRS must yield no candidates"
+    );
 }
 
 // ---- index.rs: ball_windows pole-covering branch ------------------------------
@@ -438,7 +490,8 @@ fn bbox_candidate_literals_empty_for_non_geographic_crs() {
 /// pole-covering window (lat_max >= 90.0 - 1e-12) inside ball_windows. [OPUS-4.8]
 #[test]
 fn within_distance_pole_covering_window() {
-    let nt = concat!( // [OPUS-4.8]
+    let nt = concat!(
+        // [OPUS-4.8]
         "<http://ex.org/a> <http://www.opengis.net/ont/geosparql#asWKT> ",
         "\"POINT(0 89)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral> .\n"
     );
@@ -449,7 +502,10 @@ fn within_distance_pole_covering_window() {
     let center = Point::new(0.0, 89.5); // [OPUS-4.8]
     let hits = index.within_distance(center, 1_000_000.0, None);
     // The point at (0, 89) is ~55 km from (0, 89.5); well within 1 000 km.
-    assert!(!hits.is_empty(), "expected the high-lat point to be found near the pole");
+    assert!(
+        !hits.is_empty(),
+        "expected the high-lat point to be found near the pole"
+    );
 }
 
 // ---- metadata.rs: uncovered paths --------------------------------------------
@@ -480,11 +536,17 @@ fn topological_dimension_nonempty_multipolygon_is_two() {
 fn is_simple_multilinestring() {
     // Two disjoint straight curves: simple. [OPUS-4.8]
     let simple_mls = parse_wkt_literal("MULTILINESTRING((0 0, 1 1),(2 2, 3 3))").unwrap();
-    assert!(simple_mls.metadata().is_simple, "two disjoint straight curves must be simple");
+    assert!(
+        simple_mls.metadata().is_simple,
+        "two disjoint straight curves must be simple"
+    );
 
     // A MultiLineString with a self-crossing member curve: not simple.
     let non_simple_mls = parse_wkt_literal("MULTILINESTRING((0 0, 2 2, 0 2, 2 0))").unwrap(); // [OPUS-4.8]
-    assert!(!non_simple_mls.metadata().is_simple, "self-crossing curve must not be simple");
+    assert!(
+        !non_simple_mls.metadata().is_simple,
+        "self-crossing curve must not be simple"
+    );
 }
 
 /// lex::spatial_dimension returns Some(2) for a non-empty point. [OPUS-4.8]

@@ -39,11 +39,11 @@
 #![cfg(feature = "experimental")]
 
 use oxrdf::Triple;
+use spargebra::SparqlParser;
 use sparq_core::Graph;
 use sparq_engine::QueryResult;
 use sparq_reason::Profile;
 use sparq_reason_ql::rewrite_production;
-use spargebra::SparqlParser;
 use std::collections::BTreeSet;
 
 const TURTLE_PREFIXES: &str = "\
@@ -167,8 +167,7 @@ fn answers(result: &QueryResult) -> BTreeSet<Binding> {
                 .iter()
                 .zip(row.iter())
                 .filter_map(|(var, term)| {
-                    term.as_ref()
-                        .map(|t| ((*var).to_string(), t.to_string()))
+                    term.as_ref().map(|t| ((*var).to_string(), t.to_string()))
                 })
                 .collect();
             binding.sort();

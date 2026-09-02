@@ -40,9 +40,7 @@ fn iri(local: &str) -> String {
 #[test]
 fn equivalent_class_captures_both_directions() {
     // :A owl:equivalentClass :B  =>  A ⊑ B  AND  B ⊑ A
-    let ts = triples(&[&format!(
-        "<{EX}A> <{OWL}equivalentClass> <{EX}B> ."
-    )]);
+    let ts = triples(&[&format!("<{EX}A> <{OWL}equivalentClass> <{EX}B> .")]);
     let tbox = TBox::extract(&ts);
 
     let a_sub_b = ConceptInclusion {
@@ -78,9 +76,7 @@ fn equivalent_class_captures_both_directions() {
 fn equivalent_class_complex_object_counts_skipped() {
     // :A owl:equivalentClass _:bn  (blank node = complex expression — outside QL rewriting)
     // The triple DOES still need to be accounted for (not silently ignored).
-    let ts = triples(&[&format!(
-        "<{EX}A> <{OWL}equivalentClass> _:complex ."
-    )]);
+    let ts = triples(&[&format!("<{EX}A> <{OWL}equivalentClass> _:complex .")]);
     let tbox = TBox::extract(&ts);
 
     assert_eq!(
@@ -109,10 +105,12 @@ fn equivalent_property_captures_both_directions() {
     let r_manages = Role::named(iri("manages"));
     let r_works_for = Role::named(iri("worksFor"));
 
-    let manages_sub_works =
-        tbox.role_incl.contains(&(r_manages.clone(), r_works_for.clone()));
-    let works_sub_manages =
-        tbox.role_incl.contains(&(r_works_for.clone(), r_manages.clone()));
+    let manages_sub_works = tbox
+        .role_incl
+        .contains(&(r_manages.clone(), r_works_for.clone()));
+    let works_sub_manages = tbox
+        .role_incl
+        .contains(&(r_works_for.clone(), r_manages.clone()));
 
     assert!(
         manages_sub_works,
@@ -124,7 +122,10 @@ fn equivalent_property_captures_both_directions() {
         "expected worksFor ⊑ manages; got {:?}",
         tbox.role_incl
     );
-    assert_eq!(tbox.skipped, 0, "named-role equivalentProperty must not count as skipped");
+    assert_eq!(
+        tbox.skipped, 0,
+        "named-role equivalentProperty must not count as skipped"
+    );
     assert_eq!(
         tbox.unrecognised_schema, 0,
         "equivalentProperty is a recognised predicate"
@@ -137,14 +138,11 @@ fn equivalent_property_captures_both_directions() {
 
 #[test]
 fn disjoint_with_increments_consistency_relevant() {
-    let ts = triples(&[&format!(
-        "<{EX}A> <{OWL}disjointWith> <{EX}B> ."
-    )]);
+    let ts = triples(&[&format!("<{EX}A> <{OWL}disjointWith> <{EX}B> .")]);
     let tbox = TBox::extract(&ts);
 
     assert_eq!(
-        tbox.consistency_relevant,
-        1,
+        tbox.consistency_relevant, 1,
         "owl:disjointWith must increment consistency_relevant by exactly 1"
     );
     assert_eq!(
@@ -152,37 +150,44 @@ fn disjoint_with_increments_consistency_relevant() {
         0,
         "owl:disjointWith must NOT produce a positive inclusion (unsound)"
     );
-    assert_eq!(tbox.skipped, 0, "owl:disjointWith is not 'outside QL' — it is QL-legal");
-    assert_eq!(tbox.unrecognised_schema, 0, "owl:disjointWith is a recognised predicate");
+    assert_eq!(
+        tbox.skipped, 0,
+        "owl:disjointWith is not 'outside QL' — it is QL-legal"
+    );
+    assert_eq!(
+        tbox.unrecognised_schema, 0,
+        "owl:disjointWith is a recognised predicate"
+    );
 }
 
 #[test]
 fn property_disjoint_with_increments_consistency_relevant() {
-    let ts = triples(&[&format!(
-        "<{EX}p> <{OWL}propertyDisjointWith> <{EX}q> ."
-    )]);
+    let ts = triples(&[&format!("<{EX}p> <{OWL}propertyDisjointWith> <{EX}q> .")]);
     let tbox = TBox::extract(&ts);
 
     assert_eq!(
-        tbox.consistency_relevant,
-        1,
+        tbox.consistency_relevant, 1,
         "owl:propertyDisjointWith must increment consistency_relevant by exactly 1"
     );
-    assert_eq!(tbox.role_incl.len(), 0, "owl:propertyDisjointWith must NOT produce a role inclusion");
+    assert_eq!(
+        tbox.role_incl.len(),
+        0,
+        "owl:propertyDisjointWith must NOT produce a role inclusion"
+    );
     assert_eq!(tbox.skipped, 0, "owl:propertyDisjointWith is QL-legal");
-    assert_eq!(tbox.unrecognised_schema, 0, "owl:propertyDisjointWith is a recognised predicate");
+    assert_eq!(
+        tbox.unrecognised_schema, 0,
+        "owl:propertyDisjointWith is a recognised predicate"
+    );
 }
 
 #[test]
 fn complement_of_increments_consistency_relevant() {
-    let ts = triples(&[&format!(
-        "<{EX}A> <{OWL}complementOf> <{EX}B> ."
-    )]);
+    let ts = triples(&[&format!("<{EX}A> <{OWL}complementOf> <{EX}B> .")]);
     let tbox = TBox::extract(&ts);
 
     assert_eq!(
-        tbox.consistency_relevant,
-        1,
+        tbox.consistency_relevant, 1,
         "owl:complementOf must increment consistency_relevant by exactly 1"
     );
     assert_eq!(
@@ -281,16 +286,17 @@ fn fully_captured_false_when_skipped_nonzero() {
         &format!("_:r <{OWL}allValuesFrom> <{EX}B> ."),
     ]);
     let tbox = TBox::extract(&ts);
-    assert!(!tbox.fully_captured(), "skipped > 0 => fully_captured() must return false");
+    assert!(
+        !tbox.fully_captured(),
+        "skipped > 0 => fully_captured() must return false"
+    );
 }
 
 #[test]
 fn fully_captured_false_when_unrecognised_schema_nonzero() {
     // owl:unionOf is in the owl: namespace but NOT a recognised TBox predicate or restriction
     // sub-predicate or annotation → unrecognised_schema += 1.
-    let ts = triples(&[&format!(
-        "<{EX}A> <{OWL}unionOf> _:list ."
-    )]);
+    let ts = triples(&[&format!("<{EX}A> <{OWL}unionOf> _:list .")]);
     let tbox = TBox::extract(&ts);
     assert!(
         tbox.unrecognised_schema > 0,
@@ -319,8 +325,14 @@ fn fully_captured_true_in_total_case() {
     let tbox = TBox::extract(&ts);
 
     assert_eq!(tbox.skipped, 0, "all axioms in this TBox are QL-capturable");
-    assert_eq!(tbox.unrecognised_schema, 0, "no unrecognised schema predicates");
-    assert!(tbox.fully_captured(), "total case: fully_captured() must return true");
+    assert_eq!(
+        tbox.unrecognised_schema, 0,
+        "no unrecognised schema predicates"
+    );
+    assert!(
+        tbox.fully_captured(),
+        "total case: fully_captured() must return true"
+    );
 }
 
 #[test]
@@ -361,7 +373,10 @@ fn rdfs_annotation_predicates_not_counted_as_unrecognised() {
     ]);
     let tbox = TBox::extract(&ts);
 
-    assert_eq!(tbox.unrecognised_schema, 0, "rdfs annotation predicates must not be unrecognised");
+    assert_eq!(
+        tbox.unrecognised_schema, 0,
+        "rdfs annotation predicates must not be unrecognised"
+    );
     assert_eq!(tbox.skipped, 0);
 }
 
@@ -369,12 +384,17 @@ fn rdfs_annotation_predicates_not_counted_as_unrecognised() {
 fn owl_annotation_predicates_not_counted_as_unrecognised() {
     // owl:deprecated, owl:versionInfo — annotation predicates.
     let ts = triples(&[
-        &format!("<{EX}onto> <{OWL}deprecated> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> ."),
+        &format!(
+            "<{EX}onto> <{OWL}deprecated> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> ."
+        ),
         &format!("<{EX}onto> <{OWL}versionInfo> \"1.0\" ."),
     ]);
     let tbox = TBox::extract(&ts);
 
-    assert_eq!(tbox.unrecognised_schema, 0, "owl annotation predicates must not be unrecognised");
+    assert_eq!(
+        tbox.unrecognised_schema, 0,
+        "owl annotation predicates must not be unrecognised"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -460,11 +480,9 @@ fn characteristic_property_types_are_all_counted() {
         let line = format!("<{EX}p> <{RDF_TYPE}> <{OWL}{}> .", local);
         let tbox = TBox::extract(&triples(&[&line]));
         assert_eq!(
-            tbox.unrecognised_schema,
-            1,
+            tbox.unrecognised_schema, 1,
             "owl:{} in rdf:type object must increment unrecognised_schema exactly once; got {}",
-            local,
-            tbox.unrecognised_schema
+            local, tbox.unrecognised_schema
         );
         assert!(
             !tbox.fully_captured(),
@@ -501,11 +519,13 @@ fn ql_legal_declarations_stay_fully_captured() {
     let tbox = TBox::extract(&ts);
 
     assert_eq!(
-        tbox.unrecognised_schema,
-        0,
+        tbox.unrecognised_schema, 0,
         "QL-legal rdf:type declarations must NOT count as unrecognised_schema"
     );
-    assert_eq!(tbox.skipped, 0, "QL-legal declarations must not count as skipped");
+    assert_eq!(
+        tbox.skipped, 0,
+        "QL-legal declarations must not count as skipped"
+    );
     assert!(
         tbox.fully_captured(),
         "a TBox with only QL-legal declarations + subClassOf must be fully captured"
@@ -550,15 +570,13 @@ fn ontology_metadata_predicates_not_counted_as_unrecognised() {
     let tbox = TBox::extract(&ts);
 
     assert_eq!(
-        tbox.unrecognised_schema,
-        0,
+        tbox.unrecognised_schema, 0,
         "owl:imports / owl:versionIRI / owl:versionInfo / rdfs:label must NOT count \
          as unrecognised_schema; got unrecognised_schema={}",
         tbox.unrecognised_schema
     );
     assert_eq!(
-        tbox.skipped,
-        0,
+        tbox.skipped, 0,
         "ontology metadata predicates must not count as skipped"
     );
     assert!(

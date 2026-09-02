@@ -35,7 +35,10 @@
 /// Only the variants reachable on the target arch exist, so there is no unconstructible variant
 /// to `allow(dead_code)` away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(any(target_arch = "aarch64", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "aarch64", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub(crate) enum Kernel {
     /// The NEON kernel, `l2_sq_neon`.
     #[cfg(target_arch = "aarch64")]
@@ -59,7 +62,10 @@ pub(crate) enum Kernel {
 /// On a target with no intrinsic kernel (e.g. `wasm32`) this always answers `Scalar` and
 /// nothing branches on it — hence the `dead_code` allow, scoped to exactly those targets.
 #[inline]
-#[cfg_attr(not(any(target_arch = "aarch64", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "aarch64", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub(crate) fn active_kernel() -> Kernel {
     #[cfg(target_arch = "aarch64")]
     {
@@ -193,7 +199,10 @@ unsafe fn l2_sq_avx2(a: &[f32], b: &[f32]) -> f32 {
     let mut i = 0usize;
     while i + 16 <= n {
         let d0 = _mm256_sub_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)));
-        let d1 = _mm256_sub_ps(_mm256_loadu_ps(pa.add(i + 8)), _mm256_loadu_ps(pb.add(i + 8)));
+        let d1 = _mm256_sub_ps(
+            _mm256_loadu_ps(pa.add(i + 8)),
+            _mm256_loadu_ps(pb.add(i + 8)),
+        );
         acc0 = _mm256_fmadd_ps(d0, d0, acc0);
         acc1 = _mm256_fmadd_ps(d1, d1, acc1);
         i += 16;
@@ -229,7 +238,10 @@ mod tests {
     /// The reference squared distance — the mathematical definition, computed left-to-right in
     /// f64 so it is the highest-precision baseline the SIMD/scalar kernels are checked against.
     fn reference_l2_sq(a: &[f32], b: &[f32]) -> f64 {
-        a.iter().zip(b).map(|(&x, &y)| ((x - y) as f64).powi(2)).sum()
+        a.iter()
+            .zip(b)
+            .map(|(&x, &y)| ((x - y) as f64).powi(2))
+            .sum()
     }
 
     fn splitmix64(state: &mut u64) -> u64 {
@@ -274,10 +286,24 @@ mod tests {
         let mut st = 7u64;
         for dim in [1usize, 3, 8, 15, 16, 100, 128, 129] {
             let a: Vec<f32> = (0..dim).map(|_| randf(&mut st)).collect();
-            assert_eq!(l2_sq_dist(&a, &a), 0.0, "dim {}: self-distance is exactly 0", dim);
-            assert_eq!(l2_sq_scalar(&a, &a), 0.0, "dim {}: scalar self-distance is exactly 0", dim);
+            assert_eq!(
+                l2_sq_dist(&a, &a),
+                0.0,
+                "dim {}: self-distance is exactly 0",
+                dim
+            );
+            assert_eq!(
+                l2_sq_scalar(&a, &a),
+                0.0,
+                "dim {}: scalar self-distance is exactly 0",
+                dim
+            );
             let b: Vec<f32> = (0..dim).map(|_| randf(&mut st)).collect();
-            assert!(l2_sq_dist(&a, &b) >= 0.0, "dim {}: distance is non-negative", dim);
+            assert!(
+                l2_sq_dist(&a, &b) >= 0.0,
+                "dim {}: distance is non-negative",
+                dim
+            );
         }
     }
 
@@ -292,7 +318,13 @@ mod tests {
             let b: Vec<f32> = (0..dim).map(|_| randf(&mut st)).collect();
             let d = l2_sq_dist(&a, &b);
             let s = l2_sq_scalar(&a, &b);
-            assert!((d - s).abs() <= 1e-4 * dim as f32, "dim {}: simd {} vs scalar {}", dim, d, s);
+            assert!(
+                (d - s).abs() <= 1e-4 * dim as f32,
+                "dim {}: simd {} vs scalar {}",
+                dim,
+                d,
+                s
+            );
         }
     }
 
@@ -342,7 +374,10 @@ mod tests {
                  to knowingly accept scalar-only coverage here.",
                 kernel
             );
-            eprintln!("skipping: this host has no avx2+fma, l2_sq_dist dispatches to {:?}", kernel);
+            eprintln!(
+                "skipping: this host has no avx2+fma, l2_sq_dist dispatches to {:?}",
+                kernel
+            );
             return;
         }
         // AVX2 is what the dispatcher selects, so these calls DO execute `l2_sq_avx2` — as did

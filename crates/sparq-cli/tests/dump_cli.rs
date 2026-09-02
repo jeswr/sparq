@@ -67,10 +67,7 @@ ex:g2 { ex:x ex:p ex:y . }
 /// Run a non-aggregate SELECT through the mmap index and return its solution count.
 fn query_mmap_count(index: &Path, query: &str) -> usize {
     let (code, out, err) = run3(&["query-mmap", s(index), query, "--count"]);
-    assert_eq!(
-        code, 0,
-        "query-mmap failed for {query:?}; stderr: {err}"
-    );
+    assert_eq!(code, 0, "query-mmap failed for {query:?}; stderr: {err}");
     out.split_whitespace()
         .next()
         .and_then(|n| n.parse().ok())
@@ -121,8 +118,7 @@ fn assert_textual_dump_roundtrip(
 
     // A plain triple pattern is scoped to the default graph. UNION it with GRAPH ?g to count
     // the complete dataset without using COUNT(*), because `--count` counts solution rows.
-    let dataset_query =
-        "SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
+    let dataset_query = "SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
     assert_eq!(
         query_mmap_count(&index, dataset_query),
         expected_total,
@@ -170,9 +166,18 @@ fn dump_jsonld_expanded_still_works() {
     let (code, out, err) = run3(&["dump", s(&data), "turtle", "jsonld-expanded"]);
     assert_eq!(code, 0, "stderr: {err}");
     // Expanded with no named graphs is a bare node-object array (full IRIs, no @context).
-    assert!(out.trim_start().starts_with('['), "expanded doc is a bare array: {out}");
-    assert!(out.contains("http://schema.org/name"), "full-IRI predicate present: {out}");
-    assert!(!out.contains("\"@context\""), "expanded form has no @context: {out}");
+    assert!(
+        out.trim_start().starts_with('['),
+        "expanded doc is a bare array: {out}"
+    );
+    assert!(
+        out.contains("http://schema.org/name"),
+        "full-IRI predicate present: {out}"
+    );
+    assert!(
+        !out.contains("\"@context\""),
+        "expanded form has no @context: {out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -184,15 +189,33 @@ fn dump_jsonld_compact_with_context() {
     let dir = scratch("compact");
     let data = write(&dir, "g.ttl", TTL);
     let ctx = write(&dir, "ctx.jsonld", r#"{"@vocab":"http://schema.org/"}"#);
-    let (code, out, err) =
-        run3(&["dump", s(&data), "turtle", "jsonld-compact", "--context", s(&ctx)]);
+    let (code, out, err) = run3(&[
+        "dump",
+        s(&data),
+        "turtle",
+        "jsonld-compact",
+        "--context",
+        s(&ctx),
+    ]);
     assert_eq!(code, 0, "compaction must succeed; stderr: {err}");
-    assert!(out.contains("\"@vocab\":\"http://schema.org/\""), "context echoed: {out}");
+    assert!(
+        out.contains("\"@vocab\":\"http://schema.org/\""),
+        "context echoed: {out}"
+    );
     // Bare `@vocab`-relative predicate keys (NOT `schema:name`) prove the algorithm ran.
-    assert!(out.contains("\"name\":"), "predicate is a bare @vocab term: {out}");
-    assert!(out.contains("\"knows\":"), "second predicate compacted too: {out}");
+    assert!(
+        out.contains("\"name\":"),
+        "predicate is a bare @vocab term: {out}"
+    );
+    assert!(
+        out.contains("\"knows\":"),
+        "second predicate compacted too: {out}"
+    );
     // Minified by default — the pretty pass inserts newlines, so the default output has none.
-    assert!(!out.contains('\n'), "minified by default (no pretty newlines): {out}");
+    assert!(
+        !out.contains('\n'),
+        "minified by default (no pretty newlines): {out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -203,7 +226,12 @@ fn dump_jsonld_compact_pretty() {
     let data = write(&dir, "g.ttl", TTL);
     let ctx = write(&dir, "ctx.jsonld", r#"{"@vocab":"http://schema.org/"}"#);
     let (code, out, err) = run3(&[
-        "dump", s(&data), "turtle", "jsonld-compact-pretty", "--context", s(&ctx),
+        "dump",
+        s(&data),
+        "turtle",
+        "jsonld-compact-pretty",
+        "--context",
+        s(&ctx),
     ]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains('\n'), "pretty compaction is multi-line: {out}");
@@ -230,10 +258,19 @@ fn dump_jsonld_compact_non_object_context_errors() {
     let dir = scratch("bad-ctx");
     let data = write(&dir, "g.ttl", TTL);
     let ctx = write(&dir, "ctx.json", r#"["not an object"]"#);
-    let (code, _out, err) =
-        run3(&["dump", s(&data), "turtle", "jsonld-compact", "--context", s(&ctx)]);
+    let (code, _out, err) = run3(&[
+        "dump",
+        s(&data),
+        "turtle",
+        "jsonld-compact",
+        "--context",
+        s(&ctx),
+    ]);
     assert_eq!(code, 1, "a non-object @context must exit 1: {err}");
-    assert!(err.contains("@context") || err.contains("JSON object"), "clear error: {err}");
+    assert!(
+        err.contains("@context") || err.contains("JSON object"),
+        "clear error: {err}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -242,8 +279,7 @@ fn dump_jsonld_compact_non_object_context_errors() {
 fn dump_context_flag_missing_value_errors() {
     let dir = scratch("ctx-no-val");
     let data = write(&dir, "g.ttl", TTL);
-    let (code, _out, err) =
-        run3(&["dump", s(&data), "turtle", "jsonld-compact", "--context"]);
+    let (code, _out, err) = run3(&["dump", s(&data), "turtle", "jsonld-compact", "--context"]);
     assert_eq!(code, 2, "--context with no value must exit 2: {err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -271,13 +307,28 @@ fn dump_jsonld_input_roundtrips_default_build() {
     let data = write(&dir, "g.jsonld", jsonld_in);
     // Read JSON-LD in (oxjsonld parser), re-emit as expanded JSON-LD (engine writer).
     let (code, out, err) = run3(&["dump", s(&data), "jsonld", "jsonld-expanded"]);
-    assert_eq!(code, 0, "JSON-LD in -> JSON-LD out must succeed in the default build; stderr: {err}");
+    assert_eq!(
+        code, 0,
+        "JSON-LD in -> JSON-LD out must succeed in the default build; stderr: {err}"
+    );
     // The output is a JSON-LD node-object array carrying the parsed triples.
-    assert!(out.trim_start().starts_with('['), "re-serialised as a JSON-LD array: {out}");
-    assert!(out.contains("http://schema.org/alice"), "subject survived the round-trip: {out}");
-    assert!(out.contains("http://schema.org/name"), "name predicate survived: {out}");
+    assert!(
+        out.trim_start().starts_with('['),
+        "re-serialised as a JSON-LD array: {out}"
+    );
+    assert!(
+        out.contains("http://schema.org/alice"),
+        "subject survived the round-trip: {out}"
+    );
+    assert!(
+        out.contains("http://schema.org/name"),
+        "name predicate survived: {out}"
+    );
     assert!(out.contains("Alice"), "literal value survived: {out}");
-    assert!(out.contains("http://schema.org/bob"), "object IRI survived: {out}");
+    assert!(
+        out.contains("http://schema.org/bob"),
+        "object IRI survived: {out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -291,8 +342,17 @@ fn dump_jsonld_input_media_type_alias_default_build() {
     let jsonld_in = r#"{"@id":"http://ex/s","http://ex/p":[{"@value":"v"}]}"#;
     let data = write(&dir, "g.jsonld", jsonld_in);
     let (code, out, err) = run3(&["dump", s(&data), "application/ld+json", "ntriples"]);
-    assert_eq!(code, 0, "the `application/ld+json` input alias parses in the default build; stderr: {err}");
-    assert!(out.contains("<http://ex/s>"), "parsed subject present: {out}");
-    assert!(out.contains("<http://ex/p>"), "parsed predicate present: {out}");
+    assert_eq!(
+        code, 0,
+        "the `application/ld+json` input alias parses in the default build; stderr: {err}"
+    );
+    assert!(
+        out.contains("<http://ex/s>"),
+        "parsed subject present: {out}"
+    );
+    assert!(
+        out.contains("<http://ex/p>"),
+        "parsed predicate present: {out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

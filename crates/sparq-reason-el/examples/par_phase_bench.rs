@@ -148,7 +148,8 @@ fn run_synthetic(leaves: usize) {
     let mut reference: Option<ParPhaseStats> = None;
     for threads in THREAD_COUNTS {
         let (mut dict_par, mut triples_par) = (dict.clone(), triples.clone());
-        let (report_par, stats) = classify_graph_par_stats(&mut dict_par, &mut triples_par, nz(threads));
+        let (report_par, stats) =
+            classify_graph_par_stats(&mut dict_par, &mut triples_par, nz(threads));
 
         // (1) closure unchanged — never report a phase split for a run that derived something else.
         assert_eq!(
@@ -165,7 +166,12 @@ fn run_synthetic(leaves: usize) {
             None => reference = Some(stats),
             Some(r) => {
                 assert_eq!(
-                    (r.rounds, r.frontier_items, r.derived_members, r.derived_links),
+                    (
+                        r.rounds,
+                        r.frontier_items,
+                        r.derived_members,
+                        r.derived_links
+                    ),
                     (
                         stats.rounds,
                         stats.frontier_items,
@@ -179,7 +185,12 @@ fn run_synthetic(leaves: usize) {
             }
         }
 
-        print_row("synthetic", threads, &stats, report_par.emitted_subsumptions);
+        print_row(
+            "synthetic",
+            threads,
+            &stats,
+            report_par.emitted_subsumptions,
+        );
     }
     println!(
         "OK: closure identical to sequential and derivation work counts thread-invariant at \
@@ -201,7 +212,8 @@ fn run_gather(path: &str, format: &str) {
     );
     for threads in THREAD_COUNTS {
         let (mut dict_par, mut triples_par) = (dict.clone(), triples.clone());
-        let (report, stats) = classify_graph_par_stats(&mut dict_par, &mut triples_par, nz(threads));
+        let (report, stats) =
+            classify_graph_par_stats(&mut dict_par, &mut triples_par, nz(threads));
         print_row("gather", threads, &stats, report.emitted_subsumptions);
     }
 }

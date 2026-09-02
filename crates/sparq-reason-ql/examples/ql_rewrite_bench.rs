@@ -63,14 +63,24 @@ fn triple(s: &str) -> Triple {
 /// Build a DEPTH-deep `rdfs:subClassOf` chain `C0 ⊑ C1 ⊑ … ⊑ C_DEPTH`.
 fn subclass_chain(depth: usize) -> Vec<Triple> {
     (0..depth)
-        .map(|i| triple(&format!("<{EX}C{i}> <{RDFS_SUB_CLASS_OF}> <{EX}C{}> .", i + 1)))
+        .map(|i| {
+            triple(&format!(
+                "<{EX}C{i}> <{RDFS_SUB_CLASS_OF}> <{EX}C{}> .",
+                i + 1
+            ))
+        })
         .collect()
 }
 
 /// Build a DEPTH-deep `rdfs:subPropertyOf` chain `P0 ⊑ P1 ⊑ … ⊑ P_DEPTH`.
 fn subproperty_chain(depth: usize) -> Vec<Triple> {
     (0..depth)
-        .map(|i| triple(&format!("<{EX}P{i}> <{RDFS_SUB_PROPERTY_OF}> <{EX}P{}> .", i + 1)))
+        .map(|i| {
+            triple(&format!(
+                "<{EX}P{i}> <{RDFS_SUB_PROPERTY_OF}> <{EX}P{}> .",
+                i + 1
+            ))
+        })
         .collect()
 }
 
@@ -80,7 +90,9 @@ fn parse(q: &str) -> Query {
 
 fn run_subclass(depth: usize) {
     let tbox = subclass_chain(depth);
-    let query = parse(&format!("SELECT ?x WHERE {{ ?x <{RDF_TYPE}> <{EX}C{depth}> }}"));
+    let query = parse(&format!(
+        "SELECT ?x WHERE {{ ?x <{RDF_TYPE}> <{EX}C{depth}> }}"
+    ));
     let t = Instant::now();
     let r = rewrite(&query, &tbox).expect("subclass chain CQ is in QL scope");
     let dt = secs(t);
@@ -127,7 +139,9 @@ fn run_subproperty(depth: usize) {
 /// unsoundness bug to collapse incomparable disjuncts) and not a no-op stub.
 fn run_production(depth: usize) {
     let tbox = subclass_chain(depth);
-    let query = parse(&format!("SELECT ?x WHERE {{ ?x <{RDF_TYPE}> <{EX}C{depth}> }}"));
+    let query = parse(&format!(
+        "SELECT ?x WHERE {{ ?x <{RDF_TYPE}> <{EX}C{depth}> }}"
+    ));
     let t = Instant::now();
     let r = rewrite_production(&query, &tbox).expect("subclass chain CQ is in QL scope");
     let dt = secs(t);
@@ -232,7 +246,9 @@ fn realistic_corpus() -> Vec<(&'static str, &'static str, &'static str, usize)> 
 /// Profile the realistic corpus + the adversarial ceiling probes and assert the closed forms. The
 /// realistic distribution is the load-bearing datum for the sq-pbz04.3.5 non-adoption verdict.
 fn run_corpus_profile() {
-    println!("\n[sq-pbz04.3.5] combined-approach evaluate-first — minimised-UCQ profile (deterministic)");
+    println!(
+        "\n[sq-pbz04.3.5] combined-approach evaluate-first — minimised-UCQ profile (deterministic)"
+    );
 
     // (1) Realistic corpus: every case is asserted to its hand-verified closed form, and the
     //     whole distribution is bucketed. The load-bearing claim: NOTHING blows up.
@@ -280,15 +296,38 @@ fn run_corpus_profile() {
         let ttl = format!("{} {}", chain_ttl("C", k), chain_ttl("D", k));
         let body = format!("SELECT ?x WHERE {{ ?x a :C{} . ?x a :D{} }}", k, k);
         let m = min_ucq(&ttl, &body);
-        assert_eq!(m, (k + 1) * (k + 1), "product-2 k={} UCQ {} != (k+1)^2", k, m);
+        assert_eq!(
+            m,
+            (k + 1) * (k + 1),
+            "product-2 k={} UCQ {} != (k+1)^2",
+            k,
+            m
+        );
         println!("  ceiling product(2 atoms, depth {}): UCQ {} = (k+1)^2 (incomparable — minimisation cannot help)", k, m);
     }
     for k in [2usize, 3] {
-        let ttl = format!("{} {} {}", chain_ttl("C", k), chain_ttl("D", k), chain_ttl("E", k));
-        let body = format!("SELECT ?x WHERE {{ ?x a :C{} . ?x a :D{} . ?x a :E{} }}", k, k, k);
+        let ttl = format!(
+            "{} {} {}",
+            chain_ttl("C", k),
+            chain_ttl("D", k),
+            chain_ttl("E", k)
+        );
+        let body = format!(
+            "SELECT ?x WHERE {{ ?x a :C{} . ?x a :D{} . ?x a :E{} }}",
+            k, k, k
+        );
         let m = min_ucq(&ttl, &body);
-        assert_eq!(m, (k + 1) * (k + 1) * (k + 1), "product-3 k={} UCQ {} != (k+1)^3", k, m);
-        println!("  ceiling product(3 atoms, depth {}): UCQ {} = (k+1)^3", k, m);
+        assert_eq!(
+            m,
+            (k + 1) * (k + 1) * (k + 1),
+            "product-3 k={} UCQ {} != (k+1)^3",
+            k,
+            m
+        );
+        println!(
+            "  ceiling product(3 atoms, depth {}): UCQ {} = (k+1)^3",
+            k, m
+        );
     }
     println!(
         "  VERDICT: realistic UCQ <= 4; blow-up needs multi-atom CQs over independent deep \

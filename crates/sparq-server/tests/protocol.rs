@@ -148,8 +148,14 @@ async fn negotiate_tsv() {
     let body = resp.text().await.unwrap();
     assert!(body.starts_with("?s\t?a\n"));
     // sq-u79ee: SPARQL Results TSV abbreviates xsd:integer to its bare Turtle token.
-    assert!(body.lines().any(|l| l.ends_with("\t30")), "integer not abbreviated: {body}");
-    assert!(!body.contains("\"30\"^^"), "integer should not be quoted+typed: {body}");
+    assert!(
+        body.lines().any(|l| l.ends_with("\t30")),
+        "integer not abbreviated: {body}"
+    );
+    assert!(
+        !body.contains("\"30\"^^"),
+        "integer should not be quoted+typed: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +201,11 @@ async fn ask_xml() {
         resp.headers()["content-type"],
         "application/sparql-results+xml"
     );
-    assert!(resp.text().await.unwrap().contains("<boolean>true</boolean>"));
+    assert!(resp
+        .text()
+        .await
+        .unwrap()
+        .contains("<boolean>true</boolean>"));
 }
 
 // ---------------------------------------------------------------------------
@@ -312,9 +322,17 @@ async fn streamed_select_json_is_byte_identical() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let advertised: usize = resp.headers()["content-length"].to_str().unwrap().parse().unwrap();
+    let advertised: usize = resp.headers()["content-length"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     let body = resp.text().await.unwrap();
-    assert_eq!(body.len(), advertised, "Content-Length must match the streamed body");
+    assert_eq!(
+        body.len(),
+        advertised,
+        "Content-Length must match the streamed body"
+    );
     // Exactly the engine's single-string serialisation.
     let expect = sparq_engine::query_json(&Graph::load_str(DATA, "turtle").unwrap(), q).unwrap();
     assert_eq!(body, expect);
@@ -416,14 +434,20 @@ async fn sparql_update_insert_then_query() {
     let body = cl
         .get(format!("{base}/sparql"))
         .header("accept", "application/sparql-results+json")
-        .query(&[("query", "SELECT ?o WHERE { <http://ex/newS> <http://ex/newP> ?o }")])
+        .query(&[(
+            "query",
+            "SELECT ?o WHERE { <http://ex/newS> <http://ex/newP> ?o }",
+        )])
         .send()
         .await
         .unwrap()
         .text()
         .await
         .unwrap();
-    assert!(body.contains("http://ex/newO"), "inserted object should be queryable: {body}");
+    assert!(
+        body.contains("http://ex/newO"),
+        "inserted object should be queryable: {body}"
+    );
 
     // A malformed update is a 400.
     let bad = cl
@@ -525,7 +549,11 @@ async fn gsp_put_then_get_roundtrip_named() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 201, "first PUT into an absent graph must be 201 Created");
+    assert_eq!(
+        put.status(),
+        201,
+        "first PUT into an absent graph must be 201 Created"
+    );
 
     // GET it back via the indirect form.
     let get = cl
@@ -535,11 +563,22 @@ async fn gsp_put_then_get_roundtrip_named() {
         .unwrap();
     assert_eq!(get.status(), 200);
     let got = get.text().await.unwrap();
-    assert!(got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."), "round-trip lost the triple: {got:?}");
+    assert!(
+        got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."),
+        "round-trip lost the triple: {got:?}"
+    );
 
     // The triple must NOT bleed into the default graph.
-    let def = cl.get(format!("{base}/sparql/graph?default")).send().await.unwrap();
-    assert_eq!(def.text().await.unwrap().trim(), "", "named-graph PUT leaked into the default graph");
+    let def = cl
+        .get(format!("{base}/sparql/graph?default"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        def.text().await.unwrap().trim(),
+        "",
+        "named-graph PUT leaked into the default graph"
+    );
 }
 
 /// A second PUT REPLACES the graph contents (not a merge) and returns 204 (graph existed).
@@ -553,7 +592,10 @@ async fn gsp_put_replaces_existing_204() {
         cl.put(format!("{base}/sparql/graph?graph={g}"))
             .header("content-type", "text/turtle")
             .body("<http://ex/a> <http://ex/p> <http://ex/1> .")
-            .send().await.unwrap().status(),
+            .send()
+            .await
+            .unwrap()
+            .status(),
         201
     );
     // Replace with a different triple.
@@ -564,11 +606,28 @@ async fn gsp_put_replaces_existing_204() {
         .send()
         .await
         .unwrap();
-    assert_eq!(second.status(), 204, "PUT replacing an existing graph must be 204");
+    assert_eq!(
+        second.status(),
+        204,
+        "PUT replacing an existing graph must be 204"
+    );
 
-    let got = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap().text().await.unwrap();
-    assert!(got.contains("<http://ex/b>"), "replaced content missing: {got:?}");
-    assert!(!got.contains("<http://ex/a>"), "PUT must REPLACE, not merge: {got:?}");
+    let got = cl
+        .get(format!("{base}/sparql/graph?graph={g}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        got.contains("<http://ex/b>"),
+        "replaced content missing: {got:?}"
+    );
+    assert!(
+        !got.contains("<http://ex/a>"),
+        "PUT must REPLACE, not merge: {got:?}"
+    );
 }
 
 /// POST MERGES (additive) into a graph; two POSTs accumulate.
@@ -583,7 +642,9 @@ async fn gsp_post_merges_additive() {
         .post(format!("{base}/sparql/graph?graph={g}"))
         .header("content-type", "application/n-triples")
         .body("<http://ex/s1> <http://ex/p> <http://ex/o1> .")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(p1.status(), 201);
 
     // Second POST adds to it → 204 (graph now exists).
@@ -591,11 +652,23 @@ async fn gsp_post_merges_additive() {
         .post(format!("{base}/sparql/graph?graph={g}"))
         .header("content-type", "application/n-triples")
         .body("<http://ex/s2> <http://ex/p> <http://ex/o2> .")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(p2.status(), 204);
 
-    let got = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap().text().await.unwrap();
-    assert!(got.contains("<http://ex/s1>") && got.contains("<http://ex/s2>"), "POST must accumulate both triples: {got:?}");
+    let got = cl
+        .get(format!("{base}/sparql/graph?graph={g}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        got.contains("<http://ex/s1>") && got.contains("<http://ex/s2>"),
+        "POST must accumulate both triples: {got:?}"
+    );
 }
 
 /// DELETE drops a graph; a follow-up GET serialises it as empty, and a second DELETE 404s.
@@ -608,18 +681,32 @@ async fn gsp_delete_then_get_and_404() {
     cl.put(format!("{base}/sparql/graph?graph={g}"))
         .header("content-type", "application/n-triples")
         .body("<http://ex/s> <http://ex/p> <http://ex/o> .")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
-    let del = cl.delete(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap();
+    let del = cl
+        .delete(format!("{base}/sparql/graph?graph={g}"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(del.status(), 204, "DELETE of an existing graph must be 204");
 
     // GET the now-dropped graph → 200, empty body (GSP read serves the empty graph).
-    let get = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap();
+    let get = cl
+        .get(format!("{base}/sparql/graph?graph={g}"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200);
     assert_eq!(get.text().await.unwrap().trim(), "");
 
     // Second DELETE of the now-absent graph → 404.
-    let del2 = cl.delete(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap();
+    let del2 = cl
+        .delete(format!("{base}/sparql/graph?graph={g}"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(del2.status(), 404, "DELETE of an absent graph must be 404");
 }
 
@@ -634,15 +721,45 @@ async fn gsp_default_graph_write_and_delete() {
         .post(format!("{base}/sparql/graph?default"))
         .header("content-type", "application/n-triples")
         .body("<http://ex/extra> <http://ex/p> <http://ex/v> .")
-        .send().await.unwrap();
-    assert!(post.status() == 204 || post.status() == 201, "default-graph POST status: {}", post.status());
-    let got = cl.get(format!("{base}/sparql/graph?default")).send().await.unwrap().text().await.unwrap();
-    assert!(got.contains("<http://ex/extra>"), "default-graph POST not visible: {got:?}");
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        post.status() == 204 || post.status() == 201,
+        "default-graph POST status: {}",
+        post.status()
+    );
+    let got = cl
+        .get(format!("{base}/sparql/graph?default"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        got.contains("<http://ex/extra>"),
+        "default-graph POST not visible: {got:?}"
+    );
 
     // DELETE (CLEAR DEFAULT) empties it → 204; the default graph always exists.
-    let del = cl.delete(format!("{base}/sparql/graph?default")).send().await.unwrap();
+    let del = cl
+        .delete(format!("{base}/sparql/graph?default"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(del.status(), 204);
-    assert_eq!(cl.get(format!("{base}/sparql/graph?default")).send().await.unwrap().text().await.unwrap().trim(), "");
+    assert_eq!(
+        cl.get(format!("{base}/sparql/graph?default"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+            .trim(),
+        ""
+    );
 }
 
 /// Content negotiation by Content-Type: a Turtle body parses; an N-Quads body folds its
@@ -658,10 +775,22 @@ async fn gsp_write_content_negotiation() {
         .put(format!("{base}/sparql/graph?graph={g}"))
         .header("content-type", "text/turtle")
         .body("@prefix ex: <http://ex/> . ex:s ex:p ex:o .")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(put.status(), 201);
-    let got = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap().text().await.unwrap();
-    assert!(got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."), "turtle body not parsed: {got:?}");
+    let got = cl
+        .get(format!("{base}/sparql/graph?graph={g}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."),
+        "turtle body not parsed: {got:?}"
+    );
 }
 
 /// A malformed RDF body is a 400 (the body is parsed/validated before any write).
@@ -672,7 +801,9 @@ async fn gsp_malformed_body_is_400() {
         .put(format!("{base}/sparql/graph?graph=http://ex/bad"))
         .header("content-type", "text/turtle")
         .body("this is not turtle <<< ]")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 400);
 }
 
@@ -684,7 +815,9 @@ async fn gsp_unsupported_media_type_is_415() {
         .put(format!("{base}/sparql/graph?graph=http://ex/x"))
         .header("content-type", "application/json")
         .body("{}")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 415);
 }
 
@@ -699,11 +832,23 @@ async fn gsp_put_direct_then_get_direct() {
         .put(format!("{base}/graphs/team/alpha"))
         .header("content-type", "application/n-triples")
         .body("<http://ex/s> <http://ex/p> <http://ex/o> .")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(put.status(), 201);
 
-    let got = cl.get(format!("{base}/graphs/team/alpha")).send().await.unwrap().text().await.unwrap();
-    assert!(got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."), "direct round-trip lost the triple: {got:?}");
+    let got = cl
+        .get(format!("{base}/graphs/team/alpha"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."),
+        "direct round-trip lost the triple: {got:?}"
+    );
 }
 
 /// A selector-less POST to the GSP endpoint creates a fresh, server-named graph (GSP §5.5):
@@ -716,16 +861,33 @@ async fn gsp_post_no_selector_creates_fresh_graph() {
         .post(format!("{base}/sparql/graph"))
         .header("content-type", "application/n-triples")
         .body("<http://ex/fresh> <http://ex/p> <http://ex/o> .")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 201, "selector-less POST must create a fresh graph (201)");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        201,
+        "selector-less POST must create a fresh graph (201)"
+    );
 
     // The triple lives in SOME named graph now — visible via a GRAPH ?g query.
     let q = cl
         .get(format!("{base}/sparql"))
-        .query(&[("query", "SELECT ?g WHERE { GRAPH ?g { <http://ex/fresh> ?p ?o } }")])
-        .send().await.unwrap().text().await.unwrap();
-    assert!(q.contains("\"bindings\"") && q.contains("http://ex/fresh") || q.matches("urn:sparq:gsp").count() >= 1,
-        "fresh-graph triple not queryable: {q}");
+        .query(&[(
+            "query",
+            "SELECT ?g WHERE { GRAPH ?g { <http://ex/fresh> ?p ?o } }",
+        )])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        q.contains("\"bindings\"") && q.contains("http://ex/fresh")
+            || q.matches("urn:sparq:gsp").count() >= 1,
+        "fresh-graph triple not queryable: {q}"
+    );
 }
 
 /// An unsupported method (not GET/HEAD/PUT/POST/DELETE/PATCH) on a graph resource is a 405 with an
@@ -736,8 +898,13 @@ async fn gsp_post_no_selector_creates_fresh_graph() {
 async fn gsp_unsupported_method_is_405_with_allow() {
     let base = spawn().await;
     let resp = client()
-        .request(reqwest::Method::OPTIONS, format!("{base}/sparql/graph?default"))
-        .send().await.unwrap();
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{base}/sparql/graph?default"),
+        )
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 405);
     let allow = resp.headers()["allow"].to_str().unwrap();
     assert!(
@@ -757,12 +924,19 @@ async fn gsp_unsupported_method_is_405_with_allow() {
 async fn gsp_patch_is_handled_not_405() {
     let base = spawn().await;
     let resp = client()
-        .request(reqwest::Method::PATCH, format!("{base}/sparql/graph?default"))
+        .request(
+            reqwest::Method::PATCH,
+            format!("{base}/sparql/graph?default"),
+        )
         .body("anything")
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 415, "PATCH is handled (415 unsupported body), not 405");
+    assert_eq!(
+        resp.status(),
+        415,
+        "PATCH is handled (415 unsupported body), not 405"
+    );
 }
 
 #[tokio::test]
@@ -811,7 +985,10 @@ async fn spawn_dataset() -> String {
 /// Counts SELECT `?s ?p ?o` solution rows in a SPARQL-JSON body.
 fn json_row_count(body: &str) -> usize {
     let v: serde_json::Value = serde_json::from_str(body).unwrap();
-    v["results"]["bindings"].as_array().map(|a| a.len()).unwrap_or(0)
+    v["results"]["bindings"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0)
 }
 
 /// `default-graph-uri=g1` re-scopes the active default graph to ONLY g1's triple — the store's
@@ -844,8 +1021,14 @@ async fn default_graph_uri_rescopes_active_dataset() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert_eq!(json_row_count(&body), 1);
-    assert!(body.contains("http://ex/in_g1"), "expected g1's triple, got {body}");
-    assert!(!body.contains("in_default"), "store default graph must drop out: {body}");
+    assert!(
+        body.contains("http://ex/in_g1"),
+        "expected g1's triple, got {body}"
+    );
+    assert!(
+        !body.contains("in_default"),
+        "store default graph must drop out: {body}"
+    );
 }
 
 /// Two `default-graph-uri` values merge into the active default graph (g1 ∪ g2 = 2 triples).
@@ -908,7 +1091,10 @@ async fn protocol_override_replaces_in_query_from() {
     let resp = client()
         .get(format!("{base}/sparql"))
         .query(&[
-            ("query", "SELECT ?s ?p ?o FROM <http://ex/g2> WHERE { ?s ?p ?o }"),
+            (
+                "query",
+                "SELECT ?s ?p ?o FROM <http://ex/g2> WHERE { ?s ?p ?o }",
+            ),
             ("default-graph-uri", "http://ex/g1"),
         ])
         .send()
@@ -916,8 +1102,14 @@ async fn protocol_override_replaces_in_query_from() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("http://ex/in_g1"), "override (g1) must win over in-query FROM g2: {body}");
-    assert!(!body.contains("in_g2"), "in-query FROM g2 must be replaced: {body}");
+    assert!(
+        body.contains("http://ex/in_g1"),
+        "override (g1) must win over in-query FROM g2: {body}"
+    );
+    assert!(
+        !body.contains("in_g2"),
+        "in-query FROM g2 must be replaced: {body}"
+    );
 }
 
 /// The override also applies on the url-encoded POST form (body-carried params).
@@ -933,7 +1125,10 @@ async fn default_graph_uri_via_post_form() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("http://ex/in_g1"), "POST-form override must re-scope: {body}");
+    assert!(
+        body.contains("http://ex/in_g1"),
+        "POST-form override must re-scope: {body}"
+    );
 }
 
 /// A `default-graph-uri` that is not a valid absolute IRI is a 400 (caller-input validation).
@@ -973,13 +1168,22 @@ async fn using_graph_uri_rescopes_update_where() {
     // The marker must reference g1's object, proving the WHERE read g1, not the store default.
     let q = cl
         .get(format!("{base}/sparql"))
-        .query(&[("query", "SELECT ?o WHERE { <http://ex/marker> <http://ex/saw> ?o }")])
+        .query(&[(
+            "query",
+            "SELECT ?o WHERE { <http://ex/marker> <http://ex/saw> ?o }",
+        )])
         .send()
         .await
         .unwrap();
     let body = q.text().await.unwrap();
-    assert!(body.contains("http://ex/in_g1"), "USING g1 must re-scope the WHERE: {body}");
-    assert!(!body.contains("in_default"), "WHERE must NOT read the store default graph: {body}");
+    assert!(
+        body.contains("http://ex/in_g1"),
+        "USING g1 must re-scope the WHERE: {body}"
+    );
+    assert!(
+        !body.contains("in_default"),
+        "WHERE must NOT read the store default graph: {body}"
+    );
 }
 
 /// Per §2.2 it is an error to supply `using-graph-uri` alongside an in-update `USING` clause: 400.
@@ -996,7 +1200,11 @@ async fn using_graph_uri_conflict_with_in_update_using_is_400() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400, "USING + using-graph-uri must be a protocol error");
+    assert_eq!(
+        resp.status(),
+        400,
+        "USING + using-graph-uri must be a protocol error"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,7 +1235,11 @@ async fn gsp_put_rdfxml_then_get_rdfxml_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 201, "first PUT of an RDF/XML body into an absent graph must be 201");
+    assert_eq!(
+        put.status(),
+        201,
+        "first PUT of an RDF/XML body into an absent graph must be 201"
+    );
 
     // GET it back, asking for RDF/XML.
     let get = cl
@@ -1037,20 +1249,46 @@ async fn gsp_put_rdfxml_then_get_rdfxml_roundtrip() {
         .await
         .unwrap();
     assert_eq!(get.status(), 200);
-    assert_eq!(get.headers()["content-type"], "application/rdf+xml; charset=utf-8");
+    assert_eq!(
+        get.headers()["content-type"],
+        "application/rdf+xml; charset=utf-8"
+    );
     let body = get.text().await.unwrap();
-    assert!(body.contains("<?xml"), "RDF/XML response must be a real XML document: {body}");
-    assert!(body.contains("rdf:RDF"), "RDF/XML response must have an rdf:RDF root: {body}");
+    assert!(
+        body.contains("<?xml"),
+        "RDF/XML response must be a real XML document: {body}"
+    );
+    assert!(
+        body.contains("rdf:RDF"),
+        "RDF/XML response must have an rdf:RDF root: {body}"
+    );
 
     // The recovered RDF/XML must re-parse to exactly the inserted triple.
     let triples = sparq_server::graph::parse_rdfxml(body.as_bytes(), None).unwrap();
-    assert_eq!(triples.len(), 1, "RDF/XML round-trip must preserve the single triple: {body}");
+    assert_eq!(
+        triples.len(),
+        1,
+        "RDF/XML round-trip must preserve the single triple: {body}"
+    );
     assert_eq!(triples[0].subject.to_string(), "<http://ex/alice>");
-    assert_eq!(triples[0].predicate.as_str(), "http://xmlns.com/foaf/0.1/name");
+    assert_eq!(
+        triples[0].predicate.as_str(),
+        "http://xmlns.com/foaf/0.1/name"
+    );
 
     // And it must also be readable as N-Triples (default Accept) — same one triple.
-    let nt = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap().text().await.unwrap();
-    assert!(nt.contains("<http://ex/alice> <http://xmlns.com/foaf/0.1/name> \"Alice\" ."), "N-Triples view lost the triple: {nt}");
+    let nt = cl
+        .get(format!("{base}/sparql/graph?graph={g}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        nt.contains("<http://ex/alice> <http://xmlns.com/foaf/0.1/name> \"Alice\" ."),
+        "N-Triples view lost the triple: {nt}"
+    );
 }
 
 /// A malformed `application/rdf+xml` body is a 400 (parsed/validated before any write).
@@ -1083,12 +1321,22 @@ async fn construct_negotiates_rdfxml() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.headers()["content-type"], "application/rdf+xml; charset=utf-8");
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/rdf+xml; charset=utf-8"
+    );
     let body = resp.text().await.unwrap();
-    assert!(body.contains("<?xml") && body.contains("rdf:RDF"), "not RDF/XML: {body}");
+    assert!(
+        body.contains("<?xml") && body.contains("rdf:RDF"),
+        "not RDF/XML: {body}"
+    );
     // Three subjects have ex:age in DATA → three constructed triples.
     let triples = sparq_server::graph::parse_rdfxml(body.as_bytes(), None).unwrap();
-    assert_eq!(triples.len(), 3, "RDF/XML CONSTRUCT result must carry all three triples: {body}");
+    assert_eq!(
+        triples.len(),
+        3,
+        "RDF/XML CONSTRUCT result must carry all three triples: {body}"
+    );
 }
 
 /// CONSTRUCT with `Accept: text/turtle` returns PREFIX-COMPACTING Turtle (a real `@prefix`
@@ -1112,8 +1360,14 @@ async fn construct_turtle_is_prefix_compacting() {
     assert_eq!(resp.headers()["content-type"], "text/turtle; charset=utf-8");
     let body = resp.text().await.unwrap();
     // A genuine Turtle document declares prefixes and uses the compact form.
-    assert!(body.contains("@prefix owl:"), "Turtle must declare the owl prefix: {body}");
-    assert!(body.contains("owl:Thing"), "Turtle must compact the owl: IRI: {body}");
+    assert!(
+        body.contains("@prefix owl:"),
+        "Turtle must declare the owl prefix: {body}"
+    );
+    assert!(
+        body.contains("owl:Thing"),
+        "Turtle must compact the owl: IRI: {body}"
+    );
     // And it must still load as Turtle to the same triple count.
     assert_eq!(Graph::load_str(&body, "turtle").unwrap().len(), 3);
 }
@@ -1124,17 +1378,30 @@ async fn gsp_read_negotiates_rdfxml() {
     let base = spawn().await; // pre-populated default graph (DATA)
     let resp = client()
         .get(format!("{base}/sparql/graph?default"))
-        .header("accept", "application/rdf+xml;q=0.9, application/n-triples;q=0.5")
+        .header(
+            "accept",
+            "application/rdf+xml;q=0.9, application/n-triples;q=0.5",
+        )
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.headers()["content-type"], "application/rdf+xml; charset=utf-8");
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/rdf+xml; charset=utf-8"
+    );
     let body = resp.text().await.unwrap();
-    assert!(body.contains("rdf:RDF"), "GSP RDF/XML read must be RDF/XML: {body}");
+    assert!(
+        body.contains("rdf:RDF"),
+        "GSP RDF/XML read must be RDF/XML: {body}"
+    );
     // The default graph (DATA): alice(knows/age/name)=3, bob(age/name)=2, carol(age)=1 → 6.
     let triples = sparq_server::graph::parse_rdfxml(body.as_bytes(), None).unwrap();
-    assert_eq!(triples.len(), 6, "GSP RDF/XML read must carry every default-graph triple: {body}");
+    assert_eq!(
+        triples.len(),
+        6,
+        "GSP RDF/XML read must carry every default-graph triple: {body}"
+    );
 }
 
 /// A Turtle body PUT round-trips through an RDF/XML GET (cross-format): write Turtle, read
@@ -1160,9 +1427,16 @@ async fn gsp_put_turtle_get_rdfxml_cross_format() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.headers()["content-type"], "application/rdf+xml; charset=utf-8");
+    assert_eq!(
+        get.headers()["content-type"],
+        "application/rdf+xml; charset=utf-8"
+    );
     let body = get.text().await.unwrap();
     let triples = sparq_server::graph::parse_rdfxml(body.as_bytes(), None).unwrap();
-    assert_eq!(triples.len(), 1, "cross-format round-trip lost the triple: {body}");
+    assert_eq!(
+        triples.len(),
+        1,
+        "cross-format round-trip lost the triple: {body}"
+    );
     assert_eq!(triples[0].object.to_string(), "<http://ex/o>");
 }

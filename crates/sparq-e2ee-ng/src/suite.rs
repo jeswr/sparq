@@ -52,7 +52,13 @@ pub fn aead_seal(
 ) -> Vec<u8> {
     let cipher = XChaCha20Poly1305::new(key.into());
     cipher
-        .encrypt(XNonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .encrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         // XChaCha20-Poly1305 encryption is infallible for in-bounds inputs.
         .expect("aead seal")
 }
@@ -67,6 +73,12 @@ pub fn aead_open(
 ) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(key.into());
     cipher
-        .decrypt(XNonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| Error::Decrypt)
 }

@@ -1647,10 +1647,14 @@ impl DisclosedTerm {
     pub fn to_term(&self) -> Option<oxrdf::Term> {
         const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
         match self {
-            DisclosedTerm::Iri { value } => {
-                oxrdf::NamedNode::new(value).ok().map(oxrdf::Term::NamedNode)
-            }
-            DisclosedTerm::Literal { value, datatype, language } => {
+            DisclosedTerm::Iri { value } => oxrdf::NamedNode::new(value)
+                .ok()
+                .map(oxrdf::Term::NamedNode),
+            DisclosedTerm::Literal {
+                value,
+                datatype,
+                language,
+            } => {
                 let lit = match (datatype.as_deref(), language.as_deref()) {
                     (Some(dt), Some(_)) if dt != RDF_LANG_STRING => return None,
                     (_, Some(lang)) => {
@@ -2784,12 +2788,12 @@ mod join_schema_tests {
     /// declaration order. If the Noir `main` reorders, this constant and the
     /// reconstruction arm must move together.
     const JOIN_EQ_PUBLIC_INPUT_LAYOUT: &[&str] = &[
-        "challenge",        // field 0 — every member's first `pub` (verifier nonce)
-        "commit_a",         // graph-A commitment C(G_a)
-        "commit_b",         // graph-B commitment C(G_b)
-        "join_commitment",  // HIDING commitment to the join value (design §2.4)
-        "slot_a",           // graph-A join slot in {0,1,2} (query-bound)
-        "slot_b",           // graph-B join slot in {0,1,2} (query-bound)
+        "challenge",       // field 0 — every member's first `pub` (verifier nonce)
+        "commit_a",        // graph-A commitment C(G_a)
+        "commit_b",        // graph-B commitment C(G_b)
+        "join_commitment", // HIDING commitment to the join value (design §2.4)
+        "slot_a",          // graph-A join slot in {0,1,2} (query-bound)
+        "slot_b",          // graph-B join slot in {0,1,2} (query-bound)
     ];
 
     fn join_inputs() -> ProofInputs {
@@ -2821,7 +2825,10 @@ mod join_schema_tests {
         // The id round-trips through serde with its `kind` tag like every variant.
         let id = CircuitId::JoinEq { n_a: 16, n_b: 16 };
         let json = serde_json::to_string(&id).expect("serializes");
-        assert!(json.contains("join_eq"), "snake_case `kind` tag is `join_eq`");
+        assert!(
+            json.contains("join_eq"),
+            "snake_case `kind` tag is `join_eq`"
+        );
         let back: CircuitId = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, id, "CircuitId::JoinEq round-trips");
     }
@@ -2880,7 +2887,11 @@ mod join_schema_tests {
         m2.join_edges = vec![edge.clone()];
         let json = serde_json::to_string(&m2).expect("serializes");
         let back: ProofManifest = serde_json::from_str(&json).expect("deserializes");
-        assert_eq!(back.join_edges, vec![edge], "manifest join_edges round-trip");
+        assert_eq!(
+            back.join_edges,
+            vec![edge],
+            "manifest join_edges round-trip"
+        );
     }
 
     /// The `ProofInputs::JoinEq` field set is EXACTLY the public inputs the Noir
@@ -2890,7 +2901,13 @@ mod join_schema_tests {
     #[test]
     fn join_eq_field_ordering_matches_circuit_layout() {
         // The struct fields, in declaration order, that are PUBLIC inputs.
-        let struct_pub_fields = ["commit_a", "commit_b", "join_commitment", "slot_a", "slot_b"];
+        let struct_pub_fields = [
+            "commit_a",
+            "commit_b",
+            "join_commitment",
+            "slot_a",
+            "slot_b",
+        ];
         // The circuit layout minus field 0 (`challenge`, carried by `binding`).
         let circuit_after_challenge = &JOIN_EQ_PUBLIC_INPUT_LAYOUT[1..];
         assert_eq!(
@@ -2953,12 +2970,34 @@ mod canonical_edge_tests {
         }
     }
 
-    fn binding_edge(from_proof: usize, from_row: usize, from_slot: usize, to_proof: usize) -> BindingEdge {
-        BindingEdge { from_proof, from_row, from_slot, to_proof }
+    fn binding_edge(
+        from_proof: usize,
+        from_row: usize,
+        from_slot: usize,
+        to_proof: usize,
+    ) -> BindingEdge {
+        BindingEdge {
+            from_proof,
+            from_row,
+            from_slot,
+            to_proof,
+        }
     }
 
-    fn join_edge(scan_a: usize, graph_a: usize, scan_b: usize, graph_b: usize, join_proof: usize) -> JoinEdge {
-        JoinEdge { scan_a, graph_a, scan_b, graph_b, join_proof }
+    fn join_edge(
+        scan_a: usize,
+        graph_a: usize,
+        scan_b: usize,
+        graph_b: usize,
+        join_proof: usize,
+    ) -> JoinEdge {
+        JoinEdge {
+            scan_a,
+            graph_a,
+            scan_b,
+            graph_b,
+            join_proof,
+        }
     }
 
     /// `canonicalize` sorts `binding_edges` to ascending
@@ -2996,8 +3035,14 @@ mod canonical_edge_tests {
         let mut b = manifest_with_edges(order_y, vec![]);
         a.canonicalize();
         b.canonicalize();
-        assert_eq!(a.binding_edges, expected, "binding_edges sort to the tuple order");
-        assert_eq!(a.binding_edges, b.binding_edges, "order-independent canonical form");
+        assert_eq!(
+            a.binding_edges, expected,
+            "binding_edges sort to the tuple order"
+        );
+        assert_eq!(
+            a.binding_edges, b.binding_edges,
+            "order-independent canonical form"
+        );
 
         // Idempotent: a second canonicalise is a no-op.
         let once = a.binding_edges.clone();
@@ -3035,7 +3080,10 @@ mod canonical_edge_tests {
         a.canonicalize();
         b.canonicalize();
         assert_eq!(a.join_edges, expected, "join_edges sort to the tuple order");
-        assert_eq!(a.join_edges, b.join_edges, "order-independent canonical form");
+        assert_eq!(
+            a.join_edges, b.join_edges,
+            "order-independent canonical form"
+        );
     }
 
     /// `to_json` canonicalises BOTH edge vectors before serialising, WITHOUT
@@ -3044,14 +3092,8 @@ mod canonical_edge_tests {
     /// same hash over those bytes).
     #[test]
     fn to_json_is_byte_identical_regardless_of_edge_insertion_order() {
-        let binding_x = vec![
-            binding_edge(1, 0, 0, 5),
-            binding_edge(0, 0, 0, 3),
-        ];
-        let joins_x = vec![
-            join_edge(1, 0, 2, 0, 6),
-            join_edge(0, 0, 1, 0, 4),
-        ];
+        let binding_x = vec![binding_edge(1, 0, 0, 5), binding_edge(0, 0, 0, 3)];
+        let joins_x = vec![join_edge(1, 0, 2, 0, 6), join_edge(0, 0, 1, 0, 4)];
         // Reverse BOTH vectors.
         let binding_y: Vec<_> = binding_x.iter().rev().cloned().collect();
         let joins_y: Vec<_> = joins_x.iter().rev().cloned().collect();
@@ -3061,7 +3103,10 @@ mod canonical_edge_tests {
 
         let json_x = m_x.to_json();
         let json_y = m_y.to_json();
-        assert_eq!(json_x, json_y, "edge-order-only difference => identical canonical JSON");
+        assert_eq!(
+            json_x, json_y,
+            "edge-order-only difference => identical canonical JSON"
+        );
 
         // to_json does NOT mutate self (canonicalises a clone): the in-memory
         // manifest keeps its original (unsorted) edge order.
@@ -3124,7 +3169,10 @@ mod path_schema_tests {
     #[test]
     fn path_reach_inputs_round_trip_and_expose_the_id() {
         let inputs = path_inputs();
-        assert_eq!(inputs.circuit_id(), &CircuitId::PathReach { d: 4, k: 2, n: 16 });
+        assert_eq!(
+            inputs.circuit_id(),
+            &CircuitId::PathReach { d: 4, k: 2, n: 16 }
+        );
         let json = serde_json::to_string(&inputs).expect("serializes");
         let back: ProofInputs = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, inputs, "ProofInputs::PathReach round-trips");
@@ -3141,7 +3189,9 @@ mod path_schema_tests {
             scan_rows: vec![0, 1],
             solution: vec![SolutionBinding {
                 var: "o".to_string(),
-                term: DisclosedTerm::Iri { value: "http://ex/b".to_string() },
+                term: DisclosedTerm::Iri {
+                    value: "http://ex/b".to_string(),
+                },
             }],
         };
         let json = serde_json::to_string(&bw).expect("serializes");
@@ -3163,13 +3213,25 @@ mod path_schema_tests {
     fn disclosed_term_to_term_builds_iris_and_literal_shapes() {
         // IRI.
         assert_eq!(
-            DisclosedTerm::Iri { value: "http://ex/a".into() }.to_term(),
-            Some(oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://ex/a").unwrap()))
+            DisclosedTerm::Iri {
+                value: "http://ex/a".into()
+            }
+            .to_term(),
+            Some(oxrdf::Term::NamedNode(
+                oxrdf::NamedNode::new("http://ex/a").unwrap()
+            ))
         );
         // Plain literal.
         assert_eq!(
-            DisclosedTerm::Literal { value: "x".into(), datatype: None, language: None }.to_term(),
-            Some(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal("x")))
+            DisclosedTerm::Literal {
+                value: "x".into(),
+                datatype: None,
+                language: None
+            }
+            .to_term(),
+            Some(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal(
+                "x"
+            )))
         );
         // Typed literal.
         assert_eq!(
@@ -3186,15 +3248,25 @@ mod path_schema_tests {
         );
         // Language-tagged literal.
         assert_eq!(
-            DisclosedTerm::Literal { value: "x".into(), datatype: None, language: Some("en".into()) }
-                .to_term(),
+            DisclosedTerm::Literal {
+                value: "x".into(),
+                datatype: None,
+                language: Some("en".into())
+            }
+            .to_term(),
             Some(oxrdf::Term::Literal(
                 oxrdf::Literal::new_language_tagged_literal("x", "en").unwrap()
             ))
         );
         // Fail-closed: an unparseable IRI, a bad datatype, a bad language tag, and
         // a language + non-langString datatype all return None.
-        assert_eq!(DisclosedTerm::Iri { value: "not an iri".into() }.to_term(), None);
+        assert_eq!(
+            DisclosedTerm::Iri {
+                value: "not an iri".into()
+            }
+            .to_term(),
+            None
+        );
         assert_eq!(
             DisclosedTerm::Literal {
                 value: "x".into(),
@@ -3228,10 +3300,15 @@ mod path_schema_tests {
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
             derivation_steps: vec![],
-            binding: BindingMode::Challenge { challenge: fh("0x2a") },
+            binding: BindingMode::Challenge {
+                challenge: fh("0x2a"),
+            },
             revocation: None,
             status_snapshots: vec![],
-            sub_proofs: vec![SubProof { inputs: path_inputs(), proof_hex: String::new() }],
+            sub_proofs: vec![SubProof {
+                inputs: path_inputs(),
+                proof_hex: String::new(),
+            }],
             binding_edges: vec![],
             join_edges: vec![],
             hidden_revocation: None,

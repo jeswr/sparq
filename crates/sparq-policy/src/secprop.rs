@@ -167,36 +167,36 @@ pub const REQUIRES_ASSURANCE: &str = "https://w3id.org/zkp-sparql/sec-prop#requi
 // in "the dimension this leftOperand ranges over" — but they now resolve to one
 // string, so `DIM_SOUNDNESS` and `sparq_trust::secprop::SECX_SOUNDNESS` cannot drift.
 
-/// `secx:UnlinkabilityScope` dimension.
-pub use sparq_secprop_vocab::SECX_UNLINKABILITY_SCOPE as DIM_UNLINKABILITY_SCOPE;
-/// `secx:UnlinkabilityStrength` dimension.
-pub use sparq_secprop_vocab::SECX_UNLINKABILITY_STRENGTH as DIM_UNLINKABILITY_STRENGTH;
-/// `secx:PostQuantumForgery` dimension (a vendored `sec-prop:` property).
-pub use sparq_secprop_vocab::SEC_PROP_POST_QUANTUM_FORGERY as DIM_POST_QUANTUM_FORGERY;
-/// `secx:PostQuantumSnooping` dimension (a vendored `sec-prop:` property).
-pub use sparq_secprop_vocab::SEC_PROP_POST_QUANTUM_SNOOPING as DIM_POST_QUANTUM_SNOOPING;
-/// `secx:ZeroKnowledgeType` dimension.
-pub use sparq_secprop_vocab::SECX_ZERO_KNOWLEDGE_TYPE as DIM_ZERO_KNOWLEDGE_TYPE;
-/// `secx:Soundness` dimension.
-pub use sparq_secprop_vocab::SECX_SOUNDNESS as DIM_SOUNDNESS;
+/// `secx:Anonymity` dimension.
+pub use sparq_secprop_vocab::SECX_ANONYMITY as DIM_ANONYMITY;
+/// `secx:AssuranceLevel` dimension (the epistemic-basis axis — design §4.2.2).
+pub use sparq_secprop_vocab::SECX_ASSURANCE_LEVEL as DIM_ASSURANCE_LEVEL;
+/// `secx:Binding` dimension.
+pub use sparq_secprop_vocab::SECX_BINDING as DIM_BINDING;
 /// `secx:Completeness` dimension.
 pub use sparq_secprop_vocab::SECX_COMPLETENESS as DIM_COMPLETENESS;
 /// `secx:Hiding` dimension.
 pub use sparq_secprop_vocab::SECX_HIDING as DIM_HIDING;
-/// `secx:Binding` dimension.
-pub use sparq_secprop_vocab::SECX_BINDING as DIM_BINDING;
-/// `secx:Anonymity` dimension.
-pub use sparq_secprop_vocab::SECX_ANONYMITY as DIM_ANONYMITY;
-/// `secx:SelectiveDisclosure` dimension.
-pub use sparq_secprop_vocab::SECX_SELECTIVE_DISCLOSURE as DIM_SELECTIVE_DISCLOSURE;
-/// `secx:SingleUse` dimension.
-pub use sparq_secprop_vocab::SECX_SINGLE_USE as DIM_SINGLE_USE;
-/// `secx:Setup` dimension.
-pub use sparq_secprop_vocab::SECX_SETUP as DIM_SETUP;
 /// `secx:Interactivity` dimension.
 pub use sparq_secprop_vocab::SECX_INTERACTIVITY as DIM_INTERACTIVITY;
-/// `secx:AssuranceLevel` dimension (the epistemic-basis axis — design §4.2.2).
-pub use sparq_secprop_vocab::SECX_ASSURANCE_LEVEL as DIM_ASSURANCE_LEVEL;
+/// `secx:SelectiveDisclosure` dimension.
+pub use sparq_secprop_vocab::SECX_SELECTIVE_DISCLOSURE as DIM_SELECTIVE_DISCLOSURE;
+/// `secx:Setup` dimension.
+pub use sparq_secprop_vocab::SECX_SETUP as DIM_SETUP;
+/// `secx:SingleUse` dimension.
+pub use sparq_secprop_vocab::SECX_SINGLE_USE as DIM_SINGLE_USE;
+/// `secx:Soundness` dimension.
+pub use sparq_secprop_vocab::SECX_SOUNDNESS as DIM_SOUNDNESS;
+/// `secx:UnlinkabilityScope` dimension.
+pub use sparq_secprop_vocab::SECX_UNLINKABILITY_SCOPE as DIM_UNLINKABILITY_SCOPE;
+/// `secx:UnlinkabilityStrength` dimension.
+pub use sparq_secprop_vocab::SECX_UNLINKABILITY_STRENGTH as DIM_UNLINKABILITY_STRENGTH;
+/// `secx:ZeroKnowledgeType` dimension.
+pub use sparq_secprop_vocab::SECX_ZERO_KNOWLEDGE_TYPE as DIM_ZERO_KNOWLEDGE_TYPE;
+/// `secx:PostQuantumForgery` dimension (a vendored `sec-prop:` property).
+pub use sparq_secprop_vocab::SEC_PROP_POST_QUANTUM_FORGERY as DIM_POST_QUANTUM_FORGERY;
+/// `secx:PostQuantumSnooping` dimension (a vendored `sec-prop:` property).
+pub use sparq_secprop_vocab::SEC_PROP_POST_QUANTUM_SNOOPING as DIM_POST_QUANTUM_SNOOPING;
 
 /// The complete `(leftOperand, dimension)` map of the sparq security-property
 /// profile — one entry per requireable dimension, in declaration order. The **single
@@ -653,7 +653,11 @@ mod tests {
         );
 
         let obligations = requirement.obligations();
-        assert_eq!(obligations.len(), 1, "only the secx: constraint is an obligation");
+        assert_eq!(
+            obligations.len(),
+            1,
+            "only the secx: constraint is an obligation"
+        );
         let o = obligations[0];
         assert_eq!(o.rule, "urn:rule:1");
         assert_eq!(o.deontic, Deontic::Permission);
@@ -782,7 +786,10 @@ mod tests {
             xone,
             DischargeExpr::All(vec![DischargeExpr::ExactlyOne(expected_leaves)]),
         );
-        assert_ne!(and, or, "an `or` of alternatives is not an `and` of mandates");
+        assert_ne!(
+            and, or,
+            "an `or` of alternatives is not an `and` of mandates"
+        );
         assert_ne!(or, xone, "exactly-one is not at-least-one");
 
         // …while the NON-decisional flat inventory is identical for all three — which
@@ -868,7 +875,10 @@ mod tests {
             DischargeExpr::All(ops) => ops.iter().all(|o| holds(o, context, established)),
             DischargeExpr::Any(ops) => ops.iter().any(|o| holds(o, context, established)),
             DischargeExpr::ExactlyOne(ops) => {
-                ops.iter().filter(|o| holds(o, context, established)).count() == 1
+                ops.iter()
+                    .filter(|o| holds(o, context, established))
+                    .count()
+                    == 1
             }
         }
     }

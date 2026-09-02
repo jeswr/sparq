@@ -493,7 +493,10 @@ mod serialize {
     fn serialize_turtle_no_abbreviate() {
         let store = Store::load(DATA, "turtle").unwrap();
         let ttl = store.serialize("turtle", true, None, false, None).unwrap();
-        assert!(!ttl.contains("@prefix"), "no header when abbreviate=false: {ttl}");
+        assert!(
+            !ttl.contains("@prefix"),
+            "no header when abbreviate=false: {ttl}"
+        );
         assert!(ttl.contains("<http://ex/alice>"), "full IRIs: {ttl}");
     }
 
@@ -503,7 +506,10 @@ mod serialize {
         let nq = "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g1> .\n";
         let store = Store::load_dataset(nq, "nquads").unwrap();
         let trig = store.serialize("trig", true, None, true, None).unwrap();
-        assert!(trig.contains("GRAPH"), "named graph as a GRAPH block: {trig}");
+        assert!(
+            trig.contains("GRAPH"),
+            "named graph as a GRAPH block: {trig}"
+        );
     }
 
     /// An unknown format string surfaces as the `JsError` Err arm across the boundary, not
@@ -525,10 +531,10 @@ mod serialize {
     /// the JS boundary, not just natively. Exercises all three forms.
     #[wasm_bindgen_test]
     fn serialize_jsonld_pretty_matches_engine() {
+        use sparq_core::Graph;
         use sparq_engine::serialize::{
             default_prefixes, graph_to_jsonld_pretty_with, JsonLdForm, JsonLdPrettyOptions,
         };
-        use sparq_core::Graph;
         let store = Store::load(DATA, "turtle").unwrap();
         let g = Graph::load_str(DATA, "turtle").unwrap();
         let opts = JsonLdPrettyOptions {
@@ -544,7 +550,10 @@ mod serialize {
                 .serialize(fmt, true, Some("  ".to_string()), true, None)
                 .unwrap();
             let want = graph_to_jsonld_pretty_with(&g, form, &default_prefixes(), &opts);
-            assert_eq!(got, want, "wasm pretty JSON-LD ({fmt}) must equal the engine output");
+            assert_eq!(
+                got, want,
+                "wasm pretty JSON-LD ({fmt}) must equal the engine output"
+            );
             assert!(got.contains('\n'), "pretty JSON-LD is indented: {got}");
         }
         // The compacted form carries a prefix `@context`; expanded does not — a quick
@@ -552,7 +561,10 @@ mod serialize {
         let compacted = store
             .serialize("jsonld-compacted", true, None, true, None)
             .unwrap();
-        assert!(compacted.contains("@context"), "compacted has @context: {compacted}");
+        assert!(
+            compacted.contains("@context"),
+            "compacted has @context: {compacted}"
+        );
     }
 
     // ---- [OPUS-4.8] sq-l5kr: the OPTIONAL caller-supplied prefix map, in real wasm ----
@@ -590,7 +602,13 @@ mod serialize {
 
         // Pretty Turtle through the binding with the custom map.
         let got = store
-            .serialize("turtle", true, Some("  ".to_string()), true, Some(prefixes.clone()))
+            .serialize(
+                "turtle",
+                true,
+                Some("  ".to_string()),
+                true,
+                Some(prefixes.clone()),
+            )
             .unwrap();
         // Byte-for-byte equal to the engine writer fed the SAME pair list.
         let g = Graph::load_str(data, "turtle").unwrap();
@@ -599,7 +617,10 @@ mod serialize {
             ("schema", "https://schema.org/"),
         ]);
         let want = graph_to_turtle_pretty_with(&g, &map, &PrettyOptions::default());
-        assert_eq!(got, want, "wasm prefix-map Turtle must equal the engine output:\n{got}");
+        assert_eq!(
+            got, want,
+            "wasm prefix-map Turtle must equal the engine output:\n{got}"
+        );
         // The new capability: example.org abbreviates and the HTTPS schema is used.
         assert!(got.contains("ex:x"), "ex:x abbreviated: {got}");
         assert!(got.contains("ex:p"), "ex:p abbreviated: {got}");
@@ -608,15 +629,24 @@ mod serialize {
             got.contains("@prefix schema: <https://schema.org/> ."),
             "HTTPS schema namespace in header: {got}"
         );
-        assert!(!got.contains("http://schema.org/"), "no default HTTP schema: {got}");
+        assert!(
+            !got.contains("http://schema.org/"),
+            "no default HTTP schema: {got}"
+        );
 
         // The same custom policy reaches the JSON-LD compacted `@context`.
         let jc = store
             .serialize("jsonld-compacted", false, None, true, Some(prefixes))
             .unwrap();
         let jc_want = graph_to_jsonld_with(&g, JsonLdForm::Compacted, &map);
-        assert_eq!(jc, jc_want, "wasm prefix-map JSON-LD must equal the engine output:\n{jc}");
-        assert!(jc.contains("\"schema\":\"https://schema.org/\""), "@context https schema: {jc}");
+        assert_eq!(
+            jc, jc_want,
+            "wasm prefix-map JSON-LD must equal the engine output:\n{jc}"
+        );
+        assert!(
+            jc.contains("\"schema\":\"https://schema.org/\""),
+            "@context https schema: {jc}"
+        );
 
         // `None` (omitted) keeps using the engine defaults — back-compat across the boundary:
         // `http://example.org/` is NOT a default prefix, so those IRIs stay full `<…>`.
@@ -637,7 +667,9 @@ mod serialize {
         let bad = js_sys::Array::new();
         bad.push(&JsValue::from_str("not-a-pair"));
         assert!(
-            store.serialize("turtle", true, None, true, Some(bad)).is_err(),
+            store
+                .serialize("turtle", true, None, true, Some(bad))
+                .is_err(),
             "a malformed prefixes entry must return Err, not panic or silently drop"
         );
     }
@@ -661,24 +693,42 @@ mod serialize {
         let ctx_text = r#"{"@vocab":"http://schema.org/"}"#;
         // The pretty form is multi-line (the indenter inserts a space after each colon, so
         // the exact no-space substrings are asserted on the MINIFIED doc below).
-        let got = store.serialize_compact(ctx_text, true, Some("  ".to_string())).unwrap();
+        let got = store
+            .serialize_compact(ctx_text, true, Some("  ".to_string()))
+            .unwrap();
         assert!(got.contains('\n'), "pretty compaction is multi-line: {got}");
         let ctx = parse_context_json(ctx_text).unwrap();
         // Minified parity with the engine writer across the JS boundary + the @vocab shape.
         let minified = store.serialize_compact(ctx_text, false, None).unwrap();
-        assert!(minified.contains("\"@vocab\":\"http://schema.org/\""), "context echoed: {minified}");
-        assert!(minified.contains("\"name\":"), "predicate is @vocab-relative bare term: {minified}");
-        assert_eq!(minified, graph_to_jsonld_compact(&g, &ctx), "wasm compaction == engine");
+        assert!(
+            minified.contains("\"@vocab\":\"http://schema.org/\""),
+            "context echoed: {minified}"
+        );
+        assert!(
+            minified.contains("\"name\":"),
+            "predicate is @vocab-relative bare term: {minified}"
+        );
+        assert_eq!(
+            minified,
+            graph_to_jsonld_compact(&g, &ctx),
+            "wasm compaction == engine"
+        );
         // A non-object context surfaces as the Err arm across the boundary, not a trap.
         assert!(
-            store.serialize_compact("[\"not an object\"]", false, None).is_err(),
+            store
+                .serialize_compact("[\"not an object\"]", false, None)
+                .is_err(),
             "a malformed @context must Err",
         );
         // Round-trip: the compacted doc re-parses to the same triple count (jsonld ingest).
         #[cfg(feature = "jsonld")]
         {
             let reparsed = Graph::load_str(&minified, "jsonld").unwrap();
-            assert_eq!(reparsed.len(), store.size(), "compaction round-trips to the same triples");
+            assert_eq!(
+                reparsed.len(),
+                store.size(),
+                "compaction round-trips to the same triples"
+            );
         }
     }
 }
@@ -885,7 +935,10 @@ shapeClass ex:Person {
         let store = Store::load("", "turtle").unwrap();
         // An unterminated shape block is a parse error.
         let bad = store.parse_shacl_compact("shape <#S> {\n", None);
-        assert!(bad.is_err(), "a malformed SCS document must return Err, not panic");
+        assert!(
+            bad.is_err(),
+            "a malformed SCS document must return Err, not panic"
+        );
     }
 }
 
@@ -1009,7 +1062,10 @@ mod bytes_ingest {
         let got = via_bytes.query(q).unwrap();
         assert_eq!(got, via_str.query(q).unwrap(), "multi-byte JSON equal");
         // The CJK + emoji literals really crossed the byte boundary intact.
-        assert!(got.contains("\u{65e5}\u{672c}\u{8a9e}"), "CJK literal preserved: {got}");
+        assert!(
+            got.contains("\u{65e5}\u{672c}\u{8a9e}"),
+            "CJK literal preserved: {got}"
+        );
         assert!(got.contains("\u{1f980}"), "emoji literal preserved: {got}");
     }
 
@@ -1026,7 +1082,10 @@ mod bytes_ingest {
         let q = "SELECT ?s ?o WHERE { ?s <http://ex/dir/p> ?o }";
         let got = via_bytes.query(q).unwrap();
         assert_eq!(got, via_str.query(q).unwrap());
-        assert!(got.contains("http://ex/dir/a"), "base resolved the relative subject: {got}");
+        assert!(
+            got.contains("http://ex/dir/a"),
+            "base resolved the relative subject: {got}"
+        );
     }
 
     /// Invalid UTF-8 input fails CLOSED: an `Err` (JsError) across the boundary, never a
@@ -1089,7 +1148,8 @@ mod forms {
     /// document the wasm binding must return verbatim.
     fn direct_description(mode: sparq_forms::Mode, shape: Option<&str>) -> String {
         let data = sparq_core::Graph::load_dataset(FORM_DATA, "turtle").expect("data fixture");
-        let shapes = sparq_core::Graph::load_dataset(FORM_SHAPES, "turtle").expect("shapes fixture");
+        let shapes =
+            sparq_core::Graph::load_dataset(FORM_SHAPES, "turtle").expect("shapes fixture");
         let focus = oxrdf::Term::from(oxrdf::NamedNode::new_unchecked("http://example.org/alice"));
         let options = sparq_forms::FormOptions {
             mode,

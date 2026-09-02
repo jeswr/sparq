@@ -62,7 +62,11 @@ fn generate_u1_oracle_fail_closed() {
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
     // Every expected decision in the WAC lane must match the oracle.
-    for ed in ds.expected_decisions.iter().filter(|e| e.model == sparq_acbench::AcModel::Wac) {
+    for ed in ds
+        .expected_decisions
+        .iter()
+        .filter(|e| e.model == sparq_acbench::AcModel::Wac)
+    {
         let oracle_result = oracle_wac(&ed.request, &ds.intents);
         assert_eq!(
             oracle_result, ed.decision,
@@ -89,7 +93,7 @@ fn generate_u1_oracle_fail_closed() {
 #[test]
 fn owner_wac_shadowed_by_nearest_acl_while_acp_inherits() {
     use sparq_acbench::{
-        oracle_acp, oracle_wac, personal, AccessMode, AcModel, Audience, Decision, GenParams,
+        oracle_acp, oracle_wac, personal, AcModel, AccessMode, Audience, Decision, GenParams,
         Request, Scope,
     };
     let params = GenParams::smoke();
@@ -104,7 +108,10 @@ fn owner_wac_shadowed_by_nearest_acl_while_acp_inherits() {
         .audience
     {
         Audience::Agent(a) => a.clone(),
-        other => panic!("U1's pod-root subtree grant must be an Agent audience, got {:?}", other),
+        other => panic!(
+            "U1's pod-root subtree grant must be an Agent audience, got {:?}",
+            other
+        ),
     };
     let owner_audience = Audience::Agent(owner_uri.clone());
 
@@ -151,17 +158,24 @@ fn owner_wac_shadowed_by_nearest_acl_while_acp_inherits() {
             mode: AccessMode::read_only(),
         };
 
-        let want_wac = if names_owner { Decision::Allow } else { Decision::Deny };
+        let want_wac = if names_owner {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        };
         assert_eq!(
             oracle_wac(&req, &ds.intents),
             want_wac,
-            "WAC nearest-ACL: resource {} own-ACL-names-owner={}", resource_uri, names_owner
+            "WAC nearest-ACL: resource {} own-ACL-names-owner={}",
+            resource_uri,
+            names_owner
         );
         // ACP accumulates the pod-root ancestor grant, so the owner is allowed regardless.
         assert_eq!(
             oracle_acp(&req, &ds.intents),
             Decision::Allow,
-            "ACP cumulative inheritance must still allow the owner on {}", resource_uri
+            "ACP cumulative inheritance must still allow the owner on {}",
+            resource_uri
         );
 
         if names_owner {
@@ -200,7 +214,7 @@ fn owner_wac_shadowed_by_nearest_acl_while_acp_inherits() {
 /// non-public resources (fail-closed default).
 #[test]
 fn unknown_agent_denied_on_private_resources() {
-    use sparq_acbench::{AccessMode, AcModel, Decision, personal, GenParams, Request};
+    use sparq_acbench::{personal, AcModel, AccessMode, Decision, GenParams, Request};
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
 
@@ -210,9 +224,7 @@ fn unknown_agent_denied_on_private_resources() {
         .expected_decisions
         .iter()
         .filter(|e| {
-            e.model == AcModel::Wac
-                && e.request.agent == unknown
-                && e.decision == Decision::Deny
+            e.model == AcModel::Wac && e.request.agent == unknown && e.decision == Decision::Deny
         })
         .count();
 
@@ -228,7 +240,10 @@ fn unknown_agent_denied_on_private_resources() {
         .filter(|e| e.model == AcModel::Wac && e.request.agent == unknown)
     {
         let oracle = sparq_acbench::oracle_wac(&ed.request, &ds.intents);
-        assert_eq!(oracle, ed.decision, "Oracle mismatch for unknown agent request");
+        assert_eq!(
+            oracle, ed.decision,
+            "Oracle mismatch for unknown agent request"
+        );
     }
 
     // Also verify: an explicit request for an unlisted resource URI returns Deny.
@@ -294,7 +309,7 @@ fn w2_fixtures_present() {
 #[test]
 fn expressibility_matrix_client_restricted() {
     use sparq_acbench::{
-        personal, AcModel, Audience, AccessMode, Condition, Effect, Expressibility, GenParams,
+        personal, AcModel, AccessMode, Audience, Condition, Effect, Expressibility, GenParams,
         IntentRow, Scope,
     };
     // Build a minimal ClientRestricted intent row to probe the expressibility matrix.
@@ -339,7 +354,7 @@ fn expressibility_matrix_client_restricted() {
 #[test]
 fn expressibility_matrix_group() {
     use sparq_acbench::{
-        personal, AcModel, Audience, AccessMode, Condition, Effect, Expressibility, GenParams,
+        personal, AcModel, AccessMode, Audience, Condition, Effect, Expressibility, GenParams,
         IntentRow, Scope,
     };
     let row = IntentRow {
@@ -387,7 +402,11 @@ fn generate_u1_oracle_acp_round_trip() {
     use sparq_acbench::{oracle_acp, personal, AcModel, GenParams};
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
-    for ed in ds.expected_decisions.iter().filter(|e| e.model == AcModel::Acp) {
+    for ed in ds
+        .expected_decisions
+        .iter()
+        .filter(|e| e.model == AcModel::Acp)
+    {
         let oracle_result = oracle_acp(&ed.request, &ds.intents);
         assert_eq!(
             oracle_result, ed.decision,
@@ -403,7 +422,11 @@ fn generate_u1_oracle_odrl_round_trip() {
     use sparq_acbench::{oracle_odrl, personal, AcModel, GenParams};
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
-    for ed in ds.expected_decisions.iter().filter(|e| e.model == AcModel::Odrl) {
+    for ed in ds
+        .expected_decisions
+        .iter()
+        .filter(|e| e.model == AcModel::Odrl)
+    {
         let oracle_result = oracle_odrl(&ed.request, &ds.intents);
         assert_eq!(
             oracle_result, ed.decision,

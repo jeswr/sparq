@@ -311,12 +311,17 @@ fn push_group_projection_clause_by_output_var_membership() {
     assert_eq!(a.sub.project, Vec::<String>::new());
     // (b) output_vars names ONLY a var the group does NOT produce ⇒ project the group's own
     // vars (?s ?o), NOT `*`. Under `&&`→`||` this wrongly becomes `SELECT *`.
-    let b = push_group(&group, &bgp, &cap, &["absent".to_string()], &[], &[], None).expect("pushes");
+    let b =
+        push_group(&group, &bgp, &cap, &["absent".to_string()], &[], &[], None).expect("pushes");
     assert_eq!(
         b.sub.sparql, "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }",
         "output_vars naming no group var ⇒ project the group's vars, never SELECT *"
     );
-    assert_eq!(b.sub.project, Vec::<String>::new(), "no group var is in output_vars");
+    assert_eq!(
+        b.sub.project,
+        Vec::<String>::new(),
+        "no group var is in output_vars"
+    );
     // (c) output_vars names a produced var ⇒ project exactly it.
     let c = push_group(&group, &bgp, &cap, &["o".to_string()], &[], &[], None).expect("pushes");
     assert_eq!(c.sub.sparql, "SELECT ?o WHERE { ?s <http://ex/p> ?o }");
@@ -483,7 +488,10 @@ fn egress_guard_is_allowed_and_port_scoping() {
     assert!(guard.is_allowed_port("open.example", 80));
     assert!(guard.is_allowed_port("open.example", 65535));
     // Port-scoped entry: exactly that port, no other.
-    assert!(guard.is_allowed("scoped.example"), "on the list at SOME port");
+    assert!(
+        guard.is_allowed("scoped.example"),
+        "on the list at SOME port"
+    );
     assert!(guard.is_allowed_port("scoped.example", 8443));
     assert!(!guard.is_allowed_port("scoped.example", 8444));
     // Absent host: nothing.
@@ -759,7 +767,8 @@ mod loopback {
     use super::*;
     use sparq_fedclient::discovery::{Fetcher, HttpFetcher};
     use sparq_fedclient::{
-        FragPattern, FragmentTransport, HttpFragmentTransport, HttpTransport, PatternTerm, Transport,
+        FragPattern, FragmentTransport, HttpFragmentTransport, HttpTransport, PatternTerm,
+        Transport,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -784,9 +793,7 @@ mod loopback {
                         Ok(0) | Err(_) => break None,
                         Ok(n) => {
                             req.extend_from_slice(&buf[..n]);
-                            if let Some(pos) =
-                                req.windows(4).position(|w| w == b"\r\n\r\n")
-                            {
+                            if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
                                 break Some(pos + 4);
                             }
                         }

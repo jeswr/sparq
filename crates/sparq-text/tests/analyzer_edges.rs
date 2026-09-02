@@ -49,7 +49,11 @@ fn nfc_and_nfd_are_distinct_tokens() {
     // is a conscious, tested decision.
     let nfc = "café"; // precomposed
     let nfd = "cafe\u{0301}"; // decomposed
-    assert_ne!(tokenize(nfc), tokenize(nfd), "NFC and NFD must not collapse");
+    assert_ne!(
+        tokenize(nfc),
+        tokenize(nfd),
+        "NFC and NFD must not collapse"
+    );
 
     let g = graph_of(&[&format!(r#""{nfc}""#), &format!(r#""{nfd}""#)]);
     let idx = TextIndex::build(&g);
@@ -75,7 +79,10 @@ fn cjk_han_splits_per_ideograph() {
     let idx = TextIndex::build(&g);
     // A single-ideograph query "京" hits every document containing that char.
     // (`values` sorts by Rust string order = codepoint: 京 < 北 < 東.)
-    assert_eq!(values(&g, &idx.search("京")), ["京都府", "北京市", "東京都に住む"]);
+    assert_eq!(
+        values(&g, &idx.search("京")),
+        ["京都府", "北京市", "東京都に住む"]
+    );
     // A multi-char CJK term is the AND of its ideographs (co-occurrence, any order).
     // "東" and "都" both occur only in the first doc.
     assert_eq!(values(&g, &idx.search("東都")), ["東京都に住む"]);
@@ -146,10 +153,10 @@ fn punctuation_at_phrase_boundaries() {
     // adjacent phrase NOR create spurious adjacency. "quick, brown" tokenizes to
     // ["quick","brown"] and a doc "quick brown" matches it.
     let g = graph_of(&[
-        r#""quick brown fox""#,        // clean
-        r#""quick, brown! fox.""#,     // heavy punctuation between every word
-        r#""quick — brown — dog""#,    // em-dash separators
-        r#""quickbrown fox""#,         // joined: ONE token "quickbrown", no "quick"/"brown"
+        r#""quick brown fox""#,     // clean
+        r#""quick, brown! fox.""#,  // heavy punctuation between every word
+        r#""quick — brown — dog""#, // em-dash separators
+        r#""quickbrown fox""#,      // joined: ONE token "quickbrown", no "quick"/"brown"
     ]);
     let idx = TextIndex::build_with_positions(&g);
 
@@ -171,7 +178,14 @@ fn punctuation_at_phrase_boundaries() {
     // Expected list is in byte-lexicographic order (how `Vec<String>::sort` orders them):
     // index 5 is space(0x20) < comma(0x2C), so the comma doc sorts LAST; between the two
     // space docs, 'b'(0x62) < the em-dash's leading UTF-8 byte(0xE2). [OPUS-4.8]
-    assert_eq!(vals, ["quick brown fox", "quick — brown — dog", "quick, brown! fox."]);
+    assert_eq!(
+        vals,
+        [
+            "quick brown fox",
+            "quick — brown — dog",
+            "quick, brown! fox."
+        ]
+    );
 
     // A phrase query with leading/trailing/embedded punctuation tokenizes the
     // same way and matches identically. Sort BOTH id lists before comparing so the
@@ -215,7 +229,11 @@ fn delete_then_readd_leaves_no_orphan_postings() {
     //    the document, since the dictionary still holds the literal id).
     graph.apply_delta(&[], &ins).unwrap();
     idx.apply_delta(&graph, &[], &ins);
-    assert_eq!(idx, TextIndex::build(&graph), "incremental == rebuilt after delete");
+    assert_eq!(
+        idx,
+        TextIndex::build(&graph),
+        "incremental == rebuilt after delete"
+    );
 
     // 3. Re-add the SAME literal (a new triple with the same object). The literal
     //    id is unchanged (dict retains it), so this must NOT create a duplicate
@@ -230,14 +248,22 @@ fn delete_then_readd_leaves_no_orphan_postings() {
     idx.apply_delta(&graph, &readd, &[]);
 
     let hits = idx.search("quick fox");
-    assert_eq!(hits.len(), 1, "exactly one document after delete-then-readd");
+    assert_eq!(
+        hits.len(),
+        1,
+        "exactly one document after delete-then-readd"
+    );
     assert_eq!(
         values(&graph, &hits),
         ["the quick brown fox"],
         "the deleted+readded document returns the correct hit"
     );
     // No orphan/duplicate posting: token frequency is what a fresh rebuild has.
-    assert_eq!(idx, TextIndex::build(&graph), "incremental == rebuilt after readd");
+    assert_eq!(
+        idx,
+        TextIndex::build(&graph),
+        "incremental == rebuilt after readd"
+    );
 
     // The literal occupies a single dictionary document throughout (no orphan id
     // proliferation): the only indexed doc is the one literal.
@@ -251,7 +277,9 @@ fn delete_then_readd_leaves_no_orphan_postings() {
 fn churned_delete_readd_matches_rebuild() {
     let p = Term::NamedNode(NamedNode::new_unchecked("http://ex/p"));
     let lit = |v: &str| Term::Literal(Literal::new_simple_literal(v));
-    let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
+    let words = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    ];
 
     let mut graph = Graph::load_str("", "ntriples").unwrap();
     let mut idx = TextIndex::build(&graph);
@@ -285,6 +313,10 @@ fn churned_delete_readd_matches_rebuild() {
         assert_eq!(hits.len(), 1, "word {w:?} should resolve to one document");
         assert_eq!(values(&graph, &hits), [w.to_string()]);
     }
-    assert_eq!(idx, TextIndex::build(&graph), "incremental == rebuilt after churn");
+    assert_eq!(
+        idx,
+        TextIndex::build(&graph),
+        "incremental == rebuilt after churn"
+    );
     assert_eq!(idx.len() as Id, words.len() as Id);
 }

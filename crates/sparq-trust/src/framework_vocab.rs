@@ -427,7 +427,10 @@ mod tests {
             "https://sparq.dev/ns/trust#TrustRequirements"
         );
         assert_eq!(TRUSTX_QUESTION, "https://sparq.dev/ns/trust#question");
-        assert_eq!(TRUSTX_TRUSTS_ISSUER, "https://sparq.dev/ns/trust#trustsIssuer");
+        assert_eq!(
+            TRUSTX_TRUSTS_ISSUER,
+            "https://sparq.dev/ns/trust#trustsIssuer"
+        );
         assert_eq!(
             TRUSTX_TRUSTS_FRAMEWORK,
             "https://sparq.dev/ns/trust#trustsFramework"
@@ -440,13 +443,19 @@ mod tests {
             TRUSTX_REQUIRES_VALID_STATUS_AT,
             "https://sparq.dev/ns/trust#requiresValidStatusAt"
         );
-        assert_eq!(TRUSTX_METHOD_POLICY, "https://sparq.dev/ns/trust#methodPolicy");
+        assert_eq!(
+            TRUSTX_METHOD_POLICY,
+            "https://sparq.dev/ns/trust#methodPolicy"
+        );
     }
 
     #[test]
     fn certification_scope_iris_are_stable() {
         assert_eq!(TRUSTX_FRAMEWORK, "https://sparq.dev/ns/trust#Framework");
-        assert_eq!(TRUSTX_CERTIFICATION, "https://sparq.dev/ns/trust#Certification");
+        assert_eq!(
+            TRUSTX_CERTIFICATION,
+            "https://sparq.dev/ns/trust#Certification"
+        );
         assert_eq!(TRUSTX_CERTIFIES, "https://sparq.dev/ns/trust#certifies");
         assert_eq!(
             TRUSTX_UNDER_FRAMEWORK,
@@ -492,7 +501,10 @@ mod tests {
     fn framework_individual_iris_are_stable() {
         assert_eq!(TRUSTX_EIDAS2, "https://sparq.dev/ns/trust#eIDAS2");
         assert_eq!(TRUSTX_DIATF, "https://sparq.dev/ns/trust#DIATF");
-        assert_eq!(SEC_REQ_EIDAS20, "https://w3id.org/zkp-sparql/sec-req#Eidas20");
+        assert_eq!(
+            SEC_REQ_EIDAS20,
+            "https://w3id.org/zkp-sparql/sec-req#Eidas20"
+        );
         assert_eq!(SEC_REQ_UK_DVS, "https://w3id.org/zkp-sparql/sec-req#UkDvs");
     }
 

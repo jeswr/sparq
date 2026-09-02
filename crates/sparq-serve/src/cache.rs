@@ -260,9 +260,7 @@ impl Validity {
     /// Is an entry recorded with this validity still fresh against the live state?
     fn is_fresh(&self, epochs: &PodEpochs, generation: u64) -> bool {
         match self {
-            Validity::Pods(recorded) => recorded
-                .iter()
-                .all(|(pod, e)| epochs.epoch(pod) == *e),
+            Validity::Pods(recorded) => recorded.iter().all(|(pod, e)| epochs.epoch(pod) == *e),
             Validity::Generation(g) => *g == generation,
         }
     }
@@ -364,8 +362,12 @@ impl LeadGuard {
     /// own use (so the caller writes its response from the shared `Arc`).
     pub fn fulfill(mut self, bytes: Bytes, epochs: &PodEpochs, generation: u64) -> Bytes {
         let validity = self.cache.validity_for(&self.footprint, epochs, generation);
-        self.cache
-            .complete_lease(&self.key, &self.lease, bytes.clone(), Some((validity, &bytes)));
+        self.cache.complete_lease(
+            &self.key,
+            &self.lease,
+            bytes.clone(),
+            Some((validity, &bytes)),
+        );
         self.fulfilled = true;
         bytes
     }
@@ -584,11 +586,9 @@ impl ResultCache {
     /// Derives the [`Validity`] record for a footprint against the live state.
     fn validity_for(&self, footprint: &Footprint, epochs: &PodEpochs, generation: u64) -> Validity {
         match footprint {
-            Footprint::Pods(pods) => Validity::Pods(
-                pods.iter()
-                    .map(|p| (p.clone(), epochs.epoch(p)))
-                    .collect(),
-            ),
+            Footprint::Pods(pods) => {
+                Validity::Pods(pods.iter().map(|p| (p.clone(), epochs.epoch(p))).collect())
+            }
             Footprint::Unbounded => Validity::Generation(generation),
         }
     }
@@ -686,15 +686,16 @@ impl ResultCache {
 
     /// True if no body is cached.
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().expect("result cache poisoned").map.is_empty()
+        self.inner
+            .lock()
+            .expect("result cache poisoned")
+            .map
+            .is_empty()
     }
 
     /// Current total bytes held by cached bodies (≤ `max_bytes`).
     pub fn bytes_used(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("result cache poisoned")
-            .bytes_used
+        self.inner.lock().expect("result cache poisoned").bytes_used
     }
 
     /// Snapshot of the measurement counters (§6.3 hit-rate instrumentation).

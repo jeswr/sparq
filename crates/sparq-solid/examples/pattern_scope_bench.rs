@@ -37,7 +37,12 @@ fn best_of<T>(n: usize, mut f: impl FnMut() -> T) -> (f64, T) {
 }
 
 fn main() {
-    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let alice = Session {
+        agent: Some(ALICE),
+        client: None,
+        issuer: None,
+        now: None,
+    };
     let mut rows = Vec::new();
 
     for extra in [0usize, 20, 50] {
@@ -63,19 +68,31 @@ fn main() {
         let (scoped_build_ms, scoped) =
             best_of(3, || store.scoped_dataset(&alice, Mode::Read, &scopes));
 
-        let (view_query_ms, view_rows) =
-            best_of(5, || store.query_as(&alice, Mode::Read, Q).unwrap().rows.len());
-        let (replica_query_ms, replica_rows) =
-            best_of(5, || scoped.query(Q).unwrap().rows.len());
-        let (view_scan_ms, _) =
-            best_of(5, || store.query_as(&alice, Mode::Read, Q_ALL).unwrap().rows.len());
+        let (view_query_ms, view_rows) = best_of(5, || {
+            store.query_as(&alice, Mode::Read, Q).unwrap().rows.len()
+        });
+        let (replica_query_ms, replica_rows) = best_of(5, || scoped.query(Q).unwrap().rows.len());
+        let (view_scan_ms, _) = best_of(5, || {
+            store
+                .query_as(&alice, Mode::Read, Q_ALL)
+                .unwrap()
+                .rows
+                .len()
+        });
         let (replica_scan_ms, _) = best_of(5, || scoped.query(Q_ALL).unwrap().rows.len());
 
         assert_eq!(replica_rows, 0, "masked replica must hold no title triples");
-        assert!(view_rows > 0, "the unmasked view path must see title triples");
+        assert!(
+            view_rows > 0,
+            "the unmasked view path must see title triples"
+        );
 
         let saving = view_scan_ms - replica_scan_ms;
-        let breakeven = if saving > 0.0 { (scoped_build_ms / saving).ceil() } else { -1.0 };
+        let breakeven = if saving > 0.0 {
+            (scoped_build_ms / saving).ceil()
+        } else {
+            -1.0
+        };
         rows.push(format!(
             "    {{\"extra\": {extra}, \"quads\": {quads}, \"scoped_build_ms\": {scoped_build_ms:.3}, \
              \"view_query_ms\": {view_query_ms:.3}, \"replica_query_ms\": {replica_query_ms:.3}, \

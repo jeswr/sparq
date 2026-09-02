@@ -72,9 +72,16 @@ pub fn triples_to_turtle(triples: &[Triple]) -> String {
         // `with_prefix` only fails on a syntactically invalid prefix IRI; ours are constants
         // and valid, so the error is unreachable — fall back to the un-prefixed serialiser
         // rather than panicking if a future edit breaks one.
-        ser = ser.with_prefix(*name, *iri).unwrap_or_else(|_| oxttl::TurtleSerializer::new());
+        ser = ser
+            .with_prefix(*name, *iri)
+            .unwrap_or_else(|_| oxttl::TurtleSerializer::new());
     }
-    serialize_with(ser.for_writer(Vec::new()), triples, |w, t| w.serialize_triple(t), |w| w.finish())
+    serialize_with(
+        ser.for_writer(Vec::new()),
+        triples,
+        |w, t| w.serialize_triple(t),
+        |w| w.finish(),
+    )
 }
 
 /// Serialises an RDF graph as **RDF/XML** (`application/rdf+xml`) with [`COMMON_PREFIXES`]
@@ -83,9 +90,16 @@ pub fn triples_to_turtle(triples: &[Triple]) -> String {
 pub fn triples_to_rdfxml(triples: &[Triple]) -> String {
     let mut ser = oxrdfxml::RdfXmlSerializer::new();
     for (name, iri) in COMMON_PREFIXES {
-        ser = ser.with_prefix(*name, *iri).unwrap_or_else(|_| oxrdfxml::RdfXmlSerializer::new());
+        ser = ser
+            .with_prefix(*name, *iri)
+            .unwrap_or_else(|_| oxrdfxml::RdfXmlSerializer::new());
     }
-    serialize_with(ser.for_writer(Vec::new()), triples, |w, t| w.serialize_triple(t), |w| w.finish())
+    serialize_with(
+        ser.for_writer(Vec::new()),
+        triples,
+        |w, t| w.serialize_triple(t),
+        |w| w.finish(),
+    )
 }
 
 /// [OPUS-4.8] sq-oy1f.1: Serialises an RDF graph (triple list) as **JSON-LD 1.1**
@@ -142,7 +156,9 @@ fn serialize_with<W>(
 pub fn parse_rdfxml(bytes: &[u8], base: Option<&str>) -> Result<Vec<Triple>, String> {
     let mut parser = oxrdfxml::RdfXmlParser::new();
     if let Some(base) = base {
-        parser = parser.with_base_iri(base).map_err(|e| format!("invalid base IRI '{base}': {e}"))?;
+        parser = parser
+            .with_base_iri(base)
+            .map_err(|e| format!("invalid base IRI '{base}': {e}"))?;
     }
     let mut triples = Vec::new();
     for t in parser.for_slice(bytes) {
@@ -172,14 +188,21 @@ mod tests {
             Triple::new(
                 iri("http://ex/alice"),
                 iri("http://xmlns.com/foaf/0.1/age"),
-                Term::Literal(Literal::new_typed_literal("30", iri("http://www.w3.org/2001/XMLSchema#integer"))),
+                Term::Literal(Literal::new_typed_literal(
+                    "30",
+                    iri("http://www.w3.org/2001/XMLSchema#integer"),
+                )),
             ),
             Triple::new(
                 iri("http://ex/alice"),
                 iri("http://xmlns.com/foaf/0.1/name"),
                 Term::Literal(Literal::new_language_tagged_literal("Alice", "en").unwrap()),
             ),
-            Triple::new(iri("http://ex/alice"), iri("http://xmlns.com/foaf/0.1/knows"), BlankNode::new("b0").unwrap()),
+            Triple::new(
+                iri("http://ex/alice"),
+                iri("http://xmlns.com/foaf/0.1/knows"),
+                BlankNode::new("b0").unwrap(),
+            ),
         ]
     }
 
@@ -194,11 +217,21 @@ mod tests {
     fn turtle_compacts_common_prefixes() {
         let ttl = triples_to_turtle(&sample());
         // The header declares the registered prefixes…
-        assert!(ttl.contains("@prefix foaf: <http://xmlns.com/foaf/0.1/>"), "missing foaf prefix decl: {ttl}");
+        assert!(
+            ttl.contains("@prefix foaf: <http://xmlns.com/foaf/0.1/>"),
+            "missing foaf prefix decl: {ttl}"
+        );
         // …and the body uses the compact form rather than the full IRI.
-        assert!(ttl.contains("foaf:age") || ttl.contains("foaf:name"), "namespace not compacted: {ttl}");
+        assert!(
+            ttl.contains("foaf:age") || ttl.contains("foaf:name"),
+            "namespace not compacted: {ttl}"
+        );
         // It must still be valid Turtle that re-parses to the same triple count.
-        assert_eq!(sparq_core::Graph::load_str(&ttl, "turtle").unwrap().len(), 4, "turtle round-trip lost triples: {ttl}");
+        assert_eq!(
+            sparq_core::Graph::load_str(&ttl, "turtle").unwrap().len(),
+            4,
+            "turtle round-trip lost triples: {ttl}"
+        );
     }
 
     #[test]
@@ -208,7 +241,11 @@ mod tests {
         assert!(xml.contains("rdf:RDF"), "missing rdf:RDF root: {xml}");
         // Re-parse our own RDF/XML output: the graph must come back identical (4 triples).
         let back = parse_rdfxml(xml.as_bytes(), None).unwrap();
-        assert_eq!(back.len(), 4, "rdf/xml round-trip changed triple count: {xml}");
+        assert_eq!(
+            back.len(),
+            4,
+            "rdf/xml round-trip changed triple count: {xml}"
+        );
     }
 
     #[test]
@@ -222,10 +259,19 @@ mod tests {
         // [OPUS-4.8] sq-4vao: the `base` (the GSP graph IRI) is fed to `with_base_iri`; a
         // syntactically invalid base must fail FAST with a clear message (the caller maps it
         // to a 400) rather than silently parsing against no base. A bare space is not a valid IRI.
-        let err = parse_rdfxml(b"<?xml version=\"1.0\"?><rdf:RDF/>", Some("not a valid iri"))
-            .expect_err("an invalid base IRI must be rejected");
-        assert!(err.contains("invalid base IRI"), "unexpected message: {err}");
-        assert!(err.contains("not a valid iri"), "message should echo the bad base: {err}");
+        let err = parse_rdfxml(
+            b"<?xml version=\"1.0\"?><rdf:RDF/>",
+            Some("not a valid iri"),
+        )
+        .expect_err("an invalid base IRI must be rejected");
+        assert!(
+            err.contains("invalid base IRI"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("not a valid iri"),
+            "message should echo the bad base: {err}"
+        );
     }
 
     #[test]

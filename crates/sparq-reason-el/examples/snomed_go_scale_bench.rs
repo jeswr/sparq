@@ -232,7 +232,9 @@ fn run(scale: usize) -> usize {
     // 1. Total complete-closure subsumption edges.
     let lookup = |s: &str| {
         use oxrdf::{NamedNode, Term as OTerm};
-        dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(format!("{EX}{s}"))))
+        dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(format!(
+            "{EX}{s}"
+        ))))
     };
     let mut named: Vec<Id> = vec![
         lookup("Root"),

@@ -88,12 +88,17 @@ impl VerifiedCredentials {
     /// requirement IRI `requirement`. The assertion is taken on trust from the caller — see
     /// the module docs for the security boundary.
     pub fn hold(&mut self, agent: impl Into<String>, requirement: impl Into<String>) {
-        self.by_agent.entry(agent.into()).or_default().insert(requirement.into());
+        self.by_agent
+            .entry(agent.into())
+            .or_default()
+            .insert(requirement.into());
     }
 
     /// Whether `agent` has been asserted to satisfy the `acp:vc` requirement `requirement`.
     pub fn holds(&self, agent: &str, requirement: &str) -> bool {
-        self.by_agent.get(agent).is_some_and(|s| s.contains(requirement))
+        self.by_agent
+            .get(agent)
+            .is_some_and(|s| s.contains(requirement))
     }
 
     /// Whether no holding at all was supplied (an empty map grants through no `acp:vc`
@@ -214,7 +219,11 @@ impl std::fmt::Display for VcAdmitError {
                 n, CREDENTIAL_SUBJECT
             ),
             VcAdmitError::ReservedSubject(s) => {
-                write!(f, "credential subject <{}> is in the reserved principal space", s)
+                write!(
+                    f,
+                    "credential subject <{}> is in the reserved principal space",
+                    s
+                )
             }
         }
     }
@@ -341,17 +350,15 @@ fn credential_subject(credential: &[oxrdf::Triple]) -> Result<String, VcAdmitErr
 /// The issuer DID a `verificationMethod` belongs to — the part before any `#fragment`.
 #[cfg(feature = "acp-vc")]
 fn issuer_did(verification_method: &str) -> &str {
-    verification_method.split('#').next().unwrap_or(verification_method)
+    verification_method
+        .split('#')
+        .next()
+        .unwrap_or(verification_method)
 }
 
 /// Whether `subject` carries `predicate` with the named-node object `object`.
 #[cfg(feature = "acp-vc")]
-fn subject_has(
-    credential: &[oxrdf::Triple],
-    subject: &str,
-    predicate: &str,
-    object: &str,
-) -> bool {
+fn subject_has(credential: &[oxrdf::Triple], subject: &str, predicate: &str, object: &str) -> bool {
     subject_has_term(
         credential,
         subject,
@@ -408,7 +415,10 @@ mod tests {
     fn hold_is_idempotent() {
         let mut creds = VerifiedCredentials::new();
         creds.hold("https://alice.ex/card#me", "https://req.ex/r1");
-        creds.hold(String::from("https://alice.ex/card#me"), String::from("https://req.ex/r1"));
+        creds.hold(
+            String::from("https://alice.ex/card#me"),
+            String::from("https://req.ex/r1"),
+        );
         assert_eq!(creds.iter().count(), 1);
     }
 
@@ -417,14 +427,22 @@ mod tests {
         let mut creds = VerifiedCredentials::new();
         creds.hold("https://alice.ex/card#me", "https://req.ex/r1");
         creds.hold("https://bob.ex/card#me", "https://req.ex/r2");
-        let mut seen: Vec<(String, String)> =
-            creds.iter().map(|(a, r)| (a.to_owned(), r.to_owned())).collect();
+        let mut seen: Vec<(String, String)> = creds
+            .iter()
+            .map(|(a, r)| (a.to_owned(), r.to_owned()))
+            .collect();
         seen.sort();
         assert_eq!(
             seen,
             vec![
-                ("https://alice.ex/card#me".to_owned(), "https://req.ex/r1".to_owned()),
-                ("https://bob.ex/card#me".to_owned(), "https://req.ex/r2".to_owned()),
+                (
+                    "https://alice.ex/card#me".to_owned(),
+                    "https://req.ex/r1".to_owned()
+                ),
+                (
+                    "https://bob.ex/card#me".to_owned(),
+                    "https://req.ex/r2".to_owned()
+                ),
             ]
         );
     }
@@ -470,7 +488,10 @@ mod tests {
         // pinned end-to-end by `tests/acp_vc_backend.rs`, which carries an actual proof.)
         for order in [vec![alice.clone(), bob.clone()], vec![bob, alice]] {
             assert!(
-                matches!(credential_subject(&order), Err(VcAdmitError::AmbiguousSubject(2))),
+                matches!(
+                    credential_subject(&order),
+                    Err(VcAdmitError::AmbiguousSubject(2))
+                ),
                 "an ambiguous subject must be refused, not resolved by slice order"
             );
         }
@@ -497,7 +518,10 @@ mod tests {
     #[cfg(feature = "acp-vc")]
     #[test]
     fn a_credential_with_no_subject_triple_is_refused() {
-        assert!(matches!(credential_subject(&[]), Err(VcAdmitError::NoSubject)));
+        assert!(matches!(
+            credential_subject(&[]),
+            Err(VcAdmitError::NoSubject)
+        ));
     }
 
     #[cfg(feature = "acp-vc")]

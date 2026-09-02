@@ -479,7 +479,15 @@ fn compact_element(
 
             // 12.8.7: graph objects — the four @graph container forms.
             if item_is_graph {
-                compact_graph_item(&mut result, cur, &iap, &container, item, compacted_item, as_array)?;
+                compact_graph_item(
+                    &mut result,
+                    cur,
+                    &iap,
+                    &container,
+                    item,
+                    compacted_item,
+                    as_array,
+                )?;
                 continue;
             }
 

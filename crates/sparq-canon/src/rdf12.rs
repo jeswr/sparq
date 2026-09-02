@@ -1149,8 +1149,14 @@ mod private_tests {
         let mut out: Vec<String> = Vec::new();
         collect_bnodes_term(&tt, &mut out);
         // Both the subject bnode and the inner object bnode must be collected.
-        assert!(out.contains(&"subj".to_string()), "subject bnode in triple term: {out:?}");
-        assert!(out.contains(&"inner".to_string()), "object bnode in triple term: {out:?}");
+        assert!(
+            out.contains(&"subj".to_string()),
+            "subject bnode in triple term: {out:?}"
+        );
+        assert!(
+            out.contains(&"inner".to_string()),
+            "object bnode in triple term: {out:?}"
+        );
         assert_eq!(out.len(), 2, "exactly two bnodes: {out:?}");
     }
 
@@ -1293,7 +1299,11 @@ mod private_tests {
         assert_eq!(issuer.issue("c"), "c14n2");
         // Idempotent: re-issuing returns the SAME label, counter does not advance.
         assert_eq!(issuer.issue("a"), "c14n0", "re-issue must be idempotent");
-        assert_eq!(issuer.issue("d"), "c14n3", "counter must not advance on re-issue");
+        assert_eq!(
+            issuer.issue("d"),
+            "c14n3",
+            "counter must not advance on re-issue"
+        );
     }
 
     // ---- hash_hex ----
@@ -1306,8 +1316,7 @@ mod private_tests {
         // SHA-256("") is a well-known constant; must be exact + lowercase + 64 chars.
         let hex = hash_hex::<Sha256>(b"");
         assert_eq!(
-            hex,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "hash_hex must produce lowercase hex of SHA-256"
         );
         assert_eq!(hex.len(), 64, "SHA-256 hex must be 64 chars");
@@ -1317,7 +1326,8 @@ mod private_tests {
         assert_eq!(hex2.len(), 64, "SHA-256 hex must be 64 chars");
         // Must be all-lowercase hex (no uppercase A-F).
         assert!(
-            hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            hex.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
             "hash_hex must be lowercase hex: {hex}"
         );
     }
@@ -1379,8 +1389,7 @@ mod private_tests {
         );
         let line = serialize_quad_line(&q);
         assert_eq!(
-            line,
-            "<http://ex/s> <http://ex/p> <http://ex/o> .\n",
+            line, "<http://ex/s> <http://ex/p> <http://ex/o> .\n",
             "default-graph quad must serialize without a graph term"
         );
     }
@@ -1395,8 +1404,7 @@ mod private_tests {
         );
         let line = serialize_quad_line(&q);
         assert_eq!(
-            line,
-            "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n",
+            line, "<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n",
             "named-graph quad must carry the graph term"
         );
     }
@@ -1416,8 +1424,7 @@ mod private_tests {
         );
         let line = canonical_line_no_newline(&q);
         assert_eq!(
-            line,
-            "<http://ex/s> <http://ex/p> \"v\" .",
+            line, "<http://ex/s> <http://ex/p> \"v\" .",
             "default-graph line must have NO trailing newline"
         );
         assert!(
@@ -1435,10 +1442,7 @@ mod private_tests {
             GraphName::NamedNode(iri("http://ex/g")),
         );
         let line = canonical_line_no_newline(&q);
-        assert_eq!(
-            line,
-            "<http://ex/s> <http://ex/p> \"v\" <http://ex/g> .",
-        );
+        assert_eq!(line, "<http://ex/s> <http://ex/p> \"v\" <http://ex/g> .",);
     }
 
     // ---- relabel_quad_first_degree ----
@@ -1530,7 +1534,10 @@ mod private_tests {
         let mut issued = HashMap::new();
         issued.insert("b".to_string(), "c14n0".to_string());
         let doc = serialize_canonical(&[q], &issued);
-        assert!(!doc.is_empty(), "serialize_canonical must not return empty string");
+        assert!(
+            !doc.is_empty(),
+            "serialize_canonical must not return empty string"
+        );
         assert!(doc.ends_with('\n'), "each line must be newline-terminated");
         assert!(
             doc.contains("_:c14n0"),

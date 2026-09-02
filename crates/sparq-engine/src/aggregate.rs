@@ -31,8 +31,8 @@
 //! how the builtin `SUM`/`AVG` report a type error).
 
 use oxrdf::{NamedNode, Term};
-use sparq_core::Graph;
 use spargebra::SparqlParser;
+use sparq_core::Graph;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -108,7 +108,10 @@ impl CustomAggregateRegistry {
 /// aggregate, so `<iri>(?x)` in a `GROUP BY` projection parses as an aggregate
 /// (not a scalar function call). A malformed registry IRI is reported as a
 /// parse-level error rather than panicking.
-fn parse_with_aggregates(sparql: &str, reg: &CustomAggregateRegistry) -> Result<PreparedQuery, String> {
+fn parse_with_aggregates(
+    sparql: &str,
+    reg: &CustomAggregateRegistry,
+) -> Result<PreparedQuery, String> {
     let mut parser = SparqlParser::new();
     for iri in reg.iris() {
         let nn = NamedNode::new(iri).map_err(|e| format!("custom aggregate IRI {iri:?}: {e}"))?;
@@ -154,7 +157,9 @@ pub fn query_with_aggregates_and_budget(
     budget: &QueryBudget,
 ) -> Result<QueryResult, String> {
     let prepared = parse_with_aggregates(sparql, reg)?;
-    with_aggregates(reg, || crate::query_prepared_with_budget(graph, &prepared, budget))
+    with_aggregates(reg, || {
+        crate::query_prepared_with_budget(graph, &prepared, budget)
+    })
 }
 
 #[cfg(test)]
@@ -199,10 +204,21 @@ mod tests {
         let got: Vec<(String, String)> = r
             .rows
             .iter()
-            .map(|row| (row[0].as_ref().unwrap().to_string(), row[1].as_ref().unwrap().to_string()))
+            .map(|row| {
+                (
+                    row[0].as_ref().unwrap().to_string(),
+                    row[1].as_ref().unwrap().to_string(),
+                )
+            })
             .collect();
-        assert!(got[0].0.contains("eng") && got[0].1.contains("\"6000\""), "eng row: {got:?}");
-        assert!(got[1].0.contains("sales") && got[1].1.contains("\"35\""), "sales row: {got:?}");
+        assert!(
+            got[0].0.contains("eng") && got[0].1.contains("\"6000\""),
+            "eng row: {got:?}"
+        );
+        assert!(
+            got[1].0.contains("sales") && got[1].1.contains("\"35\""),
+            "sales row: {got:?}"
+        );
     }
 
     /// A whole-dataset custom aggregate (no GROUP BY): one group over every row.
@@ -267,7 +283,10 @@ mod tests {
                      GROUP BY ?g";
         let all = query_with_aggregates(&graph, q_all, &reg).unwrap();
         let all_c = all.rows[0][0].as_ref().unwrap().to_string();
-        assert!(all_c.contains("\"3\""), "without DISTINCT should count 3 members, got {all_c:?}");
+        assert!(
+            all_c.contains("\"3\""),
+            "without DISTINCT should count 3 members, got {all_c:?}"
+        );
 
         // WITH DISTINCT: members are de-duplicated to the 2 distinct tag values first.
         let q_distinct = "PREFIX ex: <http://ex/> PREFIX agg: <http://ex/agg#> \
@@ -275,7 +294,10 @@ mod tests {
                           GROUP BY ?g";
         let distinct = query_with_aggregates(&graph, q_distinct, &reg).unwrap();
         let distinct_c = distinct.rows[0][0].as_ref().unwrap().to_string();
-        assert!(distinct_c.contains("\"2\""), "with DISTINCT should count 2 distinct members, got {distinct_c:?}");
+        assert!(
+            distinct_c.contains("\"2\""),
+            "with DISTINCT should count 2 distinct members, got {distinct_c:?}"
+        );
     }
 
     /// [OPUS-4.8] (sq-fldo) A SUM-style custom aggregate over a column with a
@@ -306,7 +328,11 @@ mod tests {
                      SELECT (agg:sum(?n) AS ?s) WHERE { ?x ex:grp ?g ; ex:n ?n } GROUP BY ?g";
         let all = query_with_aggregates(&graph, q_all, &reg).unwrap();
         assert!(
-            all.rows[0][0].as_ref().unwrap().to_string().contains("\"40\""),
+            all.rows[0][0]
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("\"40\""),
             "without DISTINCT sum should be 10+10+20=40, got {:?}",
             all.rows[0][0]
         );
@@ -315,7 +341,11 @@ mod tests {
                           SELECT (agg:sum(DISTINCT ?n) AS ?s) WHERE { ?x ex:grp ?g ; ex:n ?n } GROUP BY ?g";
         let distinct = query_with_aggregates(&graph, q_distinct, &reg).unwrap();
         assert!(
-            distinct.rows[0][0].as_ref().unwrap().to_string().contains("\"30\""),
+            distinct.rows[0][0]
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("\"30\""),
             "with DISTINCT sum should de-dup the repeated 10 -> 10+20=30, got {:?}",
             distinct.rows[0][0]
         );
@@ -349,7 +379,11 @@ mod tests {
                  SELECT (agg:sum(?x * MULTIPLICITY()) AS ?w) WHERE { SELECT ?x WHERE { ?s ex:v ?x } }";
         let r = query_with_aggregates(&graph, q, &reg).unwrap();
         assert!(
-            r.rows[0][0].as_ref().unwrap().to_string().contains("\"70\""),
+            r.rows[0][0]
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("\"70\""),
             "custom Σ(?x·multiplicity) over distinct {{10×3,20×2}} = 70, got {:?}",
             r.rows[0][0]
         );

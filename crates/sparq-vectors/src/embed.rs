@@ -48,7 +48,13 @@ impl HashEmbedder {
         // …and character trigrams over the whitespace-normalized, padded text, so
         // near-matches ("Athina" / "Athens 1896") still share mass.
         let padded: Vec<char> = std::iter::once(' ')
-            .chain(lower.split_whitespace().collect::<Vec<_>>().join(" ").chars())
+            .chain(
+                lower
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars(),
+            )
             .chain(std::iter::once(' '))
             .collect();
         for window in padded.windows(3) {
@@ -67,7 +73,11 @@ impl HashEmbedder {
     fn add_token(&self, acc: &mut [f32], token: &[u8]) {
         let mut state = fnv1a64(token) ^ self.seed;
         for slot in acc.iter_mut() {
-            *slot += if splitmix64(&mut state) & 1 == 1 { 1.0 } else { -1.0 };
+            *slot += if splitmix64(&mut state) & 1 == 1 {
+                1.0
+            } else {
+                -1.0
+            };
         }
     }
 }
@@ -293,8 +303,10 @@ pub mod provider {
                     // (which poisons the mutex) doesn't cascade-fail every other one;
                     // we still serialize and the restore-on-drop keeps state clean.
                     let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-                    let saved =
-                        ENV_VARS.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+                    let saved = ENV_VARS
+                        .iter()
+                        .map(|&k| (k, std::env::var(k).ok()))
+                        .collect();
                     EnvGuard { _lock: lock, saved }
                 }
 
@@ -356,7 +368,10 @@ pub mod provider {
                 let g = EnvGuard::acquire();
                 g.clear();
                 std::env::set_var("SPARQ_EMBEDDINGS_API_KEY", "sk-x");
-                std::env::set_var("SPARQ_EMBEDDINGS_BASE_URL", "http://localhost:8080/v1/embeddings");
+                std::env::set_var(
+                    "SPARQ_EMBEDDINGS_BASE_URL",
+                    "http://localhost:8080/v1/embeddings",
+                );
                 std::env::set_var("SPARQ_EMBEDDINGS_MODEL", "bge-small");
                 let e = RemoteEmbedder::from_env(384).expect("builds with overrides");
                 assert_eq!(e.cfg.endpoint, "http://localhost:8080/v1/embeddings");
@@ -413,14 +428,19 @@ pub mod provider {
                 headers.push(("Authorization".to_string(), format!("Bearer {key}")));
             }
             let response =
-                self.transport.post_json(&self.cfg.endpoint, &headers, &body.to_string())?;
+                self.transport
+                    .post_json(&self.cfg.endpoint, &headers, &body.to_string())?;
             let parsed: serde_json::Value =
                 serde_json::from_str(&response).map_err(|e| format!("bad response JSON: {e}"))?;
             let data = parsed["data"]
                 .as_array()
                 .ok_or_else(|| "response has no `data` array".to_string())?;
             if data.len() != texts.len() {
-                return Err(format!("asked for {} embeddings, got {}", texts.len(), data.len()));
+                return Err(format!(
+                    "asked for {} embeddings, got {}",
+                    texts.len(),
+                    data.len()
+                ));
             }
             // The API may return out of order; honor the `index` field. Each input
             // index must appear exactly once — a duplicate or missing index is a
@@ -429,9 +449,13 @@ pub mod provider {
             let mut out: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
             for item in data {
                 let i = item["index"].as_u64().ok_or("embedding without `index`")? as usize;
-                let emb = item["embedding"].as_array().ok_or("embedding without `embedding`")?;
-                let v: Vec<f32> =
-                    emb.iter().map(|x| x.as_f64().unwrap_or(f64::NAN) as f32).collect();
+                let emb = item["embedding"]
+                    .as_array()
+                    .ok_or("embedding without `embedding`")?;
+                let v: Vec<f32> = emb
+                    .iter()
+                    .map(|x| x.as_f64().unwrap_or(f64::NAN) as f32)
+                    .collect();
                 if v.len() != self.cfg.dim || v.iter().any(|x| !x.is_finite()) {
                     return Err(format!(
                         "embedding {i} has dim {} (expected {}) or non-finite values",
@@ -439,7 +463,9 @@ pub mod provider {
                         self.cfg.dim
                     ));
                 }
-                let slot = out.get_mut(i).ok_or(format!("embedding index {i} out of range"))?;
+                let slot = out
+                    .get_mut(i)
+                    .ok_or(format!("embedding index {i} out of range"))?;
                 if slot.is_some() {
                     return Err(format!("duplicate embedding index {i} in response"));
                 }
@@ -458,9 +484,16 @@ pub mod provider {
 
         struct Fake;
         impl Transport for Fake {
-            fn post_json(&self, url: &str, headers: &[(String, String)], body: &str) -> Result<String, String> {
+            fn post_json(
+                &self,
+                url: &str,
+                headers: &[(String, String)],
+                body: &str,
+            ) -> Result<String, String> {
                 assert_eq!(url, "https://example.test/v1/embeddings");
-                assert!(headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer k"));
+                assert!(headers
+                    .iter()
+                    .any(|(k, v)| k == "Authorization" && v == "Bearer k"));
                 assert!(body.contains("\"model\":\"m\""));
                 // Out-of-order response to exercise `index` handling.
                 Ok(r#"{"data":[
@@ -490,7 +523,12 @@ pub mod provider {
         /// missing) must be rejected, not silently yield an empty vector.
         struct DupIndex;
         impl Transport for DupIndex {
-            fn post_json(&self, _: &str, _: &[(String, String)], _: &str) -> Result<String, String> {
+            fn post_json(
+                &self,
+                _: &str,
+                _: &[(String, String)],
+                _: &str,
+            ) -> Result<String, String> {
                 Ok(r#"{"data":[
                     {"index":1,"embedding":[0.5,0.5]},
                     {"index":1,"embedding":[1.0,0.0]}
@@ -526,7 +564,12 @@ pub mod provider {
         fn embed_with_body(body: &'static str) -> Result<Vec<Vec<f32>>, String> {
             struct Body(&'static str);
             impl Transport for Body {
-                fn post_json(&self, _: &str, _: &[(String, String)], _: &str) -> Result<String, String> {
+                fn post_json(
+                    &self,
+                    _: &str,
+                    _: &[(String, String)],
+                    _: &str,
+                ) -> Result<String, String> {
                     Ok(self.0.to_string())
                 }
             }
@@ -548,7 +591,12 @@ pub mod provider {
             // that panics if hit proves no request is sent.
             struct NeverCalled;
             impl Transport for NeverCalled {
-                fn post_json(&self, _: &str, _: &[(String, String)], _: &str) -> Result<String, String> {
+                fn post_json(
+                    &self,
+                    _: &str,
+                    _: &[(String, String)],
+                    _: &str,
+                ) -> Result<String, String> {
                     panic!("empty input must not issue a request");
                 }
             }
@@ -569,7 +617,12 @@ pub mod provider {
             // A transport-level failure (network/HTTP/status error) surfaces verbatim, not swallowed.
             struct Failing;
             impl Transport for Failing {
-                fn post_json(&self, _: &str, _: &[(String, String)], _: &str) -> Result<String, String> {
+                fn post_json(
+                    &self,
+                    _: &str,
+                    _: &[(String, String)],
+                    _: &str,
+                ) -> Result<String, String> {
                     Err("embeddings API error (503): upstream down".into())
                 }
             }
@@ -583,7 +636,10 @@ pub mod provider {
                 Failing,
             );
             let err = e.embed(&["a", "b"]).unwrap_err();
-            assert!(err.contains("503") && err.contains("upstream down"), "got: {err}");
+            assert!(
+                err.contains("503") && err.contains("upstream down"),
+                "got: {err}"
+            );
         }
 
         #[test]
@@ -601,7 +657,8 @@ pub mod provider {
         #[test]
         fn remote_embedder_rejects_wrong_embedding_count() {
             // Asked for 2 embeddings, the provider returned 1 — a count mismatch, not silently padded.
-            let err = embed_with_body(r#"{"data":[{"index":0,"embedding":[1.0,0.0]}]}"#).unwrap_err();
+            let err =
+                embed_with_body(r#"{"data":[{"index":0,"embedding":[1.0,0.0]}]}"#).unwrap_err();
             assert!(err.contains("asked for 2 embeddings, got 1"), "got: {err}");
         }
 
@@ -649,7 +706,8 @@ pub mod provider {
             // The duplicate index 0 trips the duplicate guard before the missing-index assemble — both
             // are "this response is malformed" errors; assert it is one of those two specific messages.
             assert!(
-                err.contains("duplicate embedding index 0") || err.contains("missing embedding index 1"),
+                err.contains("duplicate embedding index 0")
+                    || err.contains("missing embedding index 1"),
                 "got: {err}"
             );
         }
@@ -662,10 +720,9 @@ pub mod provider {
             )
             .unwrap_err();
             assert!(no_index.contains("without `index`"), "got: {no_index}");
-            let no_emb = embed_with_body(
-                r#"{"data":[{"index":0},{"index":1,"embedding":[0.0,1.0]}]}"#,
-            )
-            .unwrap_err();
+            let no_emb =
+                embed_with_body(r#"{"data":[{"index":0},{"index":1,"embedding":[0.0,1.0]}]}"#)
+                    .unwrap_err();
             assert!(no_emb.contains("without `embedding`"), "got: {no_emb}");
         }
     }
@@ -688,12 +745,17 @@ mod tests {
     #[test]
     fn hash_embedder_correlates_lexically_similar_texts() {
         let e = HashEmbedder::new(64);
-        let v = e.embed(&["Usain Bolt", "Usain Bolt Jr", "Pierre de Coubertin"]).unwrap();
+        let v = e
+            .embed(&["Usain Bolt", "Usain Bolt Jr", "Pierre de Coubertin"])
+            .unwrap();
         let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
         let near = cos(&v[0], &v[1]);
         let far = cos(&v[0], &v[2]);
         assert!(near > far, "near {near} should beat far {far}");
-        assert!(near > 0.4, "shared n-grams should correlate strongly, got {near}");
+        assert!(
+            near > 0.4,
+            "shared n-grams should correlate strongly, got {near}"
+        );
     }
 
     #[test]

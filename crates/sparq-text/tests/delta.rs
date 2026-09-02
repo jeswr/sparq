@@ -13,18 +13,43 @@ use sparq_core::Graph;
 use sparq_text::TextIndex;
 
 const WORDS: &[&str] = &[
-    "quick", "brown", "fox", "lazy", "dog", "jumps", "over", "the", "café", "straße",
-    "σοφία", "москва", "data", "graph", "query", "index", "text", "search",
+    "quick",
+    "brown",
+    "fox",
+    "lazy",
+    "dog",
+    "jumps",
+    "over",
+    "the",
+    "café",
+    "straße",
+    "σοφία",
+    "москва",
+    "data",
+    "graph",
+    "query",
+    "index",
+    "text",
+    "search",
 ];
 
 fn random_sentence(rng: &mut StdRng) -> String {
     let n = rng.random_range(1..=8);
-    (0..n).map(|_| WORDS[rng.random_range(0..WORDS.len())]).collect::<Vec<_>>().join(" ")
+    (0..n)
+        .map(|_| WORDS[rng.random_range(0..WORDS.len())])
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn random_triple(rng: &mut StdRng) -> [Term; 3] {
-    let s = Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/s{}", rng.random_range(0..40))));
-    let p = Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/p{}", rng.random_range(0..4))));
+    let s = Term::NamedNode(NamedNode::new_unchecked(format!(
+        "http://ex/s{}",
+        rng.random_range(0..40)
+    )));
+    let p = Term::NamedNode(NamedNode::new_unchecked(format!(
+        "http://ex/p{}",
+        rng.random_range(0..4)
+    )));
     let o = match rng.random_range(0..10) {
         // Mostly string literals; some language-tagged, some typed/IRI noise.
         0..=5 => Term::Literal(Literal::new_simple_literal(random_sentence(rng))),
@@ -36,7 +61,10 @@ fn random_triple(rng: &mut StdRng) -> [Term; 3] {
             format!("{}", rng.random_range(0..1000)),
             NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
         )),
-        _ => Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/o{}", rng.random_range(0..20)))),
+        _ => Term::NamedNode(NamedNode::new_unchecked(format!(
+            "http://ex/o{}",
+            rng.random_range(0..20)
+        ))),
     };
     [s, p, o]
 }
@@ -57,7 +85,9 @@ fn incremental_equals_rebuilt_after_random_deltas() {
     for round in 0..30 {
         // A random batch: fresh inserts (some duplicating live triples or
         // already-interned literals) + deletes of live triples.
-        let inserts: Vec<[Term; 3]> = (0..rng.random_range(1..=15)).map(|_| random_triple(&mut rng)).collect();
+        let inserts: Vec<[Term; 3]> = (0..rng.random_range(1..=15))
+            .map(|_| random_triple(&mut rng))
+            .collect();
         let mut deletes: Vec<[Term; 3]> = Vec::new();
         for _ in 0..rng.random_range(0..=10) {
             if live.is_empty() {
@@ -75,7 +105,11 @@ fn incremental_equals_rebuilt_after_random_deltas() {
 
         // And the observable behaviour agrees too (belt and braces).
         for q in ["quick fox", "café", "straße data", "mosk*", "σοφία"] {
-            assert_eq!(index.search(q), rebuilt.search(q), "search({q:?}) diverged in round {round}");
+            assert_eq!(
+                index.search(q),
+                rebuilt.search(q),
+                "search({q:?}) diverged in round {round}"
+            );
             assert_eq!(index.search_any(q), rebuilt.search_any(q));
         }
     }

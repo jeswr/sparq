@@ -493,7 +493,8 @@ fn commit_operators(
             return Err(SeamError::DescriptorMismatch {
                 phase: SeamPhase::PlanBinding,
                 source_id: String::new(),
-                detail: "routing and leakage envelope disagree on an operator's disclose/hide route",
+                detail:
+                    "routing and leakage envelope disagree on an operator's disclose/hide route",
             });
         }
         if let Routing::Hidden(class) = routed.routing {
@@ -603,8 +604,11 @@ pub fn revalidate_plan(claimed: &PlanCommitment, observed: &PlanCommitment) -> P
     // a count mismatch IS the full description of the tail ("operators n..m are absent"), and
     // `OperatorArity` above names both counts. The pairwise walk below therefore covers only the
     // common prefix by design; the truncation is not a silent one.
-    for (index, (claimed_op, observed_op)) in
-        claimed.operators.iter().zip(&observed.operators).enumerate()
+    for (index, (claimed_op, observed_op)) in claimed
+        .operators
+        .iter()
+        .zip(&observed.operators)
+        .enumerate()
     {
         if claimed_op.operator != observed_op.operator {
             divergences.push(PlanDivergence::OperatorRelabelled {
@@ -859,7 +863,10 @@ mod tests {
 
         assert_ne!(claimed.plan_digest(), observed.plan_digest());
         let outcome = revalidate_plan(&claimed, &observed);
-        assert!(!outcome.is_bound(), "a dropped source must NOT read as bound");
+        assert!(
+            !outcome.is_bound(),
+            "a dropped source must NOT read as bound"
+        );
 
         let PlanRevalidation::Diverged(divergences) = outcome else {
             panic!("expected divergence");

@@ -47,7 +47,11 @@ fn leaves_entail(rules: &str, tree: &ProofTree, conclusion: &[String; 3]) {
     }
     let closure = reason_n3_terms(&src, None).expect("leaf subset must re-parse");
     let ok = closure.facts.iter().any(|f| &render(f) == conclusion);
-    assert!(ok, "proof leaves do not re-entail {conclusion:?}\nproof:\n{}", tree.to_text());
+    assert!(
+        ok,
+        "proof leaves do not re-entail {conclusion:?}\nproof:\n{}",
+        tree.to_text()
+    );
 }
 
 const RULES: &str = r#"
@@ -87,7 +91,13 @@ fn rule_chain_hand_checked() {
     leaves_entail(RULES, &tree, &render(&f));
     let root = &tree.nodes()[tree.root() as usize];
     assert_eq!(root.rule, "n3-rule-1");
-    assert!(tree.nodes().iter().filter(|n| n.rule == "n3-rule-0").count() >= 2);
+    assert!(
+        tree.nodes()
+            .iter()
+            .filter(|n| n.rule == "n3-rule-0")
+            .count()
+            >= 2
+    );
     assert!(tree.nodes().iter().filter(|n| n.rule == "asserted").count() == 2);
 
     // Asserted facts explain as single leaves; absent facts do not explain.
@@ -107,7 +117,11 @@ fn differential_every_derived_fact_explains() {
     // re-entail from its leaves.
     let mut base: Vec<[Term; 3]> = Vec::new();
     for i in 0..12 {
-        base.push([ex(&format!("p{i}")), ex("parent"), ex(&format!("p{}", i + 1))]);
+        base.push([
+            ex(&format!("p{i}")),
+            ex("parent"),
+            ex(&format!("p{}", i + 1)),
+        ]);
     }
     let g = MaterializedN3Graph::new(RULES, &base).expect("rules parse");
     assert_eq!(g.mode(), N3Mode::Counting);
@@ -115,14 +129,19 @@ fn differential_every_derived_fact_explains() {
     let rendered_set = rendered(&base);
     let mut derived = 0usize;
     for f in g.closure() {
-        let tree = g.why(&f).unwrap_or_else(|| panic!("no proof for closure fact"));
+        let tree = g
+            .why(&f)
+            .unwrap_or_else(|| panic!("no proof for closure fact"));
         check_proof(&tree, &rendered_set, Some(&render(&f)));
         if !base_set.contains(&f) {
             leaves_entail(RULES, &tree, &render(&f));
             derived += 1;
         }
     }
-    assert!(derived >= 78, "expected the full ancestor closure, got {derived}");
+    assert!(
+        derived >= 78,
+        "expected the full ancestor closure, got {derived}"
+    );
 }
 
 #[test]
@@ -161,7 +180,10 @@ fn fallback_mode_still_explains() {
 { ?x :ancestor ?y } <= { ?x :parent ?y } .
 { ?x :parent ?y . ?y :parent ?z } => { ?x :grandparent ?z } .
 "#;
-    let base = vec![[ex("a"), ex("parent"), ex("b")], [ex("b"), ex("parent"), ex("c")]];
+    let base = vec![
+        [ex("a"), ex("parent"), ex("b")],
+        [ex("b"), ex("parent"), ex("c")],
+    ];
     let g = MaterializedN3Graph::new(rules, &base).expect("rules parse");
     assert_eq!(g.mode(), N3Mode::Fallback);
     let f = [ex("a"), ex("grandparent"), ex("c")];
@@ -184,9 +206,15 @@ fn id_level_bridge_from_reason_n3_proof() {
     let mut dict = Dict::new();
     let (facts, steps) = reason_n3_proof(&mut dict, src).expect("reasoning succeeds");
     let (a, anc, c) = (
-        dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/a"))),
-        dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/ancestor"))),
-        dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/c"))),
+        dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://ex/a",
+        ))),
+        dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://ex/ancestor",
+        ))),
+        dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+            "http://ex/c",
+        ))),
     );
     let target = [a, anc, c];
     assert!(facts.contains(&target));
@@ -196,14 +224,21 @@ fn id_level_bridge_from_reason_n3_proof() {
         .iter()
         .filter(|t| !steps.iter().any(|s| s.conclusion == **t))
         .map(|&t| {
-            [dict.term(t[0]).to_string(), dict.term(t[1]).to_string(), dict.term(t[2]).to_string()]
+            [
+                dict.term(t[0]).to_string(),
+                dict.term(t[1]).to_string(),
+                dict.term(t[2]).to_string(),
+            ]
         })
         .collect();
     check_proof(&tree, &asserted, None);
     assert_eq!(tree.conclusion()[1], "<http://ex/ancestor>");
     // Inputs have no step: the bridge returns None for them (callers explain those as asserted).
-    let b = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/b")));
-    let par = dict
-        .lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/parent")));
+    let b = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+        "http://ex/b",
+    )));
+    let par = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+        "http://ex/parent",
+    )));
     assert!(n3_proof_tree(&dict, &steps, [a, par, b], ExplainOpts::default()).is_none());
 }

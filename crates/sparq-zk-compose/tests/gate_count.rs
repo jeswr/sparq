@@ -237,9 +237,7 @@ fn gate_count_regression() {
         let live = gate_count(&dir, member);
         let ceiling = (baseline as f64 * (1.0 + snapshot.tolerance_pct / 100.0)).floor() as u64;
         let delta_pct = (live as f64 - baseline as f64) / baseline as f64 * 100.0;
-        eprintln!(
-            "{member}: baseline={baseline} live={live} ({delta_pct:+.2}%) ceiling={ceiling}"
-        );
+        eprintln!("{member}: baseline={baseline} live={live} ({delta_pct:+.2}%) ceiling={ceiling}");
         if live > ceiling {
             regressions.push(format!(
                 "{member}: live={live} exceeds ceiling={ceiling} (baseline={baseline}, +{delta_pct:.2}% > {:.1}% tolerance)",

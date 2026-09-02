@@ -46,7 +46,7 @@ mod bgp_is_empty_guard {
     #[test]
     fn empty_bgp_with_nonempty_selection_yields_no_plan() {
         let bgp = Bgp::new(vec![]); // empty BGP
-        // Build a real selection from a non-empty BGP so the slice is non-empty.
+                                    // Build a real selection from a non-empty BGP so the slice is non-empty.
         let dummy_bgp = Bgp::new(vec![TriplePattern::new(
             var("s"),
             iri("http://ex/p"),
@@ -90,9 +90,8 @@ mod bgp_is_empty_guard {
 #[cfg(feature = "adaptive-replan")]
 mod diverges_boundary {
     use sparq_fedplan::{
-        plan_bgp, select_sources, AdaptiveExecutor, Bgp, PlanOptions, PredPartition,
-        ReplanOutcome, ReplanPolicy, RuntimeStats, SourceDescriptor, SourceId, Term, TriplePattern,
-        Var,
+        plan_bgp, select_sources, AdaptiveExecutor, Bgp, PlanOptions, PredPartition, ReplanOutcome,
+        ReplanPolicy, RuntimeStats, SourceDescriptor, SourceId, Term, TriplePattern, Var,
     };
 
     fn v(s: &str) -> Term {
@@ -352,7 +351,9 @@ mod record_latency_after_first_sample {
         // But the second call with the same source IS load-bearing: prior value exists →
         // mutant applies inflated α, original applies base α. Let us test TWO calls.
         stats.record_source_latency_after(0, 200.0, 10.0); // first: elapsed=10, seeds verbatim.
-        let first = stats.observed_latency_of(0).expect("first latency recorded");
+        let first = stats
+            .observed_latency_of(0)
+            .expect("first latency recorded");
         // First sample is always the raw value regardless of α (fold_latency Vacant path).
         assert_eq!(
             first, 200.0,

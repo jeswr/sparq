@@ -202,7 +202,9 @@ struct Cand {
 impl Eq for Cand {}
 impl Ord for Cand {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.dist.total_cmp(&other.dist).then(self.slot.cmp(&other.slot))
+        self.dist
+            .total_cmp(&other.dist)
+            .then(self.slot.cmp(&other.slot))
     }
 }
 impl PartialOrd for Cand {
@@ -244,7 +246,10 @@ impl Builder {
         let mut visited: Vec<u32> = Vec::new();
         let mut in_working = vec![false; n];
         let mut expanded = vec![false; n];
-        working.push(Cand { dist: sq_dist(qv, self.vector(start)), slot: start });
+        working.push(Cand {
+            dist: sq_dist(qv, self.vector(start)),
+            slot: start,
+        });
         in_working[start as usize] = true;
         loop {
             let next = working
@@ -287,7 +292,9 @@ impl Builder {
                 break;
             }
             // Keep p unless some already-kept k is alpha× closer to p than node is.
-            let keep = kept.iter().all(|&k| alpha * self.dist(k, p) > self.dist(node, p));
+            let keep = kept
+                .iter()
+                .all(|&k| alpha * self.dist(k, p) > self.dist(node, p));
             if keep {
                 kept.push(p);
             }
@@ -358,7 +365,14 @@ fn build_graph(store: &VectorStore, cfg: &VamanaConfig) -> Builder {
         }
     }
 
-    let mut b = Builder { dim, degree, vectors, ids, adj, medoid };
+    let mut b = Builder {
+        dim,
+        degree,
+        vectors,
+        ids,
+        adj,
+        medoid,
+    };
 
     if n > 1 {
         // Random processing order (DiskANN). Two passes: α=1.0 then α=cfg.alpha.
@@ -438,15 +452,21 @@ fn write_graph(
     // [OPUS-4.8] (sq-qamd) Encoding tag at offset 28..32: `1` when a PQ section is appended below,
     // else `0`. (sq-32i5) Graph fingerprint at offset 32..56; `None` leaves a zeroed block, which
     // `check_graph` treats as unverifiable.
-    let enc_tag = if pq.is_some() { ENC_TAG_PQ } else { ENC_TAG_NONE };
+    let enc_tag = if pq.is_some() {
+        ENC_TAG_PQ
+    } else {
+        ENC_TAG_NONE
+    };
     header[ENC_TAG_OFFSET..ENC_TAG_OFFSET + 4].copy_from_slice(&enc_tag.to_le_bytes());
     if let Some(fp) = fingerprint {
         header[HEADER_LEN_V1..HEADER_LEN].copy_from_slice(&fp.to_bytes());
     }
 
-    let file = std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    let file =
+        std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
     let mut w = std::io::BufWriter::new(file);
-    w.write_all(&header).map_err(|e| format!("write {}: {e}", path.display()))?;
+    w.write_all(&header)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
 
     let mut rec = vec![0u8; record_len(b.dim, r)];
     for slot in 0..count {
@@ -465,15 +485,19 @@ fn write_graph(
             let val = if i < deg as usize { nbrs[i] } else { 0u32 };
             entry.copy_from_slice(&val.to_le_bytes());
         }
-        w.write_all(&rec).map_err(|e| format!("write {}: {e}", path.display()))?;
+        w.write_all(&rec)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     // [OPUS-4.8] (sq-qamd) Trailing PQ candidate-cache section (encoding tag == 1).
     if let Some(section) = pq {
         w.write_all(&section.to_bytes())
             .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
-    let f = w.into_inner().map_err(|e| format!("flush {}: {e}", path.display()))?;
-    f.sync_all().map_err(|e| format!("fsync {}: {e}", path.display()))?;
+    let f = w
+        .into_inner()
+        .map_err(|e| format!("flush {}: {e}", path.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("fsync {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -636,7 +660,9 @@ impl DiskAnnIndex {
     /// [`open_from_bytes`](Self::open_from_bytes). [FABLE-5] (sq-98c)
     fn open_validated(map: Bytes, origin: &str) -> Result<DiskAnnIndex, String> {
         if cfg!(target_endian = "big") {
-            return Err(".spqg is a little-endian format; big-endian targets are unsupported".into());
+            return Err(
+                ".spqg is a little-endian format; big-endian targets are unsupported".into(),
+            );
         }
         if map.len() < HEADER_LEN_V1 {
             return Err(format!("{origin}: truncated header"));
@@ -652,7 +678,9 @@ impl DiskAnnIndex {
             1 => (HEADER_LEN_V1, None),
             2 => {
                 if map.len() < HEADER_LEN {
-                    return Err(format!("{origin}: truncated version-2 header (fingerprint block)"));
+                    return Err(format!(
+                        "{origin}: truncated version-2 header (fingerprint block)"
+                    ));
                 }
                 // [OPUS-4.8] (sq-32i5) All-zero block (a v2 index built without a graph binding)
                 // → `None` ("unverifiable"), not a zero fingerprint that would surface as a
@@ -703,12 +731,19 @@ impl DiskAnnIndex {
                         map.len()
                     ));
                 }
-                Some(Self::parse_pq_section(&map[nodes_end..], count, dim, origin)?)
+                Some(Self::parse_pq_section(
+                    &map[nodes_end..],
+                    count,
+                    dim,
+                    origin,
+                )?)
             }
             t => return Err(format!("{origin}: unsupported encoding tag {t}")),
         };
         if count > 0 && medoid as usize >= count {
-            return Err(format!("{origin}: medoid {medoid} out of range (count {count})"));
+            return Err(format!(
+                "{origin}: medoid {medoid} out of range (count {count})"
+            ));
         }
         Ok(DiskAnnIndex {
             map,
@@ -754,11 +789,17 @@ impl DiskAnnIndex {
         let pq = ProductQuantizer::from_bytes(&tail[hdr..hdr + cb_len])
             .map_err(|e| format!("{origin}: {e}"))?;
         if pq.dim() != dim {
-            return Err(format!("{origin}: PQ codebook dim {} != graph dim {dim}", pq.dim()));
+            return Err(format!(
+                "{origin}: PQ codebook dim {} != graph dim {dim}",
+                pq.dim()
+            ));
         }
         let stride = u32::from_le_bytes(tail[hdr + cb_len..cb_end].try_into().unwrap()) as usize;
         if stride != pq.m() {
-            return Err(format!("{origin}: PQ section stride {stride} != codebook M {}", pq.m()));
+            return Err(format!(
+                "{origin}: PQ section stride {stride} != codebook M {}",
+                pq.m()
+            ));
         }
         let want_codes = count
             .checked_mul(stride)
@@ -846,10 +887,17 @@ impl DiskAnnIndex {
         let mut in_working = vec![false; self.count];
         let mut expanded = vec![false; self.count];
         let start = self.medoid;
-        working.push(Cand { dist: sq_dist(query, self.node_vector(start)), slot: start });
+        working.push(Cand {
+            dist: sq_dist(query, self.node_vector(start)),
+            slot: start,
+        });
         in_working[start as usize] = true;
         loop {
-            let next = working.iter().filter(|c| !expanded[c.slot as usize]).min().copied();
+            let next = working
+                .iter()
+                .filter(|c| !expanded[c.slot as usize])
+                .min()
+                .copied();
             let Some(cur) = next else { break };
             expanded[cur.slot as usize] = true;
             let neighbours: Vec<u32> = self.node_neighbours(cur.slot).collect();
@@ -869,7 +917,10 @@ impl DiskAnnIndex {
         working.sort_unstable();
         working.truncate(k);
         // d² over unit vectors → cosine: cos = 1 − d²/2.
-        working.into_iter().map(|c| (c.slot, 1.0 - c.dist / 2.0)).collect()
+        working
+            .into_iter()
+            .map(|c| (c.slot, 1.0 - c.dist / 2.0))
+            .collect()
     }
 
     /// [OPUS-4.8] (sq-qamd) DiskANN's "search on PQ, re-rank on disk" greedy beam search. The
@@ -893,10 +944,17 @@ impl DiskAnnIndex {
         let mut in_working = vec![false; self.count];
         let mut expanded = vec![false; self.count];
         let start = self.medoid;
-        working.push(Cand { dist: pq_dist(start), slot: start });
+        working.push(Cand {
+            dist: pq_dist(start),
+            slot: start,
+        });
         in_working[start as usize] = true;
         loop {
-            let next = working.iter().filter(|c| !expanded[c.slot as usize]).min().copied();
+            let next = working
+                .iter()
+                .filter(|c| !expanded[c.slot as usize])
+                .min()
+                .copied();
             let Some(cur) = next else { break };
             expanded[cur.slot as usize] = true;
             let neighbours: Vec<u32> = self.node_neighbours(cur.slot).collect();
@@ -905,7 +963,10 @@ impl DiskAnnIndex {
                     continue;
                 }
                 in_working[nbr as usize] = true;
-                working.push(Cand { dist: pq_dist(nbr), slot: nbr });
+                working.push(Cand {
+                    dist: pq_dist(nbr),
+                    slot: nbr,
+                });
             }
             if working.len() > beam {
                 working.sort_unstable();
@@ -919,12 +980,18 @@ impl DiskAnnIndex {
         working.truncate(beam);
         let mut reranked: Vec<Cand> = working
             .into_iter()
-            .map(|c| Cand { dist: sq_dist(query, self.node_vector(c.slot)), slot: c.slot })
+            .map(|c| Cand {
+                dist: sq_dist(query, self.node_vector(c.slot)),
+                slot: c.slot,
+            })
             .collect();
         reranked.sort_unstable();
         reranked.truncate(k);
         // d² over unit vectors → cosine: cos = 1 − d²/2.
-        reranked.into_iter().map(|c| (c.slot, 1.0 - c.dist / 2.0)).collect()
+        reranked
+            .into_iter()
+            .map(|c| (c.slot, 1.0 - c.dist / 2.0))
+            .collect()
     }
 
     /// [OPUS-4.8] (sq-1wc1) **Filtered** greedy beam search: traverse the Vamana graph
@@ -963,11 +1030,18 @@ impl DiskAnnIndex {
         };
         let start = self.medoid;
         let start_d = sq_dist(query, self.node_vector(start));
-        working.push(Cand { dist: start_d, slot: start });
+        working.push(Cand {
+            dist: start_d,
+            slot: start,
+        });
         in_working[start as usize] = true;
         consider(start, start_d, &mut accepted);
         loop {
-            let next = working.iter().filter(|c| !expanded[c.slot as usize]).min().copied();
+            let next = working
+                .iter()
+                .filter(|c| !expanded[c.slot as usize])
+                .min()
+                .copied();
             let Some(cur) = next else { break };
             expanded[cur.slot as usize] = true;
             let neighbours: Vec<u32> = self.node_neighbours(cur.slot).collect();
@@ -989,7 +1063,10 @@ impl DiskAnnIndex {
         accepted.dedup_by_key(|c| c.slot);
         accepted.truncate(k);
         // d² over unit vectors → cosine: cos = 1 − d²/2.
-        accepted.into_iter().map(|c| (c.slot, 1.0 - c.dist / 2.0)).collect()
+        accepted
+            .into_iter()
+            .map(|c| (c.slot, 1.0 - c.dist / 2.0))
+            .collect()
     }
 
     /// [OPUS-4.8] (sq-1wc1) **Predicate-constrained (filtered) approximate top-`k`**: like
@@ -1032,7 +1109,13 @@ impl DiskAnnIndex {
         k: usize,
         cfg: crate::FilterConfig,
     ) -> Vec<(Id, f32)> {
-        assert_eq!(query.len(), self.dim, "query dim {} != index dim {}", query.len(), self.dim);
+        assert_eq!(
+            query.len(),
+            self.dim,
+            "query dim {} != index dim {}",
+            query.len(),
+            self.dim
+        );
         if mask.is_empty() {
             return Vec::new();
         }
@@ -1042,7 +1125,9 @@ impl DiskAnnIndex {
         if cfg.prefer_prefilter(mask.len(), self.count) {
             return crate::filter::nearest_exact_filtered(store, query, mask, k);
         }
-        let Some(q) = normalized(query) else { return Vec::new() };
+        let Some(q) = normalized(query) else {
+            return Vec::new();
+        };
         let beam = (self.search_beam.max(k)) * cfg.traversal_beam_factor.max(1);
         self.search_slots_filtered(&q, k, beam, |slot| mask.contains(self.node_id(slot)))
             .into_iter()
@@ -1054,8 +1139,16 @@ impl DiskAnnIndex {
     /// `query` returns no results (same contract as [`nearest_exact`](crate::ann::nearest_exact)
     /// and `VectorIndex::nearest`).
     pub fn nearest(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
-        assert_eq!(query.len(), self.dim, "query dim {} != index dim {}", query.len(), self.dim);
-        let Some(q) = normalized(query) else { return Vec::new() };
+        assert_eq!(
+            query.len(),
+            self.dim,
+            "query dim {} != index dim {}",
+            query.len(),
+            self.dim
+        );
+        let Some(q) = normalized(query) else {
+            return Vec::new();
+        };
         self.search_slots(&q, k, self.search_beam.max(k))
             .into_iter()
             .map(|(slot, cos)| (self.node_id(slot), cos))
@@ -1078,8 +1171,12 @@ impl DiskAnnIndex {
         store: &VectorStore,
         k: usize,
     ) -> Vec<(Term, f32)> {
-        let Some(id) = graph.id_of(term) else { return Vec::new() };
-        let Some(query) = store.get(id) else { return Vec::new() };
+        let Some(id) = graph.id_of(term) else {
+            return Vec::new();
+        };
+        let Some(query) = store.get(id) else {
+            return Vec::new();
+        };
         self.nearest(query, k + 1)
             .into_iter()
             .filter(|&(n, _)| n != id)
@@ -1105,7 +1202,12 @@ impl DiskAnnIndex {
     /// as well because [`nearest_term`](Self::nearest_term) resolves the query vector through it.
     pub fn check_graph(&self, store: &VectorStore, graph: &Graph) -> fingerprint::CheckResult {
         let origin = "<.spqg index>";
-        fingerprint::check_against(self.fingerprint, graph, fingerprint::Artifact::Index, origin)?;
+        fingerprint::check_against(
+            self.fingerprint,
+            graph,
+            fingerprint::Artifact::Index,
+            origin,
+        )?;
         store.check_graph(graph)
     }
 
@@ -1211,7 +1313,10 @@ mod fingerprint_tests {
         let qerr = idx
             .nearest_term_checked(&iri("http://example.org/dave"), &gb, &store, 1)
             .expect_err("a checked query against a mismatched graph must error");
-        assert!(qerr.contains("mismatch") || qerr.contains("wrong results"), "err: {qerr}");
+        assert!(
+            qerr.contains("mismatch") || qerr.contains("wrong results"),
+            "err: {qerr}"
+        );
         std::fs::remove_file(&store_path).ok();
         std::fs::remove_file(&idx_path).ok();
     }

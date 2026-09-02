@@ -30,8 +30,8 @@ fn hnsw_recall_at_10_vs_brute_force_on_50k() {
     const K: usize = 10;
     const QUERIES: usize = 100;
 
-    let path = std::env::temp_dir()
-        .join(format!("sparq-vectors-recall-{}.spqv", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("sparq-vectors-recall-{}.spqv", std::process::id()));
     let mut store = VectorStore::create(&path, DIM).unwrap();
     let mut state = 0xC0FFEE_u64;
     for i in 0..N {
@@ -47,7 +47,10 @@ fn hnsw_recall_at_10_vs_brute_force_on_50k() {
     let mut hits = 0usize;
     for _ in 0..QUERIES {
         let q = rand_vec(&mut q_state, DIM);
-        let exact: Vec<u32> = nearest_exact(&store, &q, K).into_iter().map(|(id, _)| id).collect();
+        let exact: Vec<u32> = nearest_exact(&store, &q, K)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         let approx: Vec<u32> = index.nearest(&q, K).into_iter().map(|(id, _)| id).collect();
         assert_eq!(exact.len(), K);
         assert_eq!(approx.len(), K);
@@ -65,8 +68,7 @@ fn exact_and_hnsw_agree_on_tiny_separable_data() {
     // Three well-separated clusters; both searchers must return the query's own
     // cluster, with cosine scores in agreement.
     const DIM: usize = 8;
-    let path = std::env::temp_dir()
-        .join(format!("sparq-vectors-tiny-{}.spqv", std::process::id()));
+    let path = std::env::temp_dir().join(format!("sparq-vectors-tiny-{}.spqv", std::process::id()));
     let mut store = VectorStore::create(&path, DIM).unwrap();
     let mut state = 7_u64;
     let mut centers = Vec::new();
@@ -75,7 +77,9 @@ fn exact_and_hnsw_agree_on_tiny_separable_data() {
         for i in 0..20 {
             let v: Vec<f32> = center
                 .iter()
-                .map(|x| x + ((splitmix64(&mut state) >> 40) as f32 / (1u64 << 23) as f32 - 0.5) * 0.05)
+                .map(|x| {
+                    x + ((splitmix64(&mut state) >> 40) as f32 / (1u64 << 23) as f32 - 0.5) * 0.05
+                })
                 .collect();
             store.put((c * 100 + i) as u32 + 1, &v).unwrap();
         }
@@ -89,7 +93,10 @@ fn exact_and_hnsw_agree_on_tiny_separable_data() {
         let approx = index.nearest(center, 5);
         for &(id, sim) in exact.iter().chain(approx.iter()) {
             assert_eq!((id - 1) / 100, c as u32, "neighbor {id} from wrong cluster");
-            assert!(sim > 0.99, "cluster member should be near-identical, got {sim}");
+            assert!(
+                sim > 0.99,
+                "cluster member should be near-identical, got {sim}"
+            );
         }
     }
 
@@ -114,12 +121,14 @@ fn build_time_presets_preserve_the_recall_floor() {
     const K: usize = 10;
     const QUERIES: usize = 100;
 
-    let path = std::env::temp_dir()
-        .join(format!("sparq-vectors-presets-{}.spqv", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("sparq-vectors-presets-{}.spqv", std::process::id()));
     let mut store = VectorStore::create(&path, DIM).unwrap();
     let mut state = 0xC0FFEE_u64;
     for i in 0..N {
-        store.put((i as u32) * 7 + 3, &rand_vec(&mut state, DIM)).unwrap();
+        store
+            .put((i as u32) * 7 + 3, &rand_vec(&mut state, DIM))
+            .unwrap();
     }
     store.finalize().unwrap();
 
@@ -127,7 +136,10 @@ fn build_time_presets_preserve_the_recall_floor() {
     // so a fixed seed still yields a deterministic (reproducible) graph for each.
     assert_eq!(HnswConfig::fast_build().ef_construction, 40);
     assert_eq!(HnswConfig::high_recall().ef_construction, 200);
-    assert_eq!(HnswConfig::fast_build().ef_search, HnswConfig::default().ef_search);
+    assert_eq!(
+        HnswConfig::fast_build().ef_search,
+        HnswConfig::default().ef_search
+    );
     assert_eq!(HnswConfig::fast_build().seed, HnswConfig::default().seed);
 
     let recall_of = |cfg: HnswConfig| -> f64 {
@@ -136,10 +148,11 @@ fn build_time_presets_preserve_the_recall_floor() {
         let mut hits = 0usize;
         for _ in 0..QUERIES {
             let q = rand_vec(&mut q_state, DIM);
-            let exact: Vec<u32> =
-                nearest_exact(&store, &q, K).into_iter().map(|(id, _)| id).collect();
-            let approx: Vec<u32> =
-                index.nearest(&q, K).into_iter().map(|(id, _)| id).collect();
+            let exact: Vec<u32> = nearest_exact(&store, &q, K)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            let approx: Vec<u32> = index.nearest(&q, K).into_iter().map(|(id, _)| id).collect();
             hits += approx.iter().filter(|id| exact.contains(id)).count();
         }
         hits as f64 / (QUERIES * K) as f64
@@ -150,11 +163,20 @@ fn build_time_presets_preserve_the_recall_floor() {
     eprintln!("preset recall@{K}: fast_build={fast:.4}  high_recall={high:.4}");
 
     // The load-bearing invariant: the faster build still clears the 0.95 floor.
-    assert!(fast >= 0.95, "fast_build recall {fast:.4} fell below the 0.95 floor");
+    assert!(
+        fast >= 0.95,
+        "fast_build recall {fast:.4} fell below the 0.95 floor"
+    );
     // A denser construction graph should not recall worse than the sparser one (small margin
     // for float-sum-order noise in the rayon-parallel build).
-    assert!(high + 0.01 >= fast, "high_recall {high:.4} recalled worse than fast_build {fast:.4}");
-    assert!(high >= 0.95, "high_recall recall {high:.4} fell below the 0.95 floor");
+    assert!(
+        high + 0.01 >= fast,
+        "high_recall {high:.4} recalled worse than fast_build {fast:.4}"
+    );
+    assert!(
+        high >= 0.95,
+        "high_recall recall {high:.4} fell below the 0.95 floor"
+    );
 
     let _ = std::fs::remove_file(&path);
 }

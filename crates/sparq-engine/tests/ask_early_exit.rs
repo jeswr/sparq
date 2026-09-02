@@ -46,7 +46,8 @@
 use sparq_core::Graph;
 use sparq_engine::{ask, ask_with_budget, query, query_with_budget, QueryBudget};
 
-const PFX: &str = "PREFIX : <http://ex/>\nPREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n";
+const PFX: &str =
+    "PREFIX : <http://ex/>\nPREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n";
 
 fn load(ttl: &str) -> Graph {
     Graph::load_str(&format!("@prefix : <http://ex/> .\n@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n{ttl}"), "turtle")
@@ -58,7 +59,11 @@ fn load(ttl: &str) -> Graph {
 fn assert_ask_matches_select(g: &Graph, body: &str, expected: bool) {
     let a = ask(g, &format!("{PFX}ASK {{ {body} }}")).expect("ask");
     let s = query(g, &format!("{PFX}SELECT * WHERE {{ {body} }}")).expect("select twin");
-    assert_eq!(a, !s.rows.is_empty(), "ASK != SELECT-nonemptiness for: {body}");
+    assert_eq!(
+        a,
+        !s.rows.is_empty(),
+        "ASK != SELECT-nonemptiness for: {body}"
+    );
     assert_eq!(a, expected, "unexpected boolean for: {body}");
 }
 
@@ -92,7 +97,10 @@ fn budget_witness_graph() -> Graph {
 /// The 12 000-row full join exceeds this; every capped block stays comfortably
 /// below it (first block 1024 seed rows -> 2048 joined rows).
 fn witness_budget() -> QueryBudget {
-    QueryBudget { max_rows: Some(9_500), ..Default::default() }
+    QueryBudget {
+        max_rows: Some(9_500),
+        ..Default::default()
+    }
 }
 
 /// The over-budget FILTERed join body. The residual `FILTER(?x != ?y)` passes
@@ -112,7 +120,11 @@ fn assert_budget_witness(g: &Graph, budget: &QueryBudget, body: &str, expected: 
         twin.as_ref().map(|r| r.rows.len())
     );
     let a = ask_with_budget(g, &format!("{PFX}ASK {{ {body} }}"), budget);
-    assert_eq!(a, Ok(expected), "ASK must early-exit instead of materialising: {body}");
+    assert_eq!(
+        a,
+        Ok(expected),
+        "ASK must early-exit instead of materialising: {body}"
+    );
     // And the boolean is right (unlimited oracle).
     assert_ask_matches_select(g, body, expected);
 }
@@ -218,12 +230,19 @@ fn ask_union_branch_short_circuit() {
 #[test]
 fn union_early_exit_keeps_right_branch_header() {
     let g = load(":a :p 1 . :b :q 2 .");
-    let r = query(&g, &format!("{PFX}SELECT ?v ?w WHERE {{ {{ ?x :p ?v }} UNION {{ ?y :q ?w }} }} LIMIT 1")).expect("query");
+    let r = query(
+        &g,
+        &format!("{PFX}SELECT ?v ?w WHERE {{ {{ ?x :p ?v }} UNION {{ ?y :q ?w }} }} LIMIT 1"),
+    )
+    .expect("query");
     assert_eq!(r.vars.len(), 2);
     assert_eq!(r.rows.len(), 1);
     let row = &r.rows[0];
     assert!(row[0].is_some(), "?v bound by the left branch");
-    assert!(row[1].is_none(), "?w is a right-branch variable: unbound in a left-branch solution");
+    assert!(
+        row[1].is_none(),
+        "?w is a right-branch variable: unbound in a left-branch solution"
+    );
 }
 
 // ---- Join of non-conjunctive children (the q12b / q08 shape) --------------------
@@ -246,7 +265,11 @@ fn ask_join_with_union_child() {
         false,
     );
     // Left matches, right never joins.
-    assert_ask_matches_select(&g, "?p :name \"Paul\" . { ?d :reviewer ?p } UNION { ?d :translator ?p }", false);
+    assert_ask_matches_select(
+        &g,
+        "?p :name \"Paul\" . { ?d :reviewer ?p } UNION { ?d :translator ?p }",
+        false,
+    );
 }
 
 // ---- BIND ----------------------------------------------------------------------
@@ -273,11 +296,27 @@ fn ask_order_by_is_emptiness_neutral() {
 fn ask_order_by_limit_offset_subselect() {
     let g = load(":a :p 3 . :b :p 1 . :c :p 2 .");
     // ORDER BY + LIMIT below ASK: the Slice stays exact.
-    assert_ask_matches_select(&g, "{ SELECT ?v WHERE { ?s :p ?v } ORDER BY ?v LIMIT 1 }", true);
-    assert_ask_matches_select(&g, "{ SELECT ?v WHERE { ?s :p ?v } ORDER BY ?v LIMIT 0 }", false);
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT ?v WHERE { ?s :p ?v } ORDER BY ?v LIMIT 1 }",
+        true,
+    );
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT ?v WHERE { ?s :p ?v } ORDER BY ?v LIMIT 0 }",
+        false,
+    );
     // OFFSET beyond the result size: empty.
-    assert_ask_matches_select(&g, "{ SELECT ?v WHERE { ?s :p ?v } ORDER BY ?v OFFSET 10 }", false);
-    assert_ask_matches_select(&g, "{ SELECT ?v WHERE { ?s :p ?v } ORDER BY ?v LIMIT 2 OFFSET 1 }", true);
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT ?v WHERE { ?s :p ?v } ORDER BY ?v OFFSET 10 }",
+        false,
+    );
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT ?v WHERE { ?s :p ?v } ORDER BY ?v LIMIT 2 OFFSET 1 }",
+        true,
+    );
 }
 
 /// DISTINCT below an OFFSET observes the deduplicated COUNT: 3 rows / 2 distinct
@@ -287,7 +326,11 @@ fn ask_order_by_limit_offset_subselect() {
 #[test]
 fn ask_distinct_under_offset_is_not_stripped() {
     let g = load(":a :p 1 . :b :p 1 . :c :p 2 .");
-    assert_ask_matches_select(&g, "{ SELECT DISTINCT ?v WHERE { ?s :p ?v } OFFSET 2 }", false);
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT DISTINCT ?v WHERE { ?s :p ?v } OFFSET 2 }",
+        false,
+    );
     // Control: without DISTINCT the same OFFSET leaves a row.
     assert_ask_matches_select(&g, "{ SELECT ?v WHERE { ?s :p ?v } OFFSET 2 }", true);
     // DISTINCT with no OFFSET above it is emptiness-neutral (strippable).
@@ -321,8 +364,11 @@ fn ask_fail_closed_shapes_match_oracle() {
 #[test]
 fn ask_graph_pattern_matches_oracle() {
     let mut g = Graph::load_str("", "turtle").expect("empty graph");
-    sparq_engine::update_in_place(&mut g, "INSERT DATA { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/p> 1 } }")
-        .expect("insert");
+    sparq_engine::update_in_place(
+        &mut g,
+        "INSERT DATA { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/p> 1 } }",
+    )
+    .expect("insert");
     assert_ask_matches_select(&g, "GRAPH ?g { ?s :p ?v }", true);
     assert_ask_matches_select(&g, "GRAPH ?g { ?s :r ?v }", false);
 }
@@ -333,15 +379,35 @@ fn ask_graph_pattern_matches_oracle() {
 fn ask_aggregation_and_having() {
     let g = load(":a :p 1 . :b :p 2 . :c :p 3 .");
     // COUNT over an EMPTY pattern is still one solution (the empty group).
-    assert_ask_matches_select(&g, "{ SELECT (COUNT(*) AS ?c) WHERE { ?s :nothing ?v } }", true);
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT (COUNT(*) AS ?c) WHERE { ?s :nothing ?v } }",
+        true,
+    );
     // ... and HAVING can remove that solution.
-    assert_ask_matches_select(&g, "{ SELECT (COUNT(*) AS ?c) WHERE { ?s :nothing ?v } HAVING (COUNT(*) > 0) }", false);
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT (COUNT(*) AS ?c) WHERE { ?s :nothing ?v } HAVING (COUNT(*) > 0) }",
+        false,
+    );
     // Non-empty groups, HAVING keeps / removes.
-    assert_ask_matches_select(&g, "{ SELECT (COUNT(*) AS ?c) WHERE { ?s :p ?v } HAVING (COUNT(*) >= 3) }", true);
-    assert_ask_matches_select(&g, "{ SELECT (COUNT(*) AS ?c) WHERE { ?s :p ?v } HAVING (COUNT(*) > 100) }", false);
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT (COUNT(*) AS ?c) WHERE { ?s :p ?v } HAVING (COUNT(*) >= 3) }",
+        true,
+    );
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT (COUNT(*) AS ?c) WHERE { ?s :p ?v } HAVING (COUNT(*) > 100) }",
+        false,
+    );
     // GROUP BY over an empty pattern: ZERO groups, ASK false (contrast with the
     // implicit single empty group above).
-    assert_ask_matches_select(&g, "{ SELECT ?s (COUNT(*) AS ?c) WHERE { ?s :nothing ?v } GROUP BY ?s }", false);
+    assert_ask_matches_select(
+        &g,
+        "{ SELECT ?s (COUNT(*) AS ?c) WHERE { ?s :nothing ?v } GROUP BY ?s }",
+        false,
+    );
 }
 
 // ---- q12a-shaped acceptance (the SP2Bench evidence shape) ------------------------
@@ -349,9 +415,18 @@ fn ask_aggregation_and_having() {
 fn q12a_graph(shared_names: bool) -> Graph {
     let mut ttl = String::new();
     for i in 0..300 {
-        ttl.push_str(&format!(":art{i} rdf:type :Article ; :creator :ap{i} .\n:ap{i} :name \"n{}\" .\n", i % 37));
-        let name = if shared_names { format!("n{}", i % 37) } else { format!("m{}", i % 41) };
-        ttl.push_str(&format!(":inp{i} rdf:type :Inproceedings ; :creator :ip{i} .\n:ip{i} :name \"{name}\" .\n"));
+        ttl.push_str(&format!(
+            ":art{i} rdf:type :Article ; :creator :ap{i} .\n:ap{i} :name \"n{}\" .\n",
+            i % 37
+        ));
+        let name = if shared_names {
+            format!("n{}", i % 37)
+        } else {
+            format!("m{}", i % 41)
+        };
+        ttl.push_str(&format!(
+            ":inp{i} rdf:type :Inproceedings ; :creator :ip{i} .\n:ip{i} :name \"{name}\" .\n"
+        ));
     }
     load(&ttl)
 }
@@ -375,8 +450,14 @@ fn ask_q12a_shape_matches_select_oracle() {
 fn q12a_shape_timing_probe() {
     let mut ttl = String::new();
     for i in 0..20_000 {
-        ttl.push_str(&format!(":art{i} rdf:type :Article ; :creator :ap{i} .\n:ap{i} :name \"n{}\" .\n", i % 371));
-        ttl.push_str(&format!(":inp{i} rdf:type :Inproceedings ; :creator :ip{i} .\n:ip{i} :name \"n{}\" .\n", i % 373));
+        ttl.push_str(&format!(
+            ":art{i} rdf:type :Article ; :creator :ap{i} .\n:ap{i} :name \"n{}\" .\n",
+            i % 371
+        ));
+        ttl.push_str(&format!(
+            ":inp{i} rdf:type :Inproceedings ; :creator :ip{i} .\n:ip{i} :name \"n{}\" .\n",
+            i % 373
+        ));
     }
     let g = load(&ttl);
     let t0 = std::time::Instant::now();
@@ -404,20 +485,34 @@ fn limit_through_join_returns_a_subset_of_the_full_result() {
     let full = query(&g, &format!("{PFX}SELECT ?s ?a ?b WHERE {{ {body} }}")).expect("full");
     assert_eq!(full.rows.len(), 6000);
     let key = |row: &Vec<Option<oxrdf::Term>>| -> String {
-        row.iter().map(|c| c.as_ref().map_or(String::new(), |t| t.to_string())).collect::<Vec<_>>().join("|")
+        row.iter()
+            .map(|c| c.as_ref().map_or(String::new(), |t| t.to_string()))
+            .collect::<Vec<_>>()
+            .join("|")
     };
     let full_set: std::collections::HashSet<String> = full.rows.iter().map(key).collect();
     for (limit, offset) in [(7usize, 0usize), (7, 5), (1, 0), (6000, 0), (9999, 0)] {
         let q = format!("{PFX}SELECT ?s ?a ?b WHERE {{ {body} }} LIMIT {limit} OFFSET {offset}");
         let r = query(&g, &q).expect("limited");
         let expected = limit.min(6000usize.saturating_sub(offset));
-        assert_eq!(r.rows.len(), expected, "row count for LIMIT {limit} OFFSET {offset}");
+        assert_eq!(
+            r.rows.len(),
+            expected,
+            "row count for LIMIT {limit} OFFSET {offset}"
+        );
         for row in &r.rows {
-            assert!(full_set.contains(&key(row)), "capped row not in the full result (LIMIT {limit} OFFSET {offset})");
+            assert!(
+                full_set.contains(&key(row)),
+                "capped row not in the full result (LIMIT {limit} OFFSET {offset})"
+            );
         }
     }
     // LIMIT past the result size returns the COMPLETE multiset.
-    let all = query(&g, &format!("{PFX}SELECT ?s ?a ?b WHERE {{ {body} }} LIMIT 9999")).expect("all");
+    let all = query(
+        &g,
+        &format!("{PFX}SELECT ?s ?a ?b WHERE {{ {body} }} LIMIT 9999"),
+    )
+    .expect("all");
     let mut got: Vec<String> = all.rows.iter().map(key).collect();
     let mut want: Vec<String> = full.rows.iter().map(key).collect();
     got.sort();
@@ -441,15 +536,25 @@ fn limit_with_late_filter_returns_only_filtered_rows() {
     let full = query(&g, &format!("{PFX}SELECT ?s ?v ?w WHERE {{ {body} }}")).expect("full");
     assert_eq!(full.rows.len(), 667);
     let key = |row: &Vec<Option<oxrdf::Term>>| -> String {
-        row.iter().map(|c| c.as_ref().map_or(String::new(), |t| t.to_string())).collect::<Vec<_>>().join("|")
+        row.iter()
+            .map(|c| c.as_ref().map_or(String::new(), |t| t.to_string()))
+            .collect::<Vec<_>>()
+            .join("|")
     };
     let full_set: std::collections::HashSet<String> = full.rows.iter().map(key).collect();
     for (limit, offset) in [(5usize, 0usize), (5, 3), (667, 0), (9999, 0)] {
         let q = format!("{PFX}SELECT ?s ?v ?w WHERE {{ {body} }} LIMIT {limit} OFFSET {offset}");
         let r = query(&g, &q).expect("limited");
-        assert_eq!(r.rows.len(), limit.min(667usize.saturating_sub(offset)), "LIMIT {limit} OFFSET {offset}");
+        assert_eq!(
+            r.rows.len(),
+            limit.min(667usize.saturating_sub(offset)),
+            "LIMIT {limit} OFFSET {offset}"
+        );
         for row in &r.rows {
-            assert!(full_set.contains(&key(row)), "row failed the FILTER or is not in the full result (LIMIT {limit})");
+            assert!(
+                full_set.contains(&key(row)),
+                "row failed the FILTER or is not in the full result (LIMIT {limit})"
+            );
         }
     }
 }

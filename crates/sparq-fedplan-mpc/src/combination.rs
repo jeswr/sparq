@@ -263,7 +263,11 @@ impl PrunedCombinations {
         }
         self.per_pattern
             .iter()
-            .filter(|p| p.candidates.iter().any(|c| !self.is_pruned(p.pattern, c.source)))
+            .filter(|p| {
+                p.candidates
+                    .iter()
+                    .any(|c| !self.is_pruned(p.pattern, c.source))
+            })
             .map(|p| p.pattern)
             .collect()
     }
@@ -592,7 +596,11 @@ fn char_sets_complete_for(desc: &SourceDescriptor, predicate: &str) -> bool {
         return false; // a repeated exact predicate set is not a partition ⇒ decline.
     }
     let mut accounted: u64 = 0;
-    for cs in desc.char_sets().iter().filter(|cs| char_set_has(cs, predicate)) {
+    for cs in desc
+        .char_sets()
+        .iter()
+        .filter(|cs| char_set_has(cs, predicate))
+    {
         let Some(next) = accounted.checked_add(cs.subjects) else {
             return false; // overflow ⇒ not a valid partition ⇒ cannot prove ⇒ decline.
         };
@@ -1428,7 +1436,10 @@ mod tests {
         ]);
         let sources = vec![split_source("http://a/", Accounting::Exact)];
         let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
-        assert!(!selected.per_pattern[0].is_empty(), "unbound predicate keeps the source");
+        assert!(
+            !selected.per_pattern[0].is_empty(),
+            "unbound predicate keeps the source"
+        );
 
         let out = prune_source_combinations(&bgp, &sources, &selected).unwrap();
         assert!(out.dead_pairings.is_empty());
@@ -1482,11 +1493,15 @@ mod tests {
         // Pattern 0 is held only by A (B does not hold sharesHouse); pattern 1 by A and B.
         let bgp = star_bgp();
         let sources = vec![
-            split_source("http://a/", Accounting::Exact),               // holds both
+            split_source("http://a/", Accounting::Exact), // holds both
             cs_source("http://b/", &[(&[NAME], 9)], Accounting::Exact), // holds `name` only
         ];
         let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
-        assert_eq!(selected.per_pattern[0].candidates.len(), 1, "only A holds sharesHouse");
+        assert_eq!(
+            selected.per_pattern[0].candidates.len(),
+            1,
+            "only A holds sharesHouse"
+        );
         assert_eq!(selected.per_pattern[1].candidates.len(), 2);
 
         let out = prune_source_combinations(&bgp, &sources, &selected).unwrap();
@@ -1505,7 +1520,10 @@ mod tests {
         assert!(out.dead_patterns.is_empty());
         assert_eq!(out.surviving_combination_patterns(), vec![0, 1]);
         assert!(out.combination_is_dead(&[0, 0]));
-        assert!(!out.combination_is_dead(&[0, 1]), "pattern 1 from B survives");
+        assert!(
+            !out.combination_is_dead(&[0, 1]),
+            "pattern 1 from B survives"
+        );
     }
 
     /// `combination_is_dead` is recall-safe on anything it cannot align: a wrong-length
@@ -1520,7 +1538,10 @@ mod tests {
         let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
         let out = prune_source_combinations(&bgp, &sources, &selected).unwrap();
         assert!(out.bgp_satisfiable, "precondition: the live path");
-        assert!(!out.combination_is_dead(&[0]), "too short ⇒ cannot prove ⇒ keep");
+        assert!(
+            !out.combination_is_dead(&[0]),
+            "too short ⇒ cannot prove ⇒ keep"
+        );
         assert!(!out.combination_is_dead(&[0, 0, 0]), "too long ⇒ keep");
         assert!(!out.combination_is_dead(&[]), "empty ⇒ keep");
     }
@@ -1679,7 +1700,11 @@ mod tests {
             "the error names the identity disagreement: {}",
             msg
         );
-        assert!(msg.contains("http://b/"), "the error names the offending id: {}", msg);
+        assert!(
+            msg.contains("http://b/"),
+            "the error names the offending id: {}",
+            msg
+        );
 
         // Control: the SAME selection against the slice it actually describes is accepted, and
         // (B covering both predicates) prunes nothing — so the rejection above is the identity

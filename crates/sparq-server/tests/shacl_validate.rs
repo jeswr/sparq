@@ -62,11 +62,16 @@ async fn spawn(data: &str, shacl_on: bool) -> String {
 
 /// [GPT-5.6] sq-lsp7k.2.4: boots guard mode with pre-loaded shapes.
 async fn spawn_guard(data: &str, guard_on: bool) -> String {
-    spawn_with(data, false, ServerConfig {
-        shacl_guard: guard_on,
-        shacl_shapes: Some(ShaclShapes::new(Graph::load_str(SHAPES, "turtle").unwrap())),
-        ..ServerConfig::default()
-    }).await
+    spawn_with(
+        data,
+        false,
+        ServerConfig {
+            shacl_guard: guard_on,
+            shacl_shapes: Some(ShaclShapes::new(Graph::load_str(SHAPES, "turtle").unwrap())),
+            ..ServerConfig::default()
+        },
+    )
+    .await
 }
 
 fn client() -> reqwest::Client {
@@ -145,14 +150,26 @@ async fn guard_rejects_violating_update_without_publishing_then_accepts_correcti
         .body("DELETE { <http://example.org/bob> <http://example.org/age> ?age } INSERT { <http://example.org/bob> <http://example.org/age> \"forty-two\" } WHERE { <http://example.org/bob> <http://example.org/age> ?age }")
         .send().await.unwrap();
     assert_eq!(rejected.status(), 422);
-    assert_eq!(rejected.headers()["content-type"], "application/json; charset=utf-8");
+    assert_eq!(
+        rejected.headers()["content-type"],
+        "application/json; charset=utf-8"
+    );
     let report = rejected.text().await.unwrap();
     assert!(report.contains("\"conforms\":false"), "{report}");
     assert!(report.contains("DatatypeConstraintComponent"), "{report}");
 
-    let unchanged = client().get(format!("{base}/sparql"))
-        .query(&[("query", "ASK { <http://example.org/bob> <http://example.org/age> 42 }")])
-        .send().await.unwrap().text().await.unwrap();
+    let unchanged = client()
+        .get(format!("{base}/sparql"))
+        .query(&[(
+            "query",
+            "ASK { <http://example.org/bob> <http://example.org/age> 42 }",
+        )])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert!(unchanged.contains("\"boolean\":true"));
 
     let corrected = client().post(format!("{base}/sparql"))
@@ -166,21 +183,40 @@ async fn guard_rejects_violating_update_without_publishing_then_accepts_correcti
 async fn guard_covers_gsp_and_runtime_off_preserves_write_path() {
     const BAD: &str = "<http://example.org/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/Person> .\n<http://example.org/alice> <http://example.org/age> <http://example.org/not-an-integer> .";
     let guarded = spawn_guard(CONFORMING_DATA, true).await;
-    let rejected = client().post(format!("{guarded}/sparql/graph?default"))
-        .header("Content-Type", "text/turtle").body(BAD).send().await.unwrap();
+    let rejected = client()
+        .post(format!("{guarded}/sparql/graph?default"))
+        .header("Content-Type", "text/turtle")
+        .body(BAD)
+        .send()
+        .await
+        .unwrap();
     let status = rejected.status();
     let body = rejected.text().await.unwrap();
     assert_eq!(status, 422, "{body}");
     assert!(body.contains("\"conforms\":false"));
 
-    let unchanged = client().get(format!("{guarded}/sparql"))
-        .query(&[("query", "ASK { <http://example.org/bob> <http://example.org/age> 42 }")])
-        .send().await.unwrap().text().await.unwrap();
+    let unchanged = client()
+        .get(format!("{guarded}/sparql"))
+        .query(&[(
+            "query",
+            "ASK { <http://example.org/bob> <http://example.org/age> 42 }",
+        )])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert!(unchanged.contains("\"boolean\":true"));
 
     let unguarded = spawn_guard(CONFORMING_DATA, false).await;
-    let accepted = client().post(format!("{unguarded}/sparql/graph?default"))
-        .header("Content-Type", "text/turtle").body(BAD).send().await.unwrap();
+    let accepted = client()
+        .post(format!("{unguarded}/sparql/graph?default"))
+        .header("Content-Type", "text/turtle")
+        .body(BAD)
+        .send()
+        .await
+        .unwrap();
     assert!(accepted.status().is_success(), "{}", accepted.status());
 }
 
@@ -216,42 +252,75 @@ const ILL_FORMED_SHAPES: &str = r#"
 #[tokio::test]
 async fn guard_fails_closed_on_unevaluable_shapes() {
     // (a) Runtime fail-closed. Boots cleanly (the shapes graph is well-FORMED)…
-    let base = spawn_with(CONFORMING_DATA, false, ServerConfig {
-        shacl_guard: true,
-        shacl_shapes: Some(ShaclShapes::new(Graph::load_str(UNEVALUABLE_PATTERN_SHAPES, "turtle").unwrap())),
-        ..ServerConfig::default()
-    }).await;
+    let base = spawn_with(
+        CONFORMING_DATA,
+        false,
+        ServerConfig {
+            shacl_guard: true,
+            shacl_shapes: Some(ShaclShapes::new(
+                Graph::load_str(UNEVALUABLE_PATTERN_SHAPES, "turtle").unwrap(),
+            )),
+            ..ServerConfig::default()
+        },
+    )
+    .await;
     let resp = client().post(format!("{base}/sparql"))
         .header("Content-Type", "application/sparql-update")
         .body("INSERT DATA { <http://example.org/mallory> a <http://example.org/Person> ; <http://example.org/age> \"not-an-integer\" }")
         .send().await.unwrap();
     // …but the guarded write is REJECTED (5xx: the operator's misconfiguration, not the
     // client's data), never admitted past the unevaluable guard.
-    assert_eq!(resp.status(), 500, "an unevaluable guard constraint must fail CLOSED, not silently admit the write");
+    assert_eq!(
+        resp.status(),
+        500,
+        "an unevaluable guard constraint must fail CLOSED, not silently admit the write"
+    );
     let body = resp.text().await.unwrap();
-    assert!(!body.contains("(unclosed"), "shapes-graph fragment must not leak into the response body: {body}");
+    assert!(
+        !body.contains("(unclosed"),
+        "shapes-graph fragment must not leak into the response body: {body}"
+    );
     // Nothing was published.
-    let unchanged = client().get(format!("{base}/sparql"))
+    let unchanged = client()
+        .get(format!("{base}/sparql"))
         .query(&[("query", "ASK { <http://example.org/mallory> ?p ?o }")])
-        .send().await.unwrap().text().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert!(unchanged.contains("\"boolean\":false"), "{unchanged}");
 
     // (b) Startup fail-closed: a parse-time ill-formed guard shape never boots.
     let graph = Graph::load_str(CONFORMING_DATA, "turtle").unwrap();
-    let err = AppState::try_with_config(graph, ServerConfig {
-        shacl_guard: true,
-        shacl_shapes: Some(ShaclShapes::new(Graph::load_str(ILL_FORMED_SHAPES, "turtle").unwrap())),
-        ..ServerConfig::default()
-    }).err().expect("an ill-formed guard shapes graph must be a hard startup error");
+    let err = AppState::try_with_config(
+        graph,
+        ServerConfig {
+            shacl_guard: true,
+            shacl_shapes: Some(ShaclShapes::new(
+                Graph::load_str(ILL_FORMED_SHAPES, "turtle").unwrap(),
+            )),
+            ..ServerConfig::default()
+        },
+    )
+    .err()
+    .expect("an ill-formed guard shapes graph must be a hard startup error");
     assert!(err.contains("not fully evaluable"), "{err}");
 }
 
 #[test]
 fn guard_requires_loaded_shapes_graph() {
     let graph = Graph::load_str(CONFORMING_DATA, "turtle").unwrap();
-    let error = AppState::try_with_config(graph, ServerConfig {
-        shacl_guard: true, ..ServerConfig::default()
-    }).err().expect("guard without shapes must fail closed");
+    let error = AppState::try_with_config(
+        graph,
+        ServerConfig {
+            shacl_guard: true,
+            ..ServerConfig::default()
+        },
+    )
+    .err()
+    .expect("guard without shapes must fail closed");
     assert!(error.contains("requires a loaded shapes graph"), "{error}");
 }
 

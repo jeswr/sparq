@@ -168,7 +168,11 @@ pub fn perfect_ref(atoms: Vec<Atom>, answer: Vec<String>, tbox: &TBox) -> Vec<Cq
             for rewritten in rewrite_atom(&cq, atom, tbox, &mut fresh) {
                 let mut new_atoms = cq.atoms.clone();
                 new_atoms[i] = rewritten;
-                push_cq(Cq::normalised(new_atoms, cq.answer.clone()), &mut seen, &mut worklist);
+                push_cq(
+                    Cq::normalised(new_atoms, cq.answer.clone()),
+                    &mut seen,
+                    &mut worklist,
+                );
             }
         }
         // (b) REDUCE: unify each unordered pair of atoms; anonymise; re-add.
@@ -391,10 +395,9 @@ fn reduce(cq: &Cq, a: usize, b: usize) -> Option<Cq> {
 /// same role direction). `None` if the atoms are not the same predicate shape.
 fn atom_unify_pairs(a: &Atom, b: &Atom) -> Option<Vec<(Term, Term)>> {
     match (a, b) {
-        (
-            Atom::Class { class: c1, arg: a1 },
-            Atom::Class { class: c2, arg: a2 },
-        ) if c1 == c2 => Some(vec![(a1.clone(), a2.clone())]),
+        (Atom::Class { class: c1, arg: a1 }, Atom::Class { class: c2, arg: a2 }) if c1 == c2 => {
+            Some(vec![(a1.clone(), a2.clone())])
+        }
         (
             Atom::Role {
                 role: r1,
@@ -664,14 +667,11 @@ mod tests {
     #[test]
     fn reduce_const_clash_fails() {
         // Two atoms with DIFFERENT constants in the same position do NOT unify (reduce = None).
-        let cq = Cq::normalised(
-            vec![
-                class_const("A", "c1"),
-                class_const("A", "c2"),
-            ],
-            vec![],
+        let cq = Cq::normalised(vec![class_const("A", "c1"), class_const("A", "c2")], vec![]);
+        assert!(
+            reduce(&cq, 0, 1).is_none(),
+            "distinct constants must not unify"
         );
-        assert!(reduce(&cq, 0, 1).is_none(), "distinct constants must not unify");
     }
 
     #[test]
@@ -715,10 +715,7 @@ mod tests {
         // A distinguished var is rigid vs a constant too: `A(?x)` and `A(:c)` with ?x distinguished
         // must NOT reduce (it would force ?x = :c, answering a different query).
         let cq = Cq::normalised(
-            vec![
-                class("A", "x"),
-                class_const("A", "c"),
-            ],
+            vec![class("A", "x"), class_const("A", "c")],
             vec!["x".into()],
         );
         assert!(

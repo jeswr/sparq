@@ -244,7 +244,11 @@ mod tests {
     fn check_seed_passes_both_oracles_on_the_real_engine() {
         let outcome = check_seed(0, false);
         assert!(outcome.tlp.is_pass(), "TLP on seed 0: {:?}", outcome.tlp);
-        assert!(outcome.norec.is_pass(), "NoREC on seed 0: {:?}", outcome.norec);
+        assert!(
+            outcome.norec.is_pass(),
+            "NoREC on seed 0: {:?}",
+            outcome.norec
+        );
         assert!(outcome.is_pass());
         assert_eq!(outcome.case.seed, 0);
     }
@@ -265,7 +269,10 @@ mod tests {
 
     #[test]
     fn window_report_all_pass_is_fail_closed_on_empty_and_on_any_non_pass() {
-        assert!(!WindowReport::default().all_pass(), "empty window must not pass");
+        assert!(
+            !WindowReport::default().all_pass(),
+            "empty window must not pass"
+        );
         let green = WindowReport {
             start: 0,
             checked: 5,
@@ -303,10 +310,16 @@ mod tests {
     fn run_window_green_path_prints_only_the_summary() {
         let mut out = Vec::new();
         let report = run_window(0, 5, false, &mut out).unwrap();
-        assert!(report.all_pass(), "seeds 0..5 must pass on main: {report:?}");
+        assert!(
+            report.all_pass(),
+            "seeds 0..5 must pass on main: {report:?}"
+        );
         assert_eq!(report.checked, 5);
         let text = String::from_utf8(out).unwrap();
-        assert!(!text.contains("VIOLATION"), "green window prints no repro: {text}");
+        assert!(
+            !text.contains("VIOLATION"),
+            "green window prints no repro: {text}"
+        );
         assert!(!text.contains("FIRST FAILING CASE"), "{text}");
         assert!(text.trim_end().ends_with(&report.summary_line()));
     }
@@ -326,7 +339,10 @@ mod tests {
         assert!(text.contains("FIRST FAILING CASE:"), "{text}");
         assert!(text.contains("replay: cargo run -p sparq-metamorph --bin metamorph-driver -- 0 1"));
         assert!(text.contains("--- queries ---") && text.contains("--- graph ---"));
-        assert!(text.contains("<http://example.org/s0>"), "graph inline: {text}");
+        assert!(
+            text.contains("<http://example.org/s0>"),
+            "graph inline: {text}"
+        );
         assert!(text.contains(&report.summary_line()));
     }
 

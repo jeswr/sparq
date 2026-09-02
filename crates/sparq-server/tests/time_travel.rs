@@ -62,7 +62,12 @@ async fn post_update(cl: &reqwest::Client, base: &str, update: &str) -> reqwest:
 const PROBE: &str = "SELECT ?s WHERE { ?s <http://ex/seen> ?o }";
 
 /// GETs `query` (optionally pinned to `generation`), returning the response.
-async fn query_response(cl: &reqwest::Client, base: &str, query: &str, generation: Option<&str>) -> reqwest::Response {
+async fn query_response(
+    cl: &reqwest::Client,
+    base: &str,
+    query: &str,
+    generation: Option<&str>,
+) -> reqwest::Response {
     let mut params = vec![("query", query)];
     if let Some(g) = generation {
         params.push(("generation", g));
@@ -108,7 +113,11 @@ mod with_feature {
 
         // Generation 0: empty. The response header exposes the current generation.
         let r0 = query_response(&cl, &base, PROBE, None).await;
-        assert_eq!(generation_header(&r0), Some(0), "query response exposes its generation");
+        assert_eq!(
+            generation_header(&r0),
+            Some(0),
+            "query response exposes its generation"
+        );
         assert_eq!(rows(r0).await, 0);
 
         // Three sequential updates → generations 1, 2, 3; each 204 carries its token.
@@ -130,8 +139,16 @@ mod with_feature {
         // Pinned to each retained generation: exactly the state as of that point.
         for (g, expect) in [(0u64, 0usize), (1, 1), (2, 2), (3, 3)] {
             let resp = query_response(&cl, &base, PROBE, Some(&g.to_string())).await;
-            assert_eq!(generation_header(&resp), Some(g), "pinned response confirms its pin");
-            assert_eq!(rows(resp).await, expect, "generation {g} must serve its own state");
+            assert_eq!(
+                generation_header(&resp),
+                Some(g),
+                "pinned response confirms its pin"
+            );
+            assert_eq!(
+                rows(resp).await,
+                expect,
+                "generation {g} must serve its own state"
+            );
         }
     }
 
@@ -152,7 +169,11 @@ mod with_feature {
             .await
             .unwrap();
         assert_eq!(generation_header(&resp), Some(0));
-        assert_eq!(rows(resp).await, 0, "POST-form pin must serve generation 0's empty state");
+        assert_eq!(
+            rows(resp).await,
+            0,
+            "POST-form pin must serve generation 0's empty state"
+        );
     }
 
     fn urlencoded(s: &str) -> String {
@@ -171,7 +192,10 @@ mod with_feature {
     /// so exactly the K newest older-than-current generations are servable.
     #[tokio::test]
     async fn aged_out_generation_is_410_and_k_floor_wins() {
-        let config = ServerConfig { time_travel_generations: 2, ..ServerConfig::default() };
+        let config = ServerConfig {
+            time_travel_generations: 2,
+            ..ServerConfig::default()
+        };
         let base = spawn_empty(config).await;
         let cl = reqwest::Client::new();
         for i in 1..=6usize {
@@ -179,14 +203,25 @@ mod with_feature {
         }
         // Current = 6; retained older = max(K = 4, configured 2) = 4 → gens 2..=6.
         let ok = query_response(&cl, &base, PROBE, Some("2")).await;
-        assert_eq!(rows(ok).await, 2, "oldest retained generation still serves its state");
+        assert_eq!(
+            rows(ok).await,
+            2,
+            "oldest retained generation still serves its state"
+        );
 
         let gone = query_response(&cl, &base, PROBE, Some("1")).await;
-        assert_eq!(gone.status(), 410, "an aged-out generation is Gone, never substituted");
+        assert_eq!(
+            gone.status(),
+            410,
+            "an aged-out generation is Gone, never substituted"
+        );
         let body: serde_json::Value = gone.json().await.unwrap();
         let msg = body["error"].as_str().unwrap();
         assert!(msg.contains("aged out"), "error explains the 410: {msg}");
-        assert!(msg.contains("oldest retained: 2"), "error names the oldest retained: {msg}");
+        assert!(
+            msg.contains("oldest retained: 2"),
+            "error names the oldest retained: {msg}"
+        );
     }
 
     /// Token misuse is a 400 with a precise message: a generation that was never
@@ -199,12 +234,18 @@ mod with_feature {
         let future = query_response(&cl, &base, PROBE, Some("999")).await;
         assert_eq!(future.status(), 400);
         let body: serde_json::Value = future.json().await.unwrap();
-        assert!(body["error"].as_str().unwrap().contains("not been published"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("not been published"));
 
         let junk = query_response(&cl, &base, PROBE, Some("yesterday")).await;
         assert_eq!(junk.status(), 400);
         let body: serde_json::Value = junk.json().await.unwrap();
-        assert!(body["error"].as_str().unwrap().contains("invalid 'generation' parameter"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid 'generation' parameter"));
 
         // Updates always apply to the current generation: pinning one is refused,
         // not silently ignored.
@@ -217,7 +258,10 @@ mod with_feature {
             .unwrap();
         assert_eq!(resp.status(), 400);
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert!(body["error"].as_str().unwrap().contains("updates always apply to the current generation"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("updates always apply to the current generation"));
         // …and nothing was applied.
         assert_eq!(rows(query_response(&cl, &base, PROBE, None).await).await, 0);
     }
@@ -291,7 +335,10 @@ mod default_build {
         }
         let probe = query_response(&cl, &base, PROBE, None).await;
         let pin = generation_header(&probe).expect("default build stamps Sparq-Generation");
-        assert_eq!(pin, 3, "header exposes the current generation in the default build");
+        assert_eq!(
+            pin, 3,
+            "header exposes the current generation in the default build"
+        );
         assert_eq!(rows(probe).await, 3);
 
         // Page 1 (LIMIT 2 OFFSET 0), pinned.
@@ -311,13 +358,20 @@ mod default_build {
         let mut union: Vec<String> = page1.clone();
         union.extend(page2.clone());
         let distinct: BTreeSet<&String> = union.iter().collect();
-        assert_eq!(distinct.len(), union.len(), "no row appears on both pages: {page1:?} + {page2:?}");
+        assert_eq!(
+            distinct.len(),
+            union.len(),
+            "no row appears on both pages: {page1:?} + {page2:?}"
+        );
         assert!(
             union.iter().all(|s| s != "http://ex/u4"),
             "the interleaved write is invisible to the pinned snapshot: {union:?}"
         );
         let single = page_subjects(paged(&cl, &base, pin, 100, 0).await).await;
-        assert_eq!(union, single, "paged union == single-shot at the pinned generation");
+        assert_eq!(
+            union, single,
+            "paged union == single-shot at the pinned generation"
+        );
 
         // The pin ISOLATED the pages, it did not freeze the store: unpinned now sees all 4.
         assert_eq!(rows(query_response(&cl, &base, PROBE, None).await).await, 4);
@@ -336,14 +390,25 @@ mod default_build {
         }
         // Generation 2 is the oldest still retained → still serves its own snapshot (2 rows).
         let ok = query_response(&cl, &base, PROBE, Some("2")).await;
-        assert_eq!(rows(ok).await, 2, "oldest retained generation still serves its snapshot");
+        assert_eq!(
+            rows(ok).await,
+            2,
+            "oldest retained generation still serves its snapshot"
+        );
 
         // Generation 1 aged out of the window → 410 Gone, never substituted.
         let gone = query_response(&cl, &base, PROBE, Some("1")).await;
-        assert_eq!(gone.status(), 410, "a pin past the concurrency window is Gone, not a silent fallback");
+        assert_eq!(
+            gone.status(),
+            410,
+            "a pin past the concurrency window is Gone, not a silent fallback"
+        );
         let msg = error_of(gone).await;
         assert!(msg.contains("aged out"), "410 explains itself: {msg}");
-        assert!(msg.contains("oldest retained: 2"), "410 names the oldest retained: {msg}");
+        assert!(
+            msg.contains("oldest retained: 2"),
+            "410 names the oldest retained: {msg}"
+        );
         assert!(
             msg.contains("concurrency-retention window"),
             "default-build 410 cites the concurrency window (not the time-travel flags): {msg}"
@@ -363,7 +428,9 @@ mod default_build {
 
         let junk = query_response(&cl, &base, PROBE, Some("yesterday")).await;
         assert_eq!(junk.status(), 400);
-        assert!(error_of(junk).await.contains("invalid 'generation' parameter"));
+        assert!(error_of(junk)
+            .await
+            .contains("invalid 'generation' parameter"));
 
         // Pinning an update is an honest refusal, not a silent ignore.
         let resp = cl
@@ -374,7 +441,9 @@ mod default_build {
             .await
             .unwrap();
         assert_eq!(resp.status(), 400);
-        assert!(error_of(resp).await.contains("updates always apply to the current generation"));
+        assert!(error_of(resp)
+            .await
+            .contains("updates always apply to the current generation"));
         // …and nothing was applied.
         assert_eq!(rows(query_response(&cl, &base, PROBE, None).await).await, 0);
     }

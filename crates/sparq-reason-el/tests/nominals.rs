@@ -159,7 +159,11 @@ fn bottom_via_nominals_unsatisfiability_is_asymmetric() {
         !unsat.contains(&iri(&dict, "B")),
         "B stays satisfiable (B = {{a}} with A = ∅ is a model) — a symmetric merge would be unsound"
     );
-    assert_eq!(h.report().unsatisfiable_classes, 1, "exactly A is unsatisfiable");
+    assert_eq!(
+        h.report().unsatisfiable_classes,
+        1,
+        "exactly A is unsatisfiable"
+    );
     assert_eq!(h.report().skipped_axioms, 0, "every axiom is in-fragment");
 }
 
@@ -236,7 +240,10 @@ fn classify_graph_with_nominals_is_idempotent_and_never_leaks_individuals() {
     let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
     let before = triples.len();
     let r1 = classify_graph(&mut dict, &mut triples);
-    assert_eq!(r1.emitted_subsumptions, 1, "exactly the CR6-derived A ⊑ B edge is new");
+    assert_eq!(
+        r1.emitted_subsumptions, 1,
+        "exactly the CR6-derived A ⊑ B edge is new"
+    );
     let a_ind = iri(&dict, "a");
     let sc = dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(
         "http://www.w3.org/2000/01/rdf-schema#subClassOf".to_string(),

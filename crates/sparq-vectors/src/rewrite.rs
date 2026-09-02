@@ -623,7 +623,7 @@ fn rewrite_bgp(
                      {})",
                     iri,
                     vocab::VOCAB_REVISION
-                ))
+                ));
             }
         }
     }
@@ -1219,9 +1219,7 @@ fn run_hybrid(
 
     let fused = fuse_arms(&arms, cfg.rrf_constant(), candidates)?;
     match cfg.second_stage() {
-        Some((reranker, policy)) => {
-            apply_rerank(reranker, policy, &arm_query, fused, req.k)
-        }
+        Some((reranker, policy)) => apply_rerank(reranker, policy, &arm_query, fused, req.k),
         None => {
             let mut fused = fused;
             fused.truncate(req.k);
@@ -1348,14 +1346,22 @@ fn run_aux_arms(
             loop {
                 let arm = cfg.run_arm(i, query, want)?;
                 check_arm_ids(graph, &arm)?;
-                let ArmRanking { arm, weight, ranked } = arm;
+                let ArmRanking {
+                    arm,
+                    weight,
+                    ranked,
+                } = arm;
                 let returned = ranked.len();
                 let ranked: Vec<(Id, f64)> = ranked
                     .into_iter()
                     .filter(|(id, _)| mask.contains(*id))
                     .collect();
                 if ranked.len() >= candidates || ranked.len() >= mask.len() || returned < want {
-                    return Ok(ArmRanking { arm, weight, ranked });
+                    return Ok(ArmRanking {
+                        arm,
+                        weight,
+                        ranked,
+                    });
                 }
                 if want >= ceiling {
                     // Fail closed: the arm padded a full page of `want` results of which only

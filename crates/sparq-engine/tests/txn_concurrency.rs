@@ -97,10 +97,25 @@ fn two_writers_racing_overlapping_delete_exactly_one_wins_no_torn_state() {
         let results: Vec<(u32, Result<u64, CommitError>)> =
             handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-        let winners: Vec<u32> = results.iter().filter(|(_, r)| r.is_ok()).map(|(w, _)| *w).collect();
-        let losers: Vec<&CommitError> = results.iter().filter_map(|(_, r)| r.as_ref().err()).collect();
-        assert_eq!(winners.len(), 1, "iter {it}: exactly one writer must win the overlapping race, got {results:?}");
-        assert_eq!(losers.len(), 1, "iter {it}: the other writer must be rejected");
+        let winners: Vec<u32> = results
+            .iter()
+            .filter(|(_, r)| r.is_ok())
+            .map(|(w, _)| *w)
+            .collect();
+        let losers: Vec<&CommitError> = results
+            .iter()
+            .filter_map(|(_, r)| r.as_ref().err())
+            .collect();
+        assert_eq!(
+            winners.len(),
+            1,
+            "iter {it}: exactly one writer must win the overlapping race, got {results:?}"
+        );
+        assert_eq!(
+            losers.len(),
+            1,
+            "iter {it}: the other writer must be rejected"
+        );
         assert!(
             matches!(losers[0], CommitError::Conflict { .. }),
             "iter {it}: the loser must fail with a write-write Conflict, got {:?}",
@@ -110,8 +125,14 @@ fn two_writers_racing_overlapping_delete_exactly_one_wins_no_torn_state() {
         let winner = winners[0];
         let loser = 1 - winner;
         let r = m.begin_read();
-        assert!(!ask(&r, "ASK { :a :p :b }"), "iter {it}: the winner's delete must have landed");
-        assert!(ask(&r, "ASK { :b :p :c }"), "iter {it}: the untouched triple must survive");
+        assert!(
+            !ask(&r, "ASK { :a :p :b }"),
+            "iter {it}: the winner's delete must have landed"
+        );
+        assert!(
+            ask(&r, "ASK { :b :p :c }"),
+            "iter {it}: the untouched triple must survive"
+        );
         assert!(
             ask(&r, &format!("ASK {{ :w{winner} :p :m{winner} }}")),
             "iter {it}: the winner's marker must be committed"
@@ -120,7 +141,11 @@ fn two_writers_racing_overlapping_delete_exactly_one_wins_no_torn_state() {
             !ask(&r, &format!("ASK {{ :w{loser} :p :m{loser} }}")),
             "iter {it}: the loser's marker must NOT leak — its body was fully rolled back (no torn overlay)"
         );
-        assert_eq!(count_all(&r), BASE_COUNT, "iter {it}: net effect is exactly one writer's (-1 delete +1 marker)");
+        assert_eq!(
+            count_all(&r),
+            BASE_COUNT,
+            "iter {it}: net effect is exactly one writer's (-1 delete +1 marker)"
+        );
     }
 }
 
@@ -147,18 +172,37 @@ fn many_writers_same_triple_exactly_one_commits() {
                 let mut tx = m.begin_write();
                 // Everyone has forked from v0 before anyone stages a body.
                 begun.wait();
-                tx.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }").unwrap();
+                tx.update("PREFIX : <http://ex/> DELETE DATA { :a :p :b }")
+                    .unwrap();
                 commit_gate.wait();
                 tx.commit().is_ok()
             }));
         }
-        let oks = handles.into_iter().map(|h| h.join().unwrap()).filter(|&ok| ok).count();
-        assert_eq!(oks, 1, "iter {it}: exactly one of {N} writers racing the same triple may commit");
+        let oks = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|&ok| ok)
+            .count();
+        assert_eq!(
+            oks, 1,
+            "iter {it}: exactly one of {N} writers racing the same triple may commit"
+        );
 
         let r = m.begin_read();
-        assert!(!ask(&r, "ASK { :a :p :b }"), "iter {it}: the triple is deleted exactly once");
-        assert_eq!(count_all(&r), BASE_COUNT - 1, "iter {it}: net effect is a single delete, no torn state");
-        assert_eq!(m.committed_version(), 1, "iter {it}: only one commit advanced the version");
+        assert!(
+            !ask(&r, "ASK { :a :p :b }"),
+            "iter {it}: the triple is deleted exactly once"
+        );
+        assert_eq!(
+            count_all(&r),
+            BASE_COUNT - 1,
+            "iter {it}: net effect is a single delete, no torn state"
+        );
+        assert_eq!(
+            m.committed_version(),
+            1,
+            "iter {it}: only one commit advanced the version"
+        );
     }
 }
 
@@ -180,13 +224,23 @@ fn disjoint_writers_racing_all_commit_no_lost_update() {
             let gate = Arc::clone(&gate);
             handles.push(thread::spawn(move || {
                 let mut tx = m.begin_write();
-                tx.update(&format!("PREFIX : <http://ex/> INSERT DATA {{ :d{w} :p :v{w} }}")).unwrap();
+                tx.update(&format!(
+                    "PREFIX : <http://ex/> INSERT DATA {{ :d{w} :p :v{w} }}"
+                ))
+                .unwrap();
                 gate.wait();
                 tx.commit().is_ok()
             }));
         }
-        let oks = handles.into_iter().map(|h| h.join().unwrap()).filter(|&ok| ok).count();
-        assert_eq!(oks, N, "iter {it}: disjoint writers must ALL commit (stale-but-disjoint replays its delta)");
+        let oks = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|&ok| ok)
+            .count();
+        assert_eq!(
+            oks, N,
+            "iter {it}: disjoint writers must ALL commit (stale-but-disjoint replays its delta)"
+        );
 
         let r = m.begin_read();
         assert_eq!(
@@ -195,7 +249,10 @@ fn disjoint_writers_racing_all_commit_no_lost_update() {
             "iter {it}: every disjoint insert must survive — no lost update from a wholesale stale-fork publish"
         );
         for w in 0..N {
-            assert!(ask(&r, &format!("ASK {{ :d{w} :p :v{w} }}")), "iter {it}: writer {w}'s insert was lost");
+            assert!(
+                ask(&r, &format!("ASK {{ :d{w} :p :v{w} }}")),
+                "iter {it}: writer {w}'s insert was lost"
+            );
         }
     }
 }
@@ -222,7 +279,10 @@ fn reader_is_isolated_from_concurrent_committers() {
             let gate = Arc::clone(&gate);
             handles.push(thread::spawn(move || {
                 let mut tx = m.begin_write();
-                tx.update(&format!("PREFIX : <http://ex/> INSERT DATA {{ :r{w} :p :v{w} }}")).unwrap();
+                tx.update(&format!(
+                    "PREFIX : <http://ex/> INSERT DATA {{ :r{w} :p :v{w} }}"
+                ))
+                .unwrap();
                 gate.wait();
                 tx.commit().is_ok()
             }));
@@ -238,11 +298,23 @@ fn reader_is_isolated_from_concurrent_committers() {
             );
         }
 
-        let oks = handles.into_iter().map(|h| h.join().unwrap()).filter(|&ok| ok).count();
+        let oks = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|&ok| ok)
+            .count();
         assert_eq!(oks, N, "iter {it}: all disjoint writers commit");
         // The pinned reader is STILL isolated after every commit has landed.
-        assert_eq!(count_all(&reader), BASE_COUNT, "iter {it}: snapshot stays pinned after the writers finish");
+        assert_eq!(
+            count_all(&reader),
+            BASE_COUNT,
+            "iter {it}: snapshot stays pinned after the writers finish"
+        );
         // A fresh read observes the full committed state.
-        assert_eq!(count_all(&m.begin_read()), BASE_COUNT + N, "iter {it}: a new read sees every commit");
+        assert_eq!(
+            count_all(&m.begin_read()),
+            BASE_COUNT + N,
+            "iter {it}: a new read sees every commit"
+        );
     }
 }
