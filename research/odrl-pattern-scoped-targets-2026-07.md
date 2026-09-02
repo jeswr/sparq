@@ -243,10 +243,26 @@ of the evaluator entirely.
 
 ## 6. Production path (beyond the spike)
 
-* **Replica cache**: key = (graph name, scope fingerprint = hashed normalized scope);
-  value = masked `Graph` replica; invalidated by the store's existing write-path
-  generation bump (the `session_cache`/incremental-rematerialization precedents).
-  Sessions sharing a scope class share the replica — the common case (role-based
+* **Replica cache** — **SHIPPED** ([OPUS-5] `sq-nc3c6`, `crates/sparq-solid/src/replica_cache.rs`),
+  with three corrections to the sketch below, found while building it:
+  * *The key is not a hash.* A hashed fingerprint would let a 64-bit collision serve the
+    WRONG mask — a silent leak. The hash picks the SHARD only; the map key is the full
+    normalized decision set, compared exactly.
+  * *The cache unit is the assembled dataset, not the per-graph replica.* `sparq_core::Graph`
+    is deliberately non-`Clone` and `Graph::named` owns its sub-graphs, so per-(graph, scope)
+    replicas cannot be composed into a dataset by reference. The key is therefore the
+    COMPLETE per-graph decision set `scoped_dataset` derived (accessible graphs, each with
+    its effective scope) — which still gives the sharing this section wants, since sessions
+    in one scope class share an accessible set as well as a scope.
+  * *There was no data write-path generation bump to reuse.* The `session_cache` precedent
+    invalidates on AUTHORIZATION change (`reindex_with`); a replica holds triples, so
+    `update_as` — which does not re-materialize unless the update touched an auth-view
+    input — would have left it stale. `PodStore::bump_write_gen` is the new counter, called
+    before every `&mut self.graph` in the crate.
+
+  Original sketch, for the record: key = (graph name, scope fingerprint = hashed normalized
+  scope); value = masked `Graph` replica; invalidated by the store's write-path generation
+  bump. Sessions sharing a scope class share the replica — the common case (role-based
   policies) has few distinct scopes.
 * **Memory**: worst case one replica per (graph × scope class) of scoped triples.
   Honest bound, measured in `bench/pattern-scope/`; acceptable because pattern scopes
@@ -261,4 +277,7 @@ of the evaluator entirely.
    `auth:PatternGrant` materialization + `AuthIndex` scope extraction (§5), gated on
    `pattern-scope` + `odrl-bridge`.
 2. `sq-nc3c6` — `feat(solid)`: scoped-replica cache + write-path invalidation (§6).
+   **SHIPPED** — see the §6 note for the three corrections the implementation made to
+   the sketch (exact key not a hash, dataset-level not per-graph unit, new write
+   generation rather than a reused one).
 3. `sq-fznmq` — `spike(solid)`: pattern-scoped UPDATE enforcement design (§2.4).

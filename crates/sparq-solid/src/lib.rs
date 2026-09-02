@@ -40,6 +40,11 @@ pub mod trust_wire;
 // Design record: research/odrl-pattern-scoped-targets-2026-07.md.
 #[cfg(feature = "pattern-scope")]
 pub mod pattern_scope;
+// [OPUS-5] sq-nc3c6 (design record §6): the bounded, sharded masked-replica cache +
+// write-path invalidation behind `PodStore::scoped_dataset`. Same feature gate, so the
+// default build still carries zero pattern-scope code.
+#[cfg(feature = "pattern-scope")]
+mod replica_cache;
 mod rewrite;
 // [FABLE-5] sq-cnuqd (issue #1569): the BOUNDED, SHARDED, `&self`-readable session cache
 // that lets all read-side entry points take `&self` (concurrent `&PodStore` readers). No
@@ -270,6 +275,23 @@ pub struct PodStore {
     // serialising on one exclusive borrow. Same transient-index D3 semantics: `reindex`
     // clears/invalidates it; eviction only drops re-derivable memoized sets.
     cache: session_cache::SessionCache,
+    // [OPUS-5] sq-nc3c6: the STORE WRITE GENERATION — a counter bumped by
+    // `bump_write_gen` immediately before every mutation of `graph` in this crate. It is
+    // what invalidates the masked-replica cache below, which (unlike the session cache)
+    // holds actual TRIPLES and so must also be invalidated by DATA writes, not only by
+    // authorization changes. INVARIANT: every `&mut self.graph` use in this crate is
+    // preceded by a `self.bump_write_gen()` call (grep for it). Bumping BEFORE the
+    // mutation, and unconditionally, means a mutation that turns out to be a no-op or
+    // fails part-way still invalidates — over-invalidation costs a rebuild, while
+    // under-invalidation would be a stale masked read.
+    #[cfg(feature = "pattern-scope")]
+    write_gen: u64,
+    // [OPUS-5] sq-nc3c6 (design record §6): the BOUNDED, SHARDED masked-replica cache
+    // behind `scoped_dataset`, so a repeat scoped query amortizes the O(accessible
+    // dataset) rebuild and sessions sharing a scope class share one replica. Keyed by the
+    // complete derived visibility decision, dropped wholesale on a `write_gen` change.
+    #[cfg(feature = "pattern-scope")]
+    replicas: replica_cache::ReplicaCache,
     /// [OPUS-4.8] sq-dpk4 — the bridged-ODRL-grant ledger: what was bridged from which
     /// `(policy, request)`, plus the static-baseline auth view to rebuild from on a
     /// refresh. Only present when the `odrl-bridge` feature is enabled (the core build
@@ -436,10 +458,34 @@ impl PodStore {
             acl_index: OnceLock::new(), // [OPUS-4.8] sq-j8qtt: built lazily on first decide
             group_docs: OnceLock::new(), // [SONNET-4.6] #55: built lazily on first update
             cache: session_cache::SessionCache::new(), // [FABLE-5] sq-cnuqd: bounded + sharded
+            #[cfg(feature = "pattern-scope")]
+            write_gen: 0, // [OPUS-5] sq-nc3c6
+            #[cfg(feature = "pattern-scope")]
+            replicas: replica_cache::ReplicaCache::new(), // [OPUS-5] sq-nc3c6
             #[cfg(feature = "odrl-bridge")]
             bridge_ledger: odrl_bridge::BridgeLedger::new(),
         }
     }
+
+    /// [OPUS-5] sq-nc3c6 — record that [`PodStore::graph`] is about to be mutated, so the
+    /// masked-replica cache (`replica_cache`) drops the replicas built against the old
+    /// contents. Call it IMMEDIATELY BEFORE every `&mut self.graph` in this crate; see the
+    /// `write_gen` field docs for why bumping early and unconditionally is the safe bias.
+    ///
+    /// Compiles to nothing without the `pattern-scope` feature — there is no replica cache
+    /// to invalidate, so the default build carries no counter and no cost.
+    #[cfg(feature = "pattern-scope")]
+    #[inline]
+    fn bump_write_gen(&mut self) {
+        // `wrapping_add` for totality; a u64 wrap needs 2^64 writes, and the cache only
+        // needs INEQUALITY across a mutation, which holds for every consecutive pair.
+        self.write_gen = self.write_gen.wrapping_add(1);
+    }
+
+    /// No-op stub when pattern-scope masking is compiled out (see the gated twin).
+    #[cfg(not(feature = "pattern-scope"))]
+    #[inline]
+    fn bump_write_gen(&mut self) {}
 
     /// (Re-)materialize the WAC auth view from the `.acl` graphs. Call again after any
     /// ACL/group-document change (v1 maintenance = full re-run; measured ~1 s on the
@@ -464,6 +510,7 @@ impl PodStore {
     /// other pod's cached view (issue #1571). The public method keeps the full-clear default.
     /// [OPUS-4.8] sq-b7k7u.
     fn materialize_wac_scoped(&mut self, scope: ReindexScope) -> Result<MaterializeStats, String> {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6 — before any mutation, incl. a failing one
         let stats = materialize_wac(&mut self.graph)?;
         self.reconcile_bridged_after_static();
         self.reindex_with(scope);
@@ -482,6 +529,7 @@ impl PodStore {
     fn reconcile_bridged_after_static(&mut self) {
         self.bridge_ledger.capture_static_baseline(&self.graph);
         // refresh() rebuilds from the just-captured baseline and replays the ledger.
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         self.bridge_ledger.refresh(&mut self.graph);
     }
 
@@ -625,6 +673,7 @@ impl PodStore {
         credentials: &VerifiedCredentials,
         scope: ReindexScope,
     ) -> Result<MaterializeStats, String> {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6 — before any mutation, incl. a failing one
         let stats = materialize_acp_with_credentials(&mut self.graph, provenance, credentials)?;
         self.reconcile_bridged_after_static();
         self.reindex_with(scope);
@@ -1263,7 +1312,11 @@ impl PodStore {
         // Authorize against the CURRENT auth view before mutating anything (fail-closed).
         let auth = Arc::clone(&self.auth);
         let permit = update::check(&self.graph, &auth, s, sparql, self.group_docs())?;
-        // Authorized: apply through the engine's in-place delta path.
+        // Authorized: apply through the engine's in-place delta path. [OPUS-5] sq-nc3c6:
+        // this is the DATA write path — it does not re-materialize unless the update
+        // touched an auth-view input, so it is the seam a masked replica (which holds
+        // triples, not just graph names) would otherwise go stale across.
+        self.bump_write_gen();
         sparq_engine::update_in_place(&mut self.graph, sparql)?;
         // A change to the access-control rules invalidates the auth view.
         if permit.rematerialize {
@@ -1304,6 +1357,7 @@ impl PodStore {
         policy: &sparq_policy::Policy,
         request: &sparq_policy::Request,
     ) -> odrl_bridge::BridgeOutcome {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         let outcome = odrl_bridge::materialize_permission(&mut self.graph, policy, request);
         if outcome.granted {
             // Track for refresh/retraction (sq-dpk4), then rebuild index + drop cache.
@@ -1333,6 +1387,7 @@ impl PodStore {
         policy: &sparq_policy::Policy,
         request: &sparq_policy::Request,
     ) -> odrl_bridge::BridgeOutcome {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         let outcome = odrl_bridge::materialize_prohibition(&mut self.graph, policy, request);
         if outcome.prohibited {
             self.bridge_ledger.record(policy, request, odrl_bridge::BridgeKind::Prohibition);
@@ -1356,6 +1411,7 @@ impl PodStore {
         policy: &sparq_policy::Policy,
         request: &sparq_policy::Request,
     ) -> odrl_bridge::BridgeOutcome {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         let outcome = odrl_bridge::materialize_policy(&mut self.graph, policy, request);
         if outcome.granted || outcome.prohibited {
             self.bridge_ledger.record(policy, request, odrl_bridge::BridgeKind::Policy);
@@ -1382,6 +1438,7 @@ impl PodStore {
         policy: &sparq_policy::Policy,
         request: &sparq_policy::Request,
     ) -> odrl_bridge::BridgeOutcome {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         let outcome =
             odrl_bridge::materialize_permission_conditional(&mut self.graph, policy, request);
         if outcome.granted {
@@ -1413,6 +1470,7 @@ impl PodStore {
         policy: &sparq_policy::Policy,
         request: &sparq_policy::Request,
     ) -> odrl_bridge::BridgeOutcome {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         let outcome =
             odrl_bridge::materialize_prohibition_conditional(&mut self.graph, policy, request);
         if outcome.prohibited {
@@ -1462,6 +1520,7 @@ impl PodStore {
         request: &sparq_policy::Request,
         store: &Arc<dyn sparq_policy::UsageCounterStore + Send + Sync>,
     ) -> odrl_bridge::BridgeOutcome {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         let outcome = odrl_bridge::count::materialize_permission_counted(
             &mut self.graph,
             policy,
@@ -1519,6 +1578,7 @@ impl PodStore {
     ///   bridge entry point again with the new policy first.
     #[cfg(feature = "odrl-bridge")]
     pub fn refresh_odrl_grants(&mut self) -> usize {
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         let retracted = self.bridge_ledger.refresh(&mut self.graph);
         self.reindex_with(ReindexScope::Full);
         retracted
@@ -1550,6 +1610,7 @@ impl PodStore {
         kind: odrl_bridge::BridgeKind,
     ) -> (bool, usize) {
         let matched = self.bridge_ledger.update(policy, request, kind);
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         let retracted = self.bridge_ledger.refresh(&mut self.graph);
         self.reindex_with(ReindexScope::Full);
         (matched, retracted)

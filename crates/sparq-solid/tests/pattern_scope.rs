@@ -202,6 +202,41 @@ fn scope_on_non_accessible_graph_does_not_widen() {
     assert!(!scoped.ask("ASK { GRAPH ?g { ?s ?p ?o } }").unwrap());
 }
 
+/// [OPUS-5] sq-nc3c6 — the replica cache is shared through `&PodStore`, so N threads must
+/// be able to race on the same (and on different) scope classes and every one still get an
+/// oracle-equivalent answer. Exercises the miss/miss race in `ReplicaCache::get_or_build`,
+/// where two builders can complete concurrently and one copy is dropped.
+#[test]
+fn concurrent_readers_share_replicas_without_diverging() {
+    use std::sync::Arc;
+    let full = Arc::new(store(true));
+    let oracle = store(false);
+    let want_masked = oracle
+        .query_json_as(&alice(), Mode::Read, BATTERY[0].1)
+        .unwrap();
+    let want_unmasked = full.query_json_as(&alice(), Mode::Read, BATTERY[0].1).unwrap();
+
+    let handles: Vec<_> = (0..8)
+        .map(|n| {
+            let store = Arc::clone(&full);
+            std::thread::spawn(move || {
+                // Half the threads take the masking scope, half take the empty one, so the
+                // run mixes same-key contention with distinct-key traffic.
+                let scopes = if n % 2 == 0 { masking_scopes() } else { FxHashMap::default() };
+                let scoped = store.scoped_dataset(&alice(), Mode::Read, &scopes);
+                scoped.query_json(BATTERY[0].1).unwrap()
+            })
+        })
+        .collect();
+
+    for (n, handle) in handles.into_iter().enumerate() {
+        let got = handle.join().unwrap();
+        let want = if n % 2 == 0 { &want_masked } else { &want_unmasked };
+        assert_eq!(&got, want, "thread {n} read a replica that is not its oracle");
+    }
+    assert_ne!(want_masked, want_unmasked, "vacuous: the two scope classes agree");
+}
+
 /// The scoped replica honours the same read-path rewrite as `query_as`: a bare
 /// default-graph pattern matches nothing without the union-default opt-in.
 #[cfg(not(feature = "legacy-union-default-graph"))]

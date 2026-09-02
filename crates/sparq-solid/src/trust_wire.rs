@@ -117,6 +117,7 @@ impl PodStore {
         let admitted = admit(credential, rules, session, target);
         let grants = derive_grants(&admitted, abac_rule_n3_for(self))?;
         if !grants.is_empty() {
+            self.bump_write_gen(); // [OPUS-5] sq-nc3c6
             install_auth_grants(&mut self.graph, &grants);
             self.reindex_with(crate::ReindexScope::Full);
         }
@@ -147,6 +148,7 @@ impl PodStore {
         let admitted = admit(credential, rules, session, target);
         let grants = derive_grants(&admitted, abac_rule_n3)?;
         if !grants.is_empty() {
+            self.bump_write_gen(); // [OPUS-5] sq-nc3c6
             install_auth_grants(&mut self.graph, &grants);
             self.reindex_with(crate::ReindexScope::Full);
         }
@@ -199,6 +201,7 @@ impl PodStore {
         let conditional_grants = derive_conditional_grants(&statics, abac_rule_n3)?;
         let mut installed_count = 0usize;
         for cg in &conditional_grants {
+            self.bump_write_gen(); // [OPUS-5] sq-nc3c6
             install_conditional_grant(&mut self.graph, target, cg);
             installed_count += 1;
         }

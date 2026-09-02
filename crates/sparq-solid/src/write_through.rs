@@ -248,6 +248,7 @@ impl PodStore {
         let term = Term::NamedNode(name.clone());
         let prior = self.take_named_slot(&term);
         let existed = prior.is_some();
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         self.graph.named.push((term.clone(), new_graph));
 
         // Re-materialize; roll back to the prior content on any error. [OPUS-4.8] sq-b7k7u
@@ -294,6 +295,7 @@ impl PodStore {
     /// reject non-control IRIs up front.
     fn take_named_slot(&mut self, name: &Term) -> Option<Graph> {
         let pos = self.graph.named.iter().position(|(n, _)| n == name)?;
+        self.bump_write_gen(); // [OPUS-5] sq-nc3c6
         Some(self.graph.named.swap_remove(pos).1)
     }
 
@@ -307,6 +309,7 @@ impl PodStore {
         // prior content back.
         let _ = self.take_named_slot(name);
         if let Some(g) = prior {
+            self.bump_write_gen(); // [OPUS-5] sq-nc3c6
             self.graph.named.push((name.clone(), g));
         }
         // Rebuild the auth view from the restored (prior) rules. This re-runs the SAME

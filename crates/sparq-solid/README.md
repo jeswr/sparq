@@ -51,7 +51,7 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
 - **Trust-graph admission PoC (opt-in `trust-graph`, research — NOT a security guarantee)** — a [`sparq-trust`](../sparq-trust)
   admission stratum injects an issuer-signed, trusted-source-scoped credential fact ahead of the materialiser; OFF = byte-identical WAC/ACP. No privacy/ZK (`sq-qhy4` unaudited).
 - **Pattern-scoped masking (opt-in `pattern-scope`, spike `sq-lrtc3.3`)** — an ODRL target as allow/deny **triple patterns** over a
-  graph, enforced by **materializing the masked sub-graph replica** (masked triples physically absent ⇒ oracle-equivalent under `OPTIONAL`/`EXISTS`/`MINUS`/aggregates/`COUNT` by construction). Design: `research/odrl-pattern-scoped-targets-2026-07.md`; envelope: `bench/pattern-scope/`.
+  graph, enforced by **materializing the masked sub-graph replica** (masked triples physically absent ⇒ oracle-equivalent under `OPTIONAL`/`EXISTS`/`MINUS`/aggregates/`COUNT` by construction). The replica is memoized in a **bounded + sharded** cache keyed by the complete derived visibility decision — sessions in the same scope class share one, and every write seam (data updates included) invalidates it by write generation, so a repeat scoped query amortizes the rebuild without ever reading stale data. Design: `research/odrl-pattern-scoped-targets-2026-07.md`; envelope: `bench/pattern-scope/`.
 - **Concurrent reads (`&self`, no feature flag)** — every read entry point (`accessible`, `view_for`,
   `query_as`/`query_json_as`/`ask_as`, `wac_allow`) takes `&self`, so N threads sharing one `Arc<PodStore>` query at once via a **sharded + bounded** session cache (interior `RwLock` stripes, LRU eviction); writes stay `&mut self`.
 

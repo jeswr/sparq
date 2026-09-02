@@ -5,15 +5,21 @@
 //! numbers are NON-canonical — see `research/odrl-pattern-scoped-targets-2026-07.md` §4).
 //! Dimensions, per fixture size (`wac_fixture_sized(extra)`):
 //!
-//! 1. `scoped_build_ms` — the cost this design pays INSTEAD of per-scan filtering:
+//! 1. `scoped_build_cold_ms` — the cost this design pays INSTEAD of per-scan filtering:
 //!    one `PodStore::scoped_dataset` materialization (decode → filter → rebuild of
-//!    every accessible graph) for a scope masking the `title` predicate everywhere.
+//!    every accessible graph) for a scope masking the `title` predicate everywhere,
+//!    with the replica cache dropped before each timed run so every one pays in full.
 //! 2. `replica_query_ms` vs `view_query_ms` — the SAME query over the prebuilt
 //!    masked replica vs the ordinary graph-granular `query_as` view path on the full
 //!    store: the per-query overhead once assembly is done (expected ≈ 0 — after
 //!    assembly the engine sees an ordinary dataset).
 //! 3. `breakeven_queries` — build cost divided by any per-query saving (the replica
 //!    is smaller), when a saving exists: how many queries amortize one assembly.
+//! 4. [OPUS-5] sq-nc3c6 — the REPLICA-CACHE dimension the acceptance criterion asks
+//!    for: `scoped_build_warm_ms` (a `scoped_dataset` call that hits the cache) and
+//!    `repeat_scoped_query_*_ms` (the per-iteration cost of a repeat scoped-query loop
+//!    with the cache live vs. with it dropped every iteration — i.e. the pre-cache
+//!    behaviour). The gap between the two is the amortization the cache buys.
 
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;
@@ -60,8 +66,20 @@ fn main() {
             .map(|(name, _)| (name.clone(), deny.clone()))
             .collect();
 
-        let (scoped_build_ms, scoped) =
-            best_of(3, || store.scoped_dataset(&alice, Mode::Read, &scopes));
+        // [OPUS-5] sq-nc3c6: COLD build — drop the replica cache (outside the timer) so
+        // every timed run pays the full decode → filter → rebuild, as it did before the
+        // cache landed. `best_of` alone would now measure a cache HIT after the first run.
+        let mut scoped_build_cold_ms = f64::MAX;
+        for _ in 0..3 {
+            store.invalidate_scoped_replicas();
+            let t = Instant::now();
+            let cold = store.scoped_dataset(&alice, Mode::Read, &scopes);
+            scoped_build_cold_ms = scoped_build_cold_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            drop(cold);
+        }
+        // WARM: the same call served from the replica cache.
+        let (scoped_build_warm_ms, scoped) =
+            best_of(5, || store.scoped_dataset(&alice, Mode::Read, &scopes));
 
         let (view_query_ms, view_rows) =
             best_of(5, || store.query_as(&alice, Mode::Read, Q).unwrap().rows.len());
@@ -74,10 +92,34 @@ fn main() {
         assert_eq!(replica_rows, 0, "masked replica must hold no title triples");
         assert!(view_rows > 0, "the unmasked view path must see title triples");
 
+        // [OPUS-5] sq-nc3c6 — the repeat-scoped-query loop the acceptance criterion names:
+        // REPS iterations of (obtain the scoped dataset, run the query) with the cache
+        // live, versus the same loop with the cache dropped each iteration (the pre-cache
+        // behaviour: one full rebuild per scoped query).
+        const REPS: usize = 10;
+        let t = Instant::now();
+        for _ in 0..REPS {
+            let s = store.scoped_dataset(&alice, Mode::Read, &scopes);
+            assert_eq!(s.query(Q).unwrap().rows.len(), 0);
+        }
+        let repeat_scoped_query_cached_ms = t.elapsed().as_secs_f64() * 1e3 / REPS as f64;
+        let t = Instant::now();
+        for _ in 0..REPS {
+            store.invalidate_scoped_replicas();
+            let s = store.scoped_dataset(&alice, Mode::Read, &scopes);
+            assert_eq!(s.query(Q).unwrap().rows.len(), 0);
+        }
+        let repeat_scoped_query_rebuilt_ms = t.elapsed().as_secs_f64() * 1e3 / REPS as f64;
+
         let saving = view_scan_ms - replica_scan_ms;
-        let breakeven = if saving > 0.0 { (scoped_build_ms / saving).ceil() } else { -1.0 };
+        let breakeven = if saving > 0.0 { (scoped_build_cold_ms / saving).ceil() } else { -1.0 };
         rows.push(format!(
-            "    {{\"extra\": {extra}, \"quads\": {quads}, \"scoped_build_ms\": {scoped_build_ms:.3}, \
+            "    {{\"extra\": {extra}, \"quads\": {quads}, \
+             \"scoped_build_cold_ms\": {scoped_build_cold_ms:.3}, \
+             \"scoped_build_warm_ms\": {scoped_build_warm_ms:.3}, \
+             \"repeat_scoped_query_cached_ms\": {repeat_scoped_query_cached_ms:.3}, \
+             \"repeat_scoped_query_rebuilt_ms\": {repeat_scoped_query_rebuilt_ms:.3}, \
+             \"repeat_reps\": {REPS}, \
              \"view_query_ms\": {view_query_ms:.3}, \"replica_query_ms\": {replica_query_ms:.3}, \
              \"view_scan_ms\": {view_scan_ms:.3}, \"replica_scan_ms\": {replica_scan_ms:.3}, \
              \"view_title_rows\": {view_rows}, \"replica_title_rows\": {replica_rows}, \
@@ -86,7 +128,8 @@ fn main() {
     }
 
     println!(
-        "{{\n  \"bead\": \"sq-lrtc3.3\",\n  \"design\": \"masked-subgraph materialization \
+        "{{\n  \"bead\": \"sq-nc3c6 (replica cache) over sq-lrtc3.3\",\n  \
+         \"design\": \"masked-subgraph materialization \
          (research/odrl-pattern-scoped-targets-2026-07.md)\",\n  \"host\": \"work box — NON-canonical\",\n  \
          \"driver\": \"cargo run -p sparq-solid --features pattern-scope --release --example pattern_scope_bench\",\n  \
          \"note\": \"breakeven_queries = -1 means the replica query showed no measurable saving at this size\",\n  \

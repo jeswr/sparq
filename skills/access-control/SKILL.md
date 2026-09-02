@@ -1103,8 +1103,19 @@ graph-granular enforcement walk is reused unchanged.
 - `store.scoped_dataset(&Session, Mode, &scopes) -> ScopedDataset` — **refinement-only**
   (a scope can only shrink the session's graph-level accessible set, never widen), then
   `ScopedDataset::{query, query_json, ask, view}` on the same `wrap_read`/empty-default
-  path as `query_as`. Build once per (session × scopes), query many; rebuild after any
-  store mutation. READ path only (UPDATE stays graph-granular, record §2.4).
+  path as `query_as`. READ path only (UPDATE stays graph-granular, record §2.4).
+- **Replica cache** ([OPUS-5] `sq-nc3c6`, record §6): the masked replica is memoized in a
+  bounded + sharded cache keyed by the COMPLETE derived per-graph visibility decision, so
+  a repeat scoped query does not rebuild and every session in the same **scope class**
+  shares one replica. Just call `scoped_dataset` again — do NOT hold a `ScopedDataset`
+  across a write to keep it fresh; a held handle keeps its moment-in-time contents.
+  Invalidation is by store **write generation**: every write seam in `sparq-solid` (data
+  `update_as` included, not only ACL re-materialization) drops the whole cache, so a
+  stale masked replica is unreachable. Only direct mutation of the public `store.graph`
+  field bypasses it — that already breaks the session index too, and
+  `store.invalidate_scoped_replicas()` is the escape hatch for it. A cache hit is
+  `O(accessible graph names)`; what the cache removes is the `O(accessible dataset)`
+  rebuild (`bench/pattern-scope/`, work-box, non-canonical).
 
 ## Related skills
 

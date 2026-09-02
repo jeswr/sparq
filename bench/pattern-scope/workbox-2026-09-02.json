@@ -1,0 +1,12 @@
+{
+  "bead": "sq-nc3c6 (replica cache) over sq-lrtc3.3",
+  "design": "masked-subgraph materialization (research/odrl-pattern-scoped-targets-2026-07.md)",
+  "host": "work box — NON-canonical",
+  "driver": "cargo run -p sparq-solid --features pattern-scope --release --example pattern_scope_bench",
+  "note": "breakeven_queries = -1 means the replica query showed no measurable saving at this size",
+  "sizes": [
+    {"extra": 0, "quads": 3060, "scoped_build_cold_ms": 29.890, "scoped_build_warm_ms": 0.518, "repeat_scoped_query_cached_ms": 1.265, "repeat_scoped_query_rebuilt_ms": 33.024, "repeat_reps": 10, "view_query_ms": 1.083, "replica_query_ms": 0.488, "view_scan_ms": 1.729, "replica_scan_ms": 1.539, "view_title_rows": 599, "replica_title_rows": 0, "breakeven_queries": 158},
+    {"extra": 20, "quads": 20340, "scoped_build_cold_ms": 46.422, "scoped_build_warm_ms": 0.506, "repeat_scoped_query_cached_ms": 1.121, "repeat_scoped_query_rebuilt_ms": 51.860, "repeat_reps": 10, "view_query_ms": 1.166, "replica_query_ms": 0.481, "view_scan_ms": 6.860, "replica_scan_ms": 5.257, "view_title_rows": 599, "replica_title_rows": 0, "breakeven_queries": 29},
+    {"extra": 50, "quads": 46260, "scoped_build_cold_ms": 69.407, "scoped_build_warm_ms": 0.512, "repeat_scoped_query_cached_ms": 1.138, "repeat_scoped_query_rebuilt_ms": 74.954, "repeat_reps": 10, "view_query_ms": 1.169, "replica_query_ms": 0.506, "view_scan_ms": 17.672, "replica_scan_ms": 11.015, "view_title_rows": 599, "replica_title_rows": 0, "breakeven_queries": 11}
+  ]
+}
