@@ -1004,6 +1004,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: builds for wasm32-unknown-unknown, so its
+          # target subdir and dep closure are a different set entirely.
+          shared-key: wasm32-targets
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -1353,6 +1359,13 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: this is the ONLY `--workspace --all-features`
+          # build in the file (every other `--all-features` here is `-p`-scoped), so its
+          # closure is a superset nothing else should be contending for.
+          shared-key: lint-workspace
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -1505,6 +1518,13 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: compiles on the 1.88 floor, and rust-cache folds
+          # the rustc version into every key — this entry could not coincide with a
+          # pinned-stable one even if it shared a key name.
+          shared-key: msrv-floor
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -1589,6 +1609,12 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: release-fast only (no dev-profile half), so it
+          # shares no `target/debug` artifacts with the suite's tests.
+          shared-key: conformance-release-fast
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -1725,6 +1751,12 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: dev-profile only — it has no release-fast
+          # scoreboard step, which is the one build the suite jobs share verbatim.
+          shared-key: shacl-conformance
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -1864,6 +1896,55 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — CACHE-KEY HYGIENE + the conformance/oracle COLLAPSE.
+          # THIS IS THE CANONICAL NOTE for the `conformance-suite` key; its five other
+          # members (solid-conformance, odrl-conformance, text-oracle, rsp-oracle,
+          # jsonld-conformance) carry the same key and point back here.
+          #
+          # WHY ANY KEY AT ALL: `shared-key` is documented as replacing the key
+          # rust-cache otherwise derives from the JOB ID. Sixteen of this file's twenty
+          # rust-cache steps declared neither `shared-key` nor `key`, so sixteen jobs
+          # each held their OWN entry of the repo's shared 10 GB Actions-cache budget —
+          # and budget pressure is exactly the LRU-eviction mechanism sq-3sbrr (#1395)
+          # identified as what makes a warm cache restore cold. A derived key is also
+          # invisible and rename-fragile: renaming a job silently orphans its entry.
+          # Every rust-cache step in this file now names its key explicitly, and
+          # scripts/tests/test_mergequeue_cache_posture.py pins both that property and
+          # this group's exact membership.
+          #
+          # WHY THESE SIX COLLAPSE — the argument sq-h2gz6/sq-aemq7 already made for
+          # `coverage-measure` below. rust-cache stores the EXTERNAL dependency closure
+          # only (it cleans workspace-member artifacts out of `target/` before saving),
+          # and these six resolve that closure from one Cargo.lock, on the same pinned
+          # toolchain, for the same host target, with no job-level RUSTFLAGS. They also
+          # share one build VERBATIM: every one of them runs the same
+          # `cargo run --profile release-fast -p sparq-conformance --bin
+          # sparq-conformance-scoreboard` step. All that differs is the dev-profile
+          # `cargo test -p <one crate>` alongside it.
+          #
+          # HONEST RESIDUAL, stated as on `coverage-measure`: the six are NOT identical
+          # builds, so their closures are overlapping-but-unequal sets (jsonld-conformance
+          # additionally links oxjsonld + sparq-jsonld via `--features jsonld-suite`).
+          # rust-cache skips saving on an exact key hit, so on main ONE member's closure
+          # wins the entry and the other five take a PARTIAL restore and compile their
+          # own extra deps cold. That is a smaller compile win than six warm caches would
+          # give, traded deliberately for five slots of budget headroom — and it is still
+          # strictly better than the cold rebuild an evicted key forces. No stale-artifact
+          # risk (the key already embeds Cargo.lock, the rustc version and the Cargo.toml
+          # hashes), and the concurrent duplicate-key save on main is a benign no-op: the
+          # cache API rejects the second writer rather than clobbering the first.
+          #
+          # NOT COLLAPSED IN, deliberately: `conformance` (release-fast only),
+          # `shacl-conformance` and `service-federation-conformance` (dev only — no
+          # release-fast scoreboard build to share) and `inference-conformance` (five
+          # feature-varied dev builds plus two release-fast ones). Each keeps its own
+          # explicit key. They all build sparq-conformance too, so some of them may well
+          # belong here — but sizing that needs the per-key `gh cache list` measurement
+          # #5214 asks for, which this change does not have and does not pretend to.
+          #
+          # COST, ONCE: naming a key CHANGES it, so the first main run after this lands
+          # restores nothing for these jobs and re-seeds. One cold run, then stable.
+          shared-key: conformance-suite
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2012,6 +2093,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one dep cache for the six same-shaped conformance/oracle
+          # jobs instead of one per job id. Full rationale + the honest residual are on
+          # the `geo-conformance` cache step above (the canonical note); membership is
+          # pinned by scripts/tests/test_mergequeue_cache_posture.py.
+          shared-key: conformance-suite
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2124,6 +2210,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one dep cache for the six same-shaped conformance/oracle
+          # jobs instead of one per job id. Full rationale + the honest residual are on
+          # the `geo-conformance` cache step above (the canonical note); membership is
+          # pinned by scripts/tests/test_mergequeue_cache_posture.py.
+          shared-key: conformance-suite
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2232,6 +2323,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one dep cache for the six same-shaped conformance/oracle
+          # jobs instead of one per job id. Full rationale + the honest residual are on
+          # the `geo-conformance` cache step above (the canonical note); membership is
+          # pinned by scripts/tests/test_mergequeue_cache_posture.py.
+          shared-key: conformance-suite
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2343,6 +2439,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one dep cache for the six same-shaped conformance/oracle
+          # jobs instead of one per job id. Full rationale + the honest residual are on
+          # the `geo-conformance` cache step above (the canonical note); membership is
+          # pinned by scripts/tests/test_mergequeue_cache_posture.py.
+          shared-key: conformance-suite
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2459,6 +2560,11 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — one dep cache for the six same-shaped conformance/oracle
+          # jobs instead of one per job id. Full rationale + the honest residual are on
+          # the `geo-conformance` cache step above (the canonical note); membership is
+          # pinned by scripts/tests/test_mergequeue_cache_posture.py.
+          shared-key: conformance-suite
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2603,6 +2709,13 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: dev-profile only, and its four feature sets all
+          # forward to `service-loopback`, which links sparq-server + tokio — an async
+          # stack no other conformance job builds.
+          shared-key: service-federation
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -2766,6 +2879,14 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: five feature-varied dev builds of
+          # sparq-conformance (d-entail, rif-wg-core, rif-core, el-suite,
+          # ql-experimental) plus two release-fast ones (the inference bin and
+          # `--features dl-direct`) — a different, feature-unified closure.
+          shared-key: inference-conformance
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -3943,6 +4064,12 @@ jobs:
         run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: an llvm-cov-instrumented build under its own
+          # RUSTFLAGS; those objects are not interchangeable with an uninstrumented one.
+          shared-key: coverage-nightly
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -4365,6 +4492,12 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: `cargo mutants -p <crate>` drives its own
+          # per-crate, per-mutant rebuilds — a build shape no gating lane shares.
+          shared-key: mutants-nightly
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
@@ -4518,6 +4651,12 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [OPUS-5] #5214 — explicit cache key (rust-cache would otherwise derive one
+          # from the job id: an anonymous, rename-fragile entry of the shared 10 GB
+          # budget). Canonical note on the `geo-conformance` step.
+          # NOT in `conformance-suite`: cargo-geiger drives its own scan build from
+          # crates/sparq-core/Cargo.toml rather than the workspace root.
+          shared-key: geiger
           # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical

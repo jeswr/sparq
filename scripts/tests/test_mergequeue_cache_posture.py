@@ -35,6 +35,22 @@
 #      shards download — so the shards keep receiving the same byte-identical
 #      archive, and the nextest test set is unchanged.
 #
+#   3. CACHE-KEY HYGIENE (#5214). Every `Swatinem/rust-cache` step in ci.yml must
+#      NAME its key (`shared-key` or `key`). `shared-key` is documented as
+#      replacing the key rust-cache otherwise derives from the JOB ID, so a step
+#      that declares neither is an anonymous entry of the repo's shared 10 GB
+#      Actions-cache budget — sixteen of ci.yml's twenty steps were exactly that,
+#      one entry per job for what is largely the same dep closure off one
+#      Cargo.lock, and budget pressure is the LRU-eviction mechanism sq-3sbrr
+#      (#1395) identified as what makes a warm cache restore cold. A derived key is
+#      also rename-fragile: renaming a job silently orphans its entry. Same failure
+#      mode as items 1-2 — invisible when absent, nothing goes red, CI just gets
+#      slower. So this pins BOTH the property and the one COLLAPSE it enabled:
+#      `conformance-suite`, whose membership is exactly the six same-shaped
+#      conformance/oracle jobs, each of which runs the same release-fast
+#      `sparq-conformance-scoreboard` build (the coincidence the shared key rests
+#      on, asserted here rather than assumed).
+#
 # Deliberately NOT asserted: sccache. Bead item 3 (an sccache/GHA-backend A/B on
 # build-archive) is measure-first with a >=60 s median-win adoption bar, and no such
 # measurement has been taken — so nothing about sccache is wired, claimed, or pinned
@@ -59,6 +75,26 @@ SAVE_IF_KEY = "save-if:"
 # stop main from ever seeding a cache, so every job would restore nothing forever.
 # The value is pinned exactly for that reason.
 SAVE_IF_VALUE = "${{ github.ref == 'refs/heads/main' }}"
+
+# [OPUS-5] #5214 — the one cache key ci.yml's six same-shaped conformance/oracle jobs
+# share, and that group's exact membership. The canonical rationale (and the honest
+# residual) lives on the `geo-conformance` rust-cache step in ci.yml.
+CONFORMANCE_SUITE_KEY = "conformance-suite"
+CONFORMANCE_SUITE_JOBS = {
+    "geo-conformance",
+    "solid-conformance",
+    "odrl-conformance",
+    "text-oracle",
+    "rsp-oracle",
+    "jsonld-conformance",
+}
+# The build every member runs VERBATIM — the reason their dep closures coincide
+# enough to share one entry. Matched on the two load-bearing fragments of the ONE
+# command line, so incidental whitespace does not red the suite but a job that keeps
+# only half of it (a dev-profile scoreboard run, say) does not satisfy the premise.
+SCOREBOARD_BUILD = re.compile(
+    r"--profile release-fast.*--bin sparq-conformance-scoreboard"
+)
 
 NEXTEST_ARCHIVE_ARTIFACT = "nextest-archive"
 UPLOAD_ARTIFACT = "actions/upload-artifact@"
@@ -140,6 +176,31 @@ def with_value(body: list[str], key: str) -> str | None:
         if stripped.startswith(key):
             return stripped[len(key) :].strip()
     return None
+
+
+def enclosing_job(lines: list[str], idx: int) -> str:
+    """The id of the job whose block contains `lines[idx]` (`  <job-id>:`)."""
+    for i in range(idx, -1, -1):
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", lines[i])
+        if m:
+            return m.group(1)
+    raise AssertionError(f"no enclosing job for line {idx + 1}")
+
+
+def job_body(lines: list[str], job_id: str) -> list[str]:
+    """Every line of the `  <job-id>:` block, up to the next job."""
+    start = next(
+        (i for i, l in enumerate(lines) if re.match(rf"^  {re.escape(job_id)}:\s*$", l)),
+        None,
+    )
+    if start is None:
+        raise AssertionError(f"ci.yml has no job `{job_id}`")
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if re.match(r"^  [A-Za-z0-9_-]+:\s*$", lines[i]):
+            end = i
+            break
+    return lines[start:end]
 
 
 def merge_group_workflows_with_rust_cache() -> list[Path]:
@@ -224,6 +285,62 @@ class TestCacheSaveDiscipline(unittest.TestCase):
                     f"{wf.name}:{idx + 1}: rust-cache `lookup-only` would disable RESTORE; "
                     "sq-6vshe.15 restricts SAVING only.",
                 )
+
+
+class TestCacheKeyHygiene(unittest.TestCase):
+    """#5214 — no anonymous cache entries, and one honest collapse (item 3)."""
+
+    def _keys_by_step(self) -> list[tuple[str, str | None]]:
+        # A LIST, not a dict: a job with two rust-cache steps must not have one of
+        # them silently overwrite (and hide) the other.
+        lines = _lines(CI_YML)
+        steps = steps_using(lines, RUST_CACHE)
+        self.assertTrue(steps, "no rust-cache steps found in ci.yml — re-point this test")
+        out: list[tuple[str, str | None]] = []
+        for idx, body in steps:
+            named = with_value(body, "shared-key:") or with_value(body, "key:")
+            out.append((enclosing_job(lines, idx), named.strip('"') if named else None))
+        return out
+
+    def test_every_rust_cache_step_names_its_key(self) -> None:
+        anonymous = sorted(j for j, k in self._keys_by_step() if k is None)
+        self.assertEqual(
+            anonymous,
+            [],
+            "these ci.yml jobs run rust-cache with neither `shared-key` nor `key`, so "
+            "each takes its OWN entry of the shared 10 GB Actions-cache budget under a "
+            "key derived from the job id — anonymous, rename-fragile, and the budget "
+            f"pressure that LRU-evicts the warm entries (#5214, #1395): {anonymous}",
+        )
+
+    def test_conformance_suite_membership_is_exactly_the_six(self) -> None:
+        members = {j for j, k in self._keys_by_step() if k == CONFORMANCE_SUITE_KEY}
+        self.assertEqual(
+            members,
+            CONFORMANCE_SUITE_JOBS,
+            f"`{CONFORMANCE_SUITE_KEY}` is sized for the six same-shaped conformance/"
+            "oracle jobs (one pinned-stable host toolchain, no job RUSTFLAGS, a "
+            "dev-profile single-crate test plus the shared release-fast scoreboard "
+            "build). Adding a differently-shaped job makes its closure fight the others "
+            "for one entry; dropping one re-splits the budget. Update the canonical note "
+            "on ci.yml's `geo-conformance` cache step and this set together.",
+        )
+
+    def test_every_suite_member_runs_the_shared_scoreboard_build(self) -> None:
+        # The PREMISE of the shared key, asserted rather than assumed: what makes these
+        # six closures coincide is that each runs the same release-fast
+        # sparq-conformance-scoreboard build. A member that stopped running it would
+        # keep the key while no longer sharing the build it is justified by.
+        lines = _lines(CI_YML)
+        for job in sorted(CONFORMANCE_SUITE_JOBS):
+            body = "\n".join(l for l in job_body(lines, job) if not _is_comment(l))
+            self.assertRegex(
+                body,
+                SCOREBOARD_BUILD,
+                f"job `{job}` carries the `{CONFORMANCE_SUITE_KEY}` cache key but no "
+                "longer runs the shared release-fast sparq-conformance-scoreboard "
+                "build. Either restore the build or give the job its own key.",
+            )
 
 
 class TestNextestArchiveDiet(unittest.TestCase):
