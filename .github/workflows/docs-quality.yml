@@ -608,6 +608,19 @@ jobs:
         run: |
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
+      # [OPUS-5] sparq#5425: the TRUST half of that family — scripts/promote.py decides whether a
+      # quarantined issue is maintainer-approved, scripts/promote-poll.py is the cron driver that
+      # fetches the queue and performs the promotion. Both were reachable only from the
+      # promote-on-approval cron (promote.py's suite was invoked by NO workflow at all, and the
+      # driver was inline heredoc python with no suite to invoke), so a regression in either was
+      # first observed by mis-promoting — or silently never polling — LIVE quarantined issues.
+      # The driver's suite is what goes red if the paginated fetch is reverted to the `gh issue
+      # list --limit 200` call that stopped polling the oldest of the queue. Both are hermetic
+      # (stdlib only, no gh/network: fixture reaction rows and a stub `gh`).
+      - name: Self-test promote.py + promote-poll.py (👍 policy + quarantine-poll fetch)
+        run: |
+          python3 scripts/promote.py --self-test
+          python3 scripts/promote-poll.py --self-test
       # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
       # family — it CLEARS the `needs:area` park triage.py sets. As of #3816 it also
       # runs unattended every half hour (.github/workflows/triage-area.yml), which

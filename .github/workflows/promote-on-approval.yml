@@ -3,6 +3,12 @@
 # issue's last edit (revision-bound — an UNTRUSTED-sender edit after approval re-quarantines, with an
 # explicit revert notice; a trusted sender's edit does not, see triage-issue.yml / #2476). Uses the
 # tested pure cores scripts/promote.py + scripts/triage.py.
+#
+# [OPUS-5] sparq#5425: the driver was inline `python3 - <<'PY'` heredoc python that enumerated the
+# queue with `gh issue list --label trust:untrusted --limit 200`. `--limit` truncates SILENTLY and
+# newest-first, so past 200 open quarantined issues the OLDEST were never polled again — and inline
+# heredoc python has no --self-test, so nothing could go red on the PR that introduced it. It now
+# lives in scripts/promote-poll.py (cursor-paginated, ceiling-guarded, hermetically self-tested).
 name: promote-on-approval
 on:
   schedule:
@@ -22,43 +28,14 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # A broken poller must red BEFORE it is trusted to write. Hermetic: stdlib only, no gh, no
+      # network — it drives the real driver against a stub that emulates both `gh` fetch shapes.
+      - name: Self-test the promotion policy and the quarantine poll
+        run: |
+          set -euo pipefail
+          python3 scripts/promote.py --self-test
+          python3 scripts/promote-poll.py --self-test
       - name: Poll quarantined issues for maintainer approval
         run: |
-          python3 - <<'PY'
-          import json, os, subprocess, datetime, sys
-          sys.path.insert(0, "scripts")
-          from promote import should_promote
-          from triage import triage
-          REPO = os.environ["REPO"]
-
-          def gh(*a):
-              return subprocess.run(["gh", *a], capture_output=True, text=True)
-
-          def epoch(ts):
-              return int(datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()) if ts else 0
-
-          def perm(user):
-              r = gh("api", f"repos/{REPO}/collaborators/{user}/permission", "--jq", ".permission")
-              return r.stdout.strip() if r.returncode == 0 else "none"
-
-          issues = json.loads(gh("issue", "list", "-R", REPO, "--label", "trust:untrusted",
-                                 "--state", "open", "--limit", "200",
-                                 "--json", "number,updatedAt,labels").stdout or "[]")
-          for it in issues:
-              n = it["number"]
-              rx = json.loads(gh("api", f"repos/{REPO}/issues/{n}/reactions").stdout or "[]")
-              reactions = [{"content": r["content"], "user": r["user"]["login"],
-                            "created_at": epoch(r["created_at"])} for r in rx]
-              maints = {r["user"] for r in reactions if r["content"] == "+1" and perm(r["user"]) in ("admin", "maintain", "write")}
-              if should_promote(reactions, epoch(it["updatedAt"]), maints):
-                  gh("issue", "edit", str(n), "-R", REPO, "--remove-label", "trust:untrusted")
-                  labels = [lb["name"] for lb in it["labels"] if lb["name"] != "trust:untrusted"]
-                  d = triage(labels, "task", trusted=True)
-                  for l in sorted(d["add"]):
-                      gh("issue", "edit", str(n), "-R", REPO, "--add-label", l)
-                  for l in sorted(d["remove"]):
-                      gh("issue", "edit", str(n), "-R", REPO, "--remove-label", l)
-                  gh("issue", "comment", str(n), "-R", REPO, "--body",
-                     "> 🤖 automation — maintainer-approved (👍 after the last edit); promoted out of quarantine and triaged.")
-                  print(f"promoted #{n}")
-          PY
+          set -euo pipefail
+          python3 scripts/promote-poll.py --repo "$REPO" --apply
