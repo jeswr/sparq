@@ -4551,8 +4551,17 @@ jobs:
     # nobody was collecting.
     name: mutation ratchet leg report (advisory)
     needs: [nightly-gate, mutants-nightly-advisory]
-    # always(): the point of this job is to report when the lane DIDN'T succeed.
-    if: always() && needs.nightly-gate.outputs.fresh == 'true'
+    # always(): the point of this job is to report when the lane DIDN'T succeed — a plain
+    # `needs:`-satisfied condition would skip exactly on the runs worth reporting.
+    # The event pin is the price of that always(): it cuts this job out of the `needs:`
+    # chain that makes every other nightly job provably skipped on a pull_request, so the
+    # nightly-tier restriction is restated HERE rather than inherited from nightly-gate's
+    # own `if:`. Runtime behaviour is unchanged (nightly-gate only runs, and so only
+    # publishes `fresh`, on those two events); what changes is that the restriction is now
+    # checkable statically, which scripts/tests/test_ci_select_wiring.py requires: the
+    # shared ci-select job claims `no-leg` for a non-escape label flip, and that claim is
+    # only true while EVERY job of this workflow is demonstrably inert on such a run.
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.nightly-gate.outputs.fresh == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

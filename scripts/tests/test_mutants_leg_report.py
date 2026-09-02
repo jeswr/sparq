@@ -605,7 +605,15 @@ class TestPinnedToLiveWorkflow(unittest.TestCase):
                       if not line.lstrip().startswith("#")]
         self.assertNotIn("continue-on-error", "\n".join(directives),
                          "the report must be allowed to red — that is the whole point")
-        self.assertIn("if: always() && needs.nightly-gate.outputs.fresh == 'true'", block)
+        self.assertIn(
+            "if: always() "
+            "&& (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') "
+            "&& needs.nightly-gate.outputs.fresh == 'true'",
+            block,
+            "always() so the report survives the lane's failures; the event pin restates "
+            "the nightly-tier restriction that always() cuts out of the needs: chain, "
+            "which test_ci_select_wiring.py checks by reachability",
+        )
 
 
 if __name__ == "__main__":
