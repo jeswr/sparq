@@ -148,7 +148,12 @@ jobs:
           echo "have_labels=1" >> "$GITHUB_OUTPUT"
 
       # ---- former job: new-crate-completeness (G1) ----
-      - name: new-crate-completeness (G1) — new crate ships bench + README (+ SKILL if public)
+      # [OPUS-5] (#5843) G1 also covers a new `packages/<x>`: it must resolve to a
+      # repo-root npm workspace entry AND have a workflow leg that invokes its
+      # `test` script, so a new package cannot ship tests that never execute. Same
+      # step, same script, same JOB name — so no advisory-registry churn and the
+      # required `ci-summary / gate` still folds this in exactly as before.
+      - name: new-crate-completeness (G1) — new crate ships bench + README (+ SKILL if public); new npm package is a workspace entry with a CI leg running its tests
         env:
           # On pull_request github.base_ref is the bare target branch ('main'); on
           # merge_group it is empty, so fall back to merge_group.base_ref (a full

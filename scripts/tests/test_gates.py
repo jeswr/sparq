@@ -144,6 +144,238 @@ class G1Test(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# [OPUS-5] G1-pkg-ci (#5843) — a new npm package's tests must actually RUN.
+#
+# Hermetic: every test builds its own workflow corpus in a tmpdir and injects the
+# package manifest + the root workspace globs, so nothing depends on the live
+# .github/workflows/ tree. The ONE exception is the back-catalogue test at the
+# end, which deliberately asserts against the real tree.
+# --------------------------------------------------------------------------- #
+# A workflow whose leg runs `npm test` in packages/newpkg via a per-step
+# `working-directory:` (the js.yml shape).
+_WF_STEP_WD = """\
+name: js
+on: [pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install
+        run: npm ci
+      - name: newpkg tests
+        working-directory: packages/newpkg
+        run: |
+          npm run build
+          npm test
+"""
+
+# A workflow whose leg runs `npm test` under a JOB-level defaults.run
+# working-directory (the gui.yml `shared-client` shape) — a distinct code path.
+_WF_JOB_DEFAULT_WD = """\
+name: gui
+on: [pull_request]
+jobs:
+  shared:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/newpkg
+    steps:
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+"""
+
+# A workflow that mentions the package but never runs its `test` script: it
+# builds it, and it runs `npm test` somewhere ELSE. This is the exact defect
+# #5843 exists to catch.
+_WF_NO_TEST_LEG = """\
+name: js
+on: [pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build newpkg
+        working-directory: packages/newpkg
+        run: npm run build
+      - name: Other tests
+        working-directory: js
+        run: npm test
+"""
+
+
+class G1PackageCiTest(unittest.TestCase):
+    MANIFEST = {"name": "@sparq/newpkg", "scripts": {"test": "node --test"}}
+
+    def _corpus(self, tmp: Path, **files: str) -> Path:
+        wf = tmp / "workflows"
+        wf.mkdir(exist_ok=True)
+        for name, body in files.items():
+            (wf / f"{name}.yml").write_text(body, encoding="utf-8")
+        return wf
+
+    def _evaluate(self, wf_dir, *, manifest=None, globs=None, changed_extra=()):
+        added = ["packages/newpkg/package.json"]
+        changed, added_paths = g1.parse_status_lines(
+            _statused(added + list(changed_extra))
+        )
+        return g1.evaluate_package_ci(
+            changed,
+            added_paths,
+            manifest_overrides={"newpkg": self.MANIFEST if manifest is None else manifest},
+            globs_override=["packages/*"] if globs is None else globs,
+            workflows_dir=wf_dir,
+        )
+
+    # -- the detector finds a real executor -------------------------------- #
+    def test_step_level_working_directory_counts_as_an_executor(self):
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), js=_WF_STEP_WD)
+            self.assertEqual(self._evaluate(wf), [])
+
+    def test_job_level_defaults_working_directory_counts_as_an_executor(self):
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), gui=_WF_JOB_DEFAULT_WD)
+            self.assertEqual(self._evaluate(wf), [])
+
+    def test_workspace_selector_by_package_name_counts_as_an_executor(self):
+        wf_text = _WF_NO_TEST_LEG.replace(
+            "        working-directory: js\n        run: npm test",
+            "        run: npm test -w @sparq/newpkg",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), js=wf_text)
+            self.assertEqual(self._evaluate(wf), [])
+
+    def test_workspaces_sweep_counts_as_an_executor(self):
+        wf_text = _WF_NO_TEST_LEG.replace(
+            "        working-directory: js\n        run: npm test",
+            "        run: npm test --workspaces",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), js=wf_text)
+            self.assertEqual(self._evaluate(wf), [])
+
+    # -- the detector reports a package whose tests never run -------------- #
+    def test_package_built_but_never_tested_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), js=_WF_NO_TEST_LEG)
+            violations = self._evaluate(wf)
+            self.assertEqual(len(violations), 1)
+            pkg, missing = violations[0]
+            self.assertEqual(pkg, "newpkg")
+            self.assertEqual(len(missing), 1)
+            self.assertIn("CI leg that runs packages/newpkg's `test` script", missing[0])
+
+    def test_no_workflows_at_all_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td))
+            violations = self._evaluate(wf)
+            self.assertEqual(len(violations), 1)
+            self.assertIn("CI leg", violations[0][1][0])
+
+    def test_test_script_named_in_a_comment_is_not_an_executor(self):
+        # A workflow that only DISCUSSES `npm test` in prose (js.yml really does,
+        # e.g. "The wasm build MUST precede `npm test`") must not satisfy the
+        # gate. The comment has to sit INSIDE the packages/newpkg step's chunk —
+        # that is the position where an unstripped comment would be mistaken for
+        # a command.
+        wf_text = _WF_NO_TEST_LEG.replace(
+            "        run: npm run build",
+            "        run: npm run build\n"
+            "      # The build must precede `npm test` for this package.",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), js=wf_text)
+            self.assertEqual(len(self._evaluate(wf)), 1)
+
+    def test_sibling_script_prefixed_test_is_not_the_test_script(self):
+        # `npm run test:unit` / `npm run test-e2e` are DIFFERENT scripts.
+        for cmd in ("npm run test:unit", "npm run test-e2e"):
+            wf_text = _WF_STEP_WD.replace("          npm test", f"          {cmd}")
+            with tempfile.TemporaryDirectory() as td:
+                wf = self._corpus(Path(td), js=wf_text)
+                self.assertEqual(len(self._evaluate(wf)), 1, cmd)
+
+    def test_workspace_selector_for_a_different_package_is_not_an_executor(self):
+        wf_text = _WF_NO_TEST_LEG.replace(
+            "        working-directory: js\n        run: npm test",
+            "        run: npm test -w @sparq/other",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), js=wf_text)
+            self.assertEqual(len(self._evaluate(wf)), 1)
+
+    # -- clause (d): the workspace entry ----------------------------------- #
+    def test_package_outside_the_root_workspace_globs_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), js=_WF_STEP_WD)
+            violations = self._evaluate(wf, globs=["js", "site"])
+            self.assertEqual(len(violations), 1)
+            self.assertIn("npm workspace entry", violations[0][1][0])
+
+    def test_object_form_workspaces_are_read(self):
+        self.assertTrue(g1.package_in_workspaces("newpkg", ["packages/*"]))
+        self.assertFalse(g1.package_in_workspaces("newpkg", ["js", "site"]))
+
+    # -- clause (e): the script must exist for a leg to call ---------------- #
+    def test_test_files_without_a_test_script_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td), js=_WF_STEP_WD)
+            violations = self._evaluate(
+                wf,
+                manifest={"name": "@sparq/newpkg", "scripts": {"build": "tsc"}},
+                changed_extra=["packages/newpkg/test/a.test.mjs"],
+            )
+            self.assertEqual(len(violations), 1)
+            self.assertIn("`test` script", violations[0][1][0])
+
+    def test_package_with_neither_tests_nor_a_test_script_is_not_flagged(self):
+        # Requiring tests to EXIST is a separate clause; this one only asks that
+        # whatever tests are shipped actually run.
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._corpus(Path(td))
+            self.assertEqual(
+                self._evaluate(wf, manifest={"name": "@sparq/newpkg"}), []
+            )
+
+    def test_no_new_package_passes(self):
+        changed, added = g1.parse_status_lines(
+            _statused([], ["packages/sparq-client/src/index.ts"])
+        )
+        self.assertEqual(g1.added_packages(added), [])
+        self.assertEqual(g1.evaluate_package_ci(changed, added), [])
+
+    def test_nested_manifest_is_not_a_new_package(self):
+        changed, added = g1.parse_status_lines(
+            _statused(["packages/sparq-client/vendor/dep/package.json"])
+        )
+        self.assertEqual(g1.added_packages(added), [])
+
+    # -- the live tree ------------------------------------------------------ #
+    def test_every_existing_package_would_pass_the_gate_today(self):
+        # The back-catalogue must be clean or the gate cannot run HARD. This also
+        # pins the two real executor shapes: js.yml (per-step working-directory)
+        # and gui.yml (job-level defaults.run.working-directory).
+        pkg_dir = REPO_ROOT / "packages"
+        globs = g1.workspace_globs()
+        self.assertIn("packages/*", globs)
+        names = sorted(p.name for p in pkg_dir.iterdir() if p.is_dir())
+        self.assertTrue(names, "no packages/ members found")
+        for pkg in names:
+            manifest = g1.read_package_manifest(pkg)
+            self.assertTrue(
+                g1.package_in_workspaces(pkg, globs), f"{pkg} not a workspace entry"
+            )
+            self.assertIsNotNone(
+                g1.workflow_running_package_tests(pkg, manifest.get("name")),
+                f"no CI leg runs packages/{pkg}'s test script",
+            )
+
+
+# --------------------------------------------------------------------------- #
 # G2 — public-api → skill
 # --------------------------------------------------------------------------- #
 class G2Test(unittest.TestCase):
