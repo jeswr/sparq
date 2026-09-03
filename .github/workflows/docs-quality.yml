@@ -633,6 +633,14 @@ jobs:
         run: |
           python3 scripts/triage-area.py --self-test
           python3 scripts/tests/test_triage_area.py
+      # [OPUS-5] #5425: scripts/promote.py is the fourth member of that family — it decides
+      # whether third-party content leaves QUARANTINE, so a regression here is a security
+      # regression, not a labelling one. Its own cron (promote-on-approval.yml) self-tests only
+      # the default-branch copy every 10 minutes, i.e. after the change has merged; this PR-time
+      # gate reds the offending PR instead. Hermetic (stdlib only, no gh/network: the reaction
+      # fixtures are pure, and the quarantine fetch runs against an injected gh stub).
+      - name: Self-test promote.py (trust-promotion predicate + quarantine fetch)
+        run: python3 scripts/promote.py --self-test
       # [OPUS-5] issue #5160: the `area:` TOTALITY gate, hosted HERE rather than in
       # routing-self-tests.yml. That lane owns the rest of the attribution suite but is
       # `paths:`-filtered, and what breaks totality is a path no filter can name in
