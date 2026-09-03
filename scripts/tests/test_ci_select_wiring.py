@@ -526,9 +526,28 @@ class TestWiring(unittest.TestCase):
             for keep in ("opened", "synchronize", "reopened"):
                 self.assertIn(keep, types,
                               f"{wf_name}: must keep the default {keep} trigger")
-            self.assertIn(
-                "workflow_call", on,
+            call = on.get("workflow_call")
+            self.assertIsInstance(
+                call, dict,
                 f"{wf_name}: the label dispatcher must be able to call this workflow",
+            )
+            self.assertEqual(
+                call.get("inputs", {}).get("label_override"),
+                {"description": "Isolate and coalesce calls from ci-label-override.yml.",
+                 "required": False, "default": False, "type": "boolean"},
+                f"{wf_name}: reusable calls need an explicit, default-off override marker",
+            )
+            concurrency = wf.get("concurrency", {})
+            group = str(concurrency.get("group", ""))
+            self.assertIn("inputs.label_override", group)
+            self.assertIn("'label-override'", group)
+            self.assertNotIn(
+                "github.event.action", group,
+                f"{wf_name}: called-workflow isolation must not infer the caller from event projection",
+            )
+            self.assertNotIn(
+                "inputs.label_override && github.run_id", group,
+                f"{wf_name}: repeated override toggles must coalesce, not stack unique groups",
             )
 
         dispatch = _load(LABEL_DISPATCH_YML)
@@ -542,6 +561,7 @@ class TestWiring(unittest.TestCase):
         for job_id, (wf_name, _, _) in callers.items():
             job = dispatch["jobs"][job_id]
             self.assertEqual(job.get("uses"), f"./.github/workflows/{wf_name}")
+            self.assertEqual(job.get("with"), {"label_override": True})
             self.assertNotIn("runs-on", job)
             self.assertNotIn("steps", job)
 
@@ -1803,12 +1823,12 @@ class TestDraftTierWiring(unittest.TestCase):
             self.assertIn(key, env, f"gate step must export {key}")
         self.assertIn("github.event.pull_request.draft", str(env["PR_DRAFT"]))
 
-    def test_bench_concurrency_cancels_only_pull_request(self):
+    def test_bench_concurrency_cancels_only_pr_or_label_override(self):
         conc = self.bench.get("concurrency", {})
         self.assertEqual(str(conc.get("cancel-in-progress")),
-                         "${{ github.event_name == 'pull_request' }}",
-                         "bench must cancel superseded PR runs but never a "
-                         "push/schedule run (history integrity)")
+                         "${{ github.event_name == 'pull_request' || inputs.label_override }}",
+                         "bench must cancel superseded PR and explicit label-override "
+                         "runs, but never a push/schedule run (history integrity)")
 
     def test_js_has_per_pr_concurrency(self):
         conc = self.js.get("concurrency", {})

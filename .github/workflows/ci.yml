@@ -45,6 +45,12 @@ on:
   # [SPARQ agent] #6081: ci-label-override.yml calls this workflow only when the
   # explicit ci-full override changes. Ordinary label churn never reaches it.
   workflow_call:
+    inputs:
+      label_override:
+        description: Isolate and coalesce calls from ci-label-override.yml.
+        required: false
+        default: false
+        type: boolean
   # [OPUS-4.8] Merge queue: re-run the identical PR check-set on the queue's
   # merge_group ref so the required ci-summary gate finds the same siblings it finds
   # on a PR. The per-commit `coverage` job (if: event_name != 'schedule') runs here;
@@ -78,15 +84,14 @@ concurrency:
   # them. PR / push / merge_group runs keep the per-ref group + cancel-in-progress so a
   # superseded build still auto-cancels to save CI minutes (unchanged behaviour for them —
   # they resolve to the constant `-shared` suffix).
-  # [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events ALSO get a
-  # per-run group. A label-flip run entering the shared per-ref group would cancel the
+  # [SPARQ agent] #6081: label-router calls get a stable, isolated group. A label
+  # override entering the shared per-ref group would cancel the
   # in-flight real run on the SAME head SHA (cancellation happens at run level, before
   # job `if:` guards evaluate), leaving cancelled check-runs that RED the ci-summary
-  # gate. Isolated, a non-`ci-full` flip is a guarded no-op run and a `ci-full` toggle
-  # runs the full matrix WITHOUT killing the superseded selected run mid-flight (both
-  # conclude green; the gate aggregates the union). Non-label PR/push/merge_group runs
-  # keep the shared group + cancel-in-progress exactly as before.
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action))) && github.run_id || 'shared' }}
+  # gate. The stable `label-override` suffix prevents cross-cancellation while letting
+  # repeated override toggles replace one another instead of stacking unique-run groups.
+  # Non-label PR/push/merge_group runs keep the shared group exactly as before.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.run_id) || (inputs.label_override && 'label-override') || 'shared' }}
   cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 env:

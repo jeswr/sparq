@@ -65,15 +65,22 @@ on:
   # [SPARQ agent] #6081: ci-label-override.yml calls this workflow only when the
   # explicit ci-full override changes. Ordinary label churn never reaches it.
   workflow_call:
+    inputs:
+      label_override:
+        description: Isolate and coalesce calls from ci-label-override.yml.
+        required: false
+        default: false
+        type: boolean
   merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  # A ci-full call carries the labeled/unlabeled PR payload. Isolate it so the
-  # override cannot cancel evidence already running on the same head SHA.
-  group: vectorized-feature-off-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')) && github.run_id || 'shared' }}
+  # [SPARQ agent] #6081: the caller declares the override explicitly, independent
+  # of how GitHub projects the originating event into a reusable workflow. A stable
+  # suffix isolates it from ordinary evidence and coalesces repeated toggles.
+  group: vectorized-feature-off-${{ github.workflow }}-${{ github.ref }}-${{ inputs.label_override && 'label-override' || 'shared' }}
   cancel-in-progress: true
 
 env:

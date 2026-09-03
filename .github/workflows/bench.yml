@@ -62,6 +62,12 @@ on:
   # [SPARQ agent] #6081: ci-label-override.yml calls this workflow only when a
   # ci-full/bench-full override changes. Ordinary label churn never reaches it.
   workflow_call:
+    inputs:
+      label_override:
+        description: Isolate and coalesce calls from ci-label-override.yml.
+        required: false
+        default: false
+        type: boolean
   # [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) merge_group REMOVED. The deterministic
   # byte-count ratchet is a pure function of the code: it already ran + hard-gated on the
   # PR head (--deterministic-only above), it re-runs on push-to-main below, and the
@@ -114,8 +120,10 @@ permissions:
 # there is a no-op on the real run; a PR synchronize sits in `-shared` and correctly
 # supersedes its predecessor; push/schedule stay in `-shared` and are never cancelled.
 concurrency:
-  group: bench-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # [SPARQ agent] #6081: keep label overrides out of the ordinary per-ref group,
+  # but coalesce repeated toggles instead of assigning every call a unique run group.
+  group: bench-${{ github.ref }}-${{ inputs.label_override && 'label-override' || 'shared' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.label_override }}
 
 jobs:
   # [SONNET-4.6] sq-mel85 (design §5.2, phase 2b): the change-based test-selection

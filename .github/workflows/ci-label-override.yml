@@ -28,6 +28,8 @@ jobs:
       issues: write
       pull-requests: read
     uses: ./.github/workflows/ci.yml
+    with:
+      label_override: true
 
   feature-matrix:
     if: github.event.label.name == 'ci-full'
@@ -35,6 +37,8 @@ jobs:
       contents: read
       pull-requests: read
     uses: ./.github/workflows/feature-matrix.yml
+    with:
+      label_override: true
 
   bench:
     if: contains(fromJSON('["ci-full","bench-full"]'), github.event.label.name)
@@ -44,6 +48,8 @@ jobs:
       issues: write
       pull-requests: write
     uses: ./.github/workflows/bench.yml
+    with:
+      label_override: true
 
   fuzz:
     if: contains(fromJSON('["ci-full","fuzz-full"]'), github.event.label.name)
@@ -51,6 +57,8 @@ jobs:
       contents: write
       issues: write
     uses: ./.github/workflows/fuzz.yml
+    with:
+      label_override: true
 
   vectorized-feature-off:
     if: github.event.label.name == 'ci-full'
@@ -58,3 +66,5 @@ jobs:
       contents: read
       pull-requests: read
     uses: ./.github/workflows/vectorized-feature-off.yml
+    with:
+      label_override: true
