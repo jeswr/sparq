@@ -160,9 +160,11 @@ The same shape drives W3: because the apply's `WHERE` is evaluated over `graph` 
 
 ### A. Deny every UPDATE on a scoped graph — the status quo, formalized
 
-Keep `update_as` graph-granular; if any targeted graph carries a scope for the session, deny.
+Keep `update_as` graph-granular; deny whenever the request would take the scoped path — i.e. deny
+on gate 0's `SCOPED` verdict (§4.1), which is syntactic, rather than on a set of targeted graphs
+that a `GRAPH ?var` request cannot name without evaluating its `WHERE`.
 
-* **Sound and free.** Trivially satisfies the law (the verdict depends only on the scope map).
+* **Sound and free.** Trivially satisfies the law (the verdict depends only on `(S, U)`).
 * **Useless for the invariant.** The maintainer's motivating cases — *"the researcher may
   correct the trial results but not the participant identifiers"* — are precisely row-level
   write authority. This option says the answer is "no".
@@ -249,29 +251,84 @@ replica cost ever dominates, and only with the fuzzed differential harness of §
 
 ## 4. The chosen design in detail
 
-### 4.1 Layering — restriction composes, never widens
+### 4.1 Layering — the routing decision must come before any evaluation
 
-Three gates, in order, each strictly narrowing:
+Composition here has an ordering trap that must be resolved before the gates can be listed at
+all. The natural applicability test — *"does any targeted graph carry a scope entry for this
+session?"* — is **not answerable for a `GRAPH ?var` target without evaluating the `WHERE`**, and
+evaluating the `WHERE` over `D` is precisely the §2.2 leak. A routing test that must perform the
+dangerous operation in order to decide whether the operation is dangerous is circular, and the
+circularity is load-bearing: it sits on the W4 boundary, not below it. So routing is decided
+**first**, and from syntax alone.
 
-1. **Graph-level gate (unchanged).** `update::check` runs exactly as today. A scope may never
-   grant write on a graph the graph level denies, and every existing invariant, test and deny
-   message is preserved untouched.
-2. **Scope applicability gate.** If no targeted graph carries a scope entry for this session,
-   the request takes the existing path byte-for-byte — the strict-additivity discipline the
-   crate already uses for `trust-graph`. Otherwise the request enters the scoped path.
-3. **Delta gate (new).** Shadow-apply on `M`, authorize `Δ`, replay.
+**Gate 0 — the static routing classifier.** A pure function of the session's scope map `S` and
+the update text `U`. It reads neither `D` nor `M`, and it runs before `update::check`:
 
-On the scoped path, gate 1's `resolve_var_graphs` must **not** run over the full store (that is
-the §2.2 leak). Two admissible resolutions, both fail-closed:
+```text
+scoped_path(S, U) :=
+  if S carries no scope entry for this session                            -> UNSCOPED
+  if U contains a wildcard operation (CLEAR/DROP ALL|NAMED|DEFAULT)       -> SCOPED
+  if any GRAPH slot in U — template or WHERE — is a variable              -> SCOPED
+  if U contains a bare (non-GRAPH) pattern                                -> SCOPED
+  if any ground GRAPH IRI in U carries a scope entry in S                 -> SCOPED
+  otherwise                                                               -> UNSCOPED
+```
 
-* **Preferred:** on the scoped path, replace the precise `GRAPH ?var` resolution with the delta
-  itself — the shadow-apply enumerates the written graphs exactly, so gate 1 checks those graph
-  names *after* the shadow-apply rather than before. Ordering becomes
-  static-targets-check → shadow-apply → per-graph check of the delta's slots → delta gate → replay.
-* **Fallback:** run the binding SELECT over `M` instead of `D`. Sound *only because* the apply
-  also runs over `M` — it restores the check-dataset ≡ apply-dataset identity at the new dataset.
+Every case that cannot be settled syntactically resolves to `SCOPED`, so the classifier is
+fail-closed by construction and monotone in `S` (adding a scope entry can only move a request
+*onto* the scoped path, never off it). The degenerate rule **"any scope entry ⇒ `SCOPED`"** is
+always admissible and strictly safer; the clauses above are the cost refinement, and an
+implementation may start at the degenerate rule. The bare-pattern clause is deliberately blunt:
+a bare pattern under the legacy union-default semantics can read any accessible graph, and while
+a `USING`/`FROM`-pinned active dataset of unscoped ground graphs could be admitted later, v1
+does not attempt it.
 
-Either way the rule is: **no evaluation on a scoped request may read `D ∖ M`.**
+Why the `UNSCOPED` branch is sound even when the session *does* carry scopes: its conditions
+force every graph the request can read or write to be a ground IRI with **no** scope entry, and
+an accessible graph without a scope entry contributes to the replica *whole* — the read path
+already builds `M` that way, filling in a permissive entry for every accessible unscoped graph
+(`scoped_dataset`, `pattern_scope.rs:205`). So `M` and `D` agree on exactly the graphs such a
+request can reach, and the verdict and delta computed over `D` are the ones that would have been
+computed over `M`: on that branch non-interference is an identity, not a promise. (`M` also drops
+graph-level *inaccessible* graphs, which is the graph-level gate's business and is unchanged by
+this design — the claim here is only that no *masked* triple can influence an `UNSCOPED` request.)
+That branch also never calls `resolve_var_graphs`, since it admits no variable graph slot:
+**every request that needs precise var resolution and carries any scope is on the scoped path**,
+which is what makes the §2.2 leak unreachable rather than merely avoided.
+
+The routing bit is itself part of the verdict, so the law of §1 applies to it: a classifier that
+is a function of `(S, U)` is a fortiori a function of `(M, S, U)`.
+
+**Gate ordering, reconciled.** With gate 0 fixed, the remaining gates split by path.
+
+*Unscoped path* — `update::check` runs exactly as today, byte-for-byte, `resolve_var_graphs`
+included; every existing invariant, test and deny message is preserved untouched.
+
+*Scoped path* — in order:
+
+1. **Static graph-level check.** The graph-level authorization of `update::check` restricted to
+   what is statically known: ground `GRAPH <iri>` targets, the default-graph rejection
+   (`update.rs:537`), the wildcard rejection (§4.3). No evaluation, no `resolve_var_graphs`.
+2. **Shadow-apply.** Materialize `M` (§4.5), `update_in_place_capturing` on a clone, capture `Δ`.
+3. **Delta-derived graph-level check.** Apply the same per-graph `Need` test to the graph slots
+   the delta actually names. This *replaces* the precise var resolution rather than deferring
+   it — the shadow-apply enumerates the written graphs exactly, so there is nothing left to
+   approximate. (Admissible alternative, same guarantee: run the binding SELECT over `M` instead
+   of `D`, which restores the check-dataset ≡ apply-dataset identity at the new dataset.)
+4. **Delta gate.** Authorize `Δ` triple-by-triple against `S_r`/`S_w` (§4.2, §4.3).
+5. **Replay** onto `D`, only if every gate above passed.
+
+The rule that governs all five: **no evaluation on a scoped request may read `D ∖ M`.**
+
+One honesty note on "restriction composes, never widens": steps 1+3 are not pointwise stricter
+than today's unscoped graph-level check on the same `D`. `resolve_var_graphs` over `D` can
+enumerate graphs that the shadow-apply over `M` does not, so a request that today's check would
+deny can be permitted on the scoped path. That difference *is* the fix — those extra graphs are
+reachable only through masked bindings, and denying on them is the §2.2 one-bit oracle. The
+invariant that must survive is the module's own (checked write set ⊇ actual write set), and it
+does: the actual write set is the replayed `Δ`, whose slots are exactly what step 3 checked.
+What never widens is authority relative to the actor's view: the scoped path can only turn a
+graph-level permit into a per-triple deny (§4.3).
 
 ### 4.2 The two predicates (USING / WITH CHECK, in RDF terms)
 
@@ -294,7 +351,7 @@ That is the `WITH CHECK` error and it discloses nothing.
 
 ### 4.3 Per-operation semantics (fail-closed)
 
-Applies when the request is on the scoped path (gate 2). "Deny" means the whole request is
+Applies when the request is on the scoped path (gate 0, §4.1). "Deny" means the whole request is
 rejected and `D` is untouched.
 
 | Update form | Semantics under a scope |
@@ -390,6 +447,15 @@ follow-up beads must carry:
    form in §4.3, plus the §2.2 var-graph shape — assert: identical verdict, identical deny
    message, and `masked(apply(D₁,U), S) = masked(apply(D₂,U), S)`. This is the test that fails
    red on the §2.2 leak, and it is the one test that cannot be replaced by an oracle comparison.
+   Two routing-specific cases are mandatory, because gate 0 (§4.1) is where the leak is actually
+   closed:
+   * A **`GRAPH ?var` update whose bindings differ only in `D ∖ M`** — `D₁` and `D₂` therefore
+     resolve different concrete target sets — must still produce the identical verdict, message
+     and masked post-state. This is the §2.2 shape stated as a test.
+   * **The classifier is store-independent.** Assert `scoped_path(S, U)` is identical for `D₁`
+     and `D₂` for every case in the battery, and make it non-vacuous by mutation: replacing gate 0
+     with the naive *"does any **resolved** target carry a scope entry?"* test must turn the
+     battery red. A test suite that passes under that mutation is not testing the routing.
 2. **Write-oracle differential.** `apply_scoped(D, U)` must equal `D` updated by the delta a
    *physically-reduced* store would produce — the write mirror of `tests/pattern_scope.rs`'s
    `scoped == oracle` battery, with the same non-vacuity guard (a no-op mask must flip it red).
@@ -439,12 +505,15 @@ feature unless noted. Ids to be minted by the orchestrator — this record creat
 2. **`feat`: `WriteScope` + the delta gate.** The pure predicate layer — authorize a
    `(Δ⁻, Δ⁺)` pair against a scope map, with the §4.3 per-form rules and the control-document
    rejection at scope construction. No store plumbing; unit-testable in isolation.
-3. **`feat`: shadow-apply plumbing — `PodStore::scoped_update_as`.** Materialize `M`
-   (reach-limited per §4.5), `update_in_place_capturing` on a clone, gate the delta, replay.
-   Carries §6 obligations 2 and 3.
-4. **`fix`: re-scope the graph-level resolution on the scoped path.** The §2.2 leak fix — either
-   delta-derived graph checking or the binding SELECT over `M`. Guarded by bead 1's harness, which
-   must go red without it.
+3. **`feat`: shadow-apply plumbing — `PodStore::scoped_update_as`.** The gate 0 classifier (§4.1)
+   as a pure `(S, U)` function — it must land here, since nothing can be routed without it, and
+   may ship as the degenerate "any scope entry ⇒ scoped" rule. Then materialize `M` (reach-limited
+   per §4.5), `update_in_place_capturing` on a clone, gate the delta, replay. Carries §6
+   obligations 2 and 3.
+4. **`fix`: re-scope the graph-level resolution on the scoped path.** The §2.2 leak fix — the
+   delta-derived graph check of §4.1 step 3 (or the binding SELECT over `M`), plus the syntactic
+   refinement of gate 0 past the degenerate rule. Guarded by bead 1's harness, which must go red
+   without it — including the mutation to the naive resolved-target routing test.
 5. **`feat`: fuzz extension.** §6 obligation 4 — update batteries in
    `tests/pattern_scope_fuzz.rs`.
 6. **`perf`: replica reuse + measurement.** Reach-limited materialization tuning and cache reuse
