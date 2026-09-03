@@ -604,12 +604,18 @@ jobs:
       # expectations on main SILENTLY — the KeyError surfaced a day later, out-of-band.
       # Running both hermetic self-tests HERE (stdlib-only, no gh/network: pure label-delta
       # fixtures) reds the offending PR instead of the next cron run.
-      # [OPUS-5] #5802 adds scripts/promote.py to that set for a sharper version of the same
-      # reason: promote-on-approval.yml called it a "tested pure core", but `promote.py
-      # --self-test` was wired into NO workflow at all — the suite existed and never ran. A
-      # regression in the promotion predicate or in the paginated reaction read would first be
-      # observed as quarantined issues that silently never promote, which is a fail-QUIET defect
-      # the cron cannot report on its own. That PR wires it here AND in the cron itself.
+      # [OPUS-5] #5802 + #5425 add scripts/promote.py to that set for a sharper version of the
+      # same reason: promote-on-approval.yml called it a "tested pure core", but `promote.py
+      # --self-test` was wired into NO workflow at all — the suite existed and never ran. It
+      # decides whether third-party content leaves QUARANTINE, so a regression there is a
+      # SECURITY regression, not a labelling one; and one in the promotion predicate, in the
+      # paginated reaction read, or in the quarantine fetch would first be observed as
+      # quarantined issues that silently never promote — a fail-QUIET defect the cron cannot
+      # report on its own. Its own cron now self-tests too, but only the default-branch copy
+      # every 10 minutes, i.e. AFTER the change merged; this PR-time gate reds the offending PR
+      # instead. Hermetic like its neighbours (stdlib only, no gh/network: the reaction fixtures
+      # are pure, and both the reaction read and the quarantine fetch run against injected gh
+      # stubs).
       - name: Self-test triage.py + retriage.py + promote.py (static-triage + retriage-plan + promotion fixtures)
         run: |
           python3 scripts/triage.py --self-test
@@ -633,6 +639,8 @@ jobs:
         run: |
           python3 scripts/triage-area.py --self-test
           python3 scripts/tests/test_triage_area.py
+      # (scripts/promote.py is self-tested with its triage.py/retriage.py family above — #5802
+      # and #5425 each wired it in independently, so it is run once, in that step.)
       # [FABLE-5] #3759 / registry#563 item 4: the transient-tolerant gh READ retry
       # helper (scripts/gh_retry.py — bounded, transient-5xx-only, fail-closed
       # read-allow-list so mutations/arm calls can never be wrapped) and the two arm
