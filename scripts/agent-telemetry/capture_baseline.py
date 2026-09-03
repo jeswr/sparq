@@ -31,6 +31,11 @@ import metrics_row as mr  # noqa: E402
 
 
 def merged_prs(count: int, repo: str | None) -> list[int]:
+    # [OPUS-5] #5426 audit of the `--limit` class. Here `--limit` IS the requested SAMPLE
+    # SIZE (`--count`, default 25), not a cap on an enumeration that wants to be complete:
+    # the caller asks for "the N most recent merged PRs" and gets exactly that. So there is
+    # nothing to fail closed against — a short return means the repository has fewer than N
+    # merged PRs, which is the honest answer to the question asked.
     cmd = ["gh", "pr", "list", "--state", "merged", "--limit", str(count), "--json",
            "number"]
     if repo:

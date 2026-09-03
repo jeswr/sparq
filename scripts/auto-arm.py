@@ -323,6 +323,24 @@ PR_FIELDS = (
     "id,number,state,isDraft,headRefOid,headRefName,baseRefName,labels,autoMergeRequest,"
     "mergeStateStatus,author,title"
 )
+# [OPUS-5] #5426 — the OPEN-PR ENUMERATION CEILING (follow-up audit to the #4985 sweep).
+# `gh pr list --limit N` TRUNCATES SILENTLY: once the population exceeds N the CLI returns
+# the newest N rows, prints no warning and exits 0. `list_open` ENUMERATES the open-PR set
+# in order to decide what to arm, so a truncated read does not arm late — it never arms the
+# truncated tail on ANY tick, and reports success while doing it.
+#
+# 2000 is a fail-closed BACKSTOP, not a working cap (#4985 measured 93 open PRs on
+# 2026-09-01). `gh` pages the underlying connection and stops at the last page rather than
+# at `--limit`, so the cost of the call tracks the POPULATION, not the cap; the number only
+# decides how a runaway snapshot fails. That paging claim comes from #4985 and was NOT
+# re-measured here (this change was developed without `gh` or network access).
+#
+# Deliberately INLINE rather than an import of a shared helper: #3776 — this script is
+# fetched from the DEFAULT BRANCH while a stale PR ref may still supply a file-by-file
+# `sparse-checkout` manifest, so a new sibling import can ModuleNotFoundError this GATING
+# check. scripts/rearm-sweeper.py carries the same copy for the same reason, exactly as the
+# `_DegradedGhRetry` block above is deliberately duplicated between the two arm scripts.
+OPEN_PR_CEILING = 2000
 ENABLE_AUTO_MERGE = """mutation($id:ID!,$oid:GitObjectID!){
   enablePullRequestAutoMerge(input:{pullRequestId:$id,expectedHeadOid:$oid,mergeMethod:SQUASH}){
     pullRequest{number headRefOid autoMergeRequest{enabledAt}}
@@ -581,12 +599,25 @@ class AutoArmer:
                     "--state",
                     "open",
                     "--limit",
-                    "1000",
+                    str(OPEN_PR_CEILING),
                     "--json",
                     PR_FIELDS,
                 ]
             )
         )
+        # `>=`, not `>`: a truncated fetch returns EXACTLY the cap, so at the boundary
+        # "the population is 2000" and "the population is larger and was cut to 2000" are
+        # indistinguishable from the response alone. Raising on the equal case is a
+        # deliberate false positive; the remedy is to raise OPEN_PR_CEILING, never to
+        # widen this comparison. GhError escapes run_sweep untouched (see the #3759
+        # transient policy) so this is a loud red, never a lenient exit-0.
+        if len(raw) >= OPEN_PR_CEILING:
+            raise GhError(
+                f"gh pr list returned {len(raw)} open PRs, sitting on its ceiling of "
+                f"{OPEN_PR_CEILING}: `--limit` truncates SILENTLY, so the tail of the "
+                "open-PR set may be missing and this sweep would report success while "
+                "never arming it. Raise OPEN_PR_CEILING deliberately (#5426)."
+            )
         return [parse_pr(item) for item in raw]
 
     @property
@@ -2053,6 +2084,35 @@ def self_test() -> None:
         assert "--pr must be a PR number" in str(error), error
     else:
         raise AssertionError("a non-numeric --pr must be loud, never a whole-repo sweep")
+
+    # -------------------------------------------------- #5426 ENUMERATION CEILING
+    # `gh pr list --limit N` truncates SILENTLY at N, so a sweep that enumerates the
+    # open-PR set to decide what to arm must REFUSE a read that comes back sitting on
+    # its cap rather than arm a partial view and report success.
+    #
+    # Exercised end-to-end through `candidates()` -> `list_open()` with the module
+    # ceiling temporarily lowered, not against a hand-called predicate: a guard the
+    # listing path never consults would pass a pure-function test while still arming
+    # from a truncated snapshot. Deleting the `len(raw) >= OPEN_PR_CEILING` block reds
+    # the first half; the second half is what stops it being "this fixture always
+    # raises" — the same two PRs under a ceiling of 3 are a COMPLETE read and arm.
+    ceiling_saved = OPEN_PR_CEILING
+    try:
+        globals()["OPEN_PR_CEILING"] = 2
+        try:
+            exercise([fixture(number=801), fixture(number=802)])
+        except GhError as error:
+            assert "ceiling" in str(error), error
+            assert "OPEN_PR_CEILING" in str(error), error
+        else:
+            raise AssertionError(
+                "an open-PR listing sitting on its --limit must fail loud, never arm"
+            )
+        globals()["OPEN_PR_CEILING"] = 3
+        fake, _messages, _outcome = exercise([fixture(number=801), fixture(number=802)])
+        assert len(graphql_calls(fake)) == 2, graphql_calls(fake)
+    finally:
+        globals()["OPEN_PR_CEILING"] = ceiling_saved
 
     print("auto-arm self-test: PASS")
 

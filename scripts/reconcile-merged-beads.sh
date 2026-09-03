@@ -193,6 +193,14 @@ self_test() {
 # --- arg parsing ------------------------------------------------------------------------
 APPLY=0
 JSON=0
+# [OPUS-5] #5426 audit of the `--limit` class. These two are RECENCY WINDOWS, deliberately —
+# NOT enumerate-for-a-decision reads, so they take no fail-closed ceiling. The population
+# they sample (every merged PR / every commit on main) grows without bound and is
+# append-only, so there is no complete read to fail closed against: "scan the newest N" IS
+# the intended semantics, and the `--merged-limit=` / `--commit-limit=` flags exist to widen
+# it by hand. The direction of a short read is also safe here: this pass only ever CLOSES
+# beads whose id it can attribute to a merge, so a bead that falls off the window is left
+# open (recoverable, and re-closable by widening the window) rather than wrongly closed.
 MERGED_LIMIT=400      # how many merged PRs to scan (newest-first).
 COMMIT_LIMIT=600      # how many origin/main commit subjects to scan.
 for arg in "$@"; do

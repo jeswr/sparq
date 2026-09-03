@@ -231,6 +231,33 @@ is_zk_value_lane() {
   return 1
 }
 
+# [OPUS-5] #5426 — the OPEN-PR ENUMERATION CEILING (follow-up audit to the #4985 sweep).
+#
+# `gh pr list --limit N` TRUNCATES SILENTLY: past N it returns the newest N rows, prints no
+# warning and exits 0. The open-PR blob below is the PRIMARY in-flight signal, so a truncated
+# read drops the OLDEST open PRs — precisely the long-running ones most likely still to hold a
+# crate — their beads stop being subtracted, and the frontier re-dispatches work that is
+# already in flight. That is the sq-8rpq double-dispatch this whole section exists to prevent.
+#
+# WARN rather than `die`, deliberately: this script's contract for a degraded PR signal is
+# already warn-and-continue (see the `gh not found` branch, which tolerates a COMPLETELY empty
+# blob — strictly worse than a truncated one). Dying on the milder condition while tolerating
+# the worse one would be incoherent. What was actually wrong was that the empty case is LOUD
+# and the truncated case was SILENT; this puts them in the same visibility class.
+#
+# pr_enumeration_warning <count> <cap> : echo the warning text iff <count> sits on <cap>,
+# else echo nothing. `>=`, not `>`: a truncated fetch returns EXACTLY the cap, so at the
+# boundary a complete population and a cut one are indistinguishable from the response alone.
+# Pure arithmetic (no bd/gh/git) -> hermetically tested in self_test.
+OPEN_PR_LIMIT=2000
+pr_enumeration_warning() {
+  local count="$1" cap="$2"
+  if [ "$count" -ge "$cap" ] 2>/dev/null; then
+    printf 'open-PR enumeration returned %s row(s), sitting on its --limit of %s: gh TRUNCATES SILENTLY, so the OLDEST open PRs are missing from the in-flight blob and their beads may be RE-DISPATCHED. Raise OPEN_PR_LIMIT deliberately (#5426).\n' \
+      "$count" "$cap"
+  fi
+}
+
 # [OPUS-4.8] sq-8rpq: in-flight reservation by UNPUSHED worktree branches (not every branch).
 # inflight_wt_branch <branch> <unpushed-count> : echo <branch> iff it is an IN-FLIGHT
 # signal, i.e. iff it has UNPUSHED local commits. <unpushed-count> is the number of
@@ -399,6 +426,18 @@ self_test() {
   got="$(_zk 'docs: explain zk value-lane in the README')"
   _check "mid-prose value-lane mention -> free"      "$got" "free"
 
+  # [OPUS-5] #5426: the open-PR enumeration ceiling. A blob sitting on its `--limit` may
+  # have dropped the oldest open PRs, so their beads would be re-dispatched; that must be
+  # said out loud. The BELOW-cap case is what stops this being "always warns".
+  got="$(pr_enumeration_warning 2000 2000)"
+  _check "a blob sitting on its --limit warns"       "${got:+warned}" "warned"
+  got="$(pr_enumeration_warning 2001 2000)"
+  _check "a blob PAST its --limit warns too"         "${got:+warned}" "warned"
+  got="$(pr_enumeration_warning 1999 2000)"
+  _check "a blob below its --limit is silent"        "${got:+warned}" ""
+  got="$(pr_enumeration_warning 0 2000)"
+  _check "an empty blob is silent (gh-absent path)"  "${got:+warned}" ""
+
   echo
   if [ "$fails" -eq 0 ]; then log "self-test PASSED"; return 0; fi
   die "self-test FAILED ($fails check(s))"
@@ -446,8 +485,17 @@ fi
 # This mirrors scripts/worktree-gc.sh's `wt_unpushed_count` "never-dropped" predicate.
 if command -v gh >/dev/null 2>&1; then
   # head-branch names + titles of every open PR, joined per-line for substring search.
-  PR_BLOB="$(gh pr list --state open --limit 300 --json headRefName,title \
+  PR_BLOB="$(gh pr list --state open --limit "$OPEN_PR_LIMIT" --json headRefName,title \
     -q '.[] | (.headRefName + " " + .title)' 2>/dev/null || true)"
+  # #5426: a silent truncation here re-dispatches in-flight work. Make it visible.
+  # Written as an explicit `if` rather than `[ -n … ] && log …`: this script runs under
+  # `set -e`, and a trailing AND-list whose test fails is exactly the shape that turns the
+  # common (no-warning) path into a surprise exit.
+  PR_TRUNC_WARN="$(pr_enumeration_warning \
+    "$(printf '%s' "$PR_BLOB" | grep -c . || true)" "$OPEN_PR_LIMIT")"
+  if [ -n "$PR_TRUNC_WARN" ]; then
+    log "WARNING: $PR_TRUNC_WARN"
+  fi
 else
   log "gh not found — open-PR in-flight subtraction will be EMPTY (unpushed worktrees still used)."
   PR_BLOB=""

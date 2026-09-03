@@ -488,11 +488,35 @@ def crate_names():
         return ()
 
 
-def live_area_labels():
+# [OPUS-5] #5426 — the LABEL enumeration ceiling (follow-up audit to the #4985 sweep).
+# `gh label list --limit N` truncates SILENTLY like its issue/PR siblings. This set is read
+# for a decision: `main()` refuses the WHOLE RUN (exit 2, "rule table produced labels that do
+# not exist") if the plan names any label outside it. So a truncated read does not mislabel —
+# it stops the tick labelling ANYTHING, under a diagnosis that blames the rule table for a
+# label that in fact exists. Since this cron is the `needs:area` park's only exit (#3816),
+# that tick's whole backlog stays parked. The value of the ceiling here is therefore an
+# ACCURATE error rather than a new failure: it distinguishes "the label really is missing"
+# from "the label list was cut off". 2000 is a fail-closed backstop over a label set an order
+# of magnitude smaller, not a working cap.
+LABEL_FETCH_CEILING = 2000
+
+
+def live_area_labels(ceiling=LABEL_FETCH_CEILING):
     """The area labels that ALREADY EXIST. Never `gh label create` — an invented
     partition is invisible to every consumer (ready-issues.py, push-frontier.sh)
     and silently mis-partitions the frontier."""
-    data = json.loads(_gh(["label", "list", "--repo", REPO, "--limit", "500", "--json", "name"]))
+    data = json.loads(_gh(["label", "list", "--repo", REPO, "--limit", str(ceiling),
+                           "--json", "name"]))
+    # `>=`, not `>`: a truncated fetch returns EXACTLY the cap, so at the boundary a complete
+    # label set and a cut one are indistinguishable from the response alone. Same fail-closed
+    # posture as `open_issues` below — half a whitelist is worse than none.
+    if len(data) >= ceiling:
+        raise SystemExit(
+            f"triage-area: `gh label list` returned {len(data)} labels, sitting on its ceiling "
+            f"of {ceiling}. `--limit` truncates SILENTLY, so a real `area:` label may be absent "
+            "from this whitelist and main() would blame the rule table for it. Raise "
+            "LABEL_FETCH_CEILING deliberately (#5426)."
+        )
     return {d["name"] for d in data if d["name"].startswith("area:")}
 
 
@@ -696,6 +720,29 @@ def self_test():
     rows = plan([{"number": 1, "title": "DL L4: whatever", "body": "",
                   "labels": [{"name": "area:sparq-core"}, {"name": PARK_LABEL}]}], crates)
     f += _chk("already-area is a no-op", rows[0][1], [])
+
+    # #5426: the label-whitelist enumeration ceiling. `gh label list --limit N` truncates
+    # SILENTLY, and this whitelist gates every label write, so a short read stops labelling
+    # rather than mislabelling. Hermetic: `_gh` is swapped for a stub returning a synthetic
+    # page — no gh binary, network or token.
+    original_gh = _gh
+    try:
+        globals()["_gh"] = lambda _argv: json.dumps(
+            [{"name": f"area:crate-{n}"} for n in range(3)])
+        try:
+            live_area_labels(ceiling=3)
+        except SystemExit as exit_error:
+            f += _chk("label read sitting on its ceiling fails CLOSED",
+                      "LABEL_FETCH_CEILING" in str(exit_error), True)
+        else:
+            f += _chk("label read sitting on its ceiling fails CLOSED", "returned labels", True)
+        # One row BELOW the ceiling is a COMPLETE read and yields the whole whitelist —
+        # without this half the assertion above would also pass on a function that always
+        # raises.
+        f += _chk("label read below the ceiling returns the whole whitelist",
+                  len(live_area_labels(ceiling=4)), 3)
+    finally:
+        globals()["_gh"] = original_gh
 
     print("SELF-TEST", "FAILED" if f else "PASSED")
     return 1 if f else 0

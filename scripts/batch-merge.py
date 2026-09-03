@@ -600,6 +600,14 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
         except subprocess.CalledProcessError:
             p["files"] = []  # crate column degrades to label/em-dash — non-fatal
 
+    # [OPUS-5] #5426 audit of the `--limit` class. This one is a RECENCY WINDOW, deliberately
+    # — `--search head:sparq-omnibus/` narrows it to the newest 50 merged OMNIBUS PRs, not
+    # the newest 50 merged PRs of any kind. It exists to close the constituents of an omnibus
+    # that has just merged, which happens on the very next tick, and the closure is idempotent
+    # (step 5 of plan() skips a constituent that is no longer open). It is therefore NOT an
+    # enumerate-for-a-decision read over an unbounded population, and takes no fail-closed
+    # ceiling. The residual, stated rather than left implicit: a constituent still open after
+    # 50 FURTHER omnibus merges falls out of the window and is never closed by this path.
     merged = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "merged",
                                 "--limit", "50", "--search", "head:sparq-omnibus/",
                                 "--json", "number,headRefName,body"]))

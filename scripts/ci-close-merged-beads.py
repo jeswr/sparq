@@ -248,18 +248,45 @@ def map_beads_to_open_issues(bead_ids, issues):
     return closable, guarded, unmapped, ambiguous
 
 
-def gh_list_open_issues(repo):
+# [OPUS-5] #5426 — the OPEN-issue ENUMERATION CEILING (follow-up audit to the #4985 sweep).
+# `gh issue list --limit N` TRUNCATES SILENTLY: past N the CLI returns the newest N rows,
+# prints no warning and exits 0. This snapshot is the SOLE bead-id -> issue mapping input, so
+# a truncated read does not close a bead late — the bead simply maps to nothing, lands in
+# `unmapped`, and is never closed on any tick while the run reports success.
+#
+# 10000 is kept — the same number ready-issues.py, retriage.py, triage-area.py and
+# bd-to-issues.py use — so every issue enumeration in the repo fails closed at one number.
+ISSUE_FETCH_CEILING = 10000
+
+
+def gh_list_open_issues(repo, ceiling=ISSUE_FETCH_CEILING, runner=None):
     """OPEN-issue snapshot (number/body/labels) — the same shape bd-to-issues.fetch_bd_map
-    lists, restricted to open (a closed mapped issue is already the desired end state)."""
-    cmd = ["gh", "issue", "list", "--state", "open", "--limit", "10000",
+    lists, restricted to open (a closed mapped issue is already the desired end state).
+
+    `runner` is the read seam the hermetic self-test substitutes; it defaults to the live
+    `subprocess.check_output` so no caller has to know about it. Raises SystemExit if the read
+    comes back sitting on `ceiling` — see ISSUE_FETCH_CEILING."""
+    cmd = ["gh", "issue", "list", "--state", "open", "--limit", str(ceiling),
            "--json", "number,body,labels"]
     if repo:
         cmd += ["-R", repo]
     try:
-        raw = subprocess.check_output(cmd, text=True)
+        raw = (runner or subprocess.check_output)(cmd, text=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise SystemExit(f"[{PROG}] ERROR: `gh issue list` failed: {e}")
-    return json.loads(raw or "[]")
+    rows = json.loads(raw or "[]")
+    # `>=`, not `>`: a truncated fetch returns EXACTLY the cap, so at the boundary a complete
+    # population and a cut one are indistinguishable from the response alone. Raising on the
+    # equal case is a deliberate false positive; the remedy is to raise ISSUE_FETCH_CEILING,
+    # never to widen this comparison.
+    if len(rows) >= ceiling:
+        raise SystemExit(
+            f"[{PROG}] ERROR: `gh issue list --state open` returned {len(rows)} issues, "
+            f"sitting on its ceiling of {ceiling}. `--limit` truncates SILENTLY, so the "
+            "OLDEST open issues are missing; their beads would report as unmapped and never "
+            "be closed. Raise ISSUE_FETCH_CEILING deliberately (#5426)."
+        )
+    return rows
 
 
 def gh_close_issue(number, comment, repo):
@@ -405,6 +432,27 @@ def self_test() -> int:
         check("idempotent re-run sets changed=False", changed2, False)
     finally:
         os.unlink(tmp)
+
+    # ---- #5426: the open-issue enumeration ceiling ------------------------------------
+    # `gh issue list --limit N` truncates SILENTLY at N, and this snapshot is the sole
+    # bead-id -> issue mapping input, so a short read silently stops closing the beads whose
+    # issues fell off the tail. Hermetic: the `runner` seam returns a synthetic page, so no
+    # gh binary, network or token is involved.
+    def _page(count):
+        return lambda _cmd, text=True: json.dumps(
+            [{"number": n, "body": "", "labels": []} for n in range(count)])
+
+    try:
+        gh_list_open_issues("", ceiling=3, runner=_page(3))
+    except SystemExit as exit_error:
+        check("an open-issue read sitting on its ceiling fails CLOSED",
+              "ceiling" in str(exit_error) and "ISSUE_FETCH_CEILING" in str(exit_error), True)
+    else:
+        check("an open-issue read sitting on its ceiling fails CLOSED", "returned rows", True)
+    # One row BELOW the ceiling is a COMPLETE read and is returned unchanged — without this
+    # half the assertion above would also pass on a fetch that always raises.
+    check("a read below the ceiling is returned in full",
+          len(gh_list_open_issues("", ceiling=4, runner=_page(3))), 3)
 
     print()
     if fails == 0:

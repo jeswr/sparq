@@ -1101,6 +1101,23 @@ class TestLiveQueries(MainHarness):
         self.assertEqual(got.held_prs, 1)
         self.assertEqual(got.held_prs_conflicting, 1)
 
+    def test_a_count_sitting_on_its_limit_aborts_instead_of_publishing(self):
+        """#5426. `gh ... list --limit N` truncates SILENTLY, and `live_counts` publishes
+        `len(rows)` as a POPULATION — so a capped read renders a wrong number that is
+        indistinguishable from a right one. It must abort (publishing nothing) instead."""
+        fake = FakeGh(body="stale", counts=3)
+        original = rsh._gh
+        rsh._gh = fake
+        try:
+            with self.assertRaises(rsh.RenderAborted) as caught:
+                rsh.live_counts("sparq-org/sparq", ceiling=3)
+            self.assertIn("COUNT_CEILING", str(caught.exception))
+            # One row BELOW the ceiling is a COMPLETE read and still counts normally, so the
+            # assertion above is discriminating rather than "live_counts always aborts".
+            self.assertEqual(rsh.live_counts("sparq-org/sparq", ceiling=4).needs_area, 3)
+        finally:
+            rsh._gh = original
+
 
 class TestSeedFidelity(unittest.TestCase):
     """The migration from the hand-written body must not have silently lost an ask."""

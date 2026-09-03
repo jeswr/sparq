@@ -194,7 +194,15 @@ fi
 # (sq-8rpq part 3). The unpushed test mirrors scripts/worktree-gc.sh.
 CONTENTION_BRANCHES=""
 if command -v gh >/dev/null 2>&1; then
-  CONTENTION_BRANCHES="$(gh pr list --state open --limit 200 --json headRefName \
+  # [OPUS-5] #5426 audit of the `--limit` class. `gh pr list --limit N` truncates SILENTLY,
+  # and this enumeration IS read for a decision — but not for THIS script's decision: this
+  # script is advisory substrate (AGENTS.md Phase F) that only GROUPS and FLAGS, and
+  # scripts/push-frontier.sh is the layer that actually withholds a bead from the frontier.
+  # The fail-loud ceiling therefore lives THERE (`OPEN_PR_LIMIT` / `pr_enumeration_warning`),
+  # on the read whose truncation can cause a double dispatch, rather than being duplicated
+  # onto an advisory listing a human reads. Raised from 200 to match that ceiling so the two
+  # views of "the open PRs" cannot disagree by construction.
+  CONTENTION_BRANCHES="$(gh pr list --state open --limit 2000 --json headRefName \
     -q '.[].headRefName' 2>/dev/null || true)"
 else
   log "gh not found — open-PR contention flags will be omitted (unpushed worktrees still used)."

@@ -244,8 +244,37 @@ def live_ref_state(ref: str) -> RefState:
     return out
 
 
-def live_counts(repo: str) -> Counts:
-    """Label populations + the held-PR list, from the LIST API (never the lagging search index)."""
+# [OPUS-5] #5426 — the COUNT enumeration ceiling (follow-up audit to the #4985 sweep).
+# `gh issue list` / `gh pr list --limit N` TRUNCATE SILENTLY: past N they return the newest N
+# rows, print no warning and exit 0. `live_counts` publishes `len(rows)` as a POPULATION on
+# the maintainer front door, so a truncated read renders a wrong number that looks exactly
+# like a right one — the reader has no way to tell a real 1000 from a capped 1400. The
+# previous caps (1000 for the label counts, 300 for the held-PR list) had no such check.
+# 2000 is a fail-closed backstop, not a working cap; it replaces both.
+COUNT_CEILING = 2000
+
+
+def live_counts(repo: str, ceiling: int = COUNT_CEILING) -> Counts:
+    """Label populations + the held-PR list, from the LIST API (never the lagging search index).
+
+    Raises RenderAborted if either enumeration comes back sitting on `ceiling` — see
+    COUNT_CEILING. Nothing is written when it does, which is the whole point: a front door
+    that says `needs:area: 1000` when the real number is 1400 is worse than one that did not
+    refresh, because the wrong number is indistinguishable from a right one."""
+
+    def counted(rows: list, what: str) -> int:
+        # `>=`, not `>`: a truncated fetch returns EXACTLY the cap, so at the boundary a
+        # complete population and a cut one are indistinguishable from the response alone.
+        # Raising on the equal case is a deliberate false positive; the remedy is to raise
+        # COUNT_CEILING, never to widen this comparison.
+        if len(rows) >= ceiling:
+            raise RenderAborted(
+                f"the {what} enumeration returned {len(rows)} rows, sitting on its ceiling of "
+                f"{ceiling}. `gh ... list --limit` truncates SILENTLY, so this count would be "
+                "published as fact while being a floor. Raise COUNT_CEILING deliberately "
+                "(#5426)."
+            )
+        return len(rows)
 
     def label_count(label: str) -> int:
         raw = _gh(
@@ -259,12 +288,12 @@ def live_counts(repo: str) -> Counts:
                 "--state",
                 "open",
                 "--limit",
-                "1000",
+                str(ceiling),
                 "--json",
                 "number",
             ]
         )
-        return len(json.loads(raw))
+        return counted(json.loads(raw), f"open {label} issue")
 
     held = json.loads(
         _gh(
@@ -278,7 +307,7 @@ def live_counts(repo: str) -> Counts:
                 "--label",
                 "review:needs-user",
                 "--limit",
-                "300",
+                str(ceiling),
                 "--json",
                 "number,mergeable",
             ]
@@ -288,7 +317,7 @@ def live_counts(repo: str) -> Counts:
         needs_user=label_count("needs:user"),
         needs_area=label_count("needs:area"),
         needs_ec2=label_count("needs:ec2"),
-        held_prs=len(held),
+        held_prs=counted(held, "held review:needs-user PR"),
         held_prs_conflicting=sum(1 for p in held if p.get("mergeable") == "CONFLICTING"),
     )
 

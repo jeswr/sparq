@@ -278,6 +278,31 @@ DEFAULT_MAX_REARMS = 10
 # one makes parse_* yield None for it and arm_block_reason fail CLOSED — the guard can
 # degrade to refusing, never to admitting.
 PR_LIST_FIELDS = "number,state,isDraft,baseRefName,headRefName,labels,author,title"
+# [OPUS-5] #5426 — the CANDIDATE ENUMERATION CEILING (follow-up audit to the #4985 sweep).
+# `gh pr list --limit N` TRUNCATES SILENTLY: once the population exceeds N the CLI returns
+# the newest N rows, prints no warning and exits 0. `list_candidates` ENUMERATES the
+# `review:pass` open-PR set in order to decide what to re-arm, so a truncated read does not
+# re-arm late — it never re-arms the truncated tail on ANY tick, and the run's own
+# `found N open PR(s)` line reports the short number as if it were the population.
+#
+# The sibling `StuckArmSweeper.list_armed` already cross-checks its enumeration against the
+# repository's `pullRequests.totalCount`; this leg had no such check at all. A totalCount
+# probe is not available here (the candidate set is label-FILTERED, and the GraphQL
+# `totalCount` this repo queries is over all open PRs), so the ceiling assertion is the
+# equivalent guard: the count cannot be verified, but sitting on the cap can be refused.
+#
+# 2000 is a fail-closed BACKSTOP, not a working cap (#4985 measured 93 open PRs on
+# 2026-09-01, of which the `review:pass` subset is smaller still). Per #4985, `gh` pages the
+# underlying connection and stops at the last page rather than at `--limit`, so the number
+# only decides how a runaway snapshot fails; that paging claim was NOT re-measured here
+# (this change was developed without `gh` or network access).
+#
+# Deliberately INLINE rather than an import of a shared helper: #3776 — this script is
+# fetched from the DEFAULT BRANCH while a stale PR ref may still supply a file-by-file
+# `sparse-checkout` manifest, so a new sibling import can ModuleNotFoundError it. The
+# sibling arm script (scripts/auto-arm.py) carries the same copy for the same reason,
+# exactly as the `_DegradedGhRetry` block above is deliberately duplicated between them.
+CANDIDATE_PR_CEILING = 2000
 LIVE_QUERY = """query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
@@ -622,7 +647,7 @@ class RearmSweeper:
                     "--label",
                     REVIEW_ATTESTATION,
                     "--limit",
-                    "1000",
+                    str(CANDIDATE_PR_CEILING),
                     "--json",
                     PR_LIST_FIELDS,
                 ]
@@ -630,6 +655,20 @@ class RearmSweeper:
         )
         if not isinstance(raw, list):
             raise GhError("gh pr list returned a non-list response")
+        # `>=`, not `>`: a truncated fetch returns EXACTLY the cap, so at the boundary
+        # "the population is 2000" and "the population is larger and was cut to 2000" are
+        # indistinguishable from the response alone. Raising on the equal case is a
+        # deliberate false positive; the remedy is to raise CANDIDATE_PR_CEILING, never to
+        # widen this comparison. GhError is NOT GhTransientExhausted, so run() does not
+        # convert it into a lenient missed cycle — it escapes as a loud red.
+        if len(raw) >= CANDIDATE_PR_CEILING:
+            raise GhError(
+                f"gh pr list returned {len(raw)} {REVIEW_ATTESTATION} PRs, sitting on its "
+                f"ceiling of {CANDIDATE_PR_CEILING}: `--limit` truncates SILENTLY, so the "
+                "tail of the candidate set may be missing and this sweep would report a "
+                "short candidate count as the whole population. Raise "
+                "CANDIDATE_PR_CEILING deliberately (#5426)."
+            )
         return [parse_list_pr(item) for item in raw]
 
     def live_state(self, number: int) -> PullRequest:
@@ -3433,6 +3472,36 @@ def self_test() -> None:
     assert sticky_code == 1, (sticky_code, out.getvalue(), err.getvalue())
     assert "arm-failure summary: PR #3011" in out.getvalue(), out.getvalue()
     assert "::warning" not in out.getvalue(), out.getvalue()
+
+    # -------------------------------------------------- #5426 ENUMERATION CEILING
+    # `gh pr list --limit N` truncates SILENTLY at N, so a sweep that enumerates the
+    # `review:pass` set to decide what to re-arm must REFUSE a read that comes back
+    # sitting on its cap rather than re-arm a partial view and log the short count as
+    # the population.
+    #
+    # Exercised end-to-end through `run()` -> `list_candidates()` with the module ceiling
+    # temporarily lowered, not against a hand-called predicate: a guard the listing path
+    # never consults would pass a pure-function test while still arming from a truncated
+    # snapshot. Deleting the `len(raw) >= CANDIDATE_PR_CEILING` block reds the first half;
+    # the second half is what stops it being "this fixture always raises" — the same two
+    # PRs under a ceiling of 3 are a COMPLETE read and re-arm.
+    ceiling_saved = CANDIDATE_PR_CEILING
+    try:
+        globals()["CANDIDATE_PR_CEILING"] = 2
+        try:
+            exercise(fixture(3801), fixture(3802))
+        except GhError as error:
+            assert "ceiling" in str(error), error
+            assert "CANDIDATE_PR_CEILING" in str(error), error
+        else:
+            raise AssertionError(
+                "a candidate listing sitting on its --limit must fail loud, never re-arm"
+            )
+        globals()["CANDIDATE_PR_CEILING"] = 3
+        fake, _messages, _outcome = exercise(fixture(3801), fixture(3802))
+        assert len(arm_calls(fake)) == 2, arm_calls(fake)
+    finally:
+        globals()["CANDIDATE_PR_CEILING"] = ceiling_saved
 
     stuck_self_test()
 

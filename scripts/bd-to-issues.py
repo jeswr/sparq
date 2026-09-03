@@ -325,15 +325,44 @@ def _run(args, check=True):
 MARKER_RE = re.compile(r"<!--\s*bd-id:(sq-[0-9a-z]+(?:\.\d+)*)\s*-->")
 
 
-def fetch_issues(repo):
+# [OPUS-5] #5426 — the ALL-STATE ENUMERATION CEILING (follow-up audit to the #4985 sweep).
+# `gh issue list --limit N` TRUNCATES SILENTLY: past N the CLI returns the newest N rows,
+# prints no warning and exits 0. This fetch is `--state all`, so unlike every other issue
+# enumeration in the repo its population only ever GROWS — closed issues are never reclaimed
+# — which makes it the call site in this class most certain to reach its cap eventually.
+#
+# It is enumerated for a DECISION, and a creating one. `fetch_bd_map` derives the resume map
+# from these bodies, so an invisible tail reads as "this bead has no issue yet" and
+# `apply_migration` upserts a SECOND issue for a bead already migrated. 10000 is kept — the
+# same number ready-issues.py, retriage.py and triage-area.py already use — so every issue
+# enumeration in the repo fails closed at one number rather than four.
+ISSUE_FETCH_CEILING = 10000
+
+
+def fetch_issues(repo, ceiling=ISSUE_FETCH_CEILING):
     """Every issue (any state) with the fields the resume + reconcile passes need. ONE LIST call —
     the search index lags badly on this repo, so current state must come from the list API.
 
     `state` is carried for `--verify` only: a dependency edge whose endpoint issue is already
-    CLOSED cannot hold anything, so the reconcile must not report it as a live gap."""
-    out = _run(["gh", "issue", "list", "-R", repo, "--state", "all", "--limit", "10000",
+    CLOSED cannot hold anything, so the reconcile must not report it as a live gap.
+
+    Raises SystemExit if the read comes back sitting on `ceiling` — see ISSUE_FETCH_CEILING.
+    Failing CLOSED (no resume map) is strictly safer here than half a resume map."""
+    out = _run(["gh", "issue", "list", "-R", repo, "--state", "all", "--limit", str(ceiling),
                 "--json", "number,id,body,labels,author,title,state"]).stdout
-    return json.loads(out or "[]")
+    rows = json.loads(out or "[]")
+    # `>=`, not `>`: a truncated fetch returns EXACTLY the cap, so at the boundary a complete
+    # population and a cut one are indistinguishable from the response alone. Raising on the
+    # equal case is a deliberate false positive; the remedy is to raise ISSUE_FETCH_CEILING,
+    # never to widen this comparison.
+    if len(rows) >= ceiling:
+        raise SystemExit(
+            f"bd-to-issues: `gh issue list --state all` returned {len(rows)} issues, sitting "
+            f"on its ceiling of {ceiling}. `--limit` truncates SILENTLY, so the OLDEST issues "
+            "are missing and the resume map would read already-migrated beads as unmigrated, "
+            "creating duplicates on --apply. Raise ISSUE_FETCH_CEILING deliberately (#5426)."
+        )
+    return rows
 
 
 def _writer_logins(repo, logins, cache=None):
@@ -1459,6 +1488,33 @@ def _self_test():
         re.search(r'_MARKER_BLOCKED_BY = re\.compile\(r"(.+?)"\)',
                   open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "ready-issues.py"), encoding="utf-8").read()).group(1))
+
+    # ---- #5426: the --state all enumeration ceiling -------------------------------------
+    # `gh issue list --limit N` truncates SILENTLY at N, and this fetch feeds the RESUME map,
+    # so a short read makes --apply re-create already-migrated beads. Hermetic: `_run` is
+    # swapped for a stub that returns a synthetic page, no gh and no network.
+    class _StubbedRun:
+        def __init__(self, rows):
+            self.stdout = json.dumps(rows)
+
+    original_run = _run
+    try:
+        globals()["_run"] = lambda argv, check=True: _StubbedRun(
+            [{"number": n, "id": f"I_{n}", "body": "", "labels": [],
+              "author": None, "title": "t", "state": "OPEN"} for n in range(3)])
+        try:
+            fetch_issues("sparq-org/sparq", ceiling=3)
+        except SystemExit as exit_error:
+            chk("a --state all read sitting on its ceiling fails CLOSED",
+                "ceiling" in str(exit_error) and "ISSUE_FETCH_CEILING" in str(exit_error), True)
+        else:
+            chk("a --state all read sitting on its ceiling fails CLOSED", "returned rows", True)
+        # One row BELOW the ceiling is a COMPLETE read and is returned unchanged — without
+        # this half the assertion above would also pass on a fetch_issues that always raises.
+        chk("a read below the ceiling is returned in full",
+            len(fetch_issues("sparq-org/sparq", ceiling=4)), 3)
+    finally:
+        globals()["_run"] = original_run
 
     print("bd-to-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
