@@ -248,8 +248,8 @@ What is **not** risked: no committed floor is ever silently lowered (the monoton
 never left the queue, and a deliberate lowering stays a governed, loud re-baseline), and
 the nightly full-coverage tier (`coverage-nightly`) is untouched.
 
-**The cone shadow corpus is closed — an explicit decision, not a side effect** (issue
-#5148, 2026-08-31). The changed-cone selector (`scripts/cone_coverage.py`, sq-6vshe.8)
+**The cone shadow corpus is closed — an explicit decision, not a side effect**
+(issue #5148, 2026-08-31). The changed-cone selector (`scripts/cone_coverage.py`, sq-6vshe.8)
 landed in a SHADOW mode that measured everything and logged every case where an
 outside-cone crate came in below its floor — the corpus that existed so the cone could be
 validated against a real full measurement before being trusted to narrow one. **The
