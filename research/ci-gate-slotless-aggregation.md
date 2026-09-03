@@ -74,6 +74,39 @@ Why this shape and not the alternatives:
    partial early set. The evaluator equivalent: never publish a success while any
    *expected* workflow for the trigger set has not yet registered — reuse the
    path-filter outputs or require a minimum sibling count seen before a green status.
+7. **The `workflow_run` trigger MUST name its sibling workflows — RESOLVED (#5654).**
+   A draft evaluator omitted `workflows:` so it would never hard-code a sibling list,
+   recording that as an open uncertainty to confirm after merge. Resolved against the
+   sources (2026-09-03) as: **do not rely on the omission.** The three sources do not
+   agree, and the one that decides runtime behaviour is silent —
+   - `actionlint` **rejects** it. Hard-coded, not heuristic: `rule_events.go` errors
+     with `no workflow is configured for "workflow_run" event` when the list is empty.
+   - The SchemaStore `github-workflow.json` schema (what VS Code and most YAML-schema
+     linters validate against) **permits** it — `workflows` is an optional property
+     whose `minItems: 1` binds only when the key is present.
+   - **GitHub's own documentation never defines the omission.** The workflow-syntax
+     reference gives `on.workflow_run.<branches|branches-ignore>` its own entry but
+     gives `workflows` none stating whether it is required, and every example on both
+     the syntax and events pages passes `workflows:`.
+
+   So "omitting it subscribes to all workflows" is *unspecified*, not documented. The
+   failure mode is silent and lands in the worst place: if the trigger matches nothing
+   the evaluator never fires, no status is published, and a **required** context that
+   is never published reads as "expected but missing" — blocking every merge with no
+   failing run to point at. Stage 2 (adding `ci-summary/status` to the required
+   contexts) must not depend on unspecified behaviour, so the evaluator declares
+   `workflows:` explicitly and accepts the maintenance burden.
+
+   That burden is real and must be mitigated, not ignored: a hard-coded list silently
+   under-aggregates any workflow added after it was written, which is the brittleness
+   `ci-summary.yml` exists to avoid. Note the two concerns are **separable** — the
+   evaluator re-fetches *all* check-runs on the head SHA at every firing, so the
+   trigger list only controls *when* it wakes up, never *what* it aggregates. A stale
+   list therefore costs a late evaluation, not a wrong verdict; pairing an explicit
+   list with a completeness check (risk 6) keeps the verdict sound. `check_run` is not
+   an escape hatch: GitHub does not deliver it for check suites created by Actions.
+   Enforced mechanically by `scripts/check-workflow-run-filter.py` (gating in
+   `docs-quality / quick-gates`), because prose is what the first draft overlooked.
 
 ## 4. Verdict-function reuse
 

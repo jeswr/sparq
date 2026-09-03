@@ -1193,6 +1193,20 @@ jobs:
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
         run: python3 scripts/check-fast-fix-ring-guard.py
+      # [OPUS-5] #5654: every `workflow_run:` trigger must name its sibling workflow(s).
+      # Omitting `workflows:` is UNSPECIFIED behaviour, not a documented "subscribe to
+      # all": actionlint rejects it outright (hard-coded in its rule_events.go), the
+      # SchemaStore schema permits it, and GitHub's own docs never define it — every
+      # documented example passes `workflows:`. The failure mode is silent (the trigger
+      # may match nothing, so the workflow never fires), which is unacceptable for the
+      # planned `ci-summary/status` required context: a never-published required status
+      # reads as "expected but missing" and blocks every merge with no failing run to
+      # point at. All six existing triggers already comply, so this reds only a NEW
+      # omission. Pure stdlib — no PyYAML. See research/ci-gate-slotless-aggregation.md §3.7.
+      - name: Self-test the workflow_run `workflows:` filter guard (#5654 fixtures)
+        run: python3 scripts/check-workflow-run-filter.py --self-test
+      - name: "Enforce a non-empty `workflows:` on every workflow_run trigger (#5654) — GATING"
+        run: python3 scripts/check-workflow-run-filter.py
       # [OPUS-5] #4966: the SAME two doorbells, from the opposite direction — a MISSING
       # REGISTRY_RING_TOKEN must fail LOUD instead of suppressing ~130 rings into green
       # runs. Extracts each ring job's real `run:` script from the live YAML and
