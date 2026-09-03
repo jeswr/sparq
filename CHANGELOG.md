@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns `Promise<ResultStream<Bindings>>` instead of `Bindings[]`; await it and consume
   `data` / `end` / `error` events (or use `query()` for synchronous materialisation). Unsupported
   `context.sources` overrides, including an empty array, now reject instead of being ignored.
+- `sparq-vectors` can open canonical little-endian `.spqv` stores on big-endian hosts by
+  validating the file and byte-swapping its dense f32 region into aligned owned storage; `.spqv`
+  writers and the `.spqg` reader/writer remain little-endian-host only.
 
 ## [0.1.0] - 2026-06-13
 
