@@ -172,6 +172,12 @@ authority) is a different problem (blind writes into masked regions, delete-visi
 interactions) and is explicitly deferred (§7, follow-up bead). A scoped dataset is a
 read-only replica; writes to the underlying store invalidate it (§6).
 
+That deferred problem now has its own design record:
+[`solid-pattern-scoped-update-2026-09.md`](solid-pattern-scoped-update-2026-09.md)
+(spike `sq-fznmq`) — the write-path leakage bar, the non-interference law it needs
+instead of oracle equivalence, and the shadow-apply-on-the-masked-replica design.
+Design only; nothing there is implemented.
+
 ## 3. Prototype (merged with this record, feature `pattern-scope`, OFF by default)
 
 `crates/sparq-solid/src/pattern_scope.rs`, `#[cfg(feature = "pattern-scope")]`:
