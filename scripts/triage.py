@@ -27,20 +27,21 @@ ROLE_BY_KIND = {"docs": "docs", "design": "research", "research": "research", "p
 ROLE_BY_TYPE = {"feature": "impl", "bug": "impl", "task": "impl", "chore": "ci",
                 "spike": "research", "epic": "impl"}
 SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
-# [FABLE-5] UI/front-end surfaces route role:site (maintainer decision 2026-07-17: GPT-5.6 codex,
-# the original registry-dashboard builder — agent-account-registry e4098b9 — owns ALL UI work; the
-# role:site chain in orchestration/routing.toml leads with terra/codex). EXACT labels, not
-# substrings: a substring set would false-match (e.g. "gui" in "guide") and UI keywords must NOT
-# enter routing match_labels, which the arm-side security classifier unions into its keyword set.
+# [FABLE-5] UI/front-end surfaces route role:site (maintainer decision 2026-07-17: the original
+# registry-dashboard builder — agent-account-registry e4098b9 — owns ALL UI work). [SPARQ agent]
+# The current protocol makes role:site Sol-first. EXACT labels, not substrings: a substring set
+# would false-match (e.g. "gui" in "guide") and UI keywords must NOT enter routing match_labels,
+# which the arm-side security classifier unions into its keyword set.
 UI_SURFACE_LABELS = ("area:site", "surface:frontend", "dashboard")
 # [OPUS-5] `area:gui` gets its OWN role (maintainer directive 2026-07-26). The routing default
-# flipped to opus5-first over sol, "except for GUI work where sol should remain prioritised", and
+# previously flipped to opus5-first over sol, "except for GUI work where sol should remain
+# prioritised", and
 # the maintainer settled the boundary as "just go with area:gui work". area:gui used to sit in
 # UI_SURFACE_LABELS above and therefore derived role:site — which made the carve-out inexpressible,
 # because role:site also covers area:site / surface:frontend / dashboard, and those are NOT in the
-# carve-out. Splitting the label out is what lets orchestration/routing.toml give role:gui a
-# [SPARQ agent] The current protocol makes both role:gui and role:site Sol-first; role:site
-# historically took the Opus-first default.
+# carve-out. Splitting the label out makes role:gui independently routable. [SPARQ agent] The
+# current protocol makes both role:gui and role:site Sol-first; retaining the distinct role keeps
+# that explicit policy boundary available without conflating all site work with area:gui.
 # EXACT label, never a substring: a substring test would match "guide"/"guidance".
 #
 # THIS IS NOT WHERE THE CARVE-OUT BINDS. This rule fires only for an issue with NO explicit role —
