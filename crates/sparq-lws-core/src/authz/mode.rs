@@ -53,6 +53,18 @@ impl AccessMode {
 /// The `.acl` auxiliary-resource suffix (`<resource>.acl`, `<container>/.acl`).
 pub const ACL_SUFFIX: &str = ".acl";
 
+/// The ACP `.acr` access-control-resource suffix — the ACP spelling of the same auxiliary.
+///
+/// It is NOT part of [`is_acl_resource`]: this server's own WAC resolver derives a lowercase
+/// `<resource>.acl` and never consults an `.acr`. It IS part of the mint-side
+/// [`is_acl_auxiliary_suffix`], because the decision engine whose refusal that guard mirrors —
+/// `sparq_solid`, reachable from this crate through the `trust-graph` seam — resolves BOTH
+/// suffixes, so an `.acr` minted here is load-bearing there.
+///
+/// Deliberately crate-private (unlike the older [`ACL_SUFFIX`]): the mint guard is the only thing
+/// that should ask this question, and it is exposed as the predicate, not as a string to re-match.
+const ACR_SUFFIX: &str = ".acr";
+
 /// Whether an IRI names an ACL auxiliary resource (ends in `.acl`).
 ///
 /// This is the predicate the WAC resolver and the handler use to gate ACL access at Control; it
@@ -64,23 +76,40 @@ pub fn is_acl_resource(iri: &str) -> bool {
     iri.ends_with(ACL_SUFFIX)
 }
 
-/// Whether an IRI's FINAL path segment ends in the load-bearing `.acl` auxiliary suffix, matched
-/// CASE-INSENSITIVELY.
+/// Whether an IRI's FINAL path segment ends in a load-bearing access-control suffix — `.acl` or
+/// the ACP `.acr` — matched CASE-INSENSITIVELY.
 ///
 /// This is the create/mint-side guard, NOT the access-side predicate. It mirrors [`is_acl_resource`]
 /// (the access-side predicate the WAC resolver consults) but is broader in robustness: case-insensitive
-/// and applied to the final path segment, so an Append-only POST can NEVER mint a child that the WAC
+/// and applied to the final path segment, so an Append-only POST can NEVER mint a child that an ACL
 /// resolver will later consult as another resource's load-bearing ACL — even via a case variant
 /// (`secret.ACL`) or a container-child slug (`secret.acl/`). The check is applied to the final path
 /// segment (after the last `/`) so a `.acl` appearing only mid-path cannot false-positive, while both
 /// `…/secret.acl` (a resource) and `…/.acl` (a container's own ACL) are caught.
 ///
-/// SCOPE — `.acl` ONLY (deliberate). The ACL auxiliary is the only auxiliary this server treats as
-/// load-bearing: the WAC resolver consults `<resource>.acl`, and the PUT/PATCH create paths only
-/// special-case `.acl`. `.meta` description-resources are NOT implemented here (the resolver never
-/// reads a `.meta`), so a `secret.meta` minted via POST is just a normal resource name with no
-/// security effect — guarding it ONLY at POST (while PUT/PATCH would happily create it) was an
-/// inconsistency with no benefit, so it is intentionally not guarded.
+/// # Agreement with the decision engine (no-drift invariant)
+///
+/// `sparq_solid::is_control_document_name` asks the SAME question inside the decision engine
+/// (`PodStore::decide_create`), and two independent predicates guarding one privilege escalation is
+/// the drift shape that let this bug exist originally. This crate cannot simply CALL it: `sparq-solid`
+/// is an optional, default-OFF dependency (the `trust-graph` feature), and a CI lane asserts the
+/// `--no-default-features` build pulls in no `sparq-core`/`sparq-engine`/`spargebra` edge — which an
+/// unconditional dependency would break. So the two are pinned by a DIFFERENTIAL TEST instead:
+/// `ldp::handler`'s `mint_guard_agrees_with_sparq_solid` asserts that for every name the POST mint
+/// chokepoint can actually produce (a `sanitise_slug` output) the two predicates return the SAME
+/// verdict, and that the sanitiser never emits a spelling on which they could disagree. Widen one
+/// and that test goes red.
+///
+/// `sparq_solid`'s predicate additionally normalises percent-encoded spellings (`secret%2Eacl`,
+/// `secret.ac%6C`, a smuggled `%2F`). That normalisation is not repeated here because `sanitise_slug`
+/// DROPS `%` before this guard ever sees the name, so no percent-encoded spelling is reachable at the
+/// chokepoint — an invariant the same differential test pins.
+///
+/// SCOPE — the access-control auxiliaries ONLY (deliberate). `.acl` and `.acr` are the suffixes an
+/// ACL resolver actually consults. `.meta` description-resources are NOT implemented here (the
+/// resolver never reads a `.meta`), so a `secret.meta` minted via POST is just a normal resource name
+/// with no security effect — guarding it ONLY at POST (while PUT/PATCH would happily create it) was
+/// an inconsistency with no benefit, so it is intentionally not guarded.
 ///
 /// FORWARD-LOOKING INVARIANT: if/when `.meta` (or any other auxiliary) becomes load-bearing — i.e.
 /// the resolver or a metadata path starts consulting it — it MUST be guarded UNIFORMLY across the
@@ -92,7 +121,8 @@ pub fn is_acl_auxiliary_suffix(iri: &str) -> bool {
     // `Slug: foo.acl` requesting a CONTAINER child (`…/foo.acl/`) is still caught.
     let trimmed = iri.strip_suffix('/').unwrap_or(iri);
     let segment = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    segment.to_ascii_lowercase().ends_with(ACL_SUFFIX)
+    let lower = segment.to_ascii_lowercase();
+    lower.ends_with(ACL_SUFFIX) || lower.ends_with(ACR_SUFFIX)
 }
 
 /// Map an HTTP method + target to the single WAC [`AccessMode`] the operation requires.
@@ -161,6 +191,22 @@ mod tests {
         // A CONTAINER child minted with an `.acl` slug (trailing slash) is caught too.
         assert!(is_acl_auxiliary_suffix("https://pod.example/a/secret.acl/"));
         assert!(is_acl_auxiliary_suffix("https://pod.example/a/secret.ACL/"));
+    }
+
+    #[test]
+    fn is_acl_auxiliary_suffix_catches_the_acp_acr_spelling() {
+        // `.acr` is the ACP spelling of the same load-bearing auxiliary. The decision engine
+        // (`sparq_solid`) resolves it, so minting one through an Append-only POST is the same
+        // escalation as minting an `.acl` — the guard must refuse both, in any case variant, and
+        // for a container child.
+        assert!(is_acl_auxiliary_suffix("https://pod.example/a/policy.acr"));
+        assert!(is_acl_auxiliary_suffix("https://pod.example/a/.acr"));
+        assert!(is_acl_auxiliary_suffix("https://pod.example/a/policy.ACR"));
+        assert!(is_acl_auxiliary_suffix("https://pod.example/a/policy.AcR"));
+        assert!(is_acl_auxiliary_suffix("https://pod.example/a/policy.acr/"));
+        // Mid-path and merely-contains stay benign for `.acr` exactly as they do for `.acl`.
+        assert!(!is_acl_auxiliary_suffix("https://pod.example/x.acr/child"));
+        assert!(!is_acl_auxiliary_suffix("https://pod.example/a/acrobat"));
     }
 
     #[test]

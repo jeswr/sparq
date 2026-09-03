@@ -1327,7 +1327,8 @@ pub async fn post_handler<S: Store>(
     // is belt-and-braces against any future mint change that might preserve the suffix. A create of a
     // `.acl` is a Control operation; the Control-gated PUT/PATCH of an `.acl` is the only legitimate
     // path. The check is on the SANITISED STEM (the caller's intent, covering the case-variant
-    // `secret.ACL` via the case-insensitive `is_acl_auxiliary_suffix`).
+    // `secret.ACL` — and the ACP `.acr` spelling — via the case-insensitive
+    // `is_acl_auxiliary_suffix`).
     //
     // The denial uses the REQUESTER's denial shape — 401 + `WWW-Authenticate` for an anonymous caller,
     // 403 for an authenticated one — IDENTICAL to every other POST denial. (POST authorization already
@@ -1338,12 +1339,19 @@ pub async fn post_handler<S: Store>(
     // unauthorized POST. The guard is intent-based, not existence-based: `secret.acl` and `benign.acl`
     // are refused regardless of what exists, so it is never an existence oracle.)
     //
-    // SCOPE: `.acl` ONLY. `.meta` description-resources are NOT load-bearing in this server (the WAC
-    // resolver never consults a `.meta`, and the PUT/PATCH create paths only special-case `.acl`), so
-    // a `secret.meta` stem is just a normal resource name — guarding it ONLY at POST while PUT/PATCH
+    // SCOPE: the access-control auxiliaries ONLY — `.acl` and the ACP `.acr`. Those are the two an
+    // ACL resolver consults (this server's own resolver derives `.acl`; the `sparq_solid` decision
+    // engine, whose refusal this guard mirrors, resolves both), so minting either through an
+    // Append-only POST is the escalation. `.meta` description-resources are NOT load-bearing here (the resolver
+    // never consults a `.meta`, and the PUT/PATCH create paths only special-case `.acl`), so a
+    // `secret.meta` stem is just a normal resource name — guarding it ONLY at POST while PUT/PATCH
     // would create it freely is an inconsistency with no security benefit, so it is not guarded. If
     // `.meta` (or any other auxiliary) ever becomes load-bearing it MUST be guarded UNIFORMLY across
     // POST/PUT/PATCH/DELETE/read — not POST-only (see `is_acl_auxiliary_suffix`).
+    //
+    // NO-DRIFT: this guard and `sparq_solid::is_control_document_name` (the same refusal, inside
+    // `PodStore::decide_create`) are pinned to the same verdict on every name this chokepoint can
+    // produce by `mint_guard_agrees_with_sparq_solid` below.
     if let Some(s) = &stem {
         // Check the `.acl` suffix on the bare stem (a leaf segment with no scheme/slashes). A trailing
         // `/` is not part of a sanitised stem, so this catches `secret.acl`/`secret.ACL` directly.
@@ -3466,6 +3474,136 @@ mod tests {
                 .await
                 .unwrap(),
             "no case-variant auxiliary resource may have been written"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_slug_dot_acr_is_denied() {
+        // `.acr` is the ACP spelling of the same load-bearing auxiliary, and the `sparq_solid`
+        // decision engine's ACL discovery consults it alongside `.acl`. An Append-only POST that mints
+        // one is therefore the SAME privilege escalation as minting an `.acl`, and must be refused
+        // with the same denial shape.
+        let store = store_alice_container_bob_append_only().await;
+        let state = Arc::new(LdpState::new(store, "https://pod.example"));
+        let uri: axum::http::Uri = "/alice/c/".parse().unwrap();
+        let err = post_handler(
+            State(state.clone()),
+            Extension(bob_token()),
+            uri,
+            post_turtle_headers_with_slug("policy.acr"),
+            bob_self_control_acl_body(),
+        )
+        .await
+        .expect_err("an Append-only POST must not mint an .acr");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !state
+                .store
+                .exists("https://pod.example/alice/c/policy.acr")
+                .await
+                .unwrap(),
+            "no ACP access-control resource may have been written"
+        );
+    }
+
+    /// NO-DRIFT PIN (issue #4964) between the POST mint chokepoint's
+    /// [`crate::authz::is_acl_auxiliary_suffix`] and `sparq_solid::is_control_document_name` — the
+    /// same refusal, expressed inside the decision engine's `PodStore::decide_create`.
+    ///
+    /// Two independent predicates guarding one privilege escalation is exactly the drift shape that
+    /// let the original bug exist. The chokepoint cannot simply CALL the sparq-solid predicate:
+    /// `sparq-solid` is an optional, default-OFF dependency here (`trust-graph`), and the
+    /// feature-matrix lane asserts the `--no-default-features` build pulls in no
+    /// `sparq-core`/`sparq-engine`/`spargebra` edge — which an unconditional dependency would break.
+    /// So it is pinned by differential test instead, over the domain that actually matters: every
+    /// name this chokepoint can produce, i.e. every `sanitise_slug` output.
+    ///
+    /// The test also pins the invariant that makes the two implementations' one REMAINING difference
+    /// unreachable: `sparq_solid`'s predicate additionally percent-decodes (`secret%2Eacl`,
+    /// `secret.ac%6C`, a smuggled `%2F`), and `sanitise_slug` drops `%` outright, so no
+    /// percent-encoded spelling ever reaches the guard. Widen either predicate, or let the sanitiser
+    /// start emitting `%`, and this goes red.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mint_guard_agrees_with_sparq_solid() {
+        // Raw `Slug:` header values, spanning both crates' own test corpora: plain names, the
+        // access-control auxiliaries in both spellings and assorted cases, the non-load-bearing
+        // `.meta`, near-misses that merely contain "acl"/"acr", and the percent-encoded and
+        // double-encoded obfuscations sparq-solid normalises.
+        const RAW_SLUGS: &[&str] = &[
+            "secret.acl",
+            "secret.ACL",
+            "secret.Acl",
+            ".acl",
+            "policy.acr",
+            "policy.ACR",
+            "policy.AcR",
+            ".acr",
+            "secret.acl/",
+            "policy.acr/",
+            "note.ttl",
+            "photo.jpg",
+            "secret",
+            "secret.meta",
+            ".meta",
+            "aclremap",
+            "acrobat",
+            "acl",
+            "acr",
+            "myacl",
+            "note1",
+            "x.acl/child",
+            "secret%2Eacl",
+            "secret%2eacl",
+            "secret.ac%6C",
+            "secret%252Eacl",
+            "secret%2Facl%2Ex.acl",
+            "secret.acl%2F",
+            "policy%2Eacr",
+            "",
+            ".",
+            "..",
+            "../../etc/passwd",
+        ];
+
+        let mut refused = 0usize;
+        let mut allowed = 0usize;
+        for raw in RAW_SLUGS {
+            // The chokepoint guards the SANITISED stem, not the raw header, so that is the domain
+            // over which the two predicates have to agree. A slug the sanitiser rejects never
+            // reaches the guard at all.
+            let Some(stem) = sanitise_slug(raw) else {
+                continue;
+            };
+            // The invariant that keeps sparq-solid's extra percent-decoding unreachable here.
+            assert!(
+                !stem.contains('%'),
+                "sanitise_slug emitted a percent sign for {:?} ({:?}) — the mint guard would now \
+                 need sparq_solid's percent-decoding to stay in agreement",
+                raw,
+                stem
+            );
+            let ours = crate::authz::is_acl_auxiliary_suffix(&stem);
+            let theirs = sparq_solid::is_control_document_name(&stem);
+            assert_eq!(
+                ours, theirs,
+                "mint guard and sparq_solid::is_control_document_name disagree on {:?} \
+                 (sanitised from {:?}): ours={}, sparq-solid={}",
+                stem, raw, ours, theirs
+            );
+            if ours {
+                refused += 1;
+            } else {
+                allowed += 1;
+            }
+        }
+        // Non-vacuity: the corpus must actually exercise both verdicts, or an always-true /
+        // always-false predicate would pass the agreement assertion above.
+        assert!(
+            refused >= 8 && allowed >= 8,
+            "corpus must exercise both verdicts: refused={}, allowed={}",
+            refused,
+            allowed
         );
     }
 

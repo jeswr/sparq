@@ -345,6 +345,18 @@ h3-quinn = "0.0.10"
 # stack is native-only, and the wasm dev-graph must stay free of it.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 sparq-zk = { path = "../sparq-zk" }
+# [SONNET-4.6] issue #4964: the NO-DRIFT pin between this crate's POST mint guard
+# (`authz::is_acl_auxiliary_suffix`) and the decision engine's `sparq_solid::is_control_document_name`
+# — two independent predicates refusing one privilege escalation, which is the drift shape that let
+# the original bug exist. The guards cannot be unified by CALLING the sparq-solid one: `sparq-solid`
+# is optional + default-OFF here (`trust-graph`), and the feature-matrix lane asserts the
+# `--no-default-features` build carries no `sparq-core`/`sparq-engine`/`spargebra` edge, which an
+# unconditional dependency would break. A DEV-dep pins them instead: `ldp::handler`'s
+# `mint_guard_agrees_with_sparq_solid` runs in the ordinary `cargo test` lane, so drift in either
+# direction fails CI. Dev-only — `--edges normal` (what that lane greps) is unchanged and the default
+# `cargo build`, the published graph, and the runtime are all byte-identical. Non-wasm32 for the same
+# reason the runtime dep is: the wasm request core keeps this estate out of its graph.
+sparq-solid = { path = "../sparq-solid" }
 
 [features]
 # DEFAULT = the embedded in-process engine (sq-gg0qq.3): now that this crate lives IN the sparq
