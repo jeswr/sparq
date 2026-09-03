@@ -480,4 +480,4 @@ evidence-assembly companion to `compliance/cryptoreview/audit-readiness-dossier.
 `gap-register.md`, and an index into `research/zk-soundness-audit.md`,
 `research/zk-verifier-reaudit.md`, `research/mpc-cozk-reaudit.md`, and the forge suites.*
 
-[#1180]: https://github.com/jeswr/sparq/pull/1180
+[#1180]: https://github.com/sparq-org/sparq/pull/1180
