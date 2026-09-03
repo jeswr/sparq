@@ -1042,6 +1042,22 @@ jobs:
       # the same false header reds on arrival.
       - name: Self-test the alarm/detector lanes are DECLARED non-gating (sq-huwr8)
         run: python3 scripts/tests/test_alarm_lanes_non_gating.py
+      # [OPUS-5] #4820: the NIGHTLY MUTATION-LANE REPORT
+      # (scripts/mutants-nightly-report.py, ci.yml `mutants-nightly-report`). The mutation
+      # matrix is the repo's largest nightly CI consumer and its outcome was unreadable —
+      # advisory, 51 legs deep, and rolled into a run conclusion that reads `cancelled`
+      # whenever ONE sibling job anywhere in ci.yml is cancelled. The reporter carries that
+      # state in its own named check-run instead. Two silent ways that stops working, both
+      # pinned: the leg JOIN is by job name, so a rename of the matrix job would empty the
+      # report (and an empty report must RED, not read as a perfect night); and the
+      # reporter REDs by design, so it must be DECLARED non-gating — schedule-only is not
+      # enough, since ci-summary.yml also runs on push to main (the sq-huwr8 refutation).
+      # The behaviour half drives the real build_report() over the #4820 shapes, including
+      # a GREEN leg whose artifact is TRUNCATED — the case no leg conclusion can express.
+      - name: Self-test the nightly mutation-lane reporter (hermetic — #4820)
+        run: python3 scripts/mutants-nightly-report.py --self-test
+      - name: Self-test the mutation report's join, wiring + non-gating declaration (#4820)
+        run: python3 scripts/tests/test_mutants_nightly_report.py
       # [OPUS-5] sq-1lc4i: the CI EXECUTION-LATENCY alarm
       # (scripts/ci_execution_latency_alarm.py, .github/workflows/ci-latency-alarm.yml).
       # Hermetic (no gh, no network). Three halves: the classifiers for all three choke

@@ -86,6 +86,14 @@
    "registered": "2026-07-06",
    "gate_script_waiver": "scripts/mutants-gate.py is the mutation ratchet checker itself, run advisory while the per-crate baseline is seeding (sq-qcnn.11); exits non-fatally until sq-qcnn.27 promotes it to gating"
   },
+  "mutation ratchet report (cargo-mutants, advisory)": {
+   "workflow": "ci.yml",
+   "job_id": "mutants-nightly-report",
+   "owner_bead": "sparq-org/sparq#4820",
+   "promotion_criteria": "Promotes with the lane it reports on, never before it and never independently. This job REDs whenever a mutation leg fails to complete or uploads truncated/absent evidence, and while the sibling `mutation ratchet (cargo-mutants, advisory)` matrix is still seeding that is the NORMAL state — gating on it would block every merge on a nightly capacity condition that has nothing to do with the commit under test, which is the pressure that gets a reporter muted. It runs on schedule/workflow_dispatch only, but that alone does NOT make it non-gating: ci-summary.yml also runs on push to main, so a scheduled run's check-run lands on exactly the head SHA that gate polls (the sq-huwr8 refutation, measured on main head cb0c6739c). Delete this entry when sq-qcnn.27 promotes the mutation ratchet itself AND consecutive nightlies show zero non-completing legs.",
+   "registered": "2026-09-03",
+   "gate_script_waiver": "Runs `scripts/mutants-gate.py --check` over every downloaded artifact at once — the whole-run ratchet verdict, which is the only place a sub-sharded crate's shards are summed into a whole-crate figure (the per-leg --check in the sibling matrix job sees one `--shard k/n` slice and reports PARTIAL). Same script, same advisory posture and same waiver rationale as the `mutation ratchet (cargo-mutants, advisory)` entry above: it cannot stand in for a gate that would otherwise run, because the ratchet is not gating anywhere yet (sq-qcnn.27). It also runs `scripts/mutants-nightly-report.py`, which is a reporter, not a gate."
+  },
   "unsafe report (cargo-geiger, informational)": {
    "workflow": "ci.yml",
    "job_id": "geiger",

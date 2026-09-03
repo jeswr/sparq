@@ -4464,6 +4464,130 @@ jobs:
             target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/outcomes.json
             target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/mutants.json
 
+  mutants-nightly-report:
+    # [OPUS-5] sparq-org/sparq#4820: LEGIBILITY ROLL-UP for the matrix above.
+    #
+    # THE DEFECT. The mutation lane is, per #4820's measurement, the largest single
+    # consumer of nightly CI capacity in this repo, and its outcome has been unreadable.
+    # Three layers compose: it is ADVISORY, so nothing it finds is ever red on a PR
+    # (correct by design); its legs live inside a 51-entry matrix, so per-leg conclusions
+    # need the matrix expanded to see; and the run-level conclusion is a roll-up over
+    # every sibling job in this file, where cancelled siblings outrank failing ones — the
+    # measured case is a night of 62 successful and 10 FAILING jobs reporting `cancelled`,
+    # the same status as a run killed at startup. Each layer is individually defensible;
+    # composed, the lane's quality signal was dead for weeks with nothing red anywhere.
+    #
+    # AND A FOURTH LAYER, READABLE STRAIGHT OFF THIS FILE. The `Run cargo-mutants … +
+    # ratchet against the baseline` STEP carries `continue-on-error: true`, and so does
+    # the job; `scripts/mutants-gate.py --check` runs INSIDE that step. So a ratchet
+    # regression — the test-QUALITY finding this lane exists to produce — cannot change a
+    # leg's conclusion. A red leg NEVER means "mutants survived"; it means the leg did not
+    # reach the end. The two signals are not merely hard to see, they are not
+    # distinguishable from the job conclusions at all. That is what this job separates.
+    #
+    # WHAT IT REPORTS, in one named check-run whose conclusion means one specific thing:
+    #   * COMPLETION — per-leg conclusion, wall-clock, and per-leg EVIDENCE state read
+    #     from the artifact the leg uploaded. Evidence matters independently of the
+    #     conclusion: cargo-mutants writes outcomes.json incrementally, so a leg cut short
+    #     still uploads a well-formed artifact indistinguishable from a complete run of a
+    #     smaller crate (the reasoning + the check are scripts/mutants-gate.py's
+    #     completeness(), which the reporter calls rather than restating).
+    #   * COST — the summed leg wall-clock this run actually billed. Every shard-count and
+    #     timeout comment in the matrix above says to RE-TUNE from "the first run that
+    #     completes, using that run's own timings as the evidence of record"; this is
+    #     where that evidence lands, measured rather than asserted.
+    #   * THE RATCHET VERDICT — `mutants-gate.py --check` over EVERY downloaded artifact
+    #     at once. This is the only place a sub-sharded crate's shards are summed into a
+    #     whole-crate figure: the per-leg --check above sees a single `--shard k/n` slice,
+    #     which is a lower bound on the crate and is reported as PARTIAL, never a verdict.
+    #
+    # WHAT IT CANNOT DO — stated plainly so nobody reads more into a green square here.
+    # It cannot change the workflow run's conclusion; that roll-up is GitHub's and a
+    # cancelled sibling wins it. It does not fix the persistent non-completing legs, and
+    # it does not decide the cadence/shard-count question for sparq-engine — it produces
+    # the per-leg completion + cost evidence those two decisions have been missing.
+    #
+    # NON-GATING. Declared in .github/advisory-registry.json (#3773: the "advisory" token
+    # in a job NAME has not been what excludes a check-run since that PR — the declaration
+    # is). It is safe to RED, and it is BUILT to red while the lane is broken: a report
+    # that stayed green through ten timed-out legs would reproduce the exact defect it
+    # exists for. Its verdict is pinned by scripts/tests/test_mutants_nightly_report.py.
+    name: mutation ratchet report (cargo-mutants, advisory)
+    needs: [nightly-gate, mutants-nightly-advisory]
+    # always() is load-bearing: reporting on legs that FAILED or were CANCELLED is the
+    # entire job, so it must run when its `needs` did not all succeed. always() defeats
+    # only the implicit needs-success gate — the nightly freshness condition is repeated
+    # explicitly so an unchanged-HEAD nightly still skips this too.
+    if: always() && needs.nightly-gate.outputs.fresh == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # actions: read is the ONLY capability: list THIS run's jobs (per-leg conclusions +
+      # timestamps) and download the sibling legs' artifacts. No write scope of any kind —
+      # a reporter must never be able to acquire authority over what it reports on.
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Download this run's mutation outcomes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          # Same-run artifacts, so no run-id is needed. A pattern matching nothing is NOT
+          # an error (v4+): a run where every leg died before its upload yields an empty
+          # dir, which the reporter reports as "no evidence" rather than crashing on.
+          pattern: mutants-outcomes-nightly-*
+          path: mutants-artifacts
+      - name: List this run's mutation legs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # --paginate is required: a 51-leg matrix plus every sibling job in this file is
+          # well past one page, and a truncated first page would silently under-report the
+          # failing legs — the precise failure mode this job exists to end.
+          gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[]' > jobs.ndjson
+          echo "collected $(wc -l < jobs.ndjson) job record(s) for run $RUN_ID"
+      - name: Report legs + evidence, then the whole-run ratchet verdict
+        # Both halves must run even when the first REDs, or a failing leg-report would
+        # hide the ratchet verdict behind it — the same swallowing this job exists to
+        # undo. Hence `set +e` + an explicit rc accumulator instead of the default -e.
+        # The self-test runs FIRST (repo convention) so a regression in the reporter's own
+        # logic reds here rather than quietly producing an empty, green report.
+        run: |
+          set +e
+          set -uo pipefail
+          python3 scripts/mutants-nightly-report.py --self-test || exit 1
+          rc=0
+          # --summary (not `| tee`): the markdown goes to the step summary while the
+          # `::error::` annotations stay on the LOG, which is the only stream GitHub reads
+          # workflow commands from. Teeing one stream into both renders the annotations as
+          # literal text in the summary and emits none.
+          python3 scripts/mutants-nightly-report.py \
+            --jobs jobs.ndjson --artifacts mutants-artifacts \
+            --summary "$GITHUB_STEP_SUMMARY" || rc=1
+          mapfile -t OUTCOMES < <(find mutants-artifacts -name outcomes.json 2>/dev/null | sort)
+          {
+            echo ""
+            echo "### whole-run mutation ratchet (every shard of a crate summed)"
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${#OUTCOMES[@]}" -gt 0 ]; then
+            python3 scripts/mutants-gate.py --check "${OUTCOMES[@]}" \
+              | tee -a "$GITHUB_STEP_SUMMARY" || rc=1
+          else
+            echo "no outcomes artifacts in this run — no ratchet verdict is possible" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            rc=1
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
   unsafe-register:
     # [OPUS-4.8] sq-toze.6 / cert gap GX-5: GATING `unsafe`-count RATCHET. This is the
     # promotion the `geiger` job's own comment anticipated ("Promote to a gate later
