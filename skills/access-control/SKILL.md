@@ -146,7 +146,10 @@ Materialize the authorization view from the access-control documents, then enfor
   document per named graph named by the document IRI, no pod data in the default graph,
   `.acl`/`.acr` control documents recognized by NAME, containment from the graph name's IRI
   path, the reserved `urn:sparq:` space, trusted facts only via `AccessProvenance` /
-  `VerifiedCredentials`. The contract is documented on `PodStore`; its first four clauses are
+  `VerifiedCredentials`. `accessible` advertises authorized **resource** IRIs — document graphs
+  *plus* path-derived container anchors that need not be graphs at all — and `view_for` consumes
+  the set as a named-graph *visibility whitelist*, so an authorized name with no loaded graph
+  contributes no data. The contract is documented on `PodStore`; its first four clauses are
   pinned in `crates/sparq-solid/tests/embedding_contract.rs` (the last two already were, by
   `hardening.rs` / `acp.rs`). Listing the surface does NOT ratify the
   `sparq-server` → `sparq-solid` dependency direction — that edge exists only behind

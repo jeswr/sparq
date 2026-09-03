@@ -229,11 +229,18 @@ fn wrap_read(sparql: &str) -> Result<String, String> {
 /// here because a host has to satisfy them too.
 ///
 /// 1. **One document, one named graph, named by the document's absolute, fragment-less
-///    IRI.** Authorization granularity is the whole named graph: [`PodStore::accessible`]
-///    returns *document IRIs*, and [`PodStore::query_as`] evaluates over exactly those.
-///    Two documents sharing a graph therefore share a single verdict, and a document split
-///    across graphs is governed piecewise. A fragment-identified subject (`<doc#it>`) is
-///    governed by its document's graph — there is no per-fragment authorization.
+///    IRI.** Authorization granularity is the whole named graph. Precisely:
+///    [`PodStore::accessible`] returns the session's authorized **resource IRIs** — each a
+///    graph *name* under this contract, but not necessarily a graph that exists, since
+///    clause 4 synthesizes container anchors from the IRI path. [`PodStore::view_for`]
+///    consumes that set as a **named-graph visibility whitelist**, so an authorized name
+///    with no loaded graph matches nothing and contributes no data: [`PodStore::query_as`]
+///    evaluates over exactly the authorized names that *are* loaded graphs — no wider, no
+///    narrower. An embedding consumer that wants "the documents I may read" must therefore
+///    intersect the advertised set with the graphs it actually loaded (or scan for it).
+///    Two documents sharing a graph share a single verdict, and a document split across
+///    graphs is governed piecewise. A fragment-identified subject (`<doc#it>`) is governed
+///    by its document's graph — there is no per-fragment authorization.
 /// 2. **Pod data never lives in the default graph.** [`PodStore::view_for`] hands the
 ///    engine an empty default graph, so a triple loaded without a graph name is governed by
 ///    nothing and readable by no one — not even under the [`UNION_DEFAULT_GRAPH_IRI`]
@@ -248,7 +255,8 @@ fn wrap_read(sparql: &str) -> Result<String, String> {
 ///    containment triples: `https://h/a/b/doc` → `https://h/a/b/` → `https://h/a/` →
 ///    `https://h/`. Containers are inheritance anchors even with no graph of their own (so
 ///    `acl:default` reaches a document whose containers were never loaded) and do appear in
-///    [`PodStore::accessible`]. Name containers with a trailing `/`, matching the LDP path.
+///    [`PodStore::accessible`] — as authorized *names* per clause 1, which while unloaded
+///    scan to nothing. Name containers with a trailing `/`, matching the LDP path.
 /// 5. **The `urn:sparq:` IRI space is reserved.** Graphs named under it are dropped by
 ///    [`PodStore::new`] and are never reasoning input; agent / client / origin IRIs inside
 ///    it are rejected at materialization time. (Pinned by `tests/hardening.rs`.)
@@ -783,8 +791,12 @@ impl PodStore {
     /// (`∪ allow(principals) ∖ ∪ deny(principals)`, conditional grants applied) —
     /// cached per (agent, client, mode) until the next re-materialization.
     ///
-    /// **API tier-1 (proposed-stable)** — the *WAC-as-a-call* embedding surface; the graph
-    /// names it returns are document IRIs per the embedding contract on [`PodStore`].
+    /// **API tier-1 (proposed-stable)** — the *WAC-as-a-call* embedding surface. Per clause 1
+    /// of the embedding contract on [`PodStore`], the IRIs it returns are authorized
+    /// **resource** names: loaded document graphs *plus* the container anchors clause 4
+    /// synthesizes from the IRI path, which need not be graphs at all. It is a visibility
+    /// whitelist for [`PodStore::view_for`], not an enumeration of readable documents — an
+    /// authorized name with no loaded graph contributes no data.
     ///
     /// Fail-closed: empty before the first `materialize_*` call, empty for sessions
     /// with no matching grants, and empty for session values inside the reserved

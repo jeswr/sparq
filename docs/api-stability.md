@@ -120,7 +120,11 @@ allow is never wider than `query_as` would grant).
 
 - **Query as a session:** `PodStore::query_as`, `PodStore::query_json_as`, `PodStore::ask_as`.
 - **The authorized graph set / view:** `PodStore::accessible`, `PodStore::accessible_set`,
-  `PodStore::view_for`.
+  `PodStore::view_for`. What the set contains is part of the contract: authorized **resource
+  IRIs** — loaded document graphs plus the container anchors derived from the IRI path, which
+  need not be graphs at all. `view_for` consumes it as a named-graph *visibility whitelist*,
+  so an authorized name with no loaded graph contributes no data; it is not an enumeration of
+  readable documents.
 
 This surface is stable only relative to a **dataset shape**, so the shape is part of the
 contract: the *named-graph-per-document* embedding contract (one document per named graph,

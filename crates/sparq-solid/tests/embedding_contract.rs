@@ -6,8 +6,9 @@
 //! they are defined over is pinned too: a host (an LDP resource server embedding this crate)
 //! must know exactly how to lay its pod out before "which graphs may this session read?" has
 //! a stable answer. Clauses 1–4 of the contract documented on `PodStore` are pinned here,
-//! each exercising the REAL `PodStore::new` → `materialize_wac` → `accessible`/`query_as`
-//! path — no mock stands in for the verdict.
+//! each exercising the REAL `PodStore::new` → `materialize_wac` (and, for clause 3's `.acr`
+//! half, `materialize_acp`) → `accessible`/`query_as` path — no mock stands in for the
+//! verdict.
 //!
 //! The last two clauses were already pinned and are not duplicated: clause 5 (the reserved
 //! `urn:sparq:` space) by `hardening.rs` (`sentinel_graph_cannot_be_smuggled` /
@@ -17,6 +18,7 @@
 
 use oxrdf::Term;
 use sparq_core::Graph;
+use sparq_solid::conformance::AcrBuilder;
 use sparq_solid::wac_conformance::AclBuilder;
 use sparq_solid::{Mode, PodStore, Session};
 // Only the spec-conformant (default) read path exercises the union-default opt-in; the
@@ -39,6 +41,19 @@ fn materialized(nquads: &str) -> PodStore {
     let mut s = PodStore::new(g);
     s.materialize_wac().expect("materializes");
     s
+}
+
+/// As [`materialized`], but through the ACP materializer (clause 3's `.acr` half).
+fn materialized_acp(nquads: &str) -> PodStore {
+    let g = Graph::load_dataset(nquads, "nquads").expect("fixture loads");
+    let mut s = PodStore::new(g);
+    s.materialize_acp().expect("materializes");
+    s
+}
+
+/// [`readable`] over an ACP corpus.
+fn readable_acp(nquads: &str) -> BTreeSet<String> {
+    readable(&materialized_acp(nquads))
 }
 
 /// The session's readable graph names, as plain IRI strings.
@@ -84,9 +99,9 @@ fn scanned(store: &PodStore) -> BTreeSet<String> {
 
 // ─── Clause 1: one document = one named graph, named by the document IRI ──────────────
 
-/// A grant names a DOCUMENT, and the document IRI is verbatim the graph name — so the
-/// authorized set is a set of document IRIs, and an ungranted sibling document in the same
-/// container is absent from both `accessible` and `query_as`.
+/// A grant names a DOCUMENT, and the document IRI is verbatim the graph name — so a granted
+/// document appears in the authorized set under its own IRI, and an ungranted sibling
+/// document in the same container is absent from both `accessible` and `query_as`.
 #[test]
 fn graph_name_is_the_document_iri_and_the_unit_of_authorization() {
     let mut b = AclBuilder::new();
@@ -222,6 +237,30 @@ fn control_documents_are_gated_by_control_not_by_read() {
     assert!(acc.contains(&acl_of_n1), "Control reaches the governing ACL: {:?}", acc);
 }
 
+/// The ACP half of clause 3, on the REAL `PodStore::new` → `materialize_acp` → `accessible`
+/// path: `<R> + ".acr"` is the ACP control document of `<R>` by the same naming convention,
+/// and the identical ACR triples under any other graph name are inert pod content.
+#[test]
+fn acr_control_document_suffix_is_load_bearing() {
+    let mut acr = AcrBuilder::new();
+    acr.access_control(N1, |p| p.allow(Mode::Read).any_of_agent(ALICE));
+    acr.document(N1);
+    let granting = acr.into_nquads();
+    let acc = readable_acp(&granting);
+    assert!(acc.contains(N1), "the `.acr` graph governs N1: {:?}", acc);
+
+    // Byte-identical corpus with the ACR graph renamed `.acr-backup`: same policies, same
+    // matchers, no grant — as with `.acl`, the suffix is what makes a graph a control doc.
+    let renamed = granting.replace(&format!("{N1}.acr"), &format!("{N1}.acr-backup"));
+    assert_ne!(renamed, granting, "the rename actually rewrote the corpus");
+    let acc = readable_acp(&renamed);
+    assert!(
+        acc.is_empty(),
+        "ACP policies outside a `.acr` graph are inert pod content: {:?}",
+        acc
+    );
+}
+
 // ─── Clause 4: containment comes from the graph-name IRI path ─────────────────────────
 
 /// Container inheritance is derived from the SLASH STRUCTURE of the graph name, not from
@@ -251,4 +290,10 @@ fn containment_is_derived_from_the_graph_name_path() {
         "a document under another authority shares no ancestor container: {:?}",
         acc
     );
+
+    // The advertised set is authorized RESOURCE names, NOT loaded documents — the two
+    // container anchors above have no graph of their own. `view_for` consumes the set as a
+    // named-graph visibility whitelist, so an authorized name with no graph matches nothing
+    // and contributes no data: the scan sees the one document and neither anchor.
+    assert_eq!(scanned(&store), BTreeSet::from([deep.to_owned()]));
 }
