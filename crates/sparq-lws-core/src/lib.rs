@@ -50,9 +50,10 @@
 //! Solid Notifications (WebSocketChannel2023) are implemented as a net-new, isolated `notifications`
 //! module: an in-process subscription registry + AS2.0 notification builder, an axum WebSocket receive
 //! endpoint, a subscribe endpoint, and discovery (storage description + `Link` rels). The LDP write
-//! path makes a single emit call after a successful mutation. Everything else network-facing (the live
-//! SPARQ HTTP client, live JWKS) and the parts of the Solid surface that need designs not yet written
-//! (per-resource authorization of a subscription, the reconciler, multipart Range, `acl:agentGroup`
+//! path makes a single emit call after a successful mutation. Subscribe AND the token-gated WS
+//! receive upgrade are per-resource WAC-authorized by the same [`authz`] engine as the LDP routes.
+//! Everything else network-facing (the live SPARQ HTTP client, live JWKS) and the parts of the Solid
+//! surface that need designs not yet written (the reconciler, multipart Range, `acl:agentGroup`
 //! resolution) are clearly marked `M2-next:` seams. PATCH supports both the Solid N3 Patch and the
 //! `application/sparql-update` INSERT/DELETE-DATA subset. The Solid conformance suite passes **41/41**
 //! (Protocol 25/25 + WAC 16/16) — see `conformance/SCORE.md`. The default impls used here are
