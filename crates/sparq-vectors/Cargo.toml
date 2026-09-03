@@ -232,7 +232,6 @@ sparq-sim = { path = "../sparq-sim" }
 # feature, so we enable it for the test build ONLY. This does NOT change the published default build:
 # a dev-dependency feature is local to this crate's test/example/bench targets and never propagates
 # to downstream consumers of `sparq-vectors`.
-sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
 # [OPUS-4.8] sq-xhiv: DEV-only. The fingerprint thread-count-stability regression tests drive the
 # SAME parallel sharded dict merge the loader uses at two explicit thread counts via a scoped rayon
 # pool (`RAYON_NUM_THREADS` is read once per process, so it cannot be varied mid-test). rayon is NOT
@@ -246,6 +245,14 @@ rayon = { workspace = true }
 # OPTIONAL runtime dep (the `provider`/`embeddings` features) — listing it here makes it
 # available to the test targets in BOTH feature states, independent of those features.
 serde_json = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
+
+# [GPT-5.2-CODEX] sq-139hh: execute the owned-bytes store and DiskANN readers in a genuine wasm
+# runtime. Dev-only; it never enters sparq-vectors' published dependency graph.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 # [GPT-5.6] sq-lyf31: the codebook algebra property test exercises the opt-in
 # structure surface, so Cargo must skip that integration target in lean builds.
