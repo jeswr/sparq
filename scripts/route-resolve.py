@@ -275,7 +275,9 @@ def _self_test():
     chk("role:impl has an explicit total-exhaustion exit", esc, True)
     # [OPUS-5] docs -> SOL-led (maintainer 2026-07-26: docs writing off haiku/sonnet onto gpt-5.6
     # sol). terra is sol's same-provider fallback; opus5 the cross-provider tail.
-    chk("docs -> sol-led", resolve(["role:docs", "area:x"], doc)[0], ["sol", "terra", "opus5"])
+    chk("docs -> sol-led with bounded exhaustion",
+        resolve(["role:docs", "area:x"], doc),
+        (["sol", "terra", "opus5"], "sparq-docs", True))
     chk("docs chain has no cheap anthropic tier",
         sorted(set(resolve(["role:docs", "area:x"], doc)[0]) & NOT_A_ROUTING_TARGET), [])
     chk("site -> Sol-first implementation",

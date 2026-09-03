@@ -120,6 +120,8 @@ class TestRoutingTable(unittest.TestCase):
         self.assertEqual(len(docs), 1, "exactly one role=docs route expected")
         chain = docs[0]["model_chain"]
         self.assertEqual(chain[0], "sol", "docs writing must lead with sol (gpt-5.6)")
+        self.assertTrue(docs[0].get("escalate"),
+                        "docs writing needs a bounded exit when every provider is unavailable")
         self.assertEqual(sorted(set(chain) & {"haiku", "sonnet"}), [],
                          "docs writing was moved off the cheap anthropic tiers on 2026-07-26")
 

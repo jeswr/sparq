@@ -113,8 +113,8 @@ escalate = true                        # consumed by dispatch: on chain-exhausti
 # Sol is the primary implementation tier, while Opus 5 remains the review/soundness tier and
 # reviews new Sol-authored PRs through the existing cross-provider inversion. Opus stays behind Sol as a
 # continuity fallback for current Anthropic-authored repairs and total Sol unavailability. Each
-# implementation route declares `escalate = true` so total exhaustion has the existing bounded,
-# machine-owned exit.
+# implementation route declares `escalate = true` so capacity exhaustion takes the registry's
+# bounded retry path and then its visible, machine-owned `status:parked` soft hold.
 
 # HISTORICAL CONTEXT (superseded by the 2026-09-02 protocol above): `role:impl` was Opus5-only
 # beginning 2026-07-26. The measurements below explain that prior state; they are not current policy.
@@ -207,6 +207,8 @@ escalate = true
 # reviews the resulting OpenAI-authored PR through the registry-owned review chain.
 # The chain is deliberately frontier-only rather than floor-pinned. `escalate = true` uses the
 # registry's bounded capacity-starvation path: retry first, then a visible machine-owned park.
+# This is intentional for CI: exhaustion of both providers must not become an unbounded silent
+# defer loop; `status:parked` remains machine-recoverable when capacity returns.
 # scripts/triage.py derives role:ci for infra-surface labels (area:ci/area:ci-fragments/
 # area:orchestration/area:workflows/area:release) so surface-labelled infra work lands here.
 # Security overlap: the match_labels overrides above still WIN over this route (Opus + human
@@ -248,6 +250,7 @@ escalate = true
 role = "docs"
 model_chain = ["sol", "terra", "opus5"]
 agent = "sparq-docs"
+escalate = true
 
 # Review / soundness: Opus 5 alone (the opus-4.8 tail fallback was deprecated 2026-07-26);
 # escalate to human on chain-exhaustion (do NOT fall to a weaker model).

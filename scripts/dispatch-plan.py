@@ -303,6 +303,7 @@ def _self_test():
     chk("docs row has no cheap anthropic tier",
         sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
     chk("docs -> sparq-docs", row["agent"], "sparq-docs")
+    chk("docs -> bounded exhaustion", row["escalate"], True)
 
     # --- Fixture: a ci/infra issue → frontier-only chain (standing rule 2026-07-17) --------------
     # CI is implementation, so the plan row must be Sol-first with the continuity fallback.
