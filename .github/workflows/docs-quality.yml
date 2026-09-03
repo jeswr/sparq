@@ -1178,6 +1178,39 @@ jobs:
         run: python3 scripts/check-advisory-registry.py --self-test
       - name: "Enforce advisory-job registry + gate-intent placement (C2/C3/C4) — GATING"
         run: python3 scripts/check-advisory-registry.py
+      # [OPUS-5] sparq-org/sparq#6096: the STEP-level seam, one level below the
+      # advisory registry above. That registry governs whether a JOB gates; this
+      # governs whether the individual gate STEPS inside it can still fail. The
+      # measurement in #6096 found mutation coverage stops at the Python/shell
+      # boundary — 18/18 Python mutants died while every survivor lived in a
+      # workflow step, an `if:`, or a call site. Three edits turn a red gate green
+      # with nothing going red anywhere: deleting a gate step, adding
+      # `continue-on-error: true` to one, or narrowing its `if:` (the quietest —
+      # `ci-summary` treats `skipped` as non-failing BY DESIGN).
+      # The guard derives its population from the live tree by pattern (any `run:`
+      # step invoking scripts/check-*.{py,sh}, scripts/tests/test_*.{py,sh}, or
+      # `<script> --self-test`), so a gate step written tomorrow is protected the
+      # moment it exists with nothing to register; .github/gate-step-registry.json
+      # holds only the exceptions, and rule S4 fails on a stale one so it cannot
+      # rot. Deliberately NOT covered: job-level `if:` — see the script header.
+      # Needs PyYAML, installed once in the shared setup above.
+      - name: Self-test the gate-step seam guard (S0–S4 mutation table — #6096)
+        run: python3 scripts/check-workflow-gate-steps.py --self-test
+      - name: "Enforce the workflow gate-step seam (S0–S4) — GATING"
+        run: python3 scripts/check-workflow-gate-steps.py
+      - name: Gate-step seam suite (live-tree invariants + registry hygiene — #6096)
+        run: python3 scripts/tests/test_workflow_gate_steps.py
+      # [OPUS-5] #6096, found by the S3 rule on its first run over the live tree:
+      # both suites below existed, passed when run by hand, and were executed by
+      # NOTHING — exactly the dead-assertions class the rule exists to detect. Both
+      # are hermetic and sub-second: the first is stdlib unittest over synthetic
+      # crate trees, the second builds a scratch corpus and PATH-shadows `cargo`
+      # and the reasoner with stubs, so neither needs the network, a built binary,
+      # or a JVM. Wiring them here is the fix; declaring them exempt would not be.
+      - name: Self-test check-feature-test-execution.py (C1 detector — was unwired)
+        run: python3 scripts/tests/test_check_feature_test_execution.py
+      - name: Self-test reason-dl same-box per-input keying (was unwired)
+        run: bash scripts/tests/test_reason_dl_same_box_keys.sh
       # [OPUS-4.8] sparq-org/sparq#3475: the fast-fix ring's ONLY privileged
       # capability is the cross-repo REGISTRY_RING_TOKEN doorbell. Because a
       # `workflow_run` workflow is ALSO delivered for fork / cross-repo triggering

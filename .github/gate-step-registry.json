@@ -1,0 +1,76 @@
+{
+  "_doc": "Gate-step seam registry. [OPUS-5] sparq-org/sparq#6096. Maintained by scripts/check-workflow-gate-steps.py — read that file's header for the rules and for what they do NOT cover. This file holds ONLY the exceptions: a gate step (any workflow `run:` step invoking scripts/check-*.{py,sh}, scripts/tests/test_*.{py,sh}, or `<script> --self-test`) is by default required to be named, unconditional, free of continue-on-error, and — for the checker it runs — invoked at least once by a non-advisory job of a pull_request/merge_group workflow. Nothing needs registering to be protected; a declaration is how you take something OUT of the default, which is the direction that belongs in a diff. `conditions` declares a step-level `if:` BYTE-EXACT, so narrowing a declared `X` to `X && false` still fails. `unwired` declares a checker no gating step runs. Stale declarations in either section are a hard failure (rule S4), so this file cannot rot into a list of things that used to be true. There is deliberately no waiver for continue-on-error: to make a check non-blocking, declare its JOB in .github/advisory-registry.json, which carries an owner_bead and promotion_criteria and is what ci-summary actually honours.",
+
+  "conditions": {
+    "bench.yml::bench::Hard zone — median-of-history regression gate (main pushes only)": {
+      "if": "github.event_name != 'schedule' && github.ref == 'refs/heads/main'",
+      "reason": "The step consumes `prev-data.js` — the recorded trend history — so it is only meaningful on a main push, which is what its own name declares. On a PR head there is no comparable lineage to take a median over. Narrowing this further would silence the median-of-history regression detector without reddening anything."
+    },
+    "ci.yml::heavy-recall-demoted-filer::File the demoted-lane P1 bead + issue": {
+      "if": "steps.detect.outputs.file == 'true'",
+      "reason": "A reactive filer, not a gate: the preceding `detect` step decides whether the demoted heavy-recall lane actually failed, and this step only mints the P1 bead + issue when it did. Unconditional it would file a duplicate on every green run."
+    },
+    "ci.yml::coverage-demoted-filer::File the demoted-lane P1 bead + issue": {
+      "if": "steps.detect.outputs.file == 'true'",
+      "reason": "Same shape as heavy-recall-demoted-filer above — the `detect` step is the decision, this step is the write."
+    },
+    "differential.yml::differential::Auto-file the finding (GitHub issue + P1 bug bead, deduped)": {
+      "if": "failure()",
+      "reason": "`failure()` is the step's whole purpose: it files the finding when the differential lane has already gone red. It cannot be unconditional, and it can never mask a failure — the job is red before this step is reached."
+    },
+    "differential-update.yml::differential-update::Auto-file the finding (GitHub issue + P1 bug bead, deduped)": {
+      "if": "failure()",
+      "reason": "Same `failure()` auto-filer shape as differential.yml."
+    },
+    "metamorph.yml::metamorph::Auto-file the finding (GitHub issue + P1 bug bead, deduped)": {
+      "if": "failure()",
+      "reason": "Same `failure()` auto-filer shape as differential.yml."
+    },
+    "feature-matrix.yml::setup::Loud failure attribution — the opt-in matrix was NOT generated": {
+      "if": "failure()",
+      "reason": "Attribution, not enforcement: it explains an already-red setup job. The gate it explains is the matrix generation step above it, which is unconditional."
+    },
+    "vectorized-feature-off.yml::quick-gates::Leg 1 — vectorized absent from resolved default features": {
+      "if": "steps.changes.outputs.rust_changed == 'true'",
+      "reason": "The repo's live path filter (dorny/paths-filter feeding the `changes` step), which keeps a doc/CI-only PR from re-running the full Rust matrix. It is safe-by-default: the `changes` step forces rust_changed=true off the PR path, so the gate runs in full on merge_group and push."
+    },
+    "vectorized-feature-off.yml::quick-gates::Tripwire self-test (leg 1 guard can fail)": {
+      "if": "steps.changes.outputs.rust_changed == 'true'",
+      "reason": "Same path filter as the leg it is the tripwire for — the tripwire must run exactly when leg 1 runs, or it would assert about a leg that did not execute."
+    },
+    "vectorized-feature-off.yml::quick-gates::Leg 3 — cfg-audit of vectorized registrations and call sites": {
+      "if": "steps.changes.outputs.rust_changed == 'true'",
+      "reason": "Same safe-by-default path filter as leg 1."
+    },
+    "vectorized-feature-off.yml::artifact-exact-equality::Leg 2 — dynamic byte-identity (base tree vs head tree)": {
+      "if": "steps.changes.outputs.rust_changed == 'true'",
+      "reason": "Same safe-by-default path filter, resolved independently in this job's own `changes` step; leg 2 builds two trees and is the expensive leg the filter exists for."
+    },
+    "vectorized-feature-off.yml::artifact-exact-equality::Tripwire self-test (leg 2 comparator can fail)": {
+      "if": "steps.changes.outputs.rust_changed == 'true'",
+      "reason": "Same path filter as the leg it is the tripwire for."
+    },
+    "vectorized-feature-off.yml::artifact-exact-equality::Tripwire self-test (the declaration derivation can refuse)": {
+      "if": "always() && steps.changes.outputs.rust_changed == 'true'",
+      "reason": "The `always()` is preserved from this step's former standalone job so the tripwire still reports when an earlier step in the job failed; the rust_changed conjunct is the same safe-by-default path filter as the rest of the job."
+    }
+  },
+
+  "unwired": {
+    "scripts/check-new-bench-registered.py": {
+      "reason": "G3 is a DELIBERATE advisory soft-launch: it runs in flow-on-gates.yml's `new-bench-registry-dashboard (G3, advisory)` job with `--advisory`, and that job is declared in .github/advisory-registry.json. The heuristic is a nag, not a block, until tuned — see AGENTS.md's Enforced-by table and flow-on-gates.yml's GATING vs ADVISORY header. Promoting it means dropping the (advisory) token, the --advisory flag, the registry entry, and this declaration together."
+    },
+    "scripts/check-release-aliases.sh": {
+      "reason": "A RELEASE-time gate, not a PR-time one: release.yml runs it against the real published asset list to enforce the version-stable alias contract. There is no asset list on a PR head, so it cannot run in a pull_request job."
+    },
+    "scripts/check-site-links.sh": {
+      "reason": "A DEPLOY-time gate: pages.yml runs it against the built `site/out` tree. The PR-time half of its contract is already gating — docs-quality.yml shellchecks it and runs scripts/tests/test_check_site_links.sh (basePath remap + broken-link teeth) on every PR."
+    },
+    "scripts/check-wasm-features.py": {
+      "reason": "Invoked INDIRECTLY, from scripts/ci-bench.sh (`--require simd128` on the wasm probe), which the S3 scan cannot see through. The invocation is guarded by a `[ -f ... ]` existence test there, which is itself a soft spot — tracked as a follow-up."
+    },
+    "scripts/check-spec-normative-status.py": {
+      "reason": "GENUINELY DEAD — not an exemption on the merits. Nothing in .github/workflows invokes it, so the deferred-normative-core tracking-bead rule it implements (sq-nj0ts) has never been enforced on a PR. Discovered by this checker's first run and left declared rather than silently wired, because choosing the Typst spec surface it should scan is a maintainer decision, not a CI one. Tracked as a follow-up; deleting this entry is the fix."
+    }
+  }
+}
