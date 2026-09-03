@@ -23,18 +23,35 @@
 #      wasm-pack on PATH to compile the wasm engine.
 #
 # SCOPE — properties 1–4 are deliberately js.yml ONLY. gui.yml / site-e2e-hero.yml /
-# site-visual.yml still `cargo install` wasm-pack; converting them is separate work and
-# is NOT asserted here, so this file's silence about them is not a claim that they are
-# hardened.
+# site-visual.yml / nightly-full-sweep.yml / pages.yml / publish.yml still `cargo install`
+# wasm-pack; converting them is separate work and is NOT asserted here, so this file's
+# silence about them is not a claim that they are hardened.
+#
+# release.yml is the ONE other lane asserted, by ReleaseGuiBundleWasmPackInstall below:
+#
+#   6. THE RELEASE GUI BUNDLE USES AN ARCH-AWARE INSTALLER. #5772: release.yml's
+#      `gui-bundle` matrix has arm64 rows (`ubuntu-24.04-arm`, BLOCKING; `macos-14`), and
+#      jetli/wasm-pack-action cannot serve them — its dist/index.js switches on
+#      `process.platform` alone and always requests the `x86_64-*` asset, so on arm64
+#      Linux it installs a binary the runner cannot execute. That lane therefore installs
+#      wasm-pack through taiki-e/install-action, whose wasm-pack manifest carries
+#      `aarch64_linux_musl`/`aarch64_macos` entries. Reverting it to `cargo install
+#      wasm-pack --locked` (its previous state) would work on every row and stay green on
+#      a good day — it just puts the crates.io source-compile flake surface back on a
+#      BLOCKING row of a release build — and swapping in jetli would break the arm64 rows
+#      outright. Neither goes red on its own, hence this assertion.
 #
 # One CROSS-WORKFLOW property is asserted, by WasmPackVersionUnified below:
 #
-#   5. ONE VERSION REPO-WIDE. Every workflow that installs wasm-pack through
-#      jetli/wasm-pack-action must pass the action exactly one `with: version:` input
-#      (read indentation-aware, so a `version:` under a sibling mapping does not count
-#      as a pin), and they must all request the SAME one (a step with none takes the
-#      action's default, i.e. it is an unpinned lane, which is the same regression in
-#      a different shape). #5771: ci.yml's `wasm`
+#   5. ONE VERSION REPO-WIDE. Every workflow that installs wasm-pack through a PINNED
+#      installer — jetli/wasm-pack-action (`with: version: vX.Y.Z`) or
+#      taiki-e/install-action (`with: tool: wasm-pack@X.Y.Z`) — must name exactly one
+#      exact version (read indentation-aware, so a `version:`/`tool:` under a sibling
+#      mapping does not count as a pin), and they must all request the SAME one (a step
+#      with none takes the installer's default — the latest release — i.e. it is an
+#      unpinned lane, which is the same regression in a different shape). Both shapes are
+#      normalised to `vX.Y.Z` before comparison, so the two installers cannot skew past
+#      each other. #5771: ci.yml's `wasm`
 #      job — the lane that RUNS the headless `wasm-pack test --node` suites — pinned
 #      v0.13.1 while js.yml — the lane that BUILDS the published artifact — pinned
 #      v0.15.0, so a wasm-pack/wasm-bindgen behaviour change between those releases was
@@ -57,8 +74,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 JS_YML = WORKFLOWS / "js.yml"
+RELEASE_YML = WORKFLOWS / "release.yml"
 
 WASM_PACK_ACTION = "jetli/wasm-pack-action"
+# The arch-aware alternative (#5772): selects the download target from arch AND
+# platform, and names the tool via `with: tool: <name>[@<version>]`.
+INSTALL_ACTION = "taiki-e/install-action"
 # The repo's action-pin policy: a 40-char lowercase hex commit SHA, never a tag.
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # An exact release pin, e.g. `v0.15.0`. `latest` (and any floating ref) must fail.
@@ -92,18 +113,18 @@ def _code_lines(text: str) -> list[str]:
     return out
 
 
-def _with_versions(block: list[str]) -> list[str]:
-    """Every value of a `version:` key that is a DIRECT child of the step's `with:`
+def _with_values(block: list[str], want: str) -> list[str]:
+    """Every value of a `<want>:` key that is a DIRECT child of the step's `with:`
     mapping, in order (so duplicates are visible to the caller).
 
-    Scoping matters: `with.version` is the ONLY key that reaches the action as an
-    input. A bare "any stripped line starting `version:`" scan would also read a
-    `version:` living under some sibling mapping (`env:`, a matrix entry, a nested
-    input object), so a step that dropped its `with.version` — and therefore silently
-    takes the action's default, the #5771 regression — could still look pinned. The
+    Scoping matters: only a direct child of `with:` reaches the action as an input. A
+    bare "any stripped line starting `version:`" scan would also read a `version:`
+    living under some sibling mapping (`env:`, a matrix entry, a nested input object),
+    so a step that dropped its `with.version` — and therefore silently takes the
+    action's default, the #5771 regression — could still look pinned. The
     indentation-aware walk mirrors `check-install-action-tool.py`'s `_has_with_tool`.
     """
-    versions: list[str] = []
+    values: list[str] = []
     with_indent: int | None = None
     child_indent: int | None = None
     for raw in block:
@@ -130,9 +151,45 @@ def _with_versions(block: list[str]) -> list[str]:
         if ind != child_indent:
             # Nested deeper than the mapping's own keys — not a `with:` input.
             continue
-        if key.startswith("version:"):
-            versions.append(key.split(":", 1)[1].strip())
-    return versions
+        if key.startswith(f"{want}:"):
+            values.append(key.split(":", 1)[1].strip())
+    return values
+
+
+def _with_versions(block: list[str]) -> list[str]:
+    """`with: version:` — jetli/wasm-pack-action's version input."""
+    return _with_values(block, "version")
+
+
+def _install_action_wasm_pack_pin(block: list[str]) -> str | None:
+    """The wasm-pack version a taiki-e/install-action step pins, normalised to the
+    `vX.Y.Z` form jetli uses — or None when the step does not install wasm-pack at all,
+    or a DESCRIPTIVE SENTINEL when it installs wasm-pack without naming one exact
+    version.
+
+    install-action takes a CSV `with: tool:` list whose entries are `<name>[@<version>]`
+    (`tool: cargo-llvm-cov,nextest`, `tool: mdbook@0.4.40`). A bare `tool: wasm-pack`
+    installs the LATEST release — the unpinned lane #5771 is about, in this installer's
+    shape — so it returns a sentinel rather than None: None would drop the lane out of
+    the repo-wide comparison entirely and let the remaining lanes agree vacuously.
+
+    A step with no parseable `tool:` at all returns None: it is not identifiable as a
+    wasm-pack installer here, and `scripts/check-install-action-tool.py` already reds a
+    SHA-pinned install-action step that omits `tool:`.
+    """
+    values = _with_values(block, "tool")
+    entries = [e.strip() for v in values for e in v.split(",") if e.strip()]
+    matches = [e for e in entries if e.split("@", 1)[0] == "wasm-pack"]
+    if not matches:
+        return None
+    if len(values) != 1 or len(matches) != 1:
+        # Duplicate `with: tool:` keys (YAML last-key-wins) or wasm-pack named twice:
+        # which release the lane installs is not what a reader sees.
+        return f"<not exactly one wasm-pack `with: tool:` entry: {values!r}>"
+    _, _, version = matches[0].partition("@")
+    if not version:
+        return "<`tool: wasm-pack` with no @version: installs the latest release>"
+    return version if version.startswith("v") else f"v{version}"
 
 
 class JsLaneWasmPackInstall(unittest.TestCase):
@@ -223,6 +280,111 @@ class JsLaneWasmPackInstall(unittest.TestCase):
         )
 
 
+class ReleaseGuiBundleWasmPackInstall(unittest.TestCase):
+    """(6) release.yml's `gui-bundle` job installs wasm-pack with an ARCH-AWARE,
+    prebuilt-binary installer — #5772.
+
+    The job's matrix spans x86_64 and arm64 rows, and the arm64 Linux row is BLOCKING
+    (`soft: false`). Two regressions are pinned here because neither reds on its own:
+
+      * `cargo install wasm-pack --locked` (this lane's previous state) works on every
+        row but recompiles wasm-pack's whole source tree from crates.io per row, so a
+        transient registry blip fails a release build.
+      * jetli/wasm-pack-action — correct for the x86_64-only `js`/`wasm` lanes — ignores
+        `process.arch` and always fetches the `x86_64-*` asset, so on `ubuntu-24.04-arm`
+        it installs an unrunnable binary with no Rosetta to fall back on.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RELEASE_YML.read_text(encoding="utf-8")
+        cls.code = _code_lines(cls.text)
+
+    def _wasm_pack_steps(self) -> list[list[str]]:
+        return [
+            b
+            for b in gate.split_steps(self.text)
+            if _install_action_wasm_pack_pin(b) is not None
+            or (gate._step_uses(b) or (None,))[0] == WASM_PACK_ACTION
+        ]
+
+    def test_matrix_still_has_arm64_rows(self):
+        """Anti-vacuity: the requirement only exists because the job builds on arm64.
+
+        If `gui-bundle` ever drops both arm64 rows the assertions below stop describing
+        anything real — they should be re-derived, not left passing by luck."""
+        for row in ("ubuntu-24.04-arm", "macos-14"):
+            self.assertTrue(
+                any(row in ln for ln in self.code),
+                f"release.yml's gui-bundle matrix must still carry the {row} row — the "
+                "arch-aware-installer requirement below is about exactly these rows "
+                "(#5772).",
+            )
+
+    def test_no_cargo_install_wasm_pack(self):
+        """The crates.io source compile — the flake surface — must be gone."""
+        offenders = [ln for ln in self.code if "cargo install wasm-pack" in ln]
+        self.assertEqual(
+            offenders,
+            [],
+            "release.yml must NOT `cargo install wasm-pack`: recompiling it (and its "
+            "chrono/wasm-bindgen source tree) from crates.io on every row of the "
+            "gui-bundle matrix puts a transient-registry-blip failure on a BLOCKING row "
+            f"of a release build (#5772). Use {INSTALL_ACTION} `with: tool: "
+            "wasm-pack@<version>` instead.",
+        )
+
+    def _the_step(self) -> list[str]:
+        """The one wasm-pack install step, or a clean failure. Shared so that a
+        regression which REMOVES the step (e.g. reverting to `cargo install`) reports
+        that fact in every test instead of raising IndexError out of one of them."""
+        steps = self._wasm_pack_steps()
+        self.assertEqual(
+            len(steps),
+            1,
+            "release.yml must have exactly one wasm-pack install step (a "
+            f"{INSTALL_ACTION} step with `with: tool: wasm-pack@<version>`), found "
+            f"{len(steps)}",
+        )
+        return steps[0]
+
+    def test_installs_via_arch_aware_sha_pinned_action(self):
+        """Exactly one wasm-pack install, through the SHA-pinned arch-aware action."""
+        action, ref = gate._step_uses(self._the_step())
+        self.assertEqual(
+            action,
+            INSTALL_ACTION,
+            f"release.yml's gui-bundle must install wasm-pack via {INSTALL_ACTION}, "
+            f"not {action}. {WASM_PACK_ACTION} switches on `process.platform` alone and "
+            "always requests the x86_64 asset, so it hands the BLOCKING "
+            "`ubuntu-24.04-arm` row a binary it cannot execute (#5772).",
+        )
+        self.assertRegex(
+            ref,
+            SHA_RE,
+            f"{INSTALL_ACTION} must be pinned to a 40-hex commit SHA (repo action-pin "
+            f"policy), got {ref!r}",
+        )
+
+    def test_version_is_pinned_exactly(self):
+        """An exact `wasm-pack@X.Y.Z` — a bare `tool: wasm-pack` takes the latest."""
+        pin = _install_action_wasm_pack_pin(self._the_step())
+        self.assertIsNotNone(
+            pin,
+            "release.yml's wasm-pack step names no version this test can read — it is "
+            f"not a {INSTALL_ACTION} step carrying `with: tool: wasm-pack@<version>` "
+            "(see the arch-aware-installer assertion above, #5772).",
+        )
+        self.assertRegex(
+            pin,
+            VERSION_RE,
+            "release.yml must pin wasm-pack to an exact release (`tool: "
+            f"wasm-pack@0.15.0`), got {pin!r}. A bare `tool: wasm-pack` installs "
+            "whatever is latest at run time, so the shipped desktop bundles are built "
+            "with an unpinned toolchain (#5771/#5772).",
+        )
+
+
 def _step_version(block: list[str]) -> str:
     """The wasm-pack version one step requests, or a DESCRIPTIVE SENTINEL when the
     step does not carry exactly one non-empty `with: version:` input.
@@ -248,15 +410,21 @@ def _step_version(block: list[str]) -> str:
 
 
 class WasmPackVersionUnified(unittest.TestCase):
-    """(5) Every jetli/wasm-pack-action step in the repo asks for the SAME version,
+    """(5) Every pinned-installer wasm-pack step in the repo asks for the SAME version,
     and every such step actually asks for one.
 
     ci.yml's `wasm` job RUNS the headless suites; js.yml BUILDS + packs the npm
-    package's wasm artifact. If they skew, a wasm-pack/wasm-bindgen behaviour change is
-    only ever exercised in the build lane (#5771). This pins the EQUALITY, not the
-    value — bumping is fine, bumping one lane only is not. Dropping a lane's `version:`
-    altogether is the same regression wearing a different hat (that lane silently takes
-    the action's default), so it is caught too.
+    package's wasm artifact; release.yml's `gui-bundle` builds the wasm bundle embedded
+    in every shipped desktop installer. If they skew, a wasm-pack/wasm-bindgen behaviour
+    change is only ever exercised in some of them (#5771). This pins the EQUALITY, not
+    the value — bumping is fine, bumping one lane only is not. Dropping a lane's
+    `version:`/`@version` altogether is the same regression wearing a different hat
+    (that lane silently takes the installer's default), so it is caught too.
+
+    BOTH installer shapes count, normalised to `vX.Y.Z`: jetli/wasm-pack-action
+    (`with: version:`) and taiki-e/install-action (`with: tool: wasm-pack@…`). release.yml
+    must use the latter because jetli cannot serve its arm64 rows (#5772) — but a lane
+    that changes installer must not thereby leave this comparison.
     """
 
     @staticmethod
@@ -270,12 +438,18 @@ class WasmPackVersionUnified(unittest.TestCase):
         """
         found: dict[str, list[str]] = {}
         for name, text in sorted(sources.items()):
-            if WASM_PACK_ACTION not in text:
+            if "wasm-pack" not in text:
                 continue
             for block in gate.split_steps(text):
-                if (gate._step_uses(block) or (None,))[0] != WASM_PACK_ACTION:
-                    continue
-                found.setdefault(name, []).append(_step_version(block))
+                action = (gate._step_uses(block) or (None,))[0]
+                if action == WASM_PACK_ACTION:
+                    found.setdefault(name, []).append(_step_version(block))
+                elif action == INSTALL_ACTION:
+                    # Most install-action steps install some other tool; only the ones
+                    # that name wasm-pack join the comparison (#5772).
+                    pin = _install_action_wasm_pack_pin(block)
+                    if pin is not None:
+                        found.setdefault(name, []).append(pin)
         return found
 
     @classmethod
@@ -288,15 +462,20 @@ class WasmPackVersionUnified(unittest.TestCase):
         )
 
     def test_both_wasm_lanes_use_the_action(self):
-        """Anti-vacuity: the two lanes #5771 unified must still be in the sample."""
+        """Anti-vacuity: the lanes this unification covers must still be in the sample.
+
+        ci.yml + js.yml are the two #5771 unified; release.yml joined via the
+        install-action shape (#5772) and must not fall out of the comparison just
+        because it pins through a different installer."""
         pins = self._pins()
-        for expected in ("ci.yml", "js.yml"):
+        for expected in ("ci.yml", "js.yml", "release.yml"):
             self.assertIn(
                 expected,
                 pins,
-                f"{expected} must install wasm-pack via {WASM_PACK_ACTION} — without "
-                "it the single-version assertion below has nothing to compare and "
-                "passes vacuously (#5771).",
+                f"{expected} must install wasm-pack via a PINNED installer "
+                f"({WASM_PACK_ACTION} or {INSTALL_ACTION} `with: tool: wasm-pack@…`) — "
+                "without it the single-version assertion below has one fewer lane to "
+                "compare, and with none it passes vacuously (#5771/#5772).",
             )
 
     def test_every_step_pins_an_exact_version(self):
@@ -432,6 +611,92 @@ jobs:
                     f"{label}: must count as a DISTINCT pin so the single-version "
                     "assertion goes red",
                 )
+
+    # --- the install-action shape (#5772) ------------------------------------
+    _MUT_IA_GOOD = """\
+jobs:
+  gui-bundle:
+    steps:
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: wasm-pack@0.15.0
+"""
+    # A bare `tool: wasm-pack` takes install-action's default: the latest release.
+    _MUT_IA_UNPINNED = """\
+jobs:
+  gui-bundle:
+    steps:
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: wasm-pack
+"""
+    # A CSV `tool:` list — wasm-pack alongside another tool, at a SKEWED version.
+    _MUT_IA_SKEWED_CSV = """\
+jobs:
+  gui-bundle:
+    steps:
+      - name: Install tools
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: cargo-llvm-cov,wasm-pack@0.13.1
+"""
+    # An install-action step that installs something else entirely: must not join the
+    # wasm-pack comparison at all (dozens of these exist across the tree).
+    _MUT_IA_OTHER_TOOL = """\
+jobs:
+  coverage:
+    steps:
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: cargo-llvm-cov
+"""
+
+    def test_install_action_pin_is_normalised_and_compared(self):
+        """`tool: wasm-pack@0.15.0` must read as the SAME pin as `version: v0.15.0`.
+
+        Without the normalisation the two installers would each be self-consistent and
+        skew freely past each other — which is #5771 again, one installer swap later."""
+        agreeing = self._pins_from(
+            {"js.yml": self._MUT_GOOD, "release.yml": self._MUT_IA_GOOD}
+        )
+        self.assertEqual(
+            agreeing, {"js.yml": ["v0.15.0"], "release.yml": ["v0.15.0"]}
+        )
+        self.assertEqual(len({v for vs in agreeing.values() for v in vs}), 1)
+
+    def test_mutation_install_action_regressions_are_caught(self):
+        """Each way the install-action lane can lose its exact pin must go red."""
+        for label, text in (
+            ("bare `tool: wasm-pack`", self._MUT_IA_UNPINNED),
+            ("skewed version in a CSV `tool:` list", self._MUT_IA_SKEWED_CSV),
+        ):
+            with self.subTest(mutation=label):
+                mutated = self._pins_from(
+                    {"js.yml": self._MUT_GOOD, "release.yml": text}
+                )
+                self.assertIn(
+                    "release.yml",
+                    mutated,
+                    f"{label}: the lane must stay IN the sample (dropping out would "
+                    "let the surviving lane agree with itself vacuously)",
+                )
+                self.assertEqual(
+                    len({v for vs in mutated.values() for v in vs}),
+                    2,
+                    f"{label}: must count as a DISTINCT pin so the single-version "
+                    "assertion goes red",
+                )
+        # And the unpinned one is additionally not an exact version.
+        unpinned = self._pins_from({"release.yml": self._MUT_IA_UNPINNED})
+        self.assertNotRegex(unpinned["release.yml"][0], VERSION_RE)
+
+    def test_install_action_steps_for_other_tools_are_ignored(self):
+        """Anti-false-positive: the tree is full of install-action steps for other
+        tools; pulling them into the wasm-pack comparison would red it immediately."""
+        self.assertEqual(self._pins_from({"ci.yml": self._MUT_IA_OTHER_TOOL}), {})
 
 
 if __name__ == "__main__":

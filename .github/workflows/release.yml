@@ -493,8 +493,31 @@ jobs:
       # (repointed off the marketing site by PR #1003 / sq-ixc3.8). Its `prebuild` hook
       # (gui/app/scripts/sync-wasm.mjs) needs the lean shacl,jsonld wasm bundle present in js/wasm/.
       # Mirror gui.yml's proven-green `gui-app`/`tauri-e2e` jobs: build the wasm bundle FIRST.
+      #
+      # [OPUS-5] #5772 — PREBUILT, ARCH-AWARE. This step used to `cargo install wasm-pack
+      # --locked`, recompiling wasm-pack and its whole chrono/wasm-bindgen source tree from
+      # crates.io on EVERY row of this 5-way matrix, so a transient registry/CDN blip could
+      # red a BLOCKING row (both Linux rows are `soft: false`) of a release build.
+      #
+      # NOT jetli/wasm-pack-action (what the `js`/`wasm` lanes use): that action's dist/index.js
+      # switches on `process.platform` ALONE and ignores `process.arch`, so it always requests
+      # the `x86_64-*` asset. On the `ubuntu-24.04-arm` row — BLOCKING — that lands an x86_64
+      # binary with no Rosetta to fall back on. taiki-e/install-action resolves the target from
+      # arch AND platform (its wasm-pack manifest carries `aarch64_linux_musl` /
+      # `aarch64_macos` entries with checksums alongside the x86_64 ones), covers all five rows
+      # of this matrix (Linux/macOS/Windows), is already SHA-pinned and trusted elsewhere in
+      # this workflow, and verifies the download's hash.
+      #
+      # The version is pinned EXACTLY (repo tool-pin doctrine, cf. sq-tool-pin) and must stay
+      # EQUAL to the jetli pin in js.yml/ci.yml — the repo installs ONE wasm-pack version so a
+      # wasm-pack/wasm-bindgen behaviour change is never exercised in one lane only (#5771).
+      # That equality is enforced across BOTH installer shapes by
+      # scripts/tests/test_js_wasm_pack_install.py::WasmPackVersionUnified, so bump every lane
+      # together or that test reds.
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: wasm-pack@0.15.0
 
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js
