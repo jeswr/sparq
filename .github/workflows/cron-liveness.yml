@@ -1,0 +1,98 @@
+# cron-liveness — the CRON-ONLY LANE liveness alarm ([OPUS-5] issue #4328). 🤖 SPARQ agent.
+#
+# WHAT: a workflow triggered only by `schedule:`/`workflow_dispatch:` produces no PR, no
+# review, no merge-queue entry and no check-run on anybody's head commit, so when it dies
+# NOTHING in the fleet's normal signal set notices. `bench-ec2.yml` failed every scheduled
+# run for 12 days (2026-07-15 → 2026-07-25, 13 × "Credentials could not be loaded") before
+# anyone looked; `miri.yml` was cancelled at its ceiling 22 nights running before that.
+# scripts/cron_lane_liveness.py makes that class loud: it DISCOVERS every cron-only lane in
+# .github/workflows/, DERIVES each lane's liveness expectation from that lane's OWN
+# `schedule:` cron (no per-workflow threshold table — a table goes stale exactly the way the
+# stale `jeswr/sparq` trust-policy doc in research/ci-ec2-design.md did), and files ONE
+# deduped, self-identified SPARQ-agent issue per dead lane (label `cron-liveness`, keyed by a
+# `<!-- cron-liveness-key: … -->` body marker; an existing open alarm is UPDATED IN PLACE,
+# never duplicated, and auto-closed when the lane recovers).
+#
+# WHY AN ISSUE AND NOT A LOG LINE: registry #740 — the pipeline's structured log telemetry is
+# currently being destroyed by secret masking, so a log-only signal is worthless right now.
+#
+# DETECTOR LANES: a lane whose non-zero exit is its FINDING (review-alarm.yml,
+# formal-alarm.yml) declares so with a column-0 `# cron-liveness: verdict-lane` line in its
+# OWN yaml. Judged by conclusion alone a working detector reads as a dead lane; the
+# declaration replaces the conclusion-based rules with "did any scheduled run inside the
+# window conclude `success` or `failure` at all", so cancelled / timed-out / stopped-firing
+# still raise. It is a per-lane declaration, not a central table, and not a mute switch.
+# THIS workflow is deliberately NOT declared: its finding exits 0, so a `failure` here really
+# does mean the detector is broken.
+#
+# NOTE ON THIS FILE'S OWN SEAM: the swallow class — `continue-on-error`, `|| true`,
+# `; exit 0`, `set +e`, a `--dry-run` slipped into the detector invocation — leaves every
+# observable identical while deleting the feature, and a cron-only lane has nobody watching
+# to notice. scripts/tests/test_cron_lane_liveness.py::TestYamlSeam pins the job, BOTH steps
+# and the docs-quality.yml call site against all of it (key ABSENCE, and the detector argv by
+# EQUALITY), so any of those mutations reds a named test on every PR.
+#
+# EXIT SEMANTICS (deliberately different from formal-alarm.yml, see the script header):
+# finding a dead lane exits 0 — THE ISSUE IS THE SIGNAL. This workflow is ITSELF a cron-only
+# lane and therefore inside its own scan set, so redding its own run on every finding would
+# make the detector permanently report itself dead. Exit 2 (red) is reserved for
+# alarm-INFRASTRUCTURE failure — an unparseable workflow, a runs listing that disagrees with
+# its own `total_count`, a failed `gh issue create`. A finding can never be silently dropped:
+# an issue that cannot be written raises the infrastructure error.
+#
+# NOT A GATE: schedule-only, so it creates no check-run on any PR head or merge_group ref and
+# can never enter the `ci-summary / gate` poll set. Redding it blocks no merge.
+#
+# All actions are SHA-pinned (code-scanning / Scorecard posture). The detector's hermetic
+# test suite (scripts/tests/test_cron_lane_liveness.py) runs as the FIRST step of every run —
+# a broken detector reds before it is trusted to watch anything — and also gates every PR
+# from docs-quality.yml.
+name: cron-liveness
+
+on:
+  # Hourly: the scan set includes 10-minute lanes (promote-on-approval, rearm-sweeper,
+  # verdict-bridge), so a daily check would leave a dead fast lane unseen for a day. The scan
+  # is a handful of `gh api` reads — cheap enough to run every hour.
+  schedule:
+    - cron: "23 * * * *"
+  # Manual run for validation / triage.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cron-liveness
+  cancel-in-progress: false
+
+jobs:
+  liveness:
+    name: cron-only lane liveness alarm
+    # Canonical repo only: a fork has neither the run history nor the issue tracker this
+    # alarm reasons about, and must not file issues here.
+    if: github.repository == 'sparq-org/sparq'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # list each lane's completed scheduled runs
+      issues: write # file / update / close the deduped alarm issue
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: python3 -m pip install --disable-pip-version-check --quiet pyyaml
+      - name: Self-test the detector (hermetic fixtures)
+        run: python3 scripts/tests/test_cron_lane_liveness.py
+      - name: Scan every cron-only lane for liveness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 scripts/cron_lane_liveness.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --summary-file "$GITHUB_STEP_SUMMARY"

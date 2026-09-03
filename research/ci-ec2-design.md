@@ -30,7 +30,8 @@ and must stay **under $5/month**. This is the security + cost design.
    assumes for a short-lived token. A leaked workflow log then exposes nothing reusable.
 2. **Never run on untrusted triggers.** The EC2 workflow runs ONLY on `schedule` (weekly) and
    `workflow_dispatch` (a maintainer clicks "run"). **Never** `pull_request` — a fork PR must not be
-   able to assume the role or spend money. Guard every job with `if: github.repository == 'jeswr/sparq'`.
+   able to assume the role or spend money. Guard every job with
+   `if: github.repository == 'sparq-org/sparq'`.
 3. **Self-limiting spend.** Spot instance + hard `timeout-minutes` + **always-terminate** (even on
    failure/cancel) + a low weekly cadence. 4–5 runs/month × a ~30-min spot box ≈ **well under $5**.
 
@@ -50,13 +51,30 @@ and must stay **under $5/month**. This is the security + cost design.
        "Action": "sts:AssumeRoleWithWebIdentity",
        "Condition": {
          "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-         "StringLike": { "token.actions.githubusercontent.com:sub": "repo:jeswr/sparq:ref:refs/heads/main" }
+         "StringLike": {
+           "token.actions.githubusercontent.com:sub":
+             "repo:sparq-org/sparq:ref:refs/heads/main:runner_environment:github-hosted"
+         }
        }
      }]
    }
    ```
-   (The `sub` condition pins it to the `main` branch of `jeswr/sparq` — fork PRs and other refs
-   cannot assume it.)
+   (The `sub` condition pins it to the `main` branch of `sparq-org/sparq` — fork PRs and other refs
+   cannot assume it. The `runner_environment` segment is **only** present if the repository's
+   subject claim has been customised with `include_claim_keys: ["repo", "ref", "runner_environment"]`
+   — with the DEFAULT claim template the `sub` is just `repo:sparq-org/sparq:ref:refs/heads/main`
+   and this policy will not match. Pick one and apply both halves together; see item 2 of the
+   checklist below.)
+
+   > **ORG MIGRATION — the live role is still on the OLD org, and that is why the lane died.**
+   > The repository moved `jeswr/sparq` → `sparq-org/sparq`. The workflow was updated (`bench-ec2.yml`
+   > guards `github.repository == 'sparq-org/sparq'`) but **the IAM trust policy was not**, so
+   > `sts:AssumeRoleWithWebIdentity` has been refused ever since: `bench-ec2.yml` failed every
+   > scheduled run from 2026-07-15 to 2026-07-25 with 13 × `Credentials could not be loaded`, and the
+   > `schedule:` triggers were then retired in #3785. This is the GOOD failure mode — the role was
+   > **not** widened to compensate, so a role that can launch EC2 instances is not over-permitted.
+   > Anyone recreating or repointing the role must apply the checklist below.
+
 3. **Permissions policy** — least-privilege, tag-scoped so CI can only touch its own instances:
    ```json
    {
@@ -78,7 +96,52 @@ and must stay **under $5/month**. This is the security + cost design.
    `AWS_BENCH_ROLE_ARN`.
 5. **Budget backstop:** an AWS Budgets monthly alarm at $5 on the `purpose=sparq-ci-bench` tag.
 
+### Trust-policy hardening checklist (MAINTAINER — requires AWS console access)
+
+**No agent has, or should have, AWS credentials.** Nothing in this repo can apply any of this; it is
+a written checklist for the human who owns the AWS account. Items 1–4 are the conditions that make
+this role safe for a *public* repository whose CI can spend money.
+
+1. **Repointing the `sub` to the new org is the whole fix for the dead lane.**
+   `repo:jeswr/sparq:…` → `repo:sparq-org/sparq:…`. Nothing else is required to revive it.
+2. **`runner_environment` and `workflow_ref` can only be enforced through `sub`.** IAM evaluates
+   exactly two condition keys from the GitHub OIDC provider — `token.actions.githubusercontent.com:aud`
+   and `…:sub`. Every other claim (`runner_environment`, `workflow_ref`, `repository_owner`,
+   `job_workflow_ref`, `environment`, `actor`) is present in the JWT but is **not** a usable IAM
+   condition key, so a `StringEquals` on `…:runner_environment` silently matches nothing and buys
+   nothing. The only way to bind them is to fold them into the `sub` claim itself, via the
+   repository's **Actions → OIDC → customize the subject claim** setting (`include_claim_keys`), and
+   then match the resulting composite string. The intended binding for this role is
+   **`runner_environment=github-hosted`** — a self-hosted runner must not be able to assume a role
+   that launches EC2 instances. `include_claim_keys` is a **repository-level** setting: changing it
+   rewrites the `sub` of *every* workflow in the repo, so the IAM policy and the claim-key list must
+   be changed together or all OIDC in the repo breaks. If that coupling is not wanted, keep the short
+   `sub` (`repo:sparq-org/sparq:ref:refs/heads/main`) and accept that `runner_environment` is
+   **unenforced** — but record that choice here rather than leaving it implicit.
+3. **The policy must admit NO `…:pull_request` `sub` form.** A `pull_request`-triggered run gets
+   `sub = repo:sparq-org/sparq:pull_request`. A role that can launch EC2 instances must never be
+   assumable from a PR context — including a PR from a fork. Concretely: no `StringLike` pattern in
+   the trust policy may match `repo:sparq-org/sparq:pull_request`, which rules out the tempting
+   wildcard `repo:sparq-org/sparq:*`. Verify the pattern against that exact string before saving.
+   The workflow-side `if:` fork guard is defence in depth, not the boundary — the trust policy is.
+4. **The `ref:refs/heads/main` pin also blocks `workflow_dispatch` from any non-default branch.**
+   A maintainer dispatching this workflow from a topic branch gets `sub = …:ref:refs/heads/<branch>`
+   and the assume-role fails. That is plausibly intentional (it stops an unreviewed branch from
+   spending money) but it was never written down, and it is now the lane's only supported trigger
+   since #3785 retired the cron. **Decide and record:** keep the pin (dispatch must be from `main`),
+   or widen it deliberately to an enumerated allowlist — never to `repo:sparq-org/sparq:*`, per (3).
+
 ## The workflow (`.github/workflows/bench-ec2.yml`)
+
+> **The live file no longer matches this sketch, deliberately.** #3785 removed BOTH `schedule:`
+> blocks (a cron tick against a role that cannot be assumed is a guaranteed failure, every night)
+> and added a `vars.AWS_BENCH_ROLE_ARN != ''` role-present guard so a dispatch while the role is
+> descoped SKIPS visibly instead of failing at the OIDC step. The lane is therefore
+> **dispatch-only** today; the sketch below shows the shape to restore *together with* the
+> trust-policy fix, not the current state. Re-adding `schedule:` also puts the lane back in the
+> scope of the cron-only liveness alarm (`scripts/cron_lane_liveness.py`), which is derived from
+> the `schedule:` block itself — so a future silent death gets an issue rather than 12 days of
+> nothing.
 
 ```yaml
 on:
@@ -88,7 +151,7 @@ permissions: { id-token: write, contents: write }
 concurrency: { group: bench-ec2, cancel-in-progress: false }
 jobs:
   ec2-bench:
-    if: github.repository == 'jeswr/sparq'   # never on forks
+    if: github.repository == 'sparq-org/sparq'   # never on forks
     runs-on: ubuntu-latest
     timeout-minutes: 60                       # hard wall-clock cap
     steps:

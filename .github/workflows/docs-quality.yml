@@ -1017,6 +1017,20 @@ jobs:
       # the evaluator validated against the pre-fix expression as a known answer.
       - name: Self-test the nightly selection-bug alarm (correlation + fail-loud — sq-va7at)
         run: python3 scripts/tests/test_ci_selection_alarm.py
+      # [OPUS-5] #4328: the CRON-ONLY LANE liveness alarm
+      # (scripts/cron_lane_liveness.py, .github/workflows/cron-liveness.yml). A
+      # schedule-only workflow that dies produces no PR / review / merge-queue
+      # entry, so nothing in the fleet notices — bench-ec2.yml failed 12 days
+      # straight before anyone looked. The suite is hermetic (no gh, no network):
+      # the cron parser + period derivation from each lane's OWN `schedule:`, both
+      # raise rules, every quiet-direction fail-safe (never-ran / disabled /
+      # unreadable cron / new-lane grace / deliberately-skipped), scope discovery
+      # over the LIVE .github/workflows tree, issue idempotence across ticks, the
+      # fail-loud exits (a finding that cannot be published exits 2, never 0), and
+      # the YAML seam of cron-liveness.yml asserted on the PARSED structure so an
+      # `if: false` or a deleted step reds here.
+      - name: Self-test the cron-only-lane liveness alarm (derived thresholds + YAML seam — #4328)
+        run: python3 scripts/tests/test_cron_lane_liveness.py
       # [OPUS-5] The review-lane BLIND-SPOT alarm (scripts/review_lane_alarm.py,
       # .github/workflows/review-alarm.yml). Hermetic (no gh, no network). Two halves:
       # the four verdict obligations — no-verdict is not armable, a superseded head does
