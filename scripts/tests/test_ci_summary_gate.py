@@ -27,6 +27,7 @@ import io
 import json
 import re
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -2950,6 +2951,22 @@ class TestFeatureMatrixReporterPostCapGrace(unittest.TestCase):
                 self.assertEqual(code, 1, out)
                 self.assertEqual(calls, cfg.max_total_polls)
                 self.assertNotIn("bounded reporter-only grace", out)
+
+    def test_post_cap_grace_stop_reason_is_written_to_step_summary(self):
+        waiting = [_grp("222"), GREEN]
+        ordinary_work_appears = [_grp("222"), GREEN, PENDING]
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / "step-summary.md"
+            cfg = tiny_cfg(reporter_grace_polls=3, summary_path=str(summary))
+            polls = [waiting] * cfg.max_total_polls + [ordinary_work_appears]
+
+            code, out, calls = self._drive(cfg, polls)
+
+            self.assertEqual(code, 1, out)
+            self.assertEqual(calls, cfg.max_total_polls + 1)
+            message = "reporter-only grace stopped because ordinary pending work"
+            self.assertIn(message, out)
+            self.assertIn(message, summary.read_text(encoding="utf-8"))
 
     def test_stale_report_cannot_satisfy_or_outlive_the_bounded_grace(self):
         cfg = tiny_cfg(reporter_grace_polls=3)

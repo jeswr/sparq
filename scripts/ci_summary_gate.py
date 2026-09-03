@@ -2061,10 +2061,11 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             and attempt > cfg.max_total_polls
             and (non_reporter_pending > 0 or awaiting_full)
         ):
-            print(
+            _emit(
                 "::notice::ci-summary reporter-only grace stopped because ordinary "
                 "pending work or the full-tier hold appeared; those states do not "
-                "receive post-cap time (#6299)."
+                "receive post-cap time (#6299).",
+                cfg.summary_path,
             )
             break
 
