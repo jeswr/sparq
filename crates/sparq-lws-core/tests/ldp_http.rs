@@ -517,6 +517,58 @@ async fn get_with_explicit_q_zero_refusal_is_406() {
     assert_eq!(get.status(), StatusCode::NOT_ACCEPTABLE);
 }
 
+#[tokio::test]
+async fn get_negotiates_the_line_and_n3_read_formats_from_stored_turtle() {
+    // gh-4879: an Accept naming N-Triples / N-Quads / N3 is SERVED in that type rather than
+    // degrading to `text/turtle`. Each response carries its own Content-Type and a distinct,
+    // representation-specific ETag.
+    let h = Harness::new().await;
+    h.request(
+        "PUT",
+        "/alice/data",
+        Some("text/turtle"),
+        Body::from(TURTLE),
+    )
+    .await;
+
+    let mut etags = Vec::new();
+    for media_type in ["application/n-triples", "application/n-quads", "text/n3"] {
+        let get = h
+            .request_with(
+                "GET",
+                "/alice/data",
+                None,
+                &[("accept", media_type)],
+                Body::empty(),
+            )
+            .await;
+        assert_eq!(get.status(), StatusCode::OK, "Accept: {media_type}");
+        assert_eq!(
+            get.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            media_type
+        );
+        etags.push(
+            get.headers()
+                .get(axum::http::header::ETAG)
+                .expect("a read carries a validator")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+        let bytes = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("alice/data#me"), "{media_type} body: {text}");
+        assert!(text.contains("Alice"), "{media_type} body: {text}");
+    }
+
+    // Distinct media types are distinct representations, so their validators differ — a client
+    // holding one can never be 304'd into labelling those bytes with another type.
+    etags.sort();
+    let distinct = etags.len();
+    etags.dedup();
+    assert_eq!(etags.len(), distinct, "per-representation ETags: {etags:?}");
+}
+
 // --- M2: Range ---------------------------------------------------------------------------------
 
 #[tokio::test]

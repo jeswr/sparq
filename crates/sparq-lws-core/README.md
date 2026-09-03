@@ -66,9 +66,9 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
 ## ✨ Features
 
 - **LDP surface** — containers + RDF/non-RDF resources, conditional requests,
-  `Content-Range` reads, Turtle / JSON-LD conneg (oxrdf/oxttl/oxjsonld) honouring the
-  JSON-LD `profile` parameter (expanded / compacted forms echoed in `Content-Type`;
-  compaction is local and context-free — nothing fetched).
+  `Content-Range` reads, Turtle / JSON-LD conneg plus read-only N-Triples / N-Quads / N3
+  (oxrdf/oxttl/oxjsonld), honouring the JSON-LD `profile` parameter (expanded / compacted
+  forms echoed in `Content-Type`; compaction is local and context-free — nothing fetched).
 - **Access control** — WAC (`acl:`) evaluated against the SPARQ-authoritative
   store, with an ACL decision cache; public-read fast path.
 - **WAC-scoped query endpoint** — [GPT-5.6] default-on, query-only

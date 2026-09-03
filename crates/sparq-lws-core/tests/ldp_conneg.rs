@@ -355,6 +355,95 @@ fn variant_suffix_is_profile_specific_only_when_the_bytes_differ() {
     assert_eq!(turtle.variant_suffix(), "ttl");
 }
 
+// --- the read-only line/N3 formats (gh-4879) -------------------------------------------------
+
+#[test]
+fn an_accept_naming_a_line_or_n3_format_is_served() {
+    // Each of the three read formats is now negotiable in its own right, instead of degrading to
+    // the Solid default (`text/turtle`) because the media type was unrecognised.
+    assert_eq!(fmt("application/n-triples"), Some(RdfFormat::NTriples));
+    assert_eq!(fmt("application/n-quads"), Some(RdfFormat::NQuads));
+    assert_eq!(fmt("text/n3"), Some(RdfFormat::N3));
+    // Case-insensitively on the media type, and with parameters ignored.
+    assert_eq!(fmt("Application/N-Triples;q=1"), Some(RdfFormat::NTriples));
+    // q-values order them against the read+write formats like any other range.
+    assert_eq!(
+        fmt("text/turtle;q=0.3, application/n-quads;q=0.9"),
+        Some(RdfFormat::NQuads)
+    );
+    assert_eq!(
+        fmt("text/n3;q=0.2, application/ld+json;q=0.7"),
+        Some(RdfFormat::JsonLd)
+    );
+}
+
+#[test]
+fn the_read_formats_do_not_disturb_the_existing_wildcard_outcomes() {
+    // `text/*` now also covers `text/n3` and `application/*` the two `application/…` line formats,
+    // but the fixed producible order keeps the previous winners.
+    assert_eq!(fmt("text/*"), Some(RdfFormat::Turtle));
+    assert_eq!(fmt("application/*"), Some(RdfFormat::JsonLd));
+    assert_eq!(
+        negotiate_accept(Some("application/*"), RdfFormat::JsonLd),
+        Some(RdfFormat::JsonLd)
+    );
+    assert_eq!(fmt("*/*"), Some(RdfFormat::Turtle));
+    // An unknown type still degrades to Turtle rather than to a read-only format.
+    assert_eq!(fmt("image/png"), Some(RdfFormat::Turtle));
+}
+
+#[test]
+fn each_read_format_serialises_to_a_reparseable_document() {
+    // TWO triples on ONE subject: Turtle groups them with `;` while N-Triples repeats the subject
+    // per line, so the two serialisations are distinguishable here (they coincide for one triple).
+    let turtle = b"<https://pod.example/alice/data#me> <http://xmlns.com/foaf/0.1/name> \"Alice\" ; \
+        <http://xmlns.com/foaf/0.1/nick> \"Al\" .";
+    let triples =
+        parse_to_triples(RdfFormat::Turtle, turtle, "https://pod.example/alice/data").unwrap();
+    let ttl = serialize_triples(RdfFormat::Turtle, &triples).unwrap();
+
+    // N-Triples: one canonical line per triple, and the N-Quads document of the same (default)
+    // graph is byte-identical — a default-graph quad carries no graph label.
+    let nt = serialize_triples(RdfFormat::NTriples, &triples).unwrap();
+    let nq = serialize_triples(RdfFormat::NQuads, &triples).unwrap();
+    assert_eq!(nt, nq);
+    assert_ne!(nt, ttl, "the line format is not the Turtle serialisation");
+    assert_eq!(
+        String::from_utf8(nt.clone()).unwrap().lines().count(),
+        triples.len()
+    );
+
+    // N3 is served as the Turtle syntax it subsumes.
+    let n3 = serialize_triples(RdfFormat::N3, &triples).unwrap();
+    assert_eq!(n3, ttl);
+    assert_ne!(n3, nt);
+
+    // All three documents parse back to the same triple set through the Turtle grammar (which
+    // subsumes N-Triples), proving the bytes really carry the resource's triples.
+    for bytes in [&nt, &nq, &n3] {
+        let reparsed =
+            parse_to_triples(RdfFormat::Turtle, bytes, "https://pod.example/alice/data").unwrap();
+        assert_eq!(reparsed, triples);
+    }
+}
+
+#[test]
+fn each_read_format_gets_its_own_content_type_and_variant_tag() {
+    for (accept, media_type, suffix) in [
+        ("application/n-triples", "application/n-triples", "nt"),
+        ("application/n-quads", "application/n-quads", "nq"),
+        ("text/n3", "text/n3", "n3"),
+    ] {
+        let negotiated =
+            negotiate_accept_with_profile(Some(accept), RdfFormat::Turtle).expect("acceptable");
+        assert_eq!(negotiated.content_type(), media_type);
+        assert_eq!(negotiated.variant_suffix(), suffix);
+        // A read-only format is never the stored format, so it always re-serialises.
+        assert!(!negotiated.serves_stored_verbatim(RdfFormat::Turtle));
+        assert!(!negotiated.serves_stored_verbatim(RdfFormat::JsonLd));
+    }
+}
+
 #[test]
 fn jsonld_serialisation_round_trips_locally() {
     // The re-serialisation path emits self-contained (context-free) JSON-LD that parses back

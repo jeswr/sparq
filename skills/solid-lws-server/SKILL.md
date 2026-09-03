@@ -161,6 +161,16 @@ curl -H 'Accept: text/turtle' https://solid.example/alice/profile/card
 curl -H 'Accept: application/ld+json' https://solid.example/alice/profile/card
 ```
 
+Reads can also ask for `application/n-triples`, `application/n-quads`, or
+`text/n3`. These three are read-only: a request body declared as one of them is
+not treated as RDF — only Turtle and JSON-LD are stored as RDF resources (any
+other type is kept verbatim as an opaque binary resource) — so an RDF resource
+is always stored as Turtle or JSON-LD and re-serialized on the way out. For a
+single-graph resource the N-Quads document is the N-Triples document (a
+default-graph statement carries no graph label), and N3 is served as the Turtle
+syntax it subsumes. Each media type gets its own `ETag`, so a cached
+representation is never relabeled by a `304`.
+
 The JSON-LD reader also recognizes the canonical expanded and compacted
 profile parameters and echoes the honored profile in `Content-Type`. Its
 compacted form is a local, context-free structural compaction: it does not
