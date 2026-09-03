@@ -60,7 +60,8 @@ provider_model = "claude-opus-5"       # Opus 5 — the SOLE anthropic routing t
                                        # rather than retained as tail fallbacks. Chains that used to
                                        # end at fable/opus now either end at opus5 and DEFER on
                                        # exhaustion (retried next tick) or carry `escalate = true`
-                                       # and park to needs:user — never a silent degrade.
+                                       # and take the bounded machine-park path described below —
+                                       # never a silent degrade.
                                        # Probe-verified live 2026-07-26: `claude --model
                                        # claude-opus-5 -p` -> OK, modelUsage reports canonicalModel
                                        # "claude-opus-5" (1M context). ALWAYS pin the full id: the
@@ -99,14 +100,18 @@ escalate = true
 # ---------------------------------------------------------------------------------------------------
 # SECURITY-LABEL OVERRIDES (first-match; win over role). Soundness surfaces run on Opus 5 ALONE
 # (2026-07-26: the opus-4.8 tail fallback was deprecated, so there is no weaker anthropic rung to
-# degrade to) and, on chain-exhaustion, ESCALATE to a human (needs:user) rather than fall to a
-# weaker/cross-provider model. That is the intended fail-closed behaviour, not a dead end: an opus5
-# capacity outage now parks the item for a human instead of quietly serving it from a retired tier.
+# degrade to). [GPT-5.6] CAPACITY-ESCALATION CONTRACT: for capacity exhaustion, `escalate = true`
+# never writes `needs:user`.
+# Registry CLAIM first keeps the item `status:deferred` during the bounded retry grace, then applies
+# the machine-owned `status:parked` soft hold if zero headroom persists; a successful retry after
+# recovery clears that hold.
+# This keeps the route fail-closed without turning provider capacity into a human-owned terminal.
+# The separate post-review trust/soundness arm remains human-gated.
 [[route]]
 match_labels = ["zk", "mpc", "reasoner", "crypto", "auth", "e2ee"]
 model_chain = ["opus5"]
 agent = "sparq-reviewer"
-escalate = true                        # consumed by dispatch: on chain-exhaustion, label needs:user
+escalate = true                        # capacity: bounded defer -> machine status:parked, not needs:user
 
 # ---------------------------------------------------------------------------------------------------
 # [SPARQ agent] ROLE ROUTES. The 2026-09-02 maintainer protocol separates responsibilities: GPT-5.6
@@ -211,8 +216,8 @@ escalate = true
 # defer loop; `status:parked` remains machine-recoverable when capacity returns.
 # scripts/triage.py derives role:ci for infra-surface labels (area:ci/area:ci-fragments/
 # area:orchestration/area:workflows/area:release) so surface-labelled infra work lands here.
-# Security overlap: the match_labels overrides above still WIN over this route (Opus + human
-# escalation) — where role:ci and a security surface overlap, the security lane is correct.
+# Security overlap: the match_labels overrides above still WIN over this route (Opus-only review +
+# a separate human post-review arm) — where role:ci and a security surface overlap, that lane wins.
 [[route]]
 role = "ci"
 model_chain = ["sol", "opus5"]
@@ -229,9 +234,10 @@ escalate = true
 # rungs left a ONE-RUNG chain with no `escalate`, i.e. no exit at all: on an opus5 capacity outage
 # the item could only defer, and defer again, forever — a silent permanent stall with no human
 # ever notified. Deprecating a fallback therefore has to come with an exit, so research now
-# escalates like the other single-rung (review/soundness/security) chains: chain exhaustion parks
-# the issue to needs:user. Deliberately NOT solved by adding `sol`: research authorship stays on
-# the anthropic side, and a cross-provider rung would have hidden the stall rather than surfaced it.
+# escalates like the other single-rung (review/soundness/security) chains: chain exhaustion takes
+# the bounded defer -> machine-owned `status:parked` path documented above. Deliberately NOT solved
+# by adding `sol`: research authorship stays on the anthropic side, and a cross-provider rung would
+# have hidden the stall rather than surfaced it.
 [[route]]
 role = "research"
 model_chain = ["opus5"]
@@ -253,7 +259,7 @@ agent = "sparq-docs"
 escalate = true
 
 # Review / soundness: Opus 5 alone (the opus-4.8 tail fallback was deprecated 2026-07-26);
-# escalate to human on chain-exhaustion (do NOT fall to a weaker model).
+# on chain-exhaustion use the bounded machine-park contract above (do NOT fall to a weaker model).
 [[route]]
 role = "review"
 model_chain = ["opus5"]
