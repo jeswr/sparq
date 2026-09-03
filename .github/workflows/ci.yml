@@ -2662,7 +2662,7 @@ jobs:
         # <div> (floor N)` line re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
         # [OPUS-5] sq-mwnko (the sibling audit): `--lib` for the same reason as the QL lane in the
         # inference job — `http_protocol` is `#[cfg(feature = "service-loopback")]`-gated in
-        # src/lib.rs (this lane's `http-protocol` feature forwards to it), so its 10 in-module unit
+        # src/lib.rs (this lane's `http-protocol` feature forwards to it), so its 9 in-module unit
         # tests (raw-response parsing, the exact status-code oracle, URL escaping, the outcome
         # tally) compile only under that feature and `--test http_protocol_suite` never built them.
         # Pinned by scripts/tests/test_conformance_lib_lanes.py.
@@ -2696,7 +2696,7 @@ jobs:
         # line re-grepped here. `--nocapture` so the TOTAL line reaches stdout.
         # [OPUS-5] sq-mwnko (the sibling audit): `--lib` for the same reason as the QL lane in the
         # inference job — `sd_gsp` is `#[cfg(feature = "federation-descriptors")]`-gated in
-        # src/lib.rs, so its 9 in-module unit tests (the assert-contains/absent recorders, the GSP
+        # src/lib.rs, so its 8 in-module unit tests (the assert-contains/absent recorders, the GSP
         # read/write request shapes, the exact status-code oracle) compile only under this feature
         # and `--test sd_gsp_suite` never built them. Pinned by
         # scripts/tests/test_conformance_lib_lanes.py.
