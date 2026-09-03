@@ -830,7 +830,7 @@ impl PodStore {
     /// **API tier-1 (proposed-stable).** Part of the proposed semver-stable per-resource
     /// decision surface (with `decide_batch` / [`PodStore::resolve_acl`] /
     /// [`PodStore::wac_allow`]); the freeze is pending maintainer ratification — see the
-    /// [API stability policy](https://github.com/jeswr/sparq/blob/main/docs/api-stability.md).
+    /// [API stability policy](https://github.com/sparq-org/sparq/blob/main/docs/api-stability.md).
     ///
     /// This is the point-query an LDP resource server asks per request, NOT graph
     /// filtering. Where [`PodStore::query_as`] / [`PodStore::accessible`] return the *set*
