@@ -507,7 +507,7 @@ un-draft moment.
 - **Use the merge queue.** The #6048 rollout is deliberately staged: the live
   `merge_queue` rule remains `ALLGREEN` until this change lands. The settings follow-up
   then changes only `grouping_strategy` to `HEADGREEN`; it keeps the 8-entry merge cap
-  and the 60-minute required-check deadline. That post-merge setting is paired with the
+  and the 360-minute required-check deadline. That post-merge setting is paired with the
   executable `merge_group => --full` invariant in `ci-select.yml`: the complete combined
   tree runs every selection-controlled leg once, while GitHub no longer rebuilds every
   prefix in the group. Its remaining **throughput** parameters are recorded below.
@@ -532,15 +532,12 @@ The `merge_queue` rule's throughput parameters:
 | `min_entries_to_merge` | `1` | one queued entry is enough to form a group |
 | `min_entries_to_merge_wait_minutes` | `5` | **inert** at `min_entries_to_merge: 1` — see (b) |
 | `grouping_strategy` | staged: `ALLGREEN` until #6049 lands; `HEADGREEN` after the post-merge ruleset update | one full required-gate run validates the combined group head after rollout |
-| `check_response_timeout_minutes` | `60` | required-check reporting deadline |
+| `check_response_timeout_minutes` | `360` | required-check reporting deadline |
 
-Provenance: `max_entries_to_merge` and `check_response_timeout_minutes` are in the
-verified live-ruleset table at the end of this document; `grouping_strategy` records the
-staged #6048 transition above and must be re-read after the post-merge settings update.
-The other three are read from the 2026-07-10 profile of ruleset
-`17688455` (`research/ci-mergequeue-speedup-2026-07.md` §1, §3.3, §6) and are **not**
-re-verified against the live API at this commit — this is a doc-only change. Confirm
-them with the `gh api …/rulesets/<id>` recipe below before acting on (a).
+Provenance: every value in this table was re-read from live ruleset `17688455` on
+2026-09-03, before the #6048 settings follow-up. `grouping_strategy` records the staged
+transition above and must be re-read after that post-merge update. Confirm the complete
+ruleset projection with the `gh api …/rulesets/<id>` recipe below before acting on (a).
 
 **(a) `max_entries_to_build` 3 → 5 — approved in principle, NOT yet requested; blocked
 on `sq-6vshe.14`.** Drain capacity scales directly with this number: a full 8-deep queue
@@ -712,7 +709,7 @@ gh api repos/jeswr/sparq/rulesets
 gh api repos/jeswr/sparq/rulesets/<id> | python3 -m json.tool
 ```
 
-As verified before the #6048 settings follow-up, the live `main` ruleset
+As re-verified on 2026-09-03 before the #6048 settings follow-up, the live `main` ruleset
 (`enforcement: active`) carries one always-on repository-administrator bypass actor
 (`actor_id: 5`, `actor_type: RepositoryRole`) and exactly these rules, all of which match
 the sections above:
@@ -721,18 +718,15 @@ the sections above:
 |---|---|---|
 | `deletion` | — | History and push rules |
 | `non_fast_forward` | — | History and push rules (force-push + linear history) |
-| `pull_request` | `required_approving_review_count: 0`, `require_code_owner_review: false`, `dismiss_stale_reviews_on_push: false`, `required_review_thread_resolution: true`, `allowed_merge_methods: ["squash"]` | Required reviews |
-| `required_status_checks` | one context `gate`, `strict_required_status_checks_policy: false` | Required status checks |
+| `pull_request` | `required_approving_review_count: 0`, `require_code_owner_review: false`, `dismiss_stale_reviews_on_push: false`, `require_extra_approval_for_unattributed_changes: true`, `required_review_thread_resolution: true`, `allowed_merge_methods: ["squash"]` | Required reviews |
+| `required_status_checks` | exactly `{"context":"gate","integration_id":15368}`, `strict_required_status_checks_policy: false`, `do_not_enforce_on_create: false` | Required status checks |
 | `code_quality` | `severity: all` | Required reviews |
-| `code_scanning` | `CodeQL`, `alerts_threshold: errors_and_warnings`, `security_alerts_threshold: all` | Required reviews |
 | `copilot_code_review` | `review_on_push: true`, `review_draft_pull_requests: false` | Required reviews |
-| `merge_queue` | `grouping_strategy: ALLGREEN` before #6049; `HEADGREEN` after the post-merge ruleset update; `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` unchanged | Other settings; Merge-queue throughput settings; Omnibus batching |
+| `merge_queue` | `grouping_strategy: ALLGREEN` before #6049; `HEADGREEN` after the post-merge ruleset update; `max_entries_to_build: 3`, `max_entries_to_merge: 8`, `min_entries_to_merge: 1`, `min_entries_to_merge_wait_minutes: 5`, `merge_method: SQUASH`, `check_response_timeout_minutes: 360` unchanged | Other settings; Merge-queue throughput settings; Omnibus batching |
 
-The `Key parameters` column is a selection, not an exhaustive dump: the `merge_queue`
-row's remaining throughput parameters (`max_entries_to_build`, `min_entries_to_merge`,
-`min_entries_to_merge_wait_minutes`) are recorded in *Merge-queue throughput settings*
-above, sourced from the 2026-07-10 profile snapshot rather than re-verified here — fold
-them into this row the next time the ruleset is dumped and verified.
+The post-merge update must project this complete live shape and alter only
+`merge_queue.parameters.grouping_strategy`; a fresh read must then prove the required
+check and every other field are byte-for-byte equivalent.
 
 If a future check finds drift (e.g. a rule added or a parameter changed), update **this
 table and the matching section above in the same commit** so the doc-of-record never lags

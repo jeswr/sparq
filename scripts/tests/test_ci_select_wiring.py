@@ -982,7 +982,7 @@ class TestBenchMetricTierInvariant(unittest.TestCase):
 # contains EXACTLY ONE entry: {"context":"gate","integration_id":15368} — i.e.
 # `ci-summary / gate` is the SOLE required check.  No individual per-crate matrix
 # legs, no individual `opt-in <X>` legs are in the required list.  The merge queue
-# (grouping_strategy=HEADGREEN after #6048, check_response_timeout_minutes=60) therefore
+# (grouping_strategy=HEADGREEN after #6048, check_response_timeout_minutes=360) therefore
 # blocks ONLY on the single "gate" check, not on absent or skipped siblings. HEADGREEN's
 # one combined head is forced to full selection by TestWiring's structural invariant.
 #
@@ -1000,7 +1000,7 @@ class TestBenchMetricTierInvariant(unittest.TestCase):
 # are pinned here (hermetically, no network/API calls):
 #   (1) gate job name == "gate"  (matches the ruleset's context:"gate")
 #   (2) gate job has NO if: guard  (always runs → merge queue always gets a
-#       response within the 60-minute timeout window)
+#       response within the 360-minute timeout window)
 #   (3) ci-summary.yml triggers on merge_group  (required for the gate to produce
 #       a check-run on queue entries at all)
 # Bead sq-fmx4u.5 can safely flip CI_SELECT_MODE to "enforce" once these hold.
@@ -1058,13 +1058,13 @@ class TestRequiredCheckAnchor(unittest.TestCase):
     def test_gate_job_has_no_job_level_conditional(self):
         """The gate must run unconditionally on every event (pull_request,
         merge_group, push).  A job-level `if:` could silently skip it on some
-        triggers, leaving the merge queue waiting 60 minutes before timing out."""
+        triggers, leaving the merge queue waiting 360 minutes before timing out."""
         job = self.cs["jobs"]["gate"]
         self.assertNotIn(
             "if", job,
             "ci-summary gate job must have no `if:` guard — it must always run "
             "so the merge queue receives the required 'gate' check-run within the "
-            "60-minute check_response_timeout window (ruleset 17688455)",
+            "360-minute check_response_timeout window (ruleset 17688455)",
         )
 
     def test_ci_summary_triggers_on_merge_group(self):
