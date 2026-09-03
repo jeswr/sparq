@@ -43,7 +43,11 @@
 #     RED — scripts/ci_summary_gate.py requires every "change-based test selection"
 #     check-run to conclude success before any skipped sibling counts as satisfied;
 #   * an empty/missing output satisfies every guard's `mode != 'selected'` first
-#     disjunct => RUN.
+#     disjunct => RUN;
+#   * [OPUS-5] #5237 the optional PyYAML install below is BEST-EFFORT — it powers the
+#     comment-only-workflow-edit proof (`yaml_inert_paths`) and nothing else, and its
+#     failure leaves that proof unavailable, i.e. `.github/**/*.yml` edits keep forcing
+#     the full matrix exactly as they did before. It must never fail this job.
 #
 # The job name below carries the phrase "change-based test selection" — that is the
 # detection contract with scripts/ci_summary_gate.py (SELECT_RE); the wiring test
@@ -128,6 +132,30 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # [OPUS-5] #5237: OPTIONAL PyYAML, used ONLY for the comment-only workflow-edit
+      # proof (`yaml_inert_paths` in scripts/ci_select.py) — a `.github/**/*.yml` edit
+      # is inert iff the file parses to the identical structure at merge-base and head.
+      #
+      # BEST-EFFORT AND NON-FATAL BY CONSTRUCTION. A hard failure of THIS pre-job
+      # would skip every needs:-dependent in the calling workflow and turn the
+      # required `ci-summary / gate` RED (see the FAIL-CLOSED CONTRACT above), so an
+      # install hiccup must never fail it: the trailing `|| echo` keeps the step's
+      # exit status 0 under bash -e, and `continue-on-error` is the second belt.
+      # Without PyYAML the selector's lazy `import yaml` fails, the proof is simply
+      # unavailable, and every `.github/**/*.yml` path falls back to the `.github/`
+      # full-run trigger — a failed install costs a full matrix, never a wrong skip.
+      #
+      # HASH-pinned (Scorecard PinnedDependenciesID) against the same full-closure
+      # PyYAML manifest docs-quality.yml / feature-matrix.yml / formal-verification.yml
+      # already install; see that file's header to bump or regenerate it.
+      - name: Install PyYAML for the comment-only-workflow proof (optional, non-fatal)
+        continue-on-error: true
+        run: |
+          pip install --require-hashes -r .github/requirements/docs-quality.txt \
+            || echo "::warning::PyYAML install failed — the #5237 comment-only workflow-edit proof is unavailable on this run; every .github/**/*.yml edit falls back to the full Rust matrix (fail-closed: cost only, never a wrong skip)."
       - name: Compute the affected crate closure (scripts/ci_select.py)
         id: sel
         env:

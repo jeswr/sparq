@@ -1085,6 +1085,281 @@ class DeployOnlyInertnessTests(unittest.TestCase):
         )
 
 
+_WF_BASE = """\
+# ci — the demo workflow.
+# A second header comment line.
+name: demo
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: build          # trailing comment
+        run: |
+          set -euo pipefail
+          # a shell comment INSIDE the block scalar
+          cargo build
+"""
+
+# Comments reworded/added/removed OUTSIDE any block scalar + a blank line: the parse
+# tree is bit-identical, so this edit is PROVEN inert.
+_WF_COMMENT_ONLY = """\
+# ci — the demo workflow (reworded header).
+#
+# An entirely new comment paragraph explaining the lane.
+name: demo
+
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: build          # a different trailing comment
+        run: |
+          set -euo pipefail
+          # a shell comment INSIDE the block scalar
+          cargo build
+"""
+
+# A comment INSIDE the `run: |` block scalar: still "just a comment" to a human, but
+# it is part of the scalar STRING that CI executes, so the parse trees differ and the
+# proof must FAIL (fail-closed to the full matrix).
+_WF_BLOCK_SCALAR_COMMENT = _WF_BASE.replace(
+    "# a shell comment INSIDE the block scalar",
+    "# a REWORDED shell comment INSIDE the block scalar",
+)
+
+# A real behaviour change.
+_WF_BEHAVIOUR = _WF_BASE.replace("runs-on: ubuntu-latest", "runs-on: ubuntu-24.04")
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+class YamlInertEditTests(unittest.TestCase):
+    """[OPUS-5] #5237: the CONTENT-based inert-edit proof — a `.github/**/*.yml` edit
+    is inert iff the file's PARSED YAML is identical at the merge-base and at head.
+
+    Two halves:
+      * the PURE half — `select()` consumes a precomputed `yaml_inert` set, so the
+        carve-out's effect on the selection is testable with no git and no PyYAML;
+      * the PROVER — `yaml_inert_paths()`, exercised against a real throwaway git
+        repo (self-SKIPs without git/PyYAML, the same hermeticity posture as the
+        cargo-metadata cases).
+    """
+
+    # --- the pure half: the carve-out's effect on the selection ------------------
+    def setUp(self):
+        self.meta = _synthetic_meta()
+
+    def test_a_workflow_edit_still_forces_full_without_the_proof(self):
+        # THE BASELINE THIS BEAD CHANGES (and the regression guard on the fail-closed
+        # default): with no proof supplied, a Rust-CI workflow edit is a §4.1 trigger.
+        sel = cs.select([".github/workflows/ci.yml"], self.meta)
+        self.assertEqual(sel.mode, "full")
+        self.assertEqual(sel.affected, ALL_MEMBERS)
+
+    def test_a_proven_inert_workflow_edit_no_longer_forces_full(self):
+        sel = cs.select([".github/workflows/ci.yml"], self.meta,
+                        yaml_inert={".github/workflows/ci.yml"})
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertIn((".github/workflows/ci.yml", "YAML-INERT"), sel.file_owners)
+
+    def test_a_proven_inert_edit_narrows_rather_than_fulls_a_mixed_diff(self):
+        # The #5237 payoff shape: a comment-only ci.yml edit alongside a leaf-crate
+        # change selects just that crate instead of the whole workspace.
+        sel = cs.select([".github/workflows/ci.yml", "crates/app/src/lib.rs"], self.meta,
+                        yaml_inert={".github/workflows/ci.yml"})
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app"])
+
+    def test_an_unproven_sibling_workflow_still_forces_full(self):
+        # Proving ONE file inert must not rescue the others in the same diff.
+        sel = cs.select([".github/workflows/ci.yml", ".github/workflows/bench.yml"],
+                        self.meta, yaml_inert={".github/workflows/ci.yml"})
+        self.assertEqual(sel.mode, "full")
+
+    def test_the_proof_does_not_change_the_change_class(self):
+        # `classify_change` labels WHAT SURFACES changed; #5237 proves THIS EDIT inert.
+        # Those are different axes, so a comment-only ci.yml edit stays class `engine`
+        # — which keeps the merge-group rust_changed gate (which has no PyYAML and so
+        # cannot run this proof) conservatively running the full set.
+        sel = cs.select([".github/workflows/ci.yml"], self.meta,
+                        yaml_inert={".github/workflows/ci.yml"})
+        self.assertEqual(sel.change_class, "engine")
+
+    def test_summary_names_every_rescued_file(self):
+        # No silent skips: the step summary must say which files the proof rescued.
+        sel = cs.select([".github/workflows/ci.yml"], self.meta,
+                        yaml_inert={".github/workflows/ci.yml"})
+        summary = cs.render_summary(sel)
+        self.assertIn("YAML-INERT", summary)
+        self.assertIn(".github/workflows/ci.yml", summary)
+
+    # --- the candidate filter ----------------------------------------------------
+    def test_only_github_yaml_is_a_proof_candidate(self):
+        for path in (".github/workflows/ci.yml", ".github/feature-matrix.d/sparq-core.yml",
+                     ".github/codeql/config.yml", ".github/dependabot.yaml"):
+            with self.subTest(path=path):
+                self.assertTrue(cs._yaml_proof_candidate(path))
+        for path in ("scripts/ci_select.py", "deploy/k8s/app.yml", "Cargo.lock",
+                     ".github/advisory-registry.json", ".github/CODEOWNERS",
+                     "crates/app/fixtures/x.yml"):
+            with self.subTest(path=path):
+                self.assertFalse(cs._yaml_proof_candidate(path))
+
+    def test_prover_returns_empty_without_a_base(self):
+        # Hermetic --changed-file runs carry no revision pair => no proof => full.
+        self.assertEqual(cs.yaml_inert_paths([".github/workflows/ci.yml"], None), set())
+
+    def test_prover_returns_empty_with_no_candidates(self):
+        # And does not even attempt the optional import (P1: stdlib-only still works).
+        self.assertEqual(cs.yaml_inert_paths(["crates/app/src/lib.rs"], "HEAD~1"), set())
+
+    # --- the prover, against a real git repo -------------------------------------
+    def _repo(self):
+        if shutil.which("git") is None:
+            self.skipTest("git unavailable")
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML unavailable (the proof self-disables; see #5237)")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _git(tmp, "init", "-b", "main", "-q")
+        _git(tmp, "config", "user.email", "t@example.invalid")
+        _git(tmp, "config", "user.name", "t")
+        _git(tmp, "config", "commit.gpgsign", "false")
+        return tmp
+
+    def _write(self, repo, rel, text):
+        path = Path(repo) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _commit(self, repo, msg):
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", msg)
+
+    def _branch_with(self, head_content, rel=".github/workflows/ci.yml",
+                     base_content=_WF_BASE):
+        """main holds `base_content`; a `pr` branch off it holds `head_content`
+        (None => the file is deleted). Returns (repo, changed_paths)."""
+        repo = self._repo()
+        self._write(repo, rel, base_content)
+        self._write(repo, "crates/app/src/lib.rs", "// app\n")
+        self._commit(repo, "base")
+        _git(repo, "checkout", "-q", "-b", "pr")
+        if head_content is None:
+            (Path(repo) / rel).unlink()
+        else:
+            self._write(repo, rel, head_content)
+        self._commit(repo, "pr")
+        return repo, [rel]
+
+    def test_comment_only_edit_is_proven_inert(self):
+        # THE HEADLINE CASE (#5237 / the unaddressed half of #2536).
+        repo, changed = self._branch_with(_WF_COMMENT_ONLY)
+        self.assertEqual(cs.yaml_inert_paths(changed, "main", "pr", repo),
+                         {".github/workflows/ci.yml"})
+
+    def test_block_scalar_comment_edit_is_not_inert(self):
+        # A comment inside `run: |` is part of the executed script string.
+        repo, changed = self._branch_with(_WF_BLOCK_SCALAR_COMMENT)
+        self.assertEqual(cs.yaml_inert_paths(changed, "main", "pr", repo), set())
+
+    def test_behaviour_change_is_not_inert(self):
+        repo, changed = self._branch_with(_WF_BEHAVIOUR)
+        self.assertEqual(cs.yaml_inert_paths(changed, "main", "pr", repo), set())
+
+    def test_added_workflow_is_not_inert(self):
+        repo = self._repo()
+        self._write(repo, "crates/app/src/lib.rs", "// app\n")
+        self._commit(repo, "base")
+        _git(repo, "checkout", "-q", "-b", "pr")
+        self._write(repo, ".github/workflows/new.yml", _WF_BASE)
+        self._commit(repo, "pr")
+        self.assertEqual(
+            cs.yaml_inert_paths([".github/workflows/new.yml"], "main", "pr", repo), set(),
+            "a NEW workflow has no merge-base blob — it can never be proven inert")
+
+    def test_deleted_workflow_is_not_inert(self):
+        repo, changed = self._branch_with(None)
+        self.assertEqual(cs.yaml_inert_paths(changed, "main", "pr", repo), set())
+
+    def test_malformed_yaml_at_head_is_not_inert(self):
+        repo, changed = self._branch_with(_WF_BASE + "\n  : : not yaml\n")
+        self.assertEqual(cs.yaml_inert_paths(changed, "main", "pr", repo), set())
+
+    def test_unresolvable_revisions_fail_closed(self):
+        repo, changed = self._branch_with(_WF_COMMENT_ONLY)
+        self.assertEqual(
+            cs.yaml_inert_paths(changed, "no-such-ref", "pr", repo), set(),
+            "an unresolvable merge-base must prove nothing (fail-closed)")
+
+    def test_the_base_side_is_the_merge_base_not_the_base_tip(self):
+        # SOUNDNESS PIN on the merge-base choice. `changed_paths` comes from the
+        # three-dot diff `base...head`, i.e. it is computed against the MERGE-BASE.
+        # Here main advances with a REAL ci.yml change after the branch point and the
+        # PR lands the identical change, so base-tip and head agree while merge-base
+        # and head do not. Comparing `base:path` vs `head:path` would call this edit
+        # inert and skip the matrix for a genuine workflow change; comparing
+        # merge-base vs head correctly proves nothing.
+        repo = self._repo()
+        rel = ".github/workflows/ci.yml"
+        self._write(repo, rel, _WF_BASE)
+        self._write(repo, "crates/app/src/lib.rs", "// app\n")
+        self._commit(repo, "merge-base")
+        _git(repo, "checkout", "-q", "-b", "pr")
+        self._write(repo, rel, _WF_BEHAVIOUR)
+        self._commit(repo, "pr lands the change")
+        _git(repo, "checkout", "-q", "main")
+        self._write(repo, rel, _WF_BEHAVIOUR)
+        self._commit(repo, "main lands the same change")
+        # Sanity: the three-dot diff DOES list the file (so a proof is attempted)...
+        self.assertEqual(cs.git_changed_paths("main", "pr", repo), [rel])
+        # ...and the base-tip blobs are equal — the trap this test exists to pin.
+        self.assertEqual(_run_git_show(repo, "main", rel), _run_git_show(repo, "pr", rel))
+        self.assertEqual(cs.yaml_inert_paths([rel], "main", "pr", repo), set())
+
+    # --- end to end through main() -----------------------------------------------
+    def test_end_to_end_comment_only_workflow_pr_selects_instead_of_fulls(self):
+        repo, _ = self._branch_with(_WF_COMMENT_ONLY)
+        meta_file = Path(repo) / "meta.json"
+        meta_file.write_text(json.dumps(_synthetic_meta()), encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cs.main(["--event", "pull_request", "--base", "main", "--head", "pr",
+                            "--repo-root", repo, "--metadata-file", str(meta_file)])
+        self.assertEqual(code, 0)
+        obj = json.loads(buf.getvalue())
+        self.assertEqual(obj["mode"], "selected",
+                         "a comment-only Rust-CI workflow edit must no longer force the "
+                         "full matrix (#5237)")
+        self.assertEqual(obj["affected"], [])
+
+    def test_end_to_end_block_scalar_comment_pr_still_fulls(self):
+        repo, _ = self._branch_with(_WF_BLOCK_SCALAR_COMMENT)
+        meta_file = Path(repo) / "meta.json"
+        meta_file.write_text(json.dumps(_synthetic_meta()), encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cs.main(["--event", "pull_request", "--base", "main", "--head", "pr",
+                            "--repo-root", repo, "--metadata-file", str(meta_file)])
+        self.assertEqual(code, 0)
+        obj = json.loads(buf.getvalue())
+        self.assertEqual(obj["mode"], "full")
+
+
+def _run_git_show(repo, rev, rel):
+    return subprocess.run(["git", "show", f"{rev}:{rel}"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout
+
+
 class RealMetadataShapeTests(unittest.TestCase):
     """(i) Pinned against the REAL workspace metadata: core is root-like, geo is
     leaf-like, and closure(geo) is a subset of closure(core) (structural: geo

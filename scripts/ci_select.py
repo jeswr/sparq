@@ -48,9 +48,15 @@
 #   ci_select.py --changed-file paths.txt \        # hermetic inputs (tests): newline-delimited
 #                --metadata-file meta.json          # cargo metadata JSON snapshot
 #
-# Stdlib only (design §7 P1): no third-party deps, no compile step. Runs under
-# the CI setup-python 3.12; `tomllib` (stdlib >= 3.11) is imported lazily and
-# only when a map file is actually present.
+# Stdlib only (design §7 P1): no REQUIRED third-party deps, no compile step. Runs
+# under the CI setup-python 3.12; `tomllib` (stdlib >= 3.11) is imported lazily and
+# only when a map file is actually present. [OPUS-5] #5237 adds ONE OPTIONAL import
+# on the same terms — `yaml`, imported lazily and only when a `.github/**/*.yml`
+# path is in the diff, used solely to PROVE a comment-only workflow edit inert. Its
+# absence is not an error: the proof is simply unavailable and every such path falls
+# back to the `.github/` full-run trigger, i.e. exactly the pre-#5237 behaviour. P1
+# is therefore intact in the sense that matters — the selector never NEEDS a
+# third-party dep to produce a sound answer.
 
 from __future__ import annotations
 
@@ -210,6 +216,96 @@ def _deploy_only_match(path: str) -> bool:
     Same pre-trigger position and same fail-safe posture as
     _orchestration_safe_match — a non-matching path still hits the trigger => full."""
     return _allowlist_match(path, _DEPLOY_ONLY)
+
+
+# --- CONTENT-BASED inert-edit proof: comment-only .github YAML edits (#5237) ---
+# [OPUS-5] #5237. The two allowlists above are PATH-based proofs: they rescue files
+# that are inert NO MATTER WHAT you write in them. That cannot cover the other half
+# of #2536 — a COMMENT-ONLY edit to a workflow that genuinely DOES gate PRs (ci.yml,
+# bench.yml, fuzz.yml, feature-matrix.yml, .github/feature-matrix.d/*.yml). Those
+# files are behaviour-bearing, so no path allowlist may hold them; what is inert is
+# the particular EDIT, not the surface. So this proof is CONTENT-based:
+#
+#   a `.github/**/*.yml` edit is inert iff the file's PARSED YAML is IDENTICAL at
+#   the merge-base and at head.
+#
+# WHY THAT IS A PROOF (design §2 — a skip must be non-interference, not a guess):
+# every consumer of a `.github/**/*.yml` file that can influence a selector-gated
+# Rust lane reads it THROUGH a YAML parser — GitHub Actions itself for the workflow
+# files, PyYAML (scripts/assemble-feature-matrix.py) for the feature-matrix
+# fragments. A comment outside a block scalar does not survive parsing, so an edit
+# that leaves the parse tree bit-identical cannot change what any of them does. A
+# comment INSIDE a `run: |` block is part of the scalar string and therefore
+# compares UNEQUAL — the file is not proven inert and we fail closed to the full
+# matrix, which is exactly right (that text is the shell script CI executes, and
+# several wiring tests assert on it verbatim).
+#
+# FAIL-CLOSED AT EVERY STEP — this can only ever return FEWER paths than the truth,
+# never more, so the selection stays a superset of the sound one:
+#   * PyYAML absent            => set() (P1 keeps ci_select.py runnable on stdlib
+#                                 alone; the import is lazy and only attempted when
+#                                 there is a candidate path, so a stdlib-only run of
+#                                 the selector behaves exactly as it did pre-#5237);
+#   * no base revision / hermetic --changed-file run  => set();
+#   * unresolvable merge-base, or the blob missing at either end (an ADDED or
+#     DELETED workflow) => that path is not inert;
+#   * a parse error, a multi-document file, or ANY other exception => not inert.
+_YAML_PROOF_PREFIX = ".github/"
+_YAML_PROOF_SUFFIXES = (".yml", ".yaml")
+
+
+def _yaml_proof_candidate(path: str) -> bool:
+    """[OPUS-5] #5237: is `path` eligible for the parsed-YAML inertness proof?"""
+    return path.startswith(_YAML_PROOF_PREFIX) and path.endswith(_YAML_PROOF_SUFFIXES)
+
+
+def yaml_inert_paths(
+    changed_paths: list[str],
+    base: str | None,
+    head: str = "HEAD",
+    repo_root: str | None = None,
+) -> set[str]:
+    """[OPUS-5] #5237: the subset of `changed_paths` whose `.github/**/*.yml` edit is
+    PROVEN inert because the file parses to the identical structure at the merge-base
+    and at `head`. See the section header for the proof and the fail-closed rules.
+
+    This is the IMPURE half (git + the optional PyYAML import); `select()` stays a
+    pure function of its arguments and merely consumes the resulting set, so the
+    hermetic tests can exercise the carve-out without a git repo.
+
+    The base side is the MERGE-BASE, not `base` itself, because `changed_paths` comes
+    from the three-dot diff `base...head` — comparing against `base` would compare a
+    different pair of blobs than the one that produced the path list.
+    """
+    if not base:
+        return set()
+    candidates = sorted({p.strip() for p in changed_paths if _yaml_proof_candidate(p.strip())})
+    if not candidates:
+        return set()
+    try:
+        import yaml  # optional (design §7 P1): absent => no proof => nothing is inert
+    except ImportError:
+        return set()
+    try:
+        merge_base = _run(["git", "merge-base", base, head], cwd=repo_root).strip()
+    except SelectorError:
+        return set()
+    if not merge_base:
+        return set()
+
+    inert: set[str] = set()
+    for path in candidates:
+        try:
+            before = _run(["git", "show", f"{merge_base}:{path}"], cwd=repo_root)
+            after = _run(["git", "show", f"{head}:{path}"], cwd=repo_root)
+            if yaml.safe_load(before) == yaml.safe_load(after):
+                inert.add(path)
+        except Exception:
+            # A missing blob (the file was ADDED or DELETED), an undecodable one, a
+            # parse error, a multi-document file — anything at all — leaves this path
+            # UNPROVEN, so it falls through to the `.github/` trigger => full run.
+            continue
+    return inert
 
 
 # Change-class labels emitted for the audit trail (design: the gate renders an
@@ -662,12 +758,20 @@ def select(
     changed_paths: list[str],
     meta: dict,
     map_entries: list[dict] | None = None,
+    yaml_inert: set[str] | None = None,
 ) -> Selection:
     """Pure core: changed paths + cargo metadata + optional map -> Selection.
+
+    [OPUS-5] #5237: `yaml_inert` is the set of `.github/**/*.yml` paths whose edit
+    `yaml_inert_paths()` has PROVEN inert (identical parsed YAML at merge-base and
+    head). Omit it and the selection is exactly the pre-#5237 one, which is the
+    conservative direction — an unproven path still hits the `.github/` full-run
+    trigger.
 
     Raises SelectorError on any malformed input; main() traps that to mode=full.
     """
     map_entries = map_entries or []
+    yaml_inert = yaml_inert or set()
     ws = parse_workspace(meta)
     all_members = sorted(ws.members)
     # [OPUS-5] #5249: the class layer reads the SAME map as the closure layer below,
@@ -706,6 +810,16 @@ def select(
         # listing it here keeps the selection and the CLASS on one path list.
         if _deploy_only_match(path):
             file_owners.append((path, "DEPLOY-SAFE"))
+            continue
+        # [OPUS-5] #5237: the CONTENT-based inert-edit proof, same pre-trigger
+        # position and same "contributes no crate" treatment as the two path
+        # allowlists above — it is the only rescue from the `.github/` full-run
+        # trigger for a behaviour-bearing workflow whose edit changed no parsed
+        # YAML. Membership is decided by `yaml_inert_paths()`, which fail-closes
+        # to "not inert" on a missing PyYAML, a missing base, or any parse/git
+        # error, so an unproven path still falls through to the trigger => full.
+        if path in yaml_inert:
+            file_owners.append((path, "YAML-INERT"))
             continue
         trig = _trigger_match(path)
         if trig is not None:
@@ -921,6 +1035,18 @@ def render_summary(sel: Selection) -> str:
         for path, owner in sel.file_owners:
             lines.append(f"| `{path}` | {owner} |")
         lines.append("")
+        # [OPUS-5] #5237: no silent skips — say out loud which workflow edits were
+        # rescued from the `.github/` full-run trigger by the parsed-YAML proof.
+        inert_rows = [p for p, owner in sel.file_owners if owner == "YAML-INERT"]
+        if inert_rows:
+            lines.append(
+                "> `YAML-INERT` (#5237): these `.github/**/*.yml` files parse to the "
+                "IDENTICAL structure at the merge-base and at head — the edit is "
+                "comments/whitespace outside any block scalar, so it cannot change "
+                "what CI does and does not force the full Rust matrix: "
+                + ", ".join(f"`{p}`" for p in inert_rows)
+            )
+            lines.append("")
     if sel.mode in ("selected", "shadow"):
         total = len(sel.all_members)
         run = len(sel.affected)
@@ -1100,8 +1226,15 @@ def main(argv: list[str] | None = None) -> int:
                 map_file = candidate if os.path.exists(candidate) else None
             map_entries = load_ownership_map(map_file)
 
+            # [OPUS-5] #5237: prove which `.github/**/*.yml` edits are comment-only
+            # (identical parsed YAML at merge-base and head) so they stop forcing the
+            # full matrix. Needs the two blob versions — ci-select.yml checks out with
+            # fetch-depth: 0, so both are present. Returns an empty set (= the
+            # pre-#5237 behaviour) whenever the proof is unavailable.
+            inert_yaml = yaml_inert_paths(changed, args.base, args.head, repo_root)
+
             meta = load_metadata(args.metadata_file, repo_root)
-            sel = select(changed, meta, map_entries)
+            sel = select(changed, meta, map_entries, yaml_inert=inert_yaml)
 
     except Exception as exc:  # fail-closed boundary: ANY error => full run (design §4.3)
         # We could not even build the member list; emit full with an empty
