@@ -189,6 +189,26 @@ Materialize the authorization view from the access-control documents, then enfor
 - `store.update_as(&Session, sparql)` / `store.update_as_acp(...)` — **write-path
   gating**: check every graph an update could mutate *before* applying, and
   auto-re-materialize on `.acl`/`.acr` writes.
+- `store.update_as_with_budget(&Session, sparql, &QueryBudget)` /
+  `store.update_as_acp_with_budget(...)` — the same write path under a cooperative
+  `QueryBudget`, for a caller obliged to bound **every SPARQL evaluation** it issues (an
+  agent tool surface, an HTTP handler). [FABLE-5] sq-yhlf0. The budget reaches both places an
+  update evaluates SPARQL — the authorization check's `GRAPH ?var` binding SELECT (an
+  exhausted budget there is a **deny**, nothing mutated) and the apply's
+  `DELETE`/`INSERT … WHERE`. It does **not** bound the remaining operations, and a
+  request-size cap does not cover all of them: `INSERT`/`DELETE DATA` carry their triples
+  inline (a text cap *does* bound those; `CREATE` adds one empty-graph entry), but
+  `CLEAR`/`DROP` cost whatever
+  the targeted graphs already hold — their bound is authorization, since `NAMED`/`ALL`
+  escalates to the all-graphs wildcard and a targeted `CLEAR GRAPH <g>` needs write on `g` —
+  and `LOAD` reads a file whose size is independent of the update text (refused entirely
+  unless an allowlisted base is installed via `sparq_engine::with_load_base`). A caller
+  wanting a hard ceiling on those must add it itself. A budget can only add a failure mode,
+  never widen authorization; an unlimited budget is byte-for-byte `update_as`. Failure
+  semantics are `update_as`'s, including its engine-inherited **non-atomicity on error**
+  across a `;`-separated multi-operation request (a single operation's WHERE is fully
+  evaluated before any of its delta lands, so the common over-budget case mutates
+  nothing).
 - `store.put_acl(acl_iri, content, format) -> AclWriteOutcome` /
   `store.delete_acl(acl_iri)` (+ `…_acp` variants) — **authoritative ACL write-through**
   ([OPUS-4.8] issue #992 FR-3, sq-snopa.5): the LDP `PUT`/`DELETE /resource.acl` STORAGE
