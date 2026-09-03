@@ -105,13 +105,21 @@ escalate = true
 # Registry CLAIM first keeps the item `status:deferred` during the bounded retry grace, then applies
 # the machine-owned `status:parked` soft hold if zero headroom persists; a successful retry after
 # recovery clears that hold.
+# The executable cross-repo contract lives at stable symbols, not copied prose: this repo's
+# `scripts/route-resolve.py::resolve()` propagates the flag into
+# `scripts/dispatch-plan.py::plan_dispatch()`. The registry revalidates it in
+# `jeswr/agent-account-registry/scripts/policy-resolve.py::resolve()`, then
+# `scripts/dispatch-claim.py::escalate_starved()` and `::escalate_persist_decision()` enforce the
+# zero-headroom observation and bounded grace. Its `::_park_source_issue()` delegates the label
+# transition to `scripts/worker-issue.py::set_status(..., "parked")`; the same function's `"retry"`
+# transition clears both `status:deferred` and `status:parked` when capacity recovers.
 # This keeps the route fail-closed without turning provider capacity into a human-owned terminal.
 # The separate post-review trust/soundness arm remains human-gated.
 [[route]]
 match_labels = ["zk", "mpc", "reasoner", "crypto", "auth", "e2ee"]
 model_chain = ["opus5"]
 agent = "sparq-reviewer"
-escalate = true                        # capacity: bounded defer -> machine status:parked, not needs:user
+escalate = true                        # capacity contract above; registry _park_source_issue(), never needs:user
 
 # ---------------------------------------------------------------------------------------------------
 # [SPARQ agent] ROLE ROUTES. The 2026-09-02 maintainer protocol separates responsibilities: GPT-5.6
@@ -211,7 +219,8 @@ escalate = true
 # [SPARQ agent] CI/infrastructure is implementation and therefore uses the same Sol-first lane. Opus 5
 # reviews the resulting OpenAI-authored PR through the registry-owned review chain.
 # The chain is deliberately frontier-only rather than floor-pinned. `escalate = true` uses the
-# registry's bounded capacity-starvation path: retry first, then a visible machine-owned park.
+# registry's `dispatch-claim.py::{escalate_starved, escalate_persist_decision,
+# _park_source_issue}` path: retry first, then a visible machine-owned park, never `needs:user`.
 # This is intentional for CI: exhaustion of both providers must not become an unbounded silent
 # defer loop; `status:parked` remains machine-recoverable when capacity returns.
 # scripts/triage.py derives role:ci for infra-surface labels (area:ci/area:ci-fragments/

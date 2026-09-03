@@ -280,17 +280,19 @@ def _self_test():
         (["sol", "terra", "opus5"], "sparq-docs", True))
     chk("docs chain has no cheap anthropic tier",
         sorted(set(resolve(["role:docs", "area:x"], doc)[0]) & NOT_A_ROUTING_TARGET), [])
-    chk("site -> Sol-first implementation",
-        resolve(["role:site", "area:site"], doc)[0::2], (["sol", "opus5"], True))
+    site_mc, _site_agent, site_esc = resolve(["role:site", "area:site"], doc)
+    chk("site -> Sol-first implementation", (site_mc, site_esc), (["sol", "opus5"], True))
     # CI is implementation under the same Sol-first protocol.
     mc, ag, esc = resolve(["role:ci", "area:ci"], doc)
     chk("ci -> Sol-first implementation", (mc, ag, esc),
         (["sol", "opus5"], "sparq-ci-infra", True))
     chk("ci chain has no sub-frontier tier", sorted(set(mc) & {"sonnet", "haiku"}), [])
+    default_mc, _default_agent, default_esc = resolve(["area:sparq-core"], doc)
     chk("no role -> Sol-first defaults",
-        resolve(["area:sparq-core"], doc)[0::2], (["sol", "opus5"], True))
+        (default_mc, default_esc), (["sol", "opus5"], True))
+    perf_mc, _perf_agent, perf_esc = resolve(["role:perf", "area:sparq-engine"], doc)
     chk("perf -> Sol-first implementation",
-        resolve(["role:perf", "area:sparq-engine"], doc)[0::2], (["sol", "opus5"], True))
+        (perf_mc, perf_esc), (["sol", "opus5"], True))
 
     # ---------------------------------------------------------------------------------------------
     # [SPARQ agent] SOL IMPLEMENTATION + OPUS REVIEW (maintainer protocol 2026-09-02).
