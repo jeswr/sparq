@@ -38,8 +38,9 @@ sparq's public API is partitioned into two tiers. The tier is a property of a **
 
 The surface a downstream consumer is *encouraged to depend on*, and the surface the freeze
 (once ratified) will cover. It is deliberately **small**: the in-process embedding front
-door and the per-resource access-control decision API — the two surfaces the Solid-server
-consumer actually binds to.
+door, the per-resource access-control decision API, and the access-controlled query surface
+that decision API's set-shaped sibling provides — the surfaces the Solid-server consumer
+actually binds to.
 
 Once ratified, tier-1 carries the guarantees in [Tier-1 guarantees](#tier-1-guarantees)
 below.
@@ -50,10 +51,10 @@ below.
 change or be removed in any release, including a minor pre-`1.0` release, without a
 deprecation window. This includes — non-exhaustively — the rest of `sparq-serve` (the
 scheduler, the `backup` / `change-stream` / `change-sink` / `result-cache` opt-in features, the
-write-side footprint/commit internals), the graph-filtering and materialization halves of
-`sparq-solid` (`query_as` / `update_as` / `materialize_*` / the conformance harnesses), and
-every other crate in the workspace (`sparq-core`, `sparq-engine`, `sparq-server`'s HTTP
-router and types, and the opt-in capability crates). A consumer may still use tier-2
+write-side footprint/commit internals), the write and materialization halves of
+`sparq-solid` (`update_as` / `put_acl` / `delete_acl` / `materialize_*` / the conformance
+harnesses), and every other crate in the workspace (`sparq-core`, `sparq-engine`,
+`sparq-server`'s HTTP router and types, and the opt-in capability crates). A consumer may still use tier-2
 surfaces; it just does so without the stability guarantee, and should pin an exact revision.
 
 Note that `sparq-server`'s **Rust** surface being tier-2 is distinct from its **HTTP wire**
@@ -104,6 +105,41 @@ README / the `access-control` skill).
 The load-time helpers (`PodStore::new`, `materialize_wac` / `materialize_acp`) are the
 prerequisite for a decision but sit at the boundary of the frozen surface; they are listed
 as **tier-1-adjacent** and would be resolved (in or out) at ratification.
+
+### 3. The in-process access-controlled query surface — `sparq_solid`
+
+<!-- [SONNET-4.6] sq-neovc: #1248 item 3 / #992 FR-4 — WAC-as-a-call. -->
+
+The *set*-shaped sibling of item 2, for a host that holds the pod dataset in-process and
+wants the access decision as a **function call** rather than an HTTP round trip
+([#1248](https://github.com/jeswr/sparq/issues/1248) item 3,
+[#992](https://github.com/jeswr/sparq/issues/992) FR-4). Where `decide` answers *"may X do
+M on R?"* for one resource, this evaluates a query — or hands back the authorized graph
+set — under the session's view, with the same fail-closed oracle behind both (a `decide`
+allow is never wider than `query_as` would grant).
+
+- **Query as a session:** `PodStore::query_as`, `PodStore::query_json_as`, `PodStore::ask_as`.
+- **The authorized graph set / view:** `PodStore::accessible`, `PodStore::accessible_set`,
+  `PodStore::view_for`.
+
+This surface is stable only relative to a **dataset shape**, so the shape is part of the
+contract: the *named-graph-per-document* embedding contract (one document per named graph,
+named by the document IRI; no pod data in the default graph; `.acl` / `.acr` control
+documents by name; containment from the IRI path; the reserved `urn:sparq:` space; trusted
+facts only through the typed channels). It is documented on `PodStore`, and its first four
+clauses are pinned in `crates/sparq-solid/tests/embedding_contract.rs` (the last two were
+already pinned by that crate's `hardening.rs` / `acp.rs`).
+
+Two boundaries, stated plainly. Behaviour under `sparq-solid`'s opt-in features is **not**
+covered (per the opt-in-feature exclusion in [Tier-1 guarantees](#tier-1-guarantees)) — in
+particular `legacy-union-default-graph`, which swaps the read path's default-graph
+semantics; and `query_as_rewrite` — the v1 `FROM NAMED` portability path — stays tier-2.
+And listing this surface does **not** ratify the
+`sparq-server` → `sparq-solid` dependency **direction**: that edge exists today only behind
+`sparq-server`'s default-OFF `solid-authz` feature (the thin HTTP shell — `POST
+/authz/decide` / `/authz/wac-allow` / `/authz/query` — over this same library surface, bead
+`sq-snopa.6`), and making it a standing architectural commitment is a separate maintainer
+call ([#1135](https://github.com/jeswr/sparq/issues/1135)).
 
 ## Tier-1 guarantees
 

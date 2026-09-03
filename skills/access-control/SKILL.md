@@ -138,7 +138,21 @@ Materialize the authorization view from the access-control documents, then enfor
 - `store.query_as(&Session, Mode, sparql)` → `QueryResult` (`.rows`);
   `store.query_json_as(...)` → JSON string; `store.ask_as(...)` → `bool`. These evaluate
   through the engine's **zero-copy `DatasetView`** filtered to the session's authorized
-  graphs (the default, fast path).
+  graphs (the default, fast path). **API tier-1 (proposed-stable)** together with
+  `accessible` / `accessible_set` / `view_for` — the *WAC-as-a-call* in-process embedding
+  surface for a host that holds the pod dataset in memory (#1248 item 3 / #992 FR-4; freeze
+  pending maintainer ratification, see [`docs/api-stability.md`](../../docs/api-stability.md)).
+  Its stability is stated over the **named-graph-per-document embedding contract** — one
+  document per named graph named by the document IRI, no pod data in the default graph,
+  `.acl`/`.acr` control documents recognized by NAME, containment from the graph name's IRI
+  path, the reserved `urn:sparq:` space, trusted facts only via `AccessProvenance` /
+  `VerifiedCredentials`. The contract is documented on `PodStore`; its first four clauses are
+  pinned in `crates/sparq-solid/tests/embedding_contract.rs` (the last two already were, by
+  `hardening.rs` / `acp.rs`). Listing the surface does NOT ratify the
+  `sparq-server` → `sparq-solid` dependency direction — that edge exists only behind
+  `sparq-server`'s default-OFF `solid-authz` feature (`sq-snopa.6`), and making it a standing
+  architectural commitment is a separate maintainer call (#1135). `query_as_rewrite` and the
+  `legacy-union-default-graph` / `pattern-scope` features stay tier-2.
 - **Empty default graph + union-default-graph opt-in — SPEC-COMPLIANT BY DEFAULT**
   ([OPUS-4.8] sq-gq28y, issue #1546; maintainer decision "spec compliant - empty by default").
   The read path (`query_as`/`query_json_as`/`ask_as`) implements the *Access-Controlled SPARQL

@@ -196,6 +196,72 @@ fn wrap_read(sparql: &str) -> Result<String, String> {
 /// it is dropped wholesale whenever the view is re-materialized (epoch bump), so a
 /// revoked grant takes effect for all sessions at the next query.
 ///
+/// # Stability — **API tier-1 (proposed-stable)**
+///
+/// The in-process access-controlled **query** surface — [`PodStore::query_as`] /
+/// [`PodStore::query_json_as`] / [`PodStore::ask_as`] / [`PodStore::accessible`] /
+/// [`PodStore::accessible_set`] / [`PodStore::view_for`] — is proposed **tier-1**
+/// (semver-stable) in the [API stability & deprecation policy], alongside the per-resource
+/// decision surface ([`PodStore::decide`]). It is the *WAC-as-a-call* embedding shape
+/// ([#1248](https://github.com/jeswr/sparq/issues/1248) item 3 /
+/// [#992](https://github.com/jeswr/sparq/issues/992) FR-4): a host that already holds the
+/// pod dataset in-process gets a session's authorized view from a function call instead of
+/// an HTTP round trip. The freeze is **pending maintainer ratification** (#1346 / #1248) —
+/// the marker asserts a *proposal*, not an active guarantee.
+///
+/// The marker is documentation only: it adds no API, changes no behaviour, and takes no
+/// architectural decision. In particular it does not settle the `sparq-server` →
+/// `sparq-solid` dependency **direction**. That edge exists today only behind
+/// `sparq-server`'s default-OFF `solid-authz` feature — the thin HTTP shell over this
+/// library authoriser (`sq-snopa.6`) — so the default server build carries zero
+/// access-control code; ratifying the direction as a standing architectural commitment
+/// remains the maintainer's call
+/// ([#1135](https://github.com/jeswr/sparq/issues/1135)).
+///
+/// [API stability & deprecation policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
+///
+/// # Embedding contract — one named graph per document
+///
+/// The query surface above is defined over a **dataset shape**, so an embedding host owes
+/// this crate the following layout. Get a clause wrong and the authorization answers are
+/// still well-defined, just not about the resources you meant. Clauses 1–4 are pinned by
+/// `tests/embedding_contract.rs`; 5 and 6 were already pinned elsewhere and are restated
+/// here because a host has to satisfy them too.
+///
+/// 1. **One document, one named graph, named by the document's absolute, fragment-less
+///    IRI.** Authorization granularity is the whole named graph: [`PodStore::accessible`]
+///    returns *document IRIs*, and [`PodStore::query_as`] evaluates over exactly those.
+///    Two documents sharing a graph therefore share a single verdict, and a document split
+///    across graphs is governed piecewise. A fragment-identified subject (`<doc#it>`) is
+///    governed by its document's graph — there is no per-fragment authorization.
+/// 2. **Pod data never lives in the default graph.** [`PodStore::view_for`] hands the
+///    engine an empty default graph, so a triple loaded without a graph name is governed by
+///    nothing and readable by no one — not even under the [`UNION_DEFAULT_GRAPH_IRI`]
+///    opt-in, whose union is over the authorized *named* graphs.
+/// 3. **A control document is recognized by its NAME**: `<R> + ".acl"` (WAC) or
+///    `<R> + ".acr"` (ACP) is the access-control document of `<R>`. The suffix is
+///    load-bearing — the same authorization triples under any other graph name are inert
+///    pod content. Conversely, do not name a *content* document `*.acl` / `*.acr`: such a
+///    graph is not a content resource, and access to it follows `acl:Control` on the
+///    resource it appears to govern rather than that document's own grants.
+/// 4. **Containment is derived from the graph name's slash structure**, not from LDP
+///    containment triples: `https://h/a/b/doc` → `https://h/a/b/` → `https://h/a/` →
+///    `https://h/`. Containers are inheritance anchors even with no graph of their own (so
+///    `acl:default` reaches a document whose containers were never loaded) and do appear in
+///    [`PodStore::accessible`]. Name containers with a trailing `/`, matching the LDP path.
+/// 5. **The `urn:sparq:` IRI space is reserved.** Graphs named under it are dropped by
+///    [`PodStore::new`] and are never reasoning input; agent / client / origin IRIs inside
+///    it are rejected at materialization time. (Pinned by `tests/hardening.rs`.)
+/// 6. **Trusted facts arrive through the typed channels, never through the data**:
+///    creator/owner via [`AccessProvenance`], credential holdings via
+///    [`VerifiedCredentials`]. The loader hard-rejects `solidx:` triples found inside a
+///    control document, so a writer cannot self-grant. (Pinned by the
+///    `acp_forged_*_in_acr_document_does_not_grant` tests in `tests/acp.rs`.)
+///
+/// What the contract does *not* cover, and the host still owns: authenticating the WebID
+/// into a [`Session`] (this crate never does — the session is a caller-asserted claim) and
+/// mapping a request path to its graph name. See `research/sparq-solid-scope.md` §4.
+///
 /// # Examples
 ///
 /// ```
@@ -717,6 +783,9 @@ impl PodStore {
     /// (`∪ allow(principals) ∖ ∪ deny(principals)`, conditional grants applied) —
     /// cached per (agent, client, mode) until the next re-materialization.
     ///
+    /// **API tier-1 (proposed-stable)** — the *WAC-as-a-call* embedding surface; the graph
+    /// names it returns are document IRIs per the embedding contract on [`PodStore`].
+    ///
     /// Fail-closed: empty before the first `materialize_*` call, empty for sessions
     /// with no matching grants, and empty for session values inside the reserved
     /// `urn:sparq:` encoding (see [`AuthIndex::accessible`]).
@@ -731,6 +800,8 @@ impl PodStore {
     /// [`PodStore::accessible`] as the hash-set shape the engine [`DatasetView`]
     /// takes (`Arc<FxHashSet<Term>>`, shared per call — design doc §5.3: the engine
     /// holds no session state, visibility is one O(1) hash lookup per graph name).
+    ///
+    /// **API tier-1 (proposed-stable)** — see [`PodStore`] (stability + embedding contract).
     ///
     /// Same cache, same fail-closed semantics. Use it with
     /// [`sparq_engine::with_view`] when an entry point [`PodStore::query_as`] /
@@ -1062,6 +1133,8 @@ impl PodStore {
     /// is what [`PodStore::query_as`] evaluates under; take it directly to drive any
     /// other engine entry point through [`sparq_engine::with_view`].
     ///
+    /// **API tier-1 (proposed-stable)** — see [`PodStore`] (stability + embedding contract).
+    ///
     /// Fail-closed like [`PodStore::accessible`]: an un-materialized store or a
     /// grant-less session yields a view over the empty graph set, under which every
     /// graph is indistinguishable from absent.
@@ -1075,6 +1148,10 @@ impl PodStore {
     /// view** ([`sparq_engine::query_view`]) restricted to the session's authorized
     /// graph set. Two sessions running the same query see different results — the
     /// end-to-end contract.
+    ///
+    /// **API tier-1 (proposed-stable)** — the in-process entry point of the *WAC-as-a-call*
+    /// embedding surface (#1248 item 3 / #992 FR-4). Its stability is stated over the
+    /// named-graph-per-document dataset shape: see [`PodStore`].
     ///
     /// This is the default (v2) path: graph visibility is one O(1) hash check per
     /// graph name, evaluation runs in place on the existing sub-graphs (zero
@@ -1136,6 +1213,8 @@ impl PodStore {
     /// (via [`sparq_engine::query_json_view`]) instead of a materialized
     /// [`QueryResult`]. Same view path, same fail-closed semantics (incl. the
     /// `solid-sparql-query` union-default opt-in — see [`PodStore::query_as`]).
+    ///
+    /// **API tier-1 (proposed-stable)** — see [`PodStore`] (stability + embedding contract).
     pub fn query_json_as(&self, s: &Session, mode: Mode, sparql: &str) -> Result<String, String> {
         let wrapped = wrap_read(sparql)?;
         sparq_engine::query_json_view(&self.view_for(s, mode), &wrapped)
@@ -1145,6 +1224,8 @@ impl PodStore {
     /// iff the pattern is satisfiable inside the session's authorized graph set.
     /// Fail-closed: a grant-less session always gets `false` (empty view). Honours the
     /// `solid-sparql-query` union-default opt-in like [`PodStore::query_as`].
+    ///
+    /// **API tier-1 (proposed-stable)** — see [`PodStore`] (stability + embedding contract).
     pub fn ask_as(&self, s: &Session, mode: Mode, sparql: &str) -> Result<bool, String> {
         let wrapped = wrap_read(sparql)?;
         sparq_engine::ask_view(&self.view_for(s, mode), &wrapped)
