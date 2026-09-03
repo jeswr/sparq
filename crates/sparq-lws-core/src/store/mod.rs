@@ -28,6 +28,11 @@ pub mod embedded;
 #[cfg(all(feature = "http-sparq", not(target_arch = "wasm32")))]
 pub mod http;
 mod limits;
+// The REAL `object_store`-backed `BlobStore` (S3 / GCS / Azure / local filesystem / in-memory) —
+// the durable counterpart to the in-memory double, and the first impl the orphaned-bytes reconciler
+// can sweep against a real backend. Native-only, like the `object_store` dependency itself.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod object_blob;
 pub mod reconcile;
 pub mod sparq;
 pub mod sparql;
@@ -52,6 +57,8 @@ pub use limits::{
     InMemoryStoreLimits, StoreUsage, DEFAULT_IN_MEMORY_MAX_RESOURCE_COUNT,
     DEFAULT_IN_MEMORY_MAX_TOTAL_BYTES,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use object_blob::ObjectStoreBlobStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use reconcile::spawn_periodic;
 pub use reconcile::{

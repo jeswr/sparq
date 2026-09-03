@@ -251,6 +251,13 @@ sparq-policy = { path = "../sparq-policy", optional = true }
 sparq-solid = { path = "../sparq-solid", optional = true }
 sparq-trust = { path = "../sparq-trust", optional = true }
 object_store = "0.14"
+# [OPUS-5] The `object_store`-backed `BlobStore` adapter (`store::object_blob`) drains
+# `ObjectStore::list`, whose `BoxStream` needs `StreamExt`. `futures-util` is ALREADY resolved as a
+# NORMAL dependency of `object_store` itself (and transitively of axum's `ws` feature), so naming it
+# here adds NO new crate to the build — it only makes the existing dep nameable from `src/`. It is
+# already exempted `safe-to-deploy` in `supply-chain/config.toml`. The `[dev-dependencies]` entry
+# below stays: it is untargeted and also covers the wasm dev profile.
+futures-util = "0.3"
 pin-project-lite = "0.2"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio", "server-auto", "server-graceful"] }

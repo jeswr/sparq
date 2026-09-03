@@ -77,9 +77,10 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
   unreadable or uncertain resources never reach the query engine.
 - **Auth** — Solid-OIDC access tokens + mandatory DPoP, verified-token cache,
   tiered PoP: RFC 8705 mTLS cert-bound tokens and HKDF/HMAC DPoP-SK attestation.
-- **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: the in-process
-  engine (compiled by default, but selected only by `PSS_SPARQ_BACKEND=embedded` — the
-  boot default stays the in-memory double), opt-in live SPARQ HTTP client, `object_store`.
+- **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: the in-process engine
+  (compiled by default, selected only by `PSS_SPARQ_BACKEND=embedded` — the boot default stays the
+  in-memory double), opt-in live SPARQ HTTP client, and `store::ObjectStoreBlobStore`: the durable
+  `object_store` (S3/GCS/Azure/local) blob adapter the reconciler sweeps, not yet wired into the binary.
 - **Notification observability** — [GPT-5.6] process-wide backlog-overflow totals
   are available through `notifications::ws::NotificationMetrics::snapshot()`.
 - **Transport hardening** — HTTP/2 rapid-reset and HTTP/1 slowloris guards (explicit
