@@ -598,6 +598,11 @@ jobs:
       # exit codes) runs on every PR — same stdlib-only, no-deps pattern as the lints above.
       - name: Self-test Miri verdict classifier (timeout-vs-UB split + exit codes)
         run: python3 scripts/miri_classify_verdict.py --self-test
+      # [GPT-5.6] #6349: delayed scheduled Miri/Kani runs can overlap despite their cron
+      # offsets. Pin their individual and combined admission caps on every PR so an innocent
+      # matrix edit cannot silently consume the runner room reserved for PR/merge-group gates.
+      - name: Pin scheduled Miri/Kani hosted-runner admission budget
+        run: python3 scripts/tests/test_nightly_runner_budget.py
       # [FABLE-5] #3419: the issue-triage pair (scripts/triage.py + scripts/retriage.py) was
       # self-tested ONLY inside the retriage cron (retriage.yml), so a PR that changed
       # triage.py's promotion behavior (#2898: park no-area issues) broke retriage's fixture

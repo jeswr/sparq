@@ -132,7 +132,8 @@ name: kani
 on:
   workflow_dispatch:
   # Nightly safety net at 06:11 UTC — offset from ci.yml (03:17), fuzz/zk-toolchain (04:23),
-  # miri (05:11) and asan (05:41) so the heavy nightly lanes do not contend for one runner.
+  # miri (05:11) and asan (05:41) to reduce ordinary overlap. Delayed cron admission can
+  # still overlap them, so the strategy cap below is the enforceable capacity boundary.
   schedule:
     - cron: "11 6 * * *"
 
@@ -180,6 +181,10 @@ jobs:
     strategy:
       # One crate's OOM/timeout must NOT cancel the other crate's proofs.
       fail-fast: false
+      # [GPT-5.6] #6349: keep this informational matrix from admitting every long-lived
+      # proof suite while delayed Miri/PR runs are already competing for hosted runners.
+      # This throttles admission only; every suite below still receives a verdict.
+      max-parallel: 2
       matrix:
         # ADD A SUITE = ONE ENTRY (see header). harnesses = space-separated `#[kani::proof]`
         # fn names in that crate; features = extra cargo features the harnesses need.
