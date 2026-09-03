@@ -112,8 +112,8 @@ as **tier-1-adjacent** and would be resolved (in or out) at ratification.
 
 The *set*-shaped sibling of item 2, for a host that holds the pod dataset in-process and
 wants the access decision as a **function call** rather than an HTTP round trip
-([#1248](https://github.com/jeswr/sparq/issues/1248) item 3,
-[#992](https://github.com/jeswr/sparq/issues/992) FR-4). Where `decide` answers *"may X do
+([#1248](https://github.com/sparq-org/sparq/issues/1248) item 3,
+[#992](https://github.com/sparq-org/sparq/issues/992) FR-4). Where `decide` answers *"may X do
 M on R?"* for one resource, this evaluates a query — or hands back the authorized graph
 set — under the session's view, with the same fail-closed oracle behind both (a `decide`
 allow is never wider than `query_as` would grant).
@@ -143,7 +143,7 @@ And listing this surface does **not** ratify the
 `sparq-server`'s default-OFF `solid-authz` feature (the thin HTTP shell — `POST
 /authz/decide` / `/authz/wac-allow` / `/authz/query` — over this same library surface, bead
 `sq-snopa.6`), and making it a standing architectural commitment is a separate maintainer
-call ([#1135](https://github.com/jeswr/sparq/issues/1135)).
+call ([#1135](https://github.com/sparq-org/sparq/issues/1135)).
 
 ## Tier-1 guarantees
 

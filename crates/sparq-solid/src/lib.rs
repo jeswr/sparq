@@ -203,8 +203,8 @@ fn wrap_read(sparql: &str) -> Result<String, String> {
 /// [`PodStore::accessible_set`] / [`PodStore::view_for`] — is proposed **tier-1**
 /// (semver-stable) in the [API stability & deprecation policy], alongside the per-resource
 /// decision surface ([`PodStore::decide`]). It is the *WAC-as-a-call* embedding shape
-/// ([#1248](https://github.com/jeswr/sparq/issues/1248) item 3 /
-/// [#992](https://github.com/jeswr/sparq/issues/992) FR-4): a host that already holds the
+/// ([#1248](https://github.com/sparq-org/sparq/issues/1248) item 3 /
+/// [#992](https://github.com/sparq-org/sparq/issues/992) FR-4): a host that already holds the
 /// pod dataset in-process gets a session's authorized view from a function call instead of
 /// an HTTP round trip. The freeze is **pending maintainer ratification** (#1346 / #1248) —
 /// the marker asserts a *proposal*, not an active guarantee.
@@ -216,9 +216,9 @@ fn wrap_read(sparql: &str) -> Result<String, String> {
 /// library authoriser (`sq-snopa.6`) — so the default server build carries zero
 /// access-control code; ratifying the direction as a standing architectural commitment
 /// remains the maintainer's call
-/// ([#1135](https://github.com/jeswr/sparq/issues/1135)).
+/// ([#1135](https://github.com/sparq-org/sparq/issues/1135)).
 ///
-/// [API stability & deprecation policy]: https://github.com/jeswr/sparq/blob/main/docs/api-stability.md
+/// [API stability & deprecation policy]: https://github.com/sparq-org/sparq/blob/main/docs/api-stability.md
 ///
 /// # Embedding contract — one named graph per document
 ///
