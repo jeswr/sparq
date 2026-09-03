@@ -269,11 +269,17 @@ def _assert_not_truncated(rows: list, cap: int, what: str) -> list:
     return rows
 
 
-def live_counts(repo: str, gh=_gh) -> Counts:
-    """Label populations + the held-PR list, from the LIST API (never the lagging search index)."""
+def live_counts(repo: str, gh=None) -> Counts:
+    """Label populations + the held-PR list, from the LIST API (never the lagging search index).
+
+    `gh` is resolved at CALL time, never bound as a default: `_gh` is the module-level seam the
+    whole test suite (and `main`'s FakeGh harness) rebinds, and a `gh=_gh` default would capture
+    the real subprocess wrapper at import time — leaving every such rebind silently ineffective.
+    """
+    run = gh if gh is not None else _gh
 
     def label_count(label: str) -> int:
-        raw = gh(
+        raw = run(
             [
                 "issue",
                 "list",
@@ -295,7 +301,7 @@ def live_counts(repo: str, gh=_gh) -> Counts:
 
     held = _assert_not_truncated(
         json.loads(
-            gh(
+            run(
                 [
                     "pr",
                     "list",
