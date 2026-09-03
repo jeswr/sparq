@@ -604,10 +604,17 @@ jobs:
       # expectations on main SILENTLY — the KeyError surfaced a day later, out-of-band.
       # Running both hermetic self-tests HERE (stdlib-only, no gh/network: pure label-delta
       # fixtures) reds the offending PR instead of the next cron run.
-      - name: Self-test triage.py + retriage.py (static-triage + retriage-plan fixtures)
+      # [OPUS-5] #5802 adds scripts/promote.py to that set for a sharper version of the same
+      # reason: promote-on-approval.yml called it a "tested pure core", but `promote.py
+      # --self-test` was wired into NO workflow at all — the suite existed and never ran. A
+      # regression in the promotion predicate or in the paginated reaction read would first be
+      # observed as quarantined issues that silently never promote, which is a fail-QUIET defect
+      # the cron cannot report on its own. That PR wires it here AND in the cron itself.
+      - name: Self-test triage.py + retriage.py + promote.py (static-triage + retriage-plan + promotion fixtures)
         run: |
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
+          python3 scripts/promote.py --self-test
       # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
       # family — it CLEARS the `needs:area` park triage.py sets. As of #3816 it also
       # runs unattended every half hour (.github/workflows/triage-area.yml), which

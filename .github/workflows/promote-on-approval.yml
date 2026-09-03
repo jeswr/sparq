@@ -22,12 +22,20 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # [OPUS-5] #5802: the pure cores self-test BEFORE any label is written, so a regression in
+      # the promotion predicate or the (now paginated) reaction read reds here rather than
+      # silently mis-promoting live issues. Same shape as retriage.yml.
+      - name: Self-test the promotion cores
+        run: |
+          set -euo pipefail
+          python3 scripts/promote.py --self-test
+          python3 scripts/triage.py --self-test
       - name: Poll quarantined issues for maintainer approval
         run: |
           python3 - <<'PY'
           import json, os, subprocess, datetime, sys
           sys.path.insert(0, "scripts")
-          from promote import should_promote
+          from promote import fetch_reactions, should_promote
           from triage import triage
           REPO = os.environ["REPO"]
 
@@ -37,18 +45,24 @@ jobs:
           def epoch(ts):
               return int(datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()) if ts else 0
 
+          # Memoised: the paginated reaction read (#5802) can now surface hundreds of 👍 rows, and
+          # the same login recurs across issues — one permission call per distinct user, not per row.
+          _perm = {}
+
           def perm(user):
-              r = gh("api", f"repos/{REPO}/collaborators/{user}/permission", "--jq", ".permission")
-              return r.stdout.strip() if r.returncode == 0 else "none"
+              if user not in _perm:
+                  r = gh("api", f"repos/{REPO}/collaborators/{user}/permission", "--jq", ".permission")
+                  _perm[user] = r.stdout.strip() if r.returncode == 0 else "none"
+              return _perm[user]
 
           issues = json.loads(gh("issue", "list", "-R", REPO, "--label", "trust:untrusted",
                                  "--state", "open", "--limit", "200",
                                  "--json", "number,updatedAt,labels").stdout or "[]")
           for it in issues:
               n = it["number"]
-              rx = json.loads(gh("api", f"repos/{REPO}/issues/{n}/reactions").stdout or "[]")
-              reactions = [{"content": r["content"], "user": r["user"]["login"],
-                            "created_at": epoch(r["created_at"])} for r in rx]
+              # fetch_reactions paginates (#5802) and returns rows already normalised to
+              # {content, user (login), created_at (epoch)} — the shape should_promote reads.
+              reactions = fetch_reactions(REPO, n, gh)
               maints = {r["user"] for r in reactions if r["content"] == "+1" and perm(r["user"]) in ("admin", "maintain", "write")}
               if should_promote(reactions, epoch(it["updatedAt"]), maints):
                   gh("issue", "edit", str(n), "-R", REPO, "--remove-label", "trust:untrusted")
