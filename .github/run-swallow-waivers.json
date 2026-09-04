@@ -1,5 +1,5 @@
 {
- "_doc": "[OPUS-5] sparq-org/sparq#5799 / #6226 — workflow failure-swallow waivers. scripts/check-workflow-run-swallow.py checks every job that GATES (every job not declared in .github/advisory-registry.json). W1 covers statement-level `|| true` / `|| :`; W2 covers undisciplined `set +e`; W4 covers non-false step-level `continue-on-error`, including expression values. Each waiver needs {workflow, job_id, match, reason, registered}; `match` pins the specific command or named step, and W3 rejects stale declarations. This is a ratchet, not an approval list: adding an entry is deliberate, and removing a swallow is preferred.",
+ "_doc": "[OPUS-5] sparq-org/sparq#5799 / #6226 — workflow failure-swallow waivers. scripts/check-workflow-run-swallow.py checks every job that GATES (every job not declared in .github/advisory-registry.json). W1 covers statement-level `|| true` / `|| :`, including inside double-quoted command substitutions; W2 covers undisciplined `set +e`; W4 covers non-false step-level `continue-on-error`, including expression values. Each waiver needs {workflow, job_id, match, reason, registered}; `match` pins exactly one specific command or named step, and W3 rejects stale or multiply-bound declarations. This is a ratchet, not an approval list: adding an entry is deliberate, and removing a swallow is preferred.",
  "waivers": [
   {
    "workflow": "bench-ec2.yml",
@@ -175,6 +175,55 @@
    "match": "gh label create \"$1\" -R \"$REPO\"",
    "reason": "This `|| true` is what makes the label create IDEMPOTENT: `gh label create` exits non-zero when the label already exists, which is the common case. It is the fix from the #4211 review, not the bug — the ensure-then-write ordering exists so the single all-or-nothing `gh issue edit` that follows cannot fail on a missing label. The function already refuses any name outside the closed role:/status:/needs: set.",
    "registered": "2026-09-02"
+  },
+  {
+   "workflow": "bead-autoclose.yml",
+   "job_id": "close-merged-beads",
+   "match": "git log -1 --format=%s",
+   "reason": "Defensive fallback for deriving the merged change's subject when the pull-request title is already available as the primary input. A missing commit or subject produces an empty optional fallback; ci-close-merged-beads.py still receives the primary title and owns the close decision.",
+   "registered": "2026-09-04"
+  },
+  {
+   "workflow": "ci.yml",
+   "job_id": "heavy-recall-demoted-filer",
+   "match": "test(\"test \\\\(load-aware shard heavy-\"",
+   "reason": "The API query searches for a failed heavy recall shard. No matching job is a data outcome handled immediately by the empty-value branch, which records file=false; the producing shard's verdict is unaffected.",
+   "registered": "2026-09-04"
+  },
+  {
+   "workflow": "ci.yml",
+   "job_id": "coverage-demoted-filer",
+   "match": "test(\"^coverage (ratchet \\\\(shard |engine )\"",
+   "reason": "The API query searches for a failed demoted coverage leg. No matching job is a data outcome handled immediately by the empty-value branch, which records file=false; the coverage leg's verdict is unaffected.",
+   "registered": "2026-09-04"
+  },
+  {
+   "workflow": "flow-on-gates.yml",
+   "job_id": "quick-gates",
+   "match": "resolve-merge-group-pr.py",
+   "reason": "Best-effort primary resolution of the pull-request number from a merge-group ref. An empty result triggers the API fallback and then a loud fail-closed path where G2/G6 run unsuppressed.",
+   "registered": "2026-09-04"
+  },
+  {
+   "workflow": "flow-on-gates.yml",
+   "job_id": "quick-gates",
+   "match": "commits/${MERGE_HEAD_SHA}/pulls",
+   "reason": "Best-effort secondary pull-request lookup after deterministic merge-ref parsing returned empty. An empty or failed lookup reaches the loud fail-closed path where G2/G6 run unsuppressed.",
+   "registered": "2026-09-04"
+  },
+  {
+   "workflow": "slsa-builder-pin-review.yml",
+   "job_id": "review",
+   "match": "printf '%s' \"$refs\" | grep -c .",
+   "reason": "grep -c exits non-zero when the harvested reference list is empty. Zero is data consumed by the following exact-count assertion, which emits an error and exits 1 unless the count is exactly one.",
+   "registered": "2026-09-04"
+  },
+  {
+   "workflow": "vectors-aarch64.yml",
+   "job_id": "neon",
+   "match": "grep -c 'simd::tests::'",
+   "reason": "grep -c exits non-zero when no matching test is compiled. The zero count is the input to the immediately following fail-closed assertion, which emits an error and exits 1 when listed is less than one.",
+   "registered": "2026-09-04"
   }
  ]
 }

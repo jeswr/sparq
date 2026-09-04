@@ -21,8 +21,8 @@
 # writes). So the job here is not to remove them: it is to FREEZE the clean
 # inventory, so that the NEXT one has to be justified.
 #
-# Under this checker's own (narrower, see below) scope those 57 resolve to 22
-# `|| true` sites in gating jobs, every one of them declared in the waiver file,
+# Under this checker's scope those 57 resolve to all 29 `|| true` sites in gating
+# jobs, every one of them declared in the waiver file,
 # plus 7 `set +e` regions, all of which capture and act on the status.
 #
 # The checks, over every `run:` body in a job that GATES (i.e. a job whose name
@@ -180,6 +180,31 @@ def mask_quotes_and_expressions(text: str) -> str:
         if quote is None:
             if ch in ("'", '"'):
                 quote = ch
+        elif quote == '"' and text.startswith("$(", i):
+            # Double quotes do not suppress command substitution. Recursively
+            # mask its shell text while retaining operators such as `|| true`.
+            depth = 1
+            end = i + 2
+            inner_quote: str | None = None
+            while end < len(text) and depth:
+                current = text[end]
+                if inner_quote is None:
+                    if current in ("'", '"'):
+                        inner_quote = current
+                    elif current == "(":
+                        depth += 1
+                    elif current == ")":
+                        depth -= 1
+                elif current == "\\" and inner_quote == '"':
+                    end += 1
+                elif current == inner_quote:
+                    inner_quote = None
+                end += 1
+            interior_end = end - 1 if depth == 0 else len(text)
+            out[i + 2:interior_end] = mask_quotes_and_expressions(
+                text[i + 2:interior_end])
+            i = end
+            continue
         elif ch == "\\" and quote == '"':
             out[i] = " "
             if i + 1 < len(text):
@@ -192,6 +217,14 @@ def mask_quotes_and_expressions(text: str) -> str:
             out[i] = " "
         i += 1
     return "".join(out)
+
+
+def strip_shell_comment(line: str) -> str:
+    """Remove a shell comment without treating `#` in quotes as syntax."""
+    masked = mask_quotes_and_expressions(line)
+    for match in re.finditer(r"(?<!\S)#", masked):
+        return line[:match.start()]
+    return line
 
 
 def logical_lines(body: str, folded: bool) -> list[str]:
@@ -262,8 +295,10 @@ def head_command(segment: str, masked: str) -> str:
 # ---------------------------------------------------------------------------
 
 RUN_KEY_RE = re.compile(r"^(\s*)(?:-\s+)?run:\s*(.*)$")
-STEP_START_RE = re.compile(r"^(\s*)-\s+(?:name:\s*(.*)|(?:uses|run):\s*)")
-CONTINUE_ON_ERROR_RE = re.compile(r"^(\s*)continue-on-error:\s*(.*?)\s*(?:#.*)?$")
+STEP_START_RE = re.compile(r"^(\s*)-\s+\S")
+STEP_NAME_RE = re.compile(r"^(\s*)(?:-\s+)?name:\s*(.*)$")
+CONTINUE_ON_ERROR_RE = re.compile(
+    r"^(\s*)(-\s+)?continue-on-error:\s*(.*?)\s*(?:#.*)?$")
 FALSE_CONTINUE_VALUES = {"false", "null", "~", "0", ""}
 
 
@@ -271,8 +306,8 @@ def extract_run_blocks(block_text: str) -> list[tuple[str, bool]]:
     """Every `run:` body in a job block, as (text, is_folded).
 
     check-advisory-registry.extract_run_commands() drops the block-scalar STYLE,
-    and this checker needs it (see logical_lines). Comment handling is shared
-    with that module via _strip_shell_comments so the two stay consistent.
+    and this checker needs it (see logical_lines). Comments are removed only
+    after quote masking so a quoted `#` cannot hide a later swallow.
     """
     blocks: list[tuple[str, bool]] = []
     lines = block_text.splitlines()
@@ -285,7 +320,7 @@ def extract_run_blocks(block_text: str) -> list[tuple[str, bool]]:
         indent, inline = match.group(1), match.group(2).strip()
         i += 1
         if inline and inline not in ("|", ">", "|-", ">-", "|+", ">+"):
-            blocks.append((_ADV._strip_shell_comments(inline), False))
+            blocks.append((strip_shell_comment(inline), False))
             continue
         folded = inline.startswith(">")
         body: list[str] = []
@@ -293,7 +328,7 @@ def extract_run_blocks(block_text: str) -> list[tuple[str, bool]]:
             line = lines[i]
             if line.strip() and (len(line) - len(line.lstrip())) <= len(indent):
                 break
-            body.append(_ADV._strip_shell_comments(line))
+            body.append(strip_shell_comment(line))
             i += 1
         blocks.append(("\n".join(body), folded))
     return blocks
@@ -302,27 +337,42 @@ def extract_run_blocks(block_text: str) -> list[tuple[str, bool]]:
 def find_continue_on_error(block_text: str) -> list[dict]:
     """Return non-false step-level `continue-on-error` sites in one job.
 
-    Step keys are indented beneath a `- name:` / `- uses:` / `- run:` item.
+    Step keys are indented beneath a YAML list item, regardless of which mapping
+    key appears first.
     Comparing indentation keeps a job-level key out without needing a YAML
     dependency, and preserves expressions verbatim for waiver matching.
     """
     hits: list[dict] = []
     step_indent: int | None = None
     step_name = "<unnamed step>"
+    step_hit_start = 0
     for raw in block_text.splitlines():
         start = STEP_START_RE.match(raw)
         if start:
             step_indent = len(start.group(1))
-            name = (start.group(2) or "").strip().strip("\"'")
+            step_name = "<unnamed step>"
+            step_hit_start = len(hits)
+        name_match = STEP_NAME_RE.match(raw)
+        if (name_match and step_indent is not None
+                and len(name_match.group(1)) in (step_indent, step_indent + 2)):
+            name = name_match.group(2).strip().strip("\"'")
             step_name = name or "<unnamed step>"
-            continue
+            for hit in hits[step_hit_start:]:
+                value = hit["statement"].split(": continue-on-error: ", 1)[1]
+                hit["command"] = f"{step_name}: continue-on-error: {value}"
+                hit["statement"] = hit["command"]
         match = CONTINUE_ON_ERROR_RE.match(raw)
-        if not match or step_indent is None or len(match.group(1)) <= step_indent:
+        if not match or step_indent is None:
             continue
-        value = match.group(2).strip().strip("\"'")
+        match_indent = len(match.group(1))
+        dash_form = match.group(2) is not None
+        if ((dash_form and match_indent != step_indent)
+                or (not dash_form and match_indent != step_indent + 2)):
+            continue
+        value = match.group(3).strip().strip("\"'")
         if value.lower() in FALSE_CONTINUE_VALUES:
             continue
-        statement = f"{step_name}: continue-on-error: {match.group(2).strip()}"
+        statement = f"{step_name}: continue-on-error: {match.group(3).strip()}"
         hits.append({"command": statement, "head": "continue-on-error",
                      "statement": statement, "kind": "continue-on-error"})
     return hits
@@ -543,10 +593,13 @@ def check(root: Path) -> list[str]:
     offences.extend(waiver_errors)
 
     used: set[int] = set()
+    bindings: dict[int, list[dict]] = {i: [] for i in range(len(waivers))}
     for site in sites:
         matched = [i for i, w in enumerate(waivers) if waiver_matches(w, site)]
         if matched:
             used.update(matched)
+            for index in matched:
+                bindings[index].append(site)
             continue
         rule = "W4" if site.get("kind") == "continue-on-error" else "W1"
         mechanism = ("uses step-level `continue-on-error`" if rule == "W4" else
@@ -560,6 +613,16 @@ def check(root: Path) -> list[str]:
         )
 
     for index, waiver in enumerate(waivers):
+        if len(bindings[index]) > 1:
+            commands = ", ".join(repr(site["statement"][:80])
+                                 for site in bindings[index])
+            offences.append(
+                f"W3: {WAIVERS_PATH}: waiver for {waiver['workflow']}:"
+                f"{waiver['job_id']} matching {waiver['match']!r} binds to "
+                f"{len(bindings[index])} live commands ({commands}). A waiver "
+                f"must identify exactly one site; narrow its `match` and declare "
+                f"each additional swallow separately."
+            )
         if index not in used:
             offences.append(
                 f"W3: {WAIVERS_PATH}: waiver for {waiver['workflow']}:"
@@ -642,6 +705,14 @@ def _w1_cases() -> int:
          _wf("g", "hard gate",
              "gh issue comment 1 --body \"quarantined (see |x| and {y})\" || true"),
          {}, ["gh"]),
+        ("W1-negative: swallow inside a quoted command substitution",
+         _wf("g", "hard gate", 'out="$(cmd || true)"'), {}, ["cmd"]),
+        ("W1-negative: quoted command substitution used as an argument",
+         _wf("g", "hard gate", ': "$(cmd || true)"'), {}, ["cmd"]),
+        ("W1-negative: continued pipeline inside a quoted command substitution",
+         _wf("g", "hard gate", 'out="$(cmd \\\n  | head -n1 || true)"'), {}, ["head"]),
+        ("W1-negative: quoted hash is not a shell comment",
+         _wf("g", "hard gate", 'cmd --title "a # b" || true'), {}, ["cmd"]),
         ("W1-parse: a redirection is not the command word",
          _wf("g", "hard gate", "ls -la target/release >&2 || true"), {}, ["ls"]),
         ("W1-parse: an env-var prefix is not the command word",
@@ -812,6 +883,18 @@ def _w4_cases() -> int:
         ("W4-clean: quoted false", workflow("\"false\""), {}, 0),
         ("W4-clean: job-level key is outside this rule", workflow("true", job_level=True), {}, 0),
         ("W4-clean: declared advisory job", workflow("true"), {"hard gate": {}}, 0),
+        ("W4-negative: continue-on-error is the first step key",
+         f"{_WF_HEADER}  g:\n    name: hard gate\n    runs-on: ubuntu-latest\n"
+         "    steps:\n      - continue-on-error: true\n        name: assertion\n"
+         "        run: cargo test\n", {}, 1),
+        ("W4-negative: id is the first step key",
+         f"{_WF_HEADER}  g:\n    name: hard gate\n    runs-on: ubuntu-latest\n"
+         "    steps:\n      - id: assertion\n        run: cargo test\n"
+         "        continue-on-error: true\n", {}, 1),
+        ("W4-negative: if is the first step key",
+         f"{_WF_HEADER}  g:\n    name: hard gate\n    runs-on: ubuntu-latest\n"
+         "    steps:\n      - if: always()\n        run: cargo test\n"
+         "        continue-on-error: true\n", {}, 1),
     ]
     failures = 0
     for label, text, registry, expected in cases:
