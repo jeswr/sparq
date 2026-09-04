@@ -587,9 +587,10 @@ class ChangeClassTests(unittest.TestCase):
 
     def test_flow_on_rules_and_selftest_select_empty_closure(self):
         # [GPT-5] #6240: changing the reactive rule table normally entails changing
-        # its hermetic self-test. Both are orchestration-only and must avoid the
-        # broad scripts/ full-run trigger as a pair.
+        # its engine and hermetic self-test. All three are orchestration-only and
+        # must avoid the broad scripts/ full-run trigger as a group.
         sel = self._select([
+            "scripts/flow-on.py",
             "scripts/flow-on-rules.toml",
             "scripts/tests/test_flow_on.py",
         ])
