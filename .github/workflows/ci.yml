@@ -508,7 +508,8 @@ jobs:
       # .tar.zst is self-contained (binaries + the metadata nextest needs to run them
       # on another runner with `--archive-file`), so the shards never recompile.
       #
-      # [OPUS-4.8] The archive runs `--features approx-ann,filtered-ann,vec-predicate`
+      # [SONNET-4.6] The archive runs the opt-in set declared by this job's
+      # `ARCHIVE_FEATURES`
       # (#363, LOAD-BEARING): sparq-vectors' heavy recall/over-fetch/vec-predicate tests are
       # MODULE-gated (`#![cfg(feature = ...)]`) and MUST run in this sharded lane — without
       # these the gated binaries compile EMPTY and the heavy-hnsw shard's exact filter matches

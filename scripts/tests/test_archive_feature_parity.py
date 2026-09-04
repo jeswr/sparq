@@ -13,12 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 HEAVY_ALARM = REPO_ROOT / ".github" / "workflows" / "heavy-set-alarm.yml"
 BUILDFARM = REPO_ROOT / "scripts" / "ec2-buildfarm.sh"
+DOCS_QUALITY = REPO_ROOT / ".github" / "workflows" / "docs-quality.yml"
 
-_CI_FEATURES = re.compile(
-    r"^\s{6}ARCHIVE_FEATURES:\s*([^#\s]+)\s*$", re.MULTILINE
-)
-_ALARM_FEATURES = re.compile(
-    r"^\s{10}ARCHIVE_FEATURES:\s*([^#\s]+)\s*$", re.MULTILINE
+# [SONNET-4.6] Declaration depth and YAML scalar quoting are presentation details.
+_YAML_FEATURES = re.compile(
+    r"^\s+ARCHIVE_FEATURES:\s*([^#\n]+?)\s*$", re.MULTILINE
 )
 _BUILDFARM_FEATURES = re.compile(
     r'^ARCHIVE_FEATURES="\$\{BUILDFARM_FEATURES:-([^}]+)\}"$', re.MULTILINE
@@ -29,24 +28,29 @@ def extract(pattern: re.Pattern[str], text: str, source: str) -> str:
     matches = pattern.findall(text)
     if len(matches) != 1:
         raise ValueError(f"{source}: expected exactly one archive feature declaration, found {len(matches)}")
-    return matches[0]
+    return matches[0].strip().strip("'\"")
+
+
+def feature_set(features: str) -> frozenset[str]:
+    return frozenset(feature.strip() for feature in features.split(","))
 
 
 def parity_errors(ci_text: str, alarm_text: str, buildfarm_text: str) -> list[str]:
     declarations = {
-        "ci.yml build-archive": extract(_CI_FEATURES, ci_text, "ci.yml"),
+        "ci.yml build-archive": extract(_YAML_FEATURES, ci_text, "ci.yml"),
         "heavy-set-alarm.yml measurement": extract(
-            _ALARM_FEATURES, alarm_text, "heavy-set-alarm.yml"
+            _YAML_FEATURES, alarm_text, "heavy-set-alarm.yml"
         ),
         "ec2-buildfarm.sh default": extract(
             _BUILDFARM_FEATURES, buildfarm_text, "ec2-buildfarm.sh"
         ),
     }
     canonical = declarations["ci.yml build-archive"]
+    canonical_set = feature_set(canonical)
     return [
         f"{source} uses {features!r}; ci.yml uses {canonical!r}"
         for source, features in declarations.items()
-        if features != canonical
+        if feature_set(features) != canonical_set
     ]
 
 
@@ -98,6 +102,32 @@ class ArchiveFeatureParityTest(unittest.TestCase):
     def test_ci_declaration_must_be_unique(self):
         with self.assertRaisesRegex(ValueError, "exactly one"):
             parity_errors(self.ci + "\n      ARCHIVE_FEATURES: extra\n", self.alarm, self.buildfarm)
+
+    def test_yaml_indentation_quoting_and_order_are_not_semantic(self):
+        changed = self.alarm.replace(
+            "          ARCHIVE_FEATURES: approx-ann,filtered-ann,vec-predicate",
+            '      ARCHIVE_FEATURES: "filtered-ann,vec-predicate,approx-ann"',
+            1,
+        )
+        self.assertEqual(parity_errors(self.ci, changed, self.buildfarm), [])
+
+    def test_docs_quality_runs_this_suite_unconditionally(self):
+        docs_quality = DOCS_QUALITY.read_text(encoding="utf-8")
+        invocation = "run: python3 scripts/tests/test_archive_feature_parity.py"
+        invocation_line = f"        {invocation}"
+        self.assertEqual(
+            docs_quality.splitlines().count(invocation_line),
+            1,
+            "docs-quality.yml no longer invokes this suite — archive feature parity would stop being enforced",
+        )
+        steps = re.findall(
+            r"^      - name:[^\n]*\n(?:(?!^      - name:)[\s\S])*(?=^      - name:|\Z)",
+            docs_quality,
+            re.MULTILINE,
+        )
+        call_sites = [step for step in steps if invocation_line in step.splitlines()]
+        self.assertEqual(len(call_sites), 1, "expected exactly one archive parity call site")
+        self.assertNotRegex(call_sites[0], r"^        (?:if|continue-on-error):")
 
 
 if __name__ == "__main__":
