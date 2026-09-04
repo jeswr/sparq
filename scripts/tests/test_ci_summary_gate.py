@@ -77,7 +77,7 @@ def R(name, status="completed", conclusion="success", url="", started="", rid=0,
 
 
 def W(run_id, workflow_id, *, name="CI", status="completed", conclusion="success",
-      created="2026-07-21T14:00:00Z", attempt=1):
+      created="2026-07-21T14:00:00Z", attempt=1, event="push"):
     """Actions workflow-run fixture for the #3505 authoritative resolver."""
     return {
         "id": run_id,
@@ -90,6 +90,7 @@ def W(run_id, workflow_id, *, name="CI", status="completed", conclusion="success
         "created_at": created,
         "run_started_at": created,
         "run_attempt": attempt,
+        "event": event,
         "html_url": f"https://github.test/o/r/actions/runs/{run_id}",
     }
 
@@ -721,6 +722,71 @@ class TestNewestWorkflowRunResolution(unittest.TestCase):
         self.assertEqual(
             g.newest_workflow_runs([attempt_one, attempt_two])["id:7"]["run_attempt"], 2
         )
+
+    # [GPT-5] #6292: cron activity on main is reported but is not a gate sibling.
+    def test_failing_schedule_leg_is_printed_but_does_not_fail(self):
+        scheduled = W(104, 7, conclusion="failure", event="schedule")
+        check = R(
+            "nightly audit", conclusion="failure", rid=1001,
+            url="https://github.test/o/r/actions/runs/104/job/1",
+        )
+        resolved, _ = g.resolve_newest_workflow_runs([check], [scheduled], "999")
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+        self.assertIn("out-of-scope (schedule-triggered)", out)
+        self.assertIn("nightly audit: conclusion=failure", out)
+
+    def test_pending_schedule_leg_does_not_hold_or_exhaust_budget(self):
+        scheduled = W(
+            104, 7, status="in_progress", conclusion=None, event="schedule"
+        )
+        check = R(
+            "nightly audit", status="in_progress", conclusion=None, rid=1001,
+            url="https://github.test/o/r/actions/runs/104/job/1",
+        )
+        resolved, _ = g.resolve_newest_workflow_runs([check], [scheduled], "999")
+        code, out = run(tiny_cfg(max_total_polls=2), [resolved])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("timed out", out)
+        self.assertIn("nightly audit: conclusion=none (status=in_progress)", out)
+
+    def test_schedule_run_cannot_supersede_red_push_run(self):
+        push = W(103, 7, conclusion="failure", created="2026-07-21T13:00:00Z")
+        scheduled = W(
+            104, 7, event="schedule", created="2026-07-21T14:00:00Z"
+        )
+        push_check = R(
+            "required test", conclusion="failure", rid=1001,
+            url="https://github.test/o/r/actions/runs/103/job/1",
+        )
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [push_check], [push, scheduled], "999"
+        )
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1, out)
+        self.assertIn("required test", out)
+
+    def test_missing_event_remains_gating(self):
+        workflow = W(103, 7, conclusion="failure")
+        del workflow["event"]
+        resolved, _ = g.resolve_newest_workflow_runs([], [workflow], "999")
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1, out)
+
+    def test_non_schedule_events_and_feature_report_await_are_unchanged(self):
+        for event in ("workflow_run", "workflow_dispatch"):
+            with self.subTest(event=event):
+                workflow = W(103, 7, event=event)
+                group = R(
+                    "opt-in group (0)", rid=1001,
+                    url="https://github.test/o/r/actions/runs/103/job/1",
+                )
+                resolved, _ = g.resolve_newest_workflow_runs(
+                    [group], [workflow], "999"
+                )
+                code, out = run(tiny_cfg(max_total_polls=2), [resolved])
+                self.assertEqual(code, 1, out)
+                self.assertIn("feature-matrix report", out)
 
     def test_superseded_cancelled_and_failure_are_non_events(self):
         old_cancel = W(101, 7, conclusion="cancelled", created="2026-07-21T13:00:00Z")
