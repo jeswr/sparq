@@ -29,6 +29,17 @@ use sparq_core::dict::Id;
 use sparq_core::store::Pattern;
 use sparq_core::Graph;
 
+// [GPT-5.6] #2801: preserve the full native differential corpora while keeping the same
+// repeated-term and multi-chunk shapes tractable under Miri's instruction interpreter.
+#[cfg(not(miri))]
+const SYNTHETIC_NT_ROWS: u32 = 3000;
+#[cfg(miri)]
+const SYNTHETIC_NT_ROWS: u32 = 128;
+#[cfg(not(miri))]
+const SYNTHETIC_TURTLE_ROWS: u32 = 1500;
+#[cfg(miri)]
+const SYNTHETIC_TURTLE_ROWS: u32 = 128;
+
 fn iri(s: &str) -> Term {
     Term::NamedNode(NamedNode::new_unchecked(s.to_string()))
 }
@@ -198,7 +209,7 @@ fn synthetic_nt() -> (String, Vec<[Term; 3]>) {
     let mut nt = String::new();
     let mut reference: Vec<[Term; 3]> = Vec::new();
     let xsd_int = "http://www.w3.org/2001/XMLSchema#integer";
-    for i in 0..3000u32 {
+    for i in 0..SYNTHETIC_NT_ROWS {
         // Clustered subjects/predicates so terms recur across many shard boundaries.
         let s = format!("http://ex/s{}", i % 211);
         let p = format!("http://ex/p{}", i % 13);
@@ -223,6 +234,7 @@ fn synthetic_nt() -> (String, Vec<[Term; 3]>) {
     nt.push_str("<http://ex/s1> <http://ex/note> \"a plain string\" .\n"); // exact duplicate
     nt.push_str("<http://ex/s0> <http://ex/p0> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n"); // crosser
     reference.push([iri("http://ex/s0"), iri("http://ex/p0"), typed("0", xsd_int)]);
+    assert!(nt.len() > 8192, "fixture must still exercise chunked loading under Miri");
     (nt, reference)
 }
 
@@ -234,7 +246,7 @@ fn synthetic_turtle() -> (String, Vec<[Term; 3]>) {
     let lit = |v: &str| Term::Literal(oxrdf::Literal::new_simple_literal(v.to_string()));
     let mut ttl = String::from("@prefix ex: <http://ex/> .\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n");
     let mut reference: Vec<[Term; 3]> = Vec::new();
-    for i in 0..1500u32 {
+    for i in 0..SYNTHETIC_TURTLE_ROWS {
         let s = format!("http://ex/s{}", i % 97);
         // predicate-object list with two predicates; one object is a dotted/semicoloned literal.
         ttl.push_str(&format!(
@@ -253,6 +265,7 @@ fn synthetic_turtle() -> (String, Vec<[Term; 3]>) {
     }
     ttl.push_str("ex:end rdfs:comment \"trailing dot inside. literal\" .\n");
     reference.push([iri("http://ex/end"), iri("http://www.w3.org/2000/01/rdf-schema#comment"), lit("trailing dot inside. literal")]);
+    assert!(ttl.len() > 8192, "fixture must still exercise chunked loading under Miri");
     (ttl, reference)
 }
 
