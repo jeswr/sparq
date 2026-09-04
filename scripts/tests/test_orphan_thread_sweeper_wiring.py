@@ -24,7 +24,9 @@ from __future__ import annotations
 import copy
 import importlib.util
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -69,6 +71,20 @@ def load_module(path: Path, name: str) -> ModuleType:
 
 def run_of(step: dict) -> str:
     return str(step.get("run") or "")
+
+
+def checkout_cone(document: dict) -> list[str]:
+    """The paths the sweep's checkout materialises — its `sparse-checkout` cone.
+
+    Whitespace-separated, matching how actions/checkout reads the input, so a one-line
+    scalar and a block list are the same thing here.
+    """
+    for job in (document.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            raw = (step.get("with") or {}).get("sparse-checkout")
+            if raw:
+                return [entry for entry in str(raw).split() if entry]
+    return []
 
 
 def sweep_steps(document: dict) -> list[tuple[str, dict, dict]]:
@@ -262,6 +278,73 @@ class TestTheSweepIsReachedAndBounded(unittest.TestCase):
             f"      - name: real\n        run: python3 {SWEEP_SCRIPT} {CAP_FLAG} 10\n"
         )
         self.assertEqual(len(sweep_steps(live)), 1)
+
+
+class TestTheSelfTestCanRunInTheCheckoutTheCronGets(unittest.TestCase):
+    """The precondition step must be RUNNABLE, not merely present.
+
+    Every other pin in this file reads the workflow. None of them can see the one thing
+    that decides whether the self-test passes at 03:00: the checkout is SPARSE, and the
+    self-test resolves `.github/workflows/<file>` on disk for each registry entry. A cone
+    that omits that directory turns "runs FIRST so a regression reds the cron before a
+    single thread is touched" into "reds the cron every tick, forever" — the job fails at
+    its first step and the sweep this workflow exists for never runs at all. So this class
+    does not assert about the cone; it BUILDS one and runs the real step inside it.
+    """
+
+    def _run_in(self, cone: list[str]) -> subprocess.CompletedProcess:
+        """`--self-test`, executed in a checkout materialising exactly `cone`.
+
+        Cone mode also materialises the root-level files, so they are linked in too —
+        leaving them out would make this guard stricter than the runner and red a change
+        that in fact works.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for entry in cone + [
+                p.name for p in REPO_ROOT.iterdir() if p.is_file()
+            ]:
+                source = REPO_ROOT / entry
+                if not source.exists():
+                    continue
+                link = root / entry
+                link.parent.mkdir(parents=True, exist_ok=True)
+                if not link.exists():
+                    link.symlink_to(source)
+            script = root / SWEEP_SCRIPT
+            if not script.exists():
+                return subprocess.CompletedProcess(
+                    [], 127, "", f"{SWEEP_SCRIPT} is not in the cone {cone}"
+                )
+            return subprocess.run(
+                [sys.executable, str(script), SELF_TEST_FLAG],
+                capture_output=True,
+                text=True,
+                cwd=root,
+                check=False,
+            )
+
+    def test_the_declared_cone_is_enough_to_run_the_self_test(self) -> None:
+        cone = checkout_cone(load(SWEEP_YML))
+        self.assertTrue(cone, "the sweep's checkout declares no sparse-checkout cone")
+        done = self._run_in(cone)
+        self.assertEqual(
+            0,
+            done.returncode,
+            f"`{SELF_TEST_FLAG}` cannot run in the cron's own checkout (cone {cone}):\n"
+            f"{done.stderr}",
+        )
+
+    def test_a_cone_missing_the_workflows_directory_reds(self) -> None:
+        """MUTANT: the cone as first written. The guard must see this, or it sees nothing."""
+        done = self._run_in(["scripts"])
+        self.assertNotEqual(
+            0,
+            done.returncode,
+            "a checkout without .github/workflows passed the self-test, so this guard "
+            "cannot distinguish a runnable cone from an unrunnable one",
+        )
+        self.assertIn("codeql.yml", done.stderr)
 
 
 class TestTheYamlSeamIsIntact(unittest.TestCase):

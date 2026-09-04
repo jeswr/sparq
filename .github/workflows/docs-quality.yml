@@ -1270,6 +1270,10 @@ jobs:
       #     SHA-pinned actions, and the swallow shapes (`continue-on-error` on job or step,
       #     `if: false`, `|| true`, a left-behind `--dry-run`, a missing bound) each applied
       #     to a MUTATED copy of the real workflow so the guard is watched going red.
+      #     It also RUNS the self-test inside a checkout containing only the workflow's
+      #     declared sparse-checkout cone — a cone that cannot run the precondition step
+      #     reds the cron every tick rather than sweeping, and no structural assertion
+      #     about the YAML can see that.
       # The wiring test needs PyYAML — installed once in the shared setup above.
       - name: Self-test the orphan-thread sweep policy (eligibility rules — #4542)
         run: python3 scripts/orphan-thread-sweeper.py --self-test

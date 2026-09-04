@@ -58,7 +58,18 @@ jobs:
           # The WHOLE directory, never a file-by-file manifest — a manifest goes stale the
           # first time a script gains a sibling import and nobody remembers (see
           # rearm-sweeper.yml's account of #3776). Cone mode is what makes this recursive.
-          sparse-checkout: scripts
+          #
+          # `.github/workflows` is here because the SELF-TEST BELOW READS IT: the registry
+          # rule "an entry may only name a workflow that exists" resolves
+          # `.github/workflows/<file>` on disk, and rule 4 (the mapped workflow's live state)
+          # is unanswerable if the registry may name a file nobody can find. With `scripts`
+          # alone the self-test aborts on its first registry entry, so this step — the
+          # precondition for the whole sweep — could never pass and no thread would ever be
+          # resolved. Pinned by test_orphan_thread_sweeper_wiring.py, which runs the
+          # self-test inside a checkout containing ONLY this cone.
+          sparse-checkout: |
+            scripts
+            .github/workflows
 
       # Runs FIRST so a regression in the eligibility rules reds the cron before a single
       # thread is touched.
