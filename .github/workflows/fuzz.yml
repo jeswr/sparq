@@ -73,10 +73,11 @@ name: fuzz
 on:
   push:
     branches: [main]
-  # [OPUS-4.8] sq-fmx4u.6: toggling the `ci-full` label re-evaluates change-based
-  # selection for the fuzz lane (ci-select.yml maps it to `--full`).
-  # [SPARQ agent] #6081: ci-label-override.yml owns labeled/unlabeled events and calls this
-  # workflow only for ci-full/fuzz-full.
+  # [OPUS-4.8] sq-fmx4u.6: react to labeled/unlabeled too so toggling the `ci-full`
+  # label re-evaluates the change-based selection for the fuzz lane (ci-select.yml
+  # maps the label to `--full`, which forces the fuzz smoke to run). The default
+  # types (opened/synchronize/reopened) are listed explicitly so adding the label
+  # events does NOT drop `synchronize` (the push-to-PR trigger).
   # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
   # the `ci-full` and `fuzz-full` toggles start real work off a label event — the
   # review pipeline's review:*/status:* flips otherwise restarted this workflow on an
@@ -92,16 +93,7 @@ on:
   pull_request:
     # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
     # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
-    types: [opened, synchronize, reopened, ready_for_review]
-  # [SPARQ agent] #6081: ci-label-override.yml calls this workflow only when a
-  # ci-full/fuzz-full override changes. Ordinary label churn never reaches it.
-  workflow_call:
-    inputs:
-      label_override:
-        description: Isolate and coalesce calls from ci-label-override.yml.
-        required: false
-        default: false
-        type: boolean
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
   # REMOVED: the deterministic corpus-replay already ran + gated on the PR head
   # (select-scoped), the push-to-main run above re-replays POST-MERGE (a break on
@@ -124,13 +116,12 @@ permissions:
   contents: read
 
 concurrency:
-  # [SPARQ agent] #6081: label-router calls get a stable isolated group. A label
-  # override entering the shared per-ref group would cancel
+  # [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events get a
+  # PER-RUN group — a label-flip run entering the shared per-ref group would cancel
   # the in-flight real run on the SAME head SHA (run-level cancellation precedes job
   # `if:` evaluation), leaving cancelled check-runs that RED the ci-summary gate.
-  # Repeated override toggles replace one another; all other events retain the shared
-  # per-ref group + cancel-in-progress behavior.
-  group: fuzz-${{ github.workflow }}-${{ github.ref }}-${{ inputs.label_override && 'label-override' || 'shared' }}
+  # All other events keep the shared per-ref group + cancel-in-progress as before.
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
   cancel-in-progress: true
 
 env:

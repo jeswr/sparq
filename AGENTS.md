@@ -681,9 +681,8 @@ disappears. Fail the sweep outright on a duplicate id or an anchor that no longe
   and a too-narrow reservation puts two workers on one crate, where a too-broad one merely
   delays. Renames consume `previous_filename`, so a cross-crate move implicates both
   ends.) `--dry-run` is the default; `--apply`
-  mutates; `--backfill` sweeps every open PR (use `--pace` — each label add fires the
-  lightweight `ci-label-override` router, whose reusable calls all skip for area labels).
-  Wired to
+  mutates; `--backfill` sweeps every open PR (use `--pace` — each label add fires a
+  `pull_request: labeled` event that ci/bench/fuzz/feature-matrix all react to). Wired to
   every PR by `.github/workflows/pr-area-label.yml` (least-privilege
   `pull-requests: write`, checkout pinned to the **default branch** so a privileged token
   never runs PR-authored code, explicit fork read-only-token path, and **no `if:` at any

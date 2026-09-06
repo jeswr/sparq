@@ -345,17 +345,18 @@ belts, and rule 9 is diagnosis + a recorded decision rather than a belt (all in
    Attempt-scoped job listing supplies the completed leg inventory and prevents
    an old attempt that reused the run id from leaking into the verdict; the
    workflow-run conclusion supplies the verdict when an entire job evaporates.
-7. **A run that assembled NO LEGS is not evidence (#3781).** [OPUS-5] The
-   `ci-label-override.yml` router now owns `labeled`/`unlabeled` events (#5215).
-   For any label other than `ci-full`/`bench-full`/`fuzz-full`, all of its reusable
-   call jobs are skipped by GitHub before a runner is requested, so the heavy
-   workflows create no selector runs at all. The older fail-closed defence remains:
-   if a `ci-select` caller is invoked with such a payload, its #2546 guard skips
-   every root job and the deliberately-unconditional `select` pre-job is named
-   **`…, no-leg`**, never `…, draft-tier`. The gate treats that whole run as
-   **non-authoritative**: it is excluded from newest-run candidacy (rule 6), so the
-   previous real run stays authoritative. This prevents two failure modes first
-   measured on 2026-07-25 (#3472/#3468/#3681):
+7. **A run that assembled NO LEGS is not evidence (#3781).** [OPUS-5] A
+   `labeled`/`unlabeled` `pull_request` event whose label is not
+   `ci-full`/`bench-full`/`fuzz-full` is a guarded no-op for every `ci-select`
+   caller: the #2546 label-trigger guard skips every root job of `ci.yml`,
+   `bench.yml`, `feature-matrix.yml`, `fuzz.yml` and `vectorized-feature-off.yml`,
+   so the run's ONLY non-skipped
+   job is the deliberately-unconditional `select` pre-job. `ci-select.yml`
+   therefore names that job **`…, no-leg`**, never `…, draft-tier`, and the gate
+   treats the whole run as **non-authoritative**: it is excluded from newest-run
+   candidacy (rule 6) and every check-run it produced is a non-event, so the
+   PREVIOUS real run of that workflow stays authoritative. Two things this fixes,
+   both measured on 2026-07-25 (#3472/#3468/#3681):
    * **the deadlock.** The review pipeline re-drafts a freshly-readied worker PR
      ~13 min after the ready and flips `review:needs` in the same breath. Before
      this rule, each of the resulting no-op runs' selects came out draft-marked
@@ -368,11 +369,19 @@ belts, and rule 9 is diagnosis + a recorded decision rather than a belt (all in
      was still in flight (#3472's real CI matrix ran until 07:34:08, six minutes
      after the flip runs completed) or even a real `failure`. Ignoring the run is
      therefore strictly MORE fail-closed than the behaviour it replaces.
-   Conservative by construction: the router invokes exactly the workflows that do
-   real work for each escape label, on both application and removal. Such calls make
-   no `no-leg` claim. `scripts/tests/test_ci_select_wiring.py` evaluates the router
-   mapping and the fallback marker expression against synthetic payloads, and proves
-   by `needs:`-graph reachability that a non-escape call remains inert.
+   Conservative by construction: on a `ci-full`/`bench-full`/`fuzz-full` flip at
+   least one caller does real work, so no `no-leg` claim is made and the previous
+   behaviour stands. `scripts/tests/test_ci_select_wiring.py::TestNoLegMarkerWiring`
+   EVALUATES the marker expression against synthetic payloads and proves, by
+   `needs:`-graph reachability, that every caller job really is inert on such a
+   flip — the claim, not just the string.
+   <!-- [GPT-6-ASTRA] #6081: retain native lane identity and evidence. -->
+   Vectorized feature-OFF uses this shared pre-job without narrowing its existing
+   path/draft decisions. All three escape-label toggles still reach both root jobs;
+   other label flips run only the selector. Per-run label concurrency groups keep
+   those flips from cancelling or evicting real runs. Ordinary events add the
+   selector dependency; runner-time savings have not been measured. Workflow
+   identities, check names, reporter correlation and permissions stay native.
 8. **An unsatisfiable hold REDs immediately, with the diagnosis (#3781).**
    [OPUS-5] Rule 4's hold is a WAIT for the `ready_for_review` full-tier re-runs.
    When every sibling has CONCLUDED, a draft-marked select still lacks a successor,

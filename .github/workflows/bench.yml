@@ -26,10 +26,11 @@ on:
     # ignoring the baseline path alone never masks a genuine bench-worthy push.
     paths-ignore:
       - 'bench/perf-baseline.json'
-  # [SONNET-4.6] sq-mel85 (design §5.2, phase 2b): toggling the `ci-full` label
-  # re-evaluates change-based selection for the bench lane (ci-select.yml maps it
-  # to `--full`). [SPARQ agent] #6081: ci-label-override.yml owns labeled/unlabeled
-  # events and calls this workflow only for ci-full/bench-full.
+  # [SONNET-4.6] sq-mel85 (design §5.2, phase 2b): react to labeled/unlabeled too so
+  # toggling the `ci-full` label re-evaluates the change-based selection for the bench
+  # lane (ci-select.yml maps the label to `--full`, which forces the perf gate to run).
+  # The default types (opened/synchronize/reopened) are listed explicitly so adding the
+  # label events does NOT drop `synchronize` (the push-to-PR trigger).
   #
   # [FABLE-5] (sq-6vshe.6 heavy-lane placement, MAINTAINER-DIRECTED) On a PR the `bench`
   # job runs the FAST DETERMINISTIC form only — `ci-bench.sh --deterministic-only` — which
@@ -58,16 +59,7 @@ on:
   # §Draft-tier CI). This is independent of the label guard above and AND-composes
   # with it on the `bench` job.
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  # [SPARQ agent] #6081: ci-label-override.yml calls this workflow only when a
-  # ci-full/bench-full override changes. Ordinary label churn never reaches it.
-  workflow_call:
-    inputs:
-      label_override:
-        description: Isolate and coalesce calls from ci-label-override.yml.
-        required: false
-        default: false
-        type: boolean
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) merge_group REMOVED. The deterministic
   # byte-count ratchet is a pure function of the code: it already ran + hard-gated on the
   # PR head (--deterministic-only above), it re-runs on push-to-main below, and the
@@ -120,10 +112,8 @@ permissions:
 # there is a no-op on the real run; a PR synchronize sits in `-shared` and correctly
 # supersedes its predecessor; push/schedule stay in `-shared` and are never cancelled.
 concurrency:
-  # [SPARQ agent] #6081: keep label overrides out of the ordinary per-ref group,
-  # but coalesce repeated toggles instead of assigning every call a unique run group.
-  group: bench-${{ github.ref }}-${{ inputs.label_override && 'label-override' || 'shared' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.label_override }}
+  group: bench-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # [SONNET-4.6] sq-mel85 (design §5.2, phase 2b): the change-based test-selection
