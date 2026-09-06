@@ -372,6 +372,78 @@ fn radix_sort_rows(v: &mut Vec<[Id; 3]>) {
     }
 }
 
+/// Stable LSD radix sort of `v` by COLUMN 0 ONLY — rows that tie on column 0 keep their
+/// incoming relative order. Four passes over the four bytes of the leading column (a pass
+/// whose digit is constant across every row is skipped, so a small dictionary costs one
+/// or two passes, not four).
+///
+/// This is the primitive the DERIVED permutation build rests on
+/// ([`TripleStore::derive_perm`], sq-dzfzq): re-sorting an already-sorted run by its NEW
+/// leading column alone is enough to reach full lexicographic order, because stability
+/// preserves the source order — which is exactly the remaining two columns, ascending —
+/// inside every tie group.
+fn radix_sort_rows_by_col0(v: &mut Vec<[Id; 3]>) {
+    let n = v.len();
+    if n < 2 {
+        return;
+    }
+    // Allocated on the first pass that actually scatters; a fully constant leading column
+    // (e.g. a single-subject graph) therefore allocates nothing at all.
+    let mut scratch: Vec<[Id; 3]> = Vec::new();
+    for pass in 0..4usize {
+        let shift = (pass * 8) as u32;
+        let digit = |row: &[Id; 3]| ((row[0] >> shift) & 0xff) as usize;
+
+        let mut count = [0usize; 256];
+        for row in v.iter() {
+            count[digit(row)] += 1;
+        }
+        // Constant digit this pass -> a stable no-op; leave the partial result in `v`.
+        if count[digit(&v[0])] == n {
+            continue;
+        }
+        if scratch.len() != n {
+            scratch = vec![[0; 3]; n];
+        }
+        let mut sum = 0usize;
+        for c in count.iter_mut() {
+            let here = *c;
+            *c = sum;
+            sum += here;
+        }
+        for row in v.iter() {
+            let d = digit(row);
+            scratch[count[d]] = *row;
+            count[d] += 1;
+        }
+        std::mem::swap(v, &mut scratch);
+    }
+}
+
+/// The DERIVATION PLAN (sq-dzfzq): waves of `(source, destination)` permutation pairs.
+/// SPO is built once by the full 12-digit [`radix_sort_rows`] + the ONE dedup; every other
+/// [`BUILT`] permutation is then DERIVED from an already-materialised one by a column
+/// re-map plus a stable sort on its new leading column alone ([`radix_sort_rows_by_col0`]).
+///
+/// Pairs within a wave are independent (their sources are all already materialised) and so
+/// run concurrently; the waves themselves are ordered. Depth is 2 derivations, so the
+/// critical path is `full-sort + 2 single-column sorts` rather than six full sorts.
+///
+/// Every pair must satisfy the derivability invariant asserted in
+/// [`TripleStore::derive_perm`]: deleting the destination's leading column from the
+/// SOURCE's column order must leave the destination's other two columns, in order.
+#[cfg(not(any(target_arch = "wasm32", feature = "compact-index")))]
+const DERIVE_PLAN: &[&[(Perm, Perm)]] = &[
+    // Wave 1 — both straight off the deduped SPO run.
+    &[(Perm::Spo, Perm::Pso), (Perm::Spo, Perm::Osp)],
+    // Wave 2 — off wave 1.
+    &[(Perm::Pso, Perm::Ops), (Perm::Osp, Perm::Pos), (Perm::Osp, Perm::Sop)],
+];
+/// The `compact-index` / wasm plan: only {SPO, POS, OSP} are [`BUILT`], and POS derives
+/// from OSP (deleting P from `[O,S,P]` leaves `[O,S]` = POS's trailing columns).
+#[cfg(any(target_arch = "wasm32", feature = "compact-index"))]
+const DERIVE_PLAN: &[&[(Perm, Perm)]] = &[&[(Perm::Spo, Perm::Osp)], &[(Perm::Osp, Perm::Pos)]];
+
 impl TripleStore {
     /// Builds the [`BUILT`] permutation indexes from canonical s,p,o triples (all
     /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
@@ -408,60 +480,137 @@ impl TripleStore {
     }
 
     /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all six
-    /// by default; just SPO/POS/OSP under `compact-index`). Two `cfg`-selected bodies: the
-    /// PARALLEL build builds every permutation concurrently; the NO-THREADS build keeps the
-    /// single SPO sort+dedup and maps the rest from it. They are separate `fn` definitions so
-    /// the no-threads (wasm) codegen is byte-for-byte the historical body — this change adds
-    /// NOTHING to the feature-off bundle.
+    /// by default; just SPO/POS/OSP under `compact-index`). Two `cfg`-selected bodies — the
+    /// PARALLEL build runs each [`DERIVE_PLAN`] wave concurrently, the NO-THREADS build runs
+    /// the same plan in order — kept as separate `fn` definitions so the wasm codegen carries
+    /// no rayon shape at all.
     ///
-    /// [OPUS-4.8 sq-7d3dj.31] Concurrent-N (parallel body): build EVERY BUILT permutation (SPO
-    /// included) concurrently via the O(n) LSD radix sort, each mapping+sorting+deduping its
-    /// OWN copy straight from the raw input. This removes the serial critical-path dependency
-    /// the prior path had — where SPO was `par_sort_unstable`+deduped FIRST and the other five
-    /// could not start until that finished. Measured on this box (8T, 8 M triples, drift-
-    /// cancelled interleaved A/B): the index build (`from_triples`) is ~13-16% faster, because
-    /// the five non-SPO perms no longer wait on the SPO sort — the parallelism gain outweighs
-    /// re-deriving SPO by radix instead of reusing the deduped array. Numbers are non-canonical
-    /// (this box's thermal/contention noise); the *ratio* + the structural reason (no serial
-    /// pre-phase) are the load-bearing points.
+    /// [SONNET-4.6 sq-dzfzq] DERIVED build. One full 12-digit [`radix_sort_rows`] + ONE dedup
+    /// produces SPO; every other permutation is then [derived](Self::derive_perm) from an
+    /// already-sorted run by a column re-map plus a stable sort on its NEW LEADING COLUMN
+    /// alone — at most four byte passes over one column, usually fewer (a predicate column
+    /// that fits in a byte costs exactly one), and no dedup pass. Total sort work drops from
+    /// six full sorts (~72 byte passes over the whole row set, plus six dedups) to one full
+    /// sort plus five single-column sorts (~25 passes, one dedup). Since large-graph ingest is
+    /// memory-bandwidth bound, that traffic reduction is the point; the plan's 2-derivation
+    /// depth keeps the critical path short.
     ///
-    /// Correctness: each perm deduped INDEPENDENTLY yields the identical multiset — a duplicate
-    /// `[s,p,o]` is a duplicate in every column order, and `Vec::dedup` after a full sort
-    /// removes exactly the consecutive equals, so every BUILT perm is byte-identical to the
-    /// reference `sort_unstable`+dedup+permute. Gated by the
-    /// `from_triples_perms_match_reference_sort` differential test.
+    /// This SUPERSEDES the sq-7d3dj.31 concurrent-N build, which sorted and deduped all six
+    /// permutations independently and in parallel. Concurrent-N bought wall-clock by spending
+    /// 6x the sort work at 6x the memory traffic — a good trade only while cores sit idle and
+    /// bandwidth is not the binding constraint.
+    ///
+    /// WHICH BUILD WINS, AND WHY IT IS NOT SETTLED. The two builds trade the same quantity in
+    /// opposite directions — derived does strictly less work on a critical path of ONE full
+    /// sort plus 2 derivations, concurrent-N does six sorts' worth but on N independent tasks —
+    /// so the outcome is governed by THREADS vs PERMUTATIONS:
+    ///
+    /// * With six permutations, derived is expected to win, by a margin that NARROWS as threads
+    ///   are added, because concurrent-N is the arm that has parallelism left to spend.
+    /// * With three permutations (`compact-index`) and no threads — the wasm configuration —
+    ///   the trade does not exist and derived wins outright.
+    /// * With three permutations AND enough threads to give every permutation its own core,
+    ///   concurrent-N runs all three in parallel while the derived chain SPO->OSP->POS is
+    ///   strictly serial, so derived LOSES. This is a knowing, documented regression in a
+    ///   configuration that ships nowhere — `compact-index` is wasm-only in production
+    ///   (`BUILT` keys it on `target_arch`, and the wasm build has no threads) and is
+    ///   native-opt-in "for testing"; the one native consumer is the `bench/memtier` research
+    ///   spike. It is NOT worth a second build path here; see the follow-up issue.
+    ///
+    /// The above is the STRUCTURAL argument, and the direction of the six-permutation trade —
+    /// including whether concurrent-N eventually catches up at a high enough thread count — is
+    /// UNVERIFIED on the canonical setup. The bead's canonical gate — ingest wall + query
+    /// latency on WatDiv/synthetic-social at two scales, on the dedicated bench box — is still
+    /// OUTSTANDING and must run before this is treated as a settled multi-core win. To generate
+    /// current numbers for your own machine (non-canonical, do not commit them), run the
+    /// in-tree A/B against the replaced body, `measure_derived_vs_radix_all_build`, sweeping
+    /// `RAYON_NUM_THREADS` and the feature axis as documented on that test.
+    ///
+    /// Correctness: a column permutation is a BIJECTION on rows, so deduplicating SPO alone
+    /// deduplicates every derived permutation, and "the deduped triple set, permuted, fully
+    /// sorted" is unique — so each perm stays BYTE-IDENTICAL to the reference
+    /// `sort_unstable`+dedup+permute. Gated by the `from_triples_perms_match_reference_sort`
+    /// and `derived_perms_match_radix_all_build` differential tests.
+    ///
+    /// That byte-identity is also why this is an INGEST-ONLY change: scan/lookup/estimate, the
+    /// delta-overlay and save/open all read the same rows, in the same order, out of Vecs of
+    /// the same length AND capacity (the derived Vecs are exact-sized by construction — see
+    /// `build_raw_perms_no_capacity_slack`). There is no first-touch cost and no query-latency
+    /// dimension to trade, because no permutation is materialised any later than before. The
+    /// LAZY half of sq-dzfzq — deferring a rarely-scanned permutation to its first use, which
+    /// WOULD move cost into the query path — is deliberately NOT taken here; it is a separate,
+    /// higher-risk change and is left to a follow-up.
     #[cfg(feature = "parallel")]
-    fn build_raw_perms(triples: Vec<[Id; 3]>) -> [PermData; 6] {
-        let built: Vec<(Perm, Vec<[Id; 3]>)> = BUILT
-            .par_iter()
-            .map(|&p| {
-                let order = p.order();
-                // Pre-sized exactly from the known triple count (the mapped iterator is
-                // ExactSize, so `collect` reserves `triples.len()` up front — no grow tail).
-                let mut v: Vec<[Id; 3]> =
-                    triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
-                radix_sort_rows(&mut v);
-                v.dedup();
-                // [SONNET-4.6 sq-7d3dj.32.1] Eliminate dedup capacity slack: after dedup the Vec
-                // retains its pre-dedup allocation.  shrink_to_fit realigns len == capacity so
-                // heap_bytes() (which counts capacity()) returns zero slack per permutation.
-                // ~8 B/triple recoverable at 10 M WatDiv across 6 perms.
-                v.shrink_to_fit();
-                (p, v)
-            })
-            .collect();
+    fn build_raw_perms(mut triples: Vec<[Id; 3]>) -> [PermData; 6] {
+        radix_sort_rows(&mut triples);
+        triples.dedup();
+        // [SONNET-4.6 sq-7d3dj.32.1] Eliminate dedup capacity slack: after dedup the Vec retains
+        // its pre-dedup allocation. shrink_to_fit realigns len == capacity so heap_bytes() (which
+        // counts capacity()) returns zero slack. The DERIVED perms are exact-sized by
+        // construction (an ExactSize map-collect, then a same-length radix double-buffer).
+        triples.shrink_to_fit();
+
         let mut perms: [PermData; 6] = std::array::from_fn(|_| PermData::default());
-        for (p, v) in built {
-            perms[p as usize] = PermData::Owned(v);
+        perms[Perm::Spo as usize] = PermData::Owned(triples);
+        for wave in DERIVE_PLAN {
+            // Sources are materialised by an earlier wave, so the pairs inside a wave are
+            // independent and derive concurrently.
+            let built: Vec<(Perm, Vec<[Id; 3]>)> = wave
+                .par_iter()
+                .map(|&(src, dst)| (dst, Self::derive_perm(perms[src as usize].as_slice(), src, dst)))
+                .collect();
+            for (p, v) in built {
+                perms[p as usize] = PermData::Owned(v);
+            }
         }
         perms
     }
 
+    /// Derives the `dst` permutation from the ALREADY-SORTED `src` permutation's rows: re-map
+    /// the columns into `dst`'s layout, then stable-sort by `dst`'s leading column ALONE
+    /// ([`radix_sort_rows_by_col0`]) — at most four byte passes over one column instead of the
+    /// twelve a from-scratch [`radix_sort_rows`] costs, and no dedup pass (a column permutation
+    /// is a bijection on rows, so the deduped SPO multiset stays deduped).
+    ///
+    /// WHY ONE COLUMN SUFFICES. `src` is in full lexicographic order, so inside any group of
+    /// rows sharing a value of `dst`'s leading column the rows are still in `src` order. A
+    /// STABLE sort leaves that intra-group order untouched. So the result is fully `dst`-sorted
+    /// exactly when `src`'s order, restricted to such a group, already agrees with `dst`'s
+    /// remaining two columns — which is precisely the invariant asserted below: deleting
+    /// `dst`'s leading column from `src`'s column order leaves `dst`'s trailing columns, in
+    /// order. Every pair in [`DERIVE_PLAN`] satisfies it, and
+    /// `derive_plan_pairs_are_derivable` pins that for the plan as shipped.
+    ///
+    /// Output is BYTE-IDENTICAL to sorting the mapped rows from scratch (both are "the deduped
+    /// triple set, permuted, fully sorted" — and a fully sorted deduped set is unique), which is
+    /// what keeps scan/lookup/estimate, the delta-overlay and save/open untouched. Gated by
+    /// `from_triples_perms_match_reference_sort` and `derived_perms_match_radix_all_build`.
+    fn derive_perm(src_rows: &[[Id; 3]], src: Perm, dst: Perm) -> Vec<[Id; 3]> {
+        let (so, dor) = (src.order(), dst.order());
+        debug_assert!(
+            so.iter().copied().filter(|&c| c != dor[0]).eq(dor[1..].iter().copied()),
+            "{:?} is not derivable from {:?}: deleting the leading column does not leave the rest in order",
+            dst,
+            src
+        );
+        // Column j of a dst row is column `pick[j]` of a src row.
+        let pick: [usize; 3] =
+            std::array::from_fn(|j| so.iter().position(|&c| c == dor[j]).expect("a permutation covers every column"));
+        // Pre-sized exactly from the known row count (the mapped iterator is ExactSize, so
+        // `collect` reserves `src_rows.len()` up front — no grow tail, no capacity slack).
+        let mut v: Vec<[Id; 3]> =
+            src_rows.iter().map(|r| [r[pick[0]], r[pick[1]], r[pick[2]]]).collect();
+        radix_sort_rows_by_col0(&mut v);
+        v
+    }
+
     /// No-threads build of the permutation indexes (wasm / no-rayon path). Deduplicates via
-    /// the SPO ordering first (radix — no parallel sort to beat it here), then maps the rest
-    /// from the deduped array, reusing that array for the SPO slot. [SONNET-4.6 sq-7d3dj.32.1]
-    /// shrink_to_fit added after dedup so the SPO slot carries zero capacity slack (the five
-    /// non-SPO perms are collected from the already-deduped iterator and are already exact).
+    /// the SPO ordering first (radix — no parallel sort to beat it here), then walks
+    /// [`DERIVE_PLAN`] in order, reusing the deduped array for the SPO slot. [SONNET-4.6
+    /// sq-7d3dj.32.1] shrink_to_fit after dedup so the SPO slot carries zero capacity slack
+    /// (the derived perms are exact by construction). [SONNET-4.6 sq-dzfzq] each derived perm
+    /// now costs one single-column sort instead of a full 12-digit one — on wasm, where there
+    /// are no threads to hide the work behind, this is the whole saving.
     /// The wasm bundle byte count changes from the historical value — declared in
     /// bench/feature-off-declarations/ and bench/perf-baseline.json feature_off_exact.
     #[cfg(not(feature = "parallel"))]
@@ -473,26 +622,15 @@ impl TripleStore {
         // the full pre-dedup allocation even after duplicates are removed.
         triples.shrink_to_fit();
 
-        let build = |order: [usize; 3]| -> Vec<[Id; 3]> {
-            // Pre-sized exactly from the known triple count (the mapped iterator is
-            // ExactSize, so `collect` reserves `triples.len()` up front — no grow tail).
-            let mut v: Vec<[Id; 3]> = triples
-                .iter()
-                .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
-                .collect();
-            radix_sort_rows(&mut v);
-            v
-        };
-
-        // Build every BUILT permutation except SPO (which is the deduped `triples`).
-        let to_build: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
-        let built: Vec<Vec<[Id; 3]>> = to_build.iter().map(|p| build(p.order())).collect();
-
-        // Place each built permutation at its canonical slot; the rest stay empty.
+        // Place each permutation at its canonical slot; the rest stay empty. Every non-SPO
+        // BUILT permutation is DERIVED from an already-materialised one (sq-dzfzq) — with no
+        // threads there is nothing to overlap, so the waves just run in order and the saving is
+        // pure work: one full 12-digit sort plus one single-column sort per derived perm,
+        // instead of a full sort (and a dedup) each.
         let mut perms: [PermData; 6] = std::array::from_fn(|_| PermData::default());
         perms[Perm::Spo as usize] = PermData::Owned(triples);
-        for (p, v) in to_build.into_iter().zip(built) {
-            perms[p as usize] = PermData::Owned(v);
+        for &(src, dst) in DERIVE_PLAN.iter().copied().flatten() {
+            perms[dst as usize] = PermData::Owned(Self::derive_perm(perms[src as usize].as_slice(), src, dst));
         }
         perms
     }
@@ -938,7 +1076,9 @@ impl TripleStore {
         // dropped) — hence `merge` would reproduce `base` verbatim, rows AND sort order.
         // We therefore return the BORROWED base slice directly, restoring allocation-free
         // scans for every untouched range (the read-mostly mutated-server common case)
-        // instead of copying+re-sorting the whole range through the owned merge path.
+        // instead of paying the owned merge path — which copies the whole base range into a
+        // fresh `Vec` and merge-interleaves the (separately, already perm-sorted) in-range
+        // `added` rows. It never re-sorts the range; the cost is the copy plus the interleave.
         let rows = match &self.overlay {
             None => base,
             Some(ov) if ov.count_correction(perm, lo, hi) == (0, 0) => base,
@@ -1111,6 +1251,181 @@ mod tests {
                 let got = store.perms[perm as usize].as_slice();
                 assert_eq!(got, &want[..], "permutation {perm:?} differs from the comparison-sort reference");
             }
+        }
+    }
+
+    /// [SONNET-4.6 sq-dzfzq] The reference build the DERIVED build replaced: every BUILT
+    /// permutation mapped from the raw input and sorted+deduped INDEPENDENTLY with the full
+    /// 12-digit radix (the sq-7d3dj.31 concurrent-N body). Kept test-only as the differential
+    /// oracle for `derived_perms_match_radix_all_build` and as the "A" arm of
+    /// `measure_derived_vs_radix_all_build`.
+    fn build_raw_perms_radix_all(triples: &[[Id; 3]]) -> Vec<(Perm, Vec<[Id; 3]>)> {
+        let build = |p: Perm| {
+            let order = p.order();
+            let mut v: Vec<[Id; 3]> =
+                triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+            radix_sort_rows(&mut v);
+            v.dedup();
+            v.shrink_to_fit();
+            (p, v)
+        };
+        // Mirrors the replaced body's OWN concurrency, so the A/B compares schedules and not
+        // merely work: rayon when `parallel` is on, sequential otherwise.
+        #[cfg(feature = "parallel")]
+        {
+            BUILT.par_iter().map(|&p| build(p)).collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            BUILT.iter().map(|&p| build(p)).collect()
+        }
+    }
+
+    /// [SONNET-4.6 sq-dzfzq] The derivability invariant `derive_perm` rests on, checked for the
+    /// plan AS SHIPPED: for every `(src, dst)` pair, deleting `dst`'s LEADING column from
+    /// `src`'s column order must leave `dst`'s two trailing columns in that order — that is
+    /// exactly the condition under which a stable sort of the re-mapped rows by `dst`'s leading
+    /// column alone lands in full `dst` lexicographic order.
+    ///
+    /// Also pins the two properties that make the plan a valid *schedule*: every source is
+    /// already materialised when its wave runs (SPO, or a destination of an earlier wave), and
+    /// the plan produces each non-SPO BUILT permutation exactly once and nothing else.
+    /// Non-vacuous: swap either column of a pair and the first assertion fails.
+    #[test]
+    fn derive_plan_pairs_are_derivable() {
+        let mut have: Vec<Perm> = vec![Perm::Spo];
+        for wave in DERIVE_PLAN {
+            for &(src, dst) in wave.iter() {
+                assert!(have.contains(&src), "{src:?} is not materialised before it is used to derive {dst:?}");
+                let (so, dor) = (src.order(), dst.order());
+                let rest: Vec<usize> = so.iter().copied().filter(|&c| c != dor[0]).collect();
+                assert_eq!(rest, dor[1..], "{dst:?} is NOT derivable from {src:?} by a stable sort on its leading column");
+            }
+            // Destinations only become available to the NEXT wave.
+            for &(_, dst) in wave.iter() {
+                assert!(!have.contains(&dst), "{dst:?} is derived twice");
+                have.push(dst);
+            }
+        }
+        have.sort_unstable_by_key(|p| *p as usize);
+        let mut want: Vec<Perm> = BUILT.to_vec();
+        want.sort_unstable_by_key(|p| *p as usize);
+        assert_eq!(have, want, "the derivation plan must produce exactly the BUILT set");
+    }
+
+    /// [SONNET-4.6 sq-dzfzq] RESULT-EQUIVALENCE of the derived build: every BUILT permutation of
+    /// a derived-built store must be BYTE-IDENTICAL to the independent full-radix sort+dedup of
+    /// the same input (`build_raw_perms_radix_all` — the body the derived build replaced).
+    /// Complements `from_triples_perms_match_reference_sort` (which compares against
+    /// `sort_unstable`): this one pins the specific *replacement* claim.
+    ///
+    /// The corpora deliberately span the shapes the single-column stable sort could get wrong:
+    /// a constant leading column (no radix pass runs at all), a leading column that spans more
+    /// than one byte (multiple passes, so stability across passes matters), heavy duplicates,
+    /// and the id-space boundaries.
+    #[test]
+    fn derived_perms_match_radix_all_build() {
+        let mut st = 0x5EEDBEEFu32;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            st
+        };
+        // (subject span, predicate span, object span) — 1 means a CONSTANT column.
+        let shapes: [(u32, u32, u32); 6] = [
+            (1, 1, 1),          // every column constant: no radix pass executes anywhere
+            (1, 7, 100_000),    // constant subject, wide multi-byte object
+            (300, 1, 300),      // constant predicate
+            (100_000, 5, 3),    // wide subject, tiny object -> heavy duplicates
+            (40, 40, 40),       // all sub-byte: exactly one pass per derivation
+            (3_000_000, 900, 5_000_000), // all multi-byte
+        ];
+        for (si, pi, oi) in shapes {
+            for n in [0usize, 1, 2, 997, 6_000] {
+                let mut triples: Vec<[Id; 3]> = (0..n)
+                    .map(|_| [1 + rng() % si, 1 + rng() % pi, 1 + rng() % oi])
+                    .collect();
+                if n > 2 {
+                    // Exact duplicates and both id-space boundaries.
+                    triples.push(triples[n / 2]);
+                    triples.push([Id::MAX, Id::MAX, Id::MAX]);
+                    triples.push([0, 0, 0]);
+                    triples.push([Id::MAX, 0, Id::MAX]);
+                }
+                let want = build_raw_perms_radix_all(&triples);
+                let store = TripleStore::from_triples(triples);
+                for (perm, want_rows) in want {
+                    assert_eq!(
+                        store.perms[perm as usize].as_slice(),
+                        &want_rows[..],
+                        "derived {perm:?} differs from the independent full-radix build (shape {si}/{pi}/{oi}, n={n})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// [SONNET-4.6 sq-dzfzq] NON-CANONICAL work-box A/B for the derived permutation build —
+    /// the measure-first half of the bead. `#[ignore]`d: it times, so it must never run in the
+    /// normal test lane, and its numbers belong to whatever box ran it. Run explicitly:
+    ///
+    /// ```text
+    /// cargo test -p sparq-core --release measure_derived_vs_radix_all_build -- --ignored --nocapture
+    /// ```
+    ///
+    /// The interesting axis is THREADS vs PERMUTATIONS (see `build_raw_perms`), so sweep it:
+    /// vary `RAYON_NUM_THREADS`, and add `--no-default-features` (no threads) and/or
+    /// `--features compact-index` (three permutations) to move the other end.
+    ///
+    /// Arm A is `build_raw_perms_radix_all` — the sq-7d3dj.31 body INCLUDING its own rayon
+    /// fan-out, so this is a schedule-level comparison, not just a work-count one. Arm B is the
+    /// shipped [`TripleStore::build_raw_perms`]. The arms are interleaved and repeated so slow
+    /// drift cancels, and the input clone arm B consumes is taken OUTSIDE its timer (arm A
+    /// clones per permutation inside its own). No number is asserted — the gate is
+    /// `derived_perms_match_radix_all_build`; this only reports.
+    #[test]
+    #[ignore = "timing measurement; non-canonical, run explicitly"]
+    fn measure_derived_vs_radix_all_build() {
+        use std::time::{Duration, Instant};
+
+        // Two scales, on a shape with realistic RDF skew (few predicates, many objects).
+        for n in [200_000usize, 2_000_000] {
+            let mut st = 0xA5A5_1234u32;
+            let mut rng = || {
+                st ^= st << 13;
+                st ^= st >> 17;
+                st ^= st << 5;
+                st
+            };
+            let triples: Vec<[Id; 3]> = (0..n)
+                .map(|_| [1 + rng() % (n as u32 / 8).max(2), 1 + rng() % 60, 1 + rng() % (n as u32 / 2).max(2)])
+                .collect();
+
+            let (mut a, mut b) = (Duration::ZERO, Duration::ZERO);
+            for _ in 0..3 {
+                let t = Instant::now();
+                let ra = build_raw_perms_radix_all(&triples);
+                a += t.elapsed();
+
+                let input = triples.clone();
+                let t = Instant::now();
+                let got = TripleStore::build_raw_perms(input);
+                b += t.elapsed();
+
+                // Keep both arms alive across the timing loop AND re-check equivalence here, so
+                // the measurement can never report a speedup for a wrong answer.
+                for (perm, want) in &ra {
+                    assert_eq!(got[*perm as usize].as_slice(), &want[..], "{perm:?} differs between the two arms");
+                }
+            }
+            println!(
+                "sq-dzfzq build A/B (NON-canonical work-box) n={}: radix-all {:?} vs derived {:?} -> {:.2}x",
+                n,
+                a,
+                b,
+                a.as_secs_f64() / b.as_secs_f64()
+            );
         }
     }
 

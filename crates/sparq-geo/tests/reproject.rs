@@ -236,6 +236,11 @@ mod epsg_full {
         let g = parse_wkt_literal(&format!("<{EPSG}/3044> POINT(5432790 514940)")).unwrap();
         assert!(matches!(to_crs84(&g), Err(GeoError::Unsupported(m)) if m.contains("EPSG:3044")));
 
+        // The no-AXIS bucket is 1249 projected entries, and 1241 of them are
+        // northing-first exactly like 2180/3044 above — but the remaining 8
+        // are NOT, so the bucket as a whole is not swappable. See
+        // `registry_entries_with_an_empty_wkt_stay_refused` below.
+
         // No `+axis=`, but AXIS[…,NORTH],AXIS[…,EAST]: a pure TRANSPOSE of
         // what proj4rs would read. EPSG:8433 (Macao 1920 / Macao Grid) and
         // EPSG:8441 (Tananarive / Laborde Grid) are the registry's only two.
@@ -256,6 +261,33 @@ mod epsg_full {
         // `+axis=swu` out.
         for code in [2065, 5513, 8044, 8045] {
             assert!(proj4_definition(code).is_none(), "EPSG:{code}");
+        }
+    }
+
+    #[test]
+    fn registry_entries_with_an_empty_wkt_stay_refused() {
+        // crs-definitions 0.5.0 ships eight entries whose `wkt` string is
+        // EMPTY. They fall into the same "projected, no AXIS node" bucket as
+        // the 1241 genuinely northing-first codes, but for an unrelated
+        // reason — there is no WKT at all to carry an AXIS node — and all
+        // eight are officially EASTING/NORTHING per the EPSG registry's
+        // coordinate-system axis table (EPSG v11.022; see
+        // research/epsg-no-axis-projected-axis-order.md).
+        //
+        // They are therefore precisely the codes that a "no AXIS node means
+        // northing-first, so swap (x, y)" shortcut would silently transpose,
+        // and each is refused by the axis rule ALONE — the grid-shift and
+        // datum-less filters all pass them — so no other honesty filter is
+        // standing behind it. EPSG:8857/8858/8859 (WGS 84 / Equal Earth) are
+        // the sharpest case: plain `+datum=WGS84`, nothing else to object to.
+        for code in [3993, 6200, 6201, 6202, 6966, 8857, 8858, 8859] {
+            assert!(proj4_definition(code).is_none(), "EPSG:{code}");
+            let g = parse_wkt_literal(&format!("<{EPSG}/{code}> POINT(0 0)")).unwrap();
+            let named = format!("EPSG:{code}");
+            assert!(
+                matches!(to_crs84(&g), Err(GeoError::Unsupported(m)) if m.contains(&named)),
+                "EPSG:{code}"
+            );
         }
     }
 
