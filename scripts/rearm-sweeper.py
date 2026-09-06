@@ -1059,6 +1059,10 @@ STUCK_MARKER = "> 🤖 SPARQ agent"
 # Removing this hold requires the maintainer's separate approval, not a sweep tick.
 RERUN_HELD_PRS = frozenset({6049})
 RERUN_PHASE = "gate-rerun-claim"
+# Keep both the human marker and machine delimiters outside the park protocol.
+RERUN_MARKER = "> 🤖 [GPT-6 Astra] SPARQ agent — cancelled gate recovery (#6438)"
+RERUN_RECEIPT_OPEN = "<!-- gate-rerun-claim:"
+RERUN_RECEIPT_CLOSE = ":gate-rerun-claim -->"
 RERUN_HISTORY_QUERY = """query($owner:String!,$name:String!,$number:Int!){
   viewer{login}
   repository(owner:$owner,name:$name){pullRequest(number:$number){
@@ -1399,12 +1403,14 @@ def stuck_receipt(pull: ArmedPull, klass: str, gate: str, now: int) -> dict:
     }
 
 
-def render_receipt(receipt: dict) -> str:
+def render_receipt(
+    receipt: dict, *, opening: str = RECEIPT_OPEN, closing: str = RECEIPT_CLOSE
+) -> str:
     """One line, HTML-comment-wrapped so it renders as nothing and greps as everything."""
     return (
-        f"{RECEIPT_OPEN} "
+        f"{opening} "
         f"{json.dumps(receipt, sort_keys=True, separators=(',', ':'), ensure_ascii=False)} "
-        f"{RECEIPT_CLOSE}"
+        f"{closing}"
     )
 
 
@@ -1417,14 +1423,24 @@ def parse_stuck_receipt(body: object) -> dict | None:
     cannot read the receipt must behave as if the park were opaque, never as if it were
     satisfied.
     """
-    if not isinstance(body, str) or RECEIPT_OPEN not in body:
+    return _parse_receipt(body, RECEIPT_OPEN, RECEIPT_CLOSE)
+
+
+def parse_rerun_claim(body: object) -> dict | None:
+    """Parse only the rerun protocol; park receipts cannot claim a rerun attempt."""
+    return _parse_receipt(body, RERUN_RECEIPT_OPEN, RERUN_RECEIPT_CLOSE)
+
+
+def _parse_receipt(body: object, opening: str, closing: str) -> dict | None:
+    # [GPT-6 Astra] #6438: share the existing parser without sharing its sentinels.
+    if not isinstance(body, str) or opening not in body:
         return None
-    start = body.rfind(RECEIPT_OPEN)
-    end = body.find(RECEIPT_CLOSE, start + len(RECEIPT_OPEN))
+    start = body.rfind(opening)
+    end = body.find(closing, start + len(opening))
     if end < 0:
         return None
     try:
-        parsed = json.loads(body[start + len(RECEIPT_OPEN):end].strip())
+        parsed = json.loads(body[start + len(opening):end].strip())
     except (ValueError, TypeError):
         return None
     if not isinstance(parsed, dict):
@@ -1717,13 +1733,13 @@ class StuckArmSweeper:
         )
         state = resolve_gate(pages, is_draft=pull.is_draft)
         runs, _declared = collect_check_runs(pages)
-        run_id = None
+        check_id = None
         if runs:
             rows = [r for r in runs if r.get("name") == gate_check_name(pull.is_draft)]
             if rows:
                 ident = max(rows, key=_run_order).get("id")
-                run_id = ident if isinstance(ident, int) else None
-        return state, run_id
+                check_id = ident if isinstance(ident, int) else None
+        return state, check_id
 
     # ---- mutations. One-shot, never through the retrying read runner. -----------------
 
@@ -1771,7 +1787,10 @@ class StuckArmSweeper:
                 or check.get("head_sha") != pull.head_oid
                 or check.get("name") != GATE_CHECK_NAME
                 or check.get("status") != "completed" or check.get("conclusion") != "cancelled"):
-            raise GhError("rerun refused: check is not the cancelled Actions PR gate")
+            raise GhError(
+                "rerun refused: check is not the cancelled Actions PR gate; "
+                f"details_url={check.get('details_url')!r}"
+            )
         run_id, job_id = map(int, match.groups())
         run = get(f"actions/runs/{run_id}")
         pages = self._read_json(["api", "--paginate", "--slurp",
@@ -1832,16 +1851,23 @@ class StuckArmSweeper:
             "-f", f"owner={self.owner}", "-f", f"name={self.name}", "-F", f"number={claim['pr']}"])
         try:
             viewer = response["data"]["viewer"]
+            login = viewer["login"]
             history = response["data"]["repository"]["pullRequest"]["comments"]
             comments = history["nodes"]
             valid = (not response.get("errors")
-                and viewer["login"] in ("sparq-orchestrator[bot]", "github-actions[bot]")
                 and history["pageInfo"]["hasPreviousPage"] is False
                 and type(history["totalCount"]) is int and history["totalCount"] == len(comments))
         except (KeyError, TypeError):
             valid = False
         if not valid or not isinstance(comments, list):
-            raise GhError("rerun refused: incomplete receipt history or unknown authenticated bot")
+            raise GhError("rerun refused: incomplete receipt history or authenticated identity")
+        # The explicitly scoped workflow fallback has no actions:write. Reject it
+        # BEFORE claiming anything; a known denial must not strand an attempt.
+        if login != "sparq-orchestrator[bot]":
+            raise GhError(
+                f"rerun refused: authenticated login {login!r}; requires sparq-orchestrator[bot] "
+                "(the workflow fallback has no actions:write)"
+            )
         # GraphQL viewer has schema type User even for installation authentication.
         # Resolve its authenticated login to the public Bot node, then bind authors
         # by both server node id and login; an author-controlled body supplies neither.
@@ -1853,10 +1879,12 @@ class StuckArmSweeper:
         for comment in comments:
             if not isinstance(comment, dict) or not isinstance(comment.get("body"), str):
                 raise GhError("rerun refused: malformed receipt history")
-            body = comment["body"]
+            # GitHub may return CRLF line endings. Preserve every other byte so
+            # quotes, added prose and malformed/foreign receipts still refuse.
+            body = comment["body"].replace("\r\n", "\n")
             if RERUN_PHASE not in body:
                 continue
-            parsed = parse_stuck_receipt(body)
+            parsed = parse_rerun_claim(body)
             author = comment.get("author") or {}
             if (parsed is None or body != self.rerun_claim_body(parsed)
                     or author.get("id") != bot["node_id"] or author.get("login") != viewer["login"]
@@ -1879,10 +1907,10 @@ class StuckArmSweeper:
 
     @staticmethod
     def rerun_claim_body(claim: dict) -> str:
-        return (f"{STUCK_MARKER} — [GPT-6 Astra] cancelled gate recovery (#6438)\n\n"
+        return (f"{RERUN_MARKER}\n\n"
                 "This claim permits one Actions rerun request after fresh verification. "
                 "A rejected or uncertain request stays claimed; recovery requires separate review.\n\n"
-                + render_receipt(claim))
+                + render_receipt(claim, opening=RERUN_RECEIPT_OPEN, closing=RERUN_RECEIPT_CLOSE))
 
     def fresh_rerun_pull(self, original: ArmedPull, *, claimed: bool = False) -> ArmedPull:
         current = self.live_pull(original.number, strict=True)
@@ -1930,15 +1958,15 @@ class StuckArmSweeper:
             return
         self.log(f"[{PROGRAM}] stuck-arm PR #{pull.number}: REBASE — branch update requested")
 
-    def retrigger(self, pull: ArmedPull, run_id: int | None, detail: str) -> None:
-        if run_id is None:
+    def retrigger(self, pull: ArmedPull, check_id: int | None, detail: str) -> None:
+        if check_id is None:
             self.log(
                 f"[{PROGRAM}] stuck-arm PR #{pull.number}: SKIP — cancelled gate has no "
-                "re-requestable run id"
+                "check id to verify"
             )
             return
         self.fresh_rerun_pull(pull)
-        claim = self.rerun_target(pull, run_id)
+        claim = self.rerun_target(pull, check_id)
         self.rerun_history(claim)
         self.fresh_rerun_pull(pull)
         # Serial workflow concurrency + a BEFORE-POST claim survives both API failure
@@ -1951,7 +1979,7 @@ class StuckArmSweeper:
         if not isinstance(posted, dict) or type(posted.get("id")) is not int:
             raise GhError("rerun refused: claim response unreadable; separate recovery required")
         self.rerun_history(claim, posted["id"])
-        if self.gate_state(pull) != (GATE_CANCELLED, run_id) or self.rerun_target(pull, run_id) != claim:
+        if self.gate_state(pull) != (GATE_CANCELLED, check_id) or self.rerun_target(pull, check_id) != claim:
             raise GhError("rerun refused: latest gate/run/attempt changed after claim")
         self.fresh_rerun_pull(pull, claimed=True)
         self.gh(["api", "-X", "POST", f"repos/{self.repo}/actions/jobs/{claim['job']}/rerun"])
@@ -1961,7 +1989,7 @@ class StuckArmSweeper:
         )
 
     def apply(
-        self, pull: ArmedPull, klass: str, gate: str, run_id: int | None, detail: str
+        self, pull: ArmedPull, klass: str, gate: str, check_id: int | None, detail: str
     ) -> None:
         action = CLASS_ACTIONS[klass]
         if self.dry_run:
@@ -1976,7 +2004,7 @@ class StuckArmSweeper:
         elif action == ACTION_REBASE:
             self.rebase(pull, gate, detail)
         elif action == ACTION_RETRIGGER:
-            self.retrigger(pull, run_id, detail)
+            self.retrigger(pull, check_id, detail)
 
     # ---- the sweep --------------------------------------------------------------------
 
@@ -2006,7 +2034,7 @@ class StuckArmSweeper:
                     # Not our lane; still counted so the totals stay closed.
                     self.counts["progressing"] = self.counts.get("progressing", 0) + 1
                     continue
-                gate, run_id = self.gate_state(pull)
+                gate, check_id = self.gate_state(pull)
             except (GhError, json.JSONDecodeError) as error:
                 self.log(f"[{PROGRAM}] stuck-arm PR #{number}: SKIP — read failed ({error})")
                 self.counts["gate-indeterminate"] = (
@@ -2043,7 +2071,7 @@ class StuckArmSweeper:
                 continue
             self.actions += 1
             try:
-                self.apply(pull, klass, gate, run_id, detail)
+                self.apply(pull, klass, gate, check_id, detail)
                 self.log(
                     f"[{PROGRAM}] stuck-arm PR #{number}: {klass} -> "
                     f"{CLASS_ACTIONS[klass]} ({detail})"
@@ -2760,14 +2788,14 @@ def stuck_self_test() -> None:
         "the budget must have been spent on the ACTIONABLE PR, not on a queued one"
     )
 
-    # A cancelled gate with NO re-requestable run id must SKIP, not call the API with None.
+    # A cancelled gate with NO check id must SKIP, not call the API with None.
     fake, messages, errors, sweeper = sweep(
         {73: live_pr(73, updated=old, armed=old)},
         [check_run("gate", "cancelled", ident=None)], now_=clock,
     )
     assert sweeper.counts == {"gate-cancelled": 1}, sweeper.counts
     assert not [c for c in fake.calls if c[:3] == ["api", "-X", "POST"]], fake.calls
-    assert any("no re-requestable run id" in line for line in messages), messages
+    assert any("no check id to verify" in line for line in messages), messages
     assert errors == 0, messages
 
     # A SHORT ENUMERATION is flagged, not silently reported as a full census.

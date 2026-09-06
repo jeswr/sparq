@@ -1533,7 +1533,7 @@ class ActionsRerunFixture:
                 return "{}"
             raise AssertionError(f"unexpected mutation: {argv}")
         path = argv[-1]
-        if path == "users/sparq-orchestrator[bot]":
+        if path == f"users/{self.viewer['login']}":
             return json.dumps(dict(login=self.actor["login"],node_id=self.actor["id"],type="Bot"))
         if "/commits/" in path:
             return json.dumps(self.m.check_pages([self.check]))
@@ -1583,9 +1583,70 @@ class TestCancelledActionsRecovery(unittest.TestCase):
         self.assertEqual([c[3] for c in self.f.posts()], [
             "repos/sparq-org/sparq/issues/6360/comments",
             "repos/sparq-org/sparq/actions/jobs/202/rerun"])
-        claim = self.m.parse_stuck_receipt(self.f.comments[0]["body"])
+        claim = self.m.parse_rerun_claim(self.f.comments[0]["body"])
         self.assertEqual((claim["check"], claim["job"], claim["run"], claim["attempt"]), (101, 202, 303, 1))
         self.assertFalse(any("/rerequest" in arg for call in self.f.calls for arg in call))
+
+    def test_fallback_identity_is_refused_before_any_claim_or_rerun(self):
+        # [GPT-6 Astra] Opus B1: valid bot metadata cannot grant the explicitly
+        # unprivileged fallback a claim. Keep the real App happy path above.
+        self.f.viewer = {"login": "github-actions[bot]"}
+        self.f.actor = dict(id="BOT_ACTIONS", login="github-actions[bot]", __typename="Bot")
+        self.f.post_error = True  # model the fallback's known Actions denial
+        self.assertEqual(self.f.sweeper.run(), 1)
+        self.assertEqual(self.f.posts(), [])
+        self.assertEqual(self.f.comments, [])
+        self.assertTrue(any("github-actions[bot]" in line and "no actions:write" in line
+                            for line in self.f.logs), self.f.logs)
+
+    def test_rerun_claim_cannot_shadow_or_satisfy_a_park_receipt(self):
+        # [GPT-6 Astra] Opus B2: exercise the actual park parser/evaluator, with
+        # a new claim appearing AFTER the park in a complete comment history.
+        park = self.m.stuck_comment(self.f.original, "gate-failed", self.m.GATE_FAILURE,
+                                   "fixture park", self.f.clock)
+        self.f.comments = [dict(databaseId=501, body=park, author=self.f.actor)]
+        self.f.drive()
+        claim_body = self.f.comments[-1]["body"]
+        self.assertEqual(len(self.f.reruns()), 1)
+        self.assertNotIn(self.m.STUCK_MARKER, claim_body)
+        self.assertNotIn(self.m.RECEIPT_OPEN, claim_body)
+        self.assertIsNone(self.m.parse_stuck_receipt(claim_body))
+        self.assertIsNone(self.m.parse_rerun_claim(park))
+        expected_park = self.m.parse_stuck_receipt(park)
+        for history in (park + "\n\n" + claim_body, claim_body + "\n\n" + park):
+            selected = self.m.parse_stuck_receipt(history)
+            self.assertEqual(selected, expected_park)
+            self.assertTrue(self.m.unpark_satisfied(selected, self.f.original, self.m.GATE_SUCCESS))
+            self.assertFalse(self.m.unpark_satisfied(selected, self.f.original, self.m.GATE_FAILURE))
+        claim = self.m.parse_rerun_claim(claim_body)
+        self.assertFalse(self.m.unpark_satisfied(claim, self.f.original, self.m.GATE_SUCCESS))
+
+    def test_claim_history_cannot_change_the_existing_rearm_path(self):
+        self.f.drive()
+        claim_history = copy.deepcopy(self.f.comments)
+        for held in (False, True):
+            with self.subTest(held=held):
+                labels = ("review:pass", "needs:user") if held else ("review:pass",)
+                dropped = self.m.fixture(6360, labels=labels, armed=False)
+                dropped["comments"] = {"nodes": claim_history}
+                fake, _messages, outcome = self.m.exercise(dropped)
+                self.assertEqual(outcome.exit_code, 0)
+                self.assertEqual(len(self.m.arm_calls(fake)), 0 if held else 1)
+                # There is no production comment fetch/selector in re-arm; the
+                # separate unpark evaluator remains a human-only tool today.
+                queries = [arg for call in fake.calls for arg in call if arg.startswith("query=")]
+                self.assertFalse(any("comments(" in query for query in queries))
+
+    def test_crlf_claim_readback_preserves_integrity_and_attempt_dedupe(self):
+        def normalize_server_body():
+            self.f.comments[-1]["body"] = self.f.comments[-1]["body"].replace("\n", "\r\n")
+        self.f.after_claim = normalize_server_body
+        self.assertEqual(self.f.sweeper.run(), 0)
+        self.assertEqual(len(self.f.reruns()), 1)
+        self.f.clock += 1800
+        self.assertEqual(self.f.new_sweeper().run(), 1)
+        self.assertEqual(len(self.f.reruns()), 1)
+        self.assertEqual(len(self.f.comments), 1)
 
     def test_changed_head_draft_review_hold_queue_and_grace_never_claim(self):
         changes = [dict(headRefOid="b" * 40), dict(isDraft=True), dict(state="CLOSED"),
@@ -1687,6 +1748,7 @@ class TestCancelledActionsRecovery(unittest.TestCase):
                 (old_body,dict(self.f.actor,login="someone")),
                 (old_body,dict(self.f.actor,__typename="User")),
                 ("> " + valid_body,self.f.actor), ("```\n"+valid_body+"\n```",self.f.actor),
+                (valid_body + "\n",self.f.actor), (valid_body.replace("\n", "\r"),self.f.actor),
                 (old_body.replace('"head":"'+'b'*40+'"','"head":"invalid"'),self.f.actor),
                 (valid_body.replace('"attempt":1','"attempt":"bad"'),self.f.actor),
                 (valid_body.replace('"repo":"sparq-org/sparq"','"repo":"other/repo"'),self.f.actor),
