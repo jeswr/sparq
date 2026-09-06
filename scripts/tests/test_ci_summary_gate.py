@@ -2918,6 +2918,22 @@ class TestFeatureMatrixReporterPostCapGrace(unittest.TestCase):
         self.assertIn("bounded reporter-only grace exhausted", out)
         self.assertIn("reporter verdict never landed", out)
 
+    def test_report_success_on_final_grace_poll_cannot_skip_settle(self):
+        # [GPT-6-ASTRA] A last-poll success has only one terminal observation;
+        # the timeout fallback must not turn it green without the normal settle.
+        cfg = tiny_cfg(reporter_grace_polls=3)
+        waiting = [_grp("222"), GREEN]
+        current = [_grp("222"), _rep("222"), GREEN]
+        polls = [waiting] * (cfg.max_total_polls + cfg.reporter_grace_polls - 1)
+
+        code, out, calls = self._drive(cfg, [*polls, current])
+
+        self.assertEqual(code, 1, out)
+        self.assertEqual(calls, cfg.max_total_polls + cfg.reporter_grace_polls)
+        self.assertIn("reporter grace ended before the normal settle window", out)
+        self.assertIn("reached only 1/2 poll(s)", out)
+        self.assertNotIn("PASSED", out)
+
     def test_current_report_failure_during_grace_still_reds(self):
         cfg = tiny_cfg(reporter_grace_polls=4)
         waiting = [_grp("222"), GREEN]
