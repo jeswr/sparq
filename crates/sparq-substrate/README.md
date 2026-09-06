@@ -64,8 +64,10 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
 - **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
   `build_table` / `build_partitioned` / `probe_emit` / `probe_gather_indices` / `hash_probe_serial`
   (hash, `JoinTable` type alias backed by `hashbrown::HashMap<Key, Posting, FxBuildHasher>`,
-  single-hash probe + batch-reserve), `bind_combine` (index-nested-loop), `lftj_recurse` over
-  `Trie` / `TrieIter` (WCOJ), plus `compatible` / `merge_rows` / `any_unbound` helpers.
+  single-hash probe + batch-reserve), `bind_combine` (indexed groups) / `bind_combine_rows`
+  (contiguous row slices, preserving duplicates and appending to existing output;
+  [GPT-6-ASTRA]), `lftj_recurse` over `Trie` / `TrieIter` (WCOJ), plus `compatible` /
+  `merge_rows` / `any_unbound` helpers.
   `probe_gather_indices` is the M4 batch-emission contract (gather indices, materialise once
   per chunk, sq-pntvh.7). Also `join::delta::DeltaTable` — persistent build-side table with
   insertion-order-deterministic enumeration for the OWL-RL Δ⋈full fixpoint (sq-qonbz.1). Each
