@@ -686,6 +686,17 @@ class TestPhase2LaneScoping(unittest.TestCase):
                          "already gated the PR head + re-runs on push-to-main; the noisy timing suite "
                          "moved to the nightly EC2 lane — keeping it on merge_group only dragged the queue)")
 
+    def test_dashboard_publisher_suite_is_enforced(self):
+        # [GPT-6-ASTRA] An unlisted/disabled test would leave publication races ungated.
+        job = _load(REPO_ROOT / ".github/workflows/docs-quality.yml")["jobs"]["quick-gates"]
+        command = "python3 scripts/tests/test_bench_dashboard_publish.py"
+        steps = [step for step in job["steps"] if command in str(step.get("run", ""))]
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["run"], command)
+        self.assertNotIn("if", steps[0])
+        self.assertFalse(steps[0].get("continue-on-error", False))
+        self.assertNotIn("if", job)
+
     def test_bench_history_lane_scoping(self):
         # CRITICAL (design §6.1 continuity, criterion (d)): the auto-ratchet + history +
         # dashboard WRITES must stay on the push-to-main path and NOT fire on the
