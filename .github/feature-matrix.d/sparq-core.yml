@@ -66,6 +66,15 @@
 # corrupt-magic mutation-witness + SPQCPRM1-vs-SPQCPRM2 differential + zigzag tests, PLUS the
 # V2 corruption oracle (`mmap_loader_survives_corruption_compressed_v2`). `mmap` is co-enabled
 # (spqcprm2 implies it) so the on-disk write/open path and FILE_MAGIC_V2 tests run.
+# [OPUS-5] sq-7d3dj.8: the measure-first sparse numerics-cache arm. Default-OFF and staying
+# off (research/numerics-sparsify-measured.md records the negative A/B), so this leg exists to
+# keep the arm honest — it runs the feature-ON half of the cross-arm `numeric_value` equivalence
+# test plus the sparsify/DECLINE witness, which is what stops the retained arm from rotting.
+- name: "sparq-core (sparse-numerics)"
+  crate: "sparq-core"
+  features: "sparse-numerics"
+  test: true
+
 - name: "sparq-core (spqcprm2, mmap)"
   crate: "sparq-core"
   features: "spqcprm2,mmap"

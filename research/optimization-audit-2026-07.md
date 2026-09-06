@@ -290,6 +290,13 @@ fast path holds within noise; otherwise close the bead with the measurement reco
 (numerics bytes are outside the ratcheted metrics — footprint shows only in
 `Graph::heap_bytes`); a footprint claim must cite that accessor, not RSS on this box.
 
+**RESOLVED — negative.** Measured in `research/numerics-sparsify-measured.md`: the
+footprint win on string-heavy data is real, but the numeric probe regresses far outside
+noise, so the "holds within noise" criterion fails and the default stays dense. The A/B arm
+(`sparq-core`'s default-OFF `sparse-numerics` feature) and the harness
+(`cargo run -p sparq-core --release --example bench_numerics`) are in-tree so the
+measurement is re-runnable rather than re-argued. [OPUS-5]
+
 ### 13. MEASURE-FIRST A/B pair: NT intern/scan hot loop (P3, ingest)
 
 **Approach.** Two independently-gated micro-experiments on the shipped custom

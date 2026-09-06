@@ -125,6 +125,29 @@ iri-fast = ["dep:oxiri"]
 # oxttl, so naming it here adds no new compiled crate. The default / wasm build never references
 # any of this — sparq-core stays lean. See the `ttl` module.
 native-ttl = ["dep:oxiri"]
+# [OPUS-5] sq-7d3dj.8 (roadmap item 12, research/optimization-audit-2026-07.md): the
+# MEASURE-FIRST A/B arm for the native numerics cache. `Graph::build` keeps a DENSE
+# `Vec<f64>` (a flat 8 B per dictionary term, NaN for the non-numeric majority) even on
+# an all-string dataset, while the temporal cache already sparsifies at build. Flipping
+# numerics to the same sparse map would cut that footprint to ~17 B per REAL numeric
+# literal — but it trades `NumData::lookup`'s O(1) array index for a hashmap probe on the
+# numeric FILTER / ORDER BY / MIN-MAX fast path, and THAT DENSE LAYOUT IS A DELIBERATE
+# TRADEOFF, not an oversight. So this is OFF by default: the shipped build keeps the dense
+# cache exactly as it is, and the feature exists so both arms can be built from ONE source
+# tree and A/B'd (`cargo run --release --example bench_numerics [--features
+# sparse-numerics]`). Query RESULTS are identical in both states — a cache is a cache; only
+# the footprint and the probe cost move.
+#
+# MEASURED VERDICT — DO NOT DEFAULT THIS ON. research/numerics-sparsify-measured.md records
+# the A/B: on string-heavy data the footprint win is real but the numeric probe path
+# regresses by a large, far-outside-noise multiple (worst on the sequential MIN/MAX shape),
+# because on that data most probes MISS, and a dense miss is one array read + a NaN test
+# while a sparse miss is a failed hashmap lookup. The bead's adoption criterion ("the fast
+# path holds within noise") fails. The feature is retained as the reproducible measurement
+# arm and as a narrow opt-in for a deployment that knowingly wants footprint over numeric
+# latency; the memory-bound browser build already gets sparse caches via `into_compressed`.
+# No new dependency.
+sparse-numerics = []
 
 [dependencies]
 oxrdf.workspace = true

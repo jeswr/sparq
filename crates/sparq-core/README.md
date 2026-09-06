@@ -56,6 +56,10 @@ assert_eq!(count, 1);
   point lookups for an id that is ABSENT from the permutation (result-equivalent, never
   serialised; for a PRESENT id the zone map already narrows the candidate window to about one
   block, so there is little left to skip).
+- **Numeric fast path** — a per-term cache makes numeric FILTER / ORDER BY / MIN-MAX an O(1)
+  array index. It is dense on purpose; the opt-in `sparse-numerics` feature trades that index
+  for a map (smaller on string-heavy data, slower to probe) and is **measured not worth
+  defaulting on** — see [`research/numerics-sparsify-measured.md`](../../research/numerics-sparsify-measured.md).
 - **Compressed-seek column codecs (prototype)** — the opt-in `elias-fano` feature adds
   Elias-Fano and Partitioned-Elias-Fano codecs whose `next_geq(target)` answers a successor
   query *directly on the compressed data*, without the whole-block decode the varint block codec

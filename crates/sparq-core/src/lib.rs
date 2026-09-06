@@ -1678,7 +1678,18 @@ impl Graph {
     /// string and streaming loaders).
     fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         let store = TripleStore::from_triples(triples);
+        // [OPUS-5] (sq-7d3dj.8) The numerics cache stays DENSE here by default even when the
+        // dataset is mostly strings: `NumData::lookup` is then an O(1) array index, the numeric
+        // FILTER / ORDER BY / MIN-MAX fast path, and paying 8 B/term to keep it is a DELIBERATE
+        // tradeoff. The opt-in `sparse-numerics` feature below is the measure-first A/B arm that
+        // applies the SAME `into_sparse_if_worthwhile` (<25%-numeric) heuristic the temporal cache
+        // uses. It is OFF by default and STAYS off: research/numerics-sparsify-measured.md records
+        // the A/B — the footprint win on string-heavy data is real, but the numeric probe regresses
+        // far outside noise (most probes MISS there, and a dense miss is one array read + a NaN
+        // test where a sparse miss is a failed hashmap lookup), so the adoption criterion failed.
         let numerics = NumData::Owned(numerics_of(&dict));
+        #[cfg(feature = "sparse-numerics")]
+        let numerics = numerics.into_sparse_if_worthwhile();
         // Unlike the numerics cache (dense f64 = 8 B/term), the dense temporal cells
         // are 16 B/term — go sparse straight away when temporals are rare (usually:
         // none at all -> an empty map, zero memory), keeping the load-time memory
@@ -10667,6 +10678,94 @@ mod tests {
                 id, a.to_bits(), b.to_bits()
             );
         }
+    }
+
+    /// [OPUS-5] (sq-7d3dj.8) Builds a graph whose object literals are `numeric_frac` numeric and
+    /// the rest plain strings — the A/B corpus shape for the `sparse-numerics` measurement.
+    fn numeric_density_corpus(rows: usize, numeric_frac: f64) -> Graph {
+        let cut = (rows as f64 * numeric_frac) as usize;
+        let mut nt = String::new();
+        for i in 0..rows {
+            let obj = if i < cut {
+                // Distinct xsd:double literals: cached in `numerics`, NOT inline-encoded.
+                format!("\"{}.5\"^^<http://www.w3.org/2001/XMLSchema#double>", i)
+            } else {
+                format!("\"string value {}\"", i)
+            };
+            nt.push_str(&format!("<http://ex/s{}> <http://ex/v> {} .\n", i, obj));
+        }
+        Graph::load_str(&nt, "ntriples").unwrap()
+    }
+
+    /// [OPUS-5] (sq-7d3dj.8) RESULT EQUIVALENCE across the `sparse-numerics` A/B arms: the cache
+    /// backing is an implementation detail, so `numeric_value` must answer identically for EVERY
+    /// dictionary id in either feature state. This test is deliberately state-agnostic — it is the
+    /// assertion that makes the footprint/probe A/B a fair comparison rather than a behaviour swap.
+    #[test]
+    fn sparse_numerics_ab_arms_agree_on_every_id() {
+        for (rows, frac) in [(400usize, 0.0f64), (400, 0.05), (400, 0.5), (400, 1.0)] {
+            let g = numeric_density_corpus(rows, frac);
+            // The cache must agree with a fresh dense recomputation from the dictionary, id by id.
+            let reference = numerics_of(&g.dict);
+            // Length coupling is load-bearing: iterating the reference alone would silently check
+            // FEWER ids if the dense recomputation ever came up short, so pin the cover explicitly.
+            assert_eq!(
+                reference.len(), g.dict.len(),
+                "dense reference must cover every dictionary id (rows={} frac={})",
+                rows, frac
+            );
+            for (i, &want_raw) in reference.iter().enumerate() {
+                let id = i as Id + 1;
+                let want = (!want_raw.is_nan()).then_some(want_raw);
+                assert_eq!(
+                    g.numeric_value(id), want,
+                    "id {} disagrees with the dense reference (rows={} frac={})",
+                    id, rows, frac
+                );
+            }
+            // And the numeric literals really are cached (guards a corpus that accidentally
+            // inline-encodes every value, which would make the whole A/B vacuous).
+            let cached = (1..=g.dict.len() as Id).filter(|&id| g.numeric_value(id).is_some()).count();
+            assert_eq!(cached, (rows as f64 * frac) as usize, "cached numeric count (frac={})", frac);
+        }
+    }
+
+    /// [OPUS-5] (sq-7d3dj.8) DEFAULT (feature OFF) build keeps the DENSE cache — the shipped
+    /// behaviour this bead must not change blind. Pinning the variant makes an accidental flip of
+    /// the default a red test rather than a silent regression of the O(1) numeric fast path.
+    #[test]
+    #[cfg(not(feature = "sparse-numerics"))]
+    fn default_build_keeps_dense_numerics_cache() {
+        let g = numeric_density_corpus(400, 0.0);
+        assert!(
+            matches!(g.numerics, NumData::Owned(_)),
+            "the default build must keep the dense numerics cache (the O(1) fast path)"
+        );
+        assert_eq!(g.numerics.heap_bytes(), g.dict.len() * std::mem::size_of::<f64>());
+    }
+
+    /// [OPUS-5] (sq-7d3dj.8) With `sparse-numerics` ON the build applies the SAME <25%-numeric
+    /// heuristic the temporal cache uses: a string-heavy dictionary goes sparse (the footprint win
+    /// being measured), while a numeric-DENSE one DECLINES and stays dense (the heuristic's witness
+    /// — sparsifying there would cost both memory and probe speed).
+    #[test]
+    #[cfg(feature = "sparse-numerics")]
+    fn sparse_numerics_feature_sparsifies_only_string_heavy_builds() {
+        let sparse_arm = numeric_density_corpus(400, 0.0);
+        assert!(
+            matches!(sparse_arm.numerics, NumData::Sparse(_)),
+            "an all-string dictionary must sparsify under the feature"
+        );
+        assert!(
+            sparse_arm.numerics.heap_bytes() < sparse_arm.dict.len() * std::mem::size_of::<f64>(),
+            "the sparse backing must actually be smaller than the dense 8 B/term vec"
+        );
+        // DECLINE path: >25% numeric terms — the dense Vec is the better representation.
+        let dense_arm = numeric_density_corpus(400, 1.0);
+        assert!(
+            matches!(dense_arm.numerics, NumData::Owned(_)),
+            "a numeric-dense dictionary must DECLINE sparsification"
+        );
     }
 
     /// [FABLE-5] (sq-9781x) Direct unit test for the shared public `parse_xsd_f64`: the XSD
