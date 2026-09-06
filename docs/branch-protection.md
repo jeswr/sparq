@@ -457,8 +457,8 @@ un-draft moment.
 > `require_code_owner_review`) would **deadlock** the merge train — there is no second human
 > to approve. The **live ruleset therefore sets `required_approving_review_count: 0` and
 > `require_code_owner_review: false` deliberately**, and substitutes a *bot/automated*
-> review layer (Copilot code review on push + CodeQL code-scanning gate + the `ci-summary`
-> aggregator + conversation-resolution) for the missing second human. This is the same
+> review layer (Copilot code review on push + the `ci-summary` aggregator +
+> conversation-resolution) for the missing second human. This is the same
 > reality OpenSSF Scorecard's `Code-Review` / `Branch-Protection` checks score down — see
 > [§Solo-maintainer & the Scorecard score](#solo-maintainer--the-scorecard-code-review--branch-protection-score)
 > below; the settings here are written to match **what is actually enforced**, not an
@@ -475,13 +475,12 @@ un-draft moment.
   human approvals there is nothing to stale-dismiss; the live ruleset sets
   `dismiss_stale_reviews_on_push: false` to match. (Copilot review *does* re-run on push —
   `review_on_push: true`.)
-- **Require the automated code review** (GitHub Copilot code review + the CodeQL
-  code-scanning review). The live ruleset enables Copilot code review on push
-  (`copilot_code_review` rule, `review_on_push: true`) and treats **CodeQL code-scanning
-  alerts** as blocking via the `code_scanning` rule (`CodeQL`, `alerts_threshold:
-  errors_and_warnings`, `security_alerts_threshold: all`). The CodeQL run is also aggregated
-  by `ci-summary` as the `CodeQL analysis (rust)` check-run; the code-scanning *results*
-  rule is the complementary alert-severity gate.
+- **Automated code review.** The live ruleset enables Copilot code review on push
+  (`copilot_code_review` rule, `review_on_push: true`). The 2026-09-06 live GET contains
+  **no `code_scanning` rule**: the previously documented separate CodeQL alert-severity
+  gate is absent from that snapshot. This records existing configuration, not a removal
+  made by #6048. CodeQL workflow checks remain subject to the existing `ci-summary`
+  aggregation and event policy; they are distinct from a ruleset alert-severity gate.
 - **Require conversation resolution before merging** — all PR review threads (human and
   bot, incl. Copilot/CodeQL) must be resolved (live ruleset `pull_request`
   `required_review_thread_resolution: true`). (Also listed under "Other settings".)
@@ -511,6 +510,11 @@ un-draft moment.
   executable `merge_group => --full` invariant in `ci-select.yml`: the complete combined
   tree runs every selection-controlled leg once, while GitHub no longer rebuilds every
   prefix in the group. Its remaining **throughput** parameters are recorded below.
+  **Trade-off [GPT-6-ASTRA]:** HEADGREEN validates the final group tree; intermediate
+  squash commits within the group are not individually required to be green, whereas
+  ALLGREEN requires every prefix. Bisecting or tooling that assumes every `main` commit
+  has passed the gate must instead use validated group heads or test intermediate
+  commits explicitly. The combined-head guarantee does not imply per-commit greenness.
 - **Require conversation resolution before merging** (all PR review threads resolved —
   `required_review_thread_resolution: true`).
 
@@ -534,10 +538,10 @@ The `merge_queue` rule's throughput parameters:
 | `grouping_strategy` | staged: `ALLGREEN` until #6049 lands; `HEADGREEN` after the post-merge ruleset update | one full required-gate run validates the combined group head after rollout |
 | `check_response_timeout_minutes` | `360` | required-check reporting deadline |
 
-Provenance: every value in this table was re-read from live ruleset `17688455` on
-2026-09-03, before the #6048 settings follow-up. `grouping_strategy` records the staged
-transition above and must be re-read after that post-merge update. Confirm the complete
-ruleset projection with the `gh api …/rulesets/<id>` recipe below before acting on (a).
+Provenance: every current value in this table was re-read from live ruleset `17688455`
+on 2026-09-06, before the #6048 settings follow-up. `grouping_strategy` records the staged
+transition above and must be re-read after that post-merge update. Use the live GET
+procedure below before acting on (a); this table is not a ruleset update payload.
 
 **(a) `max_entries_to_build` 3 → 5 — approved in principle, NOT yet requested; blocked
 on `sq-6vshe.14`.** Drain capacity scales directly with this number: a full 8-deep queue
@@ -687,7 +691,7 @@ alerts).
 | Missing classic signal | Compensating control (live + enforced) |
 |---|---|
 | Independent human approving review | **GitHub Copilot code review on every PR** (`copilot_code_review`, `review_on_push: true`) — an automated, independent reviewer recorded on the PR. |
-| Code-owner gate | **CodeQL code-scanning gate** (`code_scanning` rule, `CodeQL`, `errors_and_warnings`) — blocks merge on new alerts; plus the SHA-pinned clippy/test/conformance gate aggregated by `ci-summary`. |
+| Code-owner gate | The SHA-pinned clippy/test/conformance gate aggregated by `ci-summary`; **no separate `code_scanning` rule** in the 2026-09-06 live snapshot. |
 | Review-thread accountability | **Conversation resolution required** (`required_review_thread_resolution: true`) — every Copilot/CodeQL thread must be resolved before merge. |
 | "Trusted committer only" | **No equivalent ruleset control.** Repository administrators can always bypass (`RepositoryRole`, `actor_id: 5`); the normal automated flow does not bypass and remains constrained by **merge-queue admission**, **squash-only** merges, **no force-push**, and **no deletion**. |
 
@@ -709,10 +713,12 @@ gh api repos/jeswr/sparq/rulesets
 gh api repos/jeswr/sparq/rulesets/<id> | python3 -m json.tool
 ```
 
-As re-verified on 2026-09-03 before the #6048 settings follow-up, the live `main` ruleset
-(`enforcement: active`) carries one always-on repository-administrator bypass actor
-(`actor_id: 5`, `actor_type: RepositoryRole`) and exactly these rules, all of which match
-the sections above:
+As re-verified by a raw live GET on 2026-09-06 before the #6048 settings follow-up,
+the `main` ruleset (`enforcement: active`) carries one always-on repository-administrator
+bypass actor (`actor_id: 5`, `actor_type: RepositoryRole`) and the rule types below.
+The table summarizes selected parameters, not the complete writable configuration.
+The captured JSON contains no `code_scanning` rule; documenting that absence does not
+authorize deleting a rule from any later live read.
 
 | Live rule (`type`) | Key parameters | Doc section |
 |---|---|---|
@@ -724,9 +730,18 @@ the sections above:
 | `copilot_code_review` | `review_on_push: true`, `review_draft_pull_requests: false` | Required reviews |
 | `merge_queue` | `grouping_strategy: ALLGREEN` before #6049; `HEADGREEN` after the post-merge ruleset update; `max_entries_to_build: 3`, `max_entries_to_merge: 8`, `min_entries_to_merge: 1`, `min_entries_to_merge_wait_minutes: 5`, `merge_method: SQUASH`, `check_response_timeout_minutes: 360` unchanged | Other settings; Merge-queue throughput settings; Omnibus batching |
 
-The post-merge update must project this complete live shape and alter only
-`merge_queue.parameters.grouping_strategy`; a fresh read must then prove the required
-check and every other field are byte-for-byte equivalent.
+**Post-merge update procedure [GPT-6-ASTRA]:** after the executable invariant has landed
+and the settings update is authorized, perform a fresh **live GET → one-field edit →
+full PUT → re-GET and field-level diff**. Save the raw before read, derive the complete
+writable request object from that read (omit only server-managed response metadata),
+and change only `merge_queue.parameters.grouping_strategy`. Preserve all other rules,
+parameters, conditions, enforcement and bypass actors, including fields not listed here.
+**Never construct the PUT payload from this documentation table.** If the fetched shape
+is unexpected, stop and reconcile it before sending an update. Save the PUT payload and
+raw after read; compare normalized writable configuration and require exactly the intended
+grouping-strategy difference. Server-managed metadata such as `updated_at` is not part of
+that comparison. Explicitly verify that the required `gate` context/integration and every
+other protection field are unchanged.
 
 If a future check finds drift (e.g. a rule added or a parameter changed), update **this
 table and the matching section above in the same commit** so the doc-of-record never lags

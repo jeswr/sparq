@@ -385,9 +385,10 @@ id 17688455, last updated 2026-07-02):
 - Three properties make this safe and must not drift; they are pinned by
   `scripts/tests/test_ci_select_wiring.py` (`TestRequiredCheckAnchor`):
   (1) the `ci-summary / gate` job name is exactly `"gate"` (matches the
-  ruleset's `context:"gate"`); (2) that job has no `if:` guard (always runs,
-  so the merge queue always gets a response within the 60-minute timeout
-  window); (3) `ci-summary.yml` triggers on `merge_group` (required for the
+  ruleset's `context:"gate"`); (2) that job has no `if:` guard (always scheduled,
+  but completion before the deadline still depends on runner capacity and upstream
+  checks; the live timeout was re-verified as 360 minutes on 2026-09-06);
+  (3) `ci-summary.yml` triggers on `merge_group` (required for the
   gate to produce a check-run on queue entries at all). Under HEADGREEN a fourth
   property is load-bearing: (4) the reusable selector adds `--full` for every
   `merge_group` before either the label override or shadow escape hatch. The
@@ -481,9 +482,14 @@ failed nightly jobs with suspect landed PRs and auto-files a deduplicated issue.
   CodeQL, fuzz, wasm, perf-gate) stay always-run until phase 2 scopes them
   deliberately (bead 6). Minimizes the initial soundness surface where the
   throughput win is smallest.
-- **P8 — selection applies to `merge_group` too**: the queue-entry diff vs
-  the target tip is the union of queued content — conservative by
-  construction, and queue width is where the throughput pain concentrates.
+- **P8 — full combined-head validation on `merge_group`** [GPT-6-ASTRA]:
+  #6048 supersedes queue selection and its ALLGREEN prefix-induction premise.
+  The reusable caller forces `--full` before label/shadow handling, so every
+  selection-controlled leg validates the combined head. Existing event and
+  change-class guards still apply; this does not add otherwise absent legs.
+  After the staged HEADGREEN flip, this establishes the group-head property,
+  not greenness of every intermediate squash commit on `main`. PR-head selection
+  remains enabled; see the [rollout trade-off](../docs/branch-protection.md#other-settings).
 - **P9 — the SAFE list starts empty** and only audit-proven entries join it.
 - **P10 — enforce only after the shadow window** (§6.4); nightly full +
   `ci-full` label remain permanent backstops. *(sq-fmx4u.5, 2026-07-03:
