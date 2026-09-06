@@ -8728,29 +8728,39 @@ fn bind_join(
         out_vars.push(pos_vars[p].clone().unwrap());
     }
 
-    // Group result rows by the join value so each distinct value is looked up once.
-    //
-    // Sort-based run grouping (sq-7d3dj.7): sort ONE index permutation on the join column
-    // and walk its contiguous equal-value runs, instead of the `FxHashMap<Id, Vec<usize>>`
-    // that allocated a fresh `Vec` per distinct join value — the cost that dominated
-    // high-NDV bind joins, where most groups are singletons. That is one allocation for
-    // the whole join, and each run is already a `&[usize]` slice, so `bind_combine` takes
-    // it without a per-group copy. The runs also come out in ASCENDING id order, so the
-    // per-value bound scans probe the chosen permutation index forwards instead of
-    // jumping around it.
+    // [GPT-6-ASTRA] Reuse contiguous runs only when metadata identifies the join column
+    // as sorted. This needs one index vector instead of a Vec per distinct value. Keep
+    // the existing hash grouping otherwise: sorting unsorted bags was not a consistent
+    // win in the local scope-selection measurements, especially with repeated keys.
     let nrows = result.rows.len();
-    let mut order: Vec<usize> = (0..nrows).collect();
-    // The result side is frequently ALREADY sorted on the join variable (a sorted seed
-    // scan, or an upstream merge join that kept `sorted_by`); then the identity
-    // permutation is already run-grouped and the sort is skipped outright. This shortcut
-    // cannot affect the output bag even if `sorted_by` were stale: a mis-ordered column
-    // only SPLITS one join value across several runs, and each run still scans its own
-    // value and combines only its own rows — the same (result-row, match) pairs, just
-    // rescanned. (The zk trace dedups matched triples, so a split is invisible there too.)
     let presorted = result.sorted_by.as_ref().is_some_and(|sv| result.vars.get(rk) == Some(sv));
+    let order: Vec<usize> = if presorted { (0..nrows).collect() } else { Vec::new() };
+    let mut groups: FxHashMap<Id, Vec<usize>> = FxHashMap::default();
     if !presorted {
-        order.sort_unstable_by_key(|&ri| result.rows[ri][rk]);
+        for (ri, row) in result.rows.iter().enumerate() {
+            groups.entry(row[rk]).or_default().push(ri);
+        }
     }
+
+    // Stale metadata can split equal keys into several runs, but every input row still
+    // pairs with all its matches. Only redundant scans result; zk tracing deduplicates
+    // them. Cow lets both strategies share the same scan/filter/budget body without
+    // copying run slices or retaining owned hash-group vectors after their iteration.
+    let mut start = 0usize;
+    let runs = std::iter::from_fn(|| {
+        if start == order.len() {
+            return None;
+        }
+        let val = result.rows[order[start]][rk];
+        let mut end = start + 1;
+        while end < order.len() && result.rows[order[end]][rk] == val {
+            end += 1;
+        }
+        let ris = &order[start..end];
+        start = end;
+        Some((val, std::borrow::Cow::Borrowed(ris)))
+    });
+    let hashed = groups.into_iter().map(|(val, ris)| (val, std::borrow::Cow::Owned(ris)));
 
     let mut out_rows: Vec<Row> = Vec::new();
     // zk-trace hook: accumulate the matched triples across all bound rescans
@@ -8758,19 +8768,11 @@ fn bind_join(
     // the input set merges with any full scans of the same pattern).
     #[cfg(feature = "zk")]
     let mut zk_matched: Vec<[Id; 3]> = Vec::new();
-    let mut start = 0usize;
-    while start < nrows {
+    for (val, ris) in runs.chain(hashed) {
         // Coarse budget check once per distinct join value.
         if budget::exhausted(out_rows.len()) {
             break;
         }
-        let val = result.rows[order[start]][rk];
-        let mut end = start + 1;
-        while end < nrows && result.rows[order[end]][rk] == val {
-            end += 1;
-        }
-        let ris = &order[start..end];
-        start = end;
         let mut bound = *id_pat;
         bound[pp] = Some(val);
         let scan = graph.store.scan(&bound);
@@ -8789,7 +8791,7 @@ fn bind_join(
             // The per-(result-row, match) combine is the shared substrate's `bind_combine`
             // (sq-hknqs): the scan + filter pushdown above stay engine-private (they own the
             // store + `ScanCmp`); only the id-tuple combine is shared.
-            sjoin::bind_combine(&result.rows, ris, &new_vals, &mut out_rows);
+            sjoin::bind_combine(&result.rows, &ris, &new_vals, &mut out_rows);
         }
     }
     #[cfg(feature = "zk")]
@@ -8799,15 +8801,15 @@ fn bind_join(
     Bindings::unsorted(out_vars, out_rows)
 }
 
-/// Direct unit tests for [`bind_join`]'s sort-based run grouping (sq-7d3dj.7). They pin
+/// Direct unit tests for [`bind_join`]'s presorted run grouping (sq-7d3dj.7). They pin
 /// the two things the rewrite could break: the output BAG (multiplicities included, so a
 /// dropped or duplicated group is caught) and the fact that grouping actually happened —
-/// the output's join column is non-decreasing, which the previous `FxHashMap` iteration
+/// a presorted output's join column is non-decreasing, which `FxHashMap` iteration
 /// order did not give. The hand-picked cases below are the readable pins;
 /// `randomized_differential_vs_naive_reference` is the actual result-equivalence
 /// evidence — a deterministic randomized differential against a grouping-free reference
-/// join, over both the sort and the no-sort branch, with faulty-reference controls proving
-/// the comparison is non-vacuous. [SONNET-4.6]
+/// join, over both hash and presorted branches, with faulty-reference controls proving
+/// the comparison is non-vacuous. [SONNET-4.6] [GPT-6-ASTRA]
 #[cfg(test)]
 mod bind_join_run_grouping {
     use super::*;
@@ -8853,7 +8855,7 @@ mod bind_join_run_grouping {
     }
 
     #[test]
-    fn scrambled_result_groups_into_ascending_runs() {
+    fn scrambled_result_hash_grouping_preserves_the_bag() {
         let g = Graph::load_str(TTL, "turtle").unwrap();
         // Scrambled join values, with `n1` DUPLICATED: the duplicate must be emitted twice
         // (one group, two result rows) — this is the multiplicity a bag join owes.
@@ -8866,8 +8868,6 @@ mod bind_join_run_grouping {
         sorted.sort_unstable();
         assert_eq!(sorted, expected(&g, &subjects), "output bag must match the per-row expansion");
 
-        // Grouping evidence: each distinct join value is contiguous and the runs ascend.
-        assert!(got.windows(2).all(|w| w[0].0 <= w[1].0), "join column must be non-decreasing: {:?}", got);
     }
 
     #[test]
@@ -8993,7 +8993,7 @@ mod bind_join_run_grouping {
 
     /// The result-equivalence obligation for the run-grouping rewrite: over randomized
     /// graphs and result bags, `bind_join` must agree as a MULTISET with the grouping-free
-    /// reference — on the actual-sort branch (`sorted_by: None`) and on the no-sort branch
+    /// reference — on the hash fallback branch (`sorted_by: None`) and on the presorted branch
     /// (truthfully sorted rows plus matching `sorted_by`) alike.
     ///
     /// The generated domain spans what the finding asks for: empty graphs and empty result
@@ -9036,15 +9036,15 @@ mod bind_join_run_grouping {
             let want = naive_bind_join(&g, &rows, age, Fault::None);
             total_out += want.len();
 
-            // The actual-sort branch: scrambled rows, no sortedness claimed.
+            // The hash fallback branch: scrambled rows, no sortedness claimed.
             let got = run_multiset(&g, rows.clone(), age, false);
-            assert_eq!(got, want, "sort branch, seed {}", seed);
+            assert_eq!(got, want, "hash branch, seed {}", seed);
 
             // The no-sort branch: truthfully sorted rows WITH matching metadata. The
             // reference is row-order-independent, so the same `want` applies.
             let mut asc = rows.clone();
             asc.sort_by_key(|r| r[1]);
-            assert_eq!(run_multiset(&g, asc, age, true), want, "no-sort branch, seed {}", seed);
+            assert_eq!(run_multiset(&g, asc, age, true), want, "no-hash branch, seed {}", seed);
 
             // Controls: a reference that drops a duplicate row, a group, or an extra match
             // must be REJECTED by the very comparison that just passed.
