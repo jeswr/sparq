@@ -595,8 +595,18 @@ def resolve_newest_workflow_runs(
     attempt_jobs = attempt_jobs or {}
     redispatch_pending_ids = redispatch_pending_ids or set()
     no_leg_ids = no_leg_ids or set()
+    # [GPT-5] #6292: only the API's exact schedule event is out of scope. Missing,
+    # empty and future event values remain authoritative (fail closed).
+    schedule_ids = {
+        _as_int(r.get("id")) for r in workflow_runs
+        if r.get("event") == "schedule" and _as_int(r.get("id"))
+    }
     newest = newest_workflow_runs(
-        [r for r in workflow_runs if _as_int(r.get("id")) not in no_leg_ids]
+        [
+            r for r in workflow_runs
+            if _as_int(r.get("id")) not in no_leg_ids
+            and _as_int(r.get("id")) not in schedule_ids
+        ]
     )
     all_by_id = {_as_int(r.get("id")): r for r in workflow_runs if _as_int(r.get("id"))}
     self_id = _as_int(self_run_id)
@@ -611,6 +621,11 @@ def resolve_newest_workflow_runs(
         workflow_run = all_by_id.get(run_id)
         if workflow_run is None:
             resolved.append(check)  # external/manually-posted check
+            continue
+        if run_id in schedule_ids:
+            excluded = dict(check)
+            excluded["_out_of_scope_schedule"] = True
+            resolved.append(excluded)
             continue
         key = workflow_identity(workflow_run)
         latest = newest.get(key)
@@ -750,7 +765,9 @@ class WorkflowRunResolver:
         # supersede a real predecessor through one of the other two paths.
         no_leg_ids = no_leg_run_ids(checks)
         authoritative = [
-            r for r in workflows if _as_int(r.get("id")) not in no_leg_ids
+            r for r in workflows
+            if _as_int(r.get("id")) not in no_leg_ids
+            and r.get("event") != "schedule"
         ]
         fresh_no_leg = sorted(no_leg_ids - self._no_leg_reported)
         if fresh_no_leg:
@@ -1767,6 +1784,8 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     carries the draft-tier integrity context (None => pre-draft-tier semantics).
     Returns the exit code."""
     prev_names: list[str] | None = None
+    # [GPT-5] #6292: schedule runs are diagnostics, never siblings of this gate.
+    reported_schedule_legs: set[tuple[int, str, str]] = set()
     stable = 0
     runs: list[dict] = []
     pending = 0
@@ -1819,14 +1838,40 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         # superseded evaluation, never a leg (a completed draft-tier gate
         # FAILURE on the SHA must not permanently RED the full-tier gate, and
         # its SUCCESS never was the required context).
-        kept, forgiven = forgive_superseded(raw)
+        schedule_legs = [r for r in raw if r.get("_out_of_scope_schedule") is True]
+        fresh_schedule_legs = [
+            r for r in schedule_legs
+            if (_as_int(r.get("id")), r.get("name", ""), str(r.get("conclusion")))
+            not in reported_schedule_legs
+        ]
+        if fresh_schedule_legs:
+            _emit("### out-of-scope (schedule-triggered)", cfg.summary_path)
+            for leg in fresh_schedule_legs:
+                name = leg.get("name") or "<unnamed check-run>"
+                conclusion = leg.get("conclusion")
+                shown_conclusion = (
+                    str(conclusion) if conclusion is not None
+                    else f"none (status={leg.get('status') or 'unknown'})"
+                )
+                _emit(f"- {name}: conclusion={shown_conclusion}", cfg.summary_path)
+                reported_schedule_legs.add(
+                    (_as_int(leg.get("id")), leg.get("name", ""), str(conclusion))
+                )
+
+        kept, forgiven = forgive_superseded(
+            [r for r in raw if r.get("_out_of_scope_schedule") is not True]
+        )
         runs = [
             r for r in kept
             if not is_self(r, cfg.self_run_id)
             and not is_draft_gate_artifact(r.get("name", ""))
         ]
         total = len(runs)
-        pending = sum(1 for r in runs if r.get("status") != "completed")
+        pending = sum(
+            1 for r in [*runs, *schedule_legs]
+            if r.get("status") != "completed"
+            and r.get("_out_of_scope_schedule") is not True
+        )
         # [FABLE-5] Draft-tier CI: on a FULL-tier pull_request run, a draft-tier-
         # assembled selection with no full-tier successor means the ready_for_review
         # re-run has not registered yet — treat the set as STILL-SETTLING (hold the
@@ -2167,7 +2212,7 @@ def make_fetch_workflow_runs(repo: str, sha: str, self_run_id: str = ""):
                 "--paginate",
                 "--jq",
                 ".workflow_runs[] | {id, workflow_id, name, path, head_sha, status, "
-                "conclusion, created_at, run_started_at, run_attempt, html_url}",
+                "conclusion, created_at, run_started_at, run_attempt, html_url, event}",
             ]
         )
         # The current run endpoint is fetched once and merged defensively. It
@@ -2181,7 +2226,7 @@ def make_fetch_workflow_runs(repo: str, sha: str, self_run_id: str = ""):
                         f"repos/{repo}/actions/runs/{self_run_id}",
                         "--jq",
                         "{id, workflow_id, name, path, head_sha, status, conclusion, "
-                        "created_at, run_started_at, run_attempt, html_url}",
+                        "created_at, run_started_at, run_attempt, html_url, event}",
                     ]
                 )
             )
