@@ -8728,12 +8728,16 @@ fn bind_join(
         out_vars.push(pos_vars[p].clone().unwrap());
     }
 
-    // [GPT-6-ASTRA] Reuse contiguous runs only when metadata identifies the join column
-    // as sorted. This needs one index vector instead of a Vec per distinct value. Keep
-    // the existing hash grouping otherwise: sorting unsorted bags was not a consistent
-    // win in the local scope-selection measurements, especially with repeated keys.
+    // [GPT-6-ASTRA] Verify metadata candidates without allocating: stale sortedness
+    // must not split a key across runs and repeat scans (or accumulate duplicate zk
+    // matches). Unsorted bags keep the existing hash grouping. The identity index
+    // vector keeps the shared, monomorphic slice-based combine API simple while
+    // avoiding a separate Vec allocation for every already-sorted distinct key.
     let nrows = result.rows.len();
-    let presorted = result.sorted_by.as_ref().is_some_and(|sv| result.vars.get(rk) == Some(sv));
+    let presorted = result.sorted_by.as_ref().is_some_and(|sv| result.vars.get(rk) == Some(sv))
+        && result.rows.windows(2).all(|pair| pair[0][rk] <= pair[1][rk]);
+    #[cfg(test)]
+    bind_join_run_grouping::observe_strategy(presorted);
     let order: Vec<usize> = if presorted { (0..nrows).collect() } else { Vec::new() };
     let mut groups: FxHashMap<Id, Vec<usize>> = FxHashMap::default();
     if !presorted {
@@ -8742,10 +8746,9 @@ fn bind_join(
         }
     }
 
-    // Stale metadata can split equal keys into several runs, but every input row still
-    // pairs with all its matches. Only redundant scans result; zk tracing deduplicates
-    // them. Cow lets both strategies share the same scan/filter/budget body without
-    // copying run slices or retaining owned hash-group vectors after their iteration.
+    debug_assert!(order.is_empty() || groups.is_empty());
+    // Cow lets both strategies share the same scan/filter/budget body without copying
+    // run slices or retaining owned hash-group vectors after their iteration.
     let mut start = 0usize;
     let runs = std::iter::from_fn(|| {
         if start == order.len() {
@@ -8775,6 +8778,8 @@ fn bind_join(
         }
         let mut bound = *id_pat;
         bound[pp] = Some(val);
+        #[cfg(test)]
+        bind_join_run_grouping::observe_scan();
         let scan = graph.store.scan(&bound);
         for prow in scan.rows.iter() {
             let pspo = scan.to_spo(prow);
@@ -8801,19 +8806,40 @@ fn bind_join(
     Bindings::unsorted(out_vars, out_rows)
 }
 
-/// Direct unit tests for [`bind_join`]'s presorted run grouping (sq-7d3dj.7). They pin
-/// the two things the rewrite could break: the output BAG (multiplicities included, so a
-/// dropped or duplicated group is caught) and the fact that grouping actually happened —
-/// a presorted output's join column is non-decreasing, which `FxHashMap` iteration
-/// order did not give. The hand-picked cases below are the readable pins;
-/// `randomized_differential_vs_naive_reference` is the actual result-equivalence
-/// evidence — a deterministic randomized differential against a grouping-free reference
-/// join, over both hash and presorted branches, with faulty-reference controls proving
-/// the comparison is non-vacuous. [SONNET-4.6] [GPT-6-ASTRA]
+/// Bag equivalence, bounded per-key scans, and real-query reachability for bind-join
+/// grouping. Test-only counters observe the chosen path without depending on hash-map
+/// iteration order; the randomized oracle is independent of either grouping strategy.
+/// [SONNET-4.6] [GPT-6-ASTRA]
 #[cfg(test)]
 mod bind_join_run_grouping {
     use super::*;
     use oxrdf::NamedNode;
+
+    // Thread-local observation keeps parallel tests independent and compiles out of
+    // production. Small reachability fixtures execute on the calling thread.
+    std::thread_local! {
+        static OBSERVED: std::cell::Cell<(usize, usize, usize)> = const {
+            std::cell::Cell::new((0, 0, 0))
+        };
+    }
+
+    pub(super) fn observe_strategy(presorted: bool) {
+        OBSERVED.with(|state| {
+            let (runs, hashed, scans) = state.get();
+            state.set((runs + usize::from(presorted), hashed + usize::from(!presorted), scans));
+        });
+    }
+
+    pub(super) fn observe_scan() {
+        OBSERVED.with(|state| {
+            let (runs, hashed, scans) = state.get();
+            state.set((runs, hashed, scans + 1));
+        });
+    }
+
+    fn take_observed() -> (usize, usize, usize) {
+        OBSERVED.with(|state| state.replace((0, 0, 0)))
+    }
 
     /// `ex:n2` carries TWO ages, so one run must fan out to two matches.
     const TTL: &str = "@prefix ex: <http://ex/> .\n\
@@ -8836,6 +8862,7 @@ mod bind_join_run_grouping {
         let pos_vars = [Some(k), None, Some(v)];
         let out = bind_join(g, result, &id_pat, &pos_vars, 0, 0, None);
         assert_eq!(out.vars.len(), 2, "join var + the new object var");
+        assert!(out.sorted_by.is_none(), "preserve the existing output metadata contract");
         out.rows.iter().map(|r| (r[0], r[1])).collect()
     }
 
@@ -8861,7 +8888,9 @@ mod bind_join_run_grouping {
         // (one group, two result rows) — this is the multiplicity a bag join owes.
         let subjects = [id(&g, "http://ex/n3"), id(&g, "http://ex/n1"), id(&g, "http://ex/n2"), id(&g, "http://ex/n1")];
         let rows: Vec<Row> = subjects.iter().map(|&s| Row::from_slice(&[s])).collect();
+        take_observed();
         let got = run(&g, rows, None);
+        assert_eq!(take_observed(), (0, 1, 3));
 
         assert_eq!(got.len(), 5, "n1 twice, n2 twice (two ages), n3 once: {:?}", got);
         let mut sorted = got.clone();
@@ -8873,12 +8902,13 @@ mod bind_join_run_grouping {
     #[test]
     fn presorted_result_takes_the_no_sort_path_with_the_same_bag() {
         let g = Graph::load_str(TTL, "turtle").unwrap();
-        // Already ascending on `?k` and declared so: the sort is skipped, and the answer
-        // must be identical to the scrambled-input case above.
+        // Verified ascending on `?k`: run grouping must preserve the same bag.
         let mut subjects = [id(&g, "http://ex/n3"), id(&g, "http://ex/n1"), id(&g, "http://ex/n2"), id(&g, "http://ex/n1")];
         subjects.sort_unstable();
         let rows: Vec<Row> = subjects.iter().map(|&s| Row::from_slice(&[s])).collect();
+        take_observed();
         let got = run(&g, rows, Some(Variable::new("k").unwrap()));
+        assert_eq!(take_observed(), (1, 0, 3));
 
         let mut sorted = got.clone();
         sorted.sort_unstable();
@@ -8886,16 +8916,70 @@ mod bind_join_run_grouping {
         assert!(got.windows(2).all(|w| w[0].0 <= w[1].0), "{:?}", got);
     }
 
-    /// A stale `sorted_by` may only SPLIT a value across runs — never change the bag.
     #[test]
-    fn stale_sorted_by_splits_runs_without_changing_the_bag() {
+    fn stale_sorted_by_uses_hash_grouping_and_scans_each_key_once() {
         let g = Graph::load_str(TTL, "turtle").unwrap();
-        let subjects = [id(&g, "http://ex/n2"), id(&g, "http://ex/n1"), id(&g, "http://ex/n2")];
-        let rows: Vec<Row> = subjects.iter().map(|&s| Row::from_slice(&[s])).collect();
-        // Claims sortedness the rows do NOT have, so `n2` is scanned as two separate runs.
+        let mut keys = [id(&g, "http://ex/n1"), id(&g, "http://ex/n2")];
+        keys.sort_unstable();
+        // Alternation guarantees stale metadata regardless of dictionary-id assignment.
+        // Repeated matches must not be accumulated once per split run by zk tracing.
+        let subjects: Vec<Id> = (0..128).map(|i| keys[i % 2]).collect();
+        let rows = subjects.iter().map(|&s| Row::from_slice(&[s])).collect();
+        take_observed();
         let mut got = run(&g, rows, Some(Variable::new("k").unwrap()));
+        assert_eq!(take_observed(), (0, 1, 2));
         got.sort_unstable();
         assert_eq!(got, expected(&g, &subjects));
+    }
+
+    const SORTED_QUERY: &str = "PREFIX ex: <http://ex/> SELECT ?key ?rank ?value WHERE {
+        ?key ex:seed ?rank . ?key ex:payload ?value . }";
+    const HASH_QUERY: &str = "PREFIX ex: <http://ex/> SELECT ?key ?rank ?value WHERE {
+        ?key ex:seed ?rank . ?key ex:payload ?value . FILTER(?rank >= 0) }";
+
+    fn query_graph() -> Graph {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for key in 0..1024 {
+            ttl.push_str(&format!("ex:k{key} ex:payload {}, {} .\n", 2 * key, 2 * key + 1));
+            if key < 32 {
+                // Rank order differs from key order; the filter chooses the rank scan.
+                ttl.push_str(&format!("ex:k{key} ex:seed {} .\n", 31 - key));
+            }
+        }
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    fn query_bag(result: crate::QueryResult) -> Vec<String> {
+        let mut bag: Vec<String> = result.rows.iter().map(|row| format!("{row:?}")).collect();
+        bag.sort_unstable();
+        bag
+    }
+
+    #[test]
+    fn sparql_seed_scan_reaches_verified_runs_and_filter_scan_reaches_hash_fallback() {
+        let g = query_graph();
+        take_observed();
+        let sorted = crate::query(&g, SORTED_QUERY).unwrap();
+        assert_eq!(take_observed(), (1, 0, 32), "shared-key seed scan must reach run grouping");
+        assert_eq!(sorted.rows.len(), 64, "each seed has two payload matches");
+        take_observed();
+        let hashed = crate::query(&g, HASH_QUERY).unwrap();
+        assert_eq!(take_observed(), (0, 1, 32), "rank-filter seed scan must reach hash grouping");
+        assert_eq!(query_bag(sorted), query_bag(hashed));
+    }
+
+    #[test]
+    fn sparql_join_budget_fails_instead_of_returning_a_partial_bag() {
+        let g = query_graph();
+        let limit = crate::QueryBudget { max_rows: Some(40), ..crate::QueryBudget::unlimited() };
+        for (query, expected_path) in [(SORTED_QUERY, (1, 0)), (HASH_QUERY, (0, 1))] {
+            take_observed();
+            let err = crate::query_with_budget(&g, query, &limit).unwrap_err();
+            assert_eq!(err, "query budget exceeded (max-rows)");
+            let (runs, hashed, _) = take_observed();
+            assert_eq!((runs, hashed), expected_path, "the seed fits; join fan-out trips the budget");
+            assert_eq!(crate::query(&g, query).unwrap().rows.len(), 64, "budget state must not leak");
+        }
     }
 
     // ---------------------------------------------------------------------------------
@@ -9008,6 +9092,7 @@ mod bind_join_run_grouping {
         // differential vacuous, so each must be exercised at least once.
         let mut caught = [0usize; 3];
         let mut total_out = 0usize;
+        let mut stale_cases = 0usize;
         for seed in 1u64..=64 {
             let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let n_subj = rng.below(12) as usize; // 0 → an empty graph
@@ -9040,11 +9125,20 @@ mod bind_join_run_grouping {
             let got = run_multiset(&g, rows.clone(), age, false);
             assert_eq!(got, want, "hash branch, seed {}", seed);
 
+            // Claimed sortedness over the original random bag must be checked. Stale
+            // candidates fall back and still scan each distinct key only once.
+            let is_sorted = rows.windows(2).all(|pair| pair[0][1] <= pair[1][1]);
+            let distinct = rows.iter().map(|row| row[1]).collect::<std::collections::BTreeSet<_>>().len();
+            take_observed();
+            assert_eq!(run_multiset(&g, rows.clone(), age, true), want, "claimed-sorted branch, seed {}", seed);
+            assert_eq!(take_observed(), (usize::from(is_sorted), usize::from(!is_sorted), distinct));
+            stale_cases += usize::from(!is_sorted);
+
             // The no-sort branch: truthfully sorted rows WITH matching metadata. The
             // reference is row-order-independent, so the same `want` applies.
             let mut asc = rows.clone();
             asc.sort_by_key(|r| r[1]);
-            assert_eq!(run_multiset(&g, asc, age, true), want, "no-hash branch, seed {}", seed);
+            assert_eq!(run_multiset(&g, asc, age, true), want, "presorted branch, seed {}", seed);
 
             // Controls: a reference that drops a duplicate row, a group, or an extra match
             // must be REJECTED by the very comparison that just passed.
@@ -9061,6 +9155,7 @@ mod bind_join_run_grouping {
             }
         }
         assert!(total_out > 0, "the generated corpus produced no output rows at all");
+        assert!(stale_cases > 0, "the randomized corpus must exercise stale metadata");
         for (i, n) in caught.iter().enumerate() {
             assert!(*n > 0, "control fault {} never fired — the differential is vacuous", i);
         }
