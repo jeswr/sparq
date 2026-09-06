@@ -36,6 +36,9 @@ on:
 # remediation with a 403 — visible, but useless. `contents: write` already present above
 # also covers the `PUT /pulls/{n}/update-branch` the CONFLICTING class attempts.
 permissions:
+  # [GPT-6 Astra] #6438: cancelled Actions recovery uses the preferred App's
+  # actions:write, not this legacy checks grant. Grants remain unchanged here;
+  # fallback GITHUB_TOKEN has no actions:write and rerun denial stays fail-closed.
   contents: write
   pull-requests: write
   checks: write
