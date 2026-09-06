@@ -97,20 +97,14 @@ on:
 permissions:
   contents: read
 
-# Do NOT cancel an in-progress benchmark run on main/schedule (it would corrupt the
-# stored series). push/schedule therefore keep cancel-in-progress false (see below).
-# [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events get a PER-RUN
-# group (the run_id suffix) so a label flip is ISOLATED — it can neither cancel nor
-# replace the in-flight/pending real run in the shared per-ref group on the same head
-# SHA (a group holds at most ONE PENDING run; without isolation a flip would evict a
-# pending real run even under cancel-in-progress:false). All other events resolve to
-# the constant `-shared` suffix.
-# [SPARQ agent] #6080: Superseded PR and push-to-main runs are cancelled. A newer main commit is
-# the authoritative benchmark state, so serially preserving every intermediate main
-# snapshot can build an unbounded runner backlog without improving the current-main
-# signal. Schedule/workflow_dispatch runs remain isolated and non-cancellable so the
-# nightly/manual full-run history is never lost. Label flips also remain isolated from
-# the real PR run: they get a per-run group and therefore cannot cancel it.
+# [GPT-6-ASTRA] #6080: ordinary PR and main-push generations share a per-ref
+# group; a later arrival cancels the running predecessor and replaces pending work.
+# Label events use run_id groups, so a label flip cannot cancel OR evict the real
+# PR run (a concurrency group holds at most one pending run even when cancellation
+# is false). Schedule, workflow_dispatch and unknown events also use run_id groups
+# with cancellation disabled. These groups isolate runs; they do not serialize
+# writes from separate groups. Existing writer guards still allow manual-main
+# publishing; schedule runs verify without publishing. No merge_group trigger.
 concurrency:
   group: bench-${{ github.ref }}-${{ (!contains(fromJSON('["pull_request","push"]'), github.event_name) || (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action))) && github.run_id || 'shared' }}
   cancel-in-progress: ${{ contains(fromJSON('["pull_request","push"]'), github.event_name) }}
@@ -177,12 +171,11 @@ jobs:
     # `mode != 'selected'` disjunct means an empty/missing selection output RUNS the
     # lane; a selection-skipped job reports conclusion `skipped` (= satisfied) to the
     # ci-summary gate — no per-leg name is individually required (bead sq-fmx4u.4).
-    # CRITICAL (design §6.1 continuity): push-to-main + schedule are NOT pull_request/
-    # merge_group events, so ci_select.py returns mode=full and this disjunct is TRUE =>
-    # the FULL suite runs on every main commit + on the nightly backstop. Selection can
-    # ONLY narrow on pull_request / merge_group. That is what keeps the auto-ratchet
-    # floor + benchmark-data history (both depend on every main commit being benchmarked)
-    # continuous — see the push-gated history/ratchet steps below.
+    # [GPT-6-ASTRA] Push, schedule and manual dispatch select the FULL suite.
+    # Superseded main-push runs may be cancelled by the per-ref group above, so
+    # benchmark history contains completed measurements, not every main commit.
+    # Selection can narrow only on pull_request / merge_group; this workflow has
+    # no merge_group trigger. Writer predicates below are unchanged by coalescing.
     # [FABLE-5] Draft-tier CI: benchmarks are SKIPPED ENTIRELY on draft PR heads
     # (first conjunct — fail-open off the PR path: push/schedule/dispatch satisfy
     # `github.event_name != 'pull_request'` => the selection disjunction decides as
