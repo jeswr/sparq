@@ -442,7 +442,11 @@ while label events, schedule and manual runs use isolated per-run groups;
 Bench schedule/manual runs are not cancelled by these groups. Schedule verifies
 without publishing; the existing manual-main publishing policy is unchanged.
 Isolation does not serialize those writers or guarantee a measurement for every
-main commit. `merge_group` runs are never cancelled
+main commit. The dashboard publisher retries a non-fast-forward rejection only
+when a fetch proves that its previous tip is an ancestor of the changed remote tip.
+It rebuilds the same asset-only commit without replacing concurrent history, with
+bounded attempts; permanent or unclassified push failures stop immediately.
+`merge_group` runs are never cancelled
 by these groups. **No required-check name changed** — the ruleset still requires
 exactly `ci-summary / gate`, and every full-tier run still emits exactly that
 context; a draft-tier run emits the additional, deliberately **non-required**
