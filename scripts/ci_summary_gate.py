@@ -13,14 +13,47 @@
 #     For each workflow, only its newest run/attempt is authoritative; every job
 #     from an older run is a supersession artifact, regardless of conclusion.
 #     This gate's own workflow is excluded by SELF_RUN_ID/workflow identity.
-#   * pending = check-runs with status != "completed". The settle window is re-armed
-#     ONLY by pending work (the sq-ipkku / #997 guard): an injection of
-#     already-terminal check-runs can never starve convergence.
-#   * A verdict renders only when EVERY discovered sibling is terminal, never before
+#   * pending = GATING check-runs with status != "completed" (see §AWAIT ONLY WHAT IS
+#     JUDGED). The settle window is re-armed ONLY by pending work (the sq-ipkku /
+#     #997 guard): an injection of already-terminal check-runs can never starve
+#     convergence.
+#   * A verdict renders only when every GATING sibling is terminal, never before
 #     the MIN_POLLS startup floor, and only after SETTLE_POLLS consecutive quiet
 #     polls. Verdict: only DECLARED-advisory checks (see §ADVISORY MUST BE DECLARED)
 #     are EXCLUDED; a gating check passes iff its conclusion is success/skipped/
 #     neutral; an empty stable set passes.
+#
+# AWAIT ONLY WHAT IS JUDGED (#3786). [OPUS-5] The loop used to count EVERY discovered
+# sibling as work it had to wait for, including the DECLARED-advisory legs whose
+# conclusion render_verdict excludes from the verdict by construction. On 2026-07-25
+# `gate` run 30149978128 on `main` spent its entire 43-minute budget waiting on three
+# `kani … (bounded proofs, informational)` legs — declared advisory in
+# `.github/advisory-registry.json`, and posted onto `main`'s head by an unrelated
+# `schedule` cron that fired 2h09m late (kani.yml has no push/pull_request trigger),
+# re-arming the settle window of an already-running push gate. The gate spent its
+# whole budget waiting for an answer it had already decided to ignore.
+# THE RULE NOW: `pending`, the progress signal, and the liveness read are all driven
+# off the GATING legs only — the exact complement of the set render_verdict excludes,
+# via the SAME is_advisory predicate. SOUNDNESS: the set of check-runs whose outcome
+# the gate ignores is UNCHANGED; the gate merely stops blocking on the ones already
+# ignored. Every gating leg is still awaited to terminal and still evaluated, so no
+# gating failure can be missed, and the fail-fast / hang / budget verdicts still fire
+# on exactly the same gating evidence as before. What DOES change, deliberately, is
+# WHEN a commit whose gating legs are all terminal reaches its verdict: as soon as
+# THEY settle, rather than behind a still-running leg the verdict ignores.
+# THE ONE EXIT-0 WIDENING, AND ITS BELT. render_verdict passes an EMPTY gating set
+# ("stable empty set" — e.g. a docs-only commit that triggers nothing). Not awaiting
+# advisory legs means a poll whose ONLY registered siblings are advisory-and-pending
+# could reach that pass before any gating leg registers, with only the MIN_POLLS floor
+# and the settle window in the way. So the loop holds the set OPEN (empty_gating_hold)
+# while NO gating leg has been discovered AND some sibling is still pending, and
+# budget exhaustion in that state is a fail-closed UNDETERMINED — i.e. the empty-set
+# pass is reachable under EXACTLY the conditions it was reachable under before #3786.
+# The kani incident is unaffected by the belt: the push's own gating legs are present,
+# so the gate converges as soon as THEY are terminal.
+# STILL OPEN, deliberately not decided here: whether a `schedule`-triggered workflow's
+# check-runs belong in a push gate's sibling set at all (the same question from the
+# other end). This change makes the incident harmless either way.
 #
 # ADVISORY MUST BE DECLARED, NOT INFERRED FROM A NAME (#3773). [OPUS-5] Until
 # 2026-07-25 this gate dropped a whole check-run from the gating set whenever its
@@ -237,7 +270,8 @@
 #     refusal already decided. Same verdict, named honestly, ~1 minute in.
 #
 # Exit-0 paths, exhaustively (fail-fast adds NO exit-0 path — it only ever
-# returns 1): (1) render_verdict over a stable-empty set;
+# returns 1): (1) render_verdict over a stable-empty set (reachable only under the
+# #3786 empty-gating belt, see §AWAIT ONLY WHAT IS JUDGED);
 # (2) render_verdict over an all-terminal set with zero non-passing GATING checks
 # AND every change-based-selection pre-job check green (sq-fmx4u.3: `skipped` is
 # satisfied only under a successful selection; a present-but-not-success select
@@ -1675,7 +1709,10 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
         f"### ci-summary: PASSED — all {len(gating)} gating check(s) green (or skipped/neutral); "
         f"{excluded} advisory check(s) excluded (each DECLARED in "
         f"{ADVISORY_REGISTRY_PATH}, or on the exact platform-managed allow-list); "
-        f"set stable."
+        # [OPUS-5] #3786: "gating set stable" — an excluded advisory leg may still be
+        # RUNNING here (the gate no longer waits on legs whose conclusion it ignores),
+        # so claiming the whole sibling set is stable would be false.
+        f"gating set stable."
         + (
             " DRAFT-TIER verdict (reduced leg set; PR draft state re-confirmed). This "
             f"check-run is `{DRAFT_TIER_GATE_NAME}`, never the required `{GATE_CHECK_NAME}` "
@@ -1769,7 +1806,12 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     prev_names: list[str] | None = None
     stable = 0
     runs: list[dict] = []
+    # [OPUS-5] #3786: the AWAITED subset of `runs` — the legs render_verdict will
+    # actually judge. `pending` counts ONLY these (see §AWAIT ONLY WHAT IS JUDGED).
+    gating_runs: list[dict] = []
     pending = 0
+    advisory_pending = 0
+    empty_gating_hold = False
     completed_hist: list[int] = []
     consec_fetch_failures = 0
     extension_started = False
@@ -1826,7 +1868,29 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             and not is_draft_gate_artifact(r.get("name", ""))
         ]
         total = len(runs)
-        pending = sum(1 for r in runs if r.get("status") != "completed")
+        # [OPUS-5] #3786 — AWAIT ONLY WHAT THE VERDICT JUDGES (header §AWAIT ONLY
+        # WHAT IS JUDGED). `pending` is the count of GATING legs still running: a
+        # DECLARED-advisory sibling's conclusion is excluded from the verdict by
+        # construction (the same is_advisory predicate render_verdict excludes by),
+        # so blocking on it is spending wall-clock waiting for an answer already
+        # decided to be ignored. Every gating leg is still awaited to terminal and
+        # still evaluated, so no gating failure can be missed.
+        gating_runs = [r for r in runs if not is_advisory(r.get("name", ""))]
+        pending = sum(1 for r in gating_runs if r.get("status") != "completed")
+        advisory_pending = sum(
+            1 for r in runs
+            if is_advisory(r.get("name", "")) and r.get("status") != "completed"
+        )
+        # [OPUS-5] #3786 EMPTY-GATING BELT — the one place not awaiting advisory legs
+        # would WIDEN an exit-0 path. render_verdict passes a gating set that is empty
+        # ("stable empty set"), so a poll observing ONLY advisory-and-pending siblings
+        # could otherwise converge on the empty set before the gating legs register,
+        # with just the min_polls floor and the settle window in the way. So: while
+        # NO gating leg has been discovered at all AND some sibling is still pending,
+        # the set is held OPEN exactly as it was before this change. The kani case
+        # (#3786) is unaffected — the push's gating legs are present, so the hold does
+        # not apply and the gate converges as soon as THEY are terminal.
+        empty_gating_hold = not gating_runs and advisory_pending > 0
         # [FABLE-5] Draft-tier CI: on a FULL-tier pull_request run, a draft-tier-
         # assembled selection with no full-tier successor means the ready_for_review
         # re-run has not registered yet — treat the set as STILL-SETTLING (hold the
@@ -1848,19 +1912,34 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         # terminal and must conclude RED). Budget exhaustion while still awaiting
         # FAILS CLOSED via render_verdict's reporter belt — never conclude-by-timing.
         awaiting_report = fm_report_status(runs) == "pending"
-        completed_hist.append(total - pending)
+        # [OPUS-5] #3786: progress is measured over the AWAITED (gating) legs — an
+        # advisory leg concluding is not progress on work the verdict depends on.
+        completed_hist.append(len(gating_runs) - pending)
         # Settle is a POST-TERMINAL window re-armed ONLY by pending work (sq-ipkku):
         # already-terminal injections must not starve convergence.
-        stable = 0 if (pending or awaiting_full or awaiting_report) else stable + 1
+        stable = 0 if (
+            pending or awaiting_full or awaiting_report or empty_gating_hold
+        ) else stable + 1
         names = sorted({r.get("name", "") for r in runs})
         changed = " (name set changed)" if prev_names is not None and names != prev_names else ""
         prev_names = names
         extra = f", {len(forgiven)} superseded-cancelled forgiven" if forgiven else ""
         extra += ", awaiting the full-tier re-run (draft-tier selection present)" if awaiting_full else ""
         extra += ", awaiting the feature-matrix reporter verdict" if awaiting_report else ""
+        # #3786: name the advisory legs that are running but NOT awaited, so the log
+        # states plainly why the gate is not waiting for them.
+        extra += (
+            f", {advisory_pending} declared-advisory leg(s) running but NOT awaited "
+            "(their conclusion is excluded from the verdict)" if advisory_pending else ""
+        )
+        extra += (
+            ", holding: no gating leg has registered yet (#3786 empty-gating belt)"
+            if empty_gating_hold else ""
+        )
         print(
-            f"attempt {attempt}: {total} check-run(s), {pending} running, "
-            f"all-terminal stable for {stable}/{cfg.settle_polls} poll(s){changed}{extra}",
+            f"attempt {attempt}: {total} check-run(s) ({len(gating_runs)} gating), "
+            f"{pending} gating running, "
+            f"gating-terminal stable for {stable}/{cfg.settle_polls} poll(s){changed}{extra}",
             flush=True,
         )
 
@@ -2021,11 +2100,14 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             # completion for tens of minutes by design. Queue depth may therefore
             # only count toward "hang" when the awaited siblings are `queued` or
             # absent — i.e. genuinely NOT running.
-            live = live_siblings(runs)
+            # [OPUS-5] #3786: read over the AWAITED (gating) legs only. A live
+            # DECLARED-advisory leg is not evidence about work this gate waits on,
+            # so it must not veto a hang among the legs that DO gate.
+            live = live_siblings(gating_runs)
             if not (saturated or progressing or live):
                 print(
-                    f"::error::ci-summary timed out — {pending} sibling check-run(s) never "
-                    f"finished within the base budget, NO awaited sibling is `in_progress` "
+                    f"::error::ci-summary timed out — {pending} gating sibling check-run(s) "
+                    f"never finished within the base budget, NO awaited sibling is `in_progress` "
                     f"(nothing is executing), the Actions queue is idle "
                     f"(depth={depth if depth is not None else 'unknown'} < {cfg.sat_queue_min}) "
                     f"and no completions landed in the last {cfg.progress_window} poll(s): "
@@ -2059,15 +2141,36 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             sleep_fn(cfg.interval)
 
     # Absolute budget exhausted.
-    if pending == 0:
+    if pending == 0 and not empty_gating_hold:
         # The #997 graceful timeout: everything IS terminal, we just never got a
         # full quiet settle — render the real verdict, never a blind RED.
         print(
-            "::notice::ci-summary loop budget reached with every sibling check terminal "
-            "(the set kept being injected into without a full quiet settle) — rendering "
-            "the verdict on the final all-terminal set."
+            "::notice::ci-summary loop budget reached with every GATING sibling check "
+            "terminal (the set kept being injected into without a full quiet settle) — "
+            "rendering the verdict on the final gating set."
         )
         return render_verdict(runs, cfg.summary_path, tier_ctx)
+    if empty_gating_hold:
+        # [OPUS-5] #3786 EMPTY-GATING BELT at the budget: the loop never discovered a
+        # single gating leg and advisory work was still outstanding when the wall-clock
+        # ran out. Rendering here would pass the "stable empty set" — the exit-0 path
+        # the belt exists to protect — over a commit whose gating legs may simply never
+        # have registered. Fail closed, exactly as this state did before #3786.
+        _emit(
+            f"### ci-summary: UNDETERMINED (not a test failure) — the wait budget "
+            f"expired with NO gating check-run ever discovered on this head SHA and "
+            f"{advisory_pending} declared-advisory sibling(s) still running. An empty "
+            f"gating set passes only when it is STABLE; here the sibling set was still "
+            f"moving, so the gate cannot distinguish 'this commit selects no gating "
+            f"legs' from 'the gating legs have not registered yet'. Fail-closed exit "
+            f"(#3786) — re-run this gate once the sibling set settles.",
+            cfg.summary_path,
+        )
+        print(
+            "::error::ci-summary UNDETERMINED — budget expired with no gating check-run "
+            "discovered and advisory siblings still running (see the step summary)."
+        )
+        return 1
     # [OPUS-5] #3783 VERDICT TAXONOMY (header §VERDICT TAXONOMY). Exhausting the
     # ABSOLUTE budget with work still outstanding is NOT the same event as a gating
     # leg failing: nothing in the tree has been shown to be broken, the gate simply
@@ -2075,7 +2178,7 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     # exit 1 (fail-closed — an unobserved leg can never be assumed green), but they
     # must not READ like a test failure, because reading them that way is what
     # burned repeated diagnosis on #3758/#3765/#3781/#3783.
-    live = live_siblings(runs)
+    live = live_siblings(gating_runs)  # #3786: awaited == gating
     if live:
         _emit(
             f"### ci-summary: UNDETERMINED (not a test failure) — the wait budget "
@@ -2095,7 +2198,7 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         )
         return 1
     _emit(
-        f"### ci-summary: UNDETERMINED (not a test failure) — {pending} sibling "
+        f"### ci-summary: UNDETERMINED (not a test failure) — {pending} gating sibling "
         f"check-run(s) never finished within the ABSOLUTE budget (base + saturation "
         f"extension, sq-90cv4). The runner pool stayed saturated longer than the "
         f"extension allows, so the sibling set never resolved; no gating check has "
@@ -2104,8 +2207,8 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         cfg.summary_path,
     )
     print(
-        f"::error::ci-summary timed out — {pending} sibling check-run(s) never finished "
-        f"within the ABSOLUTE budget (base + saturation extension, sq-90cv4). The runner "
+        f"::error::ci-summary timed out — {pending} gating sibling check-run(s) never "
+        f"finished within the ABSOLUTE budget (base + saturation extension, sq-90cv4). The runner "
         f"pool stayed saturated longer than the extension allows; re-run this gate once "
         f"the queue drains. See the per-poll log above."
     )
