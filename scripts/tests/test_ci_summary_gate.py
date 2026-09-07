@@ -1648,14 +1648,6 @@ class TestSelectionSemantics(unittest.TestCase):
         self.assertFalse(g.is_advisory(SELECT_NAME))
 
 
-# [SONNET-4.6] Robustness-hardening tests (sq-90cv4 follow-up: Copilot gaps).
-# Covers:
-#   (a) _gh_json_lines converts subprocess raises (FileNotFoundError, TimeoutExpired)
-#       → FetchError → routed into the existing bounded skip path, not a raw crash.
-#   (b) fetch_queue_depth raising in run_gate → depth treated as None (unknown) →
-#       NO saturation extension granted on depth alone (conservative branch).
-# Mutation check: removing either try/except causes the test to go RED (the
-# underlying exception propagates instead of being caught/re-raised as FetchError).
 class TestRateLimitFailClosed(unittest.TestCase):
     """[GPT-6-ASTRA] Explicit gh refusals stop every API path, without network.
 
@@ -1707,6 +1699,8 @@ class TestRateLimitFailClosed(unittest.TestCase):
             self._limited(),
             self._proc(error="gh: You have exceeded a secondary rate limit. (HTTP 403)\n"),
             self._proc(error="gh: Too Many Requests (HTTP 429)\n"),
+            self._proc(error="HTTP 429: request refused (https://api.github.com/repos/o/r)\n"),
+            self._proc(error="gh: Too Many Requests\n"),
             self._proc(error="gh: Forbidden (HTTP 403)\n",
                        stdout=json.dumps({"message": "API rate limit exceeded for user ID 7."})),
         )
@@ -1717,6 +1711,12 @@ class TestRateLimitFailClosed(unittest.TestCase):
                         g._gh_json_lines(["repos/o/r/commits/head/check-runs"])
                 self.assertIsInstance(raised.exception, g.RateLimitError)
                 self.assertEqual(api.call_count, 1)
+                code, out, calls = self._drive(
+                    [self._proc([_grp("222"), GREEN])] * 7 + [response])
+                self.assertEqual(code, 1, out)
+                self.assertEqual(len(calls), 8)
+                self.assertNotIn("cap fetch recovery", out)
+                self.assertNotIn("PASSED", out)
 
     def test_headerless_generic_failures_and_success_payload_do_not_prove_exhaustion(self):
         from unittest.mock import patch
@@ -1808,6 +1808,14 @@ class TestRateLimitFailClosed(unittest.TestCase):
         self.assertNotIn("Extending the wait", out)
 
 
+# [SONNET-4.6] Robustness-hardening tests (sq-90cv4 follow-up: Copilot gaps).
+# Covers:
+#   (a) _gh_json_lines converts subprocess raises (FileNotFoundError, TimeoutExpired)
+#       → FetchError → routed into the existing bounded skip path, not a raw crash.
+#   (b) fetch_queue_depth raising in run_gate → depth treated as None (unknown) →
+#       NO saturation extension granted on depth alone (conservative branch).
+# Mutation check: removing either try/except causes the test to go RED (the
+# underlying exception propagates instead of being caught/re-raised as FetchError).
 class TestSubprocessRobustness(unittest.TestCase):
     """[SONNET-4.6] subprocess raises in _gh_json_lines / fetch_queue_depth must be
     converted to graceful-degradation paths, never raw crashes."""

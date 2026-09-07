@@ -2290,7 +2290,7 @@ def _raise_if_rate_limited(proc: subprocess.CompletedProcess) -> None:
         messages.append(body["message"])
     for message in messages:
         if re.search(
-            r"\brate limit exceeded\b|\bsecondary rate limit\b|\(HTTP 429\)",
+            r"\brate limit exceeded\b|\bsecondary rate limit\b|\bHTTP 429\b|\btoo many requests\b",
             message,
             re.IGNORECASE,
         ):
