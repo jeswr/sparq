@@ -2996,6 +2996,122 @@ class TestFeatureMatrixReporterPostCapGrace(unittest.TestCase):
         self.assertNotIn("PASSED", out)
 
 
+    # [GPT-6-ASTRA] #6437: failed cap observations may consume the existing
+    # reporter-only tail, never buy extra ordinary work or assume a verdict.
+    def test_cap_fetch_error_and_neighboring_controls_have_exact_counts(self):
+        cfg = tiny_cfg(reporter_grace_polls=4)
+        waiting = [_grp("222"), GREEN]
+        current = [_grp("222"), _rep("222"), GREEN]
+        cases = (
+            ("healthy", [waiting] * 8 + [current, current]),
+            ("cap error", [waiting] * 7 + [g.FetchError("cap"), current, current]),
+            ("pre-cap error", [waiting] * 6 + [g.FetchError("pre-cap"), waiting, current, current]),
+        )
+        for name, polls in cases:
+            with self.subTest(case=name):
+                code, out, calls = self._drive(cfg, polls)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(calls, 10)
+                self.assertIn("PASSED", out)
+                self.assertEqual(out.count("cap fetch recovery"), int(name == "cap error"))
+
+    def test_cap_fetch_error_requires_last_observed_reporter_only_eligibility(self):
+        waiting = [_grp("222"), GREEN]
+        cases = (
+            ("ordinary work", [*waiting, PENDING], None, 4),
+            ("full-tier hold", [*waiting, R(SELECT_DRAFT)],
+             draft_ctx(lambda: False, run_tier="full"), 4),
+            ("failed report", [*waiting, _rep("222", conclusion="failure")], None, 4),
+            ("grace disabled", waiting, None, 0),
+        )
+        for name, last_observation, tier_ctx, grace in cases:
+            with self.subTest(case=name):
+                cfg = tiny_cfg(reporter_grace_polls=grace)
+                polls = [waiting] * 6 + [last_observation, g.FetchError("cap")]
+                code, out, calls = self._drive(cfg, polls, depth=20, tier_ctx=tier_ctx)
+                self.assertEqual(code, 1, out)
+                self.assertEqual(calls, 8)
+                self.assertNotIn("cap fetch recovery", out)
+                self.assertNotIn("PASSED", out)
+
+    def test_cap_fetch_error_preserves_normal_successful_observation_settle(self):
+        waiting = [_grp("222"), GREEN]
+        current = [*waiting, _rep("222")]
+        polls = [waiting] * 6 + [current, g.FetchError("cap"), current]
+        code, out, calls = self._drive(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(calls, 9)
+        self.assertIn("all-terminal stable for 2/2", out)
+        self.assertIn("cap fetch recovery", out)
+
+    def test_cap_recovery_keeps_the_consecutive_fetch_failure_limit(self):
+        waiting = [_grp("222"), GREEN]
+        for failure_limit, calls_expected in ((3, 10), (1, 8)):
+            with self.subTest(limit=failure_limit):
+                cfg = tiny_cfg(reporter_grace_polls=4,
+                               max_consec_fetch_failures=failure_limit)
+                code, out, calls = self._drive(
+                    cfg, [waiting] * 7 + [g.FetchError("still down")])
+                self.assertEqual(code, 1, out)
+                self.assertEqual(calls, calls_expected)
+                self.assertIn(f"{failure_limit} consecutive check-run fetch failures", out)
+                self.assertNotIn("PASSED", out)
+
+    def test_cap_recovery_errors_consume_the_fixed_tail_without_rearming(self):
+        cfg = tiny_cfg(reporter_grace_polls=4)
+        waiting = [_grp("222"), GREEN]
+        polls = [waiting] * 7 + [g.FetchError("cap"), waiting,
+                                g.FetchError("tail"), waiting, g.FetchError("last")]
+        code, out, calls = self._drive(cfg, polls)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(calls, 12)
+        self.assertEqual(out.count("cap fetch recovery"), 1)
+        self.assertIn("bounded reporter-only grace exhausted", out)
+        self.assertNotIn("PASSED", out)
+
+    def test_cap_recovery_fresh_ordinary_work_or_full_hold_stops_immediately(self):
+        waiting = [_grp("222"), GREEN]
+        cases = (
+            ("ordinary work", [*waiting, PENDING], None),
+            ("full-tier hold", [*waiting, R(SELECT_DRAFT)],
+             draft_ctx(lambda: False, run_tier="full")),
+        )
+        for name, fresh, tier_ctx in cases:
+            with self.subTest(case=name):
+                polls = [waiting] * 7 + [g.FetchError("cap"), fresh]
+                code, out, calls = self._drive(tiny_cfg(), polls, tier_ctx=tier_ctx)
+                self.assertEqual(code, 1, out)
+                self.assertEqual(calls, 9)
+                self.assertIn("reporter-only grace stopped", out)
+                self.assertNotIn("PASSED", out)
+
+    def test_cap_recovery_never_accepts_stale_or_non_success_reporters(self):
+        waiting = [_grp("222"), GREEN]
+        cases = (("stale", _rep("111"), 12),
+                 ("failed", _rep("222", conclusion="failure"), 10),
+                 ("action required", _rep("222", conclusion="action_required"), 10))
+        for name, report, expected_calls in cases:
+            with self.subTest(case=name):
+                polls = [waiting] * 7 + [g.FetchError("cap"), [*waiting, report]]
+                code, out, calls = self._drive(tiny_cfg(reporter_grace_polls=4), polls)
+                self.assertEqual(code, 1, out)
+                self.assertEqual(calls, expected_calls)
+                self.assertNotIn("PASSED", out)
+
+    def test_cap_recovery_final_success_still_requires_normal_settle(self):
+        waiting = [_grp("222"), GREEN]
+        for grace in (1, 4):
+            with self.subTest(grace=grace):
+                cfg = tiny_cfg(reporter_grace_polls=grace)
+                polls = [waiting] * 7 + [g.FetchError("cap")]
+                polls += [waiting] * (grace - 1) + [[*waiting, _rep("222")]]
+                code, out, calls = self._drive(cfg, polls)
+                self.assertEqual(code, 1, out)
+                self.assertEqual(calls, 8 + grace)
+                self.assertIn("reached only 1/2 poll(s)", out)
+                self.assertNotIn("PASSED", out)
+
+
 class TestFeatureMatrixReporterCorrelation(unittest.TestCase):
     """[FABLE-5] PR #3511 finding 2 (HIGH): a `feature-matrix report` verdict must
     correlate to the CURRENT feature-matrix run — a stale same-SHA report from an

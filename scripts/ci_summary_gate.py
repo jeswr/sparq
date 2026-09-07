@@ -1793,6 +1793,9 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     # [GPT-5.6] #6299: `poll_limit` may grow exactly once, and only for an
     # unresolved feature-matrix report after every ordinary sibling is terminal.
     reporter_grace_started = False
+    # [GPT-6-ASTRA] #6437: cached eligibility licenses only re-observation after
+    # a cap fetch failure; it is never evidence for a passing reporter verdict.
+    reporter_grace_eligible = False
     poll_limit = cfg.max_total_polls
 
     attempt = 0
@@ -1821,6 +1824,24 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                 f"attempt {attempt}: check-run fetch failed ({exc}) — skipping this poll "
                 f"({consec_fetch_failures}/{cfg.max_consec_fetch_failures} consecutive)."
             )
+            # [GPT-6-ASTRA] A failed cap poll cannot evaluate fresh eligibility.
+            # Reuse only the last successfully observed reporter-only state to
+            # arm the SAME fixed tail. Errors consume its polls; the next fresh
+            # observation still faces the ordinary/full-work stop and settle.
+            if (
+                not reporter_grace_started
+                and attempt == cfg.max_total_polls
+                and reporter_grace_eligible
+            ):
+                reporter_grace_started = True
+                poll_limit = cfg.max_total_polls + cfg.reporter_grace_polls
+                print(
+                    "::notice::ci-summary cap fetch recovery: the last observed "
+                    "sibling set was reporter-only eligible. Granting one bounded "
+                    f"reporter-only grace of {cfg.reporter_grace_polls} poll(s) "
+                    "to re-observe it; failed fetches consume the tail, and fresh "
+                    "correlation, ordinary-work and settle checks still apply (#6437)."
+                )
             sleep_fn(
                 cfg.interval
                 if reporter_grace_started
@@ -1902,16 +1923,18 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         # settle window. The current-run external_id correlation remains inside
         # fm_report_status; the tail merely gives that already-required verdict time
         # to appear and settle.
-        if (
-            not reporter_grace_started
-            and attempt == cfg.max_total_polls
-            and (
-                awaiting_report
-                or (report_state == "ok" and stable < cfg.settle_polls)
-            )
+        # [GPT-6-ASTRA] Refresh after EVERY successful observation, including
+        # ineligible states, so an older reporter-only snapshot cannot linger.
+        reporter_grace_eligible = (
+            (awaiting_report or (report_state == "ok" and stable < cfg.settle_polls))
             and not awaiting_full
             and non_reporter_pending == 0
             and cfg.reporter_grace_polls > 0
+        )
+        if (
+            not reporter_grace_started
+            and attempt == cfg.max_total_polls
+            and reporter_grace_eligible
         ):
             reporter_grace_started = True
             poll_limit = cfg.max_total_polls + cfg.reporter_grace_polls
